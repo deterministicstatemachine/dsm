@@ -1571,6 +1571,19 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 |---|---|
 | `dsm/src/economic/provenance.rs` · P15-9 | Unchanged (§6.30): the peer walk refuses a resolved SoFi position. A trader whose setup follows a SoFi position of its own has no setup claim another verifier can accept, so its later routes stay unjudgeable by others. |
 
+### 6.41 The object store's refusals are exercised (`test/storage-node-unexercised-refusals`, 2026-09-29)
+
+Four storage rows were Partial only because no test reached the branch that enforces them. Each now has a test on the assembly the node serves, on Postgres, and each test was observed red with its branch removed.
+
+| Row | Rule (storage spec) | Test | Mutation control |
+|---|---|---|---|
+| MR-STOR-0023 | §5.2: a caller-supplied address is a check, never the key | `a_put_stating_another_address_is_refused_and_nothing_is_held` | The comparison in `put_immutable` removed: the bytes are stored, red. |
+| MR-STOR-0025 | §5.4: different bytes at an address are reported as corruption | `different_bytes_at_an_address_are_reported_as_corruption` | The conflict answered as an ack: red. |
+| MR-STOR-0026 | §5.5: the node recomputes the address before serving | `a_held_object_that_no_longer_hashes_to_its_address_is_not_served` | The recomputation in `get_immutable` removed: the damaged rows are served, red. |
+| MR-STOR-0016 | §3.4: a misresponse is detectable by hash and affects availability only | the same, with `dsm::sofi::storage::tests::wrong_bytes_never_count` on the reader's side | As MR-STOR-0026. |
+
+The damaged-row tests change a held row directly in Postgres, as a failing disk would. That puts the store outside the fault model (§3), which is the case these refusals exist for: such a store fails closed.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -1578,9 +1591,9 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 | DSM high-level (MR-DSM) | 272 | 69 | 114 | 38 | 4 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 39 | 38 | 60 | 2 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 43 | 34 | 60 | 2 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **332** | **237** | **117** | **14** | **64** | **154** |
+| **All** | **918** | **336** | **233** | **117** | **14** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2235,17 +2248,17 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0013 | Met | `dsm::sofi::storage::stored`; `dsm::route_chain::evaluate` | `dsm::sofi::storage::tests::silence_never_counts`; `dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in` | sofi/arith.rs was deleted in #976; an omitted answer is Unavailable in stored and LeaderUnread in route_chain::evaluate (see MR-STOR-0021 for the index-scan exception). |
 | MR-STOR-0014 | Met | `dsm_storage_node::api::objects::immutable::put_immutable`; `dsm_storage_node::api::cells::put_cell` | `dsm_storage_node::db::store_properties::immutable_put_is_write_once_on_the_tuple`; `dsm_storage_node::db::store_properties::a_conflicting_put_leaves_the_first_write_untouched`; `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused` | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). No route overwrites or deletes held bytes. |
 | MR-STOR-0015 | Missing | no code found | — | No stale-snapshot / loss detection |
-| MR-STOR-0016 | Partial | dsm_storage_node · api/objects/immutable.rs `get_immutable`; dsm · sofi/storage.rs `stored` | no test found | Mismatch branch untested |
+| MR-STOR-0016 | Met | `dsm::sofi::storage::stored`; `dsm::sofi::storage::counts`; `dsm_storage_node::api::objects::immutable::get_immutable` | `dsm::sofi::storage::tests::wrong_bytes_never_count`; `dsm_storage_node::immutable_store_round_trip::a_held_object_that_no_longer_hashes_to_its_address_is_not_served` | A reader counts only bytes that re-hash to the address it asked for, so a misresponse leaves `Stored` unestablished, never a verdict. The node also refuses to serve a row that no longer hashes to its address (§6.41). |
 | MR-STOR-0017 | Not code | — | — | Fault-boundary assumption |
 | MR-STOR-0018 | Met | `dsm::route_chain::evaluate`; `dsm_storage_node::db::pg::require_durable_commit_posture` | `dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in`; `dsm::route_chain::tests::the_state_is_the_count_of_valid_links`; `dsm_storage_node::db::pg::durable_posture_tests::a_weaker_posture_is_refused_and_the_refusal_names_the_setting` | sofi/arith.rs was deleted in #976; an unread leader leaves the cell waiting, a chain short of two further links stays below Final, and a node without durable commit settings refuses to start. The earlier citation `check_completion_proof` is reached by no shipped build (§6.39). |
 | MR-STOR-0019 | Missing | no code found | — | "seat" is comment vocabulary only |
 | MR-STOR-0020 | Partial | dsm · sofi/storage.rs `stored`; sofi/arith.rs `resolve` | arith/storage tests | LeaderHeld/Final implemented with the superseded count rule |
 | MR-STOR-0021 | Met | `dsm::sofi::storage::keep_verifying`; `dsm::sofi::storage::keep_all_verifying`; `dsm::sofi::resolve::Verifier::vault_genesis`; `dsm::economic::lineage::advance_validated`; `dsm_sdk::sdk::b0x_sdk::B0xSDK::retrieve_from_b0x_v2`; `dsm_sdk::sdk::inbox_poller::has_pending_settlement_work` | `dsm::sofi::storage::tests::an_unestablished_candidate_is_never_none`; `dsm::sofi::storage::tests::an_unestablished_candidate_makes_discovery_partial`; `dsm_sdk::sdk::sofi_reads::tests::an_unestablished_genesis_candidate_is_not_read_as_unpublished`; `dsm_sdk::sdk::sofi_flow::tests::a_setup_scan_that_met_an_unestablished_candidate_is_not_a_refusal`; `dsm::economic_admission_lifecycle::a_register_set_not_established_is_not_a_verdict_about_the_claimant`; `dsm_sdk::sdk::storage_node_sdk::tests::a_member_that_answers_404_took_nothing`; `dsm_sdk::handlers::online_finalize::tests::an_unreadable_counterparty_head_is_never_read_as_genesis`; `dsm_sdk::sdk::inbox_poller::tests::a_lifecycle_stop_is_declined_while_settlement_state_is_unreadable`; `dsm_sdk::handlers::node_e2e_tests::an_inbox_read_that_did_not_cover_every_delivery_is_not_a_complete_sync` | A candidate whose bytes were not established is never read as absence: the single scan is Unavailable past it, discovery is Partial, and the SDK reports a network failure, never "not published" (§6.15). Five more places read an unestablished fact as a verdict and no longer do (§6.25): a register set the resolver could not establish, a 404 from a member, an unreadable cert-chain head, unreadable settlement state, and an inbox no member answered for. |
 | MR-STOR-0022 | Met | `dsm::storage_object::immutable_addr`; `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm::storage_object::tests::the_address_matches_the_spec_construction` | — |
-| MR-STOR-0023 | Partial | dsm_storage_node · api/objects/immutable.rs `put_immutable` (x-expected-addr) | no test found | No test sends a mismatching address |
+| MR-STOR-0023 | Met | `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm_storage_node::immutable_store_round_trip::a_put_stating_another_address_is_refused_and_nothing_is_held` | A put stating the address of other bytes is refused, and nothing is held at either address (§6.41). |
 | MR-STOR-0024 | Met | `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm_storage_node::db::store_properties::immutable_put_is_write_once_on_the_tuple`; `dsm_storage_node::db::store_properties::a_conflicting_put_leaves_the_first_write_untouched` | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The immutable store has no update path and no other store is mounted. |
-| MR-STOR-0025 | Partial | dsm_storage_node · db/pg.rs `insert_immutable_object_if_absent`; immutable.rs `put_immutable` | tests/immutable_store_round_trip.rs `re_putting_identical_bytes_acks_and_the_read_is_unchanged` | Tested on Postgres since the SQLite backend was deleted (2026-09-24), the conflict branch included (`db::store_properties::immutable_put_is_write_once_on_the_tuple`, `a_conflicting_put_leaves_the_first_write_untouched`). |
-| MR-STOR-0026 | Partial | dsm_storage_node · api/objects/immutable.rs `get_immutable` | no test found | Recompute-and-refuse branch untested |
+| MR-STOR-0025 | Met | `dsm_storage_node::api::objects::immutable::put_immutable`; `dsm_storage_node::db::pg::insert_immutable_object_if_absent` | `dsm_storage_node::immutable_store_round_trip::re_putting_identical_bytes_acks_and_the_read_is_unchanged`; `dsm_storage_node::immutable_store_round_trip::different_bytes_at_an_address_are_reported_as_corruption`; `dsm_storage_node::db::store_properties::a_conflicting_put_leaves_the_first_write_untouched` | The route reports a different tuple at an address and leaves the held row as it was (§6.41). |
+| MR-STOR-0026 | Met | `dsm_storage_node::api::objects::immutable::get_immutable` | `dsm_storage_node::immutable_store_round_trip::a_held_object_that_no_longer_hashes_to_its_address_is_not_served` | Rows damaged in place, in the payload or the namespace, are never served (§6.41). |
 | MR-STOR-0027 | Met | `dsm::sofi::storage::stored`; `dsm::sofi::wire::STORAGE_FINALITY_COUNT` | `dsm::sofi::storage::tests::two_members_is_not_stored`; `dsm::sofi::storage::tests::stored_returns_exact_bytes` | — |
 | MR-STOR-0028 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::api::cells::put_cells` | `dsm_storage_node::cells_keep_everything::an_identical_value_put_twice_is_held_twice` | — |
 | MR-STOR-0029 | Met | `dsm_storage_node::api::cells::get_cell`; `dsm_storage_node::db::pg::get_cell_entries` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::a_key_nothing_was_put_under_reads_as_an_empty_list_with_200`; `dsm_storage_node::db::cell_properties::every_value_put_at_a_key_is_held_in_arrival_order` | The db function lives in db/pg.rs (ORDER BY seq); the tests confirm arrival order, both values kept, and an empty list under 200 for an unused key. |
