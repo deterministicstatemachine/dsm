@@ -206,47 +206,27 @@ impl SofiReads for LiveSofiReads<'_> {
         genesis: &D32,
         device_id: &D32,
         position: u64,
-    ) -> Result<Option<AcceptedClaim>, ReadFailure> {
+    ) -> Result<AcceptedClaim, PeerLineageFailure> {
         if self.own != Some((*genesis, *device_id)) {
             // Another trader's position: the claim the peer walk accepted
-            // there, as `advance_validated` produced it on this device.
-            return match resolve_peer_with_cache(
+            // there, as `advance_validated` produced it on this device, or
+            // the walk's failure in the class it gave it.
+            return resolve_peer_with_cache(
                 &self.peer_resolver(),
                 &self.network,
                 genesis,
                 device_id,
                 position,
-            ) {
-                Ok(transition) => Ok(Some(*transition.accepted_claim())),
-                // Not in hand: the walk has not reached the position yet
-                // (Incomplete), or passes a SoFi position it cannot yet
-                // traverse (Unresolved, P15-9). A lineage the walk refuses
-                // (Invalid, Quarantined) accepted no claim there either; the
-                // setup then stays unevaluated (Amendment S9), recorded in
-                // CONFORMANCE §6.40 for the owner's ruling.
-                Err(
-                    failure @ (PeerLineageFailure::Incomplete(..)
-                    | PeerLineageFailure::Unresolved(..)
-                    | PeerLineageFailure::Invalid(..)
-                    | PeerLineageFailure::Quarantined(..)),
-                ) => {
-                    log::info!("[sofi reads] no accepted claim at {position}: {failure}");
-                    Ok(None)
-                }
-            };
+            )
+            .map(|transition| *transition.accepted_claim());
         }
-        let Some(admitted) = economic_lineage::get_admitted_at(position)
-            .map_err(|e| ReadFailure(format!("admitted history: {e}")))?
-        else {
-            return Ok(None);
-        };
-        match AcceptedClaim::rehydrate_from_admitted_store(*genesis, *device_id, admitted) {
-            Ok(claim) => Ok(Some(claim)),
-            Err(unresolved) => {
-                log::info!("[sofi reads] no accepted claim at {position}: {unresolved:?}");
-                Ok(None)
-            }
-        }
+        let admitted = economic_lineage::get_admitted_at(position)
+            .map_err(|e| PeerLineageFailure::Incomplete(format!("admitted history: {e}")))?
+            .ok_or_else(|| {
+                PeerLineageFailure::Incomplete(format!("no admitted position at {position}"))
+            })?;
+        AcceptedClaim::rehydrate_from_admitted_store(*genesis, *device_id, admitted)
+            .map_err(|unresolved| PeerLineageFailure::Unresolved(unresolved.to_string()))
     }
 
     fn recorded_generations(
