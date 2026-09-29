@@ -130,8 +130,9 @@ pub enum Invalid {
     SetupClaimRefIsNotTheAcceptedClaim,
     /// Lineage validation established the trader's lineage Invalid at or
     /// before the setup's position, so no claim was accepted there and the
-    /// setup cannot be valid (SoFi Amendment S13).
-    SetupLineageIsInvalid,
+    /// setup cannot be valid (SoFi Amendment S13). `reason` is lineage
+    /// validation's own account of why.
+    SetupLineageIsInvalid { reason: String },
     /// A token's committed policy does not parse.
     TokenPolicyDoesNotParse { token: D32 },
     /// A token's committed policy forbids transfer, so it cannot be a market
@@ -223,6 +224,13 @@ pub enum Missing {
     /// setup names by `claim_ref`, or the lineage verdict that none can be
     /// (SoFi Amendments S9, S13).
     AcceptedClaim { economic_position: u64 },
+    /// Lineage validation of P's trader has not reached a verdict at a
+    /// setup's position yet, and its own account of why: the setup waits
+    /// (SoFi Amendment S13).
+    LineageNotEstablished {
+        economic_position: u64,
+        reason: String,
+    },
     /// Bytes were supplied for an address but do not authenticate to it. They
     /// establish NOTHING — note 9: a non-verifying candidate can never prove
     /// invalidity, it only fails to supply the object.
@@ -364,8 +372,7 @@ impl EvidenceNeeds {
 }
 
 /// What lineage validation established about a trader at one setup's
-/// position (SoFi Amendments S9, S13). Not established is not one of these:
-/// the verifier holds nothing for the position and waits.
+/// position (SoFi Amendments S9, S13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupLineage {
     /// The claim lineage validation accepted at the position.
@@ -373,6 +380,11 @@ pub enum SetupLineage {
     /// Lineage validation established the lineage Invalid at or before the
     /// position.
     Invalid(InvalidLineage),
+    /// Lineage validation has not reached a verdict at the position: the
+    /// evidence it needs is not in hand, or it cannot yet pass a SoFi
+    /// position. Nothing is established and the setup waits; `reason` is
+    /// lineage validation's own account of why.
+    NotEstablished { reason: String },
 }
 
 /// The verdict that a trader's lineage is invalid at or before a position,
@@ -386,43 +398,34 @@ pub struct InvalidLineage {
     reason: String,
 }
 
-impl InvalidLineage {
-    /// Why lineage validation refused the lineage, as it reported it.
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
-}
-
 /// What lineage validation of trader `(genesis, device_id)` up to `position`
-/// establishes for a setup there (SoFi Amendment S13), or `None` while
-/// nothing is established:
+/// establishes for a setup there (SoFi Amendment S13):
 /// - an accepted claim is the claim the setup is checked against;
 /// - `Invalid`, evidence that verified as wrong, and `Quarantined`, a
 ///   divergent write-once register cell, are the verdict that the lineage is
 ///   invalid at or before `position`;
 /// - `Incomplete` (evidence not in hand) and `Unresolved` (a SoFi position
-///   the walk cannot yet pass) establish nothing, so the setup waits.
+///   the walk cannot yet pass) establish nothing: `NotEstablished`, with the
+///   failure as lineage validation reported it, class included. The setup
+///   waits.
 pub fn setup_lineage(
     genesis: D32,
     device_id: D32,
     position: u64,
     validated: Result<AcceptedClaim, crate::economic::provenance::PeerLineageFailure>,
-) -> Option<SetupLineage> {
+) -> SetupLineage {
     use crate::economic::provenance::PeerLineageFailure as F;
     match validated {
-        Ok(claim) => Some(SetupLineage::Accepted(claim)),
-        Err(F::Invalid(reason) | F::Quarantined(reason)) => {
-            Some(SetupLineage::Invalid(InvalidLineage {
-                genesis,
-                device_id,
-                position,
-                reason,
-            }))
-        }
-        Err(failure @ (F::Incomplete(..) | F::Unresolved(..))) => {
-            log::info!("[sofi verifier] no lineage verdict at {position} yet: {failure}");
-            None
-        }
+        Ok(claim) => SetupLineage::Accepted(claim),
+        Err(F::Invalid(reason) | F::Quarantined(reason)) => SetupLineage::Invalid(InvalidLineage {
+            genesis,
+            device_id,
+            position,
+            reason,
+        }),
+        Err(failure @ (F::Incomplete(..) | F::Unresolved(..))) => SetupLineage::NotEstablished {
+            reason: failure.to_string(),
+        },
     }
 }
 
@@ -616,7 +619,15 @@ fn setup_valid(
             {
                 return Err(missing_claim);
             }
-            return Err(Refusal::Invalid(Invalid::SetupLineageIsInvalid));
+            return Err(Refusal::Invalid(Invalid::SetupLineageIsInvalid {
+                reason: verdict.reason.clone(),
+            }));
+        }
+        Some(SetupLineage::NotEstablished { reason }) => {
+            return Err(Refusal::Incomplete(Missing::LineageNotEstablished {
+                economic_position: body.position(),
+                reason: reason.clone(),
+            }))
         }
         Some(SetupLineage::Accepted(accepted)) => accepted,
     };
@@ -4664,17 +4675,26 @@ mod tests {
     fn a_setup_on_a_lineage_known_invalid_is_invalid() {
         use crate::economic::provenance::PeerLineageFailure as F;
         let f = swap_fixture();
-        for verdict in [
-            F::Invalid("a step's witness does not fold".to_string()),
-            F::Quarantined("two claims hold the register cell".to_string()),
+        for (verdict, reason) in [
+            (
+                F::Invalid("a step's witness does not fold".to_string()),
+                "a step's witness does not fold",
+            ),
+            (
+                F::Quarantined("two claims hold the register cell".to_string()),
+                "two claims hold the register cell",
+            ),
         ] {
             let mut evidence = f.evidence.clone();
             evidence.setup_lineages.clear();
-            let lineage = setup_lineage(G, DEV, SETUP_POS, Err(verdict)).unwrap();
+            let lineage = setup_lineage(G, DEV, SETUP_POS, Err(verdict));
             evidence.setup_lineages.insert(SETUP_POS, lineage);
+            // The refusal carries lineage validation's own reason.
             assert_eq!(
                 validate(&f.precommit, &f.preimage, &evidence),
-                Err(Refusal::Invalid(Invalid::SetupLineageIsInvalid))
+                Err(Refusal::Invalid(Invalid::SetupLineageIsInvalid {
+                    reason: reason.to_string(),
+                }))
             );
             assert_eq!(
                 route_validation(&f.precommit, &f.preimage, &evidence),
@@ -4684,8 +4704,9 @@ mod tests {
     }
 
     /// A lineage whose verdict is not established yet — evidence not in hand,
-    /// or a SoFi position the walk cannot pass yet — yields nothing, and the
-    /// setup waits: not known is never read as known invalid.
+    /// or a SoFi position the walk cannot pass yet — establishes nothing, and
+    /// the setup waits, with lineage validation's reason: not known is never
+    /// read as known invalid.
     #[test]
     fn a_lineage_not_established_leaves_the_setup_waiting() {
         use crate::economic::provenance::PeerLineageFailure as F;
@@ -4694,7 +4715,23 @@ mod tests {
             F::Incomplete("the register cell is not decided yet".to_string()),
             F::Unresolved("a conditional position has not resolved".to_string()),
         ] {
-            assert_eq!(setup_lineage(G, DEV, SETUP_POS, Err(pending)), None);
+            let reason = pending.to_string();
+            let lineage = setup_lineage(G, DEV, SETUP_POS, Err(pending));
+            assert_eq!(
+                lineage,
+                SetupLineage::NotEstablished {
+                    reason: reason.clone()
+                }
+            );
+            let mut evidence = f.evidence.clone();
+            evidence.setup_lineages.insert(SETUP_POS, lineage);
+            assert_eq!(
+                validate(&f.precommit, &f.preimage, &evidence),
+                Err(Refusal::Incomplete(Missing::LineageNotEstablished {
+                    economic_position: SETUP_POS,
+                    reason,
+                }))
+            );
         }
         let mut evidence = f.evidence.clone();
         evidence.setup_lineages.clear();
@@ -4723,8 +4760,7 @@ mod tests {
                 DEV,
                 position,
                 Err(F::Invalid("another lineage".to_string())),
-            )
-            .unwrap();
+            );
             evidence.setup_lineages.insert(SETUP_POS, lineage);
             assert_eq!(validate(&f.precommit, &f.preimage, &evidence), missing);
         }
