@@ -415,14 +415,18 @@ def requirement_statuses():
     """Each canonical MR-ID with its CONFORMANCE §8 status, as committed: the
     intent comparator's one view of the requirements, which names MR-IDs only.
     §8.5's `STOR-014/L…` rows are lines of one requirement's section added after
-    the pin, not requirements MASTER defines, so they carry no ID here; an ID
-    §8 gives no row maps to None (the evidence check refuses that state)."""
+    the pin, not requirements MASTER defines, so they carry no ID here. A
+    canonical ID §8 gives no row is an error, never a missing status."""
     req, gaps = read(REQ), read(GAPS)
     status = {}
     for r in status_rows(gaps):
         for i in id_range(r[0]):
             status[i] = r[1]
-    return {i: status.get(i) for i in canonical_ids(req)}
+    ids = canonical_ids(req)
+    missing = [i for i in ids if i not in status]
+    if missing:
+        raise ValueError(f"{GAPS} §8 has no row for {len(missing)} canonical ID(s): {', '.join(missing[:10])}")
+    return {i: status[i] for i in ids}
 
 
 def check_ref(ref, index, results, where, use_logs):

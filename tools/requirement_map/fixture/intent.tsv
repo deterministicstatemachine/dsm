@@ -22,3 +22,4 @@ MR-FIX-0005	probe::outside::Made::From::from	fixture	MUST_REACH	active	-	-	-	fix
 MR-FIX-0020	probe::unused	fixture	MUST_REACH	active	-	-	-	fixture: a gap under a Partial requirement
 MR-FIX-0006	probe::gates::leaked	fixture	MUST_NOT_REACH	target-specific	-	-	compiled only with a feature the shipped build lacks	fixture: excluded from this build
 MR-FIX-0007	probe::installed::Installed::Example::instance_fn	fixture	MUST_REACH	active	probe::installed::Java_fixture_Probe_query	-	-	fixture: reached from the entry point that calls it, on the value another entry point made
+MR-FIX-0008	probe::main	fixture	MUST_REACH	active	probe::Java_fixture_Probe_entry	-	-	fixture: a path its build script's main shares, asked from the entry point

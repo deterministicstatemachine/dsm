@@ -129,7 +129,10 @@ def requirement_statuses(path):
     if path:
         return {r["id"]: r["status"] for r in _rows(path, ("id", "status"))}
     import conformance_evidence
-    return conformance_evidence.requirement_statuses()
+    try:
+        return conformance_evidence.requirement_statuses()
+    except ValueError as e:
+        raise Refused(str(e))
 
 
 def root_answers(map_dir):

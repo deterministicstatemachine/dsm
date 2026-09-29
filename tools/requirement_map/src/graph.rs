@@ -1016,9 +1016,11 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
         // alone: the process holds what any entry point made. The map's
         // seeds are the whole build's, so they are not applied here: an
         // answer never reads Reached on their account.
+        // Only the build's own crates: its index also holds a build script's
+        // `main`, which shares a path with the binary's and is not in the build.
         let mut compiled_paths: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for d in &loaded.definitions {
-            if gone.contains_key(d.symbol.as_str()) {
+            if gone.contains_key(d.symbol.as_str()) || !in_crates(&d.file, a.crates) {
                 continue;
             }
             if let Some(path) = rust_path(d) {

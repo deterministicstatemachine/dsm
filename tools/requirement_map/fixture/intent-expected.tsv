@@ -22,3 +22,4 @@ MR-FIX-0005	probe::outside::Made::From::from	fixture	MUST_REACH	active	-	AMBIGUO
 MR-FIX-0020	probe::unused	fixture	MUST_REACH	active	-	WIRING_GAP	known-hole
 MR-FIX-0006	probe::gates::leaked	fixture	MUST_NOT_REACH	target-specific	-	CORRECT	-
 MR-FIX-0007	probe::installed::Installed::Example::instance_fn	fixture	MUST_REACH	active	probe::installed::Java_fixture_Probe_query	SATISFIED	-
+MR-FIX-0008	probe::main	fixture	MUST_REACH	active	probe::Java_fixture_Probe_entry	SATISFIED	-
