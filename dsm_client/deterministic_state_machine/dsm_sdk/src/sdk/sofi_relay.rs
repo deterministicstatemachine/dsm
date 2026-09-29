@@ -154,7 +154,7 @@ pub async fn relay_fulfillment(
         // The exact bytes Core read as holding the cell, when the exercise
         // they are is this fulfillment's.
         if let (Some(object), Some(value)) = (read.exercise(), read.value()) {
-            if object.fulfillment.body == fulfillment.body {
+            if object.fulfillment().body == fulfillment.body {
                 carried = Some(value.to_vec());
                 break;
             }
