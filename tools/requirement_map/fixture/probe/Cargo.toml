@@ -4,7 +4,15 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "Dispatch shapes the requirement map must read: a type argument, a qualified path, a value, a type only named"
+description = "Shapes the requirement map must read: dispatch, receivers, paths, trait objects, scopes, macros, entry points and gates"
 
 [lib]
 path = "src/lib.rs"
+
+# A feature only this crate's dev-dependency on itself turns on: the index
+# compiles what it gates, the shipped build does not (as dsm_sdk's test-utils).
+[features]
+leak = []
+
+[dev-dependencies]
+probe = { path = ".", features = ["leak"] }

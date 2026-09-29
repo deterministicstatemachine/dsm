@@ -2,7 +2,7 @@
 //! A definition's canonical token text: what its hash covers. Whitespace,
 //! comments and doc comments are not part of it; every token is.
 
-use proc_macro2::{Delimiter, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, LineColumn, TokenStream, TokenTree};
 use std::str::FromStr;
 
 pub fn canonical(source: &str) -> Result<String, String> {
@@ -117,23 +117,27 @@ pub fn outer_attributes(source: &str) -> Result<Vec<Attribute>, String> {
 }
 
 /// Names captured by inline format arguments (`format!("SELECT {COLS} …")`)
-/// in the string literals of `source`. The index records no reference for
-/// them, so the map reads them here. `{{` is an escaped brace, not a capture.
-pub fn format_captures(source: &str) -> Result<Vec<String>, String> {
+/// in the string literals of `source`, each with where its literal starts in
+/// `source`. The index records no reference for them, so the map reads them
+/// here. `{{` is an escaped brace, not a capture.
+pub fn format_captures(source: &str) -> Result<Vec<(String, LineColumn)>, String> {
     let stream = TokenStream::from_str(source).map_err(|e| format!("not a token stream: {e}"))?;
     let mut out = Vec::new();
     collect_captures(stream, &mut out);
     Ok(out)
 }
 
-fn collect_captures(stream: TokenStream, out: &mut Vec<String>) {
+fn collect_captures(stream: TokenStream, out: &mut Vec<(String, LineColumn)>) {
     for tree in stream {
         match tree {
             TokenTree::Group(g) => collect_captures(g.stream(), out),
             TokenTree::Literal(l) => {
                 let text = l.to_string();
                 if text.starts_with('"') || text.starts_with("r\"") || text.starts_with("r#") {
-                    captures_in(&text, out);
+                    let mut names = Vec::new();
+                    captures_in(&text, &mut names);
+                    let at = l.span().start();
+                    out.extend(names.into_iter().map(|n| (n, at)));
                 }
             }
             TokenTree::Ident(_) | TokenTree::Punct(_) => {}
@@ -187,9 +191,14 @@ mod tests {
     #[test]
     fn inline_format_arguments_are_captures() -> Result<(), String> {
         let found = format_captures(
-            r#"fn q() { format!("SELECT {COLS} FROM t WHERE k = {key:?} {{literal}} {0} {}", 1) }"#,
+            "fn q() {\n    format!(\"SELECT {COLS} FROM t WHERE k = {key:?} {{literal}} {0} {}\", 1)\n}",
         )?;
-        assert_eq!(found, vec!["COLS".to_string(), "key".to_string()]);
+        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["COLS", "key"]);
+        // Each capture is placed at its literal: line 2, after `format!(`.
+        let places: Vec<(usize, usize)> =
+            found.iter().map(|(_, at)| (at.line, at.column)).collect();
+        assert_eq!(places, vec![(2, 12), (2, 12)]);
         Ok(())
     }
 

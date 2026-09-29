@@ -6,8 +6,15 @@
 //!   trait), counts only with evidence the impl can run: for a method taking
 //!   `self`, reached code constructs a value of the `Self` type; for an
 //!   associated function (no `self`), reached code dispatches on the type (a
-//!   call's type argument, a qualified path, a path call, or a value). A type
-//!   merely named (in a signature, a bound, an annotation) is neither.
+//!   call's type argument, a qualified path, or an associated item of the
+//!   type reached). A value of the type is no evidence that an associated
+//!   function is dispatched on it. A type merely named (in a signature, a
+//!   bound, an annotation) is neither.
+//!
+//!   Reached by proven references alone is `REACHED`. Reached only through
+//!   at least one dispatch step is `REACHED_VIA_DISPATCH`: the impl can run
+//!   where a value or type the evidence names reaches the dispatching call,
+//!   which the index does not show.
 //! - Indeterminate: no proven path, but an uncertain step could lead to it (an
 //!   uncertain edge, a dispatch whose `Self` type is not established, or a
 //!   seed: something the index cannot see names it).
@@ -34,15 +41,25 @@ pub const TYPE_ARGUMENT: &str = "type-argument";
 /// wherever a value of its `Self` type is used.
 pub const SELF_TYPE: &str = "self-type";
 
-/// Stable codes for why a node is not Reached. Tools and agents read these;
-/// the text beside each says it for a person.
+/// Stable codes for each state and each reason a node is not Reached. Tools
+/// and agents read these; the text beside each says it for a person.
 pub mod code {
+    /// A path of proven references, with no dispatch step, from an entry point.
+    pub const REACHED: &str = "REACHED";
+    /// Reached only through at least one `trait-dispatch` or `self-type` step
+    /// whose evidence (a constructed value, a type dispatched on) is reached.
+    pub const REACHED_VIA_DISPATCH: &str = "REACHED_VIA_DISPATCH";
     /// A reached call through a trait could run the impl, but reached code
     /// constructs no value of its `Self` type.
     pub const DISPATCH_SELF_TYPE: &str = "IND_DISPATCH_SELF_TYPE";
-    /// An impl of an outside trait on a type reached code names but never
-    /// constructs.
+    /// A method of an outside trait's impl on a type reached code names but
+    /// never constructs.
     pub const NOT_CONSTRUCTED: &str = "IND_NOT_CONSTRUCTED";
+    /// An associated function of an outside trait's impl (`From::from`,
+    /// `Default::default`) on a type reached code never dispatches on by
+    /// type: the call is implicit (`?`, `into()`) or through a bound, which
+    /// the index does not show.
+    pub const NOT_DISPATCHED: &str = "IND_NOT_DISPATCHED";
     /// The impl's trait name matches several traits and the file does not decide.
     pub const AMBIGUOUS_TRAIT: &str = "IND_AMBIGUOUS_TRAIT";
     /// A type name that matches several types.
@@ -189,7 +206,9 @@ pub fn reached(
                 continue;
             }
             let makes_value = e.kind == CONSTRUCT || e.kind == MEMBER_OF;
-            let dispatches = makes_value || e.kind == TYPE_ARGUMENT || e.kind == ASSOCIATED_OF;
+            // A value is no evidence of an associated function's dispatch:
+            // only the type named where a call dispatches on it is.
+            let dispatches = e.kind == TYPE_ARGUMENT || e.kind == ASSOCIATED_OF;
             if makes_value && constructed.insert(e.to) {
                 release(waiting.remove(&e.to), &mut via, &mut queue);
             }
@@ -227,6 +246,40 @@ pub fn reached(
                     queue.push_back(e.to);
                 }
             }
+        }
+    }
+    Ok(via)
+}
+
+/// The nodes proven references reach from `roots` with no dispatch step (no
+/// `trait-dispatch`, no `self-type`), and how each was reached: the part of
+/// Reached that needs no evidence about values or types.
+pub fn reached_directly(
+    n: usize,
+    edges: &[Edge],
+    roots: &[(usize, &'static str)],
+) -> Result<Vec<Option<Via>>, String> {
+    let out = outgoing(n, edges);
+    let mut via: Vec<Option<Via>> = vec![None; n];
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    for &(root, kind) in roots {
+        if root >= n {
+            return Err(format!("root {root} is not a node"));
+        }
+        if via[root].is_none() {
+            via[root] = Some(Via::Root(kind));
+            queue.push_back(root);
+        }
+    }
+    while let Some(v) = queue.pop_front() {
+        for &i in &out[v] {
+            let e = &edges[i];
+            let dispatch_step = e.kind == TRAIT_DISPATCH || e.kind == SELF_TYPE;
+            if e.doubt.is_some() || dispatch_step || via[e.to].is_some() {
+                continue;
+            }
+            via[e.to] = Some(Via::Edge(i));
+            queue.push_back(e.to);
         }
     }
     Ok(via)
@@ -287,10 +340,17 @@ pub fn classify(
                     return Err(format!("the trait impl {} has no Self type recorded", name(e.to)?))
                 }
             },
-            (None, SELF_TYPE) => Doubt::new(
+            (None, SELF_TYPE) if takes_value.contains(&e.to) => Doubt::new(
                 code::NOT_CONSTRUCTED,
                 format!(
-                    "an impl of an outside trait on {}, which reached code names but never constructs or dispatches on",
+                    "a method of an outside trait's impl on {}, which reached code names but never constructs",
+                    name(e.from)?
+                ),
+            ),
+            (None, SELF_TYPE) => Doubt::new(
+                code::NOT_DISPATCHED,
+                format!(
+                    "an associated function of an outside trait's impl on {} (as `?` or `into()` call `From::from`), which reached code never dispatches on by type; a value of the type is no evidence the function runs",
                     name(e.from)?
                 ),
             ),
@@ -489,6 +549,106 @@ mod tests {
         let via = reached(6, &edges, &[(0, "export")], &self_types, &method)?;
         let r = classify(&edges, via, &self_types, &method, &[], &names)?;
         assert_eq!(r.state[3], State::Indeterminate);
+        Ok(())
+    }
+
+    #[test]
+    fn a_value_is_no_evidence_of_an_associated_function_s_dispatch() -> Result<(), String> {
+        // Trait method 1 is reached; impl 3 is an associated function whose
+        // Self type 2 the root only constructs; impl 5's Self type 4 is a
+        // call's type argument.
+        let edges = [
+            edge(0, 1, "reference"),
+            edge(0, 2, CONSTRUCT),
+            edge(0, 4, TYPE_ARGUMENT),
+            edge(1, 3, TRAIT_DISPATCH),
+            edge(1, 5, TRAIT_DISPATCH),
+        ];
+        let mut self_types = SelfTypes::new();
+        self_types.insert(3, SelfType::Known(2));
+        self_types.insert(5, SelfType::Known(4));
+        let names: Vec<String> = (0..6).map(|i| format!("n{i}")).collect();
+        let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let associated_only = HashSet::new();
+        let via = reached(6, &edges, &[(0, "export")], &self_types, &associated_only)?;
+        let r = classify(&edges, via, &self_types, &associated_only, &[], &names)?;
+        assert_eq!(r.state[3], State::Indeterminate);
+        assert_eq!(r.state[5], State::Reached);
+        Ok(())
+    }
+
+    #[test]
+    fn an_outside_trait_s_associated_function_runs_only_on_a_dispatch_by_type() -> Result<(), String>
+    {
+        // Types 1 and 2 are named; 2 is also a call's type argument. Each has
+        // an outside trait's associated function (3, 4), like `From::from`.
+        let edges = [
+            edge(0, 1, "reference"),
+            edge(0, 2, "reference"),
+            edge(0, 2, TYPE_ARGUMENT),
+            edge(1, 3, SELF_TYPE),
+            edge(2, 4, SELF_TYPE),
+        ];
+        let self_types = SelfTypes::new();
+        let names: Vec<String> = (0..5).map(|i| format!("n{i}")).collect();
+        let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let associated_only = HashSet::new();
+        let via = reached(5, &edges, &[(0, "export")], &self_types, &associated_only)?;
+        let r = classify(&edges, via, &self_types, &associated_only, &[], &names)?;
+        assert_eq!(r.state[4], State::Reached);
+        assert_eq!(r.state[3], State::Indeterminate);
+        assert_eq!(
+            r.reason[3].as_ref().map(|d| d.code),
+            Some(code::NOT_DISPATCHED)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_associated_item_s_type_is_dispatched_on() -> Result<(), String> {
+        // Trait method 1 is reached. Impl 3's Self type 2 is dispatched on by
+        // the root naming its associated item 4 (`Type::CONST`); impl 5's
+        // Self type 6 is only constructed, which is no dispatch.
+        let edges = [
+            edge(0, 1, "reference"),
+            edge(0, 4, "reference"),
+            edge(4, 2, ASSOCIATED_OF),
+            edge(0, 6, CONSTRUCT),
+            edge(1, 3, TRAIT_DISPATCH),
+            edge(1, 5, TRAIT_DISPATCH),
+        ];
+        let mut self_types = SelfTypes::new();
+        self_types.insert(3, SelfType::Known(2));
+        self_types.insert(5, SelfType::Known(6));
+        let names: Vec<String> = (0..7).map(|i| format!("n{i}")).collect();
+        let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let associated_only = HashSet::new();
+        let via = reached(7, &edges, &[(0, "export")], &self_types, &associated_only)?;
+        let r = classify(&edges, via, &self_types, &associated_only, &[], &names)?;
+        assert_eq!(r.state[3], State::Reached);
+        assert_eq!(r.state[5], State::Indeterminate);
+        Ok(())
+    }
+
+    #[test]
+    fn a_dispatch_step_is_told_from_a_direct_path() -> Result<(), String> {
+        // 0 calls trait method 1 and constructs 2; impl 3 (Self type 2) is
+        // reached by dispatch, and 4 only through it. 5 is called directly.
+        let edges = [
+            edge(0, 1, "reference"),
+            edge(0, 2, CONSTRUCT),
+            edge(1, 3, TRAIT_DISPATCH),
+            edge(3, 4, "reference"),
+            edge(0, 5, "reference"),
+        ];
+        let mut self_types = SelfTypes::new();
+        self_types.insert(3, SelfType::Known(2));
+        let direct = reached_directly(6, &edges, &[(0, "export")])?;
+        let reached_by: Vec<usize> = (0..6).filter(|&i| direct[i].is_some()).collect();
+        assert_eq!(reached_by, vec![0, 1, 2, 5]);
+        let r = run(6, &edges, &[(0, "export")], &self_types, &[])?;
+        assert_eq!(r.state[3], State::Reached);
+        assert_eq!(r.state[4], State::Reached);
         Ok(())
     }
 
