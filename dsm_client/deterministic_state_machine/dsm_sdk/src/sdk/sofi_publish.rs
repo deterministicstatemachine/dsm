@@ -105,6 +105,7 @@ pub async fn publish_produced(
                 body,
                 signature: operation_signature,
             },
+            ToPublish::PreBalance(balance) => Publication::TraderPreBalance(balance),
         };
         out.push(publish(set, &publication).await?);
     }

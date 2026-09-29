@@ -28,7 +28,7 @@ use super::publication::{
 };
 use super::wire::{
     DlvPolicyFulfillmentBody, SettlementPreimage, SofiExercise, TraderFulfillmentBody,
-    TraderPrecommitBody,
+    TraderPrecommitBody, ValidationRef,
 };
 
 type D32 = [u8; 32];
@@ -45,6 +45,24 @@ pub struct RecognizedExercise {
     pub closure: Vec<Vec<u8>>,
     /// `E`, as `P` commits it and `P(E)` recomputes it.
     pub external_commitment: D32,
+}
+
+impl RecognizedExercise {
+    /// The closure objects this exercise carries, each under the reference
+    /// in `𝒞_E^pre` it answers: the exercise carries them in reference order
+    /// (Section 17.5), and recognition requires one per reference. Nothing is
+    /// trusted because it is here: Core re-derives every reference from the
+    /// bytes it is handed.
+    pub fn closure_objects(&self) -> std::collections::BTreeMap<ValidationRef, Vec<u8>> {
+        self.preimage
+            .settlement()
+            .closure()
+            .refs()
+            .iter()
+            .copied()
+            .zip(self.closure.iter().cloned())
+            .collect()
+    }
 }
 
 /// Rebuild the objects an exercise carries and check their binding to one
@@ -375,8 +393,9 @@ pub(crate) mod fixtures {
                 .iter()
                 .map(DlvPolicyFulfillmentBody::encode)
                 .collect(),
-            // 𝒞_E^pre references the parent P names; the exercise carries it.
-            vec![f.parent_claim.clone()],
+            // 𝒞_E^pre references the parent P names and the trader's
+            // balances before the trade; the exercise carries them.
+            f.closure_in_order(),
         )
         .unwrap();
         Built {

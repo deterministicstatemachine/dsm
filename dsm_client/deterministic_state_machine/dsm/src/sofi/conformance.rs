@@ -31,7 +31,6 @@ use super::wire::{
     ParentClaimRef, next_position, DlvPolicyFulfillmentBody, SettlementPreimage,
     SofiResolutionClaim, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
 };
-use crate::ccb::decode::policy_object_address;
 
 type D32 = [u8; 32];
 
@@ -501,7 +500,7 @@ impl Items {
 fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bool> {
     Some(match reference {
         ValidationRef::ContentAddr { object_class, addr } => {
-            policy_object_address(*object_class, bytes)? == *addr
+            derive::closure_content_address(*object_class, bytes)? == *addr
         }
         ValidationRef::SingleRootClaim { claim_ref } => derive::claim_ref(bytes) == *claim_ref,
         ValidationRef::ConditionalClaim {
@@ -971,10 +970,10 @@ mod tests {
         let mut refs: Vec<ValidationRef> = closure.keys().copied().collect();
         refs.sort_by_key(ValidationRef::encode);
         let f = swap_fixture_with(2, PreEClosureIndex::new(refs).unwrap());
-        // The fixture adds the single-root parent P names; the closure holds
-        // its exact envelope under that reference.
+        // The fixture adds the single-root parent P names and the trader's
+        // balances before the trade; the closure holds their exact bytes.
         let mut closure = closure;
-        closure.insert(f.precommit.parent_reference(), f.parent_claim.clone());
+        closure.extend(f.closure_objects());
         let precommit = f.precommit;
         let precommit_sig = sign_p(&precommit);
         let e = derive::recompute_e(&f.preimage).unwrap();
@@ -1251,7 +1250,7 @@ mod tests {
         refs.sort_by_key(ValidationRef::encode);
         let f = swap_fixture_with(1, PreEClosureIndex::new(refs).unwrap());
         let mut closure = extra;
-        closure.insert(f.precommit.parent_reference(), f.parent_claim.clone());
+        closure.extend(f.closure_objects());
         (f, closure)
     }
 

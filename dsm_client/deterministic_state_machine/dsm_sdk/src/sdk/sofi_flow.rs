@@ -355,8 +355,7 @@ pub async fn setup(
             refuse("no admitted position: a setup names the claim registered at its position")
         })?;
     let validated = validated_root_or_activate(core)?;
-    let local = local_leaves_of_validated(&genesis, &device_id, &validated)?;
-    let ctx = VerifierContext::new(set, Some(&local), Some(&admitted))?;
+    let ctx = VerifierContext::new(set, Some((genesis, device_id)), Some(&admitted))?;
     match ctx
         .verifier()
         .vault_genesis(&intent.vault_id)
@@ -496,7 +495,6 @@ async fn vault_policies(set: &StorageSet, state: &VaultStateLeaf) -> Result<Poli
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
-        BTreeMap::new(),
     );
     Policies::resolve(&evidence, state).map_err(|refusal| refuse(format!("{refusal:?}")))
 }
@@ -568,10 +566,14 @@ async fn vault_at_head(
 }
 
 impl Standing {
-    /// This device as the verifier: its own leaves and the position it
+    /// This device as the verifier: its identity and the position it
     /// resolved itself, over the pinned set.
     fn context<'a>(&'a self, set: &'a StorageSet) -> Result<VerifierContext<'a>, DsmError> {
-        VerifierContext::new(set, Some(&self.local), Some(&self.admitted))
+        VerifierContext::new(
+            set,
+            Some((self.genesis, self.device_id)),
+            Some(&self.admitted),
+        )
     }
 }
 
@@ -988,11 +990,11 @@ async fn exercise_draft(
     let ctx = standing.context(set)?;
     let verifier = ctx.verifier();
     let evidence = match verifier
-        .acquire_evidence(draft.precommit(), draft.preimage())
+        .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
         .map_err(verifier_error)?
     {
         Acquired::Complete(evidence) => evidence,
-        Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
+        Acquired::Exhausted(missing) => {
             return Err(storage(
                 "evidence",
                 format!("not in hand after the acquisition rounds: {missing:?}; nothing published"),
@@ -1033,7 +1035,8 @@ async fn exercise_draft(
             ToPublish::Setup(..)
             | ToPublish::Precommit(..)
             | ToPublish::Preimage(..)
-            | ToPublish::PolicyFulfillment(..) => None,
+            | ToPublish::PolicyFulfillment(..)
+            | ToPublish::PreBalance(..) => None,
         })
         .ok_or_else(|| refuse("the fulfillment was not produced"))?;
 
