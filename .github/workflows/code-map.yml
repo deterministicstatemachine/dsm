@@ -38,6 +38,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The pins' tests read history: a commit's parent, and the first
+          # commit, which holds no pins.
+          fetch-depth: 0
 
       - name: Free disk space
         # Three indexes build their build scripts for three targets. The
