@@ -384,7 +384,10 @@ requirement-map: ## Code map (MAP=dir): every source file hashed; each shipped b
 		rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.node.rust-analyzer.json --output $(MAP)/node.scip > $(MAP)/node.log 2>&1; \
 	fi
 	rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.tests.rust-analyzer.json --output $(MAP)/tests.scip > $(MAP)/tests.log 2>&1
+	# The intent manifest's root questions, answered by the map itself.
+	python3 ci/intent_comparator.py root-queries --manifest specs/requirements/INTENT_MANIFEST.tsv > $(MAP)/root-queries.txt
 	target/release/requirement_map index --root . --files $(MAP)/sources.txt --inputs $(MAP)/inputs.txt --fingerprint $(MAP)/tree \
+		--root-queries $(MAP)/root-queries.txt \
 		--android $(MAP)/android.scip --android-log $(MAP)/android.log \
 		--android-features $(MAP)/android-features.txt --android-features-indexed $(MAP)/android-features-indexed.txt \
 		--android-packages $(MAP)/android-packages.txt --node-packages $(MAP)/node-packages.txt \
@@ -406,10 +409,20 @@ requirement-map-fixture: ## The map's adversarial fixture read through the real 
 	rustup run $(RUST_PIN) cargo tree --locked --color never --manifest-path tools/requirement_map/fixture/Cargo.toml -p probe -e normal,build --prefix none -f '{p} {f}' > $(MAP)/fixture/features.txt
 	rustup run $(RUST_PIN) cargo tree --locked --color never --manifest-path tools/requirement_map/fixture/Cargo.toml --workspace -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/fixture/features-indexed.txt
 	rustup run $(RUST_PIN) rust-analyzer scip tools/requirement_map/fixture --config-path ci/requirement_map.fixture.rust-analyzer.json --output $(MAP)/fixture/index.scip > $(MAP)/fixture/index.log 2>&1
+	python3 ci/intent_comparator.py root-queries --manifest tools/requirement_map/fixture/intent.tsv > $(MAP)/fixture/root-queries.txt
 	target/release/requirement_map fixture --root tools/requirement_map/fixture --scip $(MAP)/fixture/index.scip --log $(MAP)/fixture/index.log \
 		--jni-declarations kotlin --crate probe/src/ --package probe \
 		--features $(MAP)/fixture/features.txt --features-indexed $(MAP)/fixture/features-indexed.txt \
+		--root-queries $(MAP)/fixture/root-queries.txt \
 		--expect tools/requirement_map/fixture/expected.tsv --out $(MAP)/fixture/map
+	# Every comparator outcome, from the fixture's manifest against its map.
+	python3 ci/intent_comparator.py --map $(MAP)/fixture/map --manifest tools/requirement_map/fixture/intent.tsv \
+		--requirements tools/requirement_map/fixture/requirements.tsv --expect tools/requirement_map/fixture/intent-expected.tsv
+
+.PHONY: requirement-map-intent
+INTENT_BUILT ?=
+requirement-map-intent: ## The intent manifest (specs/requirements/INTENT_MANIFEST.tsv) against the map (after make requirement-map): each row's outcome, the action it asks for, and a failure for every gap whose requirement is Met in CONFORMANCE §8; MAP/intent.tsv, MAP/unspecified.tsv. INTENT_BUILT=android,node requires both builds indexed (CI)
+	python3 ci/intent_comparator.py --map $(MAP) $(if $(INTENT_BUILT),--built $(INTENT_BUILT))
 
 .PHONY: requirement-map-check requirement-map-mutations
 requirement-map-check: ## The map against itself and the committed facts (after make requirement-map): no contradiction, every sentinel, entry point and count as ci/requirement_map.*.tsv hold them; MAP/committed.tsv is what this map reads, for review

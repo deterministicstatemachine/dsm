@@ -399,6 +399,32 @@ def refs(cell):
     return [t for t in re.findall(r"`([^`]+)`", cell)]
 
 
+def canonical_ids(req):
+    """The canonical MR-IDs MASTER §8 defines, in order."""
+    canon = section(req, "## 8 Canonical requirements", "### 8.5")
+    return [r[0] for r in table_rows(canon) if re.fullmatch(r"MR-[A-Z]+-\d{4}", r[0])]
+
+
+def status_rows(gaps):
+    """CONFORMANCE §8's rows: one per ID or range of IDs, with its status."""
+    per_req = section(gaps, "## 8 Per-requirement results")
+    return [r for r in table_rows(per_req) if re.match(r"(MR-[A-Z]+-\d{4}|STOR-014/L)", r[0])]
+
+
+def requirement_statuses():
+    """Each canonical MR-ID with its CONFORMANCE §8 status, as committed: the
+    intent comparator's one view of the requirements, which names MR-IDs only.
+    §8.5's `STOR-014/L…` rows are lines of one requirement's section added after
+    the pin, not requirements MASTER defines, so they carry no ID here; an ID
+    §8 gives no row maps to None (the evidence check refuses that state)."""
+    req, gaps = read(REQ), read(GAPS)
+    status = {}
+    for r in status_rows(gaps):
+        for i in id_range(r[0]):
+            status[i] = r[1]
+    return {i: status.get(i) for i in canonical_ids(req)}
+
+
 def check_ref(ref, index, results, where, use_logs):
     if FORMAL.match(ref):
         if not formal_exists(ref):
@@ -447,12 +473,11 @@ def main():
 
     # 2. coverage
     canon = section(req, "## 8 Canonical requirements", "### 8.5")
-    ids = [r[0] for r in table_rows(canon) if re.fullmatch(r"MR-[A-Z]+-\d{4}", r[0])]
+    ids = canonical_ids(req)
     if len(ids) != len(set(ids)):
         fail(f"{REQ} §8 repeats an ID")
     sources = {r[0]: r[4] for r in table_rows(canon) if re.fullmatch(r"MR-[A-Z]+-\d{4}", r[0])}
-    per_req = section(gaps, "## 8 Per-requirement results")
-    rows = [r for r in table_rows(per_req) if re.match(r"(MR-[A-Z]+-\d{4}|STOR-014/L)", r[0])]
+    rows = status_rows(gaps)
     seen = {}
     for r in rows:
         for i in id_range(r[0]):

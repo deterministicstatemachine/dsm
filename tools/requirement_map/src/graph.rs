@@ -159,6 +159,26 @@ pub struct Map {
     /// profile's: (profile, from, to, kind, evidence).
     pub edges: Vec<(&'static str, String, String, &'static str, Evidence)>,
     pub tallies: BTreeMap<&'static str, Tally>,
+    /// Each root query's answer, in the order asked.
+    pub root_answers: Vec<RootAnswer>,
+}
+
+/// A question the intent comparator asks: is `symbol` reached from the one
+/// entry point `root` in `artifact`'s build? Both are Rust paths.
+pub struct RootQuery {
+    pub artifact: String,
+    pub root: String,
+    pub symbol: String,
+}
+
+/// The map's answer: the state and code `symbol` reads when `root` is the
+/// build's only entry point, by the same rules as the build's own reading.
+pub struct RootAnswer {
+    pub artifact: String,
+    pub root: String,
+    pub symbol: String,
+    pub state: &'static str,
+    pub code: &'static str,
 }
 
 pub struct Inputs<'a> {
@@ -166,6 +186,8 @@ pub struct Inputs<'a> {
     pub tests: &'a Loaded,
     /// JNI symbols the app's Kotlin declares, and where.
     pub declared_jni: &'a crate::jni::Declarations,
+    /// The root queries asked, if any were.
+    pub root_queries: Option<&'a [RootQuery]>,
 }
 
 fn in_crates(file: &str, crates: &[&str]) -> bool {
@@ -579,6 +601,18 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
     let id_refs: BTreeMap<&str, usize> = ids.iter().map(|(k, v)| (k.as_str(), *v)).collect();
     let tested = reach(&test_adjacency, test_starts.into_iter(), &id_refs)?;
 
+    let queries = || inputs.root_queries.into_iter().flatten();
+    for q in queries() {
+        if !inputs.artifacts.iter().any(|a| a.name == q.artifact) {
+            return Err(format!(
+                "a root query names the artifact {}, which this map does not read",
+                q.artifact
+            ));
+        }
+    }
+    // Each answer with its query's place, so they come out in the order asked.
+    let mut root_answers: Vec<(usize, RootAnswer)> = Vec::new();
+
     // Reachability, per artifact.
     let mut status: BTreeMap<String, BTreeMap<&'static str, Status>> = BTreeMap::new();
     let mut artifact_edges: Vec<(&'static str, String, String, &'static str, Evidence)> =
@@ -624,6 +658,18 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
                             },
                         );
                     }
+                }
+                for (at, q) in queries().enumerate().filter(|(_, q)| q.artifact == a.name) {
+                    root_answers.push((
+                        at,
+                        RootAnswer {
+                            artifact: q.artifact.clone(),
+                            root: q.root.clone(),
+                            symbol: q.symbol.clone(),
+                            state: "not-built",
+                            code: code::PROFILE_NOT_BUILT,
+                        },
+                    ));
                 }
                 tallies.insert(a.name, tally);
                 continue;
@@ -962,6 +1008,66 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
         }
 
         let result = reach::classify(&edges, via, &self_types, &takes_value, &seeds, &name_refs)?;
+
+        // The root queries: what each named entry point alone reaches, by the
+        // same rules (a path through a dispatch needs its evidence reached from
+        // that root too). The map's seeds are the whole build's, so they are
+        // not applied here: an answer never reads Reached on their account.
+        let mut compiled_paths: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for d in &loaded.definitions {
+            if gone.contains_key(d.symbol.as_str()) {
+                continue;
+            }
+            if let Some(path) = rust_path(d) {
+                compiled_paths.entry(path).or_default().push(id(&d.symbol)?);
+            }
+        }
+        let one = |path: &str, what: &str| -> Result<usize, String> {
+            match compiled_paths.get(path).map(Vec::as_slice) {
+                Some([only]) => Ok(*only),
+                found => Err(format!(
+                    "a root query's {what} {path} names {} definitions the {} build compiles",
+                    found.map_or(0, <[usize]>::len),
+                    a.name
+                )),
+            }
+        };
+        let mut from_root: BTreeMap<usize, (reach::Reach, Vec<Option<Via>>)> = BTreeMap::new();
+        for (at, q) in queries().enumerate().filter(|(_, q)| q.artifact == a.name) {
+            let r = one(&q.root, "entry point")?;
+            let s = one(&q.symbol, "symbol")?;
+            if !from_root.contains_key(&r) {
+                let alone = [(r, "query")];
+                let via = reach::reached(names.len(), &edges, &alone, &self_types, &takes_value)?;
+                let direct = reach::reached_directly(names.len(), &edges, &alone)?;
+                let read =
+                    reach::classify(&edges, via, &self_types, &takes_value, &[], &name_refs)?;
+                from_root.insert(r, (read, direct));
+            }
+            let (read, direct) = &from_root[&r];
+            let (state, code_) = match (read.state[s], &direct[s], &read.reason[s]) {
+                (State::Reached, Some(_), _) => ("reached", code::REACHED),
+                (State::Reached, None, _) => ("reached", code::REACHED_VIA_DISPATCH),
+                (State::Indeterminate, _, Some(why)) => ("indeterminate", why.code),
+                (State::Indeterminate, _, None) => {
+                    return Err(format!(
+                        "{} from {} is indeterminate with no reason",
+                        q.symbol, q.root
+                    ))
+                }
+                (State::Dead, _, _) => ("dead", code::DEAD_NO_ROOT_PATH),
+            };
+            root_answers.push((
+                at,
+                RootAnswer {
+                    artifact: q.artifact.clone(),
+                    root: q.root.clone(),
+                    symbol: q.symbol.clone(),
+                    state,
+                    code: code_,
+                },
+            ));
+        }
         for (key, d) in &defs {
             if !in_crates(&d.file, a.crates) {
                 continue;
@@ -1090,6 +1196,10 @@ pub fn build(root: &Path, inputs: &Inputs) -> Result<Map, String> {
         nodes,
         edges: all_edges,
         tallies,
+        root_answers: {
+            root_answers.sort_by_key(|(at, _)| *at);
+            root_answers.into_iter().map(|(_, answer)| answer).collect()
+        },
     })
 }
 

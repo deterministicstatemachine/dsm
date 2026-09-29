@@ -1,0 +1,10 @@
+# The fixture's requirements and their CONFORMANCE-style statuses, standing in
+# for MASTER and §8 when ci/intent_comparator.py reads the fixture's manifest.
+id	status
+MR-FIX-0001	Met
+MR-FIX-0002	Met
+MR-FIX-0003	Met
+MR-FIX-0004	Met
+MR-FIX-0005	Met
+MR-FIX-0006	Met
+MR-FIX-0020	Partial

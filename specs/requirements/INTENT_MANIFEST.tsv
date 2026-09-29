@@ -1,0 +1,18 @@
+# The intent manifest: what the specifications say each symbol's code must do,
+# per shipped build, as ci/intent_comparator.py reads it against the
+# requirement map. The map establishes what the code does; this says what it
+# ought to do; the comparator derives the outcome and the action. Rows are
+# drafted from the specifications and CONFORMANCE §8 (each cites its source)
+# and approved by the owner through pull requests; the adversarial layer may
+# challenge a row, never write one.
+#
+#   requirement  an MR-ID MASTER defines, or `-` when none explains the symbol
+#   symbol       the canonical Rust path, as the map's defs.tsv names it
+#   artifact     android | node (a symbol expected in both takes two rows)
+#   reachability MUST_REACH | MUST_REACH_DIRECT | MAY_REACH | MUST_NOT_REACH
+#   lifecycle    active | target-specific | deprecated | test-only
+#   root         the entry point that must reach it, or `-`
+#   evidence     the tests that exercise it (`;` between), or `-`
+#   exception    why, for an exclusion, a deprecation or a row with no requirement
+#   cites        the spec clause or CONFORMANCE §8 row the intent comes from
+requirement	symbol	artifact	reachability	lifecycle	root	evidence	exception	cites

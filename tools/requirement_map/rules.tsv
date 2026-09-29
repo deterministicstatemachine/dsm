@@ -8,10 +8,11 @@
 # a reading to or from it; a check rule's mutation is a planted case naming it.
 #
 #   rule      the code, edge kind, entry-point kind or check rule
-#   kind      code | edge | root | check
+#   kind      code | edge | root | check | outcome
 #   unit      unit tests in src/ (`;` between several)
-#   positive  a fixture reading (tools/requirement_map/fixture/expected.tsv) the rule decides
-#   negative  a nearby fixture reading it does not
+#   positive  a fixture reading (tools/requirement_map/fixture/expected.tsv) the rule decides;
+#             for an outcome, a fixture manifest row (requirement:symbol, intent-expected.tsv)
+#   negative  a nearby fixture reading, or manifest row, it does not
 #   mutation  cases in tools/requirement_map/fixture/mutations.toml
 #   sentinel  a committed real-tree reading (ci/requirement_map.sentinels.tsv), artifact:path
 #   gap       why a column holds `-`; `-` when none does
@@ -68,3 +69,17 @@ sentinel-lost	check	-	-	-	a-sentinel-reads-otherwise	-	a check of the map agains
 entry-point-new	check	-	-	-	an-entry-point-appears	-	a check of the map against the committed entry points: its planted case is its test, and the clean real map is its negative
 entry-point-lost	check	-	-	-	an-entry-point-goes	-	a check of the map against the committed entry points: its planted case is its test, and the clean real map is its negative
 indeterminate-jump	check	-	-	-	the-dead-turn-indeterminate	-	a check of the map against the committed counts: its planted case is its test, and the clean real map is its negative
+SATISFIED	outcome	-	MR-FIX-0001:probe::fold	MR-FIX-0002:probe::Named::Example::static_fn	the-direct-row-names-a-direct-path	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file
+CORRECT	outcome	-	MR-FIX-0004:probe::macros::len	MR-FIX-0004:probe::fold	the-forbidden-path-is-to-dead-code	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file
+WIRING_GAP	outcome	-	MR-FIX-0003:probe::unused	MR-FIX-0001:probe::fold	the-gap-loses-its-known-hole	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file
+ARTIFACT_GAP	outcome	-	MR-FIX-0003:probe::gates::leaked	MR-FIX-0003:probe::unused	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+UNDECIDED	outcome	-	MR-FIX-0003:probe::Never::Example::instance_fn	MR-FIX-0001:probe::fold	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+DIRECT_PATH_GAP	outcome	-	MR-FIX-0002:probe::Named::Example::static_fn	MR-FIX-0002:probe::fold	dispatch-is-no-longer-enough	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file
+ROOT_MISMATCH	outcome	-	MR-FIX-0005:probe::roots::on_load	MR-FIX-0004:probe::roots::on_load	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+UNEXPECTED_LIVE_PATH	outcome	-	MR-FIX-0004:probe::fold	MR-FIX-0004:probe::macros::len	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+PRODUCTION_LEAK	outcome	-	MR-FIX-0004:probe::paths::Inherent::get	MR-FIX-0004:probe::fold	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+REMOVAL_CANDIDATE	outcome	-	MR-FIX-0005:probe::paths::Inherent::get	MR-FIX-0005:probe::paths::Inherent::never_called	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+DELETE	outcome	-	MR-FIX-0005:probe::paths::Inherent::never_called	MR-FIX-0005:probe::paths::Inherent::get	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+MISSING_SYMBOL	outcome	-	MR-FIX-0005:probe::nowhere	MR-FIX-0001:probe::fold	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+AMBIGUOUS_SYMBOL	outcome	-	MR-FIX-0005:probe::outside::Made::From::from	MR-FIX-0005:probe::nowhere	-	-	an outcome of the intent comparator, which is Python with no unit tests: the fixture manifest's rows and the manifest cases are its tests; outcomes have no sentinel file; no case moves this outcome's own row yet
+UNSPECIFIED	outcome	-	-	-	-	-	the comparator's report of every production definition no row names: no manifest row carries it, so no row can cite it; every fixture run reports its count

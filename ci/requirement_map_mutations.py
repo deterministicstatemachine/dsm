@@ -21,6 +21,9 @@
 #                 gets one contradiction written into it, and the map's own
 #                 `check` must name the case's rule: the checker is attacked
 #                 as the map is
+#   manifest      a copy of the fixture's intent manifest is changed and the
+#                 intent comparator reads it against the fixture's map: it
+#                 must refuse the row, or move exactly the outcomes named
 #
 # A case passes only when every reading it expects changes as written, every
 # reading it names as unchanged holds before and after, and every explain
@@ -390,12 +393,86 @@ def planted_case(case, work, fixture_map):
             shutil.rmtree(tree)
 
 
+def manifest_case(case, work, fixture_map):
+    """Changes one thing in a copy of the fixture's intent manifest and runs
+    the comparator over the fixture's map: `refused` names text the refusal
+    must hold; otherwise `expect` names each row (`requirement:symbol`) whose
+    outcome must become `OUTCOME fails|known-hole|-`, and every other row
+    keeps its expected outcome."""
+    tree = tempfile.mkdtemp(prefix=f"{case['name']}-", dir=work)
+    try:
+        with open(os.path.join(FIXTURE, "intent.tsv"), encoding="utf-8") as fh:
+            text = fh.read()
+        if text.count(case["find"]) != 1:
+            raise Failure(f"`find` occurs {text.count(case['find'])} times in the fixture's manifest")
+        # The changed manifest, and a directory of its own for the report
+        # (whose intent.tsv would otherwise overwrite it).
+        manifest = os.path.join(tree, "manifest.tsv")
+        with open(manifest, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(case["find"], case["replace"]))
+        report = os.path.join(tree, "report")
+        os.makedirs(report)
+        r = subprocess.run([sys.executable, "ci/intent_comparator.py", "--map", fixture_map, "--manifest", manifest,
+                            "--requirements", os.path.join(FIXTURE, "requirements.tsv"), "--report", report],
+                           capture_output=1, text=1)
+        # The comparator exits nonzero when rows fail, which the fixture's do;
+        # a crash is told apart by what it writes to stderr.
+        if r.stderr.strip():
+            return [f"the comparator failed:\n{r.stderr[-2000:]}"]
+        if "refused" in case:
+            if r.returncode == 0 or case["refused"] not in r.stdout:
+                return [f"the comparator did not refuse with {case['refused']!r}:\n{r.stdout[-1500:]}{r.stderr[-500:]}"]
+            return []
+        if "intent comparator:" in r.stdout:
+            return [f"the comparator refused the manifest:\n{r.stdout[-1500:]}"]
+        def rows_of(path, columns):
+            with open(path, encoding="utf-8") as fh:
+                lines = [l for l in fh.read().split("\n") if l and not l.startswith("#")]
+            if tuple(lines[0].split("\t")) != columns:
+                raise Failure(f"{path}: columns {lines[0]!r}, not {columns}")
+            rows = []
+            for l in lines[1:]:
+                cells = l.split("\t")
+                if len(cells) != len(columns):
+                    raise Failure(f"{path}: {len(cells)} cells, not {len(columns)}, in {l!r}")
+                rows.append(dict(zip(columns, cells)))
+            return rows
+        written = os.path.join(report, "intent.tsv")
+        if not os.path.exists(written):
+            return [f"the comparator wrote no report:\n{r.stdout[-1500:]}"]
+        got = rows_of(written, REPORT)
+        baseline = rows_of(os.path.join(FIXTURE, "intent-expected.tsv"), EXPECTED)
+        if len(got) != len(baseline):
+            return [f"{len(got)} rows reported, {len(baseline)} expected"]
+        faults = []
+        wanted = case.get("expect", {})
+        for g, b in zip(got, baseline):
+            key = f"{g['requirement']}:{g['symbol']}"
+            now = f"{g['outcome']} {g['fails']}"
+            if key in wanted:
+                if now != wanted[key]:
+                    faults.append(f"{key}: expected {wanted[key]}, the comparator says {now}")
+            elif now != f"{b['outcome']} {b['fails']}":
+                faults.append(f"{key}: moved from {b['outcome']} {b['fails']} to {now}, and the case names no such change")
+        missing = set(wanted) - {f"{g['requirement']}:{g['symbol']}" for g in got}
+        faults += [f"{k}: no such row after the change" for k in sorted(missing)]
+        return faults
+    finally:
+        if not ARGS.keep:
+            shutil.rmtree(tree)
+
+
+REPORT = ("requirement", "symbol", "artifact", "reachability", "lifecycle", "root", "evidence", "exception", "cites",
+          "state", "code", "outcome", "action", "status", "fails")
+EXPECTED = ("requirement", "symbol", "artifact", "reachability", "lifecycle", "root", "outcome", "fails")
+
+
 def main():
     global ARGS
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cases", required=1)
     ap.add_argument("--map", required=1, help="a finished `make requirement-map` directory (declarations and reindex cases)")
-    ap.add_argument("--kinds", default="fixture,declarations,reindex,planted")
+    ap.add_argument("--kinds", default="fixture,declarations,reindex,planted,manifest")
     ap.add_argument("--fixture-map", help="the fixture's map (make requirement-map-fixture) for planted cases; default MAP/fixture/map")
     ap.add_argument("--keep", action="store_true", help="keep each case's temporary copy")
     ARGS = ap.parse_args()
@@ -436,6 +513,8 @@ def main():
                 faults = declarations_case(case, work, ARGS.map)
             elif case["kind"] == "reindex":
                 faults = reindex_case(case, work, ARGS.map, pin)
+            elif case["kind"] == "manifest":
+                faults = manifest_case(case, work, fixture_map)
             elif case["kind"] == "planted":
                 which = case.get("map", "fixture")
                 faults = [unclean[which]] if which in unclean else planted_case(case, work, fixture_map)
