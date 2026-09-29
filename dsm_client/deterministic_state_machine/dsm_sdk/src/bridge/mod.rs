@@ -413,18 +413,6 @@ pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     );
 }
 
-// ---------------- Contact Management Helpers ----------------
-
-pub fn sdk_remove_contact(contact_id: &str) -> bool {
-    match crate::storage::client_db::remove_contact(contact_id) {
-        Ok(r) => r,
-        Err(e) => {
-            log::error!("remove_contact failed: {e}");
-            false
-        }
-    }
-}
-
 /// Every token balance, as the app router's `balance.list` answers it: the
 /// CANONICAL `BalanceGetResponse` rows, never a surrogate.
 ///

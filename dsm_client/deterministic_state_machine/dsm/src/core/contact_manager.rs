@@ -89,10 +89,6 @@ impl DsmContactManager {
     pub fn list_contacts(&self) -> Vec<&DsmVerifiedContact> {
         self.contacts.values().collect()
     }
-
-    pub fn remove_contact(&mut self, device_id: &[u8; 32]) -> Option<DsmVerifiedContact> {
-        self.contacts.remove(device_id)
-    }
 }
 
 #[cfg(test)]
@@ -162,22 +158,6 @@ mod tests {
         let retrieved = manager.get_contact(&device_id);
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().device_id, device_id);
-    }
-
-    #[test]
-    fn test_dsm_contact_manager_remove_contact() {
-        let own_device_id = create_test_device_id(0);
-        let mut manager = DsmContactManager::new(own_device_id);
-
-        let device_id = create_test_device_id(1);
-        let genesis_hash = create_test_genesis_hash(&device_id, 0);
-        let contact = create_test_contact(device_id, genesis_hash);
-
-        manager.add_verified_contact(contact).unwrap();
-        assert_eq!(manager.contacts.len(), 1);
-
-        manager.remove_contact(&device_id);
-        assert_eq!(manager.contacts.len(), 0);
     }
 
     #[test]

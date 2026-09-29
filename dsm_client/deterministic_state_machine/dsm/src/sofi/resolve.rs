@@ -240,11 +240,6 @@ pub fn carried_values(evidence: &CellEvidence) -> impl Iterator<Item = Vec<u8>> 
         .map(|entry| entry.value)
 }
 
-/// The value the cell's copies carry whose entry digest is `id`.
-pub fn value_of(evidence: &CellEvidence, id: &D32) -> Option<Vec<u8>> {
-    carried_values(evidence).find(|value| crate::storage_cell::entry_digest(value) == *id)
-}
-
 /// This device's own `R_econ` leaves, checked against the root they claim to
 /// form. Built from the device's leaf cache for its validated root, or by a
 /// test from leaves it holds — never from a root somebody sent.

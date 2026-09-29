@@ -2,8 +2,7 @@
 
 //! # Token Policy Module
 //!
-//! Built-in CPTA (Content-Addressed Token Policy Anchor) definitions and
-//! integrity assertions verified at library load time via `#[ctor]`.
+//! Built-in CPTA (Content-Addressed Token Policy Anchor) definitions.
 
 pub mod builtins;
 
