@@ -103,9 +103,6 @@ pub enum NotEstablished {
     ConformanceEvidence(Vec<ConformanceMissing>),
     /// Route evidence not in hand after the retry budget.
     RouteEvidence(Vec<Missing>),
-    /// Route evidence with no source this verifier can acquire it from: the
-    /// leaf pre values of another trader's route.
-    RouteEvidenceHasNoSource(Vec<Missing>),
     /// `P` names a conditional parent this verifier has not resolved.
     ParentUnresolved { fulfillment_id: D32 },
     /// A leg's attempt cell is not decided by its reads yet.

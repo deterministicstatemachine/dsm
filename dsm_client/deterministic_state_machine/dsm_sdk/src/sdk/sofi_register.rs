@@ -170,9 +170,7 @@ pub async fn install_fulfillment<R: SofiReads>(
         .map_err(|e| InstallError::Storage(e.to_string()))?
     {
         Acquired::Complete(evidence) => evidence,
-        Acquired::Exhausted(missing) | Acquired::NoSource(missing) => {
-            return Err(InstallError::Unavailable(missing))
-        }
+        Acquired::Exhausted(missing) => return Err(InstallError::Unavailable(missing)),
     };
     match fulfillment_conformance(
         request.fulfillment,

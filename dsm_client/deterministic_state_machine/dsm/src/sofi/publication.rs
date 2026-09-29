@@ -31,8 +31,8 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_FULFILLMENT_OBJECT, TAG_DSM_SOFI_POLICY_FULFILLMENT_OBJECT,
     TAG_DSM_SOFI_PRECOMMIT_OBJECT, TAG_DSM_SOFI_PREIMAGE_LOCATOR, TAG_DSM_SOFI_PREIMAGE_OBJECT,
     TAG_DSM_SOFI_REL_INDEX, TAG_DSM_SOFI_SETUP_OBJECT, TAG_DSM_SOFI_SETUP_REF,
-    TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
-    TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+    TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
+    TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
 };
 use crate::crypto::domain::TaggedHashDomain;
 use crate::storage_object::immutable_addr;
@@ -41,7 +41,7 @@ use super::derive;
 use super::signature::{verify_fulfillment, verify_precommit, verify_setup};
 use super::wire::{
     DlvPolicyFulfillmentBody, SettlementPreimage, SignedSofiObject, SofiSetupBody, SofiWireError,
-    TraderFulfillmentBody, TraderPrecommitBody, VaultGenesisPreimage,
+    TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, VaultGenesisPreimage,
 };
 
 type D32 = [u8; 32];
@@ -112,6 +112,10 @@ pub enum Publication<'a> {
         class: VaultPolicyClass,
         bytes: &'a [u8],
     },
+    /// A trader's balance of one token before a trade (Amendment S12), bare,
+    /// found by the address `𝒞_E^pre` names. The exercise carries it too;
+    /// publishing it lets a reader that holds only the closure fetch it.
+    TraderPreBalance(&'a TraderPreBalance),
 }
 
 fn envelope(
@@ -150,6 +154,7 @@ impl Publication<'_> {
             ),
             Self::VaultGenesis(preimage) => preimage.encode(),
             Self::VaultPolicy { bytes, .. } => Ok(bytes.to_vec()),
+            Self::TraderPreBalance(balance) => Ok(balance.encode()),
         }
     }
 
@@ -167,6 +172,7 @@ impl Publication<'_> {
                 VaultPolicyClass::Fee => TAG_DSM_FEE_POLICY_OBJECT,
                 VaultPolicyClass::Release => TAG_DSM_RELEASE_POLICY_OBJECT,
             },
+            Self::TraderPreBalance(_) => TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
         }
     }
 
@@ -216,7 +222,7 @@ impl Publication<'_> {
                 index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
                 locator: derive::vault_genesis_locator(&preimage.vault_id()),
             }],
-            Self::VaultPolicy { .. } => Vec::new(),
+            Self::VaultPolicy { .. } | Self::TraderPreBalance(_) => Vec::new(),
         })
     }
 }

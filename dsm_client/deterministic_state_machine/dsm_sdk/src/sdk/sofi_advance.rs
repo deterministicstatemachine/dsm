@@ -38,7 +38,7 @@ use dsm::sofi::lineage::{advance_resolved, descendant_fence, AdvanceError};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
-use dsm::sofi::resolve::{Acquired, LocalLeaves};
+use dsm::sofi::resolve::Acquired;
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::validation::{trader_post_states, vault_post_states};
 use dsm::sofi::wire::{
@@ -54,7 +54,7 @@ use crate::sdk::economic_admission_flow::validated_root_or_activate;
 use crate::sdk::route_seats::{read_cell, NodeSeats};
 use crate::sdk::sofi_exercise::{build_exercise, write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
-use crate::sdk::sofi_reads::{local_leaves_of_validated, verifier_error, VerifierContext};
+use crate::sdk::sofi_reads::{verifier_error, VerifierContext};
 use crate::sdk::sofi_register::{
     install_fulfillment, position_cells, InstallError, InstallRequest, Installed,
 };
@@ -270,28 +270,26 @@ fn install_request<'a>(request: &FulfillRequest<'a>) -> InstallRequest<'a> {
     }
 }
 
-/// This device as the verifier of its own position: its leaves at its
-/// validated root, and the position it resolved itself.
+/// This device as the verifier of its own position: its identity, and the
+/// position it resolved itself.
 struct OwnStanding {
-    local: LocalLeaves,
+    own: (D32, D32),
     admitted: AdmittedEconomicPosition,
 }
 
 impl OwnStanding {
-    fn of(
-        core: &CoreSDK,
-        admitted: AdmittedEconomicPosition,
-        validated: &ValidatedEconomicRoot,
-    ) -> Result<Self, DsmError> {
+    fn of(core: &CoreSDK, admitted: AdmittedEconomicPosition) -> Result<Self, DsmError> {
         let head = core
             .device_head()
             .ok_or_else(|| storage("device head", "none"))?;
-        let local = local_leaves_of_validated(&head.genesis_digest(), &head.devid(), validated)?;
-        Ok(Self { local, admitted })
+        Ok(Self {
+            own: (head.genesis_digest(), head.devid()),
+            admitted,
+        })
     }
 
     fn context<'a>(&'a self, set: &'a StorageSet) -> Result<VerifierContext<'a>, DsmError> {
-        VerifierContext::new(set, Some(&self.local), Some(&self.admitted))
+        VerifierContext::new(set, Some(self.own), Some(&self.admitted))
     }
 }
 
@@ -338,11 +336,6 @@ async fn exercise_legs(
     {
         Acquired::Complete(evidence) => evidence,
         Acquired::Exhausted(missing) => return Ok(Err(NotTaken::Evidence(missing))),
-        Acquired::NoSource(missing) => {
-            return Err(refuse(format!(
-                "exercise: conformance evidence has no source: {missing:?}"
-            )))
-        }
     };
     let exercise = build_exercise(&install, &evidence)?;
     let recognized = dsm::sofi::exercise::recognize_exercise(&exercise.encode())
@@ -559,9 +552,7 @@ pub async fn complete_pending_fulfillment(
     // or it is not finished.
     descendant_fence(admitted.predecessor_claim(), &pending.pre_economic_root)
         .map_err(|e| refuse(e.to_string()))?;
-    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
-        .map_err(|e| refuse(e.to_string()))?;
-    let standing = OwnStanding::of(core, admitted, &validated)?;
+    let standing = OwnStanding::of(core, admitted)?;
     let ctx = standing.context(set)?;
     let installed = match install_pair(&ctx, set, &request).await? {
         Ok(installed) => installed,
@@ -719,7 +710,7 @@ pub async fn resolve_pending_position(
     // Registration, from the pair (R10). The F at q must be THIS one: the
     // device only ever writes its own claims at its own positions, so any
     // other outcome is a local incoherence, not a race to wait out.
-    let standing = OwnStanding::of(core, admitted, &validated)?;
+    let standing = OwnStanding::of(core, admitted)?;
     let ctx = standing.context(set)?;
     let verifier = ctx.verifier();
     let registration = match verifier

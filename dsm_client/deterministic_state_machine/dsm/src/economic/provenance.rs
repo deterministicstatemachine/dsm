@@ -47,7 +47,7 @@
 use crate::common::domain_tags::{TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::economic::credit::CreditSource;
-use crate::economic::lineage::ValidatedEconomicRoot;
+use crate::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::state::EconomicLeafState;
 use crate::economic::witness::EconomicTransitionWitness;
@@ -142,6 +142,9 @@ pub struct PeerTransitionFacts {
     /// as the walk verified it. A release that names another manifest for
     /// the same root is refused against this, not against a re-read cell.
     admission_manifest_addr: [u8; 32],
+    /// The claim `advance_validated` accepted at this position: what a
+    /// setup of this peer names by `claim_ref` (SoFi Amendment S9).
+    accepted_claim: AcceptedClaim,
 }
 
 impl ValidatedPeerTransition {
@@ -164,6 +167,7 @@ impl ValidatedPeerTransition {
         embedded_parent: [u8; 32],
         verified_operation: crate::types::operations::Operation,
         admission_manifest_addr: [u8; 32],
+        accepted_claim: AcceptedClaim,
     ) -> Self {
         Self::SingleRoot(PeerTransitionFacts {
             peer_genesis,
@@ -175,6 +179,7 @@ impl ValidatedPeerTransition {
             embedded_parent,
             verified_operation,
             admission_manifest_addr,
+            accepted_claim,
         })
     }
 
@@ -203,6 +208,12 @@ impl ValidatedPeerTransition {
     /// The admission manifest the walk verified at this position.
     pub fn admission_manifest_addr(&self) -> [u8; 32] {
         self.facts().admission_manifest_addr
+    }
+
+    /// The claim the walk accepted at this position, as `advance_validated`
+    /// produced it.
+    pub fn accepted_claim(&self) -> &AcceptedClaim {
+        &self.facts().accepted_claim
     }
 
     pub fn witness(&self) -> &EconomicTransitionWitness {
