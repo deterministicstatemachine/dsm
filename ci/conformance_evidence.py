@@ -448,6 +448,26 @@ def check_ref(ref, index, results, where, use_logs):
             fail(f"{where}: test {ref} {outcome} in the given board logs")
 
 
+def code_at(ref):
+    """The commit `ref` names, and why this tree's code is not that commit's,
+    or None when it is: nothing the boards compile (TESTED_CODE: the crates,
+    the proto, the Cargo manifests and lockfiles) differs from it, tracked or
+    untracked. What makes a board log at that commit evidence for this tree."""
+    sha = subprocess.run(
+        ["git", "rev-parse", "--verify", ref + "^{commit}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    outside = ["--", *TESTED_CODE]
+    differs = subprocess.run(["git", "diff", "--quiet", sha] + outside).returncode != 0
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"] + outside,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if differs or untracked:
+        return sha, "this tree's code is not that commit's"
+    return sha, None
+
+
 def is_test_ref(ref):
     head = ref.split("::")[0]
     return (CANON.match(ref) and head in CRATES) or FORMAL.match(ref)
@@ -586,18 +606,9 @@ def main():
 
     if args.write:
         if use_logs:
-            sha = subprocess.run(
-                ["git", "rev-parse", "--verify", args.tested_at + "^{commit}"],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            outside = ["--", *TESTED_CODE]
-            differs = subprocess.run(["git", "diff", "--quiet", sha] + outside).returncode != 0
-            untracked = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"] + outside,
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            if differs or untracked:
-                print(f"refusing to record {sha[:12]}: this tree's code is not that commit's")
+            sha, why = code_at(args.tested_at)
+            if why:
+                print(f"refusing to record {sha[:12]}: {why}")
                 return 1
             line = f"| Evidence | every test named in §5A, §8 and `VERIFICATION_MATRIX.md` passed on the board at `{sha[:12]}` (`ci/conformance_evidence.py --board-log`) |"
             if re.search(r"^\| Evidence \|.*$", gaps, re.M):

@@ -26,6 +26,13 @@ pub const COMPONENT: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-
 /// One definition and everything it reaches.
 pub const CLOSURE: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/code-closure/v1");
 
+/// One intent manifest row: its cells, in column order.
+pub const MANIFEST_ROW: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/intent-manifest-row/v1");
+/// A pinned row's evidence: every fact its pin holds, in column order.
+pub const ROW_EVIDENCE: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/code-row-evidence/v1");
+
 pub type Digest = [u8; 32];
 
 /// Each part is preceded by its length, so two different part lists never
@@ -64,6 +71,7 @@ mod tests {
         assert_ne!(hash(FILE, &[b"x"]), hash(ITEM, &[b"x"]));
         assert_ne!(hash(GENERATED, &[b"x"]), hash(EXTERNAL, &[b"x"]));
         assert_ne!(hash(GENERATION, &[b"x"]), hash(GENERATED, &[b"x"]));
+        assert_ne!(hash(MANIFEST_ROW, &[b"x"]), hash(ROW_EVIDENCE, &[b"x"]));
     }
 
     #[test]
