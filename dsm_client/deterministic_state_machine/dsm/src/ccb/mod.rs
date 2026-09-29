@@ -233,6 +233,12 @@ pub mod class {
     /// root proves the creation, and a second creation of the same policy
     /// commit on that lineage cannot insert it again.
     pub const ECONOMIC_TOKEN_CREATION_STATE: u16 = 0x0060;
+    /// `0x0061` — a trader's balance of one token before a trade (SoFi
+    /// Amendment S12). `T°` states that balance only by the hash of its leaf,
+    /// so the exercise carries the value as this object, named in
+    /// `𝒞_E^pre` and accepted only because it hashes to the leaf the core
+    /// states.
+    pub const SOFI_TRADER_PRE_BALANCE: u16 = 0x0061;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

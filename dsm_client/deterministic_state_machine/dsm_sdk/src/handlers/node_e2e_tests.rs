@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use dsm::economic::lineage::{AdmittedEconomicPosition, ValidatedEconomicRoot};
+use dsm::economic::lineage::AdmittedEconomicPosition;
 use dsm::route_chain::{CellFact, ChainState};
 use dsm::sofi::conformance::{
     conformance_invalid_in_hand, derive_policy_fulfillments, FulfillmentConformanceError,
@@ -18,7 +18,7 @@ use dsm::sofi::derive;
 use dsm::sofi::exercise::{recognize_exercise, RecognizedExercise};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::resolution::WalkOutcome;
-use dsm::sofi::resolve::{LocalLeaves, WALK_BUDGET};
+use dsm::sofi::resolve::WALK_BUDGET;
 use dsm::sofi::wire::{
     AttemptEntry, DlvPolicyFulfillmentBody, PrecommitLeg, SofiExercise, TraderFulfillmentBody,
     TraderPrecommitBody,
@@ -32,7 +32,7 @@ use crate::bridge::{AppInvoke, AppQuery, AppResult, AppRouter as _};
 use crate::economic_fixtures::NETWORK;
 use crate::sdk::sofi_advance::{complete_pending_fulfillment, Completion, NotTaken};
 use crate::sdk::sofi_exercise::{attempt_cell, write_exercise};
-use crate::sdk::sofi_reads::{local_leaves_of_validated, VerifierContext};
+use crate::sdk::sofi_reads::VerifierContext;
 use crate::sdk::sofi_register::position_cells;
 use crate::sdk::storage_set::canonical_set;
 use crate::storage::client_db::economic_lineage;
@@ -254,20 +254,13 @@ struct Market {
     tkn: [u8; 32],
 }
 
-/// A creates the token and the vault (100 ERA against 1000 TKN at 30 bps);
-/// B adopts the token and sets up. Adoption precedes receipt (owner ruling
-/// 2026-09-13): the trader adds TKN before it can receive any.
-async fn open_market(p: &Pair) -> Market {
-    let tkn = create_token(&p.a, "TKN", 10_000).await;
-    let era = era();
-    let (token_a, token_b, reserve_a, reserve_b) = if era < tkn {
-        (era, tkn, 100, 1_000)
-    } else {
-        (tkn, era, 1_000, 100)
-    };
+/// `d`'s `sofi.createVault` on two tokens at their reserves, at 30 bps, the
+/// pair in the order §28 requires (`token_a < token_b`). The vault id.
+async fn create_vault(d: &TestDevice, x: ([u8; 32], u64), y: ([u8; 32], u64)) -> [u8; 32] {
+    let ((token_a, reserve_a), (token_b, reserve_b)) = if x.0 < y.0 { (x, y) } else { (y, x) };
     let vault_id = match payload(
         &invoke(
-            &p.a,
+            d,
             "sofi.createVault",
             args(&generated::SofiCreateVaultRequest {
                 token_a_policy_commit: token_a.to_vec(),
@@ -282,29 +275,55 @@ async fn open_market(p: &Pair) -> Market {
         Payload::SofiVaultCreatedResponse(v) => v.vault_id,
         other => panic!("sofi.createVault answered {other:?}"),
     };
-    let vault_id: [u8; 32] = vault_id
+    vault_id
         .as_slice()
         .try_into()
-        .expect("a vault id is 32 bytes");
-    p.b.enter();
-    let adopted =
-        p.b.router()
-            .query(crate::bridge::AppQuery {
-                path: "tokens.addByAnchor".to_string(),
-                params: crate::util::text_id::encode_base32_crockford(&tkn).into_bytes(),
-            })
-            .await;
-    assert!(adopted.success, "B adopts TKN: {:?}", adopted.error_message);
-    payload(
+        .expect("a vault id is 32 bytes")
+}
+
+/// `d` adds `token` by its anchor. Adoption precedes receipt (owner ruling
+/// 2026-09-13): a trader adds a token before it can receive any.
+async fn adopt(d: &TestDevice, token: &[u8; 32]) {
+    d.enter();
+    let adopted = d
+        .router()
+        .query(crate::bridge::AppQuery {
+            path: "tokens.addByAnchor".to_string(),
+            params: crate::util::text_id::encode_base32_crockford(token).into_bytes(),
+        })
+        .await;
+    assert!(
+        adopted.success,
+        "{} adopts the token: {:?}",
+        d.slot, adopted.error_message
+    );
+}
+
+/// `d`'s `sofi.setup` with `vault_id` (§29). The setup reference.
+async fn set_up(d: &TestDevice, vault_id: &[u8; 32]) -> Vec<u8> {
+    match payload(
         &invoke(
-            &p.b,
+            d,
             "sofi.setup",
             args(&generated::SofiSetupRequest {
                 vault_id: vault_id.to_vec(),
             }),
         )
         .await,
-    );
+    ) {
+        Payload::SofiSetupResponse(r) => r.setup_ref,
+        other => panic!("sofi.setup answered {other:?}"),
+    }
+}
+
+/// A creates the token and the vault (100 ERA against 1000 TKN at 30 bps);
+/// B adopts the token and sets up.
+async fn open_market(p: &Pair) -> Market {
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let era = era();
+    let vault_id = create_vault(&p.a, (era, 100), (tkn, 1_000)).await;
+    adopt(&p.b, &tkn).await;
+    set_up(&p.b, &vault_id).await;
     Market { vault_id, era, tkn }
 }
 
@@ -338,40 +357,41 @@ async fn resolve(p: &Pair) -> (u64, i32) {
     )
 }
 
-/// B trades `amount_in` ERA in the market and the position resolves
-/// Realized, through `sofi.resolve` if the trade's own rounds did not get
-/// there. The position.
-async fn realized_trade(p: &Pair, m: &Market, amount_in: u64) -> u64 {
+/// `d` takes a position through `route` and it resolves Realized, through
+/// `sofi.resolve` if the route's own rounds did not get there. The position.
+async fn realized_through(d: &TestDevice, route: &str, request: Vec<u8>) -> u64 {
     let realized = generated::SofiPositionState::Realized as i32;
-    let (position, state) = position_of(
-        &invoke(&p.b, "sofi.trade", args(&trade_request(m, amount_in))).await,
-        "sofi.trade",
-    );
+    let (position, state) = position_of(&invoke(d, route, request).await, route);
     if state == realized {
         return position;
     }
-    let (resolved, state) = resolve(p).await;
-    assert_eq!((resolved, state), (position, realized));
+    let resolved = position_of(
+        &invoke(d, "sofi.resolve", args(&generated::SofiResolveRequest {})).await,
+        "sofi.resolve",
+    );
+    assert_eq!(resolved, (position, realized), "{route} on {}", d.slot);
     position
 }
 
+/// B trades `amount_in` ERA in the market and the position resolves
+/// Realized. The position.
+async fn realized_trade(p: &Pair, m: &Market, amount_in: u64) -> u64 {
+    realized_through(&p.b, "sofi.trade", args(&trade_request(m, amount_in))).await
+}
+
 /// What a device stands on for a resolution, as `sofi_advance` assembles it:
-/// its own leaves at its validated predecessor, and the conditional position
-/// it resolved, if that is what it stands on.
-fn standing_of(d: &TestDevice) -> (LocalLeaves, Option<AdmittedEconomicPosition>) {
+/// its identity, and the conditional position it resolved, if that is what
+/// it stands on.
+fn standing_of(d: &TestDevice) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomicPosition>) {
     d.enter();
     let admitted = economic_lineage::get_admitted()
         .expect("read admitted")
         .expect("an admitted position");
-    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
-        .expect("a resolved predecessor");
-    let local =
-        local_leaves_of_validated(&d.genesis, &d.device_id, &validated).expect("own leaves");
     // The position this device resolved itself, for Core to read what it
     // selected when a P names it as its parent.
     let parent =
         matches!(admitted, AdmittedEconomicPosition::ResolvedSofi { .. }).then_some(admitted);
-    (local, parent)
+    ((d.genesis, d.device_id), parent)
 }
 
 fn pending_position(d: &TestDevice) -> Option<u64> {
@@ -576,8 +596,8 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
 
     // The vault's chain as B established it: the genesis root and the
     // generation B's trade produced.
-    let (local, parents) = standing_of(&p.b);
-    let ctx = VerifierContext::new(&set, Some(&local), parents.as_ref()).expect("a verifier");
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
     assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
@@ -704,8 +724,8 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
     let m = open_market(&p).await;
     realized_trade(&p, &m, 10).await;
     let set = canonical_set(NETWORK).expect("the pinned set");
-    let (local, parents) = standing_of(&p.b);
-    let ctx = VerifierContext::new(&set, Some(&local), parents.as_ref()).expect("a verifier");
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
     assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
@@ -786,8 +806,8 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
     let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
         .expect("B's next position pair");
     let pair_leader = member_name(pair.fulfillment().route().leader());
-    let (local, parents) = standing_of(&p.b);
-    let ctx = VerifierContext::new(&set, Some(&local), parents.as_ref()).expect("a verifier");
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
     assert_eq!(chain.roots().len(), 1, "the vault is at its genesis");
@@ -903,4 +923,217 @@ async fn a_route_search_that_cannot_see_a_vault_is_an_error_not_an_empty_route()
     let route = hops(&invoke(&p.b, "sofi.findRoute", args(&request)).await);
     assert_eq!(route.len(), 1, "the hop is found again");
     assert_eq!(route[0].amount_out, out);
+}
+
+/// CONFORMANCE §6.39, SoFi Amendment S12: once a trader has traded through a
+/// vault, the owner's close still resolves. The owner judges the trader's
+/// exercise from the exercise's own bytes: the trader's balance before the
+/// trade travels in it, so the owner needs nothing of the trader's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_vault_traded_through_closes_for_its_owner() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    assert_eq!(
+        set_up(&p.a, &m.vault_id).await.len(),
+        32,
+        "the owner's setup"
+    );
+    let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
+        .expect("the vault prices the trade");
+    realized_trade(&p, &m, 10).await;
+    assert_eq!(balance(&p.b, &m.tkn), out, "B holds what the trade priced");
+
+    let era_before = balance(&p.a, &m.era);
+    let tkn_before = balance(&p.a, &m.tkn);
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        balance(&p.a, &m.era),
+        era_before + 110,
+        "the vault's ERA: its reserve and all of B's input"
+    );
+    assert_eq!(
+        balance(&p.a, &m.tkn),
+        tkn_before + 1_000 - out,
+        "and the TKN B did not take"
+    );
+}
+
+/// SoFi §27 (MR-SOFI-0255): the app reaches SoFi through exactly its eight
+/// routes. Each, sent through the production router, reaches its producer
+/// and answers with the result §27 names for it:
+/// - `sofi.createVault`: A opens a vault on ERA/TKN and one on TKN/TKB.
+/// - `sofi.setup`: B sets up with both, and A with the vault it closes: a
+///   close is a one-hop route against the owner's own vault, carrying the
+///   owner's setup (§32).
+/// - `sofi.findRoute`: B is quoted ERA→TKN→TKB, two hops, each priced at its
+///   vault's head.
+/// - `sofi.route`: B takes those two hops and receives what they priced.
+/// - `sofi.relay`: A carries B's route position with nothing from B: the
+///   position pair's two cells and each hop's key.
+/// - `sofi.trade`: B takes the one hop ERA→TKN at the price it was quoted.
+/// - `sofi.close`: A closes its TKN/TKB vault and receives both reserves.
+/// - `sofi.resolve`: resolves each position its route's own rounds left
+///   pending, and with nothing pending its producer refuses.
+///
+/// A ninth `sofi.` method reaches no SoFi route: the router refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn every_sofi_route_reaches_its_producer() {
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let tkb = create_token(&p.a, "TKB", 10_000).await;
+    let first = create_vault(&p.a, (era, 100), (tkn, 1_000)).await;
+    let second = create_vault(&p.a, (tkn, 1_000), (tkb, 1_000)).await;
+    assert_eq!(balance(&p.a, &tkn), 8_000, "A funded both vaults' TKN");
+    assert_eq!(balance(&p.a, &tkb), 9_000, "and the second's TKB");
+    for token in [&tkn, &tkb] {
+        adopt(&p.b, token).await;
+    }
+    for vault in [&first, &second] {
+        assert_eq!(set_up(&p.b, vault).await.len(), 32, "a setup reference");
+    }
+    assert_eq!(set_up(&p.a, &second).await.len(), 32, "the owner's setup");
+
+    let hops = |r: &AppResult| match payload(r) {
+        Payload::SofiFindRouteResponse(r) => r.hops,
+        other => panic!("sofi.findRoute answered {other:?}"),
+    };
+    let search = |token_out: &[u8; 32]| {
+        args(&generated::SofiFindRouteRequest {
+            token_in_policy_commit: era.to_vec(),
+            token_out_policy_commit: token_out.to_vec(),
+            amount_in: 10,
+        })
+    };
+    let one = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
+        .expect("the first vault prices its hop");
+    let two = dsm::dlv::route_commit::constant_product_output(one, 1_000, 1_000, 30)
+        .expect("the second vault prices its hop");
+    let quoted: Vec<_> = hops(&invoke(&p.b, "sofi.findRoute", search(&tkb)).await)
+        .into_iter()
+        .map(|h| {
+            (
+                h.vault_id,
+                h.token_in_policy_commit,
+                h.token_out_policy_commit,
+                h.amount_in,
+                h.amount_out,
+            )
+        })
+        .collect();
+    assert_eq!(
+        quoted,
+        vec![
+            (first.to_vec(), era.to_vec(), tkn.to_vec(), 10, one),
+            (second.to_vec(), tkn.to_vec(), tkb.to_vec(), one, two),
+        ],
+        "ERA→TKN→TKB through the two vaults"
+    );
+
+    let routed = realized_through(
+        &p.b,
+        "sofi.route",
+        args(&generated::SofiRouteRequest {
+            vault_ids: vec![first.to_vec(), second.to_vec()],
+            token_in_policy_commit: era.to_vec(),
+            amount_in: 10,
+            min_amount_out: two,
+        }),
+    )
+    .await;
+    assert_eq!(balance(&p.b, &era), 190, "the route took 10 ERA");
+    assert_eq!(balance(&p.b, &tkb), two, "and gave what its hops priced");
+    assert_eq!(balance(&p.b, &tkn), 0, "and kept nothing on the way");
+
+    let relayed = match payload(
+        &invoke(
+            &p.a,
+            "sofi.relay",
+            args(&generated::SofiRelayRequest {
+                trader_genesis: p.b.genesis.to_vec(),
+                trader_device_id: p.b.device_id.to_vec(),
+                position: routed,
+            }),
+        )
+        .await,
+    ) {
+        Payload::SofiRelayResponse(r) => r.cells_written,
+        other => panic!("sofi.relay answered {other:?}"),
+    };
+    assert_eq!(
+        relayed, 4,
+        "the position pair's two cells and both hops' keys"
+    );
+
+    let quote = hops(&invoke(&p.b, "sofi.findRoute", search(&tkn)).await);
+    assert_eq!(quote.len(), 1, "one hop ERA→TKN");
+    let bought = quote[0].amount_out;
+    realized_through(
+        &p.b,
+        "sofi.trade",
+        args(&generated::SofiTradeRequest {
+            vault_id: first.to_vec(),
+            token_in_policy_commit: era.to_vec(),
+            amount_in: 10,
+            min_amount_out: bought,
+        }),
+    )
+    .await;
+    assert_eq!(balance(&p.b, &era), 180, "the trade took 10 ERA");
+    assert_eq!(balance(&p.b, &tkn), bought, "and gave what it was quoted");
+
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: second.to_vec(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        balance(&p.a, &tkb),
+        10_000 - two,
+        "the close released every TKB B does not hold"
+    );
+    assert_eq!(
+        balance(&p.a, &tkn),
+        8_000 + 1_000 + one,
+        "and the vault's TKN: its reserve and the first hop's output"
+    );
+
+    let nothing_pending = invoke(
+        &p.b,
+        "sofi.resolve",
+        args(&generated::SofiResolveRequest {}),
+    )
+    .await;
+    let Some(refusal) = nothing_pending.error_message else {
+        panic!(
+            "a resolve with nothing pending answered {:?}",
+            nothing_pending.data
+        )
+    };
+    assert!(
+        refusal.starts_with("sofi.resolve: ")
+            && refusal.contains("no pending admission: nothing to resolve"),
+        "sofi.resolve's producer refuses: {refusal}"
+    );
+
+    let unknown = invoke(&p.b, "sofi.quote", args(&generated::SofiResolveRequest {})).await;
+    let Some(refusal) = unknown.error_message else {
+        panic!("sofi.quote answered {:?}", unknown.data)
+    };
+    assert!(
+        refusal.starts_with("unknown invoke method: 'sofi.quote'"),
+        "the router refuses a method that is no SoFi route: {refusal}"
+    );
 }

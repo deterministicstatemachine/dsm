@@ -38,7 +38,7 @@ use crate::economic::authority_evidence::{verify_authority_evidence, AuthorityEv
 use crate::economic::claim::AdmissionSubstrate;
 use crate::economic::decode::decode_admission_manifest;
 use crate::economic::lineage::{
-    activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
+    activate, advance_validated, AcceptedClaim, AcceptedSubstrate, EconomicActivationSnapshot,
     EconomicValidationError, ValidatedEconomicRoot,
 };
 use crate::economic::provenance::{
@@ -389,6 +389,7 @@ fn walk_positions(
         [u8; 32],
         [u8; 32],
         [u8; 32],
+        AcceptedClaim,
     )> = None;
     for position in first_position..=target_position {
         if state.steps_remaining == 0 {
@@ -560,13 +561,21 @@ fn walk_positions(
             verified.c_dsm_plus,
             verified.embedded_parent,
             manifest_addr,
+            advanced.claim,
         ));
     }
 
-    let (witness, proven_ak, verified_operation, c_dsm_plus, embedded_parent, manifest_addr) = last
-        .ok_or_else(|| {
-            incomplete("walk had no steps — the start memo already covers the target")
-        })?;
+    let (
+        witness,
+        proven_ak,
+        verified_operation,
+        c_dsm_plus,
+        embedded_parent,
+        manifest_addr,
+        accepted_claim,
+    ) = last.ok_or_else(|| {
+        incomplete("walk had no steps — the start memo already covers the target")
+    })?;
     // SINGLE-ROOT BY CONSTRUCTION, not by label. Every position this walk
     // traversed decoded as a single-root claim: a conditional `C_q` is refused
     // above with `Unresolved`, resolved or not, because resolution is
@@ -582,6 +591,7 @@ fn walk_positions(
         embedded_parent,
         verified_operation,
         manifest_addr,
+        accepted_claim,
     ))
 }
 

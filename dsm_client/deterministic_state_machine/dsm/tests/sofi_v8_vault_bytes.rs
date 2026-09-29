@@ -1041,6 +1041,96 @@ fn decoders_refuse_wrong_classes_truncation_and_trailing_bytes() {
     ));
 }
 
+/// SoFi Amendment S12: a trader's balance before a trade. Its bytes follow
+/// the field table, its address is the immutable-store address under its own
+/// namespace, and its balance hashes to the economic leaf value a trader core
+/// states — each checked against the independent encoder and frozen here.
+#[test]
+fn a_trader_pre_balance_matches_the_independent_encoder_and_its_frozen_address() {
+    let balance = TraderPreBalance::new(b(0x91), b(0x92), b(0x93), 50_000).unwrap();
+    let bytes = [
+        indep::env(0x0061),
+        b(0x91).to_vec(),
+        b(0x92).to_vec(),
+        b(0x93).to_vec(),
+        indep::u64be(50_000),
+    ]
+    .concat();
+    assert_eq!(balance.encode(), bytes);
+    assert_eq!(TraderPreBalance::decode(&bytes).unwrap(), balance);
+
+    let namespace = "DSM/sofi/trader-pre-balance-object/v1";
+    let inner = indep::h(namespace, &[&bytes]);
+    let addr = indep::h("DSM/storage-object", &[namespace.as_bytes(), &inner]);
+    assert_eq!(d::trader_pre_balance_addr(&balance), addr);
+    assert_eq!(d::closure_content_address(0x0061, &bytes), Some(addr));
+    assert_eq!(
+        cf(&addr),
+        "EX68SMCY5KTWY45TRJEM50Z4PJN9PE5RW59QPHPK6QB08H5FF9FG"
+    );
+
+    // The leaf the core states: the economic balance state (class 0x001F)
+    // under the economic leaf-state tag.
+    let leaf = indep::h(
+        "DSM/economic-leaf-state/v1",
+        &[&[indep::env(0x001F), b(0x93).to_vec(), indep::u64be(50_000)].concat()],
+    );
+    assert_eq!(
+        dsm::economic::state::EconomicLeafState::Balance(
+            dsm::economic::state::EconomicBalanceState {
+                policy_commit: b(0x93),
+                amount: 50_000,
+            }
+        )
+        .leaf_value()
+        .unwrap(),
+        leaf
+    );
+    assert_eq!(
+        cf(&leaf),
+        "2TEDV0VXSX6BB0XTEGJ9BA21N0PVZHCC0EC99Y34SQX62YWAJ7W0"
+    );
+
+    // Strict: a zero balance, the wrong class, truncation and trailing bytes
+    // have no reading.
+    assert!(matches!(
+        TraderPreBalance::new(b(0x91), b(0x92), b(0x93), 0),
+        Err(SofiWireError::ZeroPreBalance)
+    ));
+    let zero = [
+        indep::env(0x0061),
+        b(0x91).to_vec(),
+        b(0x92).to_vec(),
+        b(0x93).to_vec(),
+        indep::u64be(0),
+    ]
+    .concat();
+    assert!(matches!(
+        TraderPreBalance::decode(&zero),
+        Err(DecodeError::Invalid(..))
+    ));
+    assert!(matches!(
+        TraderPreBalance::decode(&bytes[..bytes.len() - 1]),
+        Err(DecodeError::Truncated)
+    ));
+    let mut long = bytes.clone();
+    long.push(0);
+    assert!(matches!(
+        TraderPreBalance::decode(&long),
+        Err(DecodeError::TrailingBytes { extra: 1 })
+    ));
+    let relationship = VaultRelationshipLeaf {
+        trader_genesis: b(0x91),
+        trader_device_id: b(0x92),
+        leaf: b(0x93),
+    }
+    .encode();
+    assert!(matches!(
+        TraderPreBalance::decode(&relationship),
+        Err(DecodeError::WrongClass { got: 0x004C })
+    ));
+}
+
 #[test]
 fn the_new_classes_are_allocated_exactly_once() {
     let src = include_str!("../src/ccb/mod.rs");

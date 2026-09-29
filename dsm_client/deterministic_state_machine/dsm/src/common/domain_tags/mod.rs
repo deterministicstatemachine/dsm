@@ -169,7 +169,8 @@ mod tests {
     // it outside the registry).
     // -1 with the client-edited storage node list: its placement seed was the
     // network hash domain's only input.
-    const EXPECTED_TAG_COUNT: usize = 350;
+    // +1 with the TraderPreBalance object namespace (SoFi Amendment S12).
+    const EXPECTED_TAG_COUNT: usize = 351;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
