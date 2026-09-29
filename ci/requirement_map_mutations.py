@@ -43,6 +43,7 @@ BINARY = os.path.abspath("target/release/requirement_map")
 SENTINELS = "ci/requirement_map.sentinels.tsv"
 ROOTS = "ci/requirement_map.roots.tsv"
 COUNTS = "ci/requirement_map.counts.tsv"
+FIXTURE_SENTINELS = f"{FIXTURE}/sentinels.tsv"
 DECLARATIONS = "dsm_client/android/app/src/main"
 SOURCE_SUFFIXES = (".rs", ".kt", ".kts", ".java", ".ts", ".tsx", ".js", ".mjs", ".proto")
 
@@ -125,7 +126,9 @@ def readings(map_dir, artifact):
                 by_symbol[r["symbol"]] = f"{r['state']} {r['code']}"
     out = {}
     for path, symbols in path_of.items():
-        values = sorted({by_symbol[s] for s in symbols if s in by_symbol})
+        # One value per definition the artifact reads: two that read alike
+        # are still two, and never fold into one.
+        values = sorted(by_symbol[s] for s in symbols if s in by_symbol)
         out[path] = values
     return out
 
@@ -316,9 +319,10 @@ def reindex_case(case, work, map_dir, pin):
 
 
 def check_args(real):
-    """The check's committed facts, for a real map; none for the fixture's."""
+    """The check's committed facts: a real map's sentinels, entry points and
+    counts; the fixture's own sentinels."""
     if not real:
-        return []
+        return ["--sentinels", FIXTURE_SENTINELS]
     return ["--sentinels", SENTINELS, "--roots", ROOTS, "--counts", COUNTS]
 
 
@@ -402,8 +406,11 @@ def main():
     os.makedirs(work, exist_ok=1)
     pin = rust_pin()
     fixture_map = ARGS.fixture_map or os.path.join(ARGS.map, "fixture", "map")
+    # A planted fault means something only against a map that holds none: a
+    # map that is not clean fails its planted cases, and every other case
+    # still runs.
+    unclean = {}
     if "planted" in kinds:
-        # The attack means something only against a map that holds none.
         planted_maps = {case.get("map", "fixture") for case in cases if case["kind"] == "planted"}
         for which in sorted(planted_maps):
             real = which == "real"
@@ -411,7 +418,7 @@ def main():
                                 "check", *check_args(real)], capture_output=1, text=1)
             if r.returncode:
                 print(f"the {which} map is not clean before planting:\n{r.stdout}{r.stderr}")
-                return 1
+                unclean[which] = f"the {which} map is not clean before planting (its check is printed above)"
     failed = []
     ran = 0
     fixture_tree = None
@@ -430,7 +437,8 @@ def main():
             elif case["kind"] == "reindex":
                 faults = reindex_case(case, work, ARGS.map, pin)
             elif case["kind"] == "planted":
-                faults = planted_case(case, work, fixture_map)
+                which = case.get("map", "fixture")
+                faults = [unclean[which]] if which in unclean else planted_case(case, work, fixture_map)
             else:
                 faults = [f"no such kind {case['kind']!r}"]
         except Failure as e:

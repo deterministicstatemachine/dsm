@@ -1083,7 +1083,7 @@ fn add_impl_edges(
                         code::UNLINKED_IMPL,
                         format!(
                             "an impl of the outside trait `{trait_base}` on `{}`, a type the index has no symbol for",
-                            base_name(&it.container)
+                            it.container
                         ),
                     ),
                 );

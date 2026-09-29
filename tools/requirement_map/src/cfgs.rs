@@ -21,6 +21,13 @@ use syn::visit::Visit;
 /// a line is the package's name and version, then parenthesized groups (its
 /// source path, which may hold spaces; `(proc-macro)`; `(*)` for a repeat)
 /// and at most one bare word, the comma-separated features.
+/// The name a package's features are read under: the name its crate compiles
+/// as (`cargo tree` prints `dsm-anchor-core`; the crate is `dsm_anchor_core`).
+/// Every lookup of a feature set goes through this.
+pub fn feature_key(package: &str) -> String {
+    package.replace('-', "_")
+}
+
 pub fn features(tree: &str) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for line in tree.lines().filter(|l| !l.trim().is_empty()) {
@@ -71,7 +78,7 @@ pub fn features(tree: &str) -> Result<BTreeMap<String, BTreeSet<String>>, String
                 }
             }
         }
-        let entry = out.entry(package.replace('-', "_")).or_default();
+        let entry = out.entry(feature_key(package)).or_default();
         if let Some(list) = list {
             entry.extend(
                 list.split(',')
@@ -110,7 +117,7 @@ pub fn linked_packages(tree: &str, root: &Path) -> Result<Vec<(String, String)>,
         };
         // The source: the first parenthesized group, up to its matching `)`.
         let Some(open) = rest.strip_prefix('(') else {
-            continue;
+            return Err(format!("{line:?}: after the version, not a `(source)`"));
         };
         let mut depth = 1usize;
         let mut end = None;
@@ -384,11 +391,12 @@ impl Exclusions {
 }
 
 /// The package a crate file belongs to.
+/// The package a crate file belongs to, under the name its features are read by.
 fn package_of(file: &str, crates: &[(&str, &str)]) -> Option<String> {
     crates
         .iter()
         .find(|(prefix, _)| file.starts_with(prefix))
-        .map(|(_, package)| package.to_string())
+        .map(|(_, package)| feature_key(package))
 }
 
 /// Reads every file of the artifact's crates for `cfg`s that name a feature
@@ -409,7 +417,7 @@ pub fn exclusions(
             .filter(|f| shipped.is_none_or(|s| !s.contains(*f)))
             .cloned()
             .collect();
-        if !extra.is_empty() && crates.iter().any(|(_, p)| p == package) {
+        if !extra.is_empty() && crates.iter().any(|(_, p)| feature_key(p) == *package) {
             out.extra.insert(package.clone(), extra);
         }
     }
@@ -1065,6 +1073,42 @@ mod tests {
                 ("at_root".to_string(), "src/".to_string()),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_tree_line_s_source_is_parenthesized_or_refused() {
+        let root = std::env::temp_dir();
+        assert!(matches!(
+            linked_packages("odd v1.0.0 [somewhere]\n", &root),
+            Err(e) if e.contains("(source)")
+        ));
+    }
+
+    #[test]
+    fn a_hyphenated_package_s_leaked_features_are_found() -> Result<(), String> {
+        // `cargo tree` prints `p-q`, and the features are read under `p_q`:
+        // the item a feature only the index enabled gates is still found.
+        let root =
+            std::env::temp_dir().join(format!("requirement-map-leak-{}", std::process::id()));
+        let src = root.join("p-q/src");
+        std::fs::create_dir_all(&src).map_err(|e| e.to_string())?;
+        std::fs::write(
+            src.join("lib.rs"),
+            "#[cfg(feature = \"extra\")]\npub fn gated() {}\n",
+        )
+        .map_err(|e| e.to_string())?;
+        let built = features("p-q v0.1.0 (/x)\n")?;
+        let indexed = features("p-q v0.1.0 (/x) extra\n")?;
+        let found = exclusions(
+            &root,
+            &["p-q/src/lib.rs".to_string()],
+            &[("p-q/src/", "p-q")],
+            &built,
+            &indexed,
+        );
+        std::fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
+        assert_eq!(found?.spans.get("p-q/src/lib.rs").map(Vec::len), Some(1));
         Ok(())
     }
 

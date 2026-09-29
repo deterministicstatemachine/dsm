@@ -71,6 +71,13 @@ pub fn entry() -> usize {
 mod tests {
     #[test]
     fn test_only() {
-        assert!(matches!(super::entry(), 60 | 61));
+        // The test build turns `leak` on (the dev-dependency on itself), so
+        // every gated call is compiled; what is left is the chosen profile's.
+        let chosen = super::entry()
+            - super::called_under_leak()
+            - super::called_under_undecided()
+            - super::undecided_item()
+            - super::undecided_twin();
+        assert!(matches!(chosen, 60 | 61));
     }
 }

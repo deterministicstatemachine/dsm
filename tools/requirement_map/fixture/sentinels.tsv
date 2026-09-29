@@ -1,0 +1,5 @@
+# The fixture map's committed facts for `ci/requirement_map.py check
+# --sentinels` (ci/requirement_map_mutations.py passes it before planting
+# faults in the fixture's map): readings the check must find as they are.
+artifact	path	state	code	why
+fixture	probe::main	reached	REACHED	one path, two definitions: the build script's main is outside the build, the library's is in it
