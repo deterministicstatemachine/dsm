@@ -3496,7 +3496,9 @@ dependencies = [
  "dsm",
  "proc-macro2",
  "protobuf",
+ "quote",
  "scip",
+ "syn",
 ]
 
 [[package]]
