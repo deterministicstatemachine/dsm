@@ -37,7 +37,8 @@ use super::derive;
 use super::exercise::{AttemptCellRead, RecognizedExercise};
 use super::registration::{Registration, RegistrationRead};
 use super::resolution::{
-    AttemptWalk, LegFacts, ParentPosition, ParentStatus, RefutedInHand, RouteFacts, VaultChain,
+    AttemptWalk, GroundRouteFacts, LegFacts, ParentPosition, ParentStatus, RefutedInHand,
+    RouteFacts, VaultChain,
 };
 use super::validation::{route_invalid_in_hand, route_validation, vault_post_states, Evidence, Missing};
 use super::wire::{ParentClaimRef, SettlementPreimage};
@@ -152,6 +153,68 @@ pub struct ExerciseReads<'a> {
     pub parent: Option<&'a AdmittedEconomicPosition>,
     /// One entry per leg of `P`, in P's leg order.
     pub legs: &'a [LegReads<'a>],
+}
+
+/// What is read about one exercise before any of its validation evidence:
+/// the position pair, this verifier's own resolution of `p`, and each leg's
+/// cell, chain and walk. Every item is one [`ExerciseReads`] holds too.
+#[derive(Debug, Clone, Copy)]
+pub struct GroundReads<'a> {
+    pub exercise: &'a RecognizedExercise,
+    pub registration: &'a RegistrationRead,
+    pub parent: Option<&'a AdmittedEconomicPosition>,
+    pub legs: &'a [LegReads<'a>],
+}
+
+/// The facts of one exercise that stand without its validation evidence:
+/// registration, whether its position went to another claim, the trader
+/// parent, and each leg's cell, liveness and consumption elsewhere. A leg's
+/// parent is `Canonical` only where the vault's chain names it, and never
+/// refuted: refuting one needs the generation the evidence places it at.
+/// Enough for the skips that need no validation evidence (SoFi §23.5 and
+/// MR-SOFI-0241; Amendment S14); never enough to resolve a position or to
+/// consume a key. Built by [`establish_ground`] and by nothing else.
+#[derive(Debug, Clone)]
+pub struct GroundFacts {
+    pub(crate) external_commitment: D32,
+    pub(crate) registered: bool,
+    pub(crate) position_lost: bool,
+    pub(crate) parent: ParentPosition,
+    pub(crate) parent_pre_root: D32,
+    /// One per leg of `P`, in P's leg order.
+    pub(crate) legs: Vec<LegFacts>,
+    /// The key each leg's facts are about: `(vault, parent root, attempt)`.
+    pub(crate) keys: Vec<(D32, D32, u64)>,
+}
+
+impl GroundFacts {
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub(crate) fn route_ground(&self) -> GroundRouteFacts<'_> {
+        GroundRouteFacts {
+            external_commitment: self.external_commitment,
+            position_lost: self.position_lost,
+            parent: self.parent,
+            parent_pre_root: self.parent_pre_root,
+            legs: &self.legs,
+        }
+    }
+
+    /// The facts of the leg at `K^(attempt)` of `vault_id` at `parent_root`,
+    /// when `P` has one there.
+    pub(crate) fn leg_at(
+        &self,
+        vault_id: &D32,
+        parent_root: &D32,
+        attempt: u64,
+    ) -> Option<LegFacts> {
+        self.keys
+            .iter()
+            .position(|k| *k == (*vault_id, *parent_root, attempt))
+            .and_then(|i| self.legs.get(i).copied())
+    }
 }
 
 /// The complete facts of one exercise, as this verifier established them:
@@ -315,44 +378,13 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     let exercise = reads.exercise;
     let precommit = &exercise.precommit().body;
     let fulfillment = &exercise.fulfillment().body;
-    let e = *exercise.external_commitment();
-
-    if !reads.registration.is_of(precommit, fulfillment) {
-        return Err(NotEstablished::NotThisExercise(
-            "the registration read is of another position",
-        ));
-    }
-    let (registered, position_lost) = match reads.registration.registration() {
-        Registration::Registered(signed) => {
-            let ours = signed.body == *fulfillment;
-            (ours, !ours)
-        }
-        Registration::NeverRegistered { .. } => (false, true),
-        Registration::Unresolved => (false, false),
-    };
-
-    // The trader parent: P names it; what it selected is this verifier's
-    // own resolution of p, and nothing else resolves it.
-    let parent = match precommit.parent_claim_ref() {
-        ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot,
-        ParentClaimRef::Conditional { fulfillment_id } => match reads.parent {
-            Some(AdmittedEconomicPosition::ResolvedSofi {
-                economic_position,
-                selected_root,
-                fulfillment_id: resolved,
-                ..
-            }) if *resolved == *fulfillment_id && *economic_position == precommit.position() => {
-                ParentPosition::ConditionalSelected {
-                    selected_root: *selected_root,
-                }
-            }
-            Some(..) | None => {
-                return Err(NotEstablished::ParentUnresolved {
-                    fulfillment_id: *fulfillment_id,
-                })
-            }
-        },
-    };
+    let ground = establish_ground(&GroundReads {
+        exercise,
+        registration: reads.registration,
+        parent: reads.parent,
+        legs: reads.legs,
+    })?;
+    let e = ground.external_commitment;
 
     // FulfillmentConformance over the evidence, recomputed here (R7).
     if reads.conformance.precommit.body != *precommit
@@ -380,8 +412,9 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     // The GENERATION each leg's parent sits at, recomputed from the pre
     // states the evidence holds rather than asserted by the operation that
     // names the parent. Without it a parent cannot be refuted, only placed
-    // positively, so a vault missing here is `Unavailable` and never
-    // `Orphaned`.
+    // positively, so a vault missing here keeps the status the ground facts
+    // gave it: `Canonical` where its chain names the parent, else
+    // `Unavailable`, and never `Orphaned`.
     let generations: BTreeMap<D32, u64> =
         match vault_post_states(precommit, exercise.preimage(), reads.evidence) {
             Ok(posts) => posts
@@ -390,6 +423,90 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
                 .collect(),
             Err(..) => BTreeMap::new(),
         };
+    let mut legs = ground.legs;
+    for ((leg, read), facts) in precommit.legs().iter().zip(reads.legs).zip(legs.iter_mut()) {
+        // The chain decides, three-valued, at the generation the evidence
+        // places the parent.
+        if let (Some(chain), Some(generation)) = (read.chain, generations.get(&leg.vault_id)) {
+            facts.parent = chain.status_of(*generation, &leg.parent_root);
+        }
+    }
+    let storage_resolved =
+        ground.registered && legs.iter().all(|l| permanently_resolved(&l.cell, &e));
+    Ok(EstablishedFacts {
+        fulfillment_id: derive::fulfillment_id(fulfillment),
+        external_commitment: e,
+        registered: ground.registered,
+        conformance,
+        position_lost: ground.position_lost,
+        parent: ground.parent,
+        parent_pre_root: ground.parent_pre_root,
+        validation,
+        storage_resolved,
+        legs,
+        keys: ground.keys,
+        preimage: exercise.preimage().clone(),
+        evidence: reads.evidence.clone(),
+    })
+}
+
+/// The facts of one exercise that need none of its validation evidence
+/// ([`GroundFacts`]), over the reads a verifier makes before it acquires
+/// any: the registration from the position pair, the trader parent from this
+/// verifier's own resolution of `p`, and each leg's cell and walk. The same
+/// rules [`establish`] applies, which builds its facts on these.
+pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstablished> {
+    let exercise = reads.exercise;
+    let precommit = &exercise.precommit().body;
+    let fulfillment = &exercise.fulfillment().body;
+    let e = *exercise.external_commitment();
+
+    if !reads.registration.is_of(precommit, fulfillment) {
+        return Err(NotEstablished::NotThisExercise(
+            "the registration read is of another position",
+        ));
+    }
+    let (registered, position_lost) = match reads.registration.registration() {
+        Registration::Registered(signed) => {
+            let ours = signed.body == *fulfillment;
+            (ours, !ours)
+        }
+        Registration::NeverRegistered { .. } => (false, true),
+        // SoFi Amendment S14: the position went to the claim holding K_root(q)
+        // unless that claim is this F's own C_q, whose fulfillment may still be
+        // relayed.
+        Registration::RootTaken { claim } => (
+            false,
+            *claim
+                != crate::storage_cell::entry_digest(
+                    &derive::resolution_claim(precommit, fulfillment).encode(),
+                ),
+        ),
+        Registration::Unresolved => (false, false),
+    };
+
+    // The trader parent: P names it; what it selected is this verifier's
+    // own resolution of p, and nothing else resolves it.
+    let parent = match precommit.parent_claim_ref() {
+        ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot,
+        ParentClaimRef::Conditional { fulfillment_id } => match reads.parent {
+            Some(AdmittedEconomicPosition::ResolvedSofi {
+                economic_position,
+                selected_root,
+                fulfillment_id: resolved,
+                ..
+            }) if *resolved == *fulfillment_id && *economic_position == precommit.position() => {
+                ParentPosition::ConditionalSelected {
+                    selected_root: *selected_root,
+                }
+            }
+            Some(..) | None => {
+                return Err(NotEstablished::ParentUnresolved {
+                    fulfillment_id: *fulfillment_id,
+                })
+            }
+        },
+    };
 
     // Every leg of P at the attempt F fixed for it. The attempts cover the
     // legs exactly: that is conformance item 4, decided in hand.
@@ -418,13 +535,12 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
             ));
         }
         let cell = read.cell.fact();
-        // The chain decides, three-valued, at the generation the evidence
-        // places the parent; without a generation it can still establish
-        // the root positively, but it cannot refute one it has not placed.
-        let parent = match (read.chain, generations.get(&leg.vault_id)) {
-            (Some(chain), Some(generation)) => chain.status_of(*generation, &leg.parent_root),
-            (Some(chain), None) if chain.names(&leg.parent_root) => ParentStatus::Canonical,
-            (Some(..), None) | (None, _) => ParentStatus::Unavailable,
+        // Without the generation the evidence places the parent at, the chain
+        // can establish the root positively but cannot refute one it has not
+        // placed.
+        let parent = match read.chain {
+            Some(chain) if chain.names(&leg.parent_root) => ParentStatus::Canonical,
+            Some(..) | None => ParentStatus::Unavailable,
         };
         // `AttemptLive`: every earlier key of this leg's chain is skipped,
         // established by a walk from the first key.
@@ -453,21 +569,14 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
         });
         keys.push((leg.vault_id, leg.parent_root, attempt));
     }
-    let storage_resolved = registered && legs.iter().all(|l| permanently_resolved(&l.cell, &e));
-    Ok(EstablishedFacts {
-        fulfillment_id: derive::fulfillment_id(fulfillment),
+    Ok(GroundFacts {
         external_commitment: e,
         registered,
-        conformance,
         position_lost,
         parent,
         parent_pre_root: *precommit.void_root(),
-        validation,
-        storage_resolved,
         legs,
         keys,
-        preimage: exercise.preimage().clone(),
-        evidence: reads.evidence.clone(),
     })
 }
 
