@@ -1712,7 +1712,7 @@ After each step, every read (the cell, the index, the object, the spool from pos
 
 MR-STOR-0116 and MR-STOR-0118 are Met. MR-STOR-0119 stays Partial: its retention clause is now exercised, but exit by handover, retirement and the survivor rule are not built.
 
-### 6.50 What readers, repairers and writers cannot do to a member (`test/storage-batch-reads-restores-route-order`, 2026-09-30)
+### 6.50 Storage rows exercised and re-verified: reads, restores, arrival order, the route chain (`test/storage-batch-reads-restores-route-order`, 2026-09-30)
 
 Three storage rows had no test showing the node holds its line against a client. `dsm_storage_node::reads_restores_and_arrival_order` drives the app the binary serves, each member on a Postgres database of its own.
 
@@ -1734,6 +1734,19 @@ The writer's side is driven through `dsm_sdk::sdk::route_seats` against the netw
 
 MR-STOR-0148, 0151 and 0152 are Met.
 
+Eight storage rows cited code that is gone: `sofi/arith.rs`, `write_cell_leader_first`, `CellWrite`, `put_cell_leader_first` and `put_cells_leader_first`, or said no chain object exists. Each is re-verified against the specification and `main`. None has a manifest row.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-STOR-0046 | Partial (count rule) | Met | Core evaluates `Final` from the reads and the carried chain (`route_chain::evaluate`). |
+| MR-STOR-0047 | Partial (as 0046) | Met | Only the first recognized value at the leader holds a leader link; a chain not beginning with it counts for nothing. |
+| MR-STOR-0132 | Partial (`arith.rs`) | Met | The leader link is the first recognized object in the leader's log; junk blocks nothing. |
+| MR-STOR-0136 | Partial (no link object) | Met | Links are carried into the next copy at once; Core counts them once committed. |
+| MR-STOR-0130 | Partial (`put_cell_leader_first`) | Met | Leader first, each copy carrying the chain so far, continued from the writer's own record (the tests above). |
+| MR-STOR-0137 | Partial (no chain) | Met | Every position is written, and a stopped chain is continued along the remaining route. |
+| MR-STOR-0108 | Partial (copy count) | Met | A write goes through at three links of its chain; no payment exists. |
+| MR-STOR-0020 | Partial (count rule) | Partial | The facts now come from route chains and `stored`; that Core uses nothing else from storage is not verified at every read site. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -1741,9 +1754,9 @@ MR-STOR-0148, 0151 and 0152 are Met.
 | DSM high-level (MR-DSM) | 272 | 76 | 110 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 52 | 26 | 61 | 0 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 59 | 19 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **352** | **221** | **119** | **8** | **64** | **154** |
+| **All** | **918** | **359** | **214** | **119** | **8** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2402,7 +2415,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0017 | Not code | — | — | Fault-boundary assumption |
 | MR-STOR-0018 | Met | `dsm::route_chain::evaluate`; `dsm_storage_node::db::pg::require_durable_commit_posture` | `dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in`; `dsm::route_chain::tests::the_state_is_the_count_of_valid_links`; `dsm_storage_node::db::pg::durable_posture_tests::a_weaker_posture_is_refused_and_the_refusal_names_the_setting` | sofi/arith.rs was deleted in #976; an unread leader leaves the cell waiting, a chain short of two further links stays below Final, and a node without durable commit settings refuses to start. The earlier citation `check_completion_proof` is reached by no shipped build (§6.39). |
 | MR-STOR-0019 | Missing | no code found | — | "seat" is comment vocabulary only |
-| MR-STOR-0020 | Partial | dsm · sofi/storage.rs `stored`; sofi/arith.rs `resolve` | arith/storage tests | LeaderHeld/Final implemented with the superseded count rule |
+| MR-STOR-0020 | Partial | `dsm::route_chain::evaluate`; `dsm::sofi::storage::stored` | `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held`; `dsm::sofi::storage::tests::stored_returns_exact_bytes` | Re-verified 2026-09-30 (§6.50): the count rule and `sofi/arith.rs` are gone. `LeaderHeld` and `Final` come from route chains (`route_chain::evaluate`), `Stored` from `sofi::storage::stored`, and `Preserved` is the loss rule's (§4). That Core uses nothing else from storage is not verified across every read site. |
 | MR-STOR-0021 | Met | `dsm::sofi::storage::keep_verifying`; `dsm::sofi::storage::keep_all_verifying`; `dsm::sofi::resolve::Verifier::vault_genesis`; `dsm::economic::lineage::advance_validated`; `dsm_sdk::sdk::b0x_sdk::B0xSDK::retrieve_from_b0x_v2`; `dsm_sdk::sdk::inbox_poller::has_pending_settlement_work` | `dsm::sofi::storage::tests::an_unestablished_candidate_is_never_none`; `dsm::sofi::storage::tests::an_unestablished_candidate_makes_discovery_partial`; `dsm_sdk::sdk::sofi_reads::tests::an_unestablished_genesis_candidate_is_not_read_as_unpublished`; `dsm_sdk::sdk::sofi_flow::tests::a_setup_scan_that_met_an_unestablished_candidate_is_not_a_refusal`; `dsm::economic_admission_lifecycle::a_register_set_not_established_is_not_a_verdict_about_the_claimant`; `dsm_sdk::sdk::storage_node_sdk::tests::a_member_that_answers_404_took_nothing`; `dsm_sdk::handlers::online_finalize::tests::an_unreadable_counterparty_head_is_never_read_as_genesis`; `dsm_sdk::sdk::inbox_poller::tests::a_lifecycle_stop_is_declined_while_settlement_state_is_unreadable`; `dsm_sdk::handlers::node_e2e_tests::an_inbox_read_that_did_not_cover_every_delivery_is_not_a_complete_sync` | A candidate whose bytes were not established is never read as absence: the single scan is Unavailable past it, discovery is Partial, and the SDK reports a network failure, never "not published" (§6.15). Five more places read an unestablished fact as a verdict and no longer do (§6.25): a register set the resolver could not establish, a 404 from a member, an unreadable cert-chain head, unreadable settlement state, and an inbox no member answered for. |
 | MR-STOR-0022 | Met | `dsm::storage_object::immutable_addr`; `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm::storage_object::tests::the_address_matches_the_spec_construction` | — |
 | MR-STOR-0023 | Met | `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm_storage_node::immutable_store_round_trip::a_put_stating_another_address_is_refused_and_nothing_is_held` | A put stating the address of other bytes is refused, and nothing is held at either address (§6.43). |
@@ -2428,8 +2441,8 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0043 | Met | `dsm::sofi::exercise::AttemptCell`; `dsm::sofi::derive::storage_seed` | `dsm::sofi::exercise::tests::an_attempt_cells_leader_is_bound_to_the_vault_and_the_parent_root` | — |
 | MR-STOR-0044 | Met | `dsm::route_chain::RoutedCell::new` | `dsm::route_chain::tests::a_cell_is_routed_only_over_the_committed_set` | — |
 | MR-STOR-0045 | Partial | — | not traced | Recognition-before-read not verified across SDK read sites ChatGPT CG-03 (see MR-DSM-0041). |
-| MR-STOR-0046 | Partial | dsm · sofi/arith.rs `resolve` | arith.rs tests | Count rule, not route chain |
-| MR-STOR-0047 | Partial | as 0046 | as 0046 | — |
+| MR-STOR-0046 | Met | `dsm::route_chain::evaluate` | `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held`; `dsm::route_chain::tests::only_links_of_one_chain_count_toward_final`; `dsm::route_chain::tests::a_later_link_needs_its_own_byte_commit_and_valid_carried_links` | Re-verified 2026-09-30 (§6.50): Core evaluates `Final` from the reads and the carried chain, a valid leader link and two further valid links of one chain; the count rule it cited is deleted. |
+| MR-STOR-0047 | Met | `dsm::route_chain::evaluate` | `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`; `dsm::route_chain::tests::a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count`; `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held` | Re-verified 2026-09-30 (§6.50): only the first recognized value at the leader holds a leader link, and a chain that does not begin with it counts for nothing. |
 | MR-STOR-0048 | Met | `dsm::route_chain::evaluate` | `dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in` | sofi/arith.rs was deleted in #976; route_chain::evaluate returns Missing::LeaderUnread however many later seats hold the value. |
 | MR-STOR-0049 | Met | `dsm::route_chain::Route::of`; `dsm::sofi::fisher_yates::permute` | `dsm::route_chain::tests::a_route_is_the_fisher_yates_permutation_of_the_committed_set`; `dsm::route_chain::tests::a_cell_is_routed_only_over_the_committed_set` | — |
 | MR-STOR-0050 | Missing | no code found | — | No challenge / drop claim |
@@ -2490,7 +2503,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0105 | Missing | — | no test found | Confirmed. |
 | MR-STOR-0106 | Missing | — | no test found | Vacuous — no credits to count. |
 | MR-STOR-0107 | Missing | — | no test found | Confirmed. |
-| MR-STOR-0108 | Partial | dsm_sdk · sdk/storage_io.rs · `write_cell_leader_first`/`CellWrite{leader_reached,copies}` | no test found (copy-count only; no 3-link chain assertion) | Payment and admission are decoupled, but "getting through" is an old copy count, not a route-chain check. |
+| MR-STOR-0108 | Met | `dsm::route_chain::evaluate`; `dsm_sdk::sdk::route_seats::write_recorded` | `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held`; `dsm_sdk::sdk::route_seats::tests::a_seat_that_does_not_answer_is_recorded_empty_in_its_place` | Re-verified 2026-09-30 (§6.50): a write goes through when Core reads three links of its chain; the copy count it cited (`write_cell_leader_first`, `CellWrite`) is deleted, and no payment exists to entangle with it (the spend gate is removed, MR-STOR-0100). |
 | MR-STOR-0109 | Missing | — | — | As MR-STOR-0100 (the §3.2 Met → Violated stands as history). |
 | MR-STOR-0110 | Missing | — | — | As MR-STOR-0100. |
 | MR-STOR-0111 | Missing | — | — | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The DLV slot route and the spend gate are both gone; there is nothing to exempt. |
@@ -2512,14 +2525,14 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0127 | Not code | — | — | Proof obligations. G15: the existing finality tests and formal model prove the superseded copy rule and must be redone for route chains (ChatGPT CG-13). |
 | MR-STOR-0128 | Missing | — | no test found | Confirmed; no Part III succession exists to refine SoFi membership. |
 | MR-STOR-0129 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::api::cells::get_cell`; `dsm::storage_cell::ArrivalRecord` | `dsm_storage_node::cells_keep_everything::a_put_answers_with_the_arrival_record_a_verifier_replays` | Confirmed. |
-| MR-STOR-0130 | Partial | dsm_sdk · sdk/storage_io.rs::`write_cell_leader_first`; sdk/storage_node_sdk.rs::`put_cell_leader_first` | no test found for chain-carrying (leader-first order itself is tested, e.g. `faucet_flow_tests::…assert!(write.leader_reached)`) | Leader-first order confirmed live and heavily used (sofi_register/advance/exercise, native_reserve, economic_registers); no chain object is built or carried. |
+| MR-STOR-0130 | Met | `dsm_sdk::sdk::route_seats::write_recorded`; `dsm_sdk::sdk::route_seats::write_along` | `dsm_sdk::sdk::route_seats::tests::nothing_reaches_a_later_seat_before_the_leader_answers`; `dsm_sdk::sdk::route_seats::tests::a_seat_that_does_not_answer_is_recorded_empty_in_its_place`; `dsm_sdk::sdk::route_seats::tests::a_recorded_position_is_never_written_again` | Re-verified 2026-09-30 (§6.50): the writer goes leader first, each copy carries the chain built so far, and a stopped write continues from its own record, never from copies. `put_cell_leader_first`, which it cited, is deleted. |
 | MR-STOR-0131 | Missing | — (no `RouteEntryV1`/link type in proto or Rust) | no test found | Confirmed via grep of `proto/dsm_app.proto` and repo-wide search. |
-| MR-STOR-0132 | Partial | dsm · sofi/arith.rs::`resolve`/`resolve_objects` (`CellResolution::LeaderHeld`) | dsm::sofi::arith::tests::`a_later_value_at_the_leader_never_becomes_final`, `the_adapter_derives_final_from_the_recognized_view` | This is the pre-2026-09-22 finality rule ("first at leader + held by two others") that storage spec §23.1 item 7 explicitly superseded (Amendment S4/A6); it is still the **live production** computation (called from `sofi_register.rs`, `sofi_advance.rs`, `sofi_exercise.rs`, `native_reserve.rs`, `economic_registers.rs`). It happens to satisfy the narrow "first recognized object at leader" clause of 0132, but is not a chain/link. |
+| MR-STOR-0132 | Met | `dsm::route_chain::evaluate` | `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`; `dsm::route_chain::tests::junk_first_at_the_leader_blocks_nothing`; `dsm::route_chain::tests::a_leader_holding_no_recognized_value_leaves_the_cell_open` | Re-verified 2026-09-30 (§6.50): the leader link is the first recognized object naming the cell in the leader's log, and junk first at the leader blocks nothing. The superseded rule in `sofi/arith.rs` is deleted. |
 | MR-STOR-0133 | Missing | dsm · sofi/arith.rs::`resolve` (copy count only) | arith::tests::`copies_count_wherever_the_value_sits_in_a_copys_list` (demonstrates the count-only mechanism this requirement replaces, not compliance) | Confirmed no chain-validity, position, or mirror-coverage check anywhere. |
 | MR-STOR-0134 | Missing | dsm_sdk · sdk/storage_io.rs::`CellWrite{leader_reached,copies}` | no test found | Confirmed: aggregate counters only, no per-seat empty (`taken`/`no_response`) tracking. |
 | MR-STOR-0135 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::api::cells::get_cell` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::an_identical_value_put_twice_is_held_twice` | Confirmed. |
-| MR-STOR-0136 | Partial | dsm_storage_node · api/objects/bytecommit.rs (arrival records verifiable once cycle closes) | bytecommit_chain::`cycles_close_over_new_entries_and_commit_their_records` | Covers "verifiable once ByteCommit closes"; there is no "link" object to carry forward at all. |
-| MR-STOR-0137 | Partial | dsm_sdk · sdk/storage_node_sdk.rs::`put_cell_leader_first`/`put_cells_leader_first` (writes all 5 seats, leader first) | no test found for "any party MAY continue a chain" | Confirmed: all-five-seat write is live; nothing to continue since no chain exists. |
+| MR-STOR-0136 | Met | `dsm_sdk::sdk::route_seats::write_along`; `dsm::route_chain::evaluate` | `dsm_sdk::sdk::route_seats::tests::a_seat_that_does_not_answer_is_recorded_empty_in_its_place`; `dsm::route_chain::tests::a_leader_link_counts_only_once_a_byte_commit_commits_it`; `dsm::route_chain::tests::a_later_link_needs_its_own_byte_commit_and_valid_carried_links` | Re-verified 2026-09-30 (§6.50): the writer carries each link into the next copy at once, with no cycle closed between seats, and Core counts a link only once a ByteCommit commits its arrival record. |
+| MR-STOR-0137 | Met | `dsm_sdk::sdk::route_seats::write_along`; `dsm_sdk::sdk::route_seats::continue_write` | `dsm_sdk::sdk::route_seats::tests::a_seat_that_does_not_answer_is_recorded_empty_in_its_place`; `dsm_sdk::sdk::route_seats::tests::a_recorded_position_is_never_written_again` | Re-verified 2026-09-30 (§6.50): a write records every one of the five positions, and a chain that stopped is continued along the remaining route. `put_cells_leader_first`, which it cited, is deleted. |
 | MR-STOR-0138 | Missing | dsm · sofi/arith.rs::`CellResolution`/`ObjectResolution` (only LeaderHeld/Final, no Preserved) | no test found | Confirmed — third state absent from both enums. |
 | MR-STOR-0139 | Missing | — | no test found | Confirmed; no loss-marker/pre-loss code anywhere. |
 | MR-STOR-0140 | Met | `dsm_storage_node::api::objects::bytecommit::sync_one`; `dsm_storage_node::api::objects::bytecommit::fetch_commit` | `dsm_storage_node::bytecommit_chain::a_set_mate_mirrors_by_fetching_from_the_member_itself` | Confirmed. |
