@@ -416,11 +416,12 @@ pub struct RouteFacts<'legs> {
     /// Registration supplies no truth value for it: a registered `F` may be
     /// `Invalid`, and a producer's pre-sign check is not this verifier's.
     pub(crate) conformance: Validation,
-    /// Arm (v) of `RouteImpossible` (Section 23.5): position `q` already
-    /// holds a different claim — an ordinary transition, or another
-    /// fulfillment of the same trader naming other attempt keys — so this
-    /// `F` can never register (Section 21.1). Read from the position pair
-    /// (R10); never true together with `registered`.
+    /// The fact behind the skip `RejectedFinalInadmissible` (SoFi Amendment
+    /// S14): position `q` already holds a different claim — an ordinary
+    /// transition, or another fulfillment of the same trader naming other
+    /// attempt keys — so this `F` can never register (Section 21.1). A fact
+    /// about `F`, never an arm of `RouteImpossible(P, E)`. Read from the
+    /// position pair (R10); it never holds together with `registered`.
     pub(crate) position_lost: bool,
     /// What is known about the claim at `p`.
     pub(crate) parent: ParentPosition,
@@ -518,21 +519,16 @@ pub enum ImpossibleArm {
     /// (iv) `TraderParentImpossible(P)`: the trader parent is terminal on the
     /// other branch, or on none.
     TraderParentImpossible,
-    /// (v) the fulfillment the exercise at `K` carries can never register:
-    /// position `q` already holds a different claim (Section 21.1). Without
-    /// this arm a trader whose exercise for attempt 0 won `K^(0)` while its
-    /// fulfillment for attempt 1 registered strands the parent's attempt
-    /// chain (`DSM_SofiFulfillment.tla`, `LostPosition`).
-    PositionLost,
 }
 
 /// The arm of `RouteImpossible(P, E)` that holds, in arm order.
 ///
-/// Arms (ii) to (v) hold whatever `RouteValidation` says. Arms (iv) and (v)
-/// create no `Void`: under (iv) the trader position is Invalid through the
-/// ladder, under (v) the position went to another claim and this `F` never
-/// resolves through it; both arms exist only to stop an impossible operation
-/// stranding a DLV successor key.
+/// Arms (ii) to (iv) hold whatever `RouteValidation` says. Arm (iv) creates
+/// no `Void`: the trader position is Invalid through the ladder, and the arm
+/// exists only to stop an impossible operation stranding a DLV successor key.
+/// Every arm is a fact about `P` and `E`; which fulfillment lost its position
+/// is a fact about `F`, and it is the skip `RejectedFinalInadmissible`
+/// (SoFi Amendment S14), never an arm here.
 pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
     if facts.validation == Validation::Invalid {
         return Some(ImpossibleArm::ValidationInvalid);
@@ -549,9 +545,6 @@ pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
     }
     if trader_parent_impossible(&facts.parent, &facts.parent_pre_root) {
         return Some(ImpossibleArm::TraderParentImpossible);
-    }
-    if facts.position_lost {
-        return Some(ImpossibleArm::PositionLost);
     }
     None
 }
@@ -641,6 +634,11 @@ pub enum SkipReason {
     /// A final cell of a fulfillment that is not the exercise of its P:
     /// `FulfillmentConformance(F) = Invalid` (SoFi §23.5, MR-SOFI-0238).
     RejectedFinalConformance,
+    /// A final cell whose exercise carries a fulfillment that can never
+    /// register: position `q` is final on another claim (SoFi Amendment
+    /// S14, Section 21.1). It reads no validation evidence and creates no
+    /// Void and no Invalid: `q` resolves through the claim that holds it.
+    RejectedFinalInadmissible,
 }
 
 /// Why a fulfillment can never realize (SoFi §23.5):
@@ -693,6 +691,16 @@ pub fn classify_attempt(
                 FulfillmentImpossibility::Route(arm) => SkipReason::RejectedFinalRoute(arm),
             };
             return (AttemptClass::Skipped, Some(reason));
+        }
+        // SoFi Amendment S14: the exercise's F can never register, because
+        // another claim holds its position, so no registered fulfillment will
+        // ever name this cell. Without the skip the parent's attempt chain
+        // stops here forever (TLA `DSM_SofiFulfillment`, `LostPosition`).
+        if facts.position_lost {
+            return (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalInadmissible),
+            );
         }
         // A final cell is a consumption only when the whole operation
         // consumed: the same E across every required leg, validation Valid,
@@ -1663,11 +1671,11 @@ mod tests {
         );
     }
 
-    // ── arm (v): the position went to another claim (R12) ────────────────
+    // ── Amendment S14: a fulfillment that can never register (R12) ──────
 
     /// TLA `LostPosition` (fault `_LostPositionDropped` →
     /// `ObjectiveRejectionImpliesSkipped`), Lean
-    /// `a_lost_position_makes_a_final_route_skippable`: an exercise final at a
+    /// `a_lost_position_makes_a_final_cell_skippable`: an exercise final at a
     /// key whose F can never register — the position holds another claim —
     /// is skipped, so the parent's attempt chain is not stranded. It is no
     /// Void: the position resolves through the claim that took it, never
@@ -1680,17 +1688,18 @@ mod tests {
             position_lost: true,
             ..realized(&legs)
         };
-        assert_eq!(route_impossible(&facts), Some(ImpossibleArm::PositionLost));
+        assert_eq!(route_impossible(&facts), None);
+        assert_eq!(fulfillment_impossible(&facts), None);
         assert_eq!(
             classify_attempt(&facts, &legs[0]),
             (
                 AttemptClass::Skipped,
-                Some(SkipReason::RejectedFinalRoute(ImpossibleArm::PositionLost))
+                Some(SkipReason::RejectedFinalInadmissible)
             )
         );
         assert_eq!(resolve_position(&facts), Err(Incomplete::NotRegistered));
         assert!(!consumed_route(&facts));
-        // Without the arm the same cell is that F's open question forever.
+        // Without the skip the same cell is that F's open question forever.
         let held = RouteFacts {
             position_lost: false,
             ..facts
@@ -1700,6 +1709,33 @@ mod tests {
             classify_attempt(&held, &legs[0]).0,
             AttemptClass::Unresolved
         );
+    }
+
+    /// MR-SOFI-0239, SoFi §23.5: `RouteImpossible(P, E)` takes no F. Two
+    /// facts differ only in what is known about one particular fulfillment —
+    /// whether it registered, whether its position went to another claim —
+    /// and `route_impossible` answers both alike, for every arm.
+    #[test]
+    fn route_impossibility_reads_nothing_about_a_particular_fulfillment() {
+        let legs = [good_leg()];
+        let orphaned = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        }];
+        for legs in [&legs[..], &orphaned[..]] {
+            for validation in [Valid, Invalid] {
+                for conformance in [Valid, Invalid] {
+                    for about_f in around(legs, conformance, validation) {
+                        let without_f = RouteFacts {
+                            parent: about_f.parent,
+                            validation,
+                            ..realized(legs)
+                        };
+                        assert_eq!(route_impossible(&about_f), route_impossible(&without_f));
+                    }
+                }
+            }
+        }
     }
 
     // ── rung 8, and the ladder as a whole ──────────────────────────────────

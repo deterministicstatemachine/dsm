@@ -1539,6 +1539,14 @@ Skipped(K)                              RejectedFinalSingleLeg ∨ RejectedFinal
 **Code**
 route_impossible, CORE/sofi/resolution.rs:253, returning ImpossibleArm from the same file.
 
+> **Amendment S14 (owner, 2026-09-30) — a final cell whose fulfillment can never register is skipped.** One trader's fulfillments for one position can each win a DLV key: the exercise for attempt 0 goes final at `K^(0)` while the fulfillment naming attempt 1 registers at `q`. The fulfillment that `K^(0)`'s exercise carries can then never register, because a different claim at `q` makes it inadmissible (Section 21.1). `K^(0)` holds a final value that no registered fulfillment names, none of the skips above applies to it, and the walk over the DLV parent's attempts would stop there forever.
+>
+> - **The skip.** `RejectedFinalInadmissible(K, F, E)` holds when `StorageFinalE(K, E)`, the exercise final at `K` carries `F`, and `K_root(q)` for `F`'s position `q` is final on a claim other than `F`'s own `C_q`: another fulfillment's claim, or an ordinary transition. `Skipped(K)` is `RejectedFinalSingleLeg ∨ RejectedFinalRoute ∨ RejectedFinalInadmissible`.
+> - **Not an arm of `RouteImpossible`.** Which fulfillment lost the position is a fact about `F`, and `RouteImpossible(P, E)` stays scoped to `P` and `E`, with its four arms.
+> - **No validation evidence.** Registration at `q` is a storage fact; the skip needs neither `RouteValidation` nor `FulfillmentConformance`.
+> - **No Void and no Invalid.** The skip only frees the DLV key. Position `q` resolves through the claim that holds it, never through `F`.
+> - **Permanent.** A position that went to another claim never comes back (PairMutualExclusion), so once the skip holds it holds forever.
+
 
 <!-- spec-section: SOFI-023-6 -->
 #### 23.6 The walk

@@ -58,7 +58,7 @@ CONSTANTS
     ProducerFailsClosed,               \* [TRUE] a producer signs F at attempt a > 0 only once K^(a-1) is permanently resolved (R6)
     SetupValidRemoved,                 \* [FALSE] RouteValidation without SetupValid
     ConformanceDropped,                \* [FALSE] ConsumedRoute without FulfillmentConformance
-    LostPositionDropped,               \* [FALSE] arm (v) removed: an exercise whose F can never register is never skipped
+    LostPositionDropped,               \* [FALSE] the S14 skip removed: an exercise whose F can never register is never skipped
     RegistrationIsConformance,         \* [FALSE] a registered F is taken as conforming
     OccupancyIsConsumption,            \* [FALSE] final legs consume with no Core predicate
     PrecommitAsExercise,               \* [FALSE] storing P occupies the position
@@ -209,10 +209,11 @@ RouteRejectedAtRA0 ==
     \/ ConsumedByOtherRB /\ (StaleLegNotSkipped => AllLegsFinalE1)
     \/ ArmIV
 
-\* Arm (v), Section 21.1: the exercise final at k carries an F that can never
-\* register, because position q already holds a different claim -- another F
-\* of the same trader (naming another attempt) or an ordinary transition. Its
-\* route is impossible at k. This arm reads no evidence.
+\* SoFi Amendment S14, Section 21.1: the exercise final at k carries an F that
+\* can never register, because position q already holds a different claim --
+\* another F of the same trader (naming another attempt) or an ordinary
+\* transition. A skip in its own right, beside RouteImpossibleAt and never an
+\* arm of it: RouteImpossible(P, E) takes no F. It reads no evidence.
 LostPosition(k, tr) ==
     /\ ~LostPositionDropped
     /\ \/ slot[tr] = SlotS

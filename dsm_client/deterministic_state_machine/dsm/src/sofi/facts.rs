@@ -305,7 +305,7 @@ fn permanently_resolved(cell: &CellFact, e: &D32) -> bool {
 ///
 /// Registration from the position pair (R10): the pair decides for every `F`
 /// at `q` at once, and a position held by another claim is this `F`'s
-/// position lost (Section 21.1, arm (v)). `FulfillmentConformance` and
+/// position lost (Section 21.1; the skip of SoFi Amendment S14). `FulfillmentConformance` and
 /// `RouteValidation` recomputed over the evidence (R5, R7). The trader
 /// parent from the position this verifier resolved itself. Each leg's cell
 /// at its successor key (R11), its parent against the vault's established
