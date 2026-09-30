@@ -1569,7 +1569,7 @@ A finding stays until it is fixed or disproved, whatever a later change touches.
 
 | Location | Hole |
 |---|---|
-| `dsm/src/economic/provenance.rs` · P15-9 | Unchanged (§6.30): the peer walk refuses a resolved SoFi position. A trader whose setup follows a SoFi position of its own has no setup claim another verifier can accept, so its later routes stay unjudgeable by others. |
+| `dsm/src/economic/provenance.rs` · P15-9 | Unchanged (§6.30): the peer walk refuses a resolved SoFi position. A trader whose setup follows a SoFi position of its own has no setup claim another verifier can accept, so its later routes stay unjudgeable by others. Owner ruling 2026-09-30: P15-9 is built on frontier-relative verification (DSM Amendment A8) and on resolving the trader's position from SoFi's public objects (SoFi Amendment S15), never by extending the whole-lineage walk; proven on the nodes by a trader paying after trading (MR-DSM-0273–0276, MR-SOFI-0344–0348). |
 
 ### 6.41 The four DSM core Violated rows were stale (`test/dsm-core-violated-rows-reverified`, 2026-09-29)
 
@@ -1716,12 +1716,12 @@ MR-STOR-0116 and MR-STOR-0118 are Met. MR-STOR-0119 stays Partial: its retention
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 272 | 76 | 110 | 39 | 0 | 29 | 18 |
-| SoFi (MR-SOFI) | 343 | 219 | 84 | 18 | 5 | 17 | 0 |
+| DSM high-level (MR-DSM) | 276 | 76 | 110 | 42 | 1 | 29 | 18 |
+| SoFi (MR-SOFI) | 348 | 219 | 85 | 21 | 6 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 47 | 31 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **919** | **351** | **226** | **119** | **5** | **64** | **154** |
+| **All** | **928** | **351** | **227** | **125** | **7** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2001,6 +2001,10 @@ MR-STOR-0116 and MR-STOR-0118 are Met. MR-STOR-0119 stays Partial: its retention
 | MR-DSM-0270 | Met | `dsm::route_chain::evaluate`; `dsm_storage_node::api::cells::put_cell` | `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held`; `dsm::route_chain::tests::only_links_of_one_chain_count_toward_final`; `dsm::route_chain::tests::a_byte_commit_backs_a_link_only_when_it_follows_its_parent`; `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused` | sofi/arith.rs was deleted in #976; route_chain::evaluate counts three links of one chain from raw seat reads, and the node stores what it is given without checking or deciding. |
 | MR-DSM-0271 | Partial | dsm_sdk · storage/client_db/b0x_consumed.rs; sdk/b0x_sdk.rs · `retrieve_from_b0x_v2`, `record_consumed_b0x` | `b0x_consumed::tests` (not yet run) | Added by Amendment A7. Built, not yet compiled or exercised end to end. |
 | MR-DSM-0272 | Partial | dsm_sdk · `dsm_sdk::sdk::b0x_sdk::seal_for`; dsm · `dsm::crypto::spool_seal::seal`, `dsm::crypto::spool_seal::seal_key` | `dsm::crypto::spool_seal::tests::a_sealed_payload_opens_to_its_bytes`; `dsm::crypto::spool_seal::tests::it_opens_under_nothing_else`; `dsm::crypto::spool_seal::tests::every_message_has_its_own_key`; `dsm_sdk::handlers::node_e2e_tests::a_transfer_reaches_the_nodes_only_sealed_and_arrives` | Added by Amendment A7; traced 2026-09-29 (§6.39). Every spool payload is sealed end to end, under a domain-tagged key used for one message id only, with an authenticated cipher; a node holds ciphertext only. The key's shared secret comes from a fresh encapsulation per payload, not from the step's own Kyber exchange as A7 requires. |
+| MR-DSM-0273 | Missing | — | — | DSM Amendment A8 (2026-09-30). No frontier-relative verifier exists: `dsm::economic::peer_lineage::validate_peer_lineage` walks the payer's whole lineage from the activation root and re-validates every step from evidence fetched from the nodes, the mechanism DSM Amendment A8 replaces. The generic root-chain verifier is DSM core's to build. |
+| MR-DSM-0274 | Missing | — | — | DSM Amendment A8 (2026-09-30). No receiver keeps a frontier per payer; the walk starts at the activation root or at a cached coordinate of its own (`ValidatedStart`). |
+| MR-DSM-0275 | Violated | — | — | DSM Amendment A8 (2026-09-30). `dsm::economic::peer_lineage::validate_peer_lineage` walks the payer's whole lineage from the activation root and re-validates every step from evidence fetched from the nodes, the mechanism DSM Amendment A8 replaces: it fetches the evidence behind every root (manifest, authority evidence, transition witness) and re-executes every transition. |
+| MR-DSM-0276 | Missing | — | — | DSM Amendment A8 (2026-09-30). The walk refuses every conditional claim (`PeerLineageFailure::Unresolved`), so a payer whose lineage holds a SoFi position cannot be accepted by anyone (P15-9). |
 
 ### 8.2 SoFi settlement specification
 
@@ -2349,6 +2353,11 @@ MR-STOR-0116 and MR-STOR-0118 are Met. MR-STOR-0119 stays Partial: its retention
 | MR-SOFI-0341 | Met | `dsm::sofi::validation::trader_pre_balances`; `dsm::sofi::validation::realize_root`; `dsm::sofi::resolve::Verifier::acquire_evidence`; `dsm_sdk::sdk::sofi_reads::LiveSofiReads` | `dsm::sofi::validation::tests::a_trade_that_does_not_debit_the_trader_is_invalid_from_the_exercise_alone`; `dsm_sdk::handlers::node_e2e_tests::a_vault_traded_through_closes_for_its_owner`; `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer` | Amendment S12 (§6.40): one path for every verifier; the trader's own route is judged from the same objects. |
 | MR-SOFI-0342 | Met | `dsm::sofi::validation::setup_lineage`; `dsm::sofi::validation::InvalidLineage`; `dsm::sofi::validation::setup_valid` | `dsm::sofi::validation::tests::a_setup_on_a_lineage_known_invalid_is_invalid`; `dsm::sofi::validation::tests::an_invalid_verdict_about_another_lineage_or_position_supplies_nothing`; `dsm::sofi::validation::tests::a_lineage_not_established_leaves_the_setup_waiting` | Amendment S13 (§6.40): no accepted claim is synthesized; the verdict of lineage validation is the negative fact, and a verdict about another trader or position establishes nothing. |
 | MR-SOFI-0343 | Met | `dsm::sofi::resolution::classify_attempt`; `dsm::sofi::resolution::SkipReason`; `dsm::sofi::facts::establish` | `dsm::sofi::resolution::tests::a_final_cell_whose_fulfillment_lost_its_position_is_skipped`; `dsm::sofi::resolution::tests::an_in_hand_refutation_answers_as_the_complete_facts_do` | SoFi Amendment S14 (owner, 2026-09-30, `fix/sofi-inadmissible-fulfillment-skip`). `establish` reads from the position pair whether another claim holds this F's position (`position_lost`). A final cell whose exercise carries such an F, one that can never register, is Skipped with `SkipReason::RejectedFinalInadmissible`; the position resolves only through the claim that holds it (`resolve_position` answers `NotRegistered` for this F). It follows the `FulfillmentImpossible` check, so an exercise refuted in hand is classified exactly as before. Mutation: the skip removed from `classify_attempt` → the first test red; restored. TLA `DSM_SofiFulfillment`: `LostPosition` is a disjunct of `Skipped` beside `RouteImpossibleAt`, and `_LostPositionDropped` produces the counterexample. Lean: `a_lost_position_makes_a_final_cell_skippable`, for a route or a single leg, with validation unavailable; dropping `positionLost` from `finalSkippable` → red. |
+| MR-SOFI-0344 | Missing | — | — | SoFi Amendment S15 (2026-09-30). No resolver of another trader's position exists; the peer walk refuses a conditional claim outright (P15-9). |
+| MR-SOFI-0345 | Missing | — | — | SoFi Amendment S15 (2026-09-30). Follows MR-SOFI-0344. |
+| MR-SOFI-0346 | Missing | — | — | SoFi Amendment S15 (2026-09-30). Follows MR-SOFI-0344. |
+| MR-SOFI-0347 | Violated | — | — | SoFi Amendment S15 (2026-09-30). SetupValid obtains the trader's accepted claim at the setup position through `SofiReads::accepted_claim_at`, which in the SDK validates the trader by the whole-lineage walk (`validate_peer_lineage`), replaying the trader's transitions. |
+| MR-SOFI-0348 | Partial | `dsm::sofi::lineage::advance_resolved` | `dsm::sofi::lineage::tests::a_realized_position_crediting_an_unadopted_token_is_refused`; `dsm::sofi::lineage::tests::a_void_needs_no_adoption` | SoFi Amendment S15 (2026-09-30). The trader's own device enforces adoption when it installs a realized position. No later verifier of another trader's position exists yet (MR-SOFI-0344), so the second half has nothing to hold of. |
 
 ### 8.3 dBTC native specification
 
