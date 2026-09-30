@@ -91,7 +91,7 @@ These are the gaps that account for most of the non-Met rows. Row lists are not 
 
 **G1. SoFi has no production entry.** No handler, proto message or JNI export reaches the SoFi producers (`dsm_sdk/src/sdk/sofi_*.rs`) or the route pipeline (`sofi::validation::validate`, `sofi::conformance`, `sofi::resolution`, `sofi::exercise`, `sofi::registration`, `sofi::publication`). Live code reaches `sofi::signature::verify_operation` (from `DeviceState::advance`) and the helper modules `sofi::arith`, `sofi::fisher_yates`, `sofi::storage`, `sofi::lineage`, `sofi::wire` and `sofi::derive` (from the economic modules, the native reserve and `storage_io`). Rows: MR-SOFI-0001, 0013, 0017, 0020, 0023, 0031, 0033, 0037, 0048, 0144, 0165, 0255, 0256, 0257, 0258, 0259; MR-DSM-0187, 0209, 0211, 0212, 0214.
 
-**G2. Route-chain finality is not implemented.** DSM Amendment A6, SoFi Amendment S4 and storage §9, §12.6, §14 and §23.1 item 7 make finality a route chain: the leader's link and two further links. `sofi::arith::resolve` still decides `LeaderHeld`/`Final` by "first at the leader, held by two other members", and it is live: the native reserve, economic registers, and the SoFi register, advance and exercise paths call it. The §14 arrival records and ByteCommits exist, but nothing consumes them. There is no route-entry type, no link, no `Preserved` state and no per-seat empties. Rows: MR-DSM-0034, 0036 (Violated), 0039, 0058, 0083, 0085 (Violated), 0208, 0270; MR-SOFI-0081, 0082, 0328; MR-STOR-0020, 0046, 0047, 0108, 0130–0134, 0136–0138; STOR-014/L415.
+**G2. Route-chain finality is not implemented.** DSM Amendment A6, SoFi Amendment S4 and storage §9, §12.6, §14 and §23.1 item 7 make finality a route chain: the leader's link and two further links. `sofi::arith::resolve` still decides `LeaderHeld`/`Final` by "first at the leader, held by two other members", and it is live: the native reserve, economic registers, and the SoFi register, advance and exercise paths call it. The §14 arrival records and ByteCommits exist, but nothing consumes them. There is no route-entry type, no link, no `Preserved` state and no per-seat empties. Rows: MR-DSM-0034, 0036 (Violated), 0039, 0058, 0083, 0085 (Violated), 0208, 0270; MR-SOFI-0081, 0082, 0328; MR-STOR-0020, 0046, 0047, 0108, 0130–0134, 0136–0138; STOR-014/L415. *Update 2026-09-29 (§6.41): `sofi::arith` was deleted in #976, and `route_chain::evaluate` decides `LeaderHeld`, `Preserved` and `Final` from the links of one chain. MR-DSM-0036 and 0085 are re-verified Met; the other rows listed here were not re-examined there.*
 
 **G3. The candidate and guard state model is absent.** `DeviceState` has one flat root. There is no ρcore, P, Γ, Σ, Π, Ω, no committed position u, no guard families and no κres derivation. Rows Missing: MR-DSM-0009, 0010, 0025, 0120, 0123, 0124, 0127, 0129–0132, 0137–0139, 0143, 0144, 0146, 0148, 0149, 0151, 0155, 0159, 0201. Partial because of it: MR-DSM-0002, 0005, 0014, 0092, 0098, 0122, 0125, 0126, 0140, 0141, 0145, 0147, 0152–0154, 0156, 0157, 0160–0164, 0166, 0168, 0170, 0174, 0186, 0188, 0240, 0241, 0251, 0253, 0268.
 
@@ -121,7 +121,7 @@ Rows: MR-SOFI-0306, 0307 (Violated), 0308, 0309, 0311, 0319–0321, 0323–0325.
 - The Core state machine names SoFi operations: `DeviceState::advance` matches on `SofiSetup`, `SofiVaultCreate` and `SofiFulfill` (MR-SOFI-0036, Violated).
 - No challenge or drop-claim rung (ladder step 3a, Amendment S5) (MR-SOFI-0248, 0252, 0329).
 
-**G9. The per-device SMT evicts relationship heads.** `SparseMerkleTree::update_leaf` evicts the oldest leaf once more than `max_leaves` are held, and the device SMT is created with `max_relationships = 1024` at genesis. `DeviceState::advance` takes its root and proofs from that tree (`smt_replace` → `update_leaf`). The `tips` map keeps every head, but the root does not commit to it. Past 1,024 relationships the oldest relationships drop out of the root, and transitions in them fail. A rewind does not get through, because the counterparty checks against its own tip. No beta device is expected to reach 1,024 relationships. Fix: a commitment tree never drops leaves; remove the eviction, as `economic/tree.rs` already does. Rows: MR-DSM-0116, 0121 (Violated).
+**G9. The per-device SMT evicts relationship heads.** `SparseMerkleTree::update_leaf` evicts the oldest leaf once more than `max_leaves` are held, and the device SMT is created with `max_relationships = 1024` at genesis. `DeviceState::advance` takes its root and proofs from that tree (`smt_replace` → `update_leaf`). The `tips` map keeps every head, but the root does not commit to it. Past 1,024 relationships the oldest relationships drop out of the root, and transitions in them fail. A rewind does not get through, because the counterparty checks against its own tip. No beta device is expected to reach 1,024 relationships. Fix: a commitment tree never drops leaves; remove the eviction, as `economic/tree.rs` already does. Rows: MR-DSM-0116, 0121. *Resolved: the eviction was removed in #976; re-verified with executable evidence on 2026-09-29 (§6.41).*
 
 **G10. The SDK records a negative verdict.** `recipient_staging::mark_rejected` persists a sticky `TerminalReject` with a reason and refuses to re-stage the pair. Row: MR-DSM-0018 (Violated).
 
@@ -1583,17 +1583,69 @@ Four storage rows were Partial only because no test reached the branch that enfo
 | MR-STOR-0016 | §3.4: a misresponse is detectable by hash and affects availability only | the same, with `dsm::sofi::storage::tests::wrong_bytes_never_count` on the reader's side | As MR-STOR-0026. |
 
 The damaged-row tests change a held row directly in Postgres, as a failing disk would. That puts the store outside the fault model (§3), which is the case these refusals exist for: such a store fails closed.
+### 6.41 The device tree keeps its nodes: a write rehashes its path, a head loads in one build (`fix/smt-incremental-root`, 2026-09-29)
+
+**The finding** (found on `test/dsm-core-violated-rows-reverified`). `SparseMerkleTree::update_leaf` recomputed the root from every leaf on every write, splitting the whole key set at each of the 256 levels, and `get_inclusion_proof` did the same for each sibling. `DeviceState::restore` wrote every relationship tip and every other leaf through `update_leaf` one at a time, so loading a head was quadratic in its leaf count, and `establish_relationship` and `advance` paid for the whole tree on every step. A liveness defect, not a question of what the root is: the root is a pure function of the leaves (MR-DSM-0116, 0117, 0121), and it is unchanged.
+
+**Measured** in release on one machine, with a probe since deleted. Heads of 100, 1,000 and 5,000 leaves beside the device's own relationship; "one step" is a clone of the tree and one write with its path against the pre-root, as `advance` does. Each run printed the same root before and after the change.
+
+| | 101 leaves | 1,001 leaves | 5,001 leaves |
+|---|---|---|---|
+| `restore`, before | 197 ms | 18.9 s | 487.5 s |
+| `restore`, after | 3 ms | 34 ms | 173 ms |
+| one step, before | 7.7 ms | 75 ms | 578 ms |
+| one step, after | 38 µs | 49 µs | 116 µs |
+
+Establishing 1,025 relationships one after another: 20.2 s before, 79 ms after.
+
+**Changed**
+
+| Where | What |
+|---|---|
+| `dsm` · merkle/sparse_merkle_tree.rs | The tree keeps the hashes of its non-empty nodes, path-compressed: one leaf per key and one branch per level where the held keys separate, each branch holding its two children's hashes. `update_leaf` rehashes the written leaf's path, and on a new key the edge it splits; `get_inclusion_proof` reads its siblings from the kept hashes and lifts one subtree at most; `from_leaves` builds the nodes in one pass over the sorted keys. The full recomputation (`compute_subtree_hash`, `compute_subtree`, `collect_siblings`) is deleted from the shipped tree. |
+| `dsm` · types/device_state.rs · `DeviceState::restore` | Builds the tree once over the device's own relationship, every tip and then every other leaf, a later leaf at a key replacing an earlier one as before. The loader's check of the rebuilt root against the stored one (`dsm_sdk` · storage/client_db/bcr.rs) is unchanged. |
+
+**Evidence**
+
+- `dsm::merkle::sparse_merkle_tree::tests::a_written_root_is_the_recomputed_root` (property, 256 cases in release): after every write of a random sequence, rewrites and zero-valued leaves included, the root is the one the removed full recomputation gives over the leaves written so far, and `from_leaves` over the same writes gives it too. Keys are drawn near one base key with a random shared prefix, so branches occur at every level down to keys that differ in their last bit.
+- `dsm::merkle::sparse_merkle_tree::tests::a_kept_path_is_the_recomputed_path` (property): the path to a held key, to a random key and to a key sharing a random prefix with a held one is the recomputation's path, and folds to the root.
+- `dsm::merkle::sparse_merkle_tree::tests::a_large_tree_keeps_the_recomputed_root` (1,000 leaves) and `dsm::types::device_state::tests::a_restored_head_recomputes_the_live_root` (a restored head recomputes the live root; a tip or an extra leaf left out of the build moves it).
+- The golden and domain-separation vectors (`dsm::smt_tripwire_vectors`, `dsm::smt_tripwire_theorem`, `dsm::domain_encoding_byte_preservation`) pass unchanged.
+- Mutation controls (2026-09-29, each restored): a rewrite leaving the branch's old child hash, a split putting the new leaf always left, a path dropping the sibling where an absent key leaves the tree, the one-pass build swapping a branch's children, and `restore` building without the extra leaves each turned a named test above red.
+
+**Not found.** The finding said `extra_leaves` grows by a settlement receipt leaf per settlement. On `main` it holds anchor-state, token adoption and offline allocation leaves, each rewritten in place at its own key. No leaf is added per settlement. The fix does not depend on which it is.
+### 6.41 The four DSM core Violated rows were stale (`test/dsm-core-violated-rows-reverified`, 2026-09-29)
+
+The four MR-DSM rows marked Violated described code that #976 deleted. Their citations were not canonical names, so `ci/conformance_evidence.py` never checked them, and the rows kept a status the tree no longer had. Each is re-verified here against the specification, with tests and mutation controls.
+
+| Rows | What the row said | What the code does | Evidence |
+|---|---|---|---|
+| MR-DSM-0036, 0085 | Finality counted copies: first at the leader, held by two others (`sofi::arith::resolve`). | `sofi/arith.rs` was deleted in #976. `route_chain::evaluate` takes the first recognized value in the leader's arrival log, once the leader's ByteCommit commits its record, and counts the links of one chain: the leader's alone is `LeaderHeld`, one further `Preserved`, two further `Final`. The economic root register reads its cells through it (`read_root_cell`) and recognizes only claims naming that cell's key (`root_claim_naming`). | Existing tests: `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held`, `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`, `dsm::economic::register::registered_root_construction_tests::a_held_root_cell_carries_the_exact_bytes_that_hold_it`, and the others in the §8 rows. |
+| MR-DSM-0116, 0121 | The device tree evicted its oldest leaf past 1,024 (`max_relationships`). | The eviction and the bound were removed in #976; the tree has no capacity. Each step writes `(rel_key, h_{n+1})`. | New: `dsm::types::device_state::tests::every_relationship_stays_in_the_root_past_the_old_capacity` (a device establishes 1,025 relationships beside its own; its root is the tree of every relationship's head, and the first still proves under it) and `dsm::types::device_state::tests::a_relationships_leaf_holds_its_current_head` (`h_0`, then each step's tip, proves under the root, and the proof each earlier head had, as the device state of its time produced it, proves nothing under the later root). |
+
+Mutation controls, run on 2026-09-29, each restored byte for byte:
+
+- The leader's link alone counted final (`ChainState::with_further_links(0)` returning `Final`): eight `route_chain` tests go red, among them `three_links_are_final_two_preserved_one_leader_held` and `the_first_recognized_value_at_the_leader_holds_the_cell`.
+- `root_claim_naming` accepting a claim whatever key it names: `a_held_root_cell_carries_the_exact_bytes_that_hold_it` goes red.
+- A 1,024-leaf cap put back into `update_leaf`: `every_relationship_stays_in_the_root_past_the_old_capacity` goes red: the device's root is no longer the tree of every head it holds.
+- A step writing the head it moved past into its leaf: `a_relationships_leaf_holds_its_current_head` goes red. **`a_relationship_steps_only_from_a_leaf_the_device_committed`, which the matrix cites for MR-DSM-0116, stays green under this mutation.** It checks the step's pre-state, not the leaf after the step.
+
+Found, not changed here:
+
+- Seven more MR-DSM rows, all Partial, cite files that no longer exist: 0017, 0019 and 0046 (`sofi/arith.rs`), 0056 (`api/transport/gossip.rs`, `replication.rs`), 0126 (`cpta/mod.rs`), 0141 and 0170 (`dsm_sdk/src/sdk/dlv_pre_commitment_sdk.rs`). Their statuses are unverified until re-examined.
+- `ci/conformance_evidence.py` resolves only backticked canonical names. A row that is not Met may cite deleted code in any other form and pass, as these rows did.
 
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 272 | 69 | 114 | 38 | 4 | 29 | 18 |
+| DSM high-level (MR-DSM) | 272 | 73 | 114 | 38 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 43 | 34 | 60 | 2 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
 | **All** | **918** | **336** | **233** | **117** | **14** | **64** | **154** |
+| **All** | **918** | **336** | **237** | **117** | **10** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -1636,7 +1688,7 @@ The damaged-row tests change a held row directly in Postgres, as a failing disk 
 | MR-DSM-0033 | Met | `dsm::economic::register::RegisteredEconomicRoot::from_verified_single_root` | `dsm::economic::register::registered_root_construction_tests::a_registered_root_is_a_projection_of_a_verified_claim`; `dsm::economic::register::registered_root_construction_tests::a_conditional_claim_has_nothing_to_construct_from` | — |
 | MR-DSM-0034 | Partial | dsm_sdk · sdk/storage_node_sdk.rs::put_cell_leader_first (1475-1506) | — | Leader-first order confirmed; no accumulated chain object threaded between writes (A6 not implemented). |
 | MR-DSM-0035 | Met | `dsm::route_chain::evaluate`; `dsm::route_chain::CellEvidence`; `dsm_storage_node::api::cells` | `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`; `dsm::route_chain::tests::junk_first_at_the_leader_blocks_nothing`; `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused` | sofi/arith.rs and its tests were deleted in #976; Core now evaluates each cell from raw seat reads in route_chain::evaluate, and the node keeps every value without deciding anything. |
-| MR-DSM-0036 | Violated | dsm · sofi/arith.rs::resolve | sofi::arith::tests::the_leaders_first_value_held_by_two_others_is_final (proves the actual count-based mechanism) | Count-based (2-of-4 copies), not the A6 three-link route chain; storage_cell.rs's new ArrivalRecord/ByteCommit primitives are unconsumed by `resolve`. |
+| MR-DSM-0036 | Met | `dsm::economic::register::read_root_cell`; `dsm::economic::register::root_claim_naming`; `dsm::route_chain::evaluate`; `dsm::route_chain::ChainState` | `dsm::economic::register::registered_root_construction_tests::a_held_root_cell_carries_the_exact_bytes_that_hold_it`; `dsm::economic::register::registered_root_construction_tests::a_final_root_claim_has_a_completion_proof_that_checks`; `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held`; `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`; `dsm::route_chain::tests::a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count` | Re-verified 2026-09-29 (§6.41). sofi/arith.rs and its count-based test were deleted in #976. A root cell's reading is `route_chain::evaluate` over claims naming that cell's key: the first such claim in the leader's log holds it, final on the leader's link and two further links of one chain. |
 | MR-DSM-0037 | Met | `dsm::route_chain::evaluate`; `dsm::route_chain::Missing` | `dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in`; `dsm::economic::native_reserve::tests::finality_without_the_deterministic_leader_is_impossible` | sofi/arith.rs was deleted in #976; an unread leader is Missing::LeaderUnread in route_chain::evaluate and no other seat stands in. |
 | MR-DSM-0038 | Met | `dsm::economic::lineage::advance_validated` | `dsm::economic_admission_lifecycle::a_registered_root_disagreeing_with_the_witness_is_refused` | `advance_validated` refuses a registered root that disagrees with the witness. |
 | MR-DSM-0039 | Partial | dsm · economic/lineage.rs::advance_validated (605-610) | — | Registration-then-accept order enforced; finality half of the conjunction depends on arith.rs's pre-A6 mechanism (0036). |
@@ -1685,7 +1737,7 @@ The damaged-row tests change a held row directly in Postgres, as a failing disk 
 | MR-DSM-0082 | Partial | dsm · economic/register.rs::position_seed (74-86, signature has no node-id/availability parameter) | no test found | `position_seed` takes no node id or availability input. No test fails if one is added. |
 | MR-DSM-0083 | Partial | dsm_sdk · sdk/storage_node_sdk.rs::put_cell_leader_first | — | Same gap as 0034. |
 | MR-DSM-0084 | Met | `dsm_storage_node::api::cells::put_cell` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::an_identical_value_put_twice_is_held_twice` | — |
-| MR-DSM-0085 | Violated | dsm · sofi/arith.rs::resolve | sofi::arith::tests::the_leaders_first_value_held_by_two_others_is_final | Same evidence as 0036. |
+| MR-DSM-0085 | Met | `dsm::route_chain::evaluate`; `dsm::route_chain::ChainState` | `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`; `dsm::route_chain::tests::junk_first_at_the_leader_blocks_nothing`; `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held`; `dsm::route_chain::tests::only_links_of_one_chain_count_toward_final` | Re-verified 2026-09-29 (§6.41). sofi/arith.rs was deleted in #976; the winner is the first recognized object in the leader's arrival log, and its state is the count of valid links of one chain, the leader's first. |
 | MR-DSM-0086 | Met | `dsm::route_chain::evaluate`; `dsm::route_chain::ChainState`; `dsm_storage_node::api::cells` | `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`; `dsm::route_chain::tests::the_state_is_the_count_of_valid_links`; `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused` | sofi/arith.rs was deleted in #976; winner (leader link) and finality (count of valid links) are derived by route_chain::evaluate from raw reads, and the node stores bytes without evaluating them. |
 | MR-DSM-0087 | Met | `dsm::economic::register::RegisteredEconomicRoot`; `dsm::economic::lineage::ValidatedEconomicRoot` | `dsm::economic_lineage_register::registering_an_arbitrary_root_yields_nothing_validated` | — |
 | MR-DSM-0088 | Not code | — | — | Operator restore-discipline assumption. |
@@ -1716,12 +1768,12 @@ The damaged-row tests change a held row directly in Postgres, as a failing disk 
 | MR-DSM-0113 | Met | `dsm::merkle::sparse_merkle_tree::get_inclusion_proof` | `dsm::merkle::sparse_merkle_tree::tests::update_and_prove`; `dsm::merkle::sparse_merkle_tree::tests::multi_leaf_proofs` | — |
 | MR-DSM-0114 | Met | `dsm::merkle::sparse_merkle_tree::default_node`; `dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT` | `dsm::merkle::sparse_merkle_tree::tests::default_node_chain_consistency`; `dsm::merkle::sparse_merkle_tree::tests::empty_tree_root_matches_default_chain` | — |
 | MR-DSM-0115 | Partial | `dsm::core::bilateral_transaction_manager::compute_smt_key`; `dsm::common::domain_tags::dsm::core::TAG_SMT_KEY` | `dsm::smt_tripwire_vectors::smt_key_determinism_reversed_args`; `dsm::smt_tripwire_vectors::golden_tag_smt_key`; `dsm::smt_tripwire_theorem::theorem1_smt_key_deterministic` | The min/max order-invariant key is implemented and tested (the cited smt_replace_witness and test_smt_key_ordering tests no longer exist), but the domain tag is DSM/smt-key, not the DSM/smt-key/v1 the requirement names. |
-| MR-DSM-0116 | Violated | dsm · merkle/sparse_merkle_tree.rs · `update_leaf` (FIFO eviction past `max_leaves`); dsm_sdk · sdk/core_sdk.rs genesis (`max_relationships = 1024`) | `sparse_merkle_tree::tests::cache_eviction_fifo` (asserts the eviction) | Past 1024 relationships the oldest head is silently evicted and then reads as absent. |
+| MR-DSM-0116 | Met | `dsm::types::device_state::DeviceState::advance`; `dsm::merkle::sparse_merkle_tree::SparseMerkleTree::update_leaf` | `dsm::types::device_state::tests::a_relationships_leaf_holds_its_current_head`; `dsm::types::device_state::tests::every_relationship_stays_in_the_root_past_the_old_capacity`; `dsm::types::device_state::tests::a_relationship_steps_only_from_a_leaf_the_device_committed` | Re-verified 2026-09-29 (§6.41). The FIFO eviction and `max_relationships` were removed in #976: the tree has no capacity. Each step writes `(rel_key, h_{n+1})` into the tree, and the head it moved past no longer proves under the root. |
 | MR-DSM-0117 | Met | `dsm::merkle::sparse_merkle_tree::update_leaf` | `dsm::merkle::sparse_merkle_tree::tests::leaf_update_changes_root`; `dsm::merkle::sparse_merkle_tree::tests::multi_leaf_proofs` | — |
 | MR-DSM-0118 | Met | `dsm::merkle::sparse_merkle_tree::verify_proof_against_root` (path recompute) | `dsm::merkle::sparse_merkle_tree::tests::verify_proof_against_root_static`; `dsm::merkle::sparse_merkle_tree::tests::update_and_prove` | — |
 | MR-DSM-0119 | Met | `dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT`; `dsm::merkle::sparse_merkle_tree::get_inclusion_proof` | `dsm::merkle::sparse_merkle_tree::tests::proof_size_bounding` | — |
 | MR-DSM-0120 | Missing | — | — | Confirmed by direct grep for `rho_core`/`core_root`/`struct Candidate`/`GuardFamily`/`κres`: zero hits in `dsm/src`. `DeviceState` has a single flat root, no P/Γ/Ω. |
-| MR-DSM-0121 | Violated | same as MR-DSM-0116 | `sparse_merkle_tree::tests::cache_eviction_fifo` | Same FIFO eviction: R stops mapping evicted relationships to their heads. |
+| MR-DSM-0121 | Met | `dsm::types::device_state::DeviceState::advance`; `dsm::merkle::sparse_merkle_tree::SparseMerkleTree::update_leaf` | `dsm::types::device_state::tests::a_relationships_leaf_holds_its_current_head`; `dsm::types::device_state::tests::every_relationship_stays_in_the_root_past_the_old_capacity` | Re-verified 2026-09-29 (§6.41). Every relationship written stays in the root past the 1,024 leaves the tree once held, and the root authenticates each relationship's current head at its key. The head's own authentication is its step's receipt (MR-DSM-0117–0119). |
 | MR-DSM-0122 | Partial | `dsm/src/types/device_state.rs::RelationshipChainState::embedded_parent` (per-relationship ordering only) | no test found | No state-level `u` (sequence digest/progression coordinate) exists. |
 | MR-DSM-0123 | Missing | — | — | No committed candidate structure `P`. |
 | MR-DSM-0124 | Missing | — | — | No `Γ` structure. |
