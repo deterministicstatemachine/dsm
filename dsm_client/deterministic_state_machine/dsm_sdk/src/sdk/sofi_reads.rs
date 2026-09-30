@@ -17,6 +17,7 @@ use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedE
 use dsm::economic::provenance::{PeerLineageFailure, ValidatedPeerTransition};
 use dsm::route_chain::{CellEvidence, CompletionProof, RoutedCell};
 use dsm::sofi::derive;
+use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
     LocalLeaves, ReadFailure, RecordedGenerationRow, SofiReads, VaultLeaves, Verifier,
@@ -260,7 +261,7 @@ pub struct VerifierContext<'a> {
     members: StorageSetMembers,
     set_id: D32,
     network: Vec<u8>,
-    parent: Option<&'a AdmittedEconomicPosition>,
+    parent: Option<ResolvedParent>,
 }
 
 impl<'a> VerifierContext<'a> {
@@ -277,7 +278,7 @@ impl<'a> VerifierContext<'a> {
             members: as_ccb_members(set)?,
             set_id: set.id(),
             network: committed_network_id()?,
-            parent,
+            parent: parent.and_then(ResolvedParent::of),
         })
     }
 
