@@ -11,8 +11,9 @@ set -euo pipefail
 # `sofi::lineage::advance_resolved`. Each is a place where the conjunction that
 # earns a validated root is stated; a second caller would be a second,
 # unreviewed definition of "validated", which is exactly the fabrication the
-# private fields exist to prevent. The peer lineage walker's memo start,
-# `from_verifier_memo`, is a third, for a coordinate this verifier validated.
+# private fields exist to prevent. `from_verifier_memo` is a third, for a
+# coordinate the peer lineage verifier authenticated (DSM Amendment A8): its
+# recorded frontier, or a root its root chain authenticated.
 
 echo "=== ValidatedEconomicRoot: constructors stay where their proofs are ==="
 

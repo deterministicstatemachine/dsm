@@ -152,11 +152,12 @@ impl ValidatedEconomicRoot {
         }
     }
 
-    /// A peer coordinate THIS verifier validated on an earlier walk and
-    /// recorded (`peer_lineage::ValidatedStart`). **Only the peer lineage
-    /// walker may call this**, as the start of a walk; a walk that fails
-    /// `Invalid` from such a start is retried from the activation root, so
-    /// the memo is never authority over what the register holds.
+    /// A peer coordinate THIS verifier authenticated (DSM Amendment A8): its
+    /// recorded frontier for the peer (`peer_lineage::PeerFrontier`), or a
+    /// root its root chain authenticated on the way to a one-hop source.
+    /// **Only the peer lineage verifier may call this**, from one place
+    /// (`peer_lineage::authenticated_root`). Nothing behind a frontier is
+    /// read again: a verification that fails from one fails.
     pub(crate) fn from_verifier_memo(economic_position: u64, economic_root: [u8; 32]) -> Self {
         Self {
             economic_position,
