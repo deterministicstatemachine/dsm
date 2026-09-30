@@ -76,15 +76,15 @@ fn admitted_position() -> u64 {
     economic_fixtures::admitted_position().expect("the device is activated")
 }
 
-/// A foreign walk of `position` of this device's lineage: the resolver's
-/// cache cleared, so nothing below reads local admission state.
+/// A foreign walk of `position` of this device's lineage. A device records
+/// no frontier for itself, so the walk starts at its activation root, as a
+/// verifier meeting it first would, and nothing below reads local admission
+/// state.
 async fn foreign_walk(
     genesis: [u8; 32],
     devid: [u8; 32],
     position: u64,
 ) -> dsm::economic::provenance::ValidatedPeerTransition {
-    client_db::economic_lineage::clear_peer_lineage(&genesis, &devid)
-        .expect("clear the peer lineage cache");
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         use dsm::economic::provenance::ProvenanceResolver;

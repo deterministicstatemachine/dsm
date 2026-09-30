@@ -19,7 +19,10 @@
 //! one downstream, so the safe design is for regeneration to be impossible.
 
 use dsm::economic::claim_envelope::RegisteredEconomicClaim;
-use dsm::economic::peer_lineage::ValidatedStart;
+use dsm::economic::peer_lineage::{
+    validate_peer_lineage, ConditionalPositionResolver, PeerEvidenceFetcher, PeerFrontier,
+    PeerFrontiers,
+};
 use dsm::economic::provenance::{
     PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
 };
@@ -227,119 +230,45 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     }
 }
 
-/// Record a peer coordinate this verifier validated. The memo is a cache of
-/// this verifier's own conclusions: a failed write loses a shortcut, never a
-/// fact, so it is reported and the validated result still stands.
-fn memoize(peer_genesis: &[u8; 32], peer_devid: &[u8; 32], result: &ValidatedPeerTransition) {
-    let start = ValidatedStart {
-        economic_position: result.validated_root().economic_position(),
-        economic_root: result.validated_root().economic_root(),
-    };
-    if let Err(e) = crate::storage::client_db::economic_lineage::record_peer_validated(
-        peer_genesis,
-        peer_devid,
-        &start,
-    ) {
-        log::warn!("peer lineage memo: not recorded: {e}");
+/// This receiver's frontiers, as its store records them (DSM Amendment A8).
+pub struct StoredFrontiers;
+
+impl PeerFrontiers for StoredFrontiers {
+    fn frontier_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
+        crate::storage::client_db::economic_lineage::frontier_below(genesis, device_id, position)
+            .map_err(|e| {
+                PeerLineageFailure::Incomplete(format!("the frontier store is unreadable: {e}"))
+            })
     }
 }
 
-/// The memo-aware walk shared by every fetcher-shaped resolver: memo start,
-/// Invalid-from-memo re-walk, and the memo write — over WHATEVER
-/// `PeerEvidenceFetcher` the caller supplies, so a recording fetcher observes
-/// exactly the closure the walk consumed.
-pub(crate) fn resolve_peer_with_cache<F: dsm::economic::peer_lineage::PeerEvidenceFetcher>(
+/// A peer's lineage verified to `peer_economic_position` from this
+/// receiver's frontier (DSM Amendment A8), over WHATEVER fetcher the caller
+/// supplies, so a recording fetcher observes exactly the closure the
+/// verification consumed. Nothing is recorded here: a frontier is recorded
+/// only in the transaction that accepts a step from the peer.
+pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     peer_economic_position: u64,
+    conditional: &dyn ConditionalPositionResolver,
 ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-    use dsm::economic::peer_lineage::validate_peer_lineage;
-    let memo = match crate::storage::client_db::economic_lineage::best_peer_start(
-        peer_genesis,
-        peer_devid,
-        peer_economic_position,
-    ) {
-        Ok(memo) => memo,
-        Err(e) => {
-            log::warn!("peer lineage memo: unreadable, walking from the activation root: {e}");
-            None
-        }
-    };
-    let first = validate_peer_lineage(
+    validate_peer_lineage(
         fetcher,
         expected_network_id,
         peer_genesis,
         peer_devid,
         peer_economic_position,
-        memo,
-    );
-    let result = match (first, memo) {
-        // A memo start is never authority: an INVALID verdict from it
-        // discards the memo and re-walks from the activation root.
-        (Err(PeerLineageFailure::Invalid(reason)), Some(start)) => {
-            log::warn!(
-                "peer lineage: Invalid from the memo start at {}: {reason}; re-walking",
-                start.economic_position
-            );
-            if let Err(e) = crate::storage::client_db::economic_lineage::clear_peer_lineage(
-                peer_genesis,
-                peer_devid,
-            ) {
-                log::warn!("peer lineage memo: not cleared: {e}");
-            }
-            validate_peer_lineage(
-                fetcher,
-                expected_network_id,
-                peer_genesis,
-                peer_devid,
-                peer_economic_position,
-                None,
-            )
-        }
-        (Ok(validated), Some(start)) => {
-            log::debug!(
-                "peer lineage: validated from the memo start at {}",
-                start.economic_position
-            );
-            Ok(validated)
-        }
-        (outcome, None) => outcome,
-        (Err(failure), Some(start)) => {
-            log::debug!(
-                "peer lineage: not established from the memo start at {}: {failure}",
-                start.economic_position
-            );
-            Err(failure)
-        }
-    }?;
-    memoize(peer_genesis, peer_devid, &result);
-    Ok(result)
-}
-
-/// The walk from the activation root, with no memo start: when the recorded
-/// closure has not been proven Stored, a memo start would let the walk
-/// skip fetches the durability push then never sees.
-pub(crate) fn resolve_peer_with_cache_disabled<
-    F: dsm::economic::peer_lineage::PeerEvidenceFetcher,
->(
-    fetcher: &F,
-    expected_network_id: &[u8],
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    peer_economic_position: u64,
-) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-    let result = dsm::economic::peer_lineage::validate_peer_lineage(
-        fetcher,
-        expected_network_id,
-        peer_genesis,
-        peer_devid,
-        peer_economic_position,
-        None,
-    )?;
-    memoize(peer_genesis, peer_devid, &result);
-    Ok(result)
+        &StoredFrontiers,
+        conditional,
+    )
 }
 
 /// The RECORDING fetch boundary for recipient prevalidation. It IS the
@@ -368,19 +297,22 @@ impl<'a> RecordingResolver<'a> {
         }
     }
 
-    /// The memo-aware peer walk, recorded at the fetch boundary.
+    /// The peer's lineage verified from this receiver's frontier, recorded at
+    /// the fetch boundary.
     pub fn validated_peer_transition(
         &self,
         peer_genesis: &[u8; 32],
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
+        conditional: &dyn ConditionalPositionResolver,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        resolve_peer_with_cache(
+        resolve_peer(
             self,
             &self.inner.expected_network_id,
             peer_genesis,
             peer_devid,
             peer_economic_position,
+            conditional,
         )
     }
 }
@@ -442,12 +374,19 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        resolve_peer_with_cache(
+        // A conditional position in the peer's segment is resolved from
+        // SoFi's public objects for that position (SoFi Amendment S15).
+        let context =
+            crate::sdk::sofi_reads::VerifierContext::new(self.set, None, None).map_err(|e| {
+                PeerLineageFailure::Incomplete(format!("SoFi reads are unavailable: {e}"))
+            })?;
+        resolve_peer(
             self,
             &self.expected_network_id,
             peer_genesis,
             peer_devid,
             peer_economic_position,
+            &context.peer_position_resolver(),
         )
     }
 
