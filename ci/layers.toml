@@ -65,17 +65,17 @@ paths = [
 paths = ["**/*.md"]
 
 # The SDK suites that exercise the storage-node contract: what a STORAGE
-# change escalates to instead of every SDK unit test.
+# change escalates to instead of every SDK unit test. Each is a module of
+# dsm_sdk's library; the selector's self-test refuses a name that no longer
+# resolves to one, because a filter that matches nothing runs nothing and
+# still passes.
 [sdk_node_protocol]
 lib_filters = [
   "handlers::storage_routes",
   "sdk::storage_node_sdk",
   "sdk::b0x_sdk",
   "sdk::storage_set",
-  "sdk::storage_sync_sdk",
-  "sdk::storage_node_health",
 ]
-integration_tests = ["b0x_integration", "storage_full_lifecycle"]
 
 # The Rust test matrix groups the selector emits, and what each runs.
 [groups.dsm]
@@ -90,7 +90,7 @@ run = "cargo test --locked -p dsm_sdk --release -- --nocapture --test-threads=1"
 [groups.sdk-node-protocol]
 when = ["SDK_NODE_PROTOCOL"]
 unless = ["SDK"]
-run = "cargo test --locked -p dsm_sdk --release --lib -- --nocapture --test-threads=1 {lib_filters}\ncargo test --locked -p dsm_sdk --release {integration_tests} -- --nocapture --test-threads=1"
+run = "cargo test --locked -p dsm_sdk --release --lib -- --nocapture --test-threads=1 {lib_filters}"
 
 [groups.workspace-rest]
 when = ["CORE", "STORAGE", "FORMAL"]

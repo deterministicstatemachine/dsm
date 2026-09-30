@@ -123,9 +123,9 @@ pub async fn write_exercise(
 ) -> Result<Vec<LegWrite>, DsmError> {
     let bytes = exercise.encode();
     let mut writes = Vec::new();
-    for attempt in recognized.fulfillment.body.attempts() {
+    for attempt in recognized.fulfillment().body.attempts() {
         let leg = recognized
-            .precommit
+            .precommit()
             .body
             .legs()
             .iter()

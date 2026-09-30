@@ -9,6 +9,10 @@
 //! A commitment tree never drops a leaf: every relationship head the device
 //! holds stays in the root it commits (MR-DSM-0116, MR-DSM-0121).
 //!
+//! The root is a pure function of the leaves. The tree keeps the hashes of its
+//! non-empty nodes, path-compressed, so a write rehashes one leaf-to-root path
+//! and a device's cost per step does not grow with its leaf count.
+//!
 //! Domain separation (normative, §2.2):
 //!   leaf:     `BLAKE3("DSM/smt-leaf\0" || value)`
 //!   internal: `BLAKE3("DSM/smt-node\0" || left || right)`
@@ -146,16 +150,69 @@ fn fold_path(key: &[u8; 32], leaf_hash: [u8; 32], siblings: &[[u8; 32]]) -> [u8;
 // SparseMerkleTree — the canonical Per-Device SMT (§2.2)
 // ───────────────────────────────────────────────────────────────────
 
+/// The level of the leaves; level 0 is the root.
+const LEAF_LEVEL: usize = DEFAULT_SMT_HEIGHT as usize;
+
+/// The first bit, MSB-first, where `a` and `b` differ; `None` when they are
+/// the same key.
+fn first_difference(a: &[u8; 32], b: &[u8; 32]) -> Option<usize> {
+    a.iter()
+        .zip(b.iter())
+        .enumerate()
+        .find_map(|(byte, (x, y))| {
+            let diff = x ^ y;
+            (diff != 0).then(|| byte * 8 + diff.leading_zeros() as usize)
+        })
+}
+
+/// A non-empty subtree in the tree's node set. The set is path-compressed: a
+/// run of levels where every key below goes the same way is one edge, and
+/// every level of it has the empty subtree for its other child. So the set
+/// holds one leaf per key and one branch per level where the keys separate,
+/// `2n - 1` nodes for `n` leaves at any depth.
+#[derive(Clone, Copy)]
+enum Node {
+    /// Index into [`SparseMerkleTree::leaf_nodes`].
+    Leaf(usize),
+    /// Index into [`SparseMerkleTree::branches`].
+    Branch(usize),
+}
+
+/// A level where the keys below separate: every key under the branch shares
+/// the bits before `level`, and both values of bit `level` occur.
+#[derive(Clone, Copy)]
+struct Branch {
+    /// The node's level (0 = root). Its children are at `level + 1`.
+    level: usize,
+    /// A key under the branch, for the bits every key under it shares.
+    key: [u8; 32],
+    /// The subtrees whose keys have bit `level` 0 and 1.
+    children: [Node; 2],
+    /// Each child's hash at `level + 1`: the node's two inputs.
+    child_hashes: [[u8; 32]; 2],
+}
+
 /// Per-Device Sparse Merkle Tree with 256-bit keys.
 ///
 /// This is the canonical SMT described in §2.2 of the whitepaper. Each device
 /// maintains one of these trees indexing its bilateral relationships. Keys are
 /// 256-bit relationship identifiers; values are 32-byte chain tip digests.
+///
+/// The root is a pure function of the leaves. The tree keeps the hashes of
+/// its non-empty nodes, path-compressed, so that a write rehashes at most two
+/// leaf-to-root paths (its own, and on a new key the edge it splits) whatever
+/// the number of leaves, and a proof reads its siblings from the kept hashes.
 #[derive(Clone)]
 pub struct SparseMerkleTree {
     /// Sparse leaf storage: relationship key → chain tip. Unbounded: the root
     /// commits every leaf the tree holds.
     leaves: HashMap<[u8; 32], [u8; 32]>,
+    /// Each held key with its leaf hash `hash_smt_leaf(value)`.
+    leaf_nodes: Vec<([u8; 32], [u8; 32])>,
+    /// Every level where the held keys separate.
+    branches: Vec<Branch>,
+    /// The subtree at the root; `None` while the tree holds no leaf.
+    top: Option<Node>,
     /// Precomputed default hash at each tree level.
     /// Index 0 = root level default, index 256 = leaf level default.
     /// `defaults[256] = hash_smt_leaf(ZERO_LEAF)`
@@ -189,79 +246,191 @@ impl SparseMerkleTree {
 
         Self {
             leaves: HashMap::new(),
+            leaf_nodes: Vec::new(),
+            branches: Vec::new(),
+            top: None,
             defaults,
             root,
         }
     }
 
-    /// Build a tree holding exactly `leaves`, computing the root once. A
+    /// Build a tree holding exactly `leaves`, hashing each node once. A
     /// later duplicate key replaces an earlier one.
     pub fn from_leaves(leaves: impl IntoIterator<Item = ([u8; 32], [u8; 32])>) -> Self {
         let mut tree = Self::new();
         for (key, value) in leaves {
             tree.leaves.insert(key, value);
         }
-        tree.root = tree.compute_subtree_hash(0);
+        let mut sorted: Vec<([u8; 32], [u8; 32])> = tree
+            .leaves
+            .iter()
+            .map(|(key, value)| (*key, *value))
+            .collect();
+        sorted.sort_unstable_by_key(|(key, _)| *key);
+        if !sorted.is_empty() {
+            let (top, root) = tree.build(&sorted, 0);
+            tree.top = Some(top);
+            tree.root = root;
+        }
         tree
     }
 
-    /// Update a leaf value and recompute the root.
+    /// Update a leaf value and recompute the root over the leaf's path.
     ///
     /// The key must be a 256-bit relationship identifier computed via
     /// `compute_smt_key(DevID_A, DevID_B)`.
     pub fn update_leaf(&mut self, key: &[u8; 32], value: &[u8; 32]) {
         self.leaves.insert(*key, *value);
-
-        // Recompute root from all leaves
-        self.root = self.compute_subtree_hash(0);
+        let leaf_hash = hash_smt_leaf(value);
+        let (top, root) = match self.top {
+            Some(top) => self.write(top, 0, key, leaf_hash),
+            None => (
+                self.push_leaf(key, leaf_hash),
+                self.lift(key, leaf_hash, LEAF_LEVEL, 0),
+            ),
+        };
+        self.top = Some(top);
+        self.root = root;
     }
 
-    /// Recursively compute the hash of the subtree rooted at `level`.
-    /// `level` 0 = root, `level` 256 = leaf level.
-    fn compute_subtree_hash(&self, level: usize) -> [u8; 32] {
-        if self.leaves.is_empty() {
-            return self.defaults[0];
-        }
-        self.compute_subtree(level, &self.leaves.keys().copied().collect::<Vec<_>>())
-    }
-
-    /// Compute subtree hash for a subset of leaf keys at the given level.
-    fn compute_subtree(&self, level: usize, keys: &[[u8; 32]]) -> [u8; 32] {
-        if keys.is_empty() {
-            return self.defaults[level];
-        }
-
-        if level == 256 {
-            // Leaf level: exactly one key (collision impossible for 256-bit keys)
-            debug_assert!(keys.len() == 1, "hash collision at leaf level");
-            let value = self.leaves.get(&keys[0]).copied().unwrap_or(ZERO_LEAF);
-            return hash_smt_leaf(&value);
-        }
-
-        // Split keys into left (bit=0) and right (bit=1) at this level
-        let mut left_keys = Vec::new();
-        let mut right_keys = Vec::new();
-        for key in keys {
-            if get_bit(key, level) == 0 {
-                left_keys.push(*key);
-            } else {
-                right_keys.push(*key);
+    /// The subtree over `leaves` (sorted by key, distinct, sharing every bit
+    /// before `at`), and its hash at level `at`.
+    fn build(&mut self, leaves: &[([u8; 32], [u8; 32])], at: usize) -> (Node, [u8; 32]) {
+        let (first, value) = leaves[0];
+        // Sorted keys all share the bits the first and last share, and split
+        // at the first bit those two do not.
+        match first_difference(&first, &leaves[leaves.len() - 1].0) {
+            None => {
+                let leaf_hash = hash_smt_leaf(&value);
+                (
+                    self.push_leaf(&first, leaf_hash),
+                    self.lift(&first, leaf_hash, LEAF_LEVEL, at),
+                )
+            }
+            Some(split) => {
+                let mid = leaves.partition_point(|(key, _)| get_bit(key, split) == 0);
+                let (left, left_hash) = self.build(&leaves[..mid], split + 1);
+                let (right, right_hash) = self.build(&leaves[mid..], split + 1);
+                let branch = self.push_branch(Branch {
+                    level: split,
+                    key: first,
+                    children: [left, right],
+                    child_hashes: [left_hash, right_hash],
+                });
+                let hash = self.lift(&first, hash_smt_node(&left_hash, &right_hash), split, at);
+                (branch, hash)
             }
         }
+    }
 
-        let left_hash = if left_keys.is_empty() {
-            self.defaults[level + 1]
-        } else {
-            self.compute_subtree(level + 1, &left_keys)
-        };
+    /// Write `key`'s leaf hash into the subtree `node`, whose keys share
+    /// every bit of `key` before `at`. Returns the subtree now in its place
+    /// and that subtree's hash at level `at`.
+    fn write(
+        &mut self,
+        node: Node,
+        at: usize,
+        key: &[u8; 32],
+        leaf_hash: [u8; 32],
+    ) -> (Node, [u8; 32]) {
+        let node_key = *self.node_key(node);
+        let node_level = self.node_level(node);
+        match first_difference(key, &node_key).filter(|bit| *bit < node_level) {
+            // The key leaves the subtree's edge at `split`: a new branch there
+            // holds the subtree on one side and the new leaf on the other.
+            Some(split) => {
+                let old_side = self.lift(&node_key, self.node_hash(node), node_level, split + 1);
+                let new_side = self.lift(key, leaf_hash, LEAF_LEVEL, split + 1);
+                let leaf = self.push_leaf(key, leaf_hash);
+                let (children, child_hashes) = if get_bit(key, split) == 0 {
+                    ([leaf, node], [new_side, old_side])
+                } else {
+                    ([node, leaf], [old_side, new_side])
+                };
+                let branch = self.push_branch(Branch {
+                    level: split,
+                    key: node_key,
+                    children,
+                    child_hashes,
+                });
+                let hash = self.lift(
+                    &node_key,
+                    hash_smt_node(&child_hashes[0], &child_hashes[1]),
+                    split,
+                    at,
+                );
+                (branch, hash)
+            }
+            // The key is in the subtree: the leaf itself, or below a branch.
+            None => {
+                match node {
+                    Node::Leaf(index) => self.leaf_nodes[index].1 = leaf_hash,
+                    Node::Branch(index) => {
+                        let Branch {
+                            level, children, ..
+                        } = self.branches[index];
+                        let side = usize::from(get_bit(key, level));
+                        let (child, child_hash) =
+                            self.write(children[side], level + 1, key, leaf_hash);
+                        self.branches[index].children[side] = child;
+                        self.branches[index].child_hashes[side] = child_hash;
+                    }
+                }
+                let hash = self.lift(&node_key, self.node_hash(node), node_level, at);
+                (node, hash)
+            }
+        }
+    }
 
-        let right_hash = if right_keys.is_empty() {
-            self.defaults[level + 1]
-        } else {
-            self.compute_subtree(level + 1, &right_keys)
-        };
+    fn push_leaf(&mut self, key: &[u8; 32], leaf_hash: [u8; 32]) -> Node {
+        self.leaf_nodes.push((*key, leaf_hash));
+        Node::Leaf(self.leaf_nodes.len() - 1)
+    }
 
-        hash_smt_node(&left_hash, &right_hash)
+    fn push_branch(&mut self, branch: Branch) -> Node {
+        self.branches.push(branch);
+        Node::Branch(self.branches.len() - 1)
+    }
+
+    /// A key under `node`: the bits every key under it shares.
+    fn node_key(&self, node: Node) -> &[u8; 32] {
+        match node {
+            Node::Leaf(index) => &self.leaf_nodes[index].0,
+            Node::Branch(index) => &self.branches[index].key,
+        }
+    }
+
+    /// The level of `node` itself, below its edge.
+    fn node_level(&self, node: Node) -> usize {
+        match node {
+            Node::Leaf(_) => LEAF_LEVEL,
+            Node::Branch(index) => self.branches[index].level,
+        }
+    }
+
+    /// The hash of `node` at its own level.
+    fn node_hash(&self, node: Node) -> [u8; 32] {
+        match node {
+            Node::Leaf(index) => self.leaf_nodes[index].1,
+            Node::Branch(index) => {
+                let [left, right] = &self.branches[index].child_hashes;
+                hash_smt_node(left, right)
+            }
+        }
+    }
+
+    /// Carry `hash`, the subtree at level `from` on `key`'s path, up to level
+    /// `to` (`to <= from`) through levels whose other child is empty.
+    fn lift(&self, key: &[u8; 32], mut hash: [u8; 32], from: usize, to: usize) -> [u8; 32] {
+        for level in (to..from).rev() {
+            let empty = &self.defaults[level + 1];
+            hash = if get_bit(key, level) == 0 {
+                hash_smt_node(&hash, empty)
+            } else {
+                hash_smt_node(empty, &hash)
+            };
+        }
+        hash
     }
 
     /// Generate an inclusion proof for the given key.
@@ -282,11 +451,30 @@ impl SparseMerkleTree {
         // Absent keys get ZERO_LEAF — a valid non-inclusion proof.
         let value = Some(self.leaves.get(key).copied().unwrap_or(ZERO_LEAF));
 
-        let all_keys: Vec<[u8; 32]> = self.leaves.keys().copied().collect();
-        let mut siblings = Vec::with_capacity(256);
-
-        // Walk from root (level 0) to leaf (level 255), collecting siblings
-        self.collect_siblings(0, &all_keys, key, &mut siblings);
+        // The sibling at each level, root to leaf: the empty subtree, except
+        // where the path passes a branch or leaves a held subtree's edge.
+        let mut siblings: Vec<[u8; 32]> = self.defaults[1..].to_vec();
+        let mut next = self.top;
+        while let Some(node) = next {
+            let node_key = self.node_key(node);
+            let node_level = self.node_level(node);
+            next = match first_difference(key, node_key).filter(|bit| *bit < node_level) {
+                Some(split) => {
+                    siblings[split] =
+                        self.lift(node_key, self.node_hash(node), node_level, split + 1);
+                    None
+                }
+                None => match node {
+                    Node::Leaf(_) => None,
+                    Node::Branch(index) => {
+                        let branch = &self.branches[index];
+                        let side = usize::from(get_bit(key, branch.level));
+                        siblings[branch.level] = branch.child_hashes[1 - side];
+                        Some(branch.children[side])
+                    }
+                },
+            };
+        }
 
         // Siblings are collected root-to-leaf; reverse to get leaf-to-root order
         siblings.reverse();
@@ -300,52 +488,6 @@ impl SparseMerkleTree {
             value,
             siblings,
         })
-    }
-
-    /// Recursively collect sibling hashes along the path to `target_key`.
-    fn collect_siblings(
-        &self,
-        level: usize,
-        keys: &[[u8; 32]],
-        target_key: &[u8; 32],
-        siblings: &mut Vec<[u8; 32]>,
-    ) {
-        if level >= 256 {
-            return; // Reached leaf level
-        }
-
-        // Split keys into left (bit=0) and right (bit=1)
-        let mut left_keys = Vec::new();
-        let mut right_keys = Vec::new();
-        for key in keys {
-            if get_bit(key, level) == 0 {
-                left_keys.push(*key);
-            } else {
-                right_keys.push(*key);
-            }
-        }
-
-        let target_bit = get_bit(target_key, level);
-
-        if target_bit == 0 {
-            // Target goes left; sibling is the right subtree hash
-            let sibling_hash = if right_keys.is_empty() {
-                self.defaults[level + 1]
-            } else {
-                self.compute_subtree(level + 1, &right_keys)
-            };
-            siblings.push(sibling_hash);
-            self.collect_siblings(level + 1, &left_keys, target_key, siblings);
-        } else {
-            // Target goes right; sibling is the left subtree hash
-            let sibling_hash = if left_keys.is_empty() {
-                self.defaults[level + 1]
-            } else {
-                self.compute_subtree(level + 1, &left_keys)
-            };
-            siblings.push(sibling_hash);
-            self.collect_siblings(level + 1, &right_keys, target_key, siblings);
-        }
     }
 
     /// Verify an inclusion proof against this SMT's root.
@@ -521,6 +663,168 @@ impl SmtInclusionProof {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    /// The tree as it was computed before it kept its nodes: every leaf, split
+    /// at each of the 256 levels, on every call. The reference each kept root
+    /// and path is checked against.
+    struct Recomputed<'a> {
+        leaves: &'a HashMap<[u8; 32], [u8; 32]>,
+        defaults: &'a [[u8; 32]; 257],
+    }
+
+    impl Recomputed<'_> {
+        fn root(&self) -> [u8; 32] {
+            let keys: Vec<[u8; 32]> = self.leaves.keys().copied().collect();
+            self.subtree(0, &keys)
+        }
+
+        fn subtree(&self, level: usize, keys: &[[u8; 32]]) -> [u8; 32] {
+            if keys.is_empty() {
+                return self.defaults[level];
+            }
+            if level == 256 {
+                return hash_smt_leaf(&self.leaves[&keys[0]]);
+            }
+            let (left, right): (Vec<[u8; 32]>, Vec<[u8; 32]>) = keys
+                .iter()
+                .copied()
+                .partition(|key| get_bit(key, level) == 0);
+            hash_smt_node(
+                &self.subtree(level + 1, &left),
+                &self.subtree(level + 1, &right),
+            )
+        }
+
+        /// Leaf-to-root siblings of `target`.
+        fn siblings(&self, target: &[u8; 32]) -> Vec<[u8; 32]> {
+            let mut keys: Vec<[u8; 32]> = self.leaves.keys().copied().collect();
+            let mut siblings = Vec::with_capacity(256);
+            for level in 0..256 {
+                let (along, other): (Vec<[u8; 32]>, Vec<[u8; 32]>) = keys
+                    .iter()
+                    .copied()
+                    .partition(|key| get_bit(key, level) == get_bit(target, level));
+                siblings.push(self.subtree(level + 1, &other));
+                keys = along;
+            }
+            siblings.reverse();
+            siblings
+        }
+    }
+
+    /// A key agreeing with `base` on its first `shared` bits and with `tail`
+    /// after them. Keys drawn this way separate at every depth, down to two
+    /// that differ in their last bit only, so every branch level and edge
+    /// length occurs.
+    fn key_near(base: &[u8; 32], shared: usize, tail: &[u8; 32]) -> [u8; 32] {
+        let mut key = *tail;
+        for bit in 0..shared {
+            let mask = 0x80u8 >> (bit % 8);
+            key[bit / 8] = (key[bit / 8] & !mask) | (base[bit / 8] & mask);
+        }
+        key
+    }
+
+    /// A leaf value, the zero leaf among them: a held key whose leaf hashes
+    /// as an empty one.
+    fn a_value() -> impl Strategy<Value = [u8; 32]> {
+        prop_oneof![Just(ZERO_LEAF), any::<[u8; 32]>()]
+    }
+
+    /// A sequence of writes: new keys near one base key, interleaved with
+    /// rewrites of keys already written.
+    fn writes() -> impl Strategy<Value = Vec<([u8; 32], [u8; 32])>> {
+        let draw = (
+            0usize..=256,
+            any::<[u8; 32]>(),
+            a_value(),
+            proptest::option::of(any::<prop::sample::Index>()),
+        );
+        (any::<[u8; 32]>(), prop::collection::vec(draw, 1..40)).prop_map(|(base, draws)| {
+            let mut writes: Vec<([u8; 32], [u8; 32])> = Vec::with_capacity(draws.len());
+            for (shared, tail, value, rewrite) in draws {
+                let key = match rewrite {
+                    Some(index) if !writes.is_empty() => writes[index.index(writes.len())].0,
+                    _ => key_near(&base, shared, &tail),
+                };
+                writes.push((key, value));
+            }
+            writes
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(if cfg!(debug_assertions) { 32 } else { 256 }))]
+
+        /// After every write the root is the one the full recomputation over
+        /// the leaves written so far gives, and building those leaves at once
+        /// gives it too.
+        #[test]
+        fn a_written_root_is_the_recomputed_root(writes in writes()) {
+            let mut tree = SparseMerkleTree::new();
+            let mut leaves = HashMap::new();
+            for (key, value) in &writes {
+                tree.update_leaf(key, value);
+                leaves.insert(*key, *value);
+                let recomputed = Recomputed { leaves: &leaves, defaults: &tree.defaults };
+                prop_assert_eq!(*tree.root(), recomputed.root());
+            }
+            prop_assert_eq!(tree.leaf_count(), leaves.len());
+            let built = SparseMerkleTree::from_leaves(writes.iter().copied());
+            prop_assert_eq!(*built.root(), *tree.root());
+        }
+
+        /// A path, to a held key or to one the tree does not hold, is the path
+        /// the full recomputation gives, and it folds to the root.
+        #[test]
+        fn a_kept_path_is_the_recomputed_path(
+            writes in writes(),
+            tail in any::<[u8; 32]>(),
+            shared in 0usize..=256,
+        ) {
+            let tree = SparseMerkleTree::from_leaves(writes.iter().copied());
+            let recomputed = Recomputed { leaves: &tree.leaves, defaults: &tree.defaults };
+            let near = key_near(&writes[0].0, shared, &tail);
+            for key in tree.leaves.keys().take(12).chain([tail, near].iter()) {
+                let proof = tree.get_inclusion_proof(key, 256).expect("a path");
+                prop_assert_eq!(&proof.siblings, &recomputed.siblings(key));
+                prop_assert!(tree.verify_inclusion_proof(&proof));
+            }
+        }
+    }
+
+    /// Past the size of any small tree: a thousand uniformly drawn leaves,
+    /// written one at a time and built at once, give the recomputed root.
+    #[test]
+    fn a_large_tree_keeps_the_recomputed_root() {
+        let leaves: Vec<([u8; 32], [u8; 32])> = (0u64..1000)
+            .map(|i| {
+                let mut seed = [7u8; 32];
+                seed[..8].copy_from_slice(&i.to_le_bytes());
+                (hash_smt_leaf(&seed), hash_smt_node(&seed, &seed))
+            })
+            .collect();
+        let mut written = SparseMerkleTree::new();
+        for (key, value) in &leaves {
+            written.update_leaf(key, value);
+        }
+        let built = SparseMerkleTree::from_leaves(leaves.iter().copied());
+        let recomputed = Recomputed {
+            leaves: &built.leaves,
+            defaults: &built.defaults,
+        };
+        assert_eq!(*written.root(), recomputed.root());
+        assert_eq!(*built.root(), recomputed.root());
+        let (key, _) = leaves[500];
+        assert_eq!(
+            written
+                .get_inclusion_proof(&key, 256)
+                .expect("a path")
+                .siblings,
+            recomputed.siblings(&key)
+        );
+    }
 
     #[test]
     fn zero_leaf_is_32_zero_bytes() {
