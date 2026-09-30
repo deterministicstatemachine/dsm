@@ -1734,7 +1734,7 @@ The writer's side is driven through `dsm_sdk::sdk::route_seats` against the netw
 
 MR-STOR-0148, 0151 and 0152 are Met.
 
-Eight storage rows cited code that is gone: `sofi/arith.rs`, `write_cell_leader_first`, `CellWrite`, `put_cell_leader_first` and `put_cells_leader_first`, or said no chain object exists. Each is re-verified against the specification and `main`. None has a manifest row.
+Nine storage rows cited code that is gone or a mechanism since built: `sofi/arith.rs`, `write_cell_leader_first`, `CellWrite`, `put_cell_leader_first` and `put_cells_leader_first`, or said no chain object exists. Each is re-verified against the specification and `main`. None has a manifest row.
 
 | Row | Was | Now | Why |
 |---|---|---|---|
@@ -1745,6 +1745,7 @@ Eight storage rows cited code that is gone: `sofi/arith.rs`, `write_cell_leader_
 | MR-STOR-0130 | Partial (`put_cell_leader_first`) | Met | Leader first, each copy carrying the chain so far, continued from the writer's own record (the tests above). |
 | MR-STOR-0137 | Partial (no chain) | Met | Every position is written, and a stopped chain is continued along the remaining route. |
 | MR-STOR-0108 | Partial (copy count) | Met | A write goes through at three links of its chain; no payment exists. |
+| MR-STOR-0082 | Partial (counting at three links not built) | Met | Each seat writes durably before answering, and a write counts only at three chained links, which Core now evaluates. |
 | MR-STOR-0020 | Partial (count rule) | Partial | The facts now come from route chains and `stored`; that Core uses nothing else from storage is not verified at every read site. |
 
 ## 7 Totals
@@ -1754,9 +1755,9 @@ Eight storage rows cited code that is gone: `sofi/arith.rs`, `write_cell_leader_
 | DSM high-level (MR-DSM) | 272 | 76 | 110 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 59 | 19 | 61 | 0 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 60 | 18 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **359** | **214** | **119** | **8** | **64** | **154** |
+| **All** | **918** | **360** | **213** | **119** | **8** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2477,7 +2478,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0079 | Missing | — | no test found | Confirmed; no `handover` code anywhere. |
 | MR-STOR-0080 | Missing | dsm_storage_node · db/pg.rs · `close_cycle` (per-member_id chain only) | no test found | ByteCommit chaining exists, but cross-operator (handover) continuation does not. |
 | MR-STOR-0081 | Missing | dsm · storage_cell.rs · `is_drain_proof` (no production caller) | dsm::storage_cell::tests::`a_drain_proof_is_two_linked_empty_bytecommits` (tests the predicate only, not this requirement) | Predicate is closer to 0097 (stake) than to this "serves until handover" liveness rule; no handover code exists at all. |
-| MR-STOR-0082 | Partial | dsm_storage_node · db/pg.rs · `require_durable_commit_posture`, `begin_durable_write` | db::pg::durable_posture_tests::`a_fully_durable_server_is_accepted_in_any_letter_case`, `a_weaker_posture_is_refused_and_the_refusal_names_the_setting` | Requirement rewritten 2026-09-23 (storage §12.5; G14). Each seat's durable write before answering is implemented and tested; counting a write only at three chained links is not built (G2). |
+| MR-STOR-0082 | Met | `dsm_storage_node::db::pg::require_durable_commit_posture`; `dsm_storage_node::db::pg::begin_durable_write`; `dsm::route_chain::evaluate` | `dsm_storage_node::db::pg::durable_posture_tests::a_fully_durable_server_is_accepted_in_any_letter_case`; `dsm_storage_node::db::pg::durable_posture_tests::a_weaker_posture_is_refused_and_the_refusal_names_the_setting`; `dsm::route_chain::tests::only_links_of_one_chain_count_toward_final`; `dsm::route_chain::tests::a_copy_whose_carried_links_are_not_one_chain_does_not_count` | Requirement rewritten 2026-09-23 (storage §12.5; G14); re-verified 2026-09-30 (§6.50). Each seat writes durably before it answers. A write counts only once Core reads its leader link and two further links of one chain, each copy carrying the one before (G2, since built as route chains). Nothing requires an operator to keep a second copy of a role's memory. |
 | MR-STOR-0083 | Missing | — | no test found | Confirmed. |
 | MR-STOR-0084 | Missing | — | no test found | Confirmed; no loss/pre-loss resolution code. |
 | MR-STOR-0085 | Missing | — | no test found | Same as 0084. |
