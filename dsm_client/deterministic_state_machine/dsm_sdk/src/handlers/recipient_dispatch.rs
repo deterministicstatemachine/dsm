@@ -99,13 +99,28 @@ pub enum Ingested {
     NotRecognized(String),
 }
 
-/// What ingesting one copy did, and every staged object of the same sender
-/// that could not be read back while looking for its partner. Such an object
-/// can bind nothing; it is reported, and it never stops this copy's ingestion.
+/// A receipt that names a staged transfer's successor and did not bind to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unbound {
+    /// Its state rules fail against the Device Tree root and genesis this
+    /// device pinned for the sender: it does not prove the move of the
+    /// sender's root it signs, so it never binds and nothing is credited.
+    Refused(String),
+    /// The sender's Device Tree root is not pinned here yet, so its state
+    /// rules cannot be decided: the pair waits, staged and unbound, and binds
+    /// on a later copy once they can.
+    Pending(String),
+}
+
+/// What ingesting one copy did, every staged object of the same sender that
+/// could not be read back while looking for its partner, and every receipt
+/// that named the transfer's successor without binding. Neither binds; both
+/// are reported, and neither stops this copy's ingestion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestOutcome {
     pub ingested: Ingested,
     pub unreadable_candidates: Vec<String>,
+    pub unbound: Vec<Unbound>,
 }
 
 impl IngestOutcome {
@@ -113,6 +128,7 @@ impl IngestOutcome {
         Self {
             ingested,
             unreadable_candidates: Vec::new(),
+            unbound: Vec::new(),
         }
     }
 }
@@ -307,18 +323,74 @@ pub fn signed_operation_of(t: &StagedTransfer) -> Result<Operation, String> {
     )
 }
 
-/// Whether `receipt` is the receipt of `op`: its signed child tip is the
-/// successor of its signed parent under `op` and its transition entropy.
-fn binds(receipt: &StitchedReceiptV2, op: &Operation, here: &[u8; 32]) -> bool {
+/// What a staged receipt is to the transfer of `op`.
+enum Binding {
+    /// The transfer's receipt.
+    Binds,
+    /// The receipt of another operation.
+    Other,
+    /// It names the transfer's successor and does not bind.
+    Unbound(Unbound),
+}
+
+/// What `receipt` is to the transfer of `op`. It is that transfer's receipt
+/// when its signed child tip is the successor of its signed parent under
+/// `op` and its transition entropy, and its state rules hold
+/// (`verify_receipt_state`, the rules every producer and the BLE receiver
+/// check): its writes fold from its parent root to its child root, under the
+/// Device Tree root and genesis this device pinned for the sender. The
+/// signatures are checked before a receipt is staged; a receipt they pass
+/// still proves nothing about the sender's root until these rules hold.
+fn binding(
+    receipt: &StitchedReceiptV2,
+    op: &Operation,
+    here: &[u8; 32],
+) -> Result<Binding, String> {
     let relationship_key =
         dsm::core::bilateral_transaction_manager::compute_smt_key(here, &receipt.devid_a);
-    crate::sdk::core_sdk::successor_child_tip(
+    if crate::sdk::core_sdk::successor_child_tip(
         &relationship_key,
         &receipt.parent_tip,
         here,
         &op.to_bytes(),
         &receipt.transition_entropy,
-    ) == receipt.child_tip
+    ) != receipt.child_tip
+    {
+        return Ok(Binding::Other);
+    }
+    let sender = crate::util::text_id::encode_base32_crockford(&receipt.devid_a);
+    let root = crate::storage::client_db::get_contact_device_tree_root(&receipt.devid_a)
+        .map_err(|e| format!("{sender}'s pinned Device Tree root is unreadable: {e}"))?;
+    let contact = crate::storage::client_db::get_contact_by_device_id(&receipt.devid_a)
+        .map_err(|e| format!("{sender}'s contact is unreadable: {e}"))?;
+    let (Some(root), Some(contact)) = (root, contact) else {
+        return Ok(Binding::Unbound(Unbound::Pending(format!(
+            "{sender}'s Device Tree root is not pinned here yet, so its receipt's state rules \
+             cannot be decided"
+        ))));
+    };
+    let author_genesis = match <[u8; 32]>::try_from(contact.genesis_hash.as_slice()) {
+        Ok(genesis) => genesis,
+        Err(e) => return Err(format!("{sender}'s pinned genesis is not 32 bytes: {e}")),
+    };
+    let device_tree_commitment =
+        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(root);
+    Ok(
+        match dsm::verification::receipt_verification::verify_receipt_state(
+            receipt,
+            &dsm::verification::receipt_verification::ReceiptStateContext {
+                device_tree_commitment: &device_tree_commitment,
+                author_genesis,
+                operation: op,
+                bearer: None,
+            },
+        ) {
+            Ok(()) => Binding::Binds,
+            Err(e) => Binding::Unbound(Unbound::Refused(format!(
+                "{sender}'s receipt names this transfer's successor, and its state rules fail: {e}"
+            ))),
+        },
+    )
 }
 
 /// Ingest one copy of a transfer half read at `address` under `message_id`.
@@ -351,6 +423,7 @@ pub fn ingest_transfer_half(
     .map_err(store)?;
     let here = this_device()?;
     let mut unreadable_candidates = Vec::new();
+    let mut unbound = Vec::new();
     for staged in
         recipient_staging::unbound_receipts_from(&recognized.staged.sender).map_err(store)?
     {
@@ -361,14 +434,20 @@ pub fn ingest_transfer_half(
                 continue;
             }
         };
-        if binds(&receipt, &recognized.op, &here) {
-            recipient_staging::bind(&recognized.staged.op_id, &staged.commitment).map_err(store)?;
-            break;
+        match binding(&receipt, &recognized.op, &here)? {
+            Binding::Binds => {
+                recipient_staging::bind(&recognized.staged.op_id, &staged.commitment)
+                    .map_err(store)?;
+                break;
+            }
+            Binding::Other => {}
+            Binding::Unbound(why) => unbound.push(why),
         }
     }
     Ok(IngestOutcome {
         ingested: Ingested::Staged,
         unreadable_candidates,
+        unbound,
     })
 }
 
@@ -399,6 +478,7 @@ pub fn ingest_evidence_half(
         .map_err(store)?;
     let here = this_device()?;
     let mut unreadable_candidates = Vec::new();
+    let mut unbound = Vec::new();
     for staged in
         recipient_staging::unbound_transfers_from(&recognized.staged.sender).map_err(store)?
     {
@@ -409,14 +489,20 @@ pub fn ingest_evidence_half(
                 continue;
             }
         };
-        if binds(&recognized.receipt, &op, &here) {
-            recipient_staging::bind(&staged.op_id, &recognized.staged.commitment).map_err(store)?;
-            break;
+        match binding(&recognized.receipt, &op, &here)? {
+            Binding::Binds => {
+                recipient_staging::bind(&staged.op_id, &recognized.staged.commitment)
+                    .map_err(store)?;
+                break;
+            }
+            Binding::Other => {}
+            Binding::Unbound(why) => unbound.push(why),
         }
     }
     Ok(IngestOutcome {
         ingested: Ingested::Staged,
         unreadable_candidates,
+        unbound,
     })
 }
 
@@ -816,6 +902,171 @@ mod tests {
         assert!(matches!(out, Ingested::NotRecognized(_)), "{out:?}");
         assert_eq!(rows("recipient_staged_receipt"), 0);
         assert_eq!(rows("recipient_receipt_observation"), 0);
+    }
+
+    /// A receipt its own sender signed, every signature valid and its child
+    /// tip this transfer's successor, whose state writes do not prove the
+    /// move of the sender's root, binds nothing and credits nothing:
+    /// MR-DSM-0092's "recompute hashes and roots" on the online path. Three
+    /// forgeries are refused: a child root the writes do not fold to, a
+    /// write whose path is not its leaf's under the parent root, and a write
+    /// the operation does not imply. The honest receipt of the same transfer
+    /// still binds, and the sync credits it once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_signed_receipt_whose_state_writes_fail_binds_nothing() {
+        use crate::test_support::receipts::Party;
+        use dsm::types::receipt_types::{
+            compute_receipt_challenge_response_target, ReceiptLeaf, ReceiptWrite,
+        };
+        let (p, one) = sent().await;
+        let op = match recognize_transfer(&one.transfer_bytes, &one.header_sender)
+            .expect("recognition")
+        {
+            TransferRecognition::Recognized(r) => r.op,
+            TransferRecognition::NotRecognized(why) => panic!("the honest transfer: {why}"),
+        };
+        let honest =
+            StitchedReceiptV2::from_canonical_protobuf(&one.evidence_bytes).expect("the receipt");
+        let (a, b) = (Party::from_seed(0x0A), Party::from_seed(0x0B));
+        assert_eq!(
+            a.device_id(),
+            honest.devid_a,
+            "the harness's A is seed 0x0A"
+        );
+        // As A's wallet signs a wallet.send receipt: the relationship's
+        // first per-step EK, certified by A's AK, answering the commitment
+        // bound to itself.
+        let signed_by_a = |mut r: StitchedReceiptV2| -> Vec<u8> {
+            let commitment = r.compute_commitment().expect("the commitment");
+            let target = compute_receipt_challenge_response_target(&commitment, &commitment);
+            let c_pre = dsm::core::bilateral_transaction_manager::compute_precommit(
+                &r.parent_tip,
+                &op.with_cleared_signature().to_bytes(),
+                &r.transition_entropy,
+            );
+            let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
+            r.set_ek_pk_a(answer.ek_pk);
+            r.set_ek_cert_a(answer.ek_cert);
+            r.set_kyber_ct_a(answer.kyber_ct);
+            r.add_sig_a(answer.sig);
+            r.to_full_protobuf().expect("re-encode")
+        };
+        assert!(
+            matches!(
+                recognize_receipt(&signed_by_a(honest.clone())).expect("recognition"),
+                ReceiptRecognition::Verified(_)
+            ),
+            "the honest receipt, signed this way, verifies"
+        );
+
+        let mut wrong_root = honest.clone();
+        wrong_root.child_root[0] ^= 0x01;
+        let mut wrong_path = honest.clone();
+        wrong_path.step_writes[0].path.siblings[0] ^= 0x01;
+        let mut extra_write = honest.clone();
+        extra_write.step_writes.push(ReceiptWrite {
+            leaf: ReceiptLeaf::AnchorState,
+            path: honest.step_writes[0].path.clone(),
+        });
+
+        staged(ingest_transfer_half(
+            &one.transfer_bytes,
+            &one.header_sender,
+            &one.route,
+            &one.message_id,
+        ));
+        for (forgery, receipt) in [
+            ("a child root its writes do not fold to", wrong_root),
+            ("a write whose path is not its leaf's", wrong_path),
+            ("a write the operation does not imply", extra_write),
+        ] {
+            let bytes = signed_by_a(receipt);
+            assert!(
+                matches!(
+                    recognize_receipt(&bytes).expect("recognition"),
+                    ReceiptRecognition::Verified(_)
+                ),
+                "{forgery}: every signature verifies"
+            );
+            let out = ingest_evidence_half(&bytes, &one.evidence_route, &one.evidence_message_id)
+                .expect("ingest");
+            assert_eq!(out.ingested, Ingested::Staged, "{forgery}");
+            assert!(
+                matches!(out.unbound.as_slice(), [Unbound::Refused(_)]),
+                "{forgery}: {:?}",
+                out.unbound
+            );
+            assert_eq!(rows("recipient_pair"), 0, "{forgery}: nothing binds");
+        }
+        assert_eq!(p.b.era_balance(), 0, "nothing is credited");
+
+        staged(ingest_evidence_half(
+            &one.evidence_bytes,
+            &one.evidence_route,
+            &one.evidence_message_id,
+        ));
+        assert_eq!(rows("recipient_pair"), 1, "the honest receipt binds");
+        let synced = p.b.sync().await;
+        assert!(synced.success, "{:?}", synced.errors);
+        assert!(
+            synced.errors.iter().all(|e| e.contains("did not bind")),
+            "only the forgeries are reported: {:?}",
+            synced.errors
+        );
+        assert_eq!(p.b.era_balance(), 10);
+    }
+
+    /// While this device has not pinned the sender's Device Tree root, a
+    /// receipt's state rules cannot be decided: the pair waits, staged and
+    /// unbound, and binds on the next copy once the root is pinned.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_receipt_waits_while_its_senders_device_tree_root_is_not_pinned() {
+        let (p, one) = sent().await;
+        let sender = StitchedReceiptV2::from_canonical_protobuf(&one.evidence_bytes)
+            .expect("the receipt")
+            .devid_a;
+        let pinned = client_db::get_contact_device_tree_root(&sender)
+            .expect("the contact reads")
+            .expect("the harness pins the sender's root");
+        {
+            let binding = client_db::get_connection().expect("conn");
+            let conn = binding.lock().expect("the store lock");
+            conn.execute(
+                "UPDATE contacts SET device_tree_root = NULL WHERE device_id = ?1",
+                rusqlite::params![&sender[..]],
+            )
+            .expect("unpin the sender's root");
+        }
+        staged(ingest_transfer_half(
+            &one.transfer_bytes,
+            &one.header_sender,
+            &one.route,
+            &one.message_id,
+        ));
+        let out = ingest_evidence_half(
+            &one.evidence_bytes,
+            &one.evidence_route,
+            &one.evidence_message_id,
+        )
+        .expect("ingest");
+        assert!(
+            matches!(out.unbound.as_slice(), [Unbound::Pending(_)]),
+            "{:?}",
+            out.unbound
+        );
+        assert_eq!(rows("recipient_pair"), 0, "the pair waits");
+
+        client_db::store_contact_device_tree_root(&sender, &pinned).expect("pin the root");
+        staged(ingest_evidence_half(
+            &one.evidence_bytes,
+            &one.evidence_route,
+            &one.evidence_message_id,
+        ));
+        assert_eq!(rows("recipient_pair"), 1, "the next copy binds");
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10);
     }
 
     /// Either half may arrive first: evidence first, the pair still binds

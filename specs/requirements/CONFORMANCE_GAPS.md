@@ -1685,6 +1685,25 @@ Found, not changed here:
 
 **Not driven by the tool.** A forged countersignature (σ_B) is judged by the sender's `decide_commit_ack`, which the tool does not drive; Core's `dsm::bilateral::offline::tests::an_ack_is_only_the_receivers_counter_signed_receipt` refuses it there.
 
+### 6.46 The online receiver checks a receipt's state rules before a pair binds (`fix/online-receipt-state-rules-at-ingestion`, 2026-09-30)
+
+**The finding.** The online receiver bound a sender's receipt to its transfer on the child tip alone: `recipient_dispatch::binds` checked that the receipt's signed child tip is the operation's successor, and the signatures were checked before staging. Nothing checked the receipt's state rules, that its writes fold from its parent root to its child root under the sender's Device Tree root. The BLE receiver checks them (`bilateral::offline`, §6.45), and so does every producer before it signs (`StitchedReceiptV2::of_step`). MR-DSM-0092 names this step as "recompute hashes and roots".
+
+**Probe.** Run on 2026-09-30, on `main` after #1073, on isolated node databases. A sender whose receipt claimed a child root one bit off what its writes produce was credited by the receiver (`evidence_first_binds_when_the_transfer_lands` passed with the corrupted root). Owner decision, the same day: check at ingestion, with the existing production verifier, and keep a pair pending while the evidence it needs is missing.
+
+**Changed.** `recipient_dispatch::binding` replaces `binds`. A receipt whose child tip is the operation's successor binds only when `verify_receipt_state` holds against the Device Tree root and genesis this device pinned for the sender:
+
+| Outcome | What happens |
+|---|---|
+| The rules hold | The pair binds, as before. |
+| The rules fail | `Unbound::Refused`. The receipt never binds and nothing is credited. Nothing negative is recorded; the sync reports it. |
+| The sender's root is not pinned here | `Unbound::Pending`. The pair waits, staged and unbound, and binds on a later copy once the root is pinned. |
+
+**Evidence.**
+- `dsm_sdk::handlers::recipient_dispatch::tests::a_signed_receipt_whose_state_writes_fail_binds_nothing`: three forgeries re-signed with the sender's real per-step EK, every signature verifying. A child root its writes do not fold to, a write whose path is not its leaf's, and a write the operation does not imply are each refused. The honest receipt of the same transfer still binds and credits once.
+- `dsm_sdk::handlers::recipient_dispatch::tests::a_receipt_waits_while_its_senders_device_tree_root_is_not_pinned`.
+- Mutation controls, run 2026-09-30 and each restored: a failing state check that binds anyway turns the first red, and an unpinned root that binds turns the second red.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -1793,7 +1812,7 @@ Found, not changed here:
 | MR-DSM-0089 | Partial | dsm_storage_node · api/objects/immutable.rs::get_immutable (177-187) | no test found | Same gap as 0067 (same mechanism). |
 | MR-DSM-0090 | Not code | — | — | Fault-model assumption. |
 | MR-DSM-0091 | Not code | — | — | Dependency boundary; nothing to implement here. |
-| MR-DSM-0092 | Partial | `dsm/src/types/device_state.rs::advance` (1134); `dsm_sdk/src/sdk/receipts.rs::verify_receipt_bytes` (844) | `receipts.rs::tests::first_ever_receipt_requires_merkle_pre_root_not_cas_parent_root` (3251) | New finding: the only candidate/guard mechanism in the tree (`verification::receipt_verification::verify_stitched_receipt`, using `ForkCandidate`) is wrapped by `dsm_sdk::sdk::receipts::verify_stitched_receipt` (602), which has **zero handler callers** — production acceptance (`verify_receipt_bytes`) has no candidate/guard/linearity stage at all. Both were deleted, with the parent-consumption tracker (§6.45). |
+| MR-DSM-0092 | Partial | `dsm_sdk::handlers::recipient_dispatch::recognize_transfer`; `dsm_sdk::handlers::recipient_dispatch::recognize_receipt`; `dsm_sdk::handlers::recipient_dispatch::binding`; `dsm::verification::receipt_verification::verify_receipt_state` | `dsm_sdk::handlers::recipient_dispatch::tests::a_signed_receipt_whose_state_writes_fail_binds_nothing`; `dsm_sdk::handlers::recipient_dispatch::tests::a_transfer_whose_sig_a_does_not_verify_is_recorded_nowhere`; `dsm_sdk::handlers::recipient_dispatch::tests::a_receipt_that_does_not_verify_is_recorded_nowhere` | Re-verified 2026-09-30 (§6.46); `verify_receipt_bytes` was removed in #977, and the unreached stitched verifier in #1073 (§6.45). Online, the receiver decodes each half, verifies SIG A and the receipt's `sig_a` chain, recomputes the successor tip, and, since §6.46, holds the receipt's state rules (its writes fold from its parent root to its child root) against the sender's pinned Device Tree root before a pair binds. The canonical apply then advances from the relationship tip the receiver holds. Partial: signatures are verified before hashes are recomputed, the reverse of the requirement's order; the sender's root register is read through economic admission (MR-DSM-0046), not at this boundary; and the precommitment and guard steps have nothing to check (G3). |
 | MR-DSM-0093 | Partial | `dsm/src/types/device_state.rs::advance` (pure, operates only on `self`); `core/state_machine/mod.rs::prepare_advance_relationship/commit_advance` | no test found | Enforced structurally (no API accepts on another device's behalf) but no named test isolates this property. |
 | MR-DSM-0094 | Not code | — | — | Liveness boundary; nothing to build. |
 | MR-DSM-0095 | Partial | `dsm/src/types/device_state.rs` (`RelationshipChainState`/`DeviceState` fields, no counter/timestamp, confirmed by reading the struct) | no test found | True by field-absence; no negative test exercises it (transition.rs's tests are off the production path). |
