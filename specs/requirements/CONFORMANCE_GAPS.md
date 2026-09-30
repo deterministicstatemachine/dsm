@@ -1724,6 +1724,16 @@ Three storage rows had no test showing the node holds its line against a client.
 
 MR-STOR-0117 and MR-STOR-0120 are Met. MR-STOR-0121 stays Partial: handover and the loss rule are not built.
 
+The writer's side is driven through `dsm_sdk::sdk::route_seats` against the network's pinned nodes (the storage node's own code, on Postgres), with seats taken down and brought back:
+
+| Row | Test | Mutation control |
+|---|---|---|
+| MR-STOR-0148 | `nothing_reaches_a_later_seat_before_the_leader_answers`: with the leader down the write stops at `[NoResponse]` and no later seat holds the value; with it back, every later copy carries its record first | The write going on past an unanswered leader: red, "the write stops at the leader". |
+| MR-STOR-0151 | `a_seat_that_does_not_answer_is_recorded_empty_in_its_place`: position 2 down gives links at 0, 1, 3 and 4 and an empty at 2, and the copies at 3 and 4 carry exactly the slots before them | The empty not recorded: red, the chain is four slots and shifted. |
+| MR-STOR-0152 | `a_recorded_position_is_never_written_again`: a write stops after recording an empty at 2; with that seat back, it continues at 3 and 4 and position 2 is never written | Continuing from the number of links instead of the recorded positions: red, the closed position is written again. |
+
+MR-STOR-0148, 0151 and 0152 are Met.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -1731,9 +1741,9 @@ MR-STOR-0117 and MR-STOR-0120 are Met. MR-STOR-0121 stays Partial: handover and 
 | DSM high-level (MR-DSM) | 272 | 76 | 110 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 49 | 29 | 61 | 0 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 52 | 26 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **349** | **224** | **119** | **8** | **64** | **154** |
+| **All** | **918** | **352** | **221** | **119** | **8** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2520,11 +2530,11 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0145 | Met | `dsm_storage_node::api::transport::b0x::router`; `dsm_storage_node::db::pg::spool_list_from_seq`; `dsm_storage_node::db::pg::spool_insert` | `dsm_storage_node::api::transport::b0x::tests::a_spool_reads_the_same_from_any_position_however_often_it_is_read`; `dsm_storage_node::api::transport::b0x::tests::a_device_acknowledging_what_it_read_changes_nothing`; `dsm_storage_node::api::transport::b0x::tests::an_envelope_reusing_a_message_id_is_kept_after_the_first` | Added 2026-09-23; exercised 2026-09-30 (§6.46). The spool is read only from a position, reading changes nothing, and the acknowledge, status and unpositioned-read routes #976 removed are not served. Nothing expires: a spool row holds no time, and nothing deletes one. |
 | MR-STOR-0146 | Met | `dsm_sdk::sdk::b0x_sdk::seal_for`; `dsm::crypto::spool_seal::seal` | `dsm_sdk::handlers::node_e2e_tests::a_transfer_reaches_the_nodes_only_sealed_and_arrives`; `dsm::crypto::spool_seal::tests::a_sealed_payload_opens_to_its_bytes`; `dsm::crypto::spool_seal::tests::it_opens_under_nothing_else` | Added 2026-09-23; traced 2026-09-29 (§6.39). Every SDK spool submission goes through `B0xSDK::deliver` with bytes `seal_for` made, and a node's spool holds only what its submit route receives. The node checks nothing (Amendment A3): the property is the sending device's. |
 | MR-STOR-0147 | Deferred | — | — | Added 2026-09-23. Continuing storage payment; outside beta. |
-| MR-STOR-0148 | Partial | `dsm_sdk::sdk::route_seats::write_recorded` | — | The writer starts at the leader and carries its arrival record forward, but no test shows that nothing reaches a later seat before the leader answers. |
+| MR-STOR-0148 | Met | `dsm_sdk::sdk::route_seats::write_recorded`; `dsm_sdk::sdk::route_seats::from_leader` | `dsm_sdk::sdk::route_seats::tests::nothing_reaches_a_later_seat_before_the_leader_answers` | With the leader down, the write stops at the leader and no later seat holds the value; once the leader answers, every later copy carries its record as the first link (§6.50). |
 | MR-STOR-0149 | Met | `dsm::route_chain::leader_copy_record`; `dsm_sdk::sdk::route_seats::from_leader` | `dsm::route_chain::tests::the_leader_record_of_a_value_is_recovered_from_the_leader_log`; `dsm_sdk::sdk::route_seats::tests::a_value_the_leader_already_holds_is_not_written_there_again` | The leader link is recovered from the leader's log, and the batch to the leader writes only the values it holds no link for (a592900a). |
 | MR-STOR-0150 | Met | `dsm::route_chain::evaluate` | `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`; `dsm::route_chain::tests::a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count` | Only the value holding the leader link can have a chain that counts. |
-| MR-STOR-0151 | Partial | `dsm::route_chain::evaluate`; `dsm_sdk::sdk::route_seats::write_recorded_position` | `dsm::route_chain::tests::an_entry_carries_one_slot_per_earlier_position_and_round_trips`; `dsm::route_chain::tests::an_empty_neither_counts_nor_invalidates` | Core reads a copy's carried slots in route order and an empty neither counts nor invalidates; no test drives the writer's retry-or-empty choice at a position. |
-| MR-STOR-0152 | Partial | `dsm::route_chain::evaluate` | `dsm::route_chain::tests::a_copy_whose_carried_links_are_not_one_chain_does_not_count`; `dsm::route_chain::tests::a_copy_at_another_position_or_of_another_value_does_not_count` | Core counts nothing written to a closed position as part of the chain; no test shows the writer never writes one. |
+| MR-STOR-0151 | Met | `dsm::route_chain::evaluate`; `dsm_sdk::sdk::route_seats::write_recorded`; `dsm_sdk::sdk::route_seats::write_along` | `dsm_sdk::sdk::route_seats::tests::a_seat_that_does_not_answer_is_recorded_empty_in_its_place`; `dsm::route_chain::tests::an_entry_carries_one_slot_per_earlier_position_and_round_trips`; `dsm::route_chain::tests::an_empty_neither_counts_nor_invalidates` | A seat that does not answer is recorded as an empty in its place and the write goes on in route order; each later copy carries exactly the slots before it (§6.50). Core reads the carried slots in route order, and an empty neither counts nor invalidates. |
+| MR-STOR-0152 | Met | `dsm::route_chain::evaluate`; `dsm_sdk::sdk::route_seats::continue_write` | `dsm_sdk::sdk::route_seats::tests::a_recorded_position_is_never_written_again`; `dsm::route_chain::tests::a_copy_whose_carried_links_are_not_one_chain_does_not_count`; `dsm::route_chain::tests::a_copy_at_another_position_or_of_another_value_does_not_count` | A write that stopped after recording an empty continues from the position after its record, and the closed position is never written, even once its seat answers (§6.50). Core counts nothing written to a closed position. |
 | MR-STOR-0153 | Not code | — | — | A consequence of MR-STOR-0152 and MR-STOR-0154, not a separate mechanism. |
 | MR-STOR-0154 | Met | `dsm::route_chain::evaluate` | `dsm::route_chain::tests::three_links_are_final_two_preserved_one_leader_held`; `dsm::route_chain::tests::only_links_of_one_chain_count_toward_final` | Final at the leader link and two further links of one chain. |
 | MR-STOR-0155 | Met | `dsm::route_chain::completion_proof`; `dsm::route_chain::CompletionProof` | `dsm::route_chain::tests::a_completion_proof_is_the_chain_through_its_third_link` | The proof is the chain prefix through the third link, empties in place. |

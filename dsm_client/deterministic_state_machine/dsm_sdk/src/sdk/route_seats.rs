@@ -813,6 +813,211 @@ mod tests {
         assert!(matches!(fresh.slots.first(), Some(ChainSlot::Link(_))));
     }
 
+    /// The network's pinned nodes on Postgres, the SDK pointed at them, the
+    /// set they serve, and a test cell routed over it with key `key`.
+    async fn pinned(
+        key: u8,
+    ) -> (
+        crate::test_support::nodes::NodeSet,
+        crate::economic_fixtures::FleetGuard,
+        StorageSet,
+        RoutedCell,
+    ) {
+        let nodes = crate::test_support::nodes::NodeSet::start().await;
+        let config = crate::economic_fixtures::point_sdk_at(&nodes.members());
+        let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+            .expect("the pinned set");
+        let members = crate::sdk::storage_set::as_ccb_members(&set).expect("members");
+        let cell = RoutedCell::new(
+            b"DSM/test/route-order",
+            [key; 32],
+            &[0x61; 32],
+            &members,
+            &set.id(),
+        )
+        .expect("a routed cell");
+        (nodes, config, set, cell)
+    }
+
+    fn member_id(seat: &[u8]) -> String {
+        String::from_utf8(seat.to_vec()).expect("member ids are UTF-8")
+    }
+
+    /// Everything the seat holds at `cell`, in arrival order.
+    async fn held(seats: &NodeSeats, seat: &[u8], cell: &RoutedCell) -> Vec<Vec<u8>> {
+        seats
+            .read_values(seat, cell.namespace(), cell.key())
+            .await
+            .expect("the seat answers")
+    }
+
+    /// Storage spec §9, the leader first (MR-STOR-0148): nothing is written
+    /// to a later seat until the leader has returned its arrival record for
+    /// the value. With the leader down the write stops at the leader, and no
+    /// later seat holds anything at the cell. Once the leader is back the
+    /// write goes through, and every later copy carries the leader's record
+    /// as its first link. On the storage node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn nothing_reaches_a_later_seat_before_the_leader_answers() {
+        let (mut nodes, _config, set, cell) = pinned(0x31).await;
+        let seats = NodeSeats::new(&set).expect("seats");
+        let route = cell.route();
+        let leader = member_id(route.leader());
+        nodes.take_down(std::slice::from_ref(&leader)).await;
+
+        let mut quiet = |_: &[WriteReport; 1]| Ok(());
+        let [stopped] = from_leader(&seats, route, [(&cell, b"V".as_slice())], &mut quiet)
+            .await
+            .expect("a report");
+        assert_eq!(
+            stopped.slots,
+            vec![ChainSlot::NoResponse],
+            "the write stops at the leader"
+        );
+        for (position, seat) in route.seats().iter().enumerate().skip(1) {
+            assert_eq!(
+                held(&seats, seat, &cell).await,
+                Vec::<Vec<u8>>::new(),
+                "the seat at position {position} holds the value before the leader answered"
+            );
+        }
+
+        nodes.bring_up(&[leader]).await;
+        let [written] = from_leader(&seats, route, [(&cell, b"V".as_slice())], &mut quiet)
+            .await
+            .expect("a report");
+        let Some(ChainSlot::Link(leader_link)) = written.slots.first() else {
+            panic!("the leader answers with a link: {:?}", written.slots);
+        };
+        assert_eq!(written.slots.len(), route.seats().len());
+        for (position, seat) in route.seats().iter().enumerate().skip(1) {
+            let copies = held(&seats, seat, &cell).await;
+            assert_eq!(copies.len(), 1, "one copy at position {position}");
+            let entry = RouteEntry::decode(&copies[0]).expect("a route entry");
+            assert_eq!(entry.position, position);
+            assert_eq!(
+                entry.chain.first(),
+                Some(&ChainSlot::Link(leader_link.clone())),
+                "the copy at position {position} does not carry the leader's record first"
+            );
+        }
+    }
+
+    /// Storage spec §9, one chain in route order (MR-STOR-0151): links and
+    /// empties are appended strictly in route order, and at a seat that does
+    /// not answer the writer records an empty and goes on. With the seat at
+    /// position 2 down, the write records links at 0 and 1, an empty at 2 and
+    /// links at 3 and 4, and the copies at 3 and 4 carry exactly the slots
+    /// before them, the empty in its place.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_seat_that_does_not_answer_is_recorded_empty_in_its_place() {
+        let (mut nodes, _config, set, cell) = pinned(0x32).await;
+        let seats = NodeSeats::new(&set).expect("seats");
+        let route = cell.route();
+        nodes.take_down(&[member_id(&route.seats()[2])]).await;
+
+        let mut quiet = |_: &[WriteReport; 1]| Ok(());
+        let [report] = from_leader(&seats, route, [(&cell, b"V".as_slice())], &mut quiet)
+            .await
+            .expect("a report");
+        assert_eq!(report.slots.len(), route.seats().len());
+        assert_eq!(
+            report.slots[2],
+            ChainSlot::NoResponse,
+            "position 2 is recorded empty"
+        );
+        for position in [0, 1, 3, 4] {
+            assert!(
+                matches!(report.slots[position], ChainSlot::Link(..)),
+                "position {position}: {:?}",
+                report.slots[position]
+            );
+        }
+        for position in [3, 4] {
+            let copies = held(&seats, &route.seats()[position], &cell).await;
+            assert_eq!(copies.len(), 1, "one copy at position {position}");
+            let entry = RouteEntry::decode(&copies[0]).expect("a route entry");
+            assert_eq!(
+                entry.chain,
+                report.slots[..position].to_vec(),
+                "the copy at position {position} does not carry the chain before it"
+            );
+        }
+    }
+
+    /// Storage spec §9, closed positions (MR-STOR-0152): once a later
+    /// position is recorded, every earlier position is closed for that chain
+    /// and is never written again. A write records an empty at position 2 and
+    /// stops there, as a writer whose progress record fails. The seat comes
+    /// back, and the write continues from the record it kept: positions 3 and
+    /// 4 are written, and the seat at position 2 never is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_recorded_position_is_never_written_again() {
+        let (mut nodes, _config, set, cell) = pinned(0x33).await;
+        let seats = NodeSeats::new(&set).expect("seats");
+        let route = cell.route();
+        let closed = member_id(&route.seats()[2]);
+        nodes.take_down(std::slice::from_ref(&closed)).await;
+
+        let mut kept: Option<WriteReport> = None;
+        let mut stop_after_position_two = |reports: &[WriteReport; 1]| {
+            let [report] = reports;
+            kept = Some(report.clone());
+            match report.slots.len() {
+                3 => Err(DsmError::storage(
+                    "the progress record failed after position 2".to_string(),
+                    None::<std::io::Error>,
+                )),
+                _ => Ok(()),
+            }
+        };
+        let stopped = from_leader(
+            &seats,
+            route,
+            [(&cell, b"V".as_slice())],
+            &mut stop_after_position_two,
+        )
+        .await;
+        match stopped {
+            Err(e) => assert!(
+                e.to_string()
+                    .contains("the progress record failed after position 2"),
+                "the write stopped for another reason: {e}"
+            ),
+            Ok(reports) => panic!("the write went on past its failed record: {reports:?}"),
+        }
+        let report = kept.expect("the write recorded its progress");
+        assert_eq!(report.slots.len(), 3);
+        assert_eq!(report.slots[2], ChainSlot::NoResponse);
+
+        nodes.bring_up(&[closed]).await;
+        let mut quiet = |_: &[WriteReport; 1]| Ok(());
+        let continued = continue_write(&seats, &cell, b"V", report, &mut quiet)
+            .await
+            .expect("the write continues");
+        assert_eq!(continued.slots.len(), route.seats().len());
+        assert_eq!(
+            continued.slots[2],
+            ChainSlot::NoResponse,
+            "position 2 stays empty"
+        );
+        assert_eq!(
+            held(&seats, &route.seats()[2], &cell).await,
+            Vec::<Vec<u8>>::new(),
+            "the closed position 2 was written"
+        );
+        for position in [3, 4] {
+            assert!(
+                matches!(continued.slots[position], ChainSlot::Link(..)),
+                "position {position}: {:?}",
+                continued.slots[position]
+            );
+        }
+    }
+
     #[test]
     fn nothing_mirrored_gives_none() {
         let m = b"dsm-node-1";
