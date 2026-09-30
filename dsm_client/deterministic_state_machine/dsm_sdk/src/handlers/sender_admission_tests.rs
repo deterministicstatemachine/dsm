@@ -456,7 +456,12 @@ async fn a_send_to_a_device_that_is_not_a_contact_moves_nothing() {
 #[serial]
 async fn a_non_transferable_token_refuses_its_transfer() {
     let p = Pair::boot(100, 0).await;
-    let created = invoke(p.a.router(), "token.create", &non_transferable_request("NOTX")).await;
+    let created = invoke(
+        p.a.router(),
+        "token.create",
+        &non_transferable_request("NOTX"),
+    )
+    .await;
     match payload(&created) {
         crate::generated::envelope::Payload::TokenCreateResponse(_) => {}
         other => panic!("expected TokenCreateResponse, got {other:?}"),
@@ -606,7 +611,12 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
     use dsm::types::receipt_types::{compute_receipt_challenge_response_target, StitchedReceiptV2};
 
     let p = Pair::boot(100, 0).await;
-    let created = invoke(p.a.router(), "token.create", &non_transferable_request("NOTX")).await;
+    let created = invoke(
+        p.a.router(),
+        "token.create",
+        &non_transferable_request("NOTX"),
+    )
+    .await;
     match payload(&created) {
         crate::generated::envelope::Payload::TokenCreateResponse(_) => {}
         other => panic!("expected TokenCreateResponse, got {other:?}"),
@@ -625,7 +635,11 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
             params: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
         })
         .await;
-    assert!(adopted.success, "B adopts NOTX: {:?}", adopted.error_message);
+    assert!(
+        adopted.success,
+        "B adopts NOTX: {:?}",
+        adopted.error_message
+    );
 
     // A's transfer, signed as its send would sign it.
     p.a.enter();
@@ -662,25 +676,24 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
     // as its wallet signs a send's receipt.
     let rel_key =
         dsm::core::bilateral_transaction_manager::compute_smt_key(&p.a.device_id, &p.b.device_id);
-    let outcome = p
-        .a
-        .router()
-        .core_sdk
-        .device_head()
-        .expect("A's head")
-        .advance(
-            rel_key,
-            p.b.device_id,
-            signed.clone(),
-            &[BalanceDelta {
-                policy_commit: row.policy_commit,
-                direction: BalanceDirection::Debit,
-                amount: 25,
-            }],
-            None,
-            None,
-        )
-        .expect("A's head advances over its own transfer");
+    let outcome =
+        p.a.router()
+            .core_sdk
+            .device_head()
+            .expect("A's head")
+            .advance(
+                rel_key,
+                p.b.device_id,
+                signed.clone(),
+                &[BalanceDelta {
+                    policy_commit: row.policy_commit,
+                    direction: BalanceDirection::Debit,
+                    amount: 25,
+                }],
+                None,
+                None,
+            )
+            .expect("A's head advances over its own transfer");
     let mut receipt = StitchedReceiptV2::of_step(
         p.a.genesis,
         p.a.device_id,
