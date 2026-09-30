@@ -363,122 +363,77 @@ pub fn load_leaf_cache() -> Result<Vec<([u8; 32], [u8; 32], Vec<u8>)>> {
     Ok(out)
 }
 
-/// The best cached validated start strictly BELOW `target_position`.
-pub fn best_peer_start(
+/// This receiver's latest frontier for a peer strictly below `position`
+/// (DSM Amendment A8): a coordinate it authenticated on the way to a step it
+/// accepted from the peer, with the claim it accepted there.
+pub fn frontier_below(
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
-    target_position: u64,
-) -> Result<Option<dsm::economic::peer_lineage::ValidatedStart>> {
+    position: u64,
+) -> Result<Option<dsm::economic::peer_lineage::PeerFrontier>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let row = conn
         .query_row(
-            "SELECT validated_position, validated_root FROM peer_economic_lineage
-             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND validated_position < ?3
-             ORDER BY validated_position DESC LIMIT 1",
+            "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
+             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND economic_position < ?3
+             ORDER BY economic_position DESC LIMIT 1",
             params![
                 peer_genesis.as_slice(),
                 peer_devid.as_slice(),
-                i64::try_from(target_position).map_err(|e| anyhow!("position overflow: {e}"))?
+                i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?
             ],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
         )
         .optional()?;
-    row.map(|(position, root)| {
-        Ok(dsm::economic::peer_lineage::ValidatedStart {
-            economic_position: u64::try_from(position)
-                .map_err(|e| anyhow!("cached position {position}: {e}"))?,
-            economic_root: digest32(root, "cached root")?,
-        })
+    row.map(|(recorded, root, accepted)| {
+        Ok(
+            dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
+                *peer_genesis,
+                *peer_devid,
+                u64::try_from(recorded)
+                    .map_err(|e| anyhow!("frontier position {recorded}: {e}"))?,
+                digest32(root, "frontier root")?,
+                dsm::sofi::wire::ParentClaimRef::decode(&accepted)
+                    .map_err(|e| anyhow!("frontier claim at {recorded}: {e:?}"))?,
+            ),
+        )
     })
     .transpose()
 }
 
-/// Record one validated peer coordinate (this verifier's own conclusion).
-pub fn record_peer_validated(
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    start: &dsm::economic::peer_lineage::ValidatedStart,
+/// Record, inside the transaction that accepts a step from the peer, the
+/// frontier that step's verification reached. The activation root is every
+/// receiver's frontier and is never recorded.
+pub fn record_frontier_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    frontier: &dsm::economic::peer_lineage::PeerFrontier,
 ) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    // OR IGNORE, not REPLACE: re-validating the same coordinate must not
-    // reset `closure_stored` (correction 4 — durability is a separate,
-    // per-coordinate fact the walk itself never establishes).
-    conn.execute(
-        "INSERT OR IGNORE INTO peer_economic_lineage(
-             peer_genesis, peer_devid, validated_position, validated_root)
-         VALUES(?1, ?2, ?3, ?4)",
+    let (position, root, accepted) = frontier.recorded().ok_or_else(|| {
+        anyhow!("the activation root is every receiver's frontier and is never recorded")
+    })?;
+    tx.execute(
+        "INSERT OR IGNORE INTO peer_frontier(
+             peer_genesis, peer_devid, economic_position, economic_root, accepted_claim)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
         params![
-            peer_genesis.as_slice(),
-            peer_devid.as_slice(),
-            i64::try_from(start.economic_position)
-                .map_err(|e| anyhow!("position overflow: {e}"))?,
-            start.economic_root.as_slice()
+            frontier.genesis().as_slice(),
+            frontier.device_id().as_slice(),
+            i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?,
+            root.as_slice(),
+            accepted.encode()
         ],
-    )?;
-    Ok(())
-}
-
-/// Discard every cached coordinate for one peer — the cached-start-was-wrong
-/// path.
-pub fn clear_peer_lineage(peer_genesis: &[u8; 32], peer_devid: &[u8; 32]) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "DELETE FROM peer_economic_lineage WHERE peer_genesis = ?1 AND peer_devid = ?2",
-        params![peer_genesis.as_slice(), peer_devid.as_slice()],
     )?;
     Ok(())
 }
 
 // ── q-durability memos (3.5b PR4) ──────────────────────────────────────────
-
-/// Whether the ECONOMIC evidence closure behind this validated coordinate is
-/// Stored. Economic DAG ONLY — says nothing about EK-step ancestry.
-pub fn peer_closure_stored(
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    validated_position: u64,
-) -> Result<bool> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let flag: Option<i64> = conn
-        .query_row(
-            "SELECT closure_stored FROM peer_economic_lineage
-             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND validated_position = ?3",
-            params![
-                peer_genesis.as_slice(),
-                peer_devid.as_slice(),
-                i64::try_from(validated_position).map_err(|e| anyhow!("position: {e}"))?
-            ],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(flag == Some(1))
-}
-
-/// Mark the economic closure behind a validated coordinate Stored — and
-/// everything below it (a validation at N consumed the closure of N's whole
-/// ancestry).
-pub fn mark_peer_closure_stored(
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    validated_position: u64,
-) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "UPDATE peer_economic_lineage SET closure_stored = 1
-         WHERE peer_genesis = ?1 AND peer_devid = ?2 AND validated_position <= ?3",
-        params![
-            peer_genesis.as_slice(),
-            peer_devid.as_slice(),
-            i64::try_from(validated_position).map_err(|e| anyhow!("position: {e}"))?
-        ],
-    )?;
-    Ok(())
-}
 
 /// Whether ONE exact immutable object is known Stored on the canonical
 /// set. Per exact address, NEVER inferred from an economic-position

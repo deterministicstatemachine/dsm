@@ -1305,6 +1305,10 @@ pub(crate) struct RecipientAdmissionPrereqs {
     /// The wire's exact unsigned canonical operation bytes — the closure's
     /// verified transfer must be byte-identical to what was prevalidated.
     pub pinned_canonical_bytes: Vec<u8>,
+    /// The sender's coordinate this prevalidation verified: this device's
+    /// frontier for the sender once the transfer is accepted (DSM Amendment
+    /// A8), recorded in the accept transaction and never before it.
+    pub sender_frontier: dsm::economic::peer_lineage::PeerFrontier,
 }
 
 /// Prevalidate an inbound online transfer BEFORE any durable local state
@@ -1371,25 +1375,19 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         expected_network_id: network_id.clone(),
     };
     let recorder = crate::sdk::economic_registers::RecordingResolver::new(&live);
-    // The economic watermark only authorizes the CACHED fast path: without
-    // it, walk from the activation root so the recorder observes the FULL
-    // closure this validation depends on (correction 4: durability is never
-    // inferred).
-    let closure_durable = client_db::economic_lineage::peer_closure_stored(
-        peer_genesis,
-        peer_devid,
-        sender_economic_position,
-    )
-    .unwrap_or(false);
-    let walk = if closure_durable {
-        recorder.validated_peer_transition(peer_genesis, peer_devid, sender_economic_position)
-    } else {
-        crate::sdk::economic_registers::resolve_peer_with_cache_disabled(
-            &recorder,
-            &network_id,
+    // DSM Amendment A8: the sender's lineage is verified from this device's
+    // frontier for it, every step from there validated one hop deep, so the
+    // recorder observes exactly the closure this acceptance depends on. A
+    // conditional position on the way is resolved from SoFi's public objects
+    // for that position (SoFi Amendment S15).
+    let walk = {
+        let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
+            .map_err(|e| incomplete(format!("SoFi reads: {e}")))?;
+        recorder.validated_peer_transition(
             peer_genesis,
             peer_devid,
             sender_economic_position,
+            &sofi.peer_position_resolver(),
         )
     };
     let peer = walk.map_err(|e| match e {
@@ -1422,6 +1420,12 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         &devid,
     )
     .map_err(|e| terminal(format!("sender debit prevalidation: {e}")))?;
+    // An eligible debit is a single-root transition, so it names the claim
+    // it accepted and reaches a frontier.
+    let sender_frontier =
+        dsm::economic::peer_lineage::PeerFrontier::reached_by(&peer).ok_or_else(|| {
+            terminal("the sender's debit is not a single-root transition".to_string())
+        })?;
 
     // ── Wire ↔ validated-operation binding ─────────────────────────────────
     if peer
@@ -1470,21 +1474,14 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     }
 
     // ── The exact recorded closure, Stored on the set ──────────────────────
-    if !closure_durable {
-        // Take the recorded closure OUT before awaiting — a RefCell borrow
-        // must never live across an await point.
-        let closure = std::mem::take(&mut *recorder.recorded.borrow_mut());
-        crate::handlers::artifact_republish::ensure_closure_stored(&set, &closure)
-            .await
-            .map_err(incomplete)?;
-        if let Err(e) = client_db::economic_lineage::mark_peer_closure_stored(
-            peer_genesis,
-            peer_devid,
-            sender_economic_position,
-        ) {
-            log::warn!("peer closure memo: not recorded: {e}");
-        }
-    }
+    // Every attempt publishes what it read; an object already proven Stored
+    // is known per exact address and is not read back again. Take the
+    // recorded closure OUT before awaiting — a RefCell borrow must never live
+    // across an await point.
+    let closure = std::mem::take(&mut *recorder.recorded.borrow_mut());
+    crate::handlers::artifact_republish::ensure_closure_stored(&set, &closure)
+        .await
+        .map_err(incomplete)?;
 
     // ── The prepared admission for the exact signed op the apply will see ──
     let signed_op = dsm::types::operations::Operation::decode_and_bind_signed(
@@ -1514,6 +1511,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         authority,
         prepared,
         pinned_canonical_bytes: canonical_operation_bytes.to_vec(),
+        sender_frontier,
     })
 }
 

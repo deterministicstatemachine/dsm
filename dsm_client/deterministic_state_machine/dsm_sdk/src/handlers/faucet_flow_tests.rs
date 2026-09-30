@@ -485,10 +485,8 @@ async fn a_faucet_lineage_is_walkable_by_a_foreign_verifier() {
         .expect("read admitted")
         .expect("admitted");
 
-    // A foreign walk: nothing below reads local admission state — the
-    // resolver's cache is cleared first so the walk is from position 0.
-    client_db::economic_lineage::clear_peer_lineage(&genesis, &devid)
-        .expect("clear the peer lineage cache");
+    // A foreign walk: nothing below reads local admission state. A device
+    // records no frontier for itself, so the walk is from position 0.
     let handle = tokio::runtime::Handle::current();
     let peer = tokio::task::spawn_blocking(move || {
         use dsm::economic::provenance::ProvenanceResolver;
