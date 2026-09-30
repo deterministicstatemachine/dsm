@@ -400,6 +400,10 @@ async fn a_burn_disabled_token_refuses_its_burn() {
 /// non-transferable refuses `wallet.send` as an operation its policy does not
 /// permit, and nothing moves; a transferable created token moves through the
 /// same handler (`token_adoption_tests::an_adopted_token_resolves_on_the_receiving_device`).
+/// The receiving device refuses it too, whatever its sender checked: B's
+/// canonical apply of a transfer A signed, with B's pinned head for A as its
+/// parent, runs the token's committed policy before any acceptance is built
+/// (G7: the policy is honoured on every transfer, at both ends).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_non_transferable_token_refuses_its_transfer() {
@@ -443,6 +447,99 @@ async fn a_non_transferable_token_refuses_its_transfer() {
         head.pending_economic_admission().is_none(),
         "nothing left pending"
     );
+
+    p.b.enter();
+    let adopted = p
+        .b
+        .router()
+        .query(crate::bridge::AppQuery {
+            path: "tokens.addByAnchor".to_string(),
+            params: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
+        })
+        .await;
+    assert!(
+        adopted.success,
+        "B adopts NOTX: {:?}",
+        adopted.error_message
+    );
+    p.a.enter();
+    let b_contact = client_db::get_contact_by_device_id(&p.b.device_id)
+        .expect("A's contacts")
+        .expect("A holds B as a contact");
+    let tip = crate::handlers::app_router_impl::contact_relationship_tip(&b_contact)
+        .expect("A's relationship tip with B");
+    let unsigned = dsm::types::operations::Operation::Transfer {
+        to_device_id: p.b.device_id.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(25),
+        token_id: b"NOTX".to_vec(),
+        policy_commit: row.policy_commit,
+        mode: dsm::types::operations::TransactionMode::Unilateral,
+        nonce: crate::handlers::app_router_impl::transfer_nonce(&tip, 25, "NOTX", &p.b.device_id),
+        recipient: b_contact.public_key.clone(),
+        to: crate::util::text_id::encode_base32_crockford(&p.b.device_id).into_bytes(),
+        message: String::new(),
+        signature: Vec::new(),
+        authority_policy: None,
+    };
+    let canonical = unsigned.to_bytes();
+    let a_key = crate::sdk::signing_authority::current_public_key().expect("A's key");
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &crate::sdk::signing_authority::current_secret_key().expect("A's signing key"),
+        &canonical,
+    )
+    .expect("A signs");
+    let signed =
+        dsm::types::operations::Operation::decode_and_bind_signed(&canonical, &signature, &a_key)
+            .expect("A's signature binds");
+
+    p.b.enter();
+    let rel_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&p.b.device_id, &p.a.device_id);
+    let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+        &p.b.device_id,
+        &p.a.device_id,
+    );
+    let entropy = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_TEST_TIP,
+        &canonical,
+    );
+    let child = crate::sdk::core_sdk::successor_child_tip(
+        &rel_key,
+        &parent,
+        &p.b.device_id,
+        &signed.to_bytes(),
+        &entropy,
+    );
+    let refused = p.b.router().core_sdk.apply_incoming_transfer_staged(
+        signed,
+        &crate::types::identifiers::TransactionId::new("notx-to-b"),
+        &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+        &canonical,
+        parent,
+        child,
+        entropy,
+        |_, _| {
+            Err::<(), _>(dsm::types::error::DsmError::invalid_operation(
+                "reached acceptance: the policy did not refuse",
+            ))
+        },
+        |_, _, _| {
+            Err(dsm::types::error::DsmError::invalid_operation(
+                "reached the accept transaction: the policy did not refuse",
+            ))
+        },
+        None,
+    );
+    let why = match refused {
+        Err(e) => e.to_string(),
+        Ok(outcome) => panic!("B applied a non-transferable transfer: {outcome:?}"),
+    };
+    assert!(
+        why.contains("Operation not permitted"),
+        "B refuses by the policy's operation restriction: {why}"
+    );
+    let b_head = p.b.router().core_sdk.device_head().expect("B's head");
+    assert_eq!(b_head.balance(&row.policy_commit), 0, "nothing reached B");
 }
 
 /// Token creation through its route, end to end: the fee debit and the
