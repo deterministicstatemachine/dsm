@@ -117,14 +117,13 @@ def select(cfg: dict, files: list[str], event: str, preset: str | None) -> tuple
 def rust_matrix(cfg: dict, layers: set[str]) -> list[dict]:
     snp = cfg["sdk_node_protocol"]
     lib_filters = " ".join(snp["lib_filters"])
-    integration = " ".join(f"--test {t}" for t in snp["integration_tests"])
     include = []
     for group, spec in cfg["groups"].items():
         if not any(w in layers for w in spec["when"]):
             continue
         if any(u in layers for u in spec.get("unless", [])):
             continue
-        run = spec["run"].replace("{lib_filters}", lib_filters).replace("{integration_tests}", integration)
+        run = spec["run"].replace("{lib_filters}", lib_filters)
         include.append({"group": group, "run": run})
     return include
 
