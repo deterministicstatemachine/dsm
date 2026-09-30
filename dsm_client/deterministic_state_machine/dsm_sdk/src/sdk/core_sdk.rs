@@ -3111,6 +3111,7 @@ mod tests {
         let staged = IngestOutcome {
             ingested: Ingested::Staged,
             unreadable_candidates: Vec::new(),
+            unbound: Vec::new(),
         };
         assert_eq!(
             ingest_transfer_half(
