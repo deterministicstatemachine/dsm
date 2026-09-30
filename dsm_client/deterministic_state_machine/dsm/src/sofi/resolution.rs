@@ -416,11 +416,12 @@ pub struct RouteFacts<'legs> {
     /// Registration supplies no truth value for it: a registered `F` may be
     /// `Invalid`, and a producer's pre-sign check is not this verifier's.
     pub(crate) conformance: Validation,
-    /// Arm (v) of `RouteImpossible` (Section 23.5): position `q` already
-    /// holds a different claim — an ordinary transition, or another
-    /// fulfillment of the same trader naming other attempt keys — so this
-    /// `F` can never register (Section 21.1). Read from the position pair
-    /// (R10); never true together with `registered`.
+    /// The fact behind the skip `RejectedFinalInadmissible` (SoFi Amendment
+    /// S14): position `q` already holds a different claim — an ordinary
+    /// transition, or another fulfillment of the same trader naming other
+    /// attempt keys — so this `F` can never register (Section 21.1). A fact
+    /// about `F`, never an arm of `RouteImpossible(P, E)`. Read from the
+    /// position pair (R10); it never holds together with `registered`.
     pub(crate) position_lost: bool,
     /// What is known about the claim at `p`.
     pub(crate) parent: ParentPosition,
@@ -432,6 +433,19 @@ pub struct RouteFacts<'legs> {
     pub(crate) storage_resolved: bool,
     /// One entry per leg of `P`, in P's leg order. A single-vault trade is the
     /// one-leg case.
+    pub(crate) legs: &'legs [LegFacts],
+}
+
+/// What the skips that need no validation evidence read (SoFi §23.5 and
+/// MR-SOFI-0241; Amendment S14): the facts of [`RouteFacts`] that stand
+/// without `FulfillmentConformance` or `RouteValidation`, and nothing that
+/// needs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroundRouteFacts<'legs> {
+    pub(crate) external_commitment: [u8; 32],
+    pub(crate) position_lost: bool,
+    pub(crate) parent: ParentPosition,
+    pub(crate) parent_pre_root: [u8; 32],
     pub(crate) legs: &'legs [LegFacts],
 }
 
@@ -518,21 +532,16 @@ pub enum ImpossibleArm {
     /// (iv) `TraderParentImpossible(P)`: the trader parent is terminal on the
     /// other branch, or on none.
     TraderParentImpossible,
-    /// (v) the fulfillment the exercise at `K` carries can never register:
-    /// position `q` already holds a different claim (Section 21.1). Without
-    /// this arm a trader whose exercise for attempt 0 won `K^(0)` while its
-    /// fulfillment for attempt 1 registered strands the parent's attempt
-    /// chain (`DSM_SofiFulfillment.tla`, `LostPosition`).
-    PositionLost,
 }
 
 /// The arm of `RouteImpossible(P, E)` that holds, in arm order.
 ///
-/// Arms (ii) to (v) hold whatever `RouteValidation` says. Arms (iv) and (v)
-/// create no `Void`: under (iv) the trader position is Invalid through the
-/// ladder, under (v) the position went to another claim and this `F` never
-/// resolves through it; both arms exist only to stop an impossible operation
-/// stranding a DLV successor key.
+/// Arms (ii) to (iv) hold whatever `RouteValidation` says. Arm (iv) creates
+/// no `Void`: the trader position is Invalid through the ladder, and the arm
+/// exists only to stop an impossible operation stranding a DLV successor key.
+/// Every arm is a fact about `P` and `E`; which fulfillment lost its position
+/// is a fact about `F`, and it is the skip `RejectedFinalInadmissible`
+/// (SoFi Amendment S14), never an arm here.
 pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
     if facts.validation == Validation::Invalid {
         return Some(ImpossibleArm::ValidationInvalid);
@@ -549,9 +558,6 @@ pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
     }
     if trader_parent_impossible(&facts.parent, &facts.parent_pre_root) {
         return Some(ImpossibleArm::TraderParentImpossible);
-    }
-    if facts.position_lost {
-        return Some(ImpossibleArm::PositionLost);
     }
     None
 }
@@ -641,6 +647,11 @@ pub enum SkipReason {
     /// A final cell of a fulfillment that is not the exercise of its P:
     /// `FulfillmentConformance(F) = Invalid` (SoFi §23.5, MR-SOFI-0238).
     RejectedFinalConformance,
+    /// A final cell whose exercise carries a fulfillment that can never
+    /// register: position `q` is final on another claim (SoFi Amendment
+    /// S14, Section 21.1). It reads no validation evidence and creates no
+    /// Void and no Invalid: `q` resolves through the claim that holds it.
+    RejectedFinalInadmissible,
 }
 
 /// Why a fulfillment can never realize (SoFi §23.5):
@@ -693,6 +704,16 @@ pub fn classify_attempt(
                 FulfillmentImpossibility::Route(arm) => SkipReason::RejectedFinalRoute(arm),
             };
             return (AttemptClass::Skipped, Some(reason));
+        }
+        // SoFi Amendment S14: the exercise's F can never register, because
+        // another claim holds its position, so no registered fulfillment will
+        // ever name this cell. Without the skip the parent's attempt chain
+        // stops here forever (TLA `DSM_SofiFulfillment`, `LostPosition`).
+        if facts.position_lost {
+            return (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalInadmissible),
+            );
         }
         // A final cell is a consumption only when the whole operation
         // consumed: the same E across every required leg, validation Valid,
@@ -763,6 +784,33 @@ pub fn skip_in_hand(
     (AttemptClass::Skipped, Some(reason))
 }
 
+/// The key of a final cell classified on facts that need no validation
+/// evidence (SoFi §23.5 and MR-SOFI-0241; Amendment S14): a named parent
+/// consumed by another operation (arm (iii)), a trader parent that can never
+/// be compatible (arm (iv)), or a fulfillment whose position went to another
+/// claim. The verifier asks this BEFORE it acquires any validation evidence,
+/// so a cell that is dead on these facts is never held live by evidence that
+/// is not in hand. `Unresolved` here decides nothing: the complete facts may
+/// still skip or consume the key.
+pub fn skip_without_evidence(
+    ground: &GroundRouteFacts<'_>,
+    leg: &LegFacts,
+) -> (AttemptClass, Option<SkipReason>) {
+    if !leg.final_on(&ground.external_commitment) {
+        return (AttemptClass::Unresolved, None);
+    }
+    let reason = if ground.legs.iter().any(|l| l.parent_consumed_elsewhere) {
+        SkipReason::RejectedFinalRoute(ImpossibleArm::ParentConsumedElsewhere)
+    } else if trader_parent_impossible(&ground.parent, &ground.parent_pre_root) {
+        SkipReason::RejectedFinalRoute(ImpossibleArm::TraderParentImpossible)
+    } else if ground.position_lost {
+        SkipReason::RejectedFinalInadmissible
+    } else {
+        return (AttemptClass::Unresolved, None);
+    };
+    (AttemptClass::Skipped, Some(reason))
+}
+
 /// The ladder over a position whose exercise is refuted in hand: registration
 /// is the one fact it reads. Unregistered, rung 0 holds. Registered, the
 /// position is Invalid whatever the other facts are — rung 1 when the parent
@@ -796,6 +844,9 @@ enum KeyKnown<'f> {
     /// The complete facts of the exercise holding the key, and of the leg
     /// being walked.
     Complete(RouteFacts<'f>, LegFacts),
+    /// The exercise holding the key is dead on facts that need no validation
+    /// evidence ([`skip_without_evidence`]), and of the leg being walked.
+    Ground(GroundRouteFacts<'f>, LegFacts),
     /// The exercise holding the key is refuted by its own bytes; `cell` is
     /// the key's storage fact, read to find it.
     RefutedInHand {
@@ -824,6 +875,27 @@ impl<'f> KeyFacts<'f> {
             parent_root: *read.parent_root(),
             attempt: read.attempt(),
             known: KeyKnown::Complete(facts.route_facts(), leg),
+        })
+    }
+
+    /// The key `read` was evaluated at, held by the exercise `ground` was
+    /// established for: the facts that need no validation evidence of that
+    /// exercise's leg at this key. `None` when the read holds no exercise,
+    /// holds another exercise, or the facts have no leg at this key.
+    pub fn ground(
+        read: &super::exercise::AttemptCellRead,
+        ground: &'f super::facts::GroundFacts,
+    ) -> Option<Self> {
+        let exercise = read.exercise()?;
+        if *exercise.external_commitment() != *ground.external_commitment() {
+            return None;
+        }
+        let leg = ground.leg_at(read.vault_id(), read.parent_root(), read.attempt())?;
+        Some(Self {
+            vault_id: *read.vault_id(),
+            parent_root: *read.parent_root(),
+            attempt: read.attempt(),
+            known: KeyKnown::Ground(ground.route_ground(), leg),
         })
     }
 
@@ -864,6 +936,22 @@ impl<'f> KeyFacts<'f> {
             parent_root,
             attempt,
             known: KeyKnown::Complete(facts, leg),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ground_at(
+        vault_id: [u8; 32],
+        parent_root: [u8; 32],
+        attempt: u64,
+        ground: GroundRouteFacts<'f>,
+        leg: LegFacts,
+    ) -> Self {
+        Self {
+            vault_id,
+            parent_root,
+            attempt,
+            known: KeyKnown::Ground(ground, leg),
         }
     }
 
@@ -988,6 +1076,10 @@ where
                     KeyKnown::Complete(facts, leg) => {
                         (classify_attempt(&facts, &leg).0, facts.external_commitment)
                     }
+                    KeyKnown::Ground(ground, leg) => (
+                        skip_without_evidence(&ground, &leg).0,
+                        ground.external_commitment,
+                    ),
                     KeyKnown::RefutedInHand {
                         refuted,
                         cell,
@@ -1663,11 +1755,11 @@ mod tests {
         );
     }
 
-    // ── arm (v): the position went to another claim (R12) ────────────────
+    // ── Amendment S14: a fulfillment that can never register (R12) ──────
 
     /// TLA `LostPosition` (fault `_LostPositionDropped` →
     /// `ObjectiveRejectionImpliesSkipped`), Lean
-    /// `a_lost_position_makes_a_final_route_skippable`: an exercise final at a
+    /// `a_lost_position_makes_a_final_cell_skippable`: an exercise final at a
     /// key whose F can never register — the position holds another claim —
     /// is skipped, so the parent's attempt chain is not stranded. It is no
     /// Void: the position resolves through the claim that took it, never
@@ -1680,17 +1772,18 @@ mod tests {
             position_lost: true,
             ..realized(&legs)
         };
-        assert_eq!(route_impossible(&facts), Some(ImpossibleArm::PositionLost));
+        assert_eq!(route_impossible(&facts), None);
+        assert_eq!(fulfillment_impossible(&facts), None);
         assert_eq!(
             classify_attempt(&facts, &legs[0]),
             (
                 AttemptClass::Skipped,
-                Some(SkipReason::RejectedFinalRoute(ImpossibleArm::PositionLost))
+                Some(SkipReason::RejectedFinalInadmissible)
             )
         );
         assert_eq!(resolve_position(&facts), Err(Incomplete::NotRegistered));
         assert!(!consumed_route(&facts));
-        // Without the arm the same cell is that F's open question forever.
+        // Without the skip the same cell is that F's open question forever.
         let held = RouteFacts {
             position_lost: false,
             ..facts
@@ -1700,6 +1793,238 @@ mod tests {
             classify_attempt(&held, &legs[0]).0,
             AttemptClass::Unresolved
         );
+    }
+
+    /// MR-SOFI-0239, SoFi §23.5: `RouteImpossible(P, E)` takes no F. Two
+    /// facts differ only in what is known about one particular fulfillment —
+    /// whether it registered, whether its position went to another claim —
+    /// and `route_impossible` answers both alike, for every arm.
+    #[test]
+    fn route_impossibility_reads_nothing_about_a_particular_fulfillment() {
+        let legs = [good_leg()];
+        let orphaned = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        }];
+        for legs in [&legs[..], &orphaned[..]] {
+            for validation in [Valid, Invalid] {
+                for conformance in [Valid, Invalid] {
+                    for about_f in around(legs, conformance, validation) {
+                        let without_f = RouteFacts {
+                            parent: about_f.parent,
+                            validation,
+                            ..realized(legs)
+                        };
+                        assert_eq!(route_impossible(&about_f), route_impossible(&without_f));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── MR-SOFI-0241: skips that need no validation evidence ──────────────
+
+    /// The facts of `facts` that stand without validation evidence.
+    fn ground_of<'l>(facts: &RouteFacts<'l>) -> GroundRouteFacts<'l> {
+        GroundRouteFacts {
+            external_commitment: facts.external_commitment,
+            position_lost: facts.position_lost,
+            parent: facts.parent,
+            parent_pre_root: facts.parent_pre_root,
+            legs: facts.legs,
+        }
+    }
+
+    /// A leg at attempt 1 of `PRE` with `cell`, whose parent another
+    /// operation consumed at attempt 0: its liveness as a walk over the
+    /// parent's keys establishes it, never stated.
+    fn leg_whose_parent_went_elsewhere(cell: CellFact) -> LegFacts {
+        let other = [LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        }];
+        let consumed = walk(&V, &PRE, 0, 16, |attempt| {
+            (attempt == 0).then(|| {
+                KeyFacts::complete_at(
+                    V,
+                    PRE,
+                    0,
+                    RouteFacts {
+                        external_commitment: OTHER_E,
+                        ..realized(&other)
+                    },
+                    other[0],
+                )
+            })
+        });
+        assert_eq!(consumed.outcome(), WalkOutcome::Consumed { attempt: 0 });
+        let (attempt_live, parent_consumed_elsewhere) =
+            consumed.liveness_of(1, &E).expect("the walk reached key 1");
+        LegFacts {
+            cell,
+            attempt_live,
+            parent_consumed_elsewhere,
+            ..good_leg()
+        }
+    }
+
+    /// SoFi §23.5 and MR-SOFI-0241, Amendment S14: a final cell dead on a
+    /// fact that needs no validation evidence skips on that fact alone — a
+    /// named parent consumed elsewhere (iii), a trader parent that can never
+    /// be compatible (iv), a position that went to another claim. The ground
+    /// facts hold no conformance and no validation, so none is read.
+    #[test]
+    fn a_dead_cell_skips_on_facts_that_need_no_evidence() {
+        let taken = [leg_whose_parent_went_elsewhere(good_leg().cell)];
+        let facts = realized(&taken);
+        assert_eq!(
+            skip_without_evidence(&ground_of(&facts), &taken[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalRoute(
+                    ImpossibleArm::ParentConsumedElsewhere
+                ))
+            )
+        );
+
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            parent: ParentPosition::ConditionalNoRoot,
+            ..realized(&legs)
+        };
+        assert_eq!(
+            skip_without_evidence(&ground_of(&facts), &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalRoute(
+                    ImpossibleArm::TraderParentImpossible
+                ))
+            )
+        );
+
+        let lost = around(&legs, Valid, Valid)
+            .into_iter()
+            .find(|f| f.position_lost && f.parent == ParentPosition::SingleRoot)
+            .expect("a lost position among the facts");
+        assert_eq!(
+            skip_without_evidence(&ground_of(&lost), &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalInadmissible)
+            )
+        );
+
+        // A cell that is not final on E is no one's skip, dead or not.
+        let open = [leg_whose_parent_went_elsewhere(CellFact::Open)];
+        let facts = realized(&open);
+        assert_eq!(
+            skip_without_evidence(&ground_of(&facts), &open[0]),
+            (AttemptClass::Unresolved, None)
+        );
+    }
+
+    /// What needs validation evidence never skips without it: an Invalid
+    /// conformance, an Invalid route, and an orphaned parent (whose
+    /// generation only the evidence places) are the complete facts' to
+    /// decide.
+    #[test]
+    fn nothing_that_needs_evidence_skips_without_it() {
+        let legs = [good_leg()];
+        for facts in [
+            RouteFacts {
+                conformance: Invalid,
+                ..realized(&legs)
+            },
+            RouteFacts {
+                validation: Invalid,
+                ..realized(&legs)
+            },
+        ] {
+            assert_eq!(classify_attempt(&facts, &legs[0]).0, AttemptClass::Skipped);
+            assert_eq!(
+                skip_without_evidence(&ground_of(&facts), &legs[0]),
+                (AttemptClass::Unresolved, None)
+            );
+        }
+        let orphaned = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        }];
+        let facts = realized(&orphaned);
+        assert_eq!(
+            classify_attempt(&facts, &orphaned[0]).0,
+            AttemptClass::Skipped
+        );
+        assert_eq!(
+            skip_without_evidence(&ground_of(&facts), &orphaned[0]),
+            (AttemptClass::Unresolved, None)
+        );
+    }
+
+    /// An evidence-free skip is the complete facts' own answer: over every
+    /// combination of the facts, one and two legs, and each walked leg,
+    /// wherever `skip_without_evidence` skips a key, `classify_attempt`
+    /// skips it too — whatever the evidence would have said.
+    #[test]
+    fn an_evidence_free_skip_answers_as_the_complete_facts_do() {
+        let final_e = good_leg().cell;
+        let leg_sets = [
+            vec![good_leg()],
+            vec![open_leg()],
+            vec![leg_whose_parent_went_elsewhere(final_e)],
+            vec![leg_whose_parent_went_elsewhere(CellFact::Open)],
+            vec![good_leg(), leg_whose_parent_went_elsewhere(CellFact::Open)],
+            vec![leg_whose_parent_went_elsewhere(final_e), open_leg()],
+        ];
+        let mut skipped = 0usize;
+        for legs in &leg_sets {
+            for conformance in [Valid, Invalid] {
+                for validation in [Valid, Invalid] {
+                    for facts in around(legs, conformance, validation) {
+                        for leg in legs.iter() {
+                            if skip_without_evidence(&ground_of(&facts), leg).0
+                                == AttemptClass::Skipped
+                            {
+                                skipped += 1;
+                                assert_eq!(
+                                    classify_attempt(&facts, leg).0,
+                                    AttemptClass::Skipped,
+                                    "{facts:?} at {leg:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(skipped > 0, "the sweep exercised the evidence-free skips");
+    }
+
+    /// MR-SOFI-0241: a walk passes a key whose exercise is dead on facts that
+    /// need no validation evidence, with none of that evidence in hand, and
+    /// the next attempt is live.
+    #[test]
+    fn a_walk_passes_a_dead_key_whose_evidence_is_not_in_hand() {
+        let legs = [good_leg()];
+        let dead = RouteFacts {
+            parent: ParentPosition::ConditionalNoRoot,
+            ..realized(&legs)
+        };
+        let walked = walk(&V, &PRE, 0, 16, |attempt| {
+            (attempt == 0).then(|| KeyFacts::ground_at(V, PRE, 0, ground_of(&dead), legs[0]))
+        });
+        assert_eq!(walked.outcome(), WalkOutcome::Unresolved { attempt: 1 });
+        // The next key is live exactly as it is when the complete facts skip
+        // the same key.
+        let complete = walk(&V, &PRE, 0, 16, |attempt| {
+            (attempt == 0).then(|| KeyFacts::complete_at(V, PRE, 0, dead, legs[0]))
+        });
+        assert_eq!(walked.outcome(), complete.outcome());
+        assert_eq!(walked.liveness_of(1, &E), complete.liveness_of(1, &E));
+        assert!(walked.liveness_of(1, &E).is_some_and(|(live, _)| live));
     }
 
     // ── rung 8, and the ladder as a whole ──────────────────────────────────
