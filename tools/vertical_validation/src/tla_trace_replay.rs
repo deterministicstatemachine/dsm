@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context};
 use serde::Serialize;
 
-use crate::live_device::{stitched_receipt, verification_context, LiveDevice};
+use crate::live_device::{commit, connect, marked, Decision, LiveDevice};
 use crate::tla_runner::TlaSpec;
 use dsm::crypto::blake3::{domain_hash, domain_hash_bytes};
 use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
@@ -22,8 +22,6 @@ use dsm::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
 use dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
 use dsm::emissions::{JoinActivationProof, SourceDlvState};
 use dsm::types::operations::Operation;
-use dsm::types::receipt_types::ParentConsumptionTracker;
-use dsm::verification::receipt_verification::verify_stitched_receipt;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaTraceReplayResult {
@@ -260,7 +258,6 @@ struct DsmImplementationHarness {
     /// `send_group -> (sender, amount)`.
     undelivered: BTreeMap<i64, (TlaValue, u64)>,
     ledger: BTreeSet<TlaValue>,
-    parent_tracker: ParentConsumptionTracker,
     next_msg_id: i64,
     storage_nodes: BTreeSet<TlaValue>,
     activated_devices: BTreeSet<TlaValue>,
@@ -339,7 +336,6 @@ impl DsmImplementationHarness {
             pending_messages: Vec::new(),
             undelivered: BTreeMap::new(),
             ledger,
-            parent_tracker: ParentConsumptionTracker::new(),
             next_msg_id: int_var(initial, "nextMsgId").unwrap_or(0),
             storage_nodes: cloned_set_var(initial, "storageNodes"),
             activated_devices: cloned_set_var(initial, "activatedDevices"),
@@ -516,17 +512,10 @@ impl DsmImplementationHarness {
                 .devices
                 .get_mut(me)
                 .ok_or_else(|| anyhow!("unknown device {}", me.display()))?;
-            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &direct.live.devid,
-                &other_devid,
-            );
-            if direct.live.head.chain_tip(&rel_key).is_none() {
-                direct.live.head = direct
-                    .live
-                    .head
-                    .establish_relationship(other_devid)
-                    .map_err(|e| anyhow!("establishing the relationship: {e}"))?;
-            }
+            direct
+                .live
+                .establish_with(other_devid)
+                .map_err(|e| anyhow!("establishing the relationship: {e}"))?;
         }
         Ok(())
     }
@@ -662,53 +651,24 @@ impl DsmImplementationHarness {
         // established on both devices before its first step.
         self.establish_pair(&pending.from, &pending.to)?;
 
-        // The step, as production runs it: the sender's advance, the receipt
-        // both parties sign, the recipient's verifier with its parent tracker,
-        // and the recipient's credit.
-        let (sender_outcome, receipt, receiver_outcome) = {
-            let sender = &self
-                .devices
-                .get(&pending.from)
-                .ok_or_else(|| anyhow!("unknown sender {}", pending.from.display()))?
-                .live;
-            let recipient = &self
-                .devices
-                .get(&pending.to)
-                .ok_or_else(|| anyhow!("unknown recipient {}", pending.to.display()))?
-                .live;
-            let sender_outcome = sender
-                .send(recipient, &pending.operation)
-                .map_err(|e| anyhow!("the sender's advance was refused: {e}"))?;
-            let receipt = stitched_receipt(sender, recipient, &sender_outcome)
-                .map_err(|e| anyhow!("the step's receipt could not be built: {e}"))?;
-            let ctx =
-                verification_context(sender, recipient, sender.head.root(), &pending.operation);
-            match verify_stitched_receipt(&receipt, &ctx, &mut self.parent_tracker) {
-                Ok(acceptance) if acceptance.valid => {}
-                Ok(acceptance) => bail!(
-                    "the recipient refused the step's receipt: {}",
-                    acceptance.reason.unwrap_or_default()
-                ),
-                Err(e) => bail!("the receipt verifier errored: {e}"),
-            }
-            let receiver_outcome = recipient
-                .receive(sender, &pending.operation)
-                .map_err(|e| anyhow!("the recipient's advance was refused: {e}"))?;
-            (sender_outcome, receipt, receiver_outcome)
-        };
-        if receipt.child_tip == receipt.parent_tip {
-            bail!("the delivered step did not move the sender's tip");
+        // The step, as production runs it: the sender proposes it on the tip
+        // it holds, the recipient decides it with Core's decisions against
+        // the tip it holds, and both commit it.
+        if pending.from == pending.to {
+            bail!("net_deliver of a step from a device to itself");
         }
-        self.devices
-            .get_mut(&pending.from)
-            .ok_or_else(|| anyhow!("missing sender"))?
-            .live
-            .install(sender_outcome);
-        self.devices
-            .get_mut(&pending.to)
-            .ok_or_else(|| anyhow!("missing recipient"))?
-            .live
-            .install(receiver_outcome);
+        let mut sender = self
+            .devices
+            .remove(&pending.from)
+            .ok_or_else(|| anyhow!("unknown sender {}", pending.from.display()))?;
+        let Some(mut recipient) = self.devices.remove(&pending.to) else {
+            self.devices.insert(pending.from.clone(), sender);
+            bail!("unknown recipient {}", pending.to.display());
+        };
+        let delivered = deliver_step(&mut sender.live, &mut recipient.live, &pending.operation);
+        self.devices.insert(pending.from.clone(), sender);
+        self.devices.insert(pending.to.clone(), recipient);
+        delivered?;
 
         self.relationships
             .get_mut(&key)
@@ -1122,13 +1082,45 @@ impl DsmImplementationHarness {
     }
 }
 
+/// One step of `operation` from `sender` to `recipient`, as production runs
+/// it: proposed on the sender's tip, decided by the recipient with Core's
+/// `decide_prepare` and `decide_confirm`, and committed on both.
+fn deliver_step(
+    sender: &mut LiveDevice,
+    recipient: &mut LiveDevice,
+    operation: &Operation,
+) -> anyhow::Result<()> {
+    let step = sender
+        .propose(recipient, operation.clone())
+        .map_err(|e| anyhow!("the step could not be proposed: {e}"))?;
+    if step.receipt.child_tip == step.receipt.parent_tip {
+        bail!("the delivered step did not move the sender's tip");
+    }
+    match recipient.decide(sender, &step) {
+        Decision::Accepted(verified) => commit(sender, recipient, step, &verified)
+            .map_err(|e| anyhow!("the step did not commit: {e}")),
+        other => bail!("the recipient refused the step: {other}"),
+    }
+}
+
+/// A Tripwire trace replayed on production's receiver: every relation of the
+/// model is a relationship between two real devices, and every receipt the
+/// model adds is a step one of them proposes and the other decides with
+/// Core's decisions and commits. The model's tips map onto the shared tips
+/// the devices hold: a receipt must extend the tip its `oldTip` maps to, and
+/// its `newTip` maps to the successor both devices then hold.
+#[derive(Default)]
+struct TripwireImplementation {
+    devices: BTreeMap<TlaValue, LiveDevice>,
+    tips: BTreeMap<(TlaValue, TlaValue), BTreeMap<i64, [u8; 32]>>,
+}
+
 fn replay_tripwire_trace_into_implementation(states: &[TlaState]) -> Vec<String> {
     let mut failures = Vec::new();
-    let mut tracker = ParentConsumptionTracker::new();
+    let mut implementation = TripwireImplementation::default();
 
     for (idx, pair) in states.windows(2).enumerate() {
-        if let Err(err) = replay_tripwire_step_into_implementation(&mut tracker, &pair[0], &pair[1])
-        {
+        if let Err(err) = implementation.replay_step(&pair[0], &pair[1]) {
             failures.push(format!("step {}: {err}", idx + 1));
         }
     }
@@ -1136,39 +1128,97 @@ fn replay_tripwire_trace_into_implementation(states: &[TlaState]) -> Vec<String>
     failures
 }
 
-fn replay_tripwire_step_into_implementation(
-    tracker: &mut ParentConsumptionTracker,
-    current: &TlaState,
-    next: &TlaState,
-) -> anyhow::Result<()> {
-    // First require the TLC step to satisfy the abstract Tripwire transition:
-    // current root revisions must match the receipt anchors, and the relation-local
-    // SMT tips must advance deterministically for both participants.
-    replay_tripwire_step(current, next)?;
+impl TripwireImplementation {
+    fn replay_step(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
+        // First require the TLC step to satisfy the abstract Tripwire
+        // transition: current root revisions must match the receipt anchors,
+        // and the relation-local SMT tips must advance deterministically for
+        // both participants.
+        replay_tripwire_step(current, next)?;
 
-    let current_ledger = set_var(current, "ledger")?;
-    let next_ledger = set_var(next, "ledger")?;
-    let added = set_difference(next_ledger, current_ledger);
-    let receipt = added
-        .first()
-        .ok_or_else(|| anyhow!("Tripwire implementation replay expected one added receipt"))?;
-    let record = record_fields(receipt)?;
-    let rel_devices = set_items(
-        record
-            .get("rel")
-            .ok_or_else(|| anyhow!("Tripwire receipt missing rel"))?,
-    )?;
-    if rel_devices.len() != 2 {
-        bail!("Tripwire implementation replay expected binary relation");
+        let current_ledger = set_var(current, "ledger")?;
+        let next_ledger = set_var(next, "ledger")?;
+        let added = set_difference(next_ledger, current_ledger);
+        let receipt = added
+            .first()
+            .ok_or_else(|| anyhow!("Tripwire implementation replay expected one added receipt"))?;
+        let record = record_fields(receipt)?;
+        let rel_devices = set_items(
+            record
+                .get("rel")
+                .ok_or_else(|| anyhow!("Tripwire receipt missing rel"))?,
+        )?;
+        let [proposer, decider] = rel_devices.as_slice() else {
+            bail!("Tripwire implementation replay expected binary relation");
+        };
+        let old_tip = receipt_int(record, "oldTip")?;
+        let new_tip = receipt_int(record, "newTip")?;
+
+        for device in [proposer, decider] {
+            if !self.devices.contains_key(device) {
+                let live = LiveDevice::new(&format!("tla-tripwire-{}", tla_atom(device)?))
+                    .map_err(|e| anyhow!("device {}: {e}", device.display()))?;
+                self.devices.insert(device.clone(), live);
+            }
+        }
+        let mut sender = self
+            .devices
+            .remove(proposer)
+            .ok_or_else(|| anyhow!("missing device {}", proposer.display()))?;
+        let Some(mut recipient) = self.devices.remove(decider) else {
+            self.devices.insert(proposer.clone(), sender);
+            bail!("missing device {}", decider.display());
+        };
+        let tips = self
+            .tips
+            .entry((proposer.clone(), decider.clone()))
+            .or_default();
+        let replayed = Self::step(tips, &mut sender, &mut recipient, old_tip, new_tip);
+        self.devices.insert(proposer.clone(), sender);
+        self.devices.insert(decider.clone(), recipient);
+        replayed
     }
-    let old_tip = receipt_int(record, "oldTip")?;
-    let new_tip = receipt_int(record, "newTip")?;
-    let parent_hash = tripwire_transition_hash(&rel_devices, old_tip);
-    let child_hash = tripwire_transition_hash(&rel_devices, new_tip);
-    tracker
-        .try_consume(parent_hash, child_hash)
-        .map_err(|e| anyhow!("ParentConsumptionTracker rejected Tripwire receipt: {e}"))?;
-    Ok(())
+
+    fn step(
+        tips: &mut BTreeMap<i64, [u8; 32]>,
+        sender: &mut LiveDevice,
+        recipient: &mut LiveDevice,
+        old_tip: i64,
+        new_tip: i64,
+    ) -> anyhow::Result<()> {
+        connect(sender, recipient).map_err(|e| anyhow!("contacts: {e}"))?;
+        let held = recipient
+            .shared_tip_with(sender)
+            .ok_or_else(|| anyhow!("the recipient holds no tip for the sender"))?;
+        match tips.get(&old_tip) {
+            Some(mapped) if *mapped == held => {}
+            Some(_) => bail!("the model's tip {old_tip} is not the tip the recipient holds"),
+            None if tips.is_empty() => {
+                tips.insert(old_tip, held);
+            }
+            None => {
+                bail!("the receipt extends model tip {old_tip}, which no committed step produced")
+            }
+        }
+        // The model's tip names the step's operation: its low byte marks it.
+        let step = sender
+            .propose(recipient, marked(new_tip.to_le_bytes()[0]))
+            .map_err(|e| anyhow!("the step could not be proposed: {e}"))?;
+        let successor = step.successor_tip;
+        match recipient.decide(sender, &step) {
+            Decision::Accepted(verified) => commit(sender, recipient, step, &verified)
+                .map_err(|e| anyhow!("the step did not commit: {e}"))?,
+            other => {
+                bail!("production refused the model's receipt {old_tip}->{new_tip}: {other}")
+            }
+        }
+        match tips.insert(new_tip, successor) {
+            Some(previous) if previous != successor => {
+                bail!("the model's tip {new_tip} maps to two different successors")
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 fn replay_dsm_trace_into_implementation(states: &[TlaState]) -> Vec<String> {
@@ -1238,17 +1288,6 @@ fn canonical_pair_key(left: &TlaValue, right: &TlaValue) -> (TlaValue, TlaValue)
     } else {
         (right.clone(), left.clone())
     }
-}
-
-fn tripwire_transition_hash(devices: &[TlaValue], tip: i64) -> [u8; 32] {
-    let mut labels: Vec<String> = devices
-        .iter()
-        .map(|device| format!("{}", device.display()))
-        .collect();
-    labels.sort();
-    let mut bytes = labels.join("|").into_bytes();
-    bytes.extend_from_slice(&tip.to_le_bytes());
-    bytes32_from_hash(dsm::tagged_domain!(b"DSM/VV/tripwire-parent"), &bytes)
 }
 
 fn tla_atom(value: &TlaValue) -> anyhow::Result<String> {
