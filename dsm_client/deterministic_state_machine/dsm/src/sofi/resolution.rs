@@ -815,7 +815,7 @@ impl<'f> KeyFacts<'f> {
         facts: &'f super::facts::EstablishedFacts,
     ) -> Option<Self> {
         let exercise = read.exercise()?;
-        if exercise.external_commitment != *facts.external_commitment() {
+        if *exercise.external_commitment() != *facts.external_commitment() {
             return None;
         }
         let leg = facts.leg_at(read.vault_id(), read.parent_root(), read.attempt())?;
@@ -836,7 +836,7 @@ impl<'f> KeyFacts<'f> {
         refutation: &super::facts::InHandRefutation,
     ) -> Option<Self> {
         let exercise = read.exercise()?;
-        if exercise.external_commitment != *refutation.external_commitment() {
+        if *exercise.external_commitment() != *refutation.external_commitment() {
             return None;
         }
         Some(Self {
@@ -846,7 +846,7 @@ impl<'f> KeyFacts<'f> {
             known: KeyKnown::RefutedInHand {
                 refuted: refutation.refuted(),
                 cell: read.fact(),
-                external_commitment: exercise.external_commitment,
+                external_commitment: *exercise.external_commitment(),
             },
         })
     }

@@ -72,24 +72,24 @@ impl InHandRefutation {
 /// What the exercise's own bytes refute, before any read (MR-DSM-0041).
 pub fn refuted_in_hand(exercise: &RecognizedExercise) -> Option<InHandRefutation> {
     let bind = |refuted| InHandRefutation {
-        external_commitment: exercise.external_commitment,
-        fulfillment_id: derive::fulfillment_id(&exercise.fulfillment.body),
+        external_commitment: *exercise.external_commitment(),
+        fulfillment_id: derive::fulfillment_id(&exercise.fulfillment().body),
         refuted,
     };
     if conformance_invalid_in_hand(
-        &exercise.precommit,
-        &exercise.fulfillment.body,
-        &exercise.fulfillment.signature,
-        &exercise.preimage,
-        &exercise.closure,
+        exercise.precommit(),
+        &exercise.fulfillment().body,
+        &exercise.fulfillment().signature,
+        exercise.preimage(),
+        exercise.closure(),
     )
     .is_some()
     {
         return Some(bind(RefutedInHand::Conformance));
     }
-    route_invalid_in_hand(&exercise.precommit.body, &exercise.preimage)?;
+    route_invalid_in_hand(&exercise.precommit().body, exercise.preimage())?;
     Some(bind(RefutedInHand::Route {
-        legs: exercise.precommit.body.legs().len(),
+        legs: exercise.precommit().body.legs().len(),
     }))
 }
 
@@ -253,12 +253,12 @@ impl Established {
         refutation: &InHandRefutation,
         registration: &RegistrationRead,
     ) -> Result<Self, NotEstablished> {
-        if refutation.external_commitment != exercise.external_commitment {
+        if refutation.external_commitment != *exercise.external_commitment() {
             return Err(NotEstablished::NotThisExercise(
                 "the refutation is of another exercise",
             ));
         }
-        if !registration.is_of(&exercise.precommit.body, &exercise.fulfillment.body) {
+        if !registration.is_of(&exercise.precommit().body, &exercise.fulfillment().body) {
             return Err(NotEstablished::NotThisExercise(
                 "the registration read is of another position",
             ));
@@ -267,7 +267,7 @@ impl Established {
             fulfillment_id: refutation.fulfillment_id,
             external_commitment: refutation.external_commitment,
             refuted: refutation.refuted,
-            registered: registration.is_registered_as(&exercise.fulfillment.body),
+            registered: registration.is_registered_as(&exercise.fulfillment().body),
         }))
     }
 
@@ -313,9 +313,9 @@ fn permanently_resolved(cell: &CellFact, e: &D32) -> bool {
 /// walk over the earlier keys of that leg's chain.
 pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstablished> {
     let exercise = reads.exercise;
-    let precommit = &exercise.precommit.body;
-    let fulfillment = &exercise.fulfillment.body;
-    let e = exercise.external_commitment;
+    let precommit = &exercise.precommit().body;
+    let fulfillment = &exercise.fulfillment().body;
+    let e = *exercise.external_commitment();
 
     if !reads.registration.is_of(precommit, fulfillment) {
         return Err(NotEstablished::NotThisExercise(
@@ -356,7 +356,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
 
     // FulfillmentConformance over the evidence, recomputed here (R7).
     if reads.conformance.precommit.body != *precommit
-        || reads.conformance.preimage != exercise.preimage
+        || reads.conformance.preimage != *exercise.preimage()
     {
         return Err(NotEstablished::NotThisExercise(
             "the conformance evidence is of another operation",
@@ -364,7 +364,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     }
     let conformance = match fulfillment_conformance(
         fulfillment,
-        &exercise.fulfillment.signature,
+        &exercise.fulfillment().signature,
         reads.conformance,
     ) {
         Ok(verdict) => verdict.verdict(),
@@ -372,7 +372,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     };
 
     // RouteValidation over the evidence, recomputed here (R5).
-    let validation = match route_validation(precommit, &exercise.preimage, reads.evidence) {
+    let validation = match route_validation(precommit, exercise.preimage(), reads.evidence) {
         Ok(validation) => validation,
         Err(missing) => return Err(NotEstablished::RouteEvidence(vec![missing])),
     };
@@ -383,7 +383,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     // positively, so a vault missing here is `Unavailable` and never
     // `Orphaned`.
     let generations: BTreeMap<D32, u64> =
-        match vault_post_states(precommit, &exercise.preimage, reads.evidence) {
+        match vault_post_states(precommit, exercise.preimage(), reads.evidence) {
             Ok(posts) => posts
                 .iter()
                 .map(|post| (*post.vault_id(), post.pre_generation()))
@@ -466,7 +466,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
         storage_resolved,
         legs,
         keys,
-        preimage: exercise.preimage.clone(),
+        preimage: exercise.preimage().clone(),
         evidence: reads.evidence.clone(),
     })
 }
@@ -486,7 +486,7 @@ mod tests {
     use crate::sofi::resolution::{resolve_position, walk, Incomplete, KeyFacts, Resolution};
     use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
     use crate::sofi::validation::trader_credits;
-    use crate::sofi::wire::{TraderFulfillmentBody, TraderPrecommitBody};
+    use crate::sofi::wire::{SofiResolutionClaim, TraderFulfillmentBody, TraderPrecommitBody};
     use crate::types::device_state::DeviceState;
 
     const OTHER_ROOT: D32 = [0x77; 32];
@@ -509,7 +509,7 @@ mod tests {
         fn legs(&self) -> Vec<LegReads<'_>> {
             self.cells
                 .iter()
-                .zip(self.exercise.precommit.body.legs())
+                .zip(self.exercise.precommit().body.legs())
                 .map(|(cell, leg)| LegReads {
                     cell,
                     chain: self.chains.get(&leg.vault_id),
@@ -531,13 +531,14 @@ mod tests {
     }
 
     /// The pair of `f`'s position, routed by `parent_root`, with the envelope
-    /// final at `K_ful(q)` and, when `with_claim`, `C_q` final at `K_root(q)`.
+    /// final at `K_ful(q)` and `root_holds` final at `K_root(q)`, which is
+    /// left open when there is none.
     fn registration_read(
         p: &TraderPrecommitBody,
         f: &TraderFulfillmentBody,
         signature: &[u8],
         parent_root: &D32,
-        with_claim: bool,
+        root_holds: Option<SofiResolutionClaim>,
     ) -> RegistrationRead {
         let cells = PositionCells::new(
             p.genesis(),
@@ -554,8 +555,8 @@ mod tests {
         let mut ful = Cell::at(cells.fulfillment());
         ful.write(&envelope, ROUTE_LEN - 1, &[]);
         let mut root = Cell::at(cells.root().routed());
-        if with_claim {
-            root.write(&derive::resolution_claim(p, f).encode(), ROUTE_LEN - 1, &[]);
+        if let Some(claim) = root_holds {
+            root.write(&claim.encode(), ROUTE_LEN - 1, &[]);
         }
         let lookup = BTreeMap::from([(derive::precommit_id(p), p.clone())]);
         fulfillment_registered(&cells, &ful.evidence(), &root.evidence(), &lookup).unwrap()
@@ -591,17 +592,9 @@ mod tests {
         prior_attempts: BTreeMap<(D32, u64), CellFact>,
     ) -> ConformanceEvidence {
         ConformanceEvidence {
-            precommit: exercise.precommit.clone(),
+            precommit: exercise.precommit().clone(),
             preimage: fx.preimage.clone(),
-            closure: fx
-                .preimage
-                .settlement()
-                .closure()
-                .refs()
-                .iter()
-                .copied()
-                .zip(exercise.closure.iter().cloned())
-                .collect(),
+            closure: exercise.closure_objects(),
             setups: fx.evidence.setups.clone(),
             prior_attempts,
             parent_fulfillment: None,
@@ -618,9 +611,12 @@ mod tests {
         let registration = registration_read(
             &built.precommit,
             &built.fulfillment,
-            &exercise.fulfillment.signature,
+            &exercise.fulfillment().signature,
             built.precommit.void_root(),
-            true,
+            Some(derive::resolution_claim(
+                &built.precommit,
+                &built.fulfillment,
+            )),
         );
         let cells = built
             .precommit
@@ -694,8 +690,8 @@ mod tests {
     fn a_consumed_route_is_established_from_its_reads_and_installs_the_realize_root() {
         let (fx, r) = reads(1, &[0]);
         let facts = r.establish(&r.legs()).expect("every read decides");
-        let p = &r.exercise.precommit.body;
-        let f = &r.exercise.fulfillment.body;
+        let p = &r.exercise.precommit().body;
+        let f = &r.exercise.fulfillment().body;
         assert_eq!(facts.fulfillment_id(), &derive::fulfillment_id(f));
         assert_eq!(facts.external_commitment(), p.external_commitment());
         assert!(facts.registered);
@@ -758,8 +754,8 @@ mod tests {
     #[test]
     fn reads_of_another_position_or_key_establish_nothing() {
         let (_, r) = reads(1, &[0]);
-        let p = &r.exercise.precommit.body;
-        let f = &r.exercise.fulfillment.body;
+        let p = &r.exercise.precommit().body;
+        let f = &r.exercise.fulfillment().body;
         let legs = r.legs();
 
         // The pair routed by another root is another position's pair.
@@ -767,9 +763,9 @@ mod tests {
             registration: registration_read(
                 p,
                 f,
-                &r.exercise.fulfillment.signature,
+                &r.exercise.fulfillment().signature,
                 &OTHER_ROOT,
-                true,
+                Some(derive::resolution_claim(p, f)),
             ),
             ..reads_like(&r)
         };
@@ -815,14 +811,14 @@ mod tests {
     #[test]
     fn an_unregistered_position_is_not_resolved() {
         let (_, mut r) = reads(1, &[0]);
-        let p = &r.exercise.precommit.body;
-        let f = &r.exercise.fulfillment.body;
+        let p = &r.exercise.precommit().body;
+        let f = &r.exercise.fulfillment().body;
         r.registration = registration_read(
             p,
             f,
-            &r.exercise.fulfillment.signature,
+            &r.exercise.fulfillment().signature,
             p.void_root(),
-            false,
+            None,
         );
         let facts = r.establish(&r.legs()).expect("every read decides");
         assert!(!facts.registered);
@@ -841,7 +837,7 @@ mod tests {
     #[test]
     fn a_parent_the_chain_refutes_voids_and_one_it_has_not_placed_waits() {
         let (fx, mut r) = reads(1, &[0]);
-        let vault_id = r.exercise.precommit.body.legs()[0].vault_id;
+        let vault_id = r.exercise.precommit().body.legs()[0].vault_id;
         r.chains
             .insert(vault_id, chain_naming(&fx, &vault_id, OTHER_ROOT));
         let refuted = r.establish(&r.legs()).expect("every read decides");
@@ -865,7 +861,7 @@ mod tests {
     #[test]
     fn an_open_leg_keeps_the_position_unresolved() {
         let (_, mut r) = reads(1, &[0]);
-        let leg = r.exercise.precommit.body.legs()[0];
+        let leg = r.exercise.precommit().body.legs()[0];
         r.cells = vec![cell_read(&leg.vault_id, &leg.parent_root, 0, None)];
         let facts = r.establish(&r.legs()).expect("every read decides");
         assert_eq!(facts.legs[0].cell, CellFact::Open);
@@ -901,9 +897,12 @@ mod tests {
             registration: registration_read(
                 &built.precommit,
                 &built.fulfillment,
-                &exercise.fulfillment.signature,
+                &exercise.fulfillment().signature,
                 built.precommit.void_root(),
-                true,
+                Some(derive::resolution_claim(
+                    &built.precommit,
+                    &built.fulfillment,
+                )),
             ),
             conformance: conformance_evidence(&fx, &exercise, prior),
             evidence: fx.evidence.clone(),
@@ -981,8 +980,8 @@ mod tests {
     #[test]
     fn a_refuted_position_is_bound_to_its_exercise_and_its_registration() {
         let (_, r) = reads(1, &[0]);
-        let p = &r.exercise.precommit.body;
-        let f = &r.exercise.fulfillment.body;
+        let p = &r.exercise.precommit().body;
+        let f = &r.exercise.fulfillment().body;
         let refutation = InHandRefutation {
             external_commitment: *p.external_commitment(),
             fulfillment_id: derive::fulfillment_id(f),
@@ -1004,8 +1003,13 @@ mod tests {
             Established::refuted(&r.exercise, &other, &r.registration),
             Err(NotEstablished::NotThisExercise(..))
         ));
-        let elsewhere =
-            registration_read(p, f, &r.exercise.fulfillment.signature, &OTHER_ROOT, true);
+        let elsewhere = registration_read(
+            p,
+            f,
+            &r.exercise.fulfillment().signature,
+            &OTHER_ROOT,
+            Some(derive::resolution_claim(p, f)),
+        );
         assert!(matches!(
             Established::refuted(&r.exercise, &refutation, &elsewhere),
             Err(NotEstablished::NotThisExercise(..))
@@ -1013,9 +1017,9 @@ mod tests {
         let unregistered = registration_read(
             p,
             f,
-            &r.exercise.fulfillment.signature,
+            &r.exercise.fulfillment().signature,
             p.void_root(),
-            false,
+            None,
         );
         let Established::RefutedInHand(position) =
             Established::refuted(&r.exercise, &refutation, &unregistered).unwrap()

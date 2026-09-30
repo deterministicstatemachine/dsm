@@ -3379,6 +3379,108 @@ mod tests {
         assert_eq!(folded, first.child_r_a);
     }
 
+    /// A relationship's leaf holds that relationship's current head, and the
+    /// device root authenticates it there: `h_0` once established, then each
+    /// step's new tip. The proof each earlier head had, as the device state
+    /// of its time produced it, proves nothing under the root after the
+    /// relationship moves on (MR-DSM-0116, MR-DSM-0121).
+    #[test]
+    fn a_relationships_leaf_holds_its_current_head() {
+        use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
+
+        fn holds_only_its_current_head(
+            head: &DeviceState,
+            rk: &[u8; 32],
+            earlier: &[SmtInclusionProof],
+        ) -> SmtInclusionProof {
+            let tip = head
+                .chain_tip(rk)
+                .expect("an established relationship has a head");
+            let proof = head.rel_inclusion_proof(rk).expect("a path for the leaf");
+            assert_eq!(proof.value, Some(tip), "the leaf holds the current head");
+            assert!(SparseMerkleTree::verify_proof_against_root(
+                &proof,
+                &head.root()
+            ));
+            for past in earlier {
+                assert!(
+                    !SparseMerkleTree::verify_proof_against_root(past, &head.root()),
+                    "the proof of a head the relationship has moved past proves nothing"
+                );
+            }
+            proof
+        }
+
+        let dev = fresh_device(0x73);
+        let cp = devid(0x74);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let mut head = dev.establish_relationship(cp).expect("establish");
+        let mut proofs = vec![holds_only_its_current_head(&head, &rk, &[])];
+        for _ in 0..2 {
+            head = head
+                .advance(rk, cp, op(), &[], None, None)
+                .expect("a step on the relationship")
+                .new_device_state;
+            let proof = holds_only_its_current_head(&head, &rk, &proofs);
+            proofs.push(proof);
+        }
+    }
+
+    /// The device tree has no capacity: every relationship the device
+    /// establishes stays in its root, however many follow it (MR-DSM-0116,
+    /// MR-DSM-0121). The tree once held 1,024 leaves and evicted the oldest
+    /// past that; this device holds its own relationship and 1,025 more.
+    /// Every key and every `h_0` is derived by `establish_relationship`; the
+    /// counterparty ids are the test's only input.
+    #[test]
+    fn every_relationship_stays_in_the_root_past_the_old_capacity() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        let dev = fresh_device(0x75);
+        let counterparties: Vec<[u8; 32]> = (0u16..1_025)
+            .map(|i| {
+                let mut id = devid(0x76);
+                id[..2].copy_from_slice(&i.to_be_bytes());
+                id
+            })
+            .collect();
+        let mut head = dev.clone();
+        for cp in &counterparties {
+            head = head.establish_relationship(*cp).expect("establish");
+        }
+
+        let own = compute_smt_key(&dev.devid, &dev.devid);
+        let heads: Vec<([u8; 32], [u8; 32])> = std::iter::once(own)
+            .chain(
+                counterparties
+                    .iter()
+                    .map(|cp| compute_smt_key(&dev.devid, cp)),
+            )
+            .map(|rk| {
+                (
+                    rk,
+                    head.chain_tip(&rk)
+                        .expect("every relationship keeps its head"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            &head.root(),
+            SparseMerkleTree::from_leaves(heads.iter().copied()).root(),
+            "the root commits every relationship the device established"
+        );
+        let first = compute_smt_key(&dev.devid, &counterparties[0]);
+        let proof = head
+            .rel_inclusion_proof(&first)
+            .expect("a path for the leaf");
+        assert_eq!(proof.value, head.chain_tip(&first));
+        assert!(SparseMerkleTree::verify_proof_against_root(
+            &proof,
+            &head.root()
+        ));
+    }
+
     // ─────────────────────────────────────────────────────────────
     // Closing a vault: the complete reserve set returns, exactly once
     // ─────────────────────────────────────────────────────────────

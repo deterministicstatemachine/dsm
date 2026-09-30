@@ -481,7 +481,7 @@ fn reaimed(
     parent_root: &[u8; 32],
     sign: &dyn Fn([u8; 32]) -> Vec<u8>,
 ) -> SofiExercise {
-    let p = &honest.precommit.body;
+    let p = &honest.precommit().body;
     let legs: Vec<PrecommitLeg> = p
         .legs()
         .iter()
@@ -508,7 +508,7 @@ fn reaimed(
         p.claimant_public_key(),
     )
     .expect("a well-formed P");
-    let canonical = derive::canonical_legs(&honest.preimage).expect("P(E) derives its legs");
+    let canonical = derive::canonical_legs(honest.preimage()).expect("P(E) derives its legs");
     let shadows: Vec<[u8; 32]> = precommit
         .legs()
         .iter()
@@ -527,7 +527,7 @@ fn reaimed(
         .map(derive::policy_fulfillment_id)
         .collect();
     ids.sort();
-    let f = &honest.fulfillment.body;
+    let f = &honest.fulfillment().body;
     let attempts: Vec<AttemptEntry> = f
         .attempts()
         .iter()
@@ -564,12 +564,12 @@ fn reaimed(
         }
         .object_bytes()
         .expect("a P envelope"),
-        honest.preimage.encode().expect("P(E) bytes"),
+        honest.preimage().encode().expect("P(E) bytes"),
         witnesses
             .iter()
             .map(DlvPolicyFulfillmentBody::encode)
             .collect(),
-        honest.closure.clone(),
+        honest.closure().to_vec(),
     )
     .expect("an exercise")
 }
@@ -618,11 +618,11 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     let recognized = recognize_exercise(&hostile.encode())
         .expect("the re-aimed bytes are one operation's exercise");
     let refuted = conformance_invalid_in_hand(
-        &recognized.precommit,
-        &recognized.fulfillment.body,
-        &recognized.fulfillment.signature,
-        &recognized.preimage,
-        &recognized.closure,
+        recognized.precommit(),
+        &recognized.fulfillment().body,
+        &recognized.fulfillment().signature,
+        recognized.preimage(),
+        recognized.closure(),
     );
     assert!(
         matches!(
@@ -642,7 +642,7 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     assert_eq!(
         held.fact(),
         CellFact::Held {
-            id: recognized.external_commitment,
+            id: *recognized.external_commitment(),
             state: ChainState::Final,
         },
         "the re-aimed exercise holds the next generation's first key, final"
@@ -702,8 +702,8 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         .expect("decided")
         .into_exercise()
         .expect("B's second exercise holds the next key");
-    assert_eq!(next.fulfillment.body.position(), q2);
-    assert_eq!(next.fulfillment.body.attempts()[0].attempt, 1);
+    assert_eq!(next.fulfillment().body.position(), q2);
+    assert_eq!(next.fulfillment().body.attempts()[0].attempt, 1);
     let out2 = dsm::dlv::route_commit::constant_product_output(10, 110, 1_000 - out1, 30)
         .expect("the vault prices the second trade");
     assert_eq!(balance(&p.b, &m.era), 180);
@@ -757,7 +757,7 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
         .expect("decided")
         .into_exercise()
         .expect("B's second exercise holds the first key at R1");
-    assert_eq!(second.fulfillment.body.position(), q2);
+    assert_eq!(second.fulfillment().body.position(), q2);
     assert_eq!(balance(&p.b, &m.era), 180);
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
