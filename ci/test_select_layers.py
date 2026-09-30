@@ -61,8 +61,22 @@ class Selector(unittest.TestCase):
         self.assertEqual(layers, {"STORAGE", "SDK_NODE_PROTOCOL"})
         self.assertEqual(groups(layers), {"sdk-node-protocol", "workspace-rest"})
         run = next(g["run"] for g in sl.rust_matrix(CFG, layers) if g["group"] == "sdk-node-protocol")
-        self.assertIn("handlers::storage_routes", run)
-        self.assertIn("--test b0x_integration", run)
+        for module in CFG["sdk_node_protocol"]["lib_filters"]:
+            self.assertIn(module, run)
+        self.assertEqual(run.count("cargo test"), 1, run)
+
+    def test_every_named_sdk_suite_is_a_module_that_exists(self):
+        # A cargo test filter that matches nothing runs nothing and passes, so
+        # a name left behind by a deleted module narrows STORAGE's coverage
+        # without a signal. Each name must resolve to a module of the library.
+        root = Path(__file__).resolve().parent.parent
+        src = root / "dsm_client/deterministic_state_machine/dsm_sdk/src"
+        for module in CFG["sdk_node_protocol"]["lib_filters"]:
+            path = src.joinpath(*module.split("::"))
+            self.assertTrue(
+                path.with_suffix(".rs").is_file() or (path / "mod.rs").is_file(),
+                f"{module} names no module of dsm_sdk",
+            )
 
     def test_storage_plus_sdk_runs_full_sdk_not_the_narrow_group(self):
         layers, _ = sel(["dsm_storage_node/src/main.rs", SDK + "sdk/token_sdk.rs"])
