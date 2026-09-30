@@ -41,9 +41,7 @@ pub mod unified_error;
 pub use contact_types::DsmVerifiedContact;
 pub use identifiers::{Entropy, GenesisHash, NodeId, SessionId, Signature, TransactionId, VaultId}; // New type-safe identifiers
 pub use policy_types::{PolicyAnchor, PolicyFile, TokenPolicy};
-pub use receipt_types::{
-    ParentConsumptionTracker, ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,
-};
+pub use receipt_types::StitchedReceiptV2;
 // `pub use state_types::State` removed: no consumer imports via this short
 // path. All remaining consumers spell out `types::state_types::State`.
 // The State struct is being decomposed into DeviceState + RelationshipChainState

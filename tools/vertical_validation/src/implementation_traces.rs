@@ -29,15 +29,11 @@ use dsm::emissions::{
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
 use dsm::types::operations::{Operation, TransactionMode};
-use dsm::types::receipt_types::{
-    ParentConsumptionTracker, ReceiptVerificationContext, StitchedReceiptV2,
-};
 use dsm::types::token_types::Balance;
 use dsm::vault::{DLVManager, FulfillmentMechanism, VaultState};
-use dsm::verification::receipt_verification::verify_stitched_receipt;
 
 use crate::live_device::{
-    connect, faucet_claim, stitched_receipt, verification_context, LiveDevice,
+    commit, connect, faucet_claim, marked, Decision, LiveDevice, Stage, Step,
 };
 
 const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
@@ -116,7 +112,7 @@ pub fn collect_named_implementation_trace_results(
     }
 }
 
-fn implementation_trace_catalog() -> [(&'static str, TraceFn); 16] {
+fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
     [
         (
             "state_machine_transfer_chain",
@@ -138,11 +134,7 @@ fn implementation_trace_catalog() -> [(&'static str, TraceFn); 16] {
             "bilateral_precomputed_finalize_hash",
             trace_bilateral_precomputed_finalize_hash,
         ),
-        (
-            "tripwire_parent_consumption",
-            trace_tripwire_parent_consumption,
-        ),
-        ("receipt_verifier_tripwire", trace_receipt_verifier_tripwire),
+        ("receiver_tripwire", trace_receiver_tripwire),
         (
             "tripwire_first_contact_binding",
             trace_tripwire_first_contact_binding,
@@ -342,7 +334,7 @@ fn trace_state_machine_fork_divergence(
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
-    let (alice, bob) = trace_pair("fork");
+    let (mut alice, mut bob) = trace_pair("fork");
     let parent_tip = alice.tip_with(&bob).expect("established");
 
     let op_a = alice.transfer(&bob, 1, &[1; 8]).expect("transfer a");
@@ -356,25 +348,32 @@ fn trace_state_machine_fork_divergence(
             if pair_a.1 == pair_b.1 {
                 failures.push("different operations produced the same child tip".into());
             }
-            let receipt_a = stitched_receipt(&alice, &bob, &child_a).expect("receipt a");
-            let receipt_b = stitched_receipt(&alice, &bob, &child_b).expect("receipt b");
-            let ctx_a = verification_context(&alice, &bob, alice.head.root(), &op_a);
-            let ctx_b = verification_context(&alice, &bob, alice.head.root(), &op_b);
-            let mut tracker = ParentConsumptionTracker::new();
-            match verify_stitched_receipt(&receipt_a, &ctx_a, &mut tracker) {
-                Ok(a) if a.valid => {}
-                Ok(a) => failures.push(format!(
-                    "the first child was refused: {}",
-                    a.reason.unwrap_or_default()
-                )),
-                Err(e) => failures.push(format!("verifier error: {e}")),
-            }
-            match verify_stitched_receipt(&receipt_b, &ctx_b, &mut tracker) {
-                Ok(a) if a.valid => {
-                    failures.push("the second child of one parent was accepted".into())
+            // The receiver takes one of two children of its tip.
+            let step_a = alice.propose(&bob, op_a.clone());
+            let step_b = alice.propose(&bob, op_b.clone());
+            match (step_a, step_b) {
+                (Ok(step_a), Ok(step_b)) => {
+                    match bob.decide(&alice, &step_a) {
+                        Decision::Accepted(verified) => {
+                            if let Err(e) = commit(&mut alice, &mut bob, step_a, &verified) {
+                                failures.push(format!("the first child did not commit: {e}"));
+                            }
+                        }
+                        other => failures.push(format!("the first child was refused: {other}")),
+                    }
+                    match bob.decide(&alice, &step_b) {
+                        Decision::Accepted(_) => {
+                            failures.push("the second child of one tip was accepted".into())
+                        }
+                        Decision::StaleTip => {}
+                        other => failures.push(format!(
+                            "the second child was refused for another reason: {other}"
+                        )),
+                    }
                 }
-                Ok(_) => {}
-                Err(e) => failures.push(format!("verifier error: {e}")),
+                (Err(e), _) | (_, Err(e)) => {
+                    failures.push(format!("a step could not be proposed: {e}"))
+                }
             }
         }
         (Err(e), _) | (_, Err(e)) => failures.push(format!("advance refused: {e}")),
@@ -910,139 +909,91 @@ fn trace_token_manager_overspend_rejection(
     }
 }
 
-fn trace_tripwire_parent_consumption(
+/// The receiver's decision on `step`, reported as a trace failure message
+/// when it does not match `want`: `None` for accepted, `Some(needle)` for a
+/// refusal whose reason holds `needle` ("stale tip" for a stale tip).
+fn expect_decision(
+    failures: &mut Vec<String>,
+    label: &str,
+    receiver: &LiveDevice,
+    sender: &LiveDevice,
+    step: &Step,
+    want: Option<&str>,
+) -> Option<dsm::bilateral::offline::VerifiedConfirm> {
+    match (receiver.decide(sender, step), want) {
+        (Decision::Accepted(verified), None) => return Some(verified),
+        (Decision::Accepted(_), Some(_)) => failures.push(format!("{label}: ACCEPTED")),
+        (Decision::StaleTip, Some("stale tip")) => {}
+        (decided, Some(needle))
+            if decided
+                .refusal_at(Stage::Prepare)
+                .or(decided.refusal_at(Stage::Confirm))
+                .is_some_and(|e| e.to_string().contains(needle)) => {}
+        (other, want) => failures.push(format!("{label}: {other}, wanted {want:?}")),
+    }
+    None
+}
+
+fn trace_receiver_tripwire(
     _seed_bytes: &[u8; 32],
     _pk: &[u8],
     _sk: &[u8],
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
-    let mut tracker = ParentConsumptionTracker::new();
+    let (mut alice, mut bob) = trace_pair("receiver-tripwire");
 
-    let parent = [0x71; 32];
-    let child_a = [0x72; 32];
-    let child_b = [0x73; 32];
-
-    if let Err(e) = tracker.try_consume(parent, child_a) {
-        failures.push(format!("fresh parent rejected unexpectedly: {e}"));
-    }
-
-    match tracker.try_consume(parent, child_a) {
-        Ok(()) => failures.push("replay was accepted by parent-consumption tracker".into()),
-        Err(e) => {
-            let msg = format!("{e}");
-            if !msg.contains("replay detected") {
-                failures.push(format!("replay rejection message was too weak: {msg}"));
-            }
+    let step_a = alice.propose(&bob, marked(0xA1)).expect("step a");
+    let step_b = alice.propose(&bob, marked(0xB1)).expect("step b");
+    let replayed = step_a.clone();
+    let successor = step_a.successor_tip;
+    if let Some(verified) = expect_decision(&mut failures, "the step", &bob, &alice, &step_a, None)
+    {
+        if let Err(e) = commit(&mut alice, &mut bob, step_a, &verified) {
+            failures.push(format!("the step did not commit: {e}"));
         }
     }
-
-    match tracker.try_consume(parent, child_b) {
-        Ok(()) => failures.push("fork child was accepted by parent-consumption tracker".into()),
-        Err(e) => {
-            let msg = format!("{e}");
-            if !msg.contains("Fork detected") {
-                failures.push(format!("fork rejection message was too weak: {msg}"));
-            }
-        }
+    if alice.shared_tip_with(&bob) != Some(successor)
+        || bob.shared_tip_with(&alice) != Some(successor)
+    {
+        failures.push("the two devices do not hold the committed successor".into());
     }
-
-    if tracker.get_child(&parent) != Some(&child_a) {
-        failures.push("canonical child mapping was overwritten after fork attempt".into());
-    }
-
-    ImplementationTraceResult {
-        trace_name: "tripwire_parent_consumption".into(),
-        steps: 3,
-        passed: failures.is_empty(),
-        failures,
-        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-    }
-}
-
-/// The verifier's reason for refusing `receipt`, or `None` if it accepted.
-fn refusal(
-    receipt: &StitchedReceiptV2,
-    ctx: &ReceiptVerificationContext,
-    tracker: &mut ParentConsumptionTracker,
-) -> Result<Option<String>, String> {
-    match verify_stitched_receipt(receipt, ctx, tracker) {
-        Ok(a) if a.valid => Ok(None),
-        Ok(a) => Ok(Some(a.reason.unwrap_or_default())),
-        Err(e) => Err(format!("verifier error: {e}")),
-    }
-}
-
-fn trace_receipt_verifier_tripwire(
-    _seed_bytes: &[u8; 32],
-    _pk: &[u8],
-    _sk: &[u8],
-) -> ImplementationTraceResult {
-    let start = Instant::now();
-    let mut failures = Vec::new();
-    let (alice, bob) = trace_pair("receipt-tripwire");
-    let root = alice.head.root();
-    let mut tracker = ParentConsumptionTracker::new();
-
-    let op_a = alice.transfer(&bob, 5, &[0xA1; 8]).expect("transfer a");
-    let op_b = alice.transfer(&bob, 6, &[0xB1; 8]).expect("transfer b");
-    let child_a = alice.send(&bob, &op_a).expect("advance a");
-    let child_b = alice.send(&bob, &op_b).expect("advance b");
-    let receipt_a = stitched_receipt(&alice, &bob, &child_a).expect("receipt a");
-    let receipt_b = stitched_receipt(&alice, &bob, &child_b).expect("receipt b");
-
-    let mut expect = |label: &str,
-                      receipt: &StitchedReceiptV2,
-                      op: &dsm::types::operations::Operation,
-                      want: Option<&str>| match (
-        refusal(
-            receipt,
-            &verification_context(&alice, &bob, root, op),
-            &mut tracker,
-        ),
-        want,
-    ) {
-        (Ok(None), None) => {}
-        (Ok(None), Some(_)) => failures.push(format!("{label}: ACCEPTED")),
-        (Ok(Some(reason)), None) => failures.push(format!("{label}: refused: {reason}")),
-        (Ok(Some(reason)), Some(needle)) if reason.contains(needle) => {}
-        (Ok(Some(reason)), Some(needle)) => {
-            failures.push(format!("{label}: refused without \"{needle}\": {reason}"))
-        }
-        (Err(e), _) => failures.push(format!("{label}: {e}")),
-    };
-
-    expect("the receipt", &receipt_a, &op_a, None);
-    expect("its replay", &receipt_a, &op_a, Some("replay detected"));
-    expect(
-        "a second child of the parent",
-        &receipt_b,
-        &op_b,
-        Some("Fork detected"),
+    expect_decision(
+        &mut failures,
+        "its replay",
+        &bob,
+        &alice,
+        &replayed,
+        Some("stale tip"),
+    );
+    expect_decision(
+        &mut failures,
+        "a second child of the tip",
+        &bob,
+        &alice,
+        &step_b,
+        Some("stale tip"),
     );
 
-    // Both parties re-sign a receipt whose writes no longer fold to the
+    // The sender signs a receipt whose writes no longer fold to the
     // pre-state root: one sibling changed.
-    let mut bent = receipt_a.clone();
-    bent.step_writes[0].path.siblings[0] ^= 0x01;
-    bent.sig_a.clear();
-    bent.sig_b.clear();
-    let commitment = bent.compute_commitment().expect("commitment");
-    bent.add_sig_a(alice.keypair.sign(&commitment).expect("sig a"));
-    bent.add_sig_b(bob.keypair.sign(&commitment).expect("sig b"));
-    expect(
+    let mut bent = alice.propose(&bob, marked(0xC1)).expect("step c");
+    bent.receipt.step_writes[0].path.siblings[0] ^= 0x01;
+    let bent = bent.resigned().expect("re-signed");
+    expect_decision(
+        &mut failures,
         "a signed receipt over a bent path",
+        &bob,
+        &alice,
         &bent,
-        &op_a,
         Some("do not fold to the claimed pre-root"),
     );
-
-    if tracker.get_child(&receipt_a.parent_tip) != Some(&receipt_a.child_tip) {
-        failures.push("the tracker lost the accepted child after the fork attempt".into());
+    if bob.shared_tip_with(&alice) != Some(successor) {
+        failures.push("a refused step moved the receiver's tip".into());
     }
 
     ImplementationTraceResult {
-        trace_name: "receipt_verifier_tripwire".into(),
+        trace_name: "receiver_tripwire".into(),
         steps: 4,
         passed: failures.is_empty(),
         failures,
@@ -1057,58 +1008,62 @@ fn trace_tripwire_first_contact_binding(
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
-    let (mut alice, bob) = trace_pair("first-contact");
-    let h0 = alice.tip_with(&bob).expect("established");
-    let mut tracker = ParentConsumptionTracker::new();
+    let (mut alice, mut bob) = trace_pair("first-contact");
+    let h0 = bob.shared_tip_with(&alice).expect("established");
+    if alice.shared_tip_with(&bob) != Some(h0) {
+        failures.push("the two devices do not hold one h_0".into());
+    }
 
-    // First contact: the relationship's first step extends h_0, which the
-    // advance seeds into the tree, so its parent path carries h_0.
-    let root0 = alice.head.root();
-    let first_op = alice.transfer(&bob, 3, &[0x51; 8]).expect("transfer");
-    let first = alice.send(&bob, &first_op).expect("first step");
-    let alternate_op = alice.transfer(&bob, 4, &[0x52; 8]).expect("transfer");
+    // First contact: the relationship's first step extends h_0; an
+    // alternate first step extends it too.
+    let first = alice.propose(&bob, marked(0x51)).expect("first step");
     let alternate = alice
-        .send(&bob, &alternate_op)
+        .propose(&bob, marked(0x52))
         .expect("alternate first step");
-    let first_receipt = stitched_receipt(&alice, &bob, &first).expect("first receipt");
-    let alternate_receipt = stitched_receipt(&alice, &bob, &alternate).expect("alternate receipt");
-    if first_receipt.parent_tip != h0 {
-        failures.push("the first step does not extend the relationship's h_0".into());
+    if first.expected_tip != h0 || alternate.expected_tip != h0 {
+        failures.push("a first step does not extend the relationship's h_0".into());
     }
-    alice.install(first);
-
-    let root1 = alice.head.root();
-    let extension_op = alice.transfer(&bob, 5, &[0x53; 8]).expect("transfer");
-    let extension = alice.send(&bob, &extension_op).expect("extension step");
-    let extension_receipt = stitched_receipt(&alice, &bob, &extension).expect("extension receipt");
-
-    let first_ctx = verification_context(&alice, &bob, root0, &first_op);
-    let extension_ctx = verification_context(&alice, &bob, root1, &extension_op);
-    let alternate_ctx = verification_context(&alice, &bob, root0, &alternate_op);
-    match refusal(&first_receipt, &first_ctx, &mut tracker) {
-        Ok(None) => {}
-        Ok(Some(r)) => failures.push(format!("the first-contact receipt was refused: {r}")),
-        Err(e) => failures.push(e),
-    }
-    match refusal(&extension_receipt, &extension_ctx, &mut tracker) {
-        Ok(None) => {}
-        Ok(Some(r)) => failures.push(format!("the extension was refused: {r}")),
-        Err(e) => failures.push(e),
-    }
-    match refusal(&alternate_receipt, &alternate_ctx, &mut tracker) {
-        Ok(None) => failures.push("an alternate first-contact branch was accepted".into()),
-        Ok(Some(r)) if r.contains("Fork detected") => {}
-        Ok(Some(r)) => failures.push(format!(
-            "the alternate branch was refused without a fork: {r}"
-        )),
-        Err(e) => failures.push(e),
+    let first_successor = first.successor_tip;
+    if let Some(verified) = expect_decision(
+        &mut failures,
+        "the first-contact step",
+        &bob,
+        &alice,
+        &first,
+        None,
+    ) {
+        if let Err(e) = commit(&mut alice, &mut bob, first, &verified) {
+            failures.push(format!("the first-contact step did not commit: {e}"));
+        }
     }
 
-    if tracker.get_child(&h0) != Some(&first_receipt.child_tip) {
-        failures.push("first contact did not bind h_0 to the accepted first child".into());
+    let extension = alice.propose(&bob, marked(0x53)).expect("extension step");
+    if extension.expected_tip != first_successor {
+        failures.push("the extension does not extend the first step's successor".into());
     }
-    if tracker.get_child(&first_receipt.child_tip) != Some(&extension_receipt.child_tip) {
-        failures.push("the extension did not anchor on the accepted child".into());
+    let extension_successor = extension.successor_tip;
+    if let Some(verified) = expect_decision(
+        &mut failures,
+        "the extension",
+        &bob,
+        &alice,
+        &extension,
+        None,
+    ) {
+        if let Err(e) = commit(&mut alice, &mut bob, extension, &verified) {
+            failures.push(format!("the extension did not commit: {e}"));
+        }
+    }
+    expect_decision(
+        &mut failures,
+        "an alternate first-contact branch",
+        &bob,
+        &alice,
+        &alternate,
+        Some("stale tip"),
+    );
+    if bob.shared_tip_with(&alice) != Some(extension_successor) {
+        failures.push("the receiver does not hold the extension's successor".into());
     }
 
     ImplementationTraceResult {
@@ -1968,8 +1923,12 @@ mod tests {
     }
 
     #[test]
-    fn receipt_verifier_tripwire_trace_passes() {
-        let result = trace_receipt_verifier_tripwire(&[0u8; 32], &[], &[]);
+    fn receiver_tripwire_trace_passes() {
+        let seed = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE,
+            b"receiver-tripwire-trace",
+        );
+        let result = trace_receiver_tripwire(&seed, &[], &[]);
         assert!(result.passed, "{}", result.failures.join("; "));
     }
 

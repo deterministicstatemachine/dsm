@@ -401,8 +401,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![
-                    "tripwire_parent_consumption".into(),
-                    "receipt_verifier_tripwire".into(),
+                    "receiver_tripwire".into(),
                     "tripwire_first_contact_binding".into(),
                     "bilateral_precommit_tripwire".into(),
                     "bilateral_precomputed_finalize_hash".into(),

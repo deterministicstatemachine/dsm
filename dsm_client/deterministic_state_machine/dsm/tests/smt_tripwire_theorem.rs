@@ -22,12 +22,18 @@
 use std::collections::HashSet;
 
 use dsm::common::device_tree::DeviceTree;
-use dsm::core::bilateral_transaction_manager::{compute_smt_key, compute_successor_tip};
+use dsm::bilateral::identity_binding::binding_digest;
+use dsm::bilateral::offline::{
+    decide_prepare, PeerCredentials, PinnedPeer, PrepareClaims, PrepareDecision,
+};
+use dsm::core::bilateral_transaction_manager::{
+    bilateral_sign_message, compute_smt_key, compute_successor_tip, BilateralPreCommitment,
+};
+use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
 use dsm::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher};
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::merkle::sparse_merkle_tree::ZERO_LEAF;
 use dsm::types::operations::{Operation, TransactionMode};
-use dsm::types::receipt_types::ParentConsumptionTracker;
 use dsm::types::token_types::Balance;
 use dsm::merkle::batch_fold::{verify_batch, FoldEntry};
 use dsm::merkle::sparse_merkle_tree::{hash_smt_leaf, hash_smt_node, DeviceSmtHashes};
@@ -185,25 +191,69 @@ fn theorem2_two_successors_same_parent_rejected() {
     // Second (forked) transfer from SAME h_0: different amount.
     let entropy2 = [0xBBu8; 32];
     let receipt_digest2 = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &[0x02; 32]);
-    let (_op2, op2_bytes) = make_transfer_op(&bob.device_id, 200);
+    let (op2, op2_bytes) = make_transfer_op(&bob.device_id, 200);
     let h_1_prime = compute_successor_tip(&h_0, &op2_bytes, &entropy2, &receipt_digest2);
 
     // Different operations from the same parent produce different successor tips.
     assert_ne!(h_1, h_1_prime, "forked tips must differ");
 
-    // ParentConsumptionTracker enforces single-use.
-    let mut tracker = ParentConsumptionTracker::new();
-    tracker
-        .try_consume(h_0, h_1)
-        .expect("first consumption must succeed");
-
-    // Attempting to consume h_0 again with a different child must fail (fork detected).
-    let err = tracker.try_consume(h_0, h_1_prime);
-    assert!(err.is_err(), "second consumption must be rejected (fork)");
-    let msg = format!("{}", err.unwrap_err());
+    // Production's receiver decides a proposal against the relationship tip it
+    // holds (Core's `decide_prepare`). Once the first child has committed it
+    // holds h_1, and the second child — which extends h_0 — is refused as a
+    // stale tip. While it holds h_0, the same proposal is considered: the
+    // refusal is the held tip's, not the proposal's.
+    let (kyber_pk, _kyber_sk) =
+        generate_kyber_keypair_from_entropy(&[0x5A; 32], "tripwire-theorem").unwrap();
+    let binding_sig = alice
+        .keypair
+        .sign(&binding_digest(
+            &alice.device_id,
+            &alice.genesis_hash,
+            &kyber_pk,
+        ))
+        .unwrap();
+    let commitment = BilateralPreCommitment::new(h_0, op2.clone()).bilateral_commitment_hash;
+    let signature = alice
+        .keypair
+        .sign(&bilateral_sign_message(&commitment))
+        .unwrap();
+    let pinned = PinnedPeer {
+        device_id: alice.device_id,
+        genesis: alice.genesis_hash,
+        signing_key: &alice.keypair.public_key,
+        kyber_public_key: &kyber_pk,
+    };
+    let claims = PrepareClaims {
+        addressed_to: &bob.device_id,
+        expected_tip: Some(h_0),
+        credentials: PeerCredentials {
+            signing_key: &alice.keypair.public_key,
+            kyber_public_key: &kyber_pk,
+            kyber_binding_sig: &binding_sig,
+        },
+        signature: &signature,
+    };
+    let decide = |held| {
+        decide_prepare(
+            commitment,
+            &op2,
+            claims,
+            &pinned,
+            &bob.device_id,
+            held,
+            None,
+        )
+        .expect("the proposal is authenticated")
+    };
+    let refused = decide(h_1);
     assert!(
-        msg.contains("Fork detected"),
-        "error must mention fork; got: {msg}"
+        matches!(refused, PrepareDecision::StaleTip { held, .. } if held == h_1),
+        "the second child of h_0 must be refused once h_1 is held; got {refused:?}"
+    );
+    let considered = decide(h_0);
+    assert!(
+        matches!(considered, PrepareDecision::Consider { .. }),
+        "the same proposal is considered while h_0 is held; got {considered:?}"
     );
 }
 
@@ -638,44 +688,6 @@ fn chain_first_transaction_from_zero() {
 // ===========================================================================
 // Invariants
 // ===========================================================================
-
-#[test]
-fn parent_consumed_exactly_once() {
-    let mut tracker = ParentConsumptionTracker::new();
-
-    let parent = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_PARENT, &[0x01; 32]);
-    let child_a = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_CHILD, &[0x0A; 32]);
-    let child_b = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_CHILD, &[0x0B; 32]);
-
-    // Fresh parent: first consumption succeeds.
-    assert!(!tracker.is_consumed(&parent));
-    tracker
-        .try_consume(parent, child_a)
-        .expect("first consumption must succeed");
-    assert!(tracker.is_consumed(&parent));
-
-    // Replay (same child): must fail.
-    assert!(
-        tracker.try_consume(parent, child_a).is_err(),
-        "replay must be rejected"
-    );
-
-    // Fork (different child): must fail.
-    let fork_err = tracker.try_consume(parent, child_b);
-    assert!(fork_err.is_err(), "fork must be rejected");
-    let msg = format!("{}", fork_err.unwrap_err());
-    assert!(
-        msg.contains("Fork detected"),
-        "error must identify fork; got: {msg}"
-    );
-
-    // Recorded child is the first one.
-    assert_eq!(
-        tracker.get_child(&parent),
-        Some(&child_a),
-        "canonical child must be the first consumed"
-    );
-}
 
 #[test]
 fn balance_conservation_arithmetic() {
