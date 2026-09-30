@@ -1609,7 +1609,7 @@ resolve_position, CORE/sofi/resolution.rs:284; effect_of, :92.
 > - **The result.** The one root `q` selected — `P.realize_root` when Realized, the root authenticated at `q − 1` when Void — or Invalid, or not established yet (Amendment S3).
 > - **The claim at `K_root(q)`.** It counts only as the claim `(P, F)` derive: its two roots are the ones the resolution chooses between.
 > - **What it reads.** No private object of the trader's, and no position of the trader's other than `q` and the root the verifier authenticated at `q − 1`. It has no fallback that walks the trader's lineage.
-> - **SetupValid.** The trader's accepted claim at a setup's position (Amendments S9 and S13) is read through the trader's signed root chain (DSM Amendment A8), never by replaying the trader's transitions.
+> - **SetupValid.** The trader's accepted claim at a setup's position (Amendments S9 and S13) is read by frontier-relative verification of the trader's lineage (DSM Amendment A8), never by replaying the trader's history to genesis or recursing behind a step's one-hop evidence.
 > - **Adoption.** Where the trader's own transition requires that a realized position credit only tokens its device adopted before, that is a construction predicate of the trader's own state transition, enforced when the trader installs the realized position. Adoption is not part of frontier-relative resolution of a historical position: a later verifier resolving which root `q` selected does not re-run the trader's adoption check, and this resolution requires no adoption leaf or other private trader state.
 
 <!-- spec-section: SOFI-025 -->
