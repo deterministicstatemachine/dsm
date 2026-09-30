@@ -70,6 +70,30 @@ fn with_database(url: &str, database: &str) -> String {
     }
 }
 
+/// The database of node `index`: the one `DSM_TEST_DATABASE_URL` names,
+/// suffixed. Each node's database is dropped and created when a set boots,
+/// so a fixed name let two test runs on one server (two worktrees, two
+/// sessions) drop each other's nodes mid-test; runs whose URLs name
+/// different databases now never share a node database.
+fn node_database(index: usize) -> String {
+    let server = server_url();
+    let head = match server.split_once('?') {
+        Some((head, _)) => head,
+        None => server.as_str(),
+    };
+    let slash = head.rfind('/').expect("the database URL names no database");
+    let base = &head[slash + 1..];
+    assert!(
+        !base.is_empty()
+            && base
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+        "the database DSM_TEST_DATABASE_URL names ({base:?}) is not a lowercase SQL identifier, \
+         and every node's database is named after it"
+    );
+    format!("{base}_node_{index}")
+}
+
 /// An empty database named `database` on the server, dropped (with any
 /// connection an earlier node set left) and created.
 async fn fresh_database(database: &str) -> db::DBPool {
@@ -256,7 +280,7 @@ impl NodeSet {
         // address must be bound before any node is configured.
         let mut prepared = Vec::with_capacity(members.len());
         for (index, (member_id, pinned_incarnation)) in members.iter().enumerate() {
-            let pool = fresh_database(&format!("dsm_sdk_test_node_{index}")).await;
+            let pool = fresh_database(&node_database(index)).await;
             db::init_db(&pool).await.expect("init node db");
             restore_incarnation(&pool, pinned_incarnation).await;
             let incarnation = db::register_incarnation(&pool).await.expect("incarnation");
