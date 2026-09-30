@@ -66,8 +66,8 @@ Two independent passes produced the rows: a first pass per range, then a verific
 |---|---|---|
 | MR-SOFI-0030 | Met | Violated |
 | MR-DSM-0030 | Violated | Partial |
-| MR-STOR-0030 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::storage_contract_router` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::only_malformed_requests_are_refused`; `dsm_storage_node::immutable_store_round_trip::a_put_with_no_authorization_is_taken_on_the_served_assembly` | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The cell path conformed already; the mounted routes that authenticated writers and replaced values are gone (the §3.2 Met → Violated stands as history). |
-| MR-STOR-0109 | Missing | — | — | As MR-STOR-0100 (the §3.2 Met → Violated stands as history). |
+| MR-STOR-0030 | Met | Violated |
+| MR-STOR-0109 | Met | Violated |
 
 Where the ChatGPT findings map to rows the base already classified the same way, the rows keep their status and the finding is cited in the note: CG-01 (G2), CG-03 (MR-DSM-0041, 0042, MR-STOR-0045), CG-04 (MR-SOFI-0248, 0252, 0329; MR-STOR-0050–0054), CG-06 (G5), CG-07 (MR-STOR-0082), CG-08 (MR-DSM-0062, 0202; MR-STOR-0102–0107, 0113), CG-11 (MR-STOR-0024, 0115–0118), CG-12 (MR-STOR-0087–0091) and CG-14, which the base records under MR-STOR-0006 and 0007 (G4).
 
@@ -1685,7 +1685,16 @@ Found, not changed here:
 
 **Not driven by the tool.** A forged countersignature (σ_B) is judged by the sender's `decide_commit_ack`, which the tool does not drive; Core's `dsm::bilateral::offline::tests::an_ack_is_only_the_receivers_counter_signed_receipt` refuses it there.
 
-### 6.46 The online receiver checks a receipt's state rules before a pair binds (`fix/online-receipt-state-rules-at-ingestion`, 2026-09-30)
+### 6.46 The spool changes nothing when it is read (`test/storage-spool-reads-change-nothing`, 2026-09-30)
+
+MR-STOR-0145 was Partial with no test. The spool's tests showed it keeps every envelope, deduplicates nothing and opens nothing. But each read a spool once, from position 0, so a node that marked, hid or removed what a device had read, or served from anywhere but the position asked, passed them all. Two tests on the spool's own router, on Postgres, now read a spool the way devices do. Each was observed red under a mutation that performs what the requirement forbids.
+
+| Test | What it reads | Mutation control |
+|---|---|---|
+| `a_spool_reads_the_same_from_any_position_however_often_it_is_read` | 67 envelopes, more than one page: read whole in two pages, in the order sent, positions rising; the first page again, unchanged; from a middle position, exactly the rest; after the last, nothing | `spool_list_from_seq` deleting what it returns: red, the re-read is empty. The route passing position 0 for every read: red, the second page repeats the first. |
+| `a_device_acknowledging_what_it_read_changes_nothing` | The acknowledge, status and unpositioned-read requests #976 removed, then the spool again | The acknowledge route served again: red. The delete-on-read mutation: red. |
+
+### 6.47 The online receiver checks a receipt's state rules before a pair binds (`fix/online-receipt-state-rules-at-ingestion`, 2026-09-30)
 
 **The finding.** The online receiver bound a sender's receipt to its transfer on the child tip alone: `recipient_dispatch::binds` checked that the receipt's signed child tip is the operation's successor, and the signatures were checked before staging. Nothing checked the receipt's state rules, that its writes fold from its parent root to its child root under the sender's Device Tree root. The BLE receiver checks them (`bilateral::offline`, §6.45), and so does every producer before it signs (`StitchedReceiptV2::of_step`). MR-DSM-0092 names this step as "recompute hashes and roots".
 
@@ -1711,9 +1720,9 @@ Found, not changed here:
 | DSM high-level (MR-DSM) | 272 | 76 | 110 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 43 | 34 | 60 | 2 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 45 | 33 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **343** | **229** | **118** | **10** | **64** | **154** |
+| **All** | **918** | **345** | **228** | **119** | **8** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -1812,7 +1821,7 @@ Found, not changed here:
 | MR-DSM-0089 | Partial | dsm_storage_node · api/objects/immutable.rs::get_immutable (177-187) | no test found | Same gap as 0067 (same mechanism). |
 | MR-DSM-0090 | Not code | — | — | Fault-model assumption. |
 | MR-DSM-0091 | Not code | — | — | Dependency boundary; nothing to implement here. |
-| MR-DSM-0092 | Partial | `dsm_sdk::handlers::recipient_dispatch::recognize_transfer`; `dsm_sdk::handlers::recipient_dispatch::recognize_receipt`; `dsm_sdk::handlers::recipient_dispatch::binding`; `dsm::verification::receipt_verification::verify_receipt_state` | `dsm_sdk::handlers::recipient_dispatch::tests::a_signed_receipt_whose_state_writes_fail_binds_nothing`; `dsm_sdk::handlers::recipient_dispatch::tests::a_transfer_whose_sig_a_does_not_verify_is_recorded_nowhere`; `dsm_sdk::handlers::recipient_dispatch::tests::a_receipt_that_does_not_verify_is_recorded_nowhere` | Re-verified 2026-09-30 (§6.46); `verify_receipt_bytes` was removed in #977, and the unreached stitched verifier in #1073 (§6.45). Online, the receiver decodes each half, verifies SIG A and the receipt's `sig_a` chain, recomputes the successor tip, and, since §6.46, holds the receipt's state rules (its writes fold from its parent root to its child root) against the sender's pinned Device Tree root before a pair binds. The canonical apply then advances from the relationship tip the receiver holds. Partial: signatures are verified before hashes are recomputed, the reverse of the requirement's order; the sender's root register is read through economic admission (MR-DSM-0046), not at this boundary; and the precommitment and guard steps have nothing to check (G3). |
+| MR-DSM-0092 | Partial | `dsm_sdk::handlers::recipient_dispatch::recognize_transfer`; `dsm_sdk::handlers::recipient_dispatch::recognize_receipt`; `dsm_sdk::handlers::recipient_dispatch::binding`; `dsm::verification::receipt_verification::verify_receipt_state` | `dsm_sdk::handlers::recipient_dispatch::tests::a_signed_receipt_whose_state_writes_fail_binds_nothing`; `dsm_sdk::handlers::recipient_dispatch::tests::a_transfer_whose_sig_a_does_not_verify_is_recorded_nowhere`; `dsm_sdk::handlers::recipient_dispatch::tests::a_receipt_that_does_not_verify_is_recorded_nowhere` | Re-verified 2026-09-30 (§6.47); `verify_receipt_bytes` was removed in #977, and the unreached stitched verifier in #1073 (§6.45). Online, the receiver decodes each half, verifies SIG A and the receipt's `sig_a` chain, recomputes the successor tip, and, since §6.47, holds the receipt's state rules (its writes fold from its parent root to its child root) against the sender's pinned Device Tree root before a pair binds. The canonical apply then advances from the relationship tip the receiver holds. Partial: signatures are verified before hashes are recomputed, the reverse of the requirement's order; the sender's root register is read through economic admission (MR-DSM-0046), not at this boundary; and the precommitment and guard steps have nothing to check (G3). |
 | MR-DSM-0093 | Partial | `dsm/src/types/device_state.rs::advance` (pure, operates only on `self`); `core/state_machine/mod.rs::prepare_advance_relationship/commit_advance` | no test found | Enforced structurally (no API accepts on another device's behalf) but no named test isolates this property. |
 | MR-DSM-0094 | Not code | — | — | Liveness boundary; nothing to build. |
 | MR-DSM-0095 | Partial | `dsm/src/types/device_state.rs` (`RelationshipChainState`/`DeviceState` fields, no counter/timestamp, confirmed by reading the struct) | no test found | True by field-absence; no negative test exercises it (transition.rs's tests are off the production path). |
@@ -2382,7 +2391,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0027 | Met | `dsm::sofi::storage::stored`; `dsm::sofi::wire::STORAGE_FINALITY_COUNT` | `dsm::sofi::storage::tests::two_members_is_not_stored`; `dsm::sofi::storage::tests::stored_returns_exact_bytes` | — |
 | MR-STOR-0028 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::api::cells::put_cells` | `dsm_storage_node::cells_keep_everything::an_identical_value_put_twice_is_held_twice` | — |
 | MR-STOR-0029 | Met | `dsm_storage_node::api::cells::get_cell`; `dsm_storage_node::db::pg::get_cell_entries` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::a_key_nothing_was_put_under_reads_as_an_empty_list_with_200`; `dsm_storage_node::db::cell_properties::every_value_put_at_a_key_is_held_in_arrival_order` | The db function lives in db/pg.rs (ORDER BY seq); the tests confirm arrival order, both values kept, and an empty list under 200 for an unused key. |
-| MR-STOR-0030 | Violated | dsm_storage_node · api/cells.rs (conforms); api/objects/store.rs · `put_object`, `delete_object_proto`; db/pg.rs · `upsert_object` (`ON CONFLICT DO UPDATE`); auth/mod.rs · `device_auth` on object and b0x writes | cells_keep_everything.rs `a_second_value_at_a_key_is_kept_after_the_first_never_refused`, `only_malformed_requests_are_refused` | Reconciled Met → Violated (ChatGPT CG-09, CG-11). The cell path conforms, but mounted routes on the same node authenticate writers and replace held values. Same cause as MR-STOR-0041 (G4). |
+| MR-STOR-0030 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::storage_contract_router` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::only_malformed_requests_are_refused`; `dsm_storage_node::immutable_store_round_trip::a_put_with_no_authorization_is_taken_on_the_served_assembly` | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The cell path conformed already; the mounted routes that authenticated writers and replaced values are gone (the §3.2 Met → Violated stands as history). |
 | MR-STOR-0031 | Met | `dsm_storage_node::storage_contract_router` | `dsm_storage_node::immutable_store_round_trip::a_put_with_no_authorization_is_taken_on_the_served_assembly` | The served storage-contract assembly has no write authorization, and the cited test is its mutation control. |
 | MR-STOR-0032 | Met | `dsm_storage_node::api::cells::append_index`; `dsm_storage_node::api::cells::read_index`; `dsm_storage_node::db::pg` | `dsm_storage_node::cells_keep_everything::an_index_pages_in_append_order_from_the_last_seq` | — |
 | MR-STOR-0033 | Missing | — | — | The tip mirror (`api/identity/tips.rs`) was deleted in #977; nothing holds a per-device head (MR-DSM-0069). |
@@ -2461,7 +2470,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0106 | Missing | — | no test found | Vacuous — no credits to count. |
 | MR-STOR-0107 | Missing | — | no test found | Confirmed. |
 | MR-STOR-0108 | Partial | dsm_sdk · sdk/storage_io.rs · `write_cell_leader_first`/`CellWrite{leader_reached,copies}` | no test found (copy-count only; no 3-link chain assertion) | Payment and admission are decoupled, but "getting through" is an old copy count, not a route-chain check. |
-| MR-STOR-0109 | Violated | dsm_storage_node · api/vault/paidk.rs · `require_paidk`; callers api/objects/store.rs::`put_object`/`delete_object_proto`, api/transport/b0x.rs::`submit_b0x_envelope` | tests/paidk_gating.rs::`t_a_unpaid_device_rejected` | Reconciled Met → Violated (ChatGPT CG-10). The gate is keyed on the connected writer, not the addressed account, and reaches paths the exemption covers. Owner decision 2026-09-23: the spend gate is out of beta and is being removed; the permission is then simply unused. |
+| MR-STOR-0109 | Missing | — | — | As MR-STOR-0100 (the §3.2 Met → Violated stands as history). |
 | MR-STOR-0110 | Missing | — | — | As MR-STOR-0100. |
 | MR-STOR-0111 | Missing | — | — | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The DLV slot route and the spend gate are both gone; there is nothing to exempt. |
 | MR-STOR-0112 | Missing | — | — | As MR-STOR-0100. |
@@ -2497,7 +2506,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0142 | Met | `dsm_storage_node::db::pg::mirror_put` (ON CONFLICT DO NOTHING) | `dsm_storage_node::bytecommit_chain::a_rewritten_cycle_is_kept_beside_the_first` | Confirmed. |
 | MR-STOR-0143 | Not code | — | — | Proof obligation. G15: the existing finality tests and formal model prove the superseded copy rule and must be redone for route chains (ChatGPT CG-13). |
 | MR-STOR-0144 | Not code | — | — | Proof obligation. G15: the existing finality tests and formal model prove the superseded copy rule and must be redone for route chains (ChatGPT CG-13). |
-| MR-STOR-0145 | Partial | dsm_storage_node · api/transport/b0x.rs; db · `spool_list_from_seq` | — | Added 2026-09-23. Ack, status, expiry and the unpositioned read removed; not yet compiled. |
+| MR-STOR-0145 | Met | `dsm_storage_node::api::transport::b0x::router`; `dsm_storage_node::db::pg::spool_list_from_seq`; `dsm_storage_node::db::pg::spool_insert` | `dsm_storage_node::api::transport::b0x::tests::a_spool_reads_the_same_from_any_position_however_often_it_is_read`; `dsm_storage_node::api::transport::b0x::tests::a_device_acknowledging_what_it_read_changes_nothing`; `dsm_storage_node::api::transport::b0x::tests::an_envelope_reusing_a_message_id_is_kept_after_the_first` | Added 2026-09-23; exercised 2026-09-30 (§6.46). The spool is read only from a position, reading changes nothing, and the acknowledge, status and unpositioned-read routes #976 removed are not served. Nothing expires: a spool row holds no time, and nothing deletes one. |
 | MR-STOR-0146 | Met | `dsm_sdk::sdk::b0x_sdk::seal_for`; `dsm::crypto::spool_seal::seal` | `dsm_sdk::handlers::node_e2e_tests::a_transfer_reaches_the_nodes_only_sealed_and_arrives`; `dsm::crypto::spool_seal::tests::a_sealed_payload_opens_to_its_bytes`; `dsm::crypto::spool_seal::tests::it_opens_under_nothing_else` | Added 2026-09-23; traced 2026-09-29 (§6.39). Every SDK spool submission goes through `B0xSDK::deliver` with bytes `seal_for` made, and a node's spool holds only what its submit route receives. The node checks nothing (Amendment A3): the property is the sending device's. |
 | MR-STOR-0147 | Deferred | — | — | Added 2026-09-23. Continuing storage payment; outside beta. |
 | MR-STOR-0148 | Partial | `dsm_sdk::sdk::route_seats::write_recorded` | — | The writer starts at the leader and carries its arrival record forward, but no test shows that nothing reaches a later seat before the leader answers. |

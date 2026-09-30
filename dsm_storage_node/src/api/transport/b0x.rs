@@ -359,6 +359,148 @@ mod tests {
         assert_eq!(held, vec![short_id, junk]);
     }
 
+    /// The page the spool at `address` answers from position `from_seq`: its
+    /// entries as `(position, bytes)`, and the position after them.
+    async fn page(app: &Router, address: &str, from_seq: u64) -> (Vec<(u64, Vec<u8>)>, u64) {
+        let from = i64::try_from(from_seq).expect("a position the route takes");
+        let (status, bytes) = retrieve(app, address, from).await;
+        assert_eq!(status, HttpStatus::OK, "a page from position {from_seq}");
+        let batch =
+            dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_slice()).expect("batch");
+        let entries = batch
+            .envelopes
+            .into_iter()
+            .map(|e| (e.seq_num, e.envelope))
+            .collect();
+        (entries, batch.next_seq)
+    }
+
+    /// Storage spec §8: a spool is read from a position, and reading it
+    /// changes nothing. More envelopes than one page holds are read whole in
+    /// two pages, in the order they were sent; the first page, read again
+    /// after the second, is what it was; a read from a position in the middle
+    /// is exactly the spool from there on. A spool that marked, hid or removed
+    /// what had been read, or served from anywhere but the position asked,
+    /// fails here.
+    #[tokio::test]
+    async fn a_spool_reads_the_same_from_any_position_however_often_it_is_read() {
+        let app = spool().await;
+        let spool_key = crate::db::test_store::unique_name(0x67);
+        let page_len = usize::try_from(MAX_BATCH_RETRIEVE).expect("a page length");
+        let sent: Vec<Vec<u8>> = (0..page_len + 3)
+            .map(|_| sealed_envelope().outer.encode_to_vec())
+            .collect();
+        for body in &sent {
+            assert_eq!(
+                submit(&app, &spool_key, "application/octet-stream", body.clone()).await,
+                HttpStatus::NO_CONTENT
+            );
+        }
+
+        let (first, after_first) = page(&app, &spool_key, 0).await;
+        assert_eq!(first.len(), page_len, "a page holds {page_len} entries");
+        let (second, after_second) = page(&app, &spool_key, after_first).await;
+        let whole: Vec<(u64, Vec<u8>)> = first.iter().chain(second.iter()).cloned().collect();
+        assert_eq!(
+            whole
+                .iter()
+                .map(|(_, bytes)| bytes.clone())
+                .collect::<Vec<_>>(),
+            sent,
+            "every envelope, once, in the order it was sent"
+        );
+        assert!(
+            whole.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "positions rise in arrival order"
+        );
+        assert_eq!(after_second, whole[whole.len() - 1].0 + 1);
+
+        assert_eq!(
+            page(&app, &spool_key, 0).await,
+            (first, after_first),
+            "reading the spool marked, hid or removed something"
+        );
+
+        let middle = page_len / 2;
+        let (from_middle, after_middle) = page(&app, &spool_key, whole[middle].0).await;
+        assert_eq!(
+            from_middle,
+            whole[middle..].to_vec(),
+            "a read from a position is the spool from that position on"
+        );
+        assert_eq!(after_middle, after_second);
+
+        let end = i64::try_from(after_second).expect("a position the route takes");
+        let (status, bytes) = retrieve(&app, &spool_key, end).await;
+        assert_eq!(
+            status,
+            HttpStatus::NO_CONTENT,
+            "nothing after the last position"
+        );
+        assert!(bytes.is_empty());
+    }
+
+    /// Storage spec §8: which messages a device has consumed is the device's
+    /// own state, and a spool is served only from a position. The requests a
+    /// device once made to acknowledge what it read, to ask a message's
+    /// status and to read with no position are not served, and the spool
+    /// reads the same after them.
+    #[tokio::test]
+    async fn a_device_acknowledging_what_it_read_changes_nothing() {
+        let app = spool().await;
+        let spool_key = crate::db::test_store::unique_name(0x68);
+        let sent = sealed_envelope();
+        let body = sent.outer.encode_to_vec();
+        assert_eq!(
+            submit(&app, &spool_key, "application/octet-stream", body.clone()).await,
+            HttpStatus::NO_CONTENT
+        );
+        let (read, after_read) = page(&app, &spool_key, 0).await;
+        let batch = dsm::types::proto::SequencedBatchEnvelope {
+            envelopes: read
+                .iter()
+                .map(|(seq_num, envelope)| dsm::types::proto::SequencedEnvelope {
+                    envelope: envelope.clone(),
+                    seq_num: *seq_num,
+                })
+                .collect(),
+            next_seq: after_read,
+        };
+
+        let message_id = text_id::encode_base32_crockford(&sent.outer.message_id);
+        for (method, uri, request_body) in [
+            ("POST", "/api/v2/b0x/ack".to_string(), batch.encode_to_vec()),
+            (
+                "GET",
+                format!("/api/v2/b0x/status/{message_id}"),
+                Vec::new(),
+            ),
+            ("GET", "/api/v2/b0x/retrieve".to_string(), Vec::new()),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri.as_str())
+                .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+                .header("x-dsm-recipient", spool_key.as_str())
+                .header("x-dsm-b0x-address", spool_key.as_str())
+                .body(axum::body::Body::from(request_body))
+                .expect("a request");
+            let status = app
+                .clone()
+                .oneshot(req)
+                .await
+                .expect("the router answers")
+                .status();
+            assert_eq!(status, HttpStatus::NOT_FOUND, "{method} {uri} is served");
+        }
+
+        assert_eq!(
+            page(&app, &spool_key, 0).await,
+            (read, after_read),
+            "the spool changed after the device's requests"
+        );
+    }
+
     /// A spool nothing was sent to answers with no content.
     #[tokio::test]
     async fn an_empty_spool_answers_no_content() {
