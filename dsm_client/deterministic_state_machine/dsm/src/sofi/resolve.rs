@@ -1825,8 +1825,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         // Each vault's canonical chain, and the facts over them.
         let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
         for leg in precommit.legs() {
-            if !chains.contains_key(&leg.vault_id) {
-                chains.insert(leg.vault_id, self.chain(&leg.vault_id).map_err(read)?);
+            if let std::collections::btree_map::Entry::Vacant(slot) = chains.entry(leg.vault_id) {
+                slot.insert(self.chain(&leg.vault_id).map_err(read)?);
             }
         }
         let established = self
