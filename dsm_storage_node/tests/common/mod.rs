@@ -54,6 +54,19 @@ pub async fn fresh_store(name: &str) -> std::sync::Arc<dsm_storage_node::db::DBP
     pool
 }
 
+/// The store `fresh_store(name)` made, opened again as a restarting node
+/// opens its store: a new pool on the same database, then `init_db`.
+pub async fn reopened_store(name: &str) -> std::sync::Arc<dsm_storage_node::db::DBPool> {
+    let server = ok_or_panic(
+        std::env::var("DSM_TEST_DATABASE_URL"),
+        "DSM_TEST_DATABASE_URL must name a Postgres server",
+    );
+    let url = with_database(&server, &format!("dsm_test_{name}"));
+    let pool = std::sync::Arc::new(ok_or_panic(dsm_storage_node::db::create_pool(&url), "pool"));
+    ok_or_panic(dsm_storage_node::db::init_db(&pool).await, "init db");
+    pool
+}
+
 /// `url` with its database path replaced by `database`.
 fn with_database(url: &str, database: &str) -> String {
     let (head, query) = match url.split_once('?') {
