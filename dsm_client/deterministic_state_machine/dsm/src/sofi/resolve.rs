@@ -43,8 +43,8 @@ use super::exercise::{
     attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
 };
 use super::facts::{
-    establish, refuted_in_hand, Established, EstablishedFacts, ExerciseReads, InHandRefutation,
-    LegReads, NotEstablished,
+    establish, establish_ground, refuted_in_hand, Established, EstablishedFacts, ExerciseReads,
+    GroundFacts, GroundReads, InHandRefutation, LegReads, NotEstablished,
 };
 use super::lineage::{
     genesis_accepted, genesis_root, vault_leaves_at_genesis, AcceptedVaultGenesis, GenesisInvalid,
@@ -54,7 +54,10 @@ use super::publication::{recognize_fulfillment, recognize_setup, Signed};
 use super::registration::{
     fulfillment_completion, fulfillment_registered, PositionCells, Registration, RegistrationRead,
 };
-use super::resolution::{walk, AttemptWalk, KeyFacts, RecordedGeneration, VaultChain, WalkOutcome};
+use super::resolution::{
+    skip_without_evidence, walk, AttemptClass, AttemptWalk, KeyFacts, RecordedGeneration,
+    VaultChain, WalkOutcome,
+};
 use super::storage::{Discovered, Resolved};
 use super::validation::{
     route_validation, setup_lineage, vault_post_states, Evidence, EvidenceNeeds, Missing,
@@ -456,6 +459,9 @@ pub struct Walked {
 enum Known {
     /// Refuted by its own bytes: nothing else was read.
     RefutedInHand(InHandRefutation),
+    /// Dead on the facts that need no validation evidence (MR-SOFI-0241):
+    /// none of its validation evidence was acquired.
+    Ground(Box<GroundFacts>),
     /// The complete facts established over the reads.
     Facts(Box<EstablishedFacts>),
 }
@@ -474,8 +480,38 @@ impl KeyKnown {
     fn key_facts(&self) -> Option<KeyFacts<'_>> {
         match &self.known {
             Known::Facts(facts) => KeyFacts::of(&self.read, facts),
+            Known::Ground(ground) => KeyFacts::ground(&self.read, ground),
             Known::RefutedInHand(refutation) => KeyFacts::refuted(&self.read, refutation),
         }
+    }
+}
+
+/// What [`Verifier::read_legs`] read about one exercise before any of its
+/// validation evidence: its position's registration, and one cell and one
+/// walk per leg of `P`, in P's leg order.
+struct LegsRead {
+    registration: RegistrationRead,
+    cells: Vec<AttemptCellRead>,
+    walks: Vec<Option<AttemptWalk>>,
+}
+
+impl LegsRead {
+    /// The reads of each leg of `precommit`, with its vault's chain.
+    fn legs<'a>(
+        &'a self,
+        precommit: &TraderPrecommitBody,
+        chains: &'a BTreeMap<D32, VaultChain>,
+    ) -> Vec<LegReads<'a>> {
+        precommit
+            .legs()
+            .iter()
+            .zip(self.cells.iter().zip(self.walks.iter()))
+            .map(|(leg, (cell, walk))| LegReads {
+                cell,
+                chain: chains.get(&leg.vault_id),
+                walk: walk.as_ref(),
+            })
+            .collect()
     }
 }
 
@@ -1329,15 +1365,22 @@ impl<R: SofiReads> Verifier<'_, R> {
         recognized: &RecognizedExercise,
         registration: &RegistrationRead,
     ) -> Result<Result<Established, NotEstablished>, VerifierFailure> {
-        Ok(
-            match self.facts_of(chains, recognized, None, CHAIN_DEPTH, Some(registration))? {
-                Ok(Known::Facts(facts)) => Ok(Established::Facts(facts)),
-                Ok(Known::RefutedInHand(refutation)) => {
-                    Established::refuted(recognized, &refutation, registration)
-                }
-                Err(why) => Err(why),
-            },
-        )
+        if let Some(refutation) = refuted_in_hand(recognized) {
+            log::info!(
+                "[sofi verifier] the exercise is refuted in hand: {:?}",
+                refutation.refuted()
+            );
+            return Ok(Established::refuted(recognized, &refutation, registration));
+        }
+        let read =
+            match self.read_legs(chains, recognized, None, CHAIN_DEPTH, Some(registration))? {
+                Ok(read) => read,
+                Err(why) => return Ok(Err(why)),
+            };
+        let legs = read.legs(&recognized.precommit().body, chains);
+        Ok(self
+            .complete_facts(recognized, &read, &legs)?
+            .map(|facts| Established::Facts(Box::new(facts))))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1401,7 +1444,7 @@ impl<R: SofiReads> Verifier<'_, R> {
                         read: &read,
                         reached: &reached,
                     };
-                    match self.facts_of(chains, &exercise, Some(key), depth, None)? {
+                    match self.facts_of(chains, &exercise, key, depth)? {
                         Ok(facts) => {
                             known.insert(attempt, KeyKnown { read, known: facts });
                         }
@@ -1421,19 +1464,17 @@ impl<R: SofiReads> Verifier<'_, R> {
         }
     }
 
-    /// What is known about one exercise: refuted by its own bytes, or the
-    /// complete facts established over the reads made here. `walked` is the
-    /// key the exercise was found at, whose cell is in hand and whose
-    /// liveness the walk established by reaching it. `registration` is the
-    /// position's registration when the caller already read it; otherwise it
-    /// is read here.
+    /// What is known about the exercise found at the walked `key`: refuted by
+    /// its own bytes, dead on the facts that need no validation evidence
+    /// (MR-SOFI-0241, Amendment S14), or the complete facts established over
+    /// the reads made here. `key`'s cell is in hand, and the walk established
+    /// its liveness by reaching it.
     fn facts_of(
         &self,
         chains: &BTreeMap<D32, VaultChain>,
         exercise: &RecognizedExercise,
-        walked: Option<WalkedKey<'_>>,
+        key: WalkedKey<'_>,
         depth: usize,
-        registration: Option<&RegistrationRead>,
     ) -> Result<Result<Known, NotEstablished>, VerifierFailure> {
         if let Some(refutation) = refuted_in_hand(exercise) {
             log::info!(
@@ -1442,6 +1483,54 @@ impl<R: SofiReads> Verifier<'_, R> {
             );
             return Ok(Ok(Known::RefutedInHand(refutation)));
         }
+        let read = match self.read_legs(chains, exercise, Some(key), depth, None)? {
+            Ok(read) => read,
+            Err(why) => return Ok(Err(why)),
+        };
+        let legs = read.legs(&exercise.precommit().body, chains);
+
+        // A cell that is dead on the facts needing no validation evidence is
+        // skipped here, before any of that evidence is acquired, so evidence
+        // that is not in hand never holds a dead cell live.
+        let ground = match establish_ground(&GroundReads {
+            exercise,
+            registration: &read.registration,
+            parent: self.parent,
+            legs: &legs,
+        }) {
+            Ok(ground) => ground,
+            Err(why) => return Ok(Err(why)),
+        };
+        let dead = ground
+            .leg_at(
+                key.read.vault_id(),
+                key.read.parent_root(),
+                key.read.attempt(),
+            )
+            .is_some_and(|leg| {
+                skip_without_evidence(&ground.route_ground(), &leg).0 == AttemptClass::Skipped
+            });
+        if dead {
+            return Ok(Ok(Known::Ground(Box::new(ground))));
+        }
+        Ok(self
+            .complete_facts(exercise, &read, &legs)?
+            .map(|facts| Known::Facts(Box::new(facts))))
+    }
+
+    /// What every classification of an exercise stands on, read before any of
+    /// its validation evidence: the registration of its position, and each
+    /// leg's cell and walk. `walked` is the key the exercise was found at,
+    /// whose cell is in hand; `registration` is the position's registration
+    /// when the caller already read it, and is read here otherwise.
+    fn read_legs(
+        &self,
+        chains: &BTreeMap<D32, VaultChain>,
+        exercise: &RecognizedExercise,
+        walked: Option<WalkedKey<'_>>,
+        depth: usize,
+        registration: Option<&RegistrationRead>,
+    ) -> Result<Result<LegsRead, NotEstablished>, VerifierFailure> {
         let precommit = &exercise.precommit().body;
         let fulfillment = &exercise.fulfillment().body;
 
@@ -1458,30 +1547,6 @@ impl<R: SofiReads> Verifier<'_, R> {
                 Ok(registration) => registration,
                 Err(missing) => return Ok(Err(NotEstablished::Registration(missing))),
             },
-        };
-
-        // What FulfillmentConformance reads (R7), the exercise supplying the
-        // objects only its trader held.
-        let own = exercise.closure_objects();
-        let objects = ExerciseObjects {
-            precommit,
-            precommit_signature: &exercise.precommit().signature,
-            preimage: exercise.preimage(),
-            fulfillment,
-            fulfillment_signature: &exercise.fulfillment().signature,
-            own_objects: &own,
-        };
-        let conformance = match self.acquire_conformance_evidence(&objects)? {
-            Acquired::Complete(evidence) => evidence,
-            Acquired::Exhausted(missing) => {
-                return Ok(Err(NotEstablished::ConformanceEvidence(missing)))
-            }
-        };
-
-        // What RouteValidation reads (R5).
-        let evidence = match self.acquire_evidence(precommit, exercise.preimage(), &own)? {
-            Acquired::Complete(evidence) => evidence,
-            Acquired::Exhausted(missing) => return Ok(Err(NotEstablished::RouteEvidence(missing))),
         };
 
         // Every leg of P at the attempt F fixed for it: its cell, and the
@@ -1555,24 +1620,57 @@ impl<R: SofiReads> Verifier<'_, R> {
             cells.push(cell);
             walks.push(walk);
         }
-        let legs: Vec<LegReads<'_>> = precommit
-            .legs()
-            .iter()
-            .zip(cells.iter().zip(walks.iter()))
-            .map(|(leg, (cell, walk))| LegReads {
-                cell,
-                chain: chains.get(&leg.vault_id),
-                walk: walk.as_ref(),
-            })
-            .collect();
+        Ok(Ok(LegsRead {
+            registration,
+            cells,
+            walks,
+        }))
+    }
+
+    /// The complete facts of the exercise over `read`: its validation
+    /// evidence acquired, `FulfillmentConformance` and `RouteValidation`
+    /// recomputed, and the facts established over all of it.
+    fn complete_facts(
+        &self,
+        exercise: &RecognizedExercise,
+        read: &LegsRead,
+        legs: &[LegReads<'_>],
+    ) -> Result<Result<EstablishedFacts, NotEstablished>, VerifierFailure> {
+        let precommit = &exercise.precommit().body;
+        let fulfillment = &exercise.fulfillment().body;
+
+        // What FulfillmentConformance reads (R7), the exercise supplying the
+        // objects only its trader held.
+        let own = exercise.closure_objects();
+        let objects = ExerciseObjects {
+            precommit,
+            precommit_signature: &exercise.precommit().signature,
+            preimage: exercise.preimage(),
+            fulfillment,
+            fulfillment_signature: &exercise.fulfillment().signature,
+            own_objects: &own,
+        };
+        let conformance = match self.acquire_conformance_evidence(&objects)? {
+            Acquired::Complete(evidence) => evidence,
+            Acquired::Exhausted(missing) => {
+                return Ok(Err(NotEstablished::ConformanceEvidence(missing)))
+            }
+        };
+
+        // What RouteValidation reads (R5).
+        let evidence = match self.acquire_evidence(precommit, exercise.preimage(), &own)? {
+            Acquired::Complete(evidence) => evidence,
+            Acquired::Exhausted(missing) => return Ok(Err(NotEstablished::RouteEvidence(missing))),
+        };
+
         let reads = ExerciseReads {
             exercise,
-            registration: &registration,
+            registration: &read.registration,
             conformance: &conformance,
             evidence: &evidence,
             parent: self.parent,
-            legs: &legs,
+            legs,
         };
-        Ok(establish(&reads).map(|facts| Known::Facts(Box::new(facts))))
+        Ok(establish(&reads))
     }
 }
