@@ -635,7 +635,7 @@ Auditor finding 4 on `61d273a3`: status was written by hand and had drifted from
 | `dsm` · sofi/resolution.rs · `ImpossibleArm::PositionLost` (MR-SOFI-0239) | A fifth RouteImpossible arm, set when the F registered at q is not this F, which §23.5 does not list and which depends on a particular F. The code comment cites the TLA `LostPosition` trace it prevents. Specification conflict: for the owner. |
 | `dsm` · sofi/registration.rs, sofi/exercise.rs; `dsm_sdk` · route_seats.rs (MR-SOFI-0330, MR-STOR-0158, MR-SOFI-0268) | No unlock checks a completion proof: `check_fulfillment_completion` and `check_attempt_completion` are called only from tests and sit in the G1 baseline, and the proofs at K_ful and K_root are not kept. |
 | `dsm_sdk` · b0x_sdk.rs · `seal_for` (§5A rows 19, 23) | Each spool payload is sealed with a fresh encapsulation to the recipient's directory key, not the step's own Kyber exchange that DSM Amendment A7 names. For the owner. |
-| `dsm` · core/bilateral_transaction_manager.rs · `compute_smt_key` (MR-DSM-0115, 0249) | The tag is `DSM/smt-key`, not the `DSM/smt-key/v1` the requirement names. |
+| `dsm` · core/bilateral_transaction_manager.rs · `compute_smt_key` (MR-DSM-0115, 0249) | The tag is `DSM/smt-key`, not the `DSM/smt-key/v1` the requirement names. Resolved (§6.50): owner ruling 2026-09-30, DSM Amendment A9: `DSM/smt-key` is the canonical tag and `/v1` in the specification was an error. |
 | `dsm` · commitments/external_commitment.rs (MR-DSM-0184) | Y is `H(DSM/external-commit-id, source_id, X, evidence_hash)`, not the `H(DSM/external/v1, X)` the requirement defines. |
 | `dsm_sdk` · economic_admission_flow.rs · `record_ble_ek_steps_from_receipt` | Freezes the ek-cert-step artifact with a zero `bound_root`. Offline is a dependency boundary this round; recorded, not audited. Resolved (§6.28, #997): bound to the root the step's commit produced, in that commit. |
 
@@ -1744,7 +1744,7 @@ MR-STOR-0116 and MR-STOR-0118 are Met. MR-STOR-0119 stays Partial: its retention
 
 Mutation control, run on 2026-09-30 and restored byte for byte: the writer carrying a no-response slot in place of the leader's link, so later copies do not begin with it. `dsm_sdk::handlers::sender_admission_tests::a_transfer_registers_the_senders_root_at_the_next_position` and `dsm_sdk::handlers::faucet_flow_tests::a_release_cut_short_after_the_leader_is_carried_by_the_next_claimant_and_bricks_nothing` both go red.
 
-### 6.50 DSM core: the receiver's policy check before any read, and fifteen rows re-verified (`fix/dsm-core-beta-gaps`, 2026-09-30)
+### 6.50 DSM core: the receiver's policy check before any read, the relationship-key tag, and seventeen rows re-verified (`fix/dsm-core-beta-gaps`, 2026-09-30)
 
 **The token's policy is checked before the sender's register is read (MR-DSM-0029, G13).** The receiver's sync prevalidated each bound pair first, which walks the sender's lineage over the network. Only then did the apply check the token's committed policy, which the receiver already holds. The sync now checks the policy first; the apply checks it again under the state-machine lock. `a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is_read` builds the hostile pair from real material: the sender signs a transfer of its non-transferable token, advances its own head over it, and signs the step's receipt with its per-step EK. Both halves bind at the receiver, the sync refuses the pair by the policy, and no member is asked for a cell. MR-DSM-0029 stays Partial because adoption and the relationship tip are still decided after the read.
 
@@ -1761,6 +1761,7 @@ Mutation control, run on 2026-09-30 and restored byte for byte: the writer carry
 | MR-DSM-0079 | Partial | Met | Core counts a link only once a ByteCommit that follows its parent commits the link's record, gathered from the other members' mirrors. |
 | MR-DSM-0093 | Partial | Met | Only the device a step names as its counterparty takes it, and a rival from the same frontier never executes. |
 | MR-DSM-0029 | Partial (no locus) | Partial | See above. |
+| MR-DSM-0115, 0249 | Partial (`DSM/smt-key`, not `/v1`) | Met | Owner ruling 2026-09-30, DSM Amendment A9: `DSM/smt-key` is the canonical relationship-SMT tag and `/v1` in the specification was an error. The code and its golden vector are unchanged. |
 
 Mutation controls, run on 2026-09-30 and restored byte for byte:
 - The in-hand policy check removed from the sync. `a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is_read` goes red: the receiver asks a member for a register cell of the sender before it refuses.
@@ -1772,12 +1773,12 @@ The contact check is structural: `wallet.sendSmart` resolves the recipient throu
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 272 | 88 | 98 | 39 | 0 | 29 | 18 |
+| DSM high-level (MR-DSM) | 272 | 90 | 96 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 217 | 84 | 18 | 6 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 47 | 31 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **361** | **214** | **119** | **6** | **64** | **154** |
+| **All** | **918** | **363** | **212** | **119** | **6** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -1899,7 +1900,7 @@ The contact check is structural: `wallet.sendSmart` resolves the recipient throu
 | MR-DSM-0112 | Met | `dsm::types::device_state::advance` (conservation/admission gates read only self + named relationship) | `dsm::types::device_state::tests::conservation_guard_rules` | — |
 | MR-DSM-0113 | Met | `dsm::merkle::sparse_merkle_tree::get_inclusion_proof` | `dsm::merkle::sparse_merkle_tree::tests::update_and_prove`; `dsm::merkle::sparse_merkle_tree::tests::multi_leaf_proofs` | — |
 | MR-DSM-0114 | Met | `dsm::merkle::sparse_merkle_tree::default_node`; `dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT` | `dsm::merkle::sparse_merkle_tree::tests::default_node_chain_consistency`; `dsm::merkle::sparse_merkle_tree::tests::empty_tree_root_matches_default_chain` | — |
-| MR-DSM-0115 | Partial | `dsm::core::bilateral_transaction_manager::compute_smt_key`; `dsm::common::domain_tags::dsm::core::TAG_SMT_KEY` | `dsm::smt_tripwire_vectors::smt_key_determinism_reversed_args`; `dsm::smt_tripwire_vectors::golden_tag_smt_key`; `dsm::smt_tripwire_theorem::theorem1_smt_key_deterministic` | The min/max order-invariant key is implemented and tested (the cited smt_replace_witness and test_smt_key_ordering tests no longer exist), but the domain tag is DSM/smt-key, not the DSM/smt-key/v1 the requirement names. |
+| MR-DSM-0115 | Met | `dsm::core::bilateral_transaction_manager::compute_smt_key`; `dsm::common::domain_tags::dsm::core::TAG_SMT_KEY` | `dsm::smt_tripwire_vectors::smt_key_determinism_reversed_args`; `dsm::smt_tripwire_vectors::golden_tag_smt_key`; `dsm::smt_tripwire_theorem::theorem1_smt_key_deterministic` | Re-verified 2026-09-30 (§6.50). The key is BLAKE3 under `DSM/smt-key` over the sorted pair, the same from either side, pinned by a golden vector; DSM Amendment A9 makes `DSM/smt-key` the tag the requirement names. |
 | MR-DSM-0116 | Met | `dsm::types::device_state::DeviceState::advance`; `dsm::merkle::sparse_merkle_tree::SparseMerkleTree::update_leaf` | `dsm::types::device_state::tests::a_relationships_leaf_holds_its_current_head`; `dsm::types::device_state::tests::every_relationship_stays_in_the_root_past_the_old_capacity`; `dsm::types::device_state::tests::a_relationship_steps_only_from_a_leaf_the_device_committed` | Re-verified 2026-09-29 (§6.41). The FIFO eviction and `max_relationships` were removed in #976: the tree has no capacity. Each step writes `(rel_key, h_{n+1})` into the tree, and the head it moved past no longer proves under the root. |
 | MR-DSM-0117 | Met | `dsm::merkle::sparse_merkle_tree::update_leaf` | `dsm::merkle::sparse_merkle_tree::tests::leaf_update_changes_root`; `dsm::merkle::sparse_merkle_tree::tests::multi_leaf_proofs` | — |
 | MR-DSM-0118 | Met | `dsm::merkle::sparse_merkle_tree::verify_proof_against_root` (path recompute) | `dsm::merkle::sparse_merkle_tree::tests::verify_proof_against_root_static`; `dsm::merkle::sparse_merkle_tree::tests::update_and_prove` | — |
@@ -2033,7 +2034,7 @@ The contact check is structural: `wallet.sendSmart` resolves the recipient throu
 | MR-DSM-0246 | Not code | — | — | Cryptographic safety assumption (collision resistance), not a testable code requirement; BLAKE3 itself is implemented (see 0259). |
 | MR-DSM-0247 | Not code | — | — | Cryptographic safety assumption (unforgeability); SPHINCS+ itself is implemented (see 0259). |
 | MR-DSM-0248 | Partial | `dsm::crypto::canonical_lp::write_lp` (canonical_lp.rs:23) | no test in `canonical_lp.rs`; exercised only indirectly by hash-preimage tests | — |
-| MR-DSM-0249 | Partial | `dsm::core::bilateral_transaction_manager::compute_smt_key` | `dsm::smt_tripwire_vectors::golden_tag_smt_key`; `dsm::smt_tripwire_vectors::smt_key_determinism_reversed_args` | relationship.rs and RelationshipManager were deleted; the one derivation is compute_smt_key, pinned by a golden vector, but it uses the DSM/smt-key tag rather than DSM/smt-key/v1 (MR-DSM-0115). |
+| MR-DSM-0249 | Met | `dsm::core::bilateral_transaction_manager::compute_smt_key` | `dsm::smt_tripwire_vectors::golden_tag_smt_key`; `dsm::smt_tripwire_vectors::smt_key_determinism_reversed_args` | Re-verified 2026-09-30 (§6.50). The one derivation is `compute_smt_key`, under the `DSM/smt-key` tag DSM Amendment A9 makes canonical, pinned by a golden vector and order-invariant. |
 | MR-DSM-0250 | Partial | `dsm::economic::register::{economic_root_register_key L58, position_seed L74}`; `dsm::economic::keys.rs` | no test isolates the derivation; register.rs tests use the keys indirectly | — |
 | MR-DSM-0251 | Partial | dsm · types/device_state.rs · `advance` (no guard-family or resource-key abstraction) | no test found | No guard-family or resource-key abstraction. |
 | MR-DSM-0252 | Met | `dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root`; `dsm::merkle::sparse_merkle_tree::SparseMerkleTree::get_inclusion_proof`; `dsm::merkle::batch_fold::verify_batch`; `dsm::merkle::smt_path::decode` | `dsm::merkle::sparse_merkle_tree::tests::verify_proof_against_root_static`; `dsm::merkle::sparse_merkle_tree::tests::inclusion_proof_trailing_bytes_rejected`; `dsm::verification::receipt_verification::tests::the_state_rules_hold_only_for_the_move_the_writes_prove`; `dsm::merkle::batch_fold::tests::device_paths_of_two_trees_are_refused` | A proof against another root, a non-canonical encoding, a changed sibling and a path of another height are each refused; a receipt's paths are folded together against one pre-root (§6.35). |
