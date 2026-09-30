@@ -787,16 +787,17 @@ impl DeviceState {
         next
     }
 
-    /// Reconstruct a `DeviceState` from previously-encoded fields, replaying
-    /// its leaves into the SMT to recompute the canonical root.
+    /// Reconstruct a `DeviceState` from previously-encoded fields, building
+    /// the SMT over its leaves to recompute the canonical root.
     ///
     /// The caller supplies the device-level fields plus the sorted-by-`rel_key`
     /// tip list and this constructor:
     ///
     /// 1. Builds a fresh `DeviceState::new(...)` with empty SMT and balances.
-    /// 2. Writes each relationship tip, then every other leaf, in the supplied
-    ///    order. The tree is a pure function of its leaves, so the root is
-    ///    determined.
+    /// 2. Takes each relationship tip, then every other leaf, in the supplied
+    ///    order (a later leaf at a key replaces an earlier one), and builds the
+    ///    tree over them once. The tree is a pure function of its leaves, so
+    ///    the root is determined.
     /// 3. Installs `balances`, `tips`, and `legacy_anchor` directly.
     ///
     /// The caller is responsible for verifying that the resulting `root()`
@@ -828,17 +829,23 @@ impl DeviceState {
         state.pending_economic_admission = pending_economic_admission;
 
         for (rel_key, tip) in tips_in_order.into_iter() {
-            state.smt.update_leaf(&rel_key, &tip.chain_tip);
             state.tips.insert(rel_key, tip);
         }
 
-        // Replay non-tip leaves (offline-bearer anchor-state, SoFi vault-state) so the recomputed
-        // root matches the stored one. Omitting these was the reload-brick bug: a state with any
-        // such leaf recomputed a different root after a restart.
-        for (key, value) in extra_leaves.into_iter() {
-            state.smt.update_leaf(&key, &value);
-            state.extra_leaves.insert(key, value);
-        }
+        // Non-tip leaves (offline-bearer anchor-state, SoFi vault-state) go into the tree after
+        // the tips, so the recomputed root matches the stored one. Omitting these was the
+        // reload-brick bug: a state with any such leaf recomputed a different root after a restart.
+        state.extra_leaves = extra_leaves;
+
+        // One build over every leaf, each node hashed once: the device's own relationship `new`
+        // wrote, each tip, then each other leaf.
+        state.smt = SparseMerkleTree::from_leaves(
+            state
+                .tips
+                .iter()
+                .map(|(rel_key, tip)| (*rel_key, tip.chain_tip))
+                .chain(state.extra_leaves.iter().map(|(key, value)| (*key, *value))),
+        );
 
         Ok(state)
     }
@@ -3672,5 +3679,61 @@ mod tests {
         );
         assert_eq!(c_pre, compute_precommit(&parent, &op_bytes, &e));
         assert_eq!(sym, compute_successor_tip(&parent, &op_bytes, &e, &c_pre));
+    }
+
+    /// A head rebuilt from its persisted tips and other leaves recomputes the
+    /// root the live head committed, the tree built once over every leaf. A
+    /// tip or a leaf left out of the build moves the root, so the loader's
+    /// root check refuses the head.
+    #[test]
+    fn a_restored_head_recomputes_the_live_root() {
+        let mut live = DeviceState::new(devid(0xC1), devid(0xC2), vec![0x01; 32]);
+        for b in 0..40u8 {
+            live = live
+                .establish_relationship(devid(b))
+                .expect("a new relationship");
+        }
+        let live = live
+            .with_anchor_state_leaf(&pc(0xD1), &pc(0xD2))
+            .expect("an anchor-state leaf");
+        let tips: Vec<([u8; 32], RelChainTip)> = live
+            .relationship_keys()
+            .iter()
+            .map(|k| (*k, live.rel_chain_tip(k).expect("a held tip").clone()))
+            .collect();
+        let restore = |tips: Vec<([u8; 32], RelChainTip)>, extra: BTreeMap<[u8; 32], [u8; 32]>| {
+            DeviceState::restore(
+                live.genesis_digest(),
+                live.devid(),
+                live.public_key().to_vec(),
+                live.legacy_anchor(),
+                live.balances_snapshot().clone(),
+                tips,
+                extra,
+                live.offline_allocations_snapshot().clone(),
+                None,
+            )
+            .expect("restore")
+        };
+        let extra = live.extra_leaves_snapshot().clone();
+        assert_eq!(restore(tips.clone(), extra.clone()).root(), live.root());
+        let dropped =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&live.devid(), &devid(7));
+        let fewer: Vec<([u8; 32], RelChainTip)> = tips
+            .iter()
+            .filter(|(k, _)| *k != dropped)
+            .cloned()
+            .collect();
+        assert_eq!(fewer.len() + 1, tips.len());
+        assert_ne!(
+            restore(fewer, extra).root(),
+            live.root(),
+            "a tip left out of the build moves the root"
+        );
+        assert_ne!(
+            restore(tips, BTreeMap::new()).root(),
+            live.root(),
+            "an extra leaf left out of the build moves the root"
+        );
     }
 }
