@@ -396,6 +396,47 @@ async fn a_burn_disabled_token_refuses_its_burn() {
     );
 }
 
+/// MR-DSM-0074, Amendment A3: a device sends only over relationships it
+/// has pre-added. A device A never added as a contact cannot be sent to:
+/// `wallet.sendSmart` refuses it, nothing is debited, no position is
+/// admitted and nothing is left pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_send_to_a_device_that_is_not_a_contact_moves_nothing() {
+    let p = Pair::boot(100, 0).await;
+    let stranger = crate::test_support::two_device::TestDevice::create("C", 0x0C);
+    p.a.enter();
+    assert!(
+        client_db::get_contact_by_device_id(&stranger.device_id)
+            .expect("A's contacts")
+            .is_none(),
+        "C is not A's contact"
+    );
+    let position = admitted_position();
+
+    let sent = p.a.send(&stranger, 10).await;
+    assert!(
+        !sent.success,
+        "a device that is not a contact cannot be sent to: {:?}",
+        sent.error_message
+    );
+    let Some(why) = sent.error_message.clone() else {
+        panic!("a refused send names its reason")
+    };
+    assert!(
+        why.contains("must be an added contact"),
+        "refused because C is not a contact, not for another reason: {why}"
+    );
+    p.a.enter();
+    assert_eq!(p.a.era_balance(), 100, "nothing was debited");
+    assert_eq!(admitted_position(), position, "no position was admitted");
+    let head = p.a.router().core_sdk.device_head().expect("head");
+    assert!(
+        head.pending_economic_admission().is_none(),
+        "nothing left pending"
+    );
+}
+
 /// SoFi §49: `transferable` governs every transfer. A token created
 /// non-transferable refuses `wallet.send` as an operation its policy does not
 /// permit, and nothing moves; a transferable created token moves through the
