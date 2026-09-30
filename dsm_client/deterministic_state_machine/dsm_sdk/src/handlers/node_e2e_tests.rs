@@ -469,6 +469,137 @@ async fn a_sofi_trade_executes_end_to_end() {
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// MR-SOFI-0241, SoFi Amendment S14: a vault key held final by an exercise
+/// whose fulfillment can never register — a rival claim took the trader's
+/// position first — is skipped on that fact alone. The walk reads the key's
+/// cell and the trader's position pair, and asks for none of the exercise's
+/// validation evidence; the next key is live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_key_whose_fulfillment_can_never_register_is_skipped_without_its_evidence() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+
+    // A rival claim takes B's next position before B trades.
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let rival = dsm::sofi::wire::SofiResolutionClaim {
+        genesis: p.b.genesis,
+        device_id: p.b.device_id,
+        position: q,
+        fulfillment_id: [0x77; 32],
+        realize_root: [0x78; 32],
+        void_root: root,
+    }
+    .encode();
+    let taken = crate::sdk::route_seats::write_recorded(&set, pair.root().routed(), &rival)
+        .await
+        .expect("any party may write a claim");
+    assert!(
+        taken.reached_leader(),
+        "the rival claim holds B's root cell"
+    );
+
+    // B trades: its fulfillment lands, its claim arrives after the rival's,
+    // and its exercise holds the vault's first key.
+    invoke(&p.b, "sofi.trade", args(&trade_request(&m, 10))).await;
+
+    // A, the vault's owner, walks the vault's first parent.
+    let (own, parents) = standing_of(&p.a);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
+    let r0 = chain.roots()[0];
+    let held = verifier
+        .read_attempt_cell(&m.vault_id, &r0, 0)
+        .expect("read")
+        .expect("decided");
+    let exercise = held
+        .exercise()
+        .cloned()
+        .expect("B's exercise holds the vault's first key");
+    assert_eq!(
+        held.fact(),
+        CellFact::Held {
+            id: *exercise.external_commitment(),
+            state: ChainState::Final,
+        }
+    );
+    let registration = verifier
+        .read_registration(&p.b.genesis, &p.b.device_id, q, &root)
+        .expect("read")
+        .expect("decided");
+    assert!(
+        matches!(
+            registration.registration(),
+            dsm::sofi::registration::Registration::NeverRegistered { .. }
+        ),
+        "B's fulfillment can never register: {:?}",
+        registration.registration()
+    );
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let chains = BTreeMap::from([(m.vault_id, chain)]);
+    let walked = verifier
+        .walk_parent(&chains, &m.vault_id, &r0, 0, WALK_BUDGET)
+        .expect("the walk");
+    assert_eq!(walked.outcome, WalkOutcome::Unresolved { attempt: 1 });
+    assert_eq!(walked.not_established, None);
+
+    // What the walk asked the nodes for: the vault's first two keys, B's
+    // position pair, the chains that decide them, and the precommit the
+    // registration read names — never the exercise's validation evidence.
+    let path = |key: &[u8; 32]| crate::util::text_id::encode_base32_crockford(key);
+    let cells = [
+        *attempt_cell(&set, &m.vault_id, &r0, 0)
+            .expect("the first key")
+            .routed()
+            .key(),
+        *attempt_cell(&set, &m.vault_id, &r0, 1)
+            .expect("the next key")
+            .routed()
+            .key(),
+        *pair.fulfillment().key(),
+        *pair.root().routed().key(),
+    ]
+    .map(|key| format!("GET /api/v2/cell/{}", path(&key)));
+    let precommit = Publication::Precommit {
+        body: &exercise.precommit().body,
+        signature: &exercise.precommit().signature,
+    }
+    .address()
+    .expect("P's address");
+    let precommit_read = format!("GET /api/v2/immutable/{}", path(&precommit));
+    let mut indexes = std::collections::BTreeSet::new();
+    for node in &p.nodes.nodes {
+        for request in node.requests() {
+            if request.starts_with("GET /api/v2/index/") {
+                indexes.insert(request);
+            } else {
+                assert!(
+                    cells.contains(&request)
+                        || request == precommit_read
+                        || request.contains("/api/v2/bytecommit/")
+                        || request == "GET /api/v2/health",
+                    "{} was asked for more than the key, the pair and P: {request}",
+                    node.member_id
+                );
+            }
+        }
+    }
+    assert!(indexes.len() <= 1, "one index read, P's: {indexes:?}");
+}
+
 /// B's own exercise re-aimed at the vault's next generation: `P` names the
 /// next parent root, `F` names attempt 0 there, the witnesses derive from the
 /// re-aimed `P`, and `sign` signs both new bodies' digests. Signed by B, every
