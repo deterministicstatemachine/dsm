@@ -92,6 +92,50 @@ pub fn set_client() -> reqwest::Client {
     )
 }
 
+/// A Tokio runtime for a test that drives the served app. `#[tokio::test]`
+/// builds its runtime with `expect`, which this crate's lints refuse.
+pub fn runtime() -> tokio::runtime::Runtime {
+    ok_or_panic(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build(),
+        "a Tokio runtime",
+    )
+}
+
+/// The member the binary serves on `pool`, as member id `id`.
+pub fn member(id: &str, pool: std::sync::Arc<dsm_storage_node::db::DBPool>) -> axum::Router {
+    let state = std::sync::Arc::new(ok_or_panic(
+        dsm_storage_node::AppState::new(id.to_string(), pool, set_client()),
+        "app state",
+    ));
+    served(state)
+}
+
+/// `app`'s answer to `method uri` with `headers` and `body`: its status and
+/// its body.
+pub async fn call(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> (axum::http::StatusCode, Vec<u8>) {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let req = ok_or_panic(req.body(axum::body::Body::from(body)), "request");
+    let resp = ok_or_panic(app.clone().oneshot(req).await, "the router answers");
+    let status = resp.status();
+    let bytes = ok_or_panic(
+        axum::body::to_bytes(resp.into_body(), usize::MAX).await,
+        "body",
+    );
+    (status, bytes.to_vec())
+}
+
 /// The app the binary serves for `state`, with the deployed fleet's limits.
 pub fn served(state: std::sync::Arc<dsm_storage_node::AppState>) -> axum::Router {
     dsm_storage_node::build_app(
