@@ -20,8 +20,8 @@ use dsm::sofi::derive;
 use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
-    LocalLeaves, ReadFailure, RecordedGenerationRow, SofiReads, VaultLeaves, Verifier,
-    VerifierFailure,
+    LocalLeaves, PeerPositionResolver, ReadFailure, RecordedGenerationRow, SofiReads, VaultLeaves,
+    Verifier, VerifierFailure,
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
@@ -29,9 +29,7 @@ use dsm::sofi::wire::{TraderFulfillmentBody, TraderPrecommitBody, VaultGenesisPr
 use dsm::types::error::DsmError;
 
 use crate::sdk::economic_admission_flow::committed_network_id;
-use crate::sdk::economic_registers::{
-    anchored_policy_bytes, resolve_peer_with_cache, LiveRegisterResolver,
-};
+use crate::sdk::economic_registers::{anchored_policy_bytes, resolve_peer, LiveRegisterResolver};
 use crate::sdk::route_seats::{keep_completion, read_cell, NodeSeats};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes, LOCATOR_BUDGET};
 use crate::sdk::storage_io::{read_stored_bytes, resolve_locator_all};
@@ -109,6 +107,34 @@ impl<'a> LiveSofiReads<'a> {
         }
     }
 
+    /// Another trader's lineage to `position`, verified from this device's
+    /// frontier for it (DSM Amendment A8); a conditional position on the way
+    /// is resolved by Core over SoFi's public objects for that position alone
+    /// (SoFi Amendment S15).
+    fn peer_walk(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        let members = as_ccb_members(self.set)
+            .map_err(|e| PeerLineageFailure::Incomplete(format!("the storage set: {e}")))?;
+        let conditional = PeerPositionResolver {
+            reads: self,
+            members: &members,
+            set_id: self.set.id(),
+            network_id: &self.network,
+        };
+        resolve_peer(
+            &self.peer_resolver(),
+            &self.network,
+            genesis,
+            device_id,
+            position,
+            &conditional,
+        )
+    }
+
     fn block<T>(&self, fut: impl Future<Output = T>) -> T {
         tokio::task::block_in_place(|| self.runtime.block_on(fut))
     }
@@ -182,13 +208,7 @@ impl SofiReads for LiveSofiReads<'_> {
         device_id: &D32,
         position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        resolve_peer_with_cache(
-            &self.peer_resolver(),
-            &self.network,
-            genesis,
-            device_id,
-            position,
-        )
+        self.peer_walk(genesis, device_id, position)
     }
 
     fn vault_leaves_at(
@@ -209,17 +229,13 @@ impl SofiReads for LiveSofiReads<'_> {
         position: u64,
     ) -> Result<AcceptedClaim, PeerLineageFailure> {
         if self.own != Some((*genesis, *device_id)) {
-            // Another trader's position: the claim the peer walk accepted
-            // there, as `advance_validated` produced it on this device, or
-            // the walk's failure in the class it gave it.
-            return resolve_peer_with_cache(
-                &self.peer_resolver(),
-                &self.network,
-                genesis,
-                device_id,
-                position,
-            )
-            .map(|transition| *transition.accepted_claim());
+            // Another trader's position: the claim frontier-relative
+            // verification of its lineage accepted there (SoFi Amendment
+            // S15, MR-SOFI-0347), or the walk's failure in the class it gave
+            // it.
+            return self
+                .peer_walk(genesis, device_id, position)
+                .map(|transition| *transition.accepted_claim());
         }
         let admitted = economic_lineage::get_admitted_at(position)
             .map_err(|e| PeerLineageFailure::Incomplete(format!("admitted history: {e}")))?
@@ -280,6 +296,18 @@ impl<'a> VerifierContext<'a> {
             network: committed_network_id()?,
             parent: parent.and_then(ResolvedParent::of),
         })
+    }
+
+    /// Core's resolver of another trader's conditional position (SoFi
+    /// Amendment S15), over this context's reads, for a frontier-relative walk
+    /// of that trader's lineage (DSM Amendment A8).
+    pub fn peer_position_resolver(&self) -> PeerPositionResolver<'_, LiveSofiReads<'a>> {
+        PeerPositionResolver {
+            reads: &self.reads,
+            members: &self.members,
+            set_id: self.set_id,
+            network_id: &self.network,
+        }
     }
 
     pub fn verifier(&self) -> Verifier<'_, LiveSofiReads<'a>> {
