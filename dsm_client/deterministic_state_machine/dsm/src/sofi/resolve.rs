@@ -905,14 +905,15 @@ impl<R: SofiReads> Verifier<'_, R> {
                     precommit.device_id(),
                     position,
                 );
-                if let Some(lineage) = setup_lineage(
-                    *precommit.genesis(),
-                    *precommit.device_id(),
+                setup_lineages.insert(
                     position,
-                    validated,
-                ) {
-                    setup_lineages.insert(position, lineage);
-                }
+                    setup_lineage(
+                        *precommit.genesis(),
+                        *precommit.device_id(),
+                        position,
+                        validated,
+                    ),
+                );
             }
             setups.insert(*setup_ref, bytes);
         }
@@ -1196,10 +1197,10 @@ impl<R: SofiReads> Verifier<'_, R> {
         current: &D32,
         exercise: &RecognizedExercise,
     ) -> Result<Option<VaultPostState>, VerifierFailure> {
-        let precommit = &exercise.precommit.body;
+        let precommit = &exercise.precommit().body;
         let evidence = match self.acquire_evidence(
             precommit,
-            &exercise.preimage,
+            exercise.preimage(),
             &exercise.closure_objects(),
         )? {
             Acquired::Complete(evidence) => evidence,
@@ -1210,7 +1211,7 @@ impl<R: SofiReads> Verifier<'_, R> {
         };
         // The evidence this verifier holds may not let it recompute the
         // consumption. The chain then stops; nothing is refuted.
-        match vault_post_states(precommit, &exercise.preimage, &evidence) {
+        match vault_post_states(precommit, exercise.preimage(), &evidence) {
             Ok(posts) => Ok(posts
                 .into_iter()
                 .find(|p| p.vault_id() == vault_id && p.pre_root() == current)),
@@ -1244,7 +1245,7 @@ impl<R: SofiReads> Verifier<'_, R> {
             return Ok(false);
         };
         let mut learned = false;
-        for leg in exercise.precommit.body.legs() {
+        for leg in exercise.precommit().body.legs() {
             if leg.vault_id == *vault_id || chains.contains_key(&leg.vault_id) {
                 continue;
             }
@@ -1441,8 +1442,8 @@ impl<R: SofiReads> Verifier<'_, R> {
             );
             return Ok(Ok(Known::RefutedInHand(refutation)));
         }
-        let precommit = &exercise.precommit.body;
-        let fulfillment = &exercise.fulfillment.body;
+        let precommit = &exercise.precommit().body;
+        let fulfillment = &exercise.fulfillment().body;
 
         // Registration from the position pair (R10). The pair decides for
         // every F at q at once.
@@ -1464,10 +1465,10 @@ impl<R: SofiReads> Verifier<'_, R> {
         let own = exercise.closure_objects();
         let objects = ExerciseObjects {
             precommit,
-            precommit_signature: &exercise.precommit.signature,
-            preimage: &exercise.preimage,
+            precommit_signature: &exercise.precommit().signature,
+            preimage: exercise.preimage(),
             fulfillment,
-            fulfillment_signature: &exercise.fulfillment.signature,
+            fulfillment_signature: &exercise.fulfillment().signature,
             own_objects: &own,
         };
         let conformance = match self.acquire_conformance_evidence(&objects)? {
@@ -1478,7 +1479,7 @@ impl<R: SofiReads> Verifier<'_, R> {
         };
 
         // What RouteValidation reads (R5).
-        let evidence = match self.acquire_evidence(precommit, &exercise.preimage, &own)? {
+        let evidence = match self.acquire_evidence(precommit, exercise.preimage(), &own)? {
             Acquired::Complete(evidence) => evidence,
             Acquired::Exhausted(missing) => return Ok(Err(NotEstablished::RouteEvidence(missing))),
         };
