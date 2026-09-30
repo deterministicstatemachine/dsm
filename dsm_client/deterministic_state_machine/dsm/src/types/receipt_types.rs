@@ -16,7 +16,6 @@
 
 use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
 use crate::types::error::DsmError;
-use std::collections::HashMap;
 
 /// Canonical Stitched Receipt V2
 ///
@@ -975,172 +974,6 @@ impl From<[u8; 32]> for DeviceTreeAcceptanceCommitment {
     }
 }
 
-pub struct ReceiptVerificationContext {
-    /// Authenticated local commitment used to validate `π_dev: DevID ∈ R_G`.
-    pub device_tree_commitment: DeviceTreeAcceptanceCommitment,
-
-    /// The sender's pre-state root this verifier expects the step to start
-    /// from; a receipt over any other root is not this step.
-    pub expected_parent_root: [u8; 32],
-
-    /// SPHINCS+ public key for party A (the per-step EK_pk for this receipt).
-    pub pubkey_a: Vec<u8>,
-
-    /// SPHINCS+ public key for party B (counterparty's per-step EK_pk).
-    pub pubkey_b: Vec<u8>,
-
-    /// Per-relationship cert chain head for party A.
-    ///
-    /// This is the SPHINCS+ public key that authorized the current `pubkey_a`
-    /// via the ek-cert chain (whitepaper §11.1):
-    ///   - At step n=0: AK_pk (the device-attested long-term key).
-    ///   - At step n>0: the previous step's `EK_pk_n` (which signed cert_{n+1}).
-    ///
-    /// `Some(pk)` means the receipt must carry a valid `ek_cert_a` that verifies
-    /// against `pk`. `None` is fail-closed for receipt acceptance because
-    /// parent/root inclusion alone is not spend authority.
-    pub chain_head_pubkey_a: Option<Vec<u8>>,
-
-    /// Per-relationship cert chain head for party B.
-    /// Same semantics as `chain_head_pubkey_a`.
-    pub chain_head_pubkey_b: Option<Vec<u8>>,
-
-    /// The genesis the receipt's author (`devid_a`) is pinned under.
-    pub author_genesis: [u8; 32],
-
-    /// The operation the step carries: it decides which leaves the step
-    /// writes, and the child tip is recomputed from it.
-    pub operation: crate::types::operations::Operation,
-
-    /// For the author's own offline-bearer spend, its anchor-state leaves.
-    pub bearer: Option<crate::verification::receipt_verification::BearerLeaves>,
-}
-
-impl ReceiptVerificationContext {
-    pub fn new<T: Into<DeviceTreeAcceptanceCommitment>>(
-        device_tree_commitment: T,
-        expected_parent_root: [u8; 32],
-        pubkey_a: Vec<u8>,
-        pubkey_b: Vec<u8>,
-        author_genesis: [u8; 32],
-        operation: crate::types::operations::Operation,
-    ) -> Self {
-        Self {
-            device_tree_commitment: device_tree_commitment.into(),
-            expected_parent_root,
-            pubkey_a,
-            pubkey_b,
-            chain_head_pubkey_a: None,
-            chain_head_pubkey_b: None,
-            author_genesis,
-            operation,
-            bearer: None,
-        }
-    }
-
-    /// Builder: set the cert chain head for party A.
-    /// Once set, the receipt MUST carry a valid `ek_cert_a` (whitepaper §11.1).
-    pub fn with_chain_head_a(mut self, pubkey: Vec<u8>) -> Self {
-        self.chain_head_pubkey_a = Some(pubkey);
-        self
-    }
-
-    /// Builder: set the cert chain head for party B.
-    pub fn with_chain_head_b(mut self, pubkey: Vec<u8>) -> Self {
-        self.chain_head_pubkey_b = Some(pubkey);
-        self
-    }
-}
-
-/// Receipt acceptance result
-#[derive(Debug, Clone)]
-pub struct ReceiptAcceptance {
-    /// Whether the receipt is valid
-    pub valid: bool,
-
-    /// Detailed reason if invalid
-    pub reason: Option<String>,
-
-    /// Computed commitment hash
-    pub commitment: Option<[u8; 32]>,
-}
-
-impl ReceiptAcceptance {
-    pub fn accept(commitment: [u8; 32]) -> Self {
-        Self {
-            valid: true,
-            reason: None,
-            commitment: Some(commitment),
-        }
-    }
-
-    pub fn reject(reason: impl Into<String>) -> Self {
-        Self {
-            valid: false,
-            reason: Some(reason.into()),
-            commitment: None,
-        }
-    }
-}
-
-/// Parent consumption tracker
-///
-/// Tracks which parent tips have been consumed to enforce uniqueness
-/// and detect fork attempts.
-#[derive(Default)]
-pub struct ParentConsumptionTracker {
-    /// Map: parent_tip -> child_tip
-    consumed: HashMap<[u8; 32], [u8; 32]>,
-}
-
-impl ParentConsumptionTracker {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_capacity(_capacity: usize) -> Self {
-        Self::new()
-    }
-
-    /// Try to consume a parent tip
-    ///
-    /// Returns Ok(()) if parent is fresh, Err if already consumed.
-    pub fn try_consume(
-        &mut self,
-        parent_tip: [u8; 32],
-        child_tip: [u8; 32],
-    ) -> Result<(), DsmError> {
-        if let Some(existing_child) = self.consumed.get(&parent_tip) {
-            if existing_child == &child_tip {
-                // Idempotent: same transition attempted twice (replay)
-                return Err(DsmError::InvalidOperation(
-                    "Parent already consumed (replay detected)".to_string(),
-                ));
-            } else {
-                // Fork: different children for same parent
-                return Err(DsmError::InvalidOperation(format!(
-                    "Fork detected: parent {:?} has conflicting children",
-                    &parent_tip[..8]
-                )));
-            }
-        }
-
-        // Fresh parent: mark as consumed
-        self.consumed.insert(parent_tip, child_tip);
-        Ok(())
-    }
-
-    /// Check if parent is consumed (read-only)
-    pub fn is_consumed(&self, parent_tip: &[u8; 32]) -> bool {
-        self.consumed.contains_key(parent_tip)
-    }
-
-    /// Get the child for a consumed parent (if any)
-    pub fn get_child(&self, parent_tip: &[u8; 32]) -> Option<&[u8; 32]> {
-        self.consumed.get(parent_tip)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1521,25 +1354,6 @@ mod tests {
         assert_eq!(copied, c);
     }
 
-    // --- ReceiptAcceptance ---
-
-    #[test]
-    fn receipt_acceptance_accept() {
-        let commitment = world().transfer.receipt.compute_commitment().unwrap();
-        let acc = ReceiptAcceptance::accept(commitment);
-        assert!(acc.valid);
-        assert!(acc.reason.is_none());
-        assert_eq!(acc.commitment, Some(commitment));
-    }
-
-    #[test]
-    fn receipt_acceptance_reject() {
-        let acc = ReceiptAcceptance::reject("bad signature");
-        assert!(!acc.valid);
-        assert_eq!(acc.reason.as_deref(), Some("bad signature"));
-        assert!(acc.commitment.is_none());
-    }
-
     // --- ADR 0003 return leg: CountersignB split / overlay / wire codec ---
 
     /// The whole return-leg contract in one assertion chain: the recipient's
@@ -1864,45 +1678,5 @@ mod tests {
             f[0] ^= 0x01;
             assert_ne!(relationship_finalized_signing_target(&c), t0, "field {i}");
         }
-    }
-
-    // --- ParentConsumptionTracker ---
-
-    #[test]
-    fn tracker_fresh_parent_not_consumed() {
-        let tracker = ParentConsumptionTracker::new();
-        assert!(!tracker.is_consumed(&[0; 32]));
-        assert!(tracker.get_child(&[0; 32]).is_none());
-    }
-
-    #[test]
-    fn tracker_with_capacity_behaves_like_new() {
-        let tracker = ParentConsumptionTracker::with_capacity(100);
-        assert!(!tracker.is_consumed(&[0xFF; 32]));
-    }
-
-    #[test]
-    fn tracker_multiple_distinct_parents() {
-        let mut tracker = ParentConsumptionTracker::new();
-        let p1 = [1u8; 32];
-        let p2 = [2u8; 32];
-        let c1 = [0xA0; 32];
-        let c2 = [0xB0; 32];
-
-        tracker.try_consume(p1, c1).unwrap();
-        tracker.try_consume(p2, c2).unwrap();
-
-        assert_eq!(tracker.get_child(&p1), Some(&c1));
-        assert_eq!(tracker.get_child(&p2), Some(&c2));
-    }
-
-    #[test]
-    fn tracker_replay_same_child_is_error() {
-        let mut tracker = ParentConsumptionTracker::new();
-        let parent = [0x10; 32];
-        let child = [0x20; 32];
-        tracker.try_consume(parent, child).unwrap();
-        let err = tracker.try_consume(parent, child).unwrap_err();
-        assert!(format!("{err}").contains("replay"));
     }
 }

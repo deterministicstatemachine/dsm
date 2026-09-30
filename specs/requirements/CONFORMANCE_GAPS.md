@@ -265,7 +265,7 @@ What the backend does that no requirement asks for, or that a requirement forbid
 | Location | Note |
 |---|---|
 | `dsm` · core/state_machine/transition.rs · `create_next_state`, `apply_transition`, `verify_transition_integrity`, `apply_token_balance_delta` | Legacy `State` path, a second public way to produce state outside `DeviceState::advance` (MR-DSM-0243, 0244). Deleted with the rest of the layer (§6.10). |
-| `dsm_sdk` · sdk/receipts.rs · `verify_stitched_receipt`; `dsm` · verification/receipt_verification.rs · `verify_stitched_receipt` | The only code shaped like candidate/guard checking (`ForkCandidate`). No handler calls it. |
+| `dsm_sdk` · sdk/receipts.rs · `verify_stitched_receipt`; `dsm` · verification/receipt_verification.rs · `verify_stitched_receipt` | The only code shaped like candidate/guard checking (`ForkCandidate`). No handler calls it. Deleted, with its `ParentConsumptionTracker` (§6.45). |
 | `dsm_sdk` · sdk/dlv_pre_commitment_sdk.rs · `DlvPreCommitmentSdk` | No handler callers. Deleted (§6.10). |
 | `dsm_sdk` · sdk/smart_commitment_sdk.rs · `SmartCommitmentSdk` | No callers. |
 | `dsm` · core/verification/identity_verifier.rs; types/identity.rs; types/state_types.rs (second `IdentityAnchor`) | `IdentityVerifier`, `IdentityClaim`, `IdentityAnchor`. No production callers. |
@@ -531,7 +531,7 @@ Owner rulings of 2026-09-24 (receipts, `wallet.send`, the rule that nothing whic
 
 | Location | Finding |
 |---|---|
-| receipt verification on the live path | `verify_stitched_receipt` has no production caller; production checks the state rules with `verify_receipt_state` (the BLE confirm converged onto it, §6.11). |
+| receipt verification on the live path | `verify_stitched_receipt` has no production caller; production checks the state rules with `verify_receipt_state` (the BLE confirm converged onto it, §6.11). Resolved: deleted, and its checks moved onto production's decisions (§6.45). |
 | DLV operations | `DlvCreate`/`DlvUnlock`/`DlvClaim`/`DlvInvalidate` signatures were verified only in the deleted `create_next_state`; their executor is `BitcoinTapSdk` (dBTC deferred). No live verification. |
 | `dsm` · types/state_types.rs · `State` | A compatibility view synthesized from the head, still read in production (token and wallet SDKs, and the Bitcoin routes, which store `State` in structs and read its `hash` and `token_balances`). Removing it touches Bitcoin code. |
 | `dsm` · core/bilateral_transaction_manager.rs · `initial_chain_tip_from_device_ids` | Self-loop relationships derive `h_0` with 32 zero bytes where each genesis goes. |
@@ -1303,7 +1303,7 @@ Tests: `dsm::verification::receipt_verification::tests::the_state_rules_hold_onl
 - The online receiver does not hold the sender's A-side receipt to the state rules; it binds the receipt's child tip to the validated debit's successor and relies on the economic lineage walk.
 - History rows restored by recovery keep no operation, so their badge reads not verified.
 - Σ and K are not in the receipt (G3; MR-DSM-0160, 0161, 0162).
-- `verify_stitched_receipt` still has no production caller (§6.11): the vertical-validation models use it; production uses `verify_receipt_state`.
+- `verify_stitched_receipt` still has no production caller (§6.11): the vertical-validation models use it; production uses `verify_receipt_state`. Resolved: deleted, and the models moved onto production's decisions (§6.45).
 
 ### 6.36 The placeholder sweep of 2026-09-27 (branch `fix/placeholder-sweep-2026-09-27`)
 
@@ -1659,8 +1659,31 @@ Mutation controls, run on 2026-09-29, each restored byte for byte:
 
 Found, not changed here:
 
-- **The tripwire's integration test proves it through machinery production never runs.** `dsm/tests/smt_tripwire_theorem.rs::theorem2_two_successors_same_parent_rejected` rejects the second child through `ParentConsumptionTracker`. Its only other user is `verification::receipt_verification::verify_stitched_receipt`, which only tests call. Production verifies receipts with `verify_receipt_state` and records consumption in the canonical apply (MR-DSM-0170). `ParentConsumptionTracker::with_capacity` also ignores its argument.
+- **The tripwire's integration test proves it through machinery production never runs.** `dsm/tests/smt_tripwire_theorem.rs::theorem2_two_successors_same_parent_rejected` rejects the second child through `ParentConsumptionTracker`. Its only other user is `verification::receipt_verification::verify_stitched_receipt`, which only tests call. Production verifies receipts with `verify_receipt_state` and records consumption in the canonical apply (MR-DSM-0170). `ParentConsumptionTracker::with_capacity` also ignores its argument. Resolved: the tracker and the verifier are deleted, and the test asserts the refusal through `decide_prepare` (§6.45).
 - **Nine more MR-DSM rows cite items that no longer exist** inside files that do: 0002, 0004, 0005, 0014, 0092 and 0199 (`sdk/receipts.rs::verify_receipt_bytes`); 0034 and 0083 (`sdk/storage_node_sdk.rs::put_cell_leader_first`); 0068 (`StorageNodeSDK`, `sdk/storage_io.rs::fetch_immutable_payload`). Their statuses are unverified until re-examined.
+
+### 6.45 The unreached receipt verifier is deleted; its checks run on production's decisions (`refactor/delete-unreached-stitched-receipt-verifier`, 2026-09-30)
+
+**The finding (§6.3, §6.11, §6.44).** `verification::receipt_verification::verify_stitched_receipt` and its `ParentConsumptionTracker` had no production caller. Production decides a bilateral step with `bilateral::offline` (`decide_prepare`, `decide_confirm`, `decide_commit_ack`), and a second child of one tip is refused because the receiver holds the tip it committed. The verifier's only users were tests and the vertical-validation tool. So the tool's attack suite, its fork-exclusion property, its Tripwire traces and its TLA trace replays reported properties of code production never runs (owner ruling, 2026-09-30: port the checks onto the production path, then delete).
+
+**Changed**
+
+| Where | What |
+|---|---|
+| `dsm` · verification/receipt_verification.rs, types/receipt_types.rs, types/mod.rs | `verify_stitched_receipt`, its signature helper, `ReceiptVerificationContext`, `ReceiptAcceptance` and `ParentConsumptionTracker` deleted, with the tests that exercised only them. `verify_receipt_state` and the per-step EK checks, which production calls, are unchanged. |
+| `dsm` · tests/smt_tripwire_theorem.rs | `theorem2_two_successors_same_parent_rejected` asserts the rejection through `decide_prepare`: the second child of h_0 is `StaleTip` once h_1 is held, and is considered while h_0 is held. `parent_consumed_exactly_once`, a test of the tracker alone, is deleted. |
+| `tools/vertical_validation` · live_device.rs | A step is production's offline step: proposed on the shared tip the sender holds (from `initial_chain_tip_from_device_ids`), σ_A over the step commitment, the receipt signed by a per-step EK its chain head certifies, decided by `decide_prepare` and `decide_confirm` against the receiver's held tip and pinned keys (real Kyber identity binding), and committed on both devices. |
+| `tools/vertical_validation` · adversarial_bilateral.rs, property_tests.rs, implementation_traces.rs, tla_trace_replay.rs, tla_runner.rs | Every judge is the receiver's decision: double spend, replay and a receiver behind are refused as `StaleTip`; wrong-key, garbage and uncertified-EK signatures and forged post-states are refused by `decide_prepare` or `decide_confirm`. The TLA DSM replay delivers each step through them, and the Tripwire replay maps the model's tips onto the shared tips real devices hold. `receipt_verifier_tripwire` becomes `receiver_tripwire`; `tripwire_parent_consumption`, a trace of the tracker alone, is deleted. |
+
+**Evidence (2026-09-30)**
+- `vertical-validation adversarial`: 6 of 6 attacks refused. `property-tests --iterations 5 --seed 42`: 6 of 6. `implementation-traces`: 15 of 15. `tla-check`: all 91 specs pass, and the Tripwire and DSM_tiny, DSM_small and DSM_system traces replay literal=PASS direct=PASS on the new path.
+- `dsm::smt_tripwire_theorem::theorem2_two_successors_same_parent_rejected`; `dsm::bilateral::offline::tests::a_stale_proposal_says_whether_its_claimed_tip_recomputes`.
+- `cargo test -p dsm -p dsm_vertical_validation --release`: 1,630 passed, 0 failed.
+- Mutation control: the stale-tip arm of `decide_prepare` disabled turns both tests above red and fails double_spend_second_child, step_replay and receiver_behind (the fork is then refused only by the commitment recompute, the wrong reason); restored.
+
+**Removed with the verifier.** Its rule 2c, a receipt's parent root compared with a root the verifier expects, has no production counterpart: production's receiver decides against the relationship tip it holds, not a payer's device root. The matrix row that mapped that rule to MR-DSM-0028 and MR-DSM-0041 is deleted. Both rows are Met on other evidence (`peer_acceptance`'s EK ancestry, SoFi's in-hand refutation).
+
+**Not driven by the tool.** A forged countersignature (σ_B) is judged by the sender's `decide_commit_ack`, which the tool does not drive; Core's `dsm::bilateral::offline::tests::an_ack_is_only_the_receivers_counter_signed_receipt` refuses it there.
 
 ## 7 Totals
 
@@ -1770,7 +1793,7 @@ Found, not changed here:
 | MR-DSM-0089 | Partial | dsm_storage_node · api/objects/immutable.rs::get_immutable (177-187) | no test found | Same gap as 0067 (same mechanism). |
 | MR-DSM-0090 | Not code | — | — | Fault-model assumption. |
 | MR-DSM-0091 | Not code | — | — | Dependency boundary; nothing to implement here. |
-| MR-DSM-0092 | Partial | `dsm/src/types/device_state.rs::advance` (1134); `dsm_sdk/src/sdk/receipts.rs::verify_receipt_bytes` (844) | `receipts.rs::tests::first_ever_receipt_requires_merkle_pre_root_not_cas_parent_root` (3251) | New finding: the only candidate/guard mechanism in the tree (`verification::receipt_verification::verify_stitched_receipt`, using `ForkCandidate`) is wrapped by `dsm_sdk::sdk::receipts::verify_stitched_receipt` (602), which has **zero handler callers** — production acceptance (`verify_receipt_bytes`) has no candidate/guard/linearity stage at all. |
+| MR-DSM-0092 | Partial | `dsm/src/types/device_state.rs::advance` (1134); `dsm_sdk/src/sdk/receipts.rs::verify_receipt_bytes` (844) | `receipts.rs::tests::first_ever_receipt_requires_merkle_pre_root_not_cas_parent_root` (3251) | New finding: the only candidate/guard mechanism in the tree (`verification::receipt_verification::verify_stitched_receipt`, using `ForkCandidate`) is wrapped by `dsm_sdk::sdk::receipts::verify_stitched_receipt` (602), which has **zero handler callers** — production acceptance (`verify_receipt_bytes`) has no candidate/guard/linearity stage at all. Both were deleted, with the parent-consumption tracker (§6.45). |
 | MR-DSM-0093 | Partial | `dsm/src/types/device_state.rs::advance` (pure, operates only on `self`); `core/state_machine/mod.rs::prepare_advance_relationship/commit_advance` | no test found | Enforced structurally (no API accepts on another device's behalf) but no named test isolates this property. |
 | MR-DSM-0094 | Not code | — | — | Liveness boundary; nothing to build. |
 | MR-DSM-0095 | Partial | `dsm/src/types/device_state.rs` (`RelationshipChainState`/`DeviceState` fields, no counter/timestamp, confirmed by reading the struct) | no test found | True by field-absence; no negative test exercises it (transition.rs's tests are off the production path). |

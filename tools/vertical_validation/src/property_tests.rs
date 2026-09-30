@@ -21,10 +21,8 @@ use serde::Serialize;
 use dsm::common::domain_tags::{TAG_DSM_GENESIS_ENTROPY, TAG_DSM_STATE_ENTROPY};
 use dsm::crypto::blake3::dsm_domain_hasher;
 use dsm::crypto::sphincs::{sphincs_sign, sphincs_verify};
-use dsm::types::receipt_types::ParentConsumptionTracker;
-use dsm::verification::receipt_verification::verify_stitched_receipt;
 
-use crate::live_device::{connect, stitched_receipt, verification_context, LiveDevice};
+use crate::live_device::{commit, connect, marked, Decision, LiveDevice};
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -330,52 +328,54 @@ fn overspend_refused(iterations: u64, seed: u64) -> PropertyTestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Property 5: of two children of one parent, the verifier accepts one
+// Property 5: of two children of one tip, the receiver takes one
 // ---------------------------------------------------------------------------
 
 fn fork_exclusion(iterations: u64, seed: u64) -> PropertyTestResult {
     let start = Instant::now();
     let mut failures = Vec::new();
     let mut rng = ChaCha20Rng::seed_from_u64(seed ^ 0x464f_524b);
-    let (mut alice, bob) = funded_pair(1);
-    let mut tracker = ParentConsumptionTracker::new();
+    let (mut alice, mut bob) = funded_pair(1);
 
     for i in 0..iterations {
-        let op_a = alice
-            .transfer(&bob, 1, &random_nonce(&mut rng))
-            .expect("transfer a");
-        let op_b = alice
-            .transfer(&bob, 2, &random_nonce(&mut rng))
-            .expect("transfer b");
-        let (Ok(child_a), Ok(child_b)) = (alice.send(&bob, &op_a), alice.send(&bob, &op_b)) else {
-            failures.push(format!("iter {i}: advance refused"));
-            continue;
+        // Two different operations proposed on one tip: two children of it.
+        let mark = random_nonce(&mut rng)[0] & 0xFE;
+        let (child_a, child_b) = match (
+            alice.propose(&bob, marked(mark)),
+            alice.propose(&bob, marked(mark | 1)),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                failures.push(format!("iter {i}: a step could not be proposed: {e}"));
+                continue;
+            }
         };
-        let receipt_a = stitched_receipt(&alice, &bob, &child_a).expect("receipt a");
-        let receipt_b = stitched_receipt(&alice, &bob, &child_b).expect("receipt b");
-        if receipt_a.child_tip == receipt_b.child_tip {
+        if child_a.successor_tip == child_b.successor_tip {
             failures.push(format!(
-                "iter {i}: two different operations produced one child tip"
+                "iter {i}: two different operations produced one successor tip"
             ));
         }
-        let ctx_a = verification_context(&alice, &bob, alice.head.root(), &op_a);
-        let ctx_b = verification_context(&alice, &bob, alice.head.root(), &op_b);
-        match verify_stitched_receipt(&receipt_a, &ctx_a, &mut tracker) {
-            Ok(a) if a.valid => {}
-            Ok(a) => failures.push(format!(
-                "iter {i}: the first child was refused: {}",
-                a.reason.unwrap_or_default()
-            )),
-            Err(e) => failures.push(format!("iter {i}: verifier error: {e}")),
+        match bob.decide(&alice, &child_a) {
+            Decision::Accepted(verified) => {
+                if let Err(e) = commit(&mut alice, &mut bob, child_a, &verified) {
+                    failures.push(format!("iter {i}: the first child did not commit: {e}"));
+                    continue;
+                }
+            }
+            other => {
+                failures.push(format!("iter {i}: the first child was refused: {other}"));
+                continue;
+            }
         }
-        match verify_stitched_receipt(&receipt_b, &ctx_b, &mut tracker) {
-            Ok(a) if a.valid => failures.push(format!(
-                "iter {i}: FORK ACCEPTED: a second child of one parent"
+        match bob.decide(&alice, &child_b) {
+            Decision::Accepted(_) => failures.push(format!(
+                "iter {i}: FORK ACCEPTED: a second child of one tip"
             )),
-            Ok(_) => {}
-            Err(e) => failures.push(format!("iter {i}: verifier error: {e}")),
+            Decision::StaleTip => {}
+            other => failures.push(format!(
+                "iter {i}: the second child was refused for another reason: {other}"
+            )),
         }
-        alice.install(child_a);
     }
     finish("fork_exclusion", iterations, failures, start)
 }

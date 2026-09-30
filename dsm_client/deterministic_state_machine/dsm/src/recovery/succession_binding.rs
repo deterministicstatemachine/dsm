@@ -12,9 +12,10 @@
 //! Authentication split (REUSE, do not reinvent):
 //! - The new `(A_new,C)` establishment receipt is a normal **bilateral** stitched
 //!   receipt (co-signed by A_new — alive — and C — syncing), authenticated by
-//!   [`crate::verification::receipt_verification::verify_stitched_receipt`]
-//!   (both sigs + EK-cert chains + inclusion + parent adjacency + uniqueness). That is
-//!   the integration layer's job (it supplies `ReceiptVerificationContext`).
+//!   the offline bilateral decisions ([`crate::bilateral::offline::decide_confirm`],
+//!   [`crate::bilateral::offline::decide_commit_ack`]: signatures, EK-cert chains,
+//!   the state rules and the held relationship tip). That is the integration
+//!   layer's job.
 //! - This module verifies the **recovery-specific overlay**: device-pair `rel_key`
 //!   derivation, the tombstone/succession successor proof, the old-chain
 //!   forward-ancestry `h^cap ⟶* T_old_current`, the carry-forward commitment, the
@@ -454,8 +455,8 @@ impl CrossRelationshipSuccessionEvidence {
     /// posted (genesis-authenticated) root. Returns the verified new tip.
     ///
     /// NOTE: bilateral authentication of the new establishment receipt itself
-    /// (signatures + EK-cert chains + adjacency) is performed by
-    /// `verify_stitched_receipt` at the integration layer; this method assumes the
+    /// (signatures + EK-cert chains + the held tip) is performed by the offline
+    /// bilateral decisions at the integration layer; this method assumes the
     /// receipt's tips are the values verified there.
     pub fn verify(&self, recovery_authority_pubkey: &[u8]) -> Result<[u8; 32], DsmError> {
         self.verify_succession_semantics(recovery_authority_pubkey)?;
