@@ -1712,6 +1712,18 @@ After each step, every read (the cell, the index, the object, the spool from pos
 
 MR-STOR-0116 and MR-STOR-0118 are Met. MR-STOR-0119 stays Partial: its retention clause is now exercised, but exit by handover, retirement and the survivor rule are not built.
 
+### 6.50 What readers, repairers and writers cannot do to a member (`test/storage-batch-reads-restores-route-order`, 2026-09-30)
+
+Three storage rows had no test showing the node holds its line against a client. `dsm_storage_node::reads_restores_and_arrival_order` drives the app the binary serves, each member on a Postgres database of its own.
+
+| Row | Test | Mutation control |
+|---|---|---|
+| MR-STOR-0117 | `a_read_asks_nothing_of_the_reader_and_moves_nothing`: seven reads answer with nothing but their address, three rounds answer the same, and the cycle closed afterwards is the one the member had | The object read demanding a credit header: red. A cell read recording an arrival: red, "the reads moved what the member commits". |
+| MR-STOR-0120 | `a_client_restores_a_missing_object_accepted_by_hash_only`: a client restores A's object at B, and B serves A's bytes; C refuses other bytes stated for that address | The expected-address check skipped: red, the other bytes are taken. |
+| MR-STOR-0121 | `a_client_cannot_reorder_a_cells_arrival_log`: values written again in another order are appended, and the first entries keep their records | The cell read ordered by value instead of arrival: red. |
+
+MR-STOR-0117 and MR-STOR-0120 are Met. MR-STOR-0121 stays Partial: handover and the loss rule are not built.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -1719,9 +1731,9 @@ MR-STOR-0116 and MR-STOR-0118 are Met. MR-STOR-0119 stays Partial: its retention
 | DSM high-level (MR-DSM) | 272 | 76 | 110 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 47 | 31 | 61 | 0 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 49 | 29 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **347** | **226** | **119** | **8** | **64** | **154** |
+| **All** | **918** | **349** | **224** | **119** | **8** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2477,11 +2489,11 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0114 | Missing | — | no test found | Vacuous. |
 | MR-STOR-0115 | Partial | dsm_sdk · sdk/storage_set.rs (module doc, lines 22-24: "the catalog holds exactly the one configured fleet… immutable for the lifetime of every vault") | no test found | The "one pinned fleet, immutable for the lifetime of every vault" rule is stated and implemented in `dsm_sdk/src/sdk/storage_set.rs`. No test. |
 | MR-STOR-0116 | Met | `dsm_storage_node::api::objects::immutable::put_immutable`; `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::db::pg::close_cycle`; `dsm_storage_node::db::pg::init_db` | `dsm_storage_node::held_bytes_stay_held::nothing_the_member_does_removes_what_it_holds`; `dsm_storage_node::db::cell_properties::held_values_and_index_entries_survive_reopening_the_store` | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). Nothing the member does removes what it holds (§6.48): later cycles, a request to delete, replace or patch, and a restart each leave every read as it was. Handover, the one way a role's memory may empty, is not built (MR-STOR-0079). |
-| MR-STOR-0117 | Partial | dsm_storage_node · api/objects/immutable.rs::`get_immutable`; api/cells.rs::`get_cell`; api/objects/bytecommit.rs::`proof` (no credit/auth check on any) | no test found | No credit concept exists; reads carry no auth. No test asserts reads stay free. |
+| MR-STOR-0117 | Met | `dsm_storage_node::api::objects::immutable::get_immutable`; `dsm_storage_node::api::cells::get_cell`; `dsm_storage_node::api::objects::bytecommit::proof` | `dsm_storage_node::reads_restores_and_arrival_order::a_read_asks_nothing_of_the_reader_and_moves_nothing` | No credit concept exists, and no read asks for a credential. Every read the member serves answers with nothing but its address, and reading moves nothing the member commits: closing the cycle afterwards answers the same ByteCommit (§6.50). |
 | MR-STOR-0118 | Met | `dsm_storage_node::db::pg::close_cycle`; `dsm_storage_node::db::pg::init_db` | `dsm_storage_node::held_bytes_stay_held::nothing_the_member_does_removes_what_it_holds`; `dsm_storage_node::db::cell_properties::held_values_and_index_entries_survive_reopening_the_store` | Settled now (storage §19.4): nothing is pruned. Closing cycles and restarting leave every held read as it was (§6.48). The window and its exemptions are open (§24 item 11); a rule adopted later must keep the three exemptions. |
 | MR-STOR-0119 | Partial | as MR-STOR-0116 | `dsm_storage_node::held_bytes_stay_held::nothing_the_member_does_removes_what_it_holds`; `dsm_storage_node::db::cell_properties::held_values_and_index_entries_survive_reopening_the_store` | Retention is not tied to owner activity: nothing the member does removes what it holds (§6.48). Operator exit by handover, retirement effectiveness and the survivor rule are not built (MR-STOR-0070–0085). |
-| MR-STOR-0120 | Partial | dsm_storage_node · api/objects/immutable.rs::`put_immutable` | immutable_store_round_trip::`re_putting_identical_bytes_acks_and_the_read_is_unchanged` | The suite runs on Postgres since the SQLite backend was deleted (2026-09-24). |
-| MR-STOR-0121 | Partial | dsm_storage_node · api/cells.rs (no repair endpoint; put/get/index only) | no test found | Confirmed no client-repair path exists (prohibition trivially met); the referenced handover/loss resolution machinery does not exist either. |
+| MR-STOR-0120 | Met | `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm_storage_node::reads_restores_and_arrival_order::a_client_restores_a_missing_object_accepted_by_hash_only`; `dsm_storage_node::immutable_store_round_trip::re_putting_identical_bytes_acks_and_the_read_is_unchanged` | Any client restores a replica one member lacks from another, with no authorization; the member keys it by the bytes' own address and refuses bytes stated for an address they do not hash to (§6.50). |
+| MR-STOR-0121 | Partial | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::db::pg::get_cell_entries` | `dsm_storage_node::reads_restores_and_arrival_order::a_client_cannot_reorder_a_cells_arrival_log` | A client writing a cell's values again, in any order, only appends; the entries already held keep their arrival records (§6.50). Handover and the loss rule, by which the order may move or be resolved, are not built (MR-STOR-0079, MR-STOR-0083). |
 | MR-STOR-0122 | Not code | — | — | Proof obligations. G15: the existing finality tests and formal model prove the superseded copy rule and must be redone for route chains (ChatGPT CG-13). |
 | MR-STOR-0123 | Not code | — | — | Proof obligations. G15: the existing finality tests and formal model prove the superseded copy rule and must be redone for route chains (ChatGPT CG-13). |
 | MR-STOR-0124 | Not code | — | — | Proof obligations. G15: the existing finality tests and formal model prove the superseded copy rule and must be redone for route chains (ChatGPT CG-13). |

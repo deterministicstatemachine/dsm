@@ -9,46 +9,17 @@
 
 mod common;
 
-use std::sync::Arc;
-
-use axum::{body::Body, http::Request, http::StatusCode, Router};
+use axum::{http::StatusCode, Router};
+use common::call;
 use dsm::utils::text_id;
-use dsm_storage_node::AppState;
 use prost::Message;
-use tower::ServiceExt;
 
 const STORE: &str = "held_bytes_stay_held";
 const NS: &str = "DSM/test/held-bytes";
 
 /// The member the binary serves on `pool`.
-fn member(pool: Arc<dsm_storage_node::db::DBPool>) -> Router {
-    let state = Arc::new(common::ok_or_panic(
-        AppState::new("member".to_string(), pool, common::set_client()),
-        "app state",
-    ));
-    common::served(state)
-}
-
-/// The member's answer to `method uri`: its status and its body.
-async fn call(
-    app: &Router,
-    method: &str,
-    uri: &str,
-    headers: &[(&str, &str)],
-    body: Vec<u8>,
-) -> (StatusCode, Vec<u8>) {
-    let mut req = Request::builder().method(method).uri(uri);
-    for (name, value) in headers {
-        req = req.header(*name, *value);
-    }
-    let req = common::ok_or_panic(req.body(Body::from(body)), "request");
-    let resp = common::ok_or_panic(app.clone().oneshot(req).await, "the router answers");
-    let status = resp.status();
-    let bytes = common::ok_or_panic(
-        axum::body::to_bytes(resp.into_body(), usize::MAX).await,
-        "body",
-    );
-    (status, bytes.to_vec())
+fn member(pool: std::sync::Arc<dsm_storage_node::db::DBPool>) -> Router {
+    common::member("member", pool)
 }
 
 /// What one test holds at the member, by the paths it is read at.
@@ -149,15 +120,7 @@ async fn put_cell(app: &Router, key: &str, value: &[u8]) {
 /// After each, every read answers byte for byte what it answered before.
 #[test]
 fn nothing_the_member_does_removes_what_it_holds() {
-    // A runtime of its own: `#[tokio::test]` builds one with `expect`, which
-    // this crate's lints refuse.
-    let runtime = common::ok_or_panic(
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build(),
-        "a Tokio runtime",
-    );
-    runtime.block_on(keeps_everything());
+    common::runtime().block_on(keeps_everything());
 }
 
 /// The steps of `nothing_the_member_does_removes_what_it_holds`.
