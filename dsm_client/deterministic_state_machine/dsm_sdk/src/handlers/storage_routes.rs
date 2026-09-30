@@ -1952,6 +1952,16 @@ fn take_in_copy(
                      {unreadable}"
                 ));
             }
+            for unbound in outcome.unbound {
+                report.errors.push(match unbound {
+                    crate::handlers::recipient_dispatch::Unbound::Refused(why) => {
+                        format!("a receipt did not bind while ingesting {message_id}: {why}")
+                    }
+                    crate::handlers::recipient_dispatch::Unbound::Pending(why) => {
+                        format!("a transfer waits while ingesting {message_id}: {why}")
+                    }
+                });
+            }
             outcome.ingested
         }
         Ok(StaleOrIngested::Stale(StaleCopy::Decided)) => Ingested::Decided,
