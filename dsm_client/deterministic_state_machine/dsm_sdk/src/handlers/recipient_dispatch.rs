@@ -994,8 +994,7 @@ mod tests {
             assert_eq!(out.ingested, Ingested::Staged, "{forgery}");
             assert!(
                 matches!(out.unbound.as_slice(), [Unbound::Refused(_)]),
-                "{forgery}: {:?}",
-                out.unbound
+                "{forgery}: the receipt is refused, and only it"
             );
             assert_eq!(rows("recipient_pair"), 0, "{forgery}: nothing binds");
         }
@@ -1053,8 +1052,7 @@ mod tests {
         .expect("ingest");
         assert!(
             matches!(out.unbound.as_slice(), [Unbound::Pending(_)]),
-            "{:?}",
-            out.unbound
+            "the pair waits on the sender's root, and only it"
         );
         assert_eq!(rows("recipient_pair"), 0, "the pair waits");
 
