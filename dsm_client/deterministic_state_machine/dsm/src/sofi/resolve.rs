@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ccb::StorageSetMembers;
-use crate::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition};
+use crate::economic::lineage::AcceptedClaim;
 use crate::economic::provenance::{PeerLineageFailure, ValidatedPeerTransition};
 use crate::economic::register::root_completion;
 use crate::economic::state::EconomicLeafState;
@@ -44,11 +44,11 @@ use super::exercise::{
 };
 use super::facts::{
     establish, establish_ground, refuted_in_hand, Established, EstablishedFacts, ExerciseReads,
-    GroundFacts, GroundReads, InHandRefutation, LegReads, NotEstablished,
+    GroundFacts, GroundReads, InHandRefutation, LegReads, NotEstablished, ResolvedParent,
 };
 use super::lineage::{
-    genesis_accepted, genesis_root, vault_leaves_at_genesis, AcceptedVaultGenesis, GenesisInvalid,
-    GenesisMissing, GenesisRefusal,
+    advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted, genesis_root,
+    vault_leaves_at_genesis, AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
 };
 use super::publication::{recognize_fulfillment, recognize_setup, Signed};
 use super::registration::{
@@ -64,8 +64,9 @@ use super::validation::{
     SetupLineage, VaultLeafPre, VaultPostState,
 };
 use super::wire::{
-    CoreEntry, ParentClaimRef, SettlementPreimage, TraderCore, TraderFulfillmentBody,
-    TraderPreBalance, TraderPrecommitBody, ValidationRef, VaultGenesisPreimage, VaultStateLeaf,
+    CoreEntry, ParentClaimRef, SettlementPreimage, SofiResolutionClaim, TraderCore,
+    TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, ValidationRef,
+    VaultGenesisPreimage, VaultStateLeaf,
 };
 
 type D32 = [u8; 32];
@@ -423,7 +424,7 @@ pub struct ExerciseObjects<'a> {
 /// network, and the position it resolved itself. Every
 /// field is an established fact of THIS verifier; none is trusted because
 /// somebody sent it.
-pub struct Verifier<'a, R: SofiReads> {
+pub struct Verifier<'a, R: SofiReads + ?Sized> {
     pub reads: &'a R,
     /// The network's pinned set, as the local catalog resolves it: cells
     /// are routed over it, and `RoutedCell::new` refuses members that do
@@ -431,11 +432,11 @@ pub struct Verifier<'a, R: SofiReads> {
     pub members: &'a StorageSetMembers,
     pub set_id: D32,
     pub network_id: &'a [u8],
-    /// This verifier's own admitted position, when it resolved a conditional
-    /// one: what a `P` naming that fulfillment as its parent was built on.
-    /// Core reads what it selected; nothing else resolves a parent, and a
-    /// conditional parent this verifier did not resolve is not established.
-    pub parent: Option<&'a AdmittedEconomicPosition>,
+    /// What this verifier itself resolved at a conditional position: what a
+    /// `P` naming that fulfillment as its parent was built on. Core reads
+    /// what it selected; nothing else resolves a parent, and a conditional
+    /// parent this verifier did not resolve is not established.
+    pub parent: Option<ResolvedParent>,
 }
 
 /// Where a walk over one parent's attempt chain ended, with the exercise
@@ -527,7 +528,7 @@ fn short_id(id: &D32) -> String {
     crate::utils::text_id::encode_base32_crockford(id)
 }
 
-impl<R: SofiReads> Verifier<'_, R> {
+impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     // ── cells ───────────────────────────────────────────────────────────
 
     /// `K^(attempt)` of `vault_id` at `parent_root`, routed over the set.
@@ -1672,5 +1673,202 @@ impl<R: SofiReads> Verifier<'_, R> {
             legs,
         };
         Ok(establish(&reads))
+    }
+}
+
+/// Resolves another trader's conditional position for a frontier-relative
+/// walk of that trader's lineage (DSM Amendment A8, SoFi Amendment S15):
+/// Core's own verdict over SoFi's public objects for that position alone.
+pub struct PeerPositionResolver<'a, R: SofiReads + ?Sized> {
+    pub reads: &'a R,
+    /// The network's pinned set, over which the position's cells are routed.
+    pub members: &'a StorageSetMembers,
+    pub set_id: D32,
+    pub network_id: &'a [u8],
+}
+
+impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionResolver
+    for PeerPositionResolver<'_, R>
+{
+    fn resolve(
+        &self,
+        previous: &crate::economic::lineage::ValidatedEconomicRoot,
+        parent: &ParentClaimRef,
+        held: &SofiResolutionClaim,
+    ) -> Result<
+        (
+            crate::economic::lineage::ValidatedEconomicRoot,
+            AcceptedClaim,
+        ),
+        PeerLineageFailure,
+    > {
+        // When `q − 1` was itself a SoFi position, the walk resolved it and
+        // `previous` is the root that resolution selected: what a `P` naming
+        // that fulfillment as its parent was built on.
+        let resolved = match parent {
+            ParentClaimRef::Conditional { fulfillment_id } => Some(ResolvedParent {
+                economic_position: previous.economic_position(),
+                selected_root: previous.economic_root(),
+                fulfillment_id: *fulfillment_id,
+            }),
+            ParentClaimRef::SingleRoot { .. } => None,
+        };
+        let verifier = Verifier {
+            reads: self.reads,
+            members: self.members,
+            set_id: self.set_id,
+            network_id: self.network_id,
+            parent: resolved,
+        };
+        let advanced = verifier.peer_position(previous, parent, held)?;
+        Ok((advanced.root, advanced.claim))
+    }
+}
+
+impl<R: SofiReads + ?Sized> Verifier<'_, R> {
+    /// Advance ANOTHER trader's lineage through its SoFi position `q`, whose
+    /// root cell holds the conditional claim `held` (SoFi Amendment S15; P15-9:
+    /// a peer walk passes a resolved position).
+    ///
+    /// The same stages the trader's own device runs for its own position, over
+    /// this verifier's reads: the registration from the position pair, `P` by
+    /// its id, the exercise read back from the first leg's cell, each vault's
+    /// canonical chain, and the facts Core establishes over them. The ladder
+    /// then runs inside [`advance_peer_resolved`]. `held` counts only as the
+    /// claim `(P, F)` derive: its two roots are the ones the resolution chooses
+    /// between, or the position is Invalid.
+    ///
+    /// `previous` is the root the walk validated at `p`; `parent` is the claim
+    /// the walk accepted there; `self.parent` is the walk's own resolution of
+    /// `p` when `p` was itself a SoFi position. A read not in hand is
+    /// `Incomplete`, facts that do not decide `q` yet are `Unresolved`, and
+    /// only a verified contradiction is `Invalid`.
+    pub fn peer_position(
+        &self,
+        previous: &crate::economic::lineage::ValidatedEconomicRoot,
+        parent_claim: &ParentClaimRef,
+        held: &SofiResolutionClaim,
+    ) -> Result<PeerResolvedAdvance, PeerLineageFailure> {
+        use PeerLineageFailure::{Incomplete, Invalid, Unresolved};
+        let q = held.position;
+        let read = |e: VerifierFailure| Incomplete(format!("position {q}: {e}"));
+
+        // The registration, from the pair (R10). The claim final at the root
+        // cell names one fulfillment; the pair must hold that one registered.
+        let registration = self
+            .read_registration(&held.genesis, &held.device_id, q, &previous.economic_root())
+            .map_err(read)?
+            .map_err(|missing| {
+                Incomplete(format!("position {q}: the registration: {missing:?}"))
+            })?;
+        let fulfillment = match registration.registration() {
+            Registration::Registered(signed)
+                if derive::fulfillment_id(&signed.body) == held.fulfillment_id =>
+            {
+                signed.clone()
+            }
+            other => {
+                return Err(Unresolved(format!(
+                    "position {q}: the pair does not hold the registered fulfillment the root \
+                     cell's claim names ({other:?})"
+                )))
+            }
+        };
+        let precommit = match self
+            .reads
+            .precommit(fulfillment.body.precommit_id())
+            .map_err(|e| read(e.into()))?
+        {
+            Resolved::Kept(signed) => signed.body,
+            Resolved::None | Resolved::Unavailable => {
+                return Err(Incomplete(format!(
+                    "position {q}: the precommit the fulfillment names is not in hand"
+                )))
+            }
+        };
+        // The claim at the root cell counts only as the one (P, F) derive.
+        if derive::resolution_claim(&precommit, &fulfillment.body) != *held {
+            return Err(Invalid(format!(
+                "position {q}: the claim at the root cell is not the one P and F derive"
+            )));
+        }
+
+        // The exercise, read back from the first leg's cell.
+        let first = precommit
+            .legs()
+            .first()
+            .ok_or_else(|| Invalid(format!("position {q}: P names no leg")))?;
+        let attempt = fulfillment
+            .body
+            .attempts()
+            .iter()
+            .find(|a| a.vault_id == first.vault_id)
+            .map(|a| a.attempt)
+            .ok_or_else(|| {
+                Invalid(format!(
+                    "position {q}: F names no attempt for P's first leg"
+                ))
+            })?;
+        let exercise = self
+            .read_attempt_cell(&first.vault_id, &first.parent_root, attempt)
+            .map_err(read)?
+            .map_err(|missing| {
+                Incomplete(format!("position {q}: the first leg's cell: {missing:?}"))
+            })?
+            .into_exercise()
+            .ok_or_else(|| {
+                Unresolved(format!(
+                    "position {q}: no exercise holds the first leg's cell yet"
+                ))
+            })?;
+
+        // Each vault's canonical chain, and the facts over them.
+        let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
+        for leg in precommit.legs() {
+            if !chains.contains_key(&leg.vault_id) {
+                chains.insert(leg.vault_id, self.chain(&leg.vault_id).map_err(read)?);
+            }
+        }
+        let established = self
+            .establish_own(&chains, &exercise, &registration)
+            .map_err(read)?
+            .map_err(|why| match why {
+                NotEstablished::Registration(..)
+                | NotEstablished::ConformanceEvidence(..)
+                | NotEstablished::RouteEvidence(..)
+                | NotEstablished::AttemptCell { .. } => {
+                    Incomplete(format!("position {q}: the facts: {why:?}"))
+                }
+                NotEstablished::ParentUnresolved { .. }
+                | NotEstablished::AttemptLiveness { .. }
+                | NotEstablished::NotThisExercise(..) => {
+                    Unresolved(format!("position {q}: the facts: {why:?}"))
+                }
+            })?;
+
+        advance_peer_resolved(
+            previous,
+            &precommit,
+            &fulfillment.body,
+            parent_claim,
+            &established,
+        )
+        .map_err(|e| match e {
+            // Complete facts the ladder does not resolve yet, or facts read at
+            // a cell some other exercise holds: nothing is known wrong.
+            AdvanceError::FactsIncomplete(..) | AdvanceError::FactsAreNotThisOperation { .. } => {
+                Unresolved(format!("position {q}: {e}"))
+            }
+            AdvanceError::LineageIsTerminal
+            | AdvanceError::PositionIsNotSuccessor { .. }
+            | AdvanceError::PreRootIsNotThePredecessor { .. }
+            | AdvanceError::ParentClaimMismatch
+            | AdvanceError::RefutedYetNotTerminal
+            | AdvanceError::CreditsNotDerivable
+            | AdvanceError::TokenNotAdopted { .. }
+            | AdvanceError::BalancesNotDerivable(..)
+            | AdvanceError::PreimageIsNotThisOperation { .. }
+            | AdvanceError::Counter(..) => Invalid(format!("position {q}: {e}")),
+        })
     }
 }
