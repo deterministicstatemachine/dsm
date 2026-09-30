@@ -66,8 +66,8 @@ Two independent passes produced the rows: a first pass per range, then a verific
 |---|---|---|
 | MR-SOFI-0030 | Met | Violated |
 | MR-DSM-0030 | Violated | Partial |
-| MR-STOR-0030 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::storage_contract_router` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::only_malformed_requests_are_refused`; `dsm_storage_node::immutable_store_round_trip::a_put_with_no_authorization_is_taken_on_the_served_assembly` | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The cell path conformed already; the mounted routes that authenticated writers and replaced values are gone (the §3.2 Met → Violated stands as history). |
-| MR-STOR-0109 | Missing | — | — | As MR-STOR-0100 (the §3.2 Met → Violated stands as history). |
+| MR-STOR-0030 | Met | Violated |
+| MR-STOR-0109 | Met | Violated |
 
 Where the ChatGPT findings map to rows the base already classified the same way, the rows keep their status and the finding is cited in the note: CG-01 (G2), CG-03 (MR-DSM-0041, 0042, MR-STOR-0045), CG-04 (MR-SOFI-0248, 0252, 0329; MR-STOR-0050–0054), CG-06 (G5), CG-07 (MR-STOR-0082), CG-08 (MR-DSM-0062, 0202; MR-STOR-0102–0107, 0113), CG-11 (MR-STOR-0024, 0115–0118), CG-12 (MR-STOR-0087–0091) and CG-14, which the base records under MR-STOR-0006 and 0007 (G4).
 
@@ -1692,9 +1692,9 @@ Found, not changed here:
 | DSM high-level (MR-DSM) | 272 | 76 | 110 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 342 | 215 | 84 | 18 | 8 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 43 | 34 | 60 | 2 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 44 | 34 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **918** | **343** | **229** | **118** | **10** | **64** | **154** |
+| **All** | **918** | **344** | **229** | **119** | **8** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2363,7 +2363,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0027 | Met | `dsm::sofi::storage::stored`; `dsm::sofi::wire::STORAGE_FINALITY_COUNT` | `dsm::sofi::storage::tests::two_members_is_not_stored`; `dsm::sofi::storage::tests::stored_returns_exact_bytes` | — |
 | MR-STOR-0028 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::api::cells::put_cells` | `dsm_storage_node::cells_keep_everything::an_identical_value_put_twice_is_held_twice` | — |
 | MR-STOR-0029 | Met | `dsm_storage_node::api::cells::get_cell`; `dsm_storage_node::db::pg::get_cell_entries` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::a_key_nothing_was_put_under_reads_as_an_empty_list_with_200`; `dsm_storage_node::db::cell_properties::every_value_put_at_a_key_is_held_in_arrival_order` | The db function lives in db/pg.rs (ORDER BY seq); the tests confirm arrival order, both values kept, and an empty list under 200 for an unused key. |
-| MR-STOR-0030 | Violated | dsm_storage_node · api/cells.rs (conforms); api/objects/store.rs · `put_object`, `delete_object_proto`; db/pg.rs · `upsert_object` (`ON CONFLICT DO UPDATE`); auth/mod.rs · `device_auth` on object and b0x writes | cells_keep_everything.rs `a_second_value_at_a_key_is_kept_after_the_first_never_refused`, `only_malformed_requests_are_refused` | Reconciled Met → Violated (ChatGPT CG-09, CG-11). The cell path conforms, but mounted routes on the same node authenticate writers and replace held values. Same cause as MR-STOR-0041 (G4). |
+| MR-STOR-0030 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm_storage_node::storage_contract_router` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::only_malformed_requests_are_refused`; `dsm_storage_node::immutable_store_round_trip::a_put_with_no_authorization_is_taken_on_the_served_assembly` | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The cell path conformed already; the mounted routes that authenticated writers and replaced values are gone (the §3.2 Met → Violated stands as history). |
 | MR-STOR-0031 | Met | `dsm_storage_node::storage_contract_router` | `dsm_storage_node::immutable_store_round_trip::a_put_with_no_authorization_is_taken_on_the_served_assembly` | The served storage-contract assembly has no write authorization, and the cited test is its mutation control. |
 | MR-STOR-0032 | Met | `dsm_storage_node::api::cells::append_index`; `dsm_storage_node::api::cells::read_index`; `dsm_storage_node::db::pg` | `dsm_storage_node::cells_keep_everything::an_index_pages_in_append_order_from_the_last_seq` | — |
 | MR-STOR-0033 | Missing | — | — | The tip mirror (`api/identity/tips.rs`) was deleted in #977; nothing holds a per-device head (MR-DSM-0069). |
@@ -2442,7 +2442,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0106 | Missing | — | no test found | Vacuous — no credits to count. |
 | MR-STOR-0107 | Missing | — | no test found | Confirmed. |
 | MR-STOR-0108 | Partial | dsm_sdk · sdk/storage_io.rs · `write_cell_leader_first`/`CellWrite{leader_reached,copies}` | no test found (copy-count only; no 3-link chain assertion) | Payment and admission are decoupled, but "getting through" is an old copy count, not a route-chain check. |
-| MR-STOR-0109 | Violated | dsm_storage_node · api/vault/paidk.rs · `require_paidk`; callers api/objects/store.rs::`put_object`/`delete_object_proto`, api/transport/b0x.rs::`submit_b0x_envelope` | tests/paidk_gating.rs::`t_a_unpaid_device_rejected` | Reconciled Met → Violated (ChatGPT CG-10). The gate is keyed on the connected writer, not the addressed account, and reaches paths the exemption covers. Owner decision 2026-09-23: the spend gate is out of beta and is being removed; the permission is then simply unused. |
+| MR-STOR-0109 | Missing | — | — | As MR-STOR-0100 (the §3.2 Met → Violated stands as history). |
 | MR-STOR-0110 | Missing | — | — | As MR-STOR-0100. |
 | MR-STOR-0111 | Missing | — | — | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The DLV slot route and the spend gate are both gone; there is nothing to exempt. |
 | MR-STOR-0112 | Missing | — | — | As MR-STOR-0100. |
