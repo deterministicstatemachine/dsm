@@ -3025,7 +3025,10 @@ mod tests {
         let restored = economic_fixtures::core_sdk_for(&d.identity);
         let head = restored.device_head().expect("restored head");
         assert_eq!(head.root(), live.root());
-        assert_eq!(head.balance(&era_commit()), 100);
+        assert_eq!(
+            head.balance(&era_commit()),
+            economic_fixtures::whole_era(100)
+        );
     }
 
     fn era_commit() -> [u8; 32] {

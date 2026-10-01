@@ -378,7 +378,8 @@ mod tests {
             .unwrap()
             .expect("projection rebuilt");
         assert_eq!(
-            proj.available, 300,
+            proj.available,
+            crate::economic_fixtures::whole_era(300),
             "projection rebuilt to the head's balance"
         );
 

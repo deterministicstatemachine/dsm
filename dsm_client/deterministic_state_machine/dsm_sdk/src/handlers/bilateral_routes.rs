@@ -300,7 +300,7 @@ mod pending_list_tests {
         );
         assert_eq!(prepared.recipient_id, peer.to_vec());
         assert_eq!((prepared.amount, prepared.token_id.as_str()), (3, "ERA"));
-        assert_eq!(prepared.display_amount.as_deref(), Some("3"));
+        assert_eq!(prepared.display_amount.as_deref(), Some("0.03"));
         assert!(prepared.cancellable, "an unconfirmed proposal is offered");
 
         let confirmed = step([0xA2; 32]);

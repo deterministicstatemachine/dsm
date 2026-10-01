@@ -18,7 +18,7 @@ use dsm::economic::native_reserve::{
 };
 
 use crate::bridge::{AppQuery, AppRouter};
-use crate::economic_fixtures::NETWORK;
+use crate::economic_fixtures::{whole_era, NETWORK};
 use crate::generated;
 use crate::sdk::faucet_claim_flow::claim_era_faucet;
 use crate::sdk::storage_set::{as_ccb_members, canonical_set};
@@ -91,11 +91,15 @@ async fn a_full_claim_credits_100_era_and_admits_position_1() {
     let outcome = claim_era_faucet(d.core(), NETWORK)
         .await
         .expect("claim succeeds");
-    assert_eq!(outcome.tokens_received, 100);
+    assert_eq!(outcome.tokens_received, whole_era(100));
     assert_eq!(outcome.economic_position, 1);
 
     let head = d.core().device_head().expect("head");
-    assert_eq!(head.balance(&era()), 100, "exactly +100, conservation");
+    assert_eq!(
+        head.balance(&era()),
+        whole_era(100),
+        "exactly +100 ERA, conservation"
+    );
     assert!(
         head.pending_economic_admission().is_none(),
         "admitted ⇒ unfenced"
@@ -120,8 +124,8 @@ async fn a_full_claim_credits_100_era_and_admits_position_1() {
         claim.tx_type,
         generated::TransactionType::TxTypeFaucet as i32
     );
-    assert_eq!(claim.amount_signed, 100);
-    assert_eq!(claim.display_amount, "100");
+    assert_eq!(claim.amount_signed, whole_era(100) as i64);
+    assert_eq!(claim.display_amount, "100.00");
     assert_eq!(claim.token_id, "ERA");
     assert!(claim.from_device_id.is_empty(), "the source is the reserve");
     assert_eq!(claim.to_device_id, d.identity.device_id.to_vec());
@@ -206,7 +210,7 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     let outcome = claim_era_faucet(d.core(), NETWORK)
         .await
         .expect("the claim lands");
-    assert_eq!(outcome.tokens_received, 100);
+    assert_eq!(outcome.tokens_received, whole_era(100));
     assert_eq!(
         recipient_of(&release_at(1).await),
         d.identity.device_id,
@@ -214,7 +218,10 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     );
     let head = reserve_head().await;
     assert_eq!(head.generation, 1);
-    assert_eq!(head.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY - 100);
+    assert_eq!(
+        head.remaining_supply,
+        ERA_RESERVE_GENESIS_SUPPLY - whole_era(100)
+    );
 }
 
 /// Owner ruling 2026-09-25: a faucet release occupies a reserve cell only
@@ -256,7 +263,7 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
     let outcome = claim_era_faucet(d.core(), NETWORK)
         .await
         .expect("the claim lands");
-    assert_eq!(outcome.tokens_received, 100);
+    assert_eq!(outcome.tokens_received, whole_era(100));
     let won = release_at(1).await;
     assert_ne!(
         won.envelope_bytes, impostor,
@@ -331,7 +338,11 @@ async fn a_repeat_claimant_succeeds_on_the_next_generation() {
         .await
         .expect("second claim");
     assert_eq!(two.economic_position, 2, "each claim advances the position");
-    assert_eq!(d.era_balance(), 200, "two claims, exactly 200");
+    assert_eq!(
+        d.era_balance(),
+        whole_era(200),
+        "two claims, exactly 200 ERA"
+    );
     assert_eq!(reserve_head().await.generation, 2);
 }
 
@@ -348,15 +359,18 @@ async fn another_claimants_release_moves_the_head_and_the_next_claim_takes_the_g
     let outcome = claim_era_faucet(&p.a.router().core_sdk, NETWORK)
         .await
         .expect("A claims the next generation");
-    assert_eq!(outcome.tokens_received, 100);
+    assert_eq!(outcome.tokens_received, whole_era(100));
     assert_eq!(outcome.economic_position, 1, "A's own first position");
-    assert_eq!(p.a.era_balance(), 100);
+    assert_eq!(p.a.era_balance(), whole_era(100));
 
     assert_eq!(recipient_of(&release_at(1).await), p.b.device_id);
     assert_eq!(recipient_of(&release_at(2).await), p.a.device_id);
     let head = reserve_head().await;
     assert_eq!(head.generation, 2);
-    assert_eq!(head.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY - 200);
+    assert_eq!(
+        head.remaining_supply,
+        ERA_RESERVE_GENESIS_SUPPLY - whole_era(200)
+    );
 }
 
 /// A claim whose release reached only the leader and one more seat leaves a
@@ -398,7 +412,7 @@ async fn a_release_cut_short_after_the_leader_is_carried_by_the_next_claimant_an
         .await
         .expect("B's claim is not bricked by A's short chain");
     assert_eq!(b_claim.economic_position, 1);
-    assert_eq!(p.b.era_balance(), 100);
+    assert_eq!(p.b.era_balance(), whole_era(100));
     let first = release_at(1).await;
     assert_eq!(first.envelope_bytes, frozen, "generation 1 is A's release");
     assert_eq!(recipient_of(&release_at(2).await), p.b.device_id);
@@ -407,12 +421,15 @@ async fn a_release_cut_short_after_the_leader_is_carried_by_the_next_claimant_an
     let resumed = claim_era_faucet(&p.a.router().core_sdk, NETWORK)
         .await
         .expect("A finishes on its own generation");
-    assert_eq!(resumed.tokens_received, 100);
+    assert_eq!(resumed.tokens_received, whole_era(100));
     assert_eq!(resumed.economic_position, 1);
-    assert_eq!(p.a.era_balance(), 100);
+    assert_eq!(p.a.era_balance(), whole_era(100));
     let head = reserve_head().await;
     assert_eq!(head.generation, 2, "A released once, B once");
-    assert_eq!(head.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY - 200);
+    assert_eq!(
+        head.remaining_supply,
+        ERA_RESERVE_GENESIS_SUPPLY - whole_era(200)
+    );
 }
 
 /// The claimant alone: its release cut short after the leader, its retry
@@ -438,7 +455,7 @@ async fn a_claim_cut_short_resumes_on_its_own_release_byte_identically() {
     let outcome = claim_era_faucet(d.core(), NETWORK)
         .await
         .expect("resumed claim");
-    assert_eq!(outcome.tokens_received, 100);
+    assert_eq!(outcome.tokens_received, whole_era(100));
     assert_eq!(outcome.economic_position, 1);
     assert_eq!(
         release_at(1).await.envelope_bytes,
@@ -446,7 +463,7 @@ async fn a_claim_cut_short_resumes_on_its_own_release_byte_identically() {
         "the resumed claim used the frozen release"
     );
     assert_eq!(reserve_head().await.generation, 1, "released once");
-    assert_eq!(d.era_balance(), 100);
+    assert_eq!(d.era_balance(), whole_era(100));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -461,7 +478,7 @@ async fn admissions_are_never_double_finished_and_positions_stay_monotonic() {
     assert_eq!(second.economic_position, 2);
     let third = claim_era_faucet(d.core(), NETWORK).await.expect("claim 3");
     assert_eq!(third.economic_position, 3);
-    assert_eq!(d.era_balance(), 300);
+    assert_eq!(d.era_balance(), whole_era(300));
     let (position, _root) = client_db::economic_lineage::get_admitted_coordinate()
         .expect("read admitted")
         .expect("admitted");

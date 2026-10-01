@@ -1373,7 +1373,7 @@ mod tests {
             let item = listing(&listed.items, id);
             assert_eq!(
                 item.preview,
-                format!("From: {sender} Amount: 10 ERA"),
+                format!("From: {sender} Amount: 0.10 ERA"),
                 "every copy of the transfer shows the signed terms"
             );
             assert_eq!(item.sender_id.as_deref(), Some(sender.as_str()));
