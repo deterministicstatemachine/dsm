@@ -4,7 +4,9 @@ import type { AppState } from '../types/app';
 
 export type NativeSessionIdentityStatus = 'runtime_not_ready' | 'missing' | 'ready';
 export type NativeSessionEnvConfigStatus = 'loading' | 'ready' | 'error';
-export type NativeSessionPhase = Exclude<AppState, 'loading'>;
+// `backup_phrase` is the frontend's own: the recovery phrase is on the screen
+// before any wallet exists, so the native session never reports it.
+export type NativeSessionPhase = Exclude<AppState, 'loading' | 'backup_phrase'>;
 export type NativeSessionLockMethod = 'none' | 'pin' | 'combo' | 'biometric';
 
 export type NativeSessionLockStatus = {

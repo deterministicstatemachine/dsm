@@ -7,6 +7,7 @@ import LoadingSpinner from './common/LoadingSpinner';
 import SplashController from './SplashController';
 import LockScreen from './lock/LockScreen';
 import AppScreenRouter from './AppScreenRouter';
+import RecoveryPhraseScreen from './screens/RecoveryPhraseScreen';
 import { buildHomeStatusLines } from '../viewmodels/homeViewModel';
 
 type Props = {
@@ -24,6 +25,8 @@ type Props = {
   currentScreen: ScreenType;
   navigate: (to: ScreenType) => void;
   handleGenerateGenesis: () => Promise<void> | void;
+  cancelPhraseBackup: () => void;
+  answerPhraseCheck: (word: string) => Promise<void>;
   unlockToWallet: () => void;
   menuItems: string[];
   currentMenuIndex: number;
@@ -164,6 +167,8 @@ export default function AppContent({
   currentScreen,
   navigate,
   handleGenerateGenesis,
+  cancelPhraseBackup,
+  answerPhraseCheck,
   unlockToWallet,
   menuItems,
   currentMenuIndex,
@@ -237,6 +242,11 @@ export default function AppContent({
           <StatusText lines={buildHomeStatusLines({ appState, soundEnabled, error })} />
         </div>
       );
+
+    // INITIALIZE generated the recovery phrase: the user writes it down and
+    // picks words back out, and the wallet is created from it after that.
+    case 'backup_phrase':
+      return <RecoveryPhraseScreen onCancel={cancelPhraseBackup} onAnswer={answerPhraseCheck} />;
 
     // Local genesis is committed but the identity is not yet published to a
     // quorum of storage nodes, so it is not resolvable by peers. Rust retries
