@@ -18,12 +18,15 @@
 //!    authenticated parent, from that step's own evidence, with the SAME
 //!    `advance_validated` any device runs.
 //!
-//! ## One hop
+//! ## Sources
 //!
-//! A credit's direct source is checked one hop back and no further: the
-//! source step is validated as a step, its parent is authenticated by the
-//! source's root chain (claims only, from this verifier's frontier for the
-//! source), and nothing the source step's evidence depends on is followed.
+//! A credit's source is held to account like a payer (DSM Amendment A8 as
+//! corrected for sources, owner 2026-10-01): its own segment from this
+//! verifier's frontier for it is validated step by step, its credits'
+//! sources the same way, back to frontiers this verifier already validated.
+//! A root the source only registered proves nothing about where its value
+//! came from. The source step itself is a debit, so nothing further is asked
+//! of it.
 //!
 //! ## Conditional positions
 //!
@@ -255,13 +258,48 @@ pub trait ConditionalPositionResolver {
     ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure>;
 }
 
+/// A peer's lineage validated to its target step, with the frontier each
+/// credit source's segment reached on the way.
+///
+/// Every source frontier here stands at a step whose whole segment, from a
+/// frontier this receiver held, passed validation (DSM Amendment A8; owner
+/// ruling 2026-10-01: "A frontier becomes trusted only after the complete
+/// segment to it has passed validation"). The receiver records them in the
+/// transaction that accepts the target, beside the target's own frontier, so
+/// a later credit from the same source validates only the suffix.
+#[derive(Debug)]
+pub struct ValidatedPeerLineage {
+    transition: ValidatedPeerTransition,
+    source_frontiers: Vec<PeerFrontier>,
+}
+
+impl ValidatedPeerLineage {
+    /// The target step's validated transition.
+    pub fn transition(&self) -> &ValidatedPeerTransition {
+        &self.transition
+    }
+
+    /// The frontier each credit source's segment reached, in the order the
+    /// walk validated them.
+    pub fn source_frontiers(&self) -> &[PeerFrontier] {
+        &self.source_frontiers
+    }
+
+    /// The target step's transition and the sources' frontiers.
+    pub fn into_parts(self) -> (ValidatedPeerTransition, Vec<PeerFrontier>) {
+        (self.transition, self.source_frontiers)
+    }
+}
+
 /// Verify a peer's lineage from this receiver's frontier to
-/// `target_position` and return the target step's validated transition.
+/// `target_position`: the target step's validated transition, and the
+/// frontiers its credits' sources reached.
 ///
 /// Every step from the frontier to the target is validated from its own
-/// evidence; a credit's source is validated one hop back; a conditional
-/// position before the target is resolved by `conditional`. Nothing behind
-/// the frontier is read.
+/// evidence; a credit's source is validated through its own segment back
+/// to a frontier this receiver holds, or one this walk already validated; a
+/// conditional position before the target is resolved by `conditional`.
+/// Nothing behind a frontier is read.
 pub fn validate_peer_lineage(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
@@ -270,7 +308,7 @@ pub fn validate_peer_lineage(
     target_position: u64,
     frontiers: &dyn PeerFrontiers,
     conditional: &dyn ConditionalPositionResolver,
-) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+) -> Result<ValidatedPeerLineage, PeerLineageFailure> {
     if target_position == 0 {
         return Err(invalid(
             "position 0 is the activation root; it has no transition to validate",
@@ -283,8 +321,13 @@ pub fn validate_peer_lineage(
         frontiers,
         conditional,
         steps_remaining: std::cell::Cell::new(WALK_STEP_BUDGET),
+        sources_reached: std::cell::RefCell::new(Vec::new()),
     };
-    verifier.segment(peer_genesis, peer_devid, target_position)
+    let transition = verifier.segment(peer_genesis, peer_devid, target_position)?;
+    Ok(ValidatedPeerLineage {
+        transition,
+        source_frontiers: verifier.sources_reached.into_inner(),
+    })
 }
 
 /// The root a peer's lineage selected AT `position`, and the reference a later
@@ -313,6 +356,7 @@ pub fn peer_root_at(
         frontiers,
         conditional,
         steps_remaining: std::cell::Cell::new(WALK_STEP_BUDGET),
+        sources_reached: std::cell::RefCell::new(Vec::new()),
     };
     let below = position.checked_add(1).ok_or_else(|| {
         invalid(format!(
@@ -461,12 +505,12 @@ struct Authenticated {
 /// questions go.
 #[derive(Clone, Copy)]
 enum StepRole {
-    /// A step of the segment from the frontier to the target: its credits'
-    /// sources are validated one hop back.
+    /// A step of a segment from a frontier: its credits' sources are held
+    /// to account through their own segments.
     Segment,
-    /// A credit's source, one hop back: it must be an online transfer, and
-    /// nothing its evidence depends on is followed.
-    OneHopSource,
+    /// A credit's source step: it must be an online transfer, a debit that
+    /// names no source of its own.
+    Source,
 }
 
 struct Verifier<'a> {
@@ -476,6 +520,9 @@ struct Verifier<'a> {
     frontiers: &'a dyn PeerFrontiers,
     conditional: &'a dyn ConditionalPositionResolver,
     steps_remaining: std::cell::Cell<usize>,
+    /// The frontier each credit source's segment reached in this walk, each
+    /// standing at a step whose whole segment passed.
+    sources_reached: std::cell::RefCell<Vec<PeerFrontier>>,
 }
 
 impl Verifier<'_> {
@@ -491,21 +538,55 @@ impl Verifier<'_> {
         Ok(())
     }
 
-    /// This receiver's frontier for `(genesis, device_id)` below `position`,
-    /// or the activation root where it recorded none. A store that answers
-    /// with another identity's coordinate, or one not below `position`, is
-    /// this verifier's own fault and decides nothing about the peer.
+    /// This receiver's latest frontier for `(genesis, device_id)` below
+    /// `position`: the one it recorded, or one a source's segment reached
+    /// earlier in this walk, whichever is later; the activation root where
+    /// it holds neither. A store that answers with another identity's
+    /// coordinate, or one not below `position`, is this verifier's own fault
+    /// and decides nothing about the peer.
     fn frontier_below(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
     ) -> Result<PeerFrontier, PeerLineageFailure> {
+        let recorded = self.recorded_frontier_below(genesis, device_id, position)?;
+        let reached = self
+            .sources_reached
+            .borrow()
+            .iter()
+            .filter(|f| {
+                f.genesis() == genesis
+                    && f.device_id() == device_id
+                    && f.economic_position() < position
+            })
+            .max_by_key(|f| f.economic_position())
+            .cloned();
+        Ok(match (recorded, reached) {
+            (Some(recorded), Some(reached))
+                if reached.economic_position() > recorded.economic_position() =>
+            {
+                reached
+            }
+            (Some(recorded), _) => recorded,
+            (None, Some(reached)) => reached,
+            (None, None) => PeerFrontier::activation(*genesis, *device_id),
+        })
+    }
+
+    /// The frontier this receiver recorded for `(genesis, device_id)` below
+    /// `position`, checked to be the one asked for.
+    fn recorded_frontier_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
         let Some(frontier) = self
             .frontiers
             .frontier_below(genesis, device_id, position)?
         else {
-            return Ok(PeerFrontier::activation(*genesis, *device_id));
+            return Ok(None);
         };
         if frontier.genesis() != genesis
             || frontier.device_id() != device_id
@@ -521,7 +602,7 @@ impl Verifier<'_> {
                 encode_base32_crockford(device_id),
             )));
         }
-        Ok(frontier)
+        Ok(Some(frontier))
     }
 
     /// The chain point a frontier stands at.
@@ -729,7 +810,7 @@ impl Verifier<'_> {
         let verified =
             verify_dsm_successor_evidence(&successor_bytes, genesis, device_id, &facts.proven_ak)
                 .map_err(|e| invalid(format!("successor evidence at {position}: {e}")))?;
-        if let StepRole::OneHopSource = role {
+        if let StepRole::Source = role {
             // A credit's source is a peer's online transfer, and only its own
             // step is validated here. Its write set is a debit and names no
             // credit source, so nothing behind it is asked for.
@@ -752,11 +833,11 @@ impl Verifier<'_> {
             successor_addr,
         );
         let registered = RegisteredEconomicRoot::from_verified_single_root(claim);
-        let one_hop = OneHop { verifier: self };
-        let no_further = NoFurtherHop { verifier: self };
+        let ancestry = SourceAncestry { verifier: self };
+        let no_sources = DebitHasNoSources { verifier: self };
         let provenance: &dyn ProvenanceResolver = match role {
-            StepRole::Segment => &one_hop,
-            StepRole::OneHopSource => &no_further,
+            StepRole::Segment => &ancestry,
+            StepRole::Source => &no_sources,
         };
         let advanced = advance_validated(
             &point.root,
@@ -849,10 +930,20 @@ impl Verifier<'_> {
         Ok(point)
     }
 
-    /// A credit's source, one hop back: the source's root chain from this
-    /// receiver's frontier for it to the position before, claims only, then
-    /// the source step itself validated from its own evidence.
-    fn one_hop_source(
+    /// A credit's source, held to account (DSM Amendment A8 as corrected for
+    /// sources, owner 2026-10-01): the source's own segment from this
+    /// receiver's frontier for it to the position before, every step
+    /// validated in full from its own evidence exactly as a payer's segment
+    /// is (`chain_through`, whose credits' sources are held to account the
+    /// same way), then the source step itself.
+    ///
+    /// A root the source merely registered is not thereby valid: "admitted"
+    /// means only that the source signed it, so a source walked by root
+    /// claims alone could invent a root and pay out of it through a second
+    /// wallet of its own. The walk stops at a frontier this receiver already
+    /// validated, and when the ancestry exceeds the budget before reaching
+    /// one it is `Incomplete`, never accepted on weaker evidence.
+    fn source_step(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
@@ -864,65 +955,55 @@ impl Verifier<'_> {
             ));
         }
         let frontier = self.frontier_below(genesis, device_id, position)?;
-        let mut point = self.start(&frontier)?;
-        for chained in frontier.economic_position() + 1..position {
-            self.spend_step()?;
-            let claim = self.final_claim(genesis, device_id, chained, &point.root)?;
-            point = match claim {
-                RegisteredEconomicClaim::SingleRoot(claim) => {
-                    self.authenticate(genesis, device_id, chained, &claim)?;
-                    let registered = RegisteredEconomicRoot::from_verified_single_root(&claim);
-                    ChainPoint {
-                        root: authenticated_root(chained, registered.post_economic_root()),
-                        accepted: Some(ParentClaimRef::SingleRoot {
-                            claim_ref: registered.claim_ref(),
-                        }),
-                    }
-                }
-                RegisteredEconomicClaim::ConditionalSofi(held) => {
-                    self.conditional_position(genesis, device_id, chained, &point, &held)?
-                }
-            };
-        }
+        let point = self.chain_through(genesis, device_id, &frontier, position - 1)?;
         self.spend_step()?;
-        match self.final_claim(genesis, device_id, position, &point.root)? {
+        let source = match self.final_claim(genesis, device_id, position, &point.root)? {
             RegisteredEconomicClaim::SingleRoot(claim) => self.full_step(
                 genesis,
                 device_id,
                 position,
                 &point,
                 &claim,
-                StepRole::OneHopSource,
-            ),
-            RegisteredEconomicClaim::ConditionalSofi(_) => Err(invalid(format!(
-                "position {position}: the credit's source is a conditional SoFi position, not an \
-                 online transfer"
-            ))),
+                StepRole::Source,
+            )?,
+            RegisteredEconomicClaim::ConditionalSofi(_) => {
+                return Err(invalid(format!(
+                    "position {position}: the credit's source is a conditional SoFi position, \
+                     not an online transfer"
+                )))
+            }
+        };
+        // The whole segment to the source step has passed: its coordinate is
+        // a frontier for the rest of this walk, and for the receiver once it
+        // accepts the target.
+        if let Some(reached) = PeerFrontier::reached_by(&source) {
+            self.sources_reached.borrow_mut().push(reached);
         }
+        Ok(source)
     }
 }
 
-/// A root this verifier authenticated at `position`: its frontier, or a root
-/// its root chain authenticated (DSM Amendment A8). Never a root read from a
-/// network without that chain, and never a peer's word.
+/// A root this verifier authenticated at `position`: its recorded frontier,
+/// whose whole segment it validated before recording it (DSM Amendment A8).
+/// Never a root read from a network, and never a peer's word.
 fn authenticated_root(position: u64, root: [u8; 32]) -> ValidatedEconomicRoot {
     ValidatedEconomicRoot::from_verifier_memo(position, root)
 }
 
-/// The provenance of a segment step's credits: each source validated one hop
-/// back.
-struct OneHop<'v, 'a> {
+/// The provenance of a segment step's credits: each source validated
+/// through its own segment, back to a frontier this verifier holds.
+struct SourceAncestry<'v, 'a> {
     verifier: &'v Verifier<'a>,
 }
 
-/// The provenance of a one-hop source step. That step is an online transfer,
+/// The provenance of a credit's source step. That step is an online transfer,
 /// whose write set is a debit: it names no credit source, so a question about
 /// one means the step claims a credit an online transfer does not carry.
-struct NoFurtherHop<'v, 'a> {
+struct DebitHasNoSources<'v, 'a> {
     verifier: &'v Verifier<'a>,
 }
 
-impl ProvenanceResolver for OneHop<'_, '_> {
+impl ProvenanceResolver for SourceAncestry<'_, '_> {
     fn validated_peer_transition(
         &self,
         peer_genesis: &[u8; 32],
@@ -930,7 +1011,7 @@ impl ProvenanceResolver for OneHop<'_, '_> {
         peer_economic_position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
         self.verifier
-            .one_hop_source(peer_genesis, peer_devid, peer_economic_position)
+            .source_step(peer_genesis, peer_devid, peer_economic_position)
     }
 
     fn native_reserve_release(
@@ -968,7 +1049,7 @@ impl ProvenanceResolver for OneHop<'_, '_> {
     }
 }
 
-impl ProvenanceResolver for NoFurtherHop<'_, '_> {
+impl ProvenanceResolver for DebitHasNoSources<'_, '_> {
     fn validated_peer_transition(
         &self,
         peer_genesis: &[u8; 32],
@@ -1232,6 +1313,39 @@ mod tests {
             self.read();
             self.inner.anchored_policy_bytes(policy_commit)
         }
+    }
+
+    /// Owner ruling 2026-10-01 (pre-audit item 3): a credit's source whose
+    /// ancestry exceeds the walk budget before reaching a frontier this
+    /// verifier holds is `Incomplete`, never accepted on weaker evidence, and
+    /// nothing past the spent budget is read.
+    #[test]
+    fn a_source_walk_past_the_budget_is_incomplete_and_reads_nothing() {
+        let fetcher = CountingCells {
+            inner: ConditionalCellFetcher {
+                position: 3,
+                writes: Vec::new(),
+                last: crate::route_chain::ROUTE_LEN - 1,
+            },
+            reads: std::cell::Cell::new(0),
+        };
+        let verifier = Verifier {
+            fetcher: &fetcher,
+            expected_network_id: NETWORK,
+            register: Register::resolve(&fetcher, NETWORK).expect("the network's register"),
+            frontiers: &NoneRecorded,
+            conditional: &NoResolution,
+            steps_remaining: std::cell::Cell::new(0),
+            sources_reached: std::cell::RefCell::new(Vec::new()),
+        };
+        match verifier.source_step(&PEER_G, &peer_d(), 3) {
+            Err(PeerLineageFailure::Incomplete(why)) => {
+                assert!(why.contains("budget exhausted"), "{why}")
+            }
+            Err(other) => panic!("a spent budget is Incomplete, got {other:?}"),
+            Ok(_) => panic!("a spent budget validated a source"),
+        }
+        assert_eq!(fetcher.reads.get(), 0, "nothing of the source was read");
     }
 
     /// DSM Amendment A8, `peer_root_at`: a frontier this receiver recorded AT
