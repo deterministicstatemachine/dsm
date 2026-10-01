@@ -2054,6 +2054,76 @@ The quote took 20 s.
 - **The chain walk of a vault the trade consumed, about 19 s.** Two passes over the sibling leg re-read the same four or five cells about four times each.
 - **Establishing the facts, 2.7 s.**
 
+### 6.60 One resolution reads each final cell, object and index once (`perf/sofi-trade-read-once-and-overlap`, 2026-10-01)
+
+**Found.** §6.59 left the chain walk of a consumed vault at about 19 s. One settle read 33 cells, of which 6 were distinct. Counting each node's requests during one `resolve_pending_position` in the node harness found these reads repeating:
+- The walks and the facts re-read cells the resolution had already read.
+- The settle fetched the precommit, and then the walks fetched it again.
+- Every step of the vault owner's lineage walk (DSM Amendment A8) fetched an object that all the steps share. In a seven-step walk, that object was fetched seven times.
+- Each vault's genesis locator was scanned four times, and its candidate fetched four times.
+
+**The change.** A verifier context is one per resolution, quote or walk. It now keeps what it read for its life (`ReadOnce` in `dsm_sdk::sdk::sofi_reads`). It keeps only readings that nothing later can change:
+- **A cell's reads**, once Core has evaluated them as showing a final value at the cell. A final value holds the cell for good.
+  - For a SoFi cell, Core hands over the reads with the completion proof it keeps. `SofiReads::keep_completion` now takes the evidence as well. Core calls it only when the attempt cell's value, or a registration's two cells, are final.
+  - For a register cell of an owner walk, the reads are kept once `register::read_root_cell` reads a `Final` claim from them.
+  - A cell is keyed by its namespace, key, seed and committed set.
+- **A `Kept` precommit, fulfillment or setup.**
+- **A `Stored` object.**
+- **A `Complete` vault-genesis scan.**
+- **An object fetched by an owner walk** (`OnceFetcher`). It is kept only when its identity, recomputed from its bytes, is the identity asked for.
+
+These are never kept, and are read again each time they are asked for, since they may have been written since:
+- an open or undecided cell;
+- an unavailable or partial reading.
+
+The settle now reads the precommit through the verifier's reads. Core evaluates exactly the evidence it evaluated before; the difference is that each piece is read once per resolution, not once per pass.
+
+**A first keep rule was unsound, and two existing tests caught it.** The first rule kept a cell's reads once every seat had answered, counting a seat that held nothing as complete. That kept an open cell as if it were final. A context that had read a key while it was open then missed the write that landed there:
+- `a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_bytes_alone` read the key before the hostile exercise was written.
+- `an_unsigned_exercise_at_a_successor_key_takes_nothing` read the next key before B's second exercise.
+
+Both went red, and the rule became the one above. The first of the two tests then walked with the same context that had just read the held key final. The walk now runs in a context of its own, so the nodes' request log still shows everything the walk reads.
+
+**Test.** `dsm_sdk::handlers::node_e2e_tests::one_resolution_asks_each_node_for_a_final_cell_or_an_object_once`.
+- B's order is split across two vaults that A opened one after the other. Its resolution therefore walks A's lineage twice, over the same cells and objects below the first vault.
+- B's first order realizes and sets B up with both vaults.
+- The second order is left pending: its position pair's leader refuses the pair. Then the pair lands and the fulfillment completes.
+- One resolution realizes the position. It asks no node twice for anything except each vault's next key: the first attempt key at the generation the exercise produced. A verifier that has read nothing yet confirms that this key is open.
+
+**Mutation controls (2026-10-01, restored byte for byte).** Each memo was switched off in turn, and each time the test went red naming the repeat, as asked of one node:
+
+| Memo off | What repeated |
+|---|---|
+| The resolution's final cells: kept under a key no cell has | Cells, up to 6 times each. |
+| The walks' objects: the identity check inverted | The object every step of A's walk shares, among others. |
+| The walks' register cells: kept only when `Preserved` | A's register cells, twice: one walk per vault. |
+| Genesis scans: kept only when not `Complete` | Both vaults' genesis locators and candidates, 10 times each. |
+| Precommits: kept only when `None` | The precommit's index and object, 7 times. |
+| Fulfillments: kept only when `None` | Index and object, 6 times. |
+| Setups: kept only when `None` | 14 times. |
+| `Stored` objects: kept only when `None` | 16 times. |
+| The settle fetching the precommit itself again | The precommit's index and object, twice. |
+
+**On the rig** (three phones, APK = this branch, the same GCP fleet as §6.59). Phone C, set up with every vault involved, traded twice:
+
+| Trade | Quote | Trade, pressed to realized | Settle |
+|---|---|---|---|
+| Split RIGT → ERA: 1500 RIGT, 114.90 ERA (B's vault 740.72 → 57.57; A's vault 759.28 → 57.33). Position 15. | 11 s | 26 s | 4.5 s, 10 cell reads |
+| Chain ERA → RIGT → HOP: 20 ERA, 175.67 HOP. Position 16. | 10 s | 27 s | 5.3 s |
+| §6.59, this branch before this change | 20 s | 53 s | 28.7 s |
+
+The split's amount was sized against the reserves. B's RIGT/ERA vault held 711.43 RIGT / 113.03 ERA, so 1500 RIGT through it alone would give 113.03 · 1495.5 / (711.43 + 1495.5) ≈ 76.6 ERA; split across both vaults it gave 114.90.
+
+C's balances moved by exactly the quoted amounts:
+- RIGT: 2153.94 → 653.94.
+- ERA: 175.19 → 155.19 → 270.09. The first step is a 20 ERA chain at position 14, run on this branch's first build. That build carried the unsound rule, so position 16 supersedes its timing (25 s, settle 5.1 s).
+
+Each trade's history row names both of its vaults.
+
+**What remains.**
+- **The trade's owner walks from activation: 8–12 s.** Before a draft, each vault's owner lineage is walked from its activation root. Whether a walk records a frontier for a vault owner is the owner's question (DSM Amendment A8).
+- **ByteCommit reads inside each cell read: STORAGE's.** In one node-harness resolution they were 770 of the 980 requests: each seat's latest ByteCommit, mirrors and proofs, read again for every cell. A read of one member's ByteCommit at one height could be kept the same way.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
