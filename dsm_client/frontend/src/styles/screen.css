@@ -1135,3 +1135,55 @@ label.sb-btn.is-disabled { opacity: 0.45; pointer-events: none; }
 .sb-card--dark .sb-btn.focused,
 .sb-card--dark .sb-row.focused,
 .sb-card--dark .sb-keypad__key.focused { outline-color: var(--bg); }
+
+/* A new wallet's recovery phrase: the numbered words on the dark card, read
+   down each column, and the words to pick back out as bricks of their own. */
+.sb-phrase-steps { padding: 8px 10px 0; }
+.sb-phrase {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, auto);
+  grid-auto-flow: column;
+  gap: 6px 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sb-phrase__word {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(var(--bg-rgb), 0.35);
+  border-radius: 8px;
+}
+.sb-phrase__n {
+  flex: 0 0 auto;
+  min-width: 14px;
+  text-align: right;
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: rgba(var(--bg-rgb), 0.72);
+}
+.sb-phrase__w {
+  min-width: 0;
+  font-family: 'Martian Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.sb-phrase-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0 8px;
+}
+.sb-phrase-stack { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.sb-btn--word {
+  font-family: 'Martian Mono', ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}

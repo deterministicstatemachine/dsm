@@ -30,6 +30,8 @@ function Boot({ appState }: { appState: AppState }) {
       currentScreen="home"
       navigate={() => {}}
       handleGenerateGenesis={() => {}}
+      cancelPhraseBackup={() => {}}
+      answerPhraseCheck={() => Promise.resolve()}
       unlockToWallet={() => {}}
       menuItems={[]}
       currentMenuIndex={0}
