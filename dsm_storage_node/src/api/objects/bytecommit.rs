@@ -44,8 +44,11 @@ use dsm::utils::text_id;
 const CYCLE_HEADER: &str = "x-cycle";
 const ECHO_HEADER: &str = "x-dsm-node-id";
 /// Upper bound on cycles fetched from one member in one sync, so one request
-/// does bounded work; a later sync continues where this one stopped.
-const MAX_SYNC_CYCLES: u64 = 1024;
+/// does bounded work; a later sync continues where this one stopped, since
+/// every cycle is kept as it is fetched. At this bound one sync of a member
+/// far behind is 128 fetches, well inside what a client waits for one
+/// request (the SDK's member client waits 30 s).
+const MAX_SYNC_CYCLES: u64 = 128;
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
