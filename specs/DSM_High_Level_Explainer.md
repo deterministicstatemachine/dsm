@@ -555,6 +555,12 @@ accept.
 
 - The cell holds exactly the presented root. Accept.
 
+> **Amendment A10 (owner, 2026-10-01) — an occupant proves its own authority for the cell.** Owner ruling on the 2026-10-01 security pre-audit. The audit found that a claim signed under any key, or a conditional SoFi claim with no signature, was recognized at another device's cell, so anyone could occupy a device's next position before it did. The ruling: "If an object can win/occupy a root position, the object itself proves authority for that position."
+>
+> "Only Alice can sign one" is enforced from the bytes in hand. Every object that can occupy one of a device's position cells carries its signing key and the device's attestation digest `AttA`, and is recognized only when its signature verifies over its canonical bytes under that key and `derive_devid(key, AttA)` is the `DevID` the cell belongs to (`DevID = H(DSM/devid ‖ AK ‖ AttA)`). That covers a root claim and a SoFi conditional claim `C_q` at `K_root(q)`, and a SoFi fulfillment at `K_ful(q)` (SoFi Amendment S20 gives their formats). Recognition fetches nothing.
+>
+> An object that fails either check is not an occupant: it is neither a rival nor a winner, however early it arrived.
+
 > **Amendment A4 (owner, 2026-09-22) — order of checks at acceptance.** The receiver first evaluates everything it can decide from what it already holds: it decodes the presentation, verifies its signatures and the payer's signed root chain, and runs the precommitment, guard, linearity and policy checks as far as the evidence in hand allows. If any of these is Invalid, the transition is Invalid and the network is never touched. Only then does it read the register cell and fetch any other evidence it still needs. This supersedes the order drawn in Figure 2 (§12), which places the register read before the precommitment and guard checks.
 >
 > - **Why checks on what is in hand come first.** A transition that is invalid on what the receiver already holds never reaches the network part: no storage read is spent on it, and no one's cell is read on its behalf.

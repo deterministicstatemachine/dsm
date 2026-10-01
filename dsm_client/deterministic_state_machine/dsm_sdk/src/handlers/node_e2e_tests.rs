@@ -780,6 +780,7 @@ fn reaimed(
         f.position(),
         f.signature_alg(),
         f.claimant_public_key(),
+        *f.claimant_att_a(),
     )
     .expect("a well-formed F");
     let fulfillment_signature = sign(derive::fulfillment_signing_digest(&fulfillment));
