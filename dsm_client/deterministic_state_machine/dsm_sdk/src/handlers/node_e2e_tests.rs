@@ -355,9 +355,14 @@ async fn adopt(d: &TestDevice, token: &[u8; 32]) {
 async fn set_up(d: &TestDevice, vault_id: &[u8; 32]) {
     d.enter();
     let set = canonical_set(NETWORK).expect("the pinned set");
-    crate::sdk::sofi_flow::set_up_with(&d.router().core_sdk, &set, &[*vault_id])
-        .await
-        .expect("the setup is admitted");
+    crate::sdk::sofi_flow::set_up_with(
+        &d.router().core_sdk,
+        &set,
+        &[*vault_id],
+        &dsm::sofi::resolve::AcceptedGeneses::default(),
+    )
+    .await
+    .expect("the setup is admitted");
 }
 
 /// A creates the token and the vault (100 base units of ERA against 1000 of
@@ -987,9 +992,13 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
 async fn complete(p: &Pair) -> Completion {
     let set = canonical_set(NETWORK).expect("the pinned set");
     p.b.enter();
-    complete_pending_fulfillment(&p.b.router().core_sdk, &set)
-        .await
-        .expect("a stage the network did not take is its status, not an error")
+    complete_pending_fulfillment(
+        &p.b.router().core_sdk,
+        &set,
+        &dsm::sofi::resolve::AcceptedGeneses::default(),
+    )
+    .await
+    .expect("a stage the network did not take is its status, not an error")
 }
 
 /// SoFi Amendment S7 and storage §3, §6: a trade cut short by a member's
@@ -1943,8 +1952,8 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
 /// tokens, the chain and the head each read the genesis again: a scan of its
 /// locator and a walk of its owner's lineage every time. B discovers A's
 /// vault under ERA and under TKN, walks its chain, and asks for its genesis
-/// once more; the owner's lineage is walked once and the locator scanned
-/// once, and the vault is still found under both tokens.
+/// once more; the owner's lineage is walked once, the locator is read each
+/// time, and the vault is still found under both tokens.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_request_reads_each_vaults_genesis_once() {
@@ -1984,7 +1993,63 @@ async fn a_request_reads_each_vaults_genesis_once() {
     ));
     assert_eq!(
         reads.counts(),
-        (1, 1),
-        "one walk of the owner's lineage and one scan of the genesis locator"
+        (1, 4),
+        "one walk of the owner's lineage; the genesis locator read each time it was asked"
+    );
+}
+
+/// One operation's verifiers share the vault geneses it accepted, and a new
+/// operation's do not. On the rig a trade built three contexts — the check,
+/// the plan at the heads, the settle — and each walked both vault owners'
+/// lineages from activation: two minutes of a four-and-a-half-minute trade.
+/// Two verifiers sharing one operation's memo walk the owner's lineage once
+/// and read the genesis locator each time; a verifier of a new operation
+/// walks it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_operations_verifiers_share_the_geneses_it_accepted() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market_unset(&p).await;
+    p.b.enter();
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let live = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("live reads");
+    let reads = CountingReads {
+        live: &live,
+        owner_walks: std::sync::atomic::AtomicUsize::new(0),
+        genesis_scans: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let members = crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members");
+    let network = crate::sdk::economic_admission_flow::committed_network_id().expect("network");
+    let verifier = |accepted: &dsm::sofi::resolve::AcceptedGeneses| {
+        dsm::sofi::resolve::Verifier::new(
+            &reads,
+            &members,
+            set.id(),
+            &network,
+            None,
+            accepted.clone(),
+        )
+    };
+    let accepted_by = |v: &dsm::sofi::resolve::Verifier<'_, CountingReads<'_>>| {
+        matches!(
+            v.vault_genesis(&m.vault_id),
+            Ok(dsm::sofi::resolve::VaultGenesis::Accepted(..))
+        )
+    };
+    let operation = dsm::sofi::resolve::AcceptedGeneses::default();
+    assert!(accepted_by(&verifier(&operation)), "the check");
+    assert!(accepted_by(&verifier(&operation)), "the settle");
+    assert_eq!(
+        reads.counts(),
+        (1, 2),
+        "one operation: the owner's lineage walked once, the locator read twice"
+    );
+    assert!(accepted_by(&verifier(
+        &dsm::sofi::resolve::AcceptedGeneses::default()
+    )));
+    assert_eq!(
+        reads.counts(),
+        (2, 3),
+        "a new operation walks the owner's lineage again"
     );
 }

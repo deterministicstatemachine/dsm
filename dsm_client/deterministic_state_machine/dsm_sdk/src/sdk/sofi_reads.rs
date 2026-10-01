@@ -365,13 +365,27 @@ impl<'a> VerifierContext<'a> {
         own: Option<(D32, D32)>,
         parent: Option<&'a AdmittedEconomicPosition>,
     ) -> Result<Self, DsmError> {
+        Self::sharing(set, own, parent, &AcceptedGeneses::default())
+    }
+
+    /// [`Self::new`], standing on the vault geneses `accepted` holds: the
+    /// ones this request's other contexts accepted from the network. Every
+    /// context one operation builds shares one memo, so the operation reads
+    /// each vault's genesis — a locator scan and a walk of its owner's
+    /// lineage — once.
+    pub fn sharing(
+        set: &'a StorageSet,
+        own: Option<(D32, D32)>,
+        parent: Option<&'a AdmittedEconomicPosition>,
+        accepted: &AcceptedGeneses,
+    ) -> Result<Self, DsmError> {
         Ok(Self {
             reads: LiveSofiReads::new(set, own)?,
             members: as_ccb_members(set)?,
             set_id: set.id(),
             network: committed_network_id()?,
             parent: parent.and_then(ResolvedParent::of),
-            accepted: AcceptedGeneses::default(),
+            accepted: accepted.clone(),
         })
     }
 
