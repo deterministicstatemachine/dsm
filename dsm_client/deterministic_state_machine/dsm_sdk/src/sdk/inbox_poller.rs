@@ -104,6 +104,18 @@ pub(crate) fn poller_start_deferred() -> bool {
     POLLER_START_DEFERRED.load(Ordering::SeqCst)
 }
 
+/// Held by the poller task for as long as it runs, and clears the running
+/// flag when it ends, however it ends. A sync cycle that panics unwinds
+/// through it, so a later start is not refused as "already running" by a
+/// poller that no longer runs.
+struct RunningFlag;
+
+impl Drop for RunningFlag {
+    fn drop(&mut self) {
+        POLLER_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Start the inbox poller background task on the SDK runtime.
 ///
 /// Idempotent: if already running, returns immediately.
@@ -125,6 +137,7 @@ pub fn start_poller() {
     let wake = POLLER_WAKE.clone();
 
     crate::runtime::get_runtime().spawn(async move {
+        let _running = RunningFlag;
         log::info!("[inbox_poller] Background poller started");
 
         // Initial delay before first poll (let bootstrap settle).
@@ -185,7 +198,6 @@ pub fn start_poller() {
             }
         }
 
-        POLLER_RUNNING.store(false, Ordering::SeqCst);
         log::info!("[inbox_poller] Background poller stopped");
     });
 }
@@ -536,6 +548,28 @@ mod tests {
             "the hold was not released as the failing test unwound"
         );
         stop_poller();
+    }
+
+    /// A poller task that ends by panicking clears the running flag as it
+    /// unwinds: the flag says a poller runs only while one does.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_poller_that_panics_is_no_longer_running() {
+        // The real start marks a poller running; its task is stopped before
+        // it polls anything.
+        start_poller();
+        stop_poller();
+        assert!(poller_running(), "the poller was started");
+        let ended = tokio::spawn(async {
+            let _running = RunningFlag;
+            panic!("a sync cycle panics");
+        })
+        .await;
+        assert!(ended.unwrap_err().is_panic());
+        assert!(
+            !poller_running(),
+            "a poller that panicked is still reported running, so it can never start again"
+        );
     }
 
     #[test]

@@ -47,8 +47,9 @@ if [ "${N}" -lt 1 ]; then
     exit 1
 fi
 
-# SSH options
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
+# SSH options: a host seen for the first time is recorded; a host whose key
+# has changed since is refused.
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 if [ -n "${SSH_KEY}" ]; then
     SSH_OPTS="${SSH_OPTS} -i ${SSH_KEY}"
 fi
@@ -115,7 +116,11 @@ set -e
 cd ${REMOTE_DIR}
 docker load -i dsm-storage-node.tar
 rm -f dsm-storage-node.tar
-chmod 644 certs/node.key
+# The key is readable by the user the image runs as and nobody else.
+NODE_UID=\$(docker run --rm --entrypoint id dsm-storage-node:latest -u)
+NODE_GID=\$(docker run --rm --entrypoint id dsm-storage-node:latest -g)
+sudo chown "\${NODE_UID}:\${NODE_GID}" certs/node.key
+sudo chmod 600 certs/node.key
 docker compose -f docker-compose.node.yml down 2>/dev/null || true
 docker compose -f docker-compose.node.yml up -d
 echo "Services started on ${IP}"

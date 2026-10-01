@@ -19,11 +19,16 @@ use dsm::utils::text_id;
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024; // 128 KiB (normalized)
 const MAX_BATCH_RETRIEVE: i64 = 64;
 
-fn valid_spool_key(value: &str) -> bool {
-    matches!(
-        text_id::decode_base32_crockford(value),
-        Some(bytes) if bytes.len() == 32
-    )
+/// The spool key `value` names, in its one canonical spelling, or `None`
+/// when it is not Base32 Crockford of 32 bytes. Base32 Crockford reads
+/// several spellings as the same bytes (either case, `I` and `L` for `1`,
+/// `O` for `0`), and the spool is kept under exactly one, so the spelling a
+/// writer chooses cannot put a message where its recipient never reads.
+fn canonical_spool_key(value: &str) -> Option<String> {
+    match text_id::decode_base32_crockford(value) {
+        Some(bytes) if bytes.len() == 32 => Some(text_id::encode_base32_crockford(&bytes)),
+        _ => None,
+    }
 }
 
 /// The b0x spool. No write authorization and no reader authorization
@@ -67,12 +72,10 @@ async fn submit_b0x_envelope(
     let recipient_spool_key = headers
         .get("x-dsm-recipient")
         .and_then(|v| v.to_str().ok())
+        .and_then(canonical_spool_key)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    if !valid_spool_key(recipient_spool_key) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
 
-    crate::db::spool_insert(&app.db_pool, recipient_spool_key, &body)
+    crate::db::spool_insert(&app.db_pool, &recipient_spool_key, &body)
         .await
         .map_err(|e| {
             log::error!("b0x submit: spool_insert failed: {e:?}");
@@ -93,14 +96,11 @@ async fn retrieve_b0x_batch_from_seq(
     let lookup_key = headers
         .get("x-dsm-b0x-address")
         .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
+        .and_then(canonical_spool_key)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    if !valid_spool_key(lookup_key) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
 
     let rows =
-        crate::db::spool_list_from_seq(&app.db_pool, lookup_key, from_seq, MAX_BATCH_RETRIEVE)
+        crate::db::spool_list_from_seq(&app.db_pool, &lookup_key, from_seq, MAX_BATCH_RETRIEVE)
             .await
             .map_err(|e| {
                 log::error!("b0x retrieve: spool_list_from_seq failed: {e:?}");
@@ -138,10 +138,20 @@ mod tests {
     use tower::ServiceExt; // oneshot
 
     #[test]
-    fn valid_spool_key_accepts_canonical_base32_and_rejects_bracketed_paths() {
+    fn a_spool_key_is_kept_in_its_one_canonical_spelling() {
         let routed = text_id::encode_base32_crockford(&[0x55u8; 32]);
-        assert!(valid_spool_key(&routed));
-        assert!(!valid_spool_key("b0x[TEST][TEST][TEST]"));
+        assert_eq!(canonical_spool_key(&routed), Some(routed.clone()));
+        assert_eq!(
+            canonical_spool_key(&routed.to_ascii_lowercase()),
+            Some(routed),
+            "another spelling of the same bytes names the same spool"
+        );
+        assert_eq!(canonical_spool_key("b0x[TEST][TEST][TEST]"), None);
+        assert_eq!(
+            canonical_spool_key(&text_id::encode_base32_crockford(&[0x55u8; 31])),
+            None,
+            "a key is 32 bytes"
+        );
     }
 
     /// The b0x router on the Postgres test database.
@@ -502,6 +512,25 @@ mod tests {
     }
 
     /// A spool nothing was sent to answers with no content.
+    /// The spool a message lands in does not depend on how its writer spells
+    /// the key. A submission under another spelling of the same 32 bytes is
+    /// read back under the canonical spelling its recipient reads, and under
+    /// the writer's spelling too: one spool, whatever the spelling.
+    #[tokio::test]
+    async fn a_message_sent_under_another_spelling_of_its_key_reaches_its_spool() {
+        let app = spool().await;
+        let spool_key = crate::db::test_store::unique_name(0x62);
+        let spelled = spool_key.to_ascii_lowercase();
+        assert_ne!(spelled, spool_key, "the key has letters to spell otherwise");
+        let body = sealed_envelope().outer.encode_to_vec();
+        assert_eq!(
+            submit(&app, &spelled, "application/octet-stream", body.clone()).await,
+            HttpStatus::NO_CONTENT
+        );
+        assert_eq!(spooled(&app, &spool_key).await, vec![body.clone()]);
+        assert_eq!(spooled(&app, &spelled).await, vec![body]);
+    }
+
     #[tokio::test]
     async fn an_empty_spool_answers_no_content() {
         let app = spool().await;

@@ -879,7 +879,7 @@ mod tests {
         RoutedCell,
     ) {
         let nodes = crate::test_support::nodes::NodeSet::start().await;
-        let config = crate::economic_fixtures::point_sdk_at(&nodes.members());
+        let config = crate::economic_fixtures::point_sdk_at(&nodes.members(), nodes.ca_pem());
         let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
             .expect("the pinned set");
         let members = crate::sdk::storage_set::as_ccb_members(&set).expect("members");

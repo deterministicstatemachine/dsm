@@ -49,6 +49,15 @@ const ECHO_HEADER: &str = "x-dsm-node-id";
 /// far behind is 128 fetches, well inside what a client waits for one
 /// request (the SDK's member client waits 30 s).
 const MAX_SYNC_CYCLES: u64 = 128;
+/// The most bytes a set-mate's answer can hold and still be a ByteCommit:
+/// the largest `ByteCommitV4` encoding, field by field (tag, length,
+/// value). An answer longer than this is not a ByteCommit, and is not read
+/// past this point.
+const MAX_BYTECOMMIT_ANSWER: usize = (1 + 2 + dsm::storage_cell::MAX_MEMBER_ID_LEN) // member id
+    + (1 + 10) // cycle index
+    + (1 + 1 + 32) // root
+    + (1 + 10) // bytes used
+    + (1 + 1 + 32); // parent digest
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
@@ -82,9 +91,13 @@ fn commit_or_absent(commit: Option<ByteCommit>) -> Response {
 /// Close the next cycle if anything arrived since the last; answer with the
 /// latest ByteCommit either way.
 async fn close(Extension(state): Extension<Arc<AppState>>) -> Result<Response, StatusCode> {
-    let commit = db::close_cycle(&state.db_pool, state.configured_member_id.as_bytes())
-        .await
-        .map_err(internal("close"))?;
+    let commit = db::close_cycle(
+        &state.db_pool,
+        &state.closing,
+        state.configured_member_id.as_bytes(),
+    )
+    .await
+    .map_err(internal("close"))?;
     Ok(commit_or_absent(commit))
 }
 
@@ -200,7 +213,7 @@ async fn fetch_commit(
     path: &str,
     member: &[u8],
 ) -> anyhow::Result<Option<ByteCommit>> {
-    let resp = client
+    let mut resp = client
         .get(format!("{}{path}", endpoint.trim_end_matches('/')))
         .send()
         .await?;
@@ -217,8 +230,16 @@ async fn fetch_commit(
     if echoed != member {
         anyhow::bail!("the node at this endpoint is not the member configured there");
     }
-    let body = resp.bytes().await?;
-    let commit = dsm::types::proto::ByteCommitV4::decode(body.as_ref())
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len() + chunk.len() > MAX_BYTECOMMIT_ANSWER {
+            anyhow::bail!(
+                "answered more than {MAX_BYTECOMMIT_ANSWER} bytes, which no ByteCommit is"
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let commit = dsm::types::proto::ByteCommitV4::decode(body.as_slice())
         .ok()
         .and_then(|p| ByteCommit::from_proto(&p))
         .ok_or_else(|| anyhow::anyhow!("not a ByteCommit"))?;
