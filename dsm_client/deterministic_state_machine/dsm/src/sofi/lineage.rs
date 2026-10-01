@@ -27,7 +27,7 @@ use crate::sofi::wire::SettlementPreimage;
 use crate::types::device_state::DeviceState;
 
 use super::derive;
-use super::facts::Established;
+use super::facts::{Established, EstablishedFacts};
 use super::resolution::{
     effect_of, resolve_position, resolve_refuted_in_hand, Incomplete, PositionEffect, Resolution,
 };
@@ -70,8 +70,8 @@ pub enum AdvanceError {
     /// A realized position credits a token this device has not adopted.
     TokenNotAdopted { policy_commit: D32 },
     /// The balances a realized position moves could not be derived from the
-    /// evidence the verdict was reached on.
-    BalancesNotDerivable,
+    /// evidence the verdict was reached on, and validation's reason why.
+    BalancesNotDerivable(crate::sofi::validation::Refusal),
     /// The preimage the facts were established over describes a different
     /// operation from the one being installed: its settlement does not
     /// recompute this `P`'s `E`.
@@ -121,9 +121,10 @@ impl core::fmt::Display for AdvanceError {
                 f,
                 "the credits of this realized position are not derivable from its evidence"
             ),
-            Self::BalancesNotDerivable => write!(
+            Self::BalancesNotDerivable(why) => write!(
                 f,
-                "the balances this realized position moves are not derivable from its evidence"
+                "the balances this realized position moves are not derivable from its \
+                 evidence: {why:?}"
             ),
             Self::TokenNotAdopted { policy_commit } => write!(
                 f,
@@ -252,6 +253,97 @@ pub fn advance_resolved(
     established: &Established,
     receiver: &DeviceState,
 ) -> Result<ResolvedAdvance, AdvanceError> {
+    let derived = derive_resolved(previous, precommit, fulfillment, parent_claim, established)?;
+    let balances = match derived.realized_over {
+        Some(facts) => {
+            // The adoption invariant, inside the function that installs the
+            // root, so that no caller can reach a realized advance without
+            // it.
+            adoption_admits(precommit, &facts.preimage, &facts.evidence, receiver)?;
+            // The balances the realize root holds for the tokens T° moves,
+            // from the same bytes `adoption_admits` just bound to this `E`.
+            ResolvedBalances(
+                trader_balance_changes(precommit, &facts.preimage, &facts.evidence)
+                    .map_err(AdvanceError::BalancesNotDerivable)?,
+            )
+        }
+        // Zero mutations: the lineage continues exactly where it was.
+        None => ResolvedBalances(Vec::new()),
+    };
+    Ok(ResolvedAdvance {
+        resolution: derived.resolution,
+        effect: effect_of(derived.resolution),
+        balances,
+        root: derived.root,
+        claim: derived.claim,
+    })
+}
+
+/// What a verifier that is not the trader establishes at a resolved SoFi
+/// position of that trader's lineage: the resolution, the validated root and
+/// the claim accepted at `q`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerResolvedAdvance {
+    pub resolution: Resolution,
+    pub root: ValidatedEconomicRoot,
+    pub claim: crate::economic::lineage::AcceptedClaim,
+}
+
+/// Advance ANOTHER trader's validated lineage through one of its resolved SoFi
+/// positions (P15-9: a peer walk passes a resolved position).
+///
+/// The verdict, the root and the accepted claim are derived exactly as
+/// [`advance_resolved`] derives them, by the same function, over facts this
+/// verifier established itself: the ladder decides, `Realized` installs
+/// `P.realize_root`, `Void` the predecessor's root, and `Invalid` nothing.
+///
+/// What it leaves out is the adoption precondition. Adoption is a rule of the
+/// RECEIVING device: its `AddToken` leaves live in that device's own state,
+/// not in its economic root, and they must precede a receipt so that the
+/// device can verify the receipt offline. A verifier walking someone else's
+/// lineage holds no such state. The root the position installs does not
+/// depend on it, and a trader whose own device refused a realized advance for
+/// want of an adoption never builds a position past `q` for anyone to walk.
+pub fn advance_peer_resolved(
+    previous: &ValidatedEconomicRoot,
+    precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
+    parent_claim: &ParentClaimRef,
+    established: &Established,
+) -> Result<PeerResolvedAdvance, AdvanceError> {
+    let derived = derive_resolved(previous, precommit, fulfillment, parent_claim, established)?;
+    Ok(PeerResolvedAdvance {
+        resolution: derived.resolution,
+        root: derived.root,
+        claim: derived.claim,
+    })
+}
+
+/// The verdict at `q` and what it installs, for every verifier of the
+/// position: its trader ([`advance_resolved`]) and anyone walking its lineage
+/// ([`advance_peer_resolved`]).
+struct Derived<'e> {
+    resolution: Resolution,
+    root: ValidatedEconomicRoot,
+    claim: crate::economic::lineage::AcceptedClaim,
+    /// The facts a `Realized` verdict was reached on; `None` otherwise.
+    realized_over: Option<&'e EstablishedFacts>,
+}
+
+/// Derive the verdict at `q` from what this verifier established, and the root
+/// and the claim it installs. Every conjunct is independent and each is a
+/// separate reason to refuse: the positions chain, the predecessor's root is
+/// the one `P` was built on, the parent claim is the one `P` names, and the
+/// facts are this operation's. `C_q` is derived from `(P, F)`: the register
+/// holds what a member was told, and the registration the facts stand on was
+/// itself read by Core from the pair.
+fn derive_resolved<'e>(
+    previous: &ValidatedEconomicRoot,
+    precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
+    parent_claim: &ParentClaimRef,
+    established: &'e Established,
+) -> Result<Derived<'e>, AdvanceError> {
     let q = next_position(precommit.position()).map_err(AdvanceError::Counter)?;
     if fulfillment.position() != q || previous.economic_position() != precommit.position() {
         return Err(AdvanceError::PositionIsNotSuccessor {
@@ -282,34 +374,14 @@ pub fn advance_resolved(
             facts: *established.external_commitment(),
         });
     }
-    let (resolution, root, balances) = match established {
+    let (resolution, root, realized_over) = match established {
         Established::Facts(facts) => {
             let resolution =
                 resolve_position(&facts.route_facts()).map_err(AdvanceError::FactsIncomplete)?;
             match resolution {
-                Resolution::Realized => {
-                    // The adoption invariant, inside the function that
-                    // installs the root, so that no caller can reach a
-                    // realized advance without it.
-                    adoption_admits(precommit, &facts.preimage, &facts.evidence, receiver)?;
-                    // The balances the realize root holds for the tokens T°
-                    // moves, from the same bytes `adoption_admits` just
-                    // bound to this `E`.
-                    let changes =
-                        trader_balance_changes(precommit, &facts.preimage, &facts.evidence)
-                            .map_err(|_| AdvanceError::BalancesNotDerivable)?;
-                    (
-                        resolution,
-                        *precommit.realize_root(),
-                        ResolvedBalances(changes),
-                    )
-                }
+                Resolution::Realized => (resolution, *precommit.realize_root(), Some(&**facts)),
                 // Zero mutations: the lineage continues exactly where it was.
-                Resolution::Void => (
-                    resolution,
-                    previous.economic_root(),
-                    ResolvedBalances(Vec::new()),
-                ),
+                Resolution::Void => (resolution, previous.economic_root(), None),
                 Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
             }
         }
@@ -330,10 +402,8 @@ pub fn advance_resolved(
     // derive, never one read out of a register.
     let derived_digest =
         derive::claim_ref(&derive::resolution_claim(precommit, fulfillment).encode());
-    Ok(ResolvedAdvance {
+    Ok(Derived {
         resolution,
-        effect: effect_of(resolution),
-        balances,
         root: ValidatedEconomicRoot::from_resolved_sofi_position(q, root),
         claim: crate::economic::lineage::AcceptedClaim::from_resolved_sofi_position(
             *precommit.genesis(),
@@ -341,6 +411,7 @@ pub fn advance_resolved(
             q,
             derived_digest,
         ),
+        realized_over,
     })
 }
 
@@ -1595,6 +1666,43 @@ mod tests {
     /// this operation is in order — positions chain, roots match, the claim is
     /// the one `P` names — and it is still refused, because the token it would
     /// credit was never adopted here. Nobody adopts on the receiver's behalf.
+    /// SoFi Amendment S15 (MR-SOFI-0348): adoption is the trader's own
+    /// construction predicate, not part of resolving its position for anyone
+    /// else. The facts the trader's own advance refuses for want of an
+    /// adoption advance another verifier's walk to the same root and the same
+    /// accepted claim, with no adoption state of the trader's in hand.
+    #[test]
+    fn another_verifier_resolves_the_position_without_the_traders_adoptions() {
+        let (fx, _) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let credits = trader_credits(&fx.preimage, &fx.evidence).unwrap();
+        let facts = established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized);
+        let bare = DeviceState::new(G, DEV, vec![0x01; 32]);
+        let previous_root = previous(*p.void_root());
+        assert_eq!(
+            advance_resolved(&previous_root, &p, &f, p.parent_claim_ref(), &facts, &bare),
+            Err(AdvanceError::TokenNotAdopted {
+                policy_commit: credits[0]
+            })
+        );
+        let peer = advance_peer_resolved(&previous_root, &p, &f, p.parent_claim_ref(), &facts)
+            .expect("another verifier resolves the position");
+        let adopter = bare.adopt_token(credits[0]).unwrap();
+        let own = advance_resolved(
+            &previous_root,
+            &p,
+            &f,
+            p.parent_claim_ref(),
+            &facts,
+            &adopter,
+        )
+        .expect("the trader that adopted it advances");
+        assert_eq!(peer.resolution, Resolution::Realized);
+        assert_eq!(peer.root, own.root);
+        assert_eq!(peer.claim, own.claim);
+    }
+
     #[test]
     fn a_realized_position_crediting_an_unadopted_token_is_refused() {
         let (fx, _) = realized_rig();
@@ -1653,7 +1761,7 @@ mod tests {
                 &established(&p, &f, &fx.preimage, &Evidence::default(), Shape::Realized),
                 &receiver,
             ),
-            Err(AdvanceError::CreditsNotDerivable | AdvanceError::BalancesNotDerivable)
+            Err(AdvanceError::CreditsNotDerivable | AdvanceError::BalancesNotDerivable(..))
         ));
     }
 

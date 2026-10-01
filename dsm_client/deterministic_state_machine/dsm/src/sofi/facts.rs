@@ -150,9 +150,41 @@ pub struct ExerciseReads<'a> {
     /// This verifier's own admitted position at `P.p`, when `P` names a
     /// conditional parent: what that position selected is what this
     /// verifier itself resolved. Nothing else resolves a parent.
-    pub parent: Option<&'a AdmittedEconomicPosition>,
+    pub parent: Option<ResolvedParent>,
     /// One entry per leg of `P`, in P's leg order.
     pub legs: &'a [LegReads<'a>],
+}
+
+/// What this verifier itself resolved at `p`, when `p` was a conditional
+/// SoFi position: the fulfillment it resolved and the root that resolution
+/// selected. The one fact about a conditional parent the facts read; nothing
+/// else resolves a parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedParent {
+    pub economic_position: u64,
+    pub selected_root: D32,
+    pub fulfillment_id: D32,
+}
+
+impl ResolvedParent {
+    /// What an admitted position records of its resolution, when it is a
+    /// resolved SoFi position.
+    pub fn of(admitted: &AdmittedEconomicPosition) -> Option<Self> {
+        match admitted {
+            AdmittedEconomicPosition::ResolvedSofi {
+                economic_position,
+                selected_root,
+                fulfillment_id,
+                ..
+            } => Some(Self {
+                economic_position: *economic_position,
+                selected_root: *selected_root,
+                fulfillment_id: *fulfillment_id,
+            }),
+            AdmittedEconomicPosition::SingleRoot { .. }
+            | AdmittedEconomicPosition::UnresolvedSofi { .. } => None,
+        }
+    }
 }
 
 /// What is read about one exercise before any of its validation evidence:
@@ -162,7 +194,7 @@ pub struct ExerciseReads<'a> {
 pub struct GroundReads<'a> {
     pub exercise: &'a RecognizedExercise,
     pub registration: &'a RegistrationRead,
-    pub parent: Option<&'a AdmittedEconomicPosition>,
+    pub parent: Option<ResolvedParent>,
     pub legs: &'a [LegReads<'a>],
 }
 
@@ -490,15 +522,12 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
     let parent = match precommit.parent_claim_ref() {
         ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot,
         ParentClaimRef::Conditional { fulfillment_id } => match reads.parent {
-            Some(AdmittedEconomicPosition::ResolvedSofi {
+            Some(ResolvedParent {
                 economic_position,
                 selected_root,
                 fulfillment_id: resolved,
-                ..
-            }) if *resolved == *fulfillment_id && *economic_position == precommit.position() => {
-                ParentPosition::ConditionalSelected {
-                    selected_root: *selected_root,
-                }
+            }) if resolved == *fulfillment_id && economic_position == precommit.position() => {
+                ParentPosition::ConditionalSelected { selected_root }
             }
             Some(..) | None => {
                 return Err(NotEstablished::ParentUnresolved {
