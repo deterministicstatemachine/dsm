@@ -1961,6 +1961,31 @@ Mutation controls, run on 2026-10-01 and restored byte for byte, each with a nam
 - The route's total taken from its last hop: `one_order_fills_through_two_vaults_of_the_same_pair` red. The quote reported `(2, 31, 236)` against the route's `(2, 60, 460)`.
 - The row naming only the route's first vault: `one_order_fills_through_two_vaults_of_the_same_pair` red, naming one vault against two.
 
+### 6.57 A cell read asks for every seat's committed state at once (`fix/route-read-concurrent-evidence`, 2026-10-01)
+
+**Found on the rig, after the fleet redeploy to c74ad8dc1.**
+- A 2-leg SoFi split took 271 s, down from 13m50s. 106 s of it passed with no log line and no CPU, during the write and settle.
+- No call timed out. After its concurrent values, closes and mirror syncs (§6.54), `dsm_sdk::sdk::route_seats::read_cell` gathered each seat's committed state one round trip at a time:
+  - per seat, `committed_at` asked the four other mirrors in turn for the ByteCommit, then in turn for its parent, then the seat for its proof;
+  - each later seat's view of the leader added three more requests;
+  - the five seats were walked in turn.
+- That is about 57 sequential HTTPS requests per read once cycles are past 1, and 33 at cycle 1. One fresh request to a fleet node costs 0.18–0.26 s from a wired Mac, and more from a phone.
+- Every flow that settles a cell pays this: economic registers, native reserve, and the SoFi advance, reads and relay.
+
+**The fix.**
+- `committed_at` asks every mirror for the ByteCommit and for its parent, and the seat for its proof, at once (`agreed_at`).
+- `read_cell` gathers all five seats' committed state and leader views at once, kept in route order.
+- The agreement rule (`agreed`) and every answer are unchanged. A failed agreement still yields no committed state; the only difference is that the other requests were already sent.
+
+**Test.** `dsm_sdk::sdk::route_seats::tests::a_cell_read_asks_for_every_seats_committed_state_at_once`:
+- writes a value to all five seats of a cell on the pinned nodes (Postgres);
+- reads it through the real seats, counting the committed-state requests in flight;
+- requires all of them in flight together, and the evidence to read Final in Core.
+
+**Mutation controls**, each red and then restored:
+- main's sequential `committed_at` and `read_cell`: 1 of 33 in flight;
+- only the per-mirror reads sequential again: 18 of 33.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
