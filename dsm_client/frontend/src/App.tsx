@@ -42,7 +42,7 @@ export default function App() {
   const [_themeIndex, setThemeIndex] = useState(0);
 
   const themes = useMemo(() => getAvailableThemes(), []);
-  const { handleGenerateGenesis } = useGenesisFlow({
+  const { handleGenerateGenesis, cancelPhraseBackup, answerPhraseCheck } = useGenesisFlow({
     appState: runtime.appState,
     setAppState: appRuntimeStore.setAppState,
     setError: appRuntimeStore.setError,
@@ -154,6 +154,8 @@ export default function App() {
                       currentScreen={navigation.currentScreen}
                       navigate={navigationStore.navigate}
                       handleGenerateGenesis={handleGenerateGenesis}
+                      cancelPhraseBackup={cancelPhraseBackup}
+                      answerPhraseCheck={answerPhraseCheck}
                       unlockToWallet={() => { void unlock(); }}
                       menuItems={menuItems}
                       currentMenuIndex={navigation.currentMenuIndex}
