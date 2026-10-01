@@ -887,14 +887,9 @@ pub async fn resolve_pending_position(
         let installed = core
             .device_head()
             .ok_or_else(|| storage("device head", "none after the install"))?;
-        record_realized(
-            &installed,
-            what,
-            &fulfillment_id,
-            q,
-            Some(&first.vault_id),
-            &moved,
-        );
+        // The row names every vault the route went through.
+        let vaults: Vec<D32> = precommit.legs().iter().map(|leg| leg.vault_id).collect();
+        record_realized(&installed, what, &fulfillment_id, q, &vaults, &moved);
     }
     Ok(Advanced::Installed {
         resolution: advanced.resolution,

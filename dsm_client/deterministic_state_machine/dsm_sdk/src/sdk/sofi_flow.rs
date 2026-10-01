@@ -27,8 +27,8 @@ use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::resolve::{Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{
-    close_vault_post, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds, HopMovement,
-    Policies,
+    close_vault_post, movement_shape, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds,
+    HopMovement, Policies, RouteShape,
 };
 use dsm::sofi::wire::{
     next_attempt, next_position, CoreEntry, DlvCore, SwapHop, TraderCore, VaultGenesisPreimage,
@@ -127,6 +127,18 @@ pub enum Search {
 pub struct RouteFound {
     pub hops: Vec<Hop>,
     pub search: Search,
+    /// What the route takes and gives as one operation; `None` for no route.
+    pub ends: Option<RouteEnds>,
+}
+
+/// What a route takes and gives as one operation, by Core's one rule for a
+/// chain's or a split's endpoints (Amendment S19): a chain gives its last
+/// hop's output, a split the sum of its legs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteEnds {
+    pub shape: RouteShape,
+    pub amount_in: u64,
+    pub amount_out: u64,
 }
 
 /// One hop of a proposed route, priced at the vault's walked head. Carries no
@@ -350,7 +362,7 @@ pub async fn create_vault(
         Realized::VaultCreate,
         &vault_id,
         admitted.economic_position,
-        Some(&vault_id),
+        &[vault_id],
         &moved,
     );
     Ok(VaultCreated {
@@ -463,7 +475,7 @@ async fn setup(core: &CoreSDK, set: &StorageSet, intent: &SetupIntent) -> Result
         Realized::Setup,
         &setup_ref,
         admitted.economic_position,
-        Some(&intent.vault_id),
+        &[intent.vault_id],
         &[],
     );
     Ok(())
@@ -868,6 +880,31 @@ fn planned_out(planned: &[Planned]) -> Result<(D32, u64), DsmError> {
     Ok((token_out, exact_out))
 }
 
+/// [`RouteEnds`] of a proposed route; `None` for no hops.
+fn route_ends(hops: &[Hop]) -> Result<Option<RouteEnds>, DsmError> {
+    let movements: Vec<HopMovement> = hops
+        .iter()
+        .map(|h| {
+            (
+                h.token_in_policy_commit,
+                h.amount_in,
+                h.token_out_policy_commit,
+                h.amount_out,
+            )
+        })
+        .collect();
+    let Some(shape) = movement_shape(&movements) else {
+        return Ok(None);
+    };
+    let (_, amount_in, _, amount_out) =
+        route_endpoints(&movements).map_err(|why| refuse(format!("{why:?}")))?;
+    Ok(Some(RouteEnds {
+        shape,
+        amount_in,
+        amount_out,
+    }))
+}
+
 /// The vaults whose market pairs `token`, from its token index (Amendment
 /// S16): accepted by Core, never taken from the index. A discovery that is
 /// not complete marks the search partial.
@@ -988,7 +1025,8 @@ pub async fn find_route(
         Some((.., hops)) => hops,
         None => Vec::new(),
     };
-    Ok(RouteFound { hops, search })
+    let ends = route_ends(&hops)?;
+    Ok(RouteFound { hops, search, ends })
 }
 
 /// `sofi.vaults`: one vault this device created, at its walked head.

@@ -21,8 +21,8 @@ use dsm::sofi::derive;
 use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
-    LocalLeaves, PeerPositionResolver, ReadFailure, RecordedGenerationRow, SofiReads, VaultLeaves,
-    Verifier, VerifierFailure,
+    AcceptedGeneses, LocalLeaves, PeerPositionResolver, ReadFailure, RecordedGenerationRow,
+    SofiReads, VaultLeaves, Verifier, VerifierFailure,
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
@@ -352,6 +352,8 @@ pub struct VerifierContext<'a> {
     set_id: D32,
     network: Vec<u8>,
     parent: Option<ResolvedParent>,
+    /// The vault geneses this context's verifiers accepted from the network.
+    accepted: AcceptedGeneses,
 }
 
 impl<'a> VerifierContext<'a> {
@@ -369,6 +371,7 @@ impl<'a> VerifierContext<'a> {
             set_id: set.id(),
             network: committed_network_id()?,
             parent: parent.and_then(ResolvedParent::of),
+            accepted: AcceptedGeneses::default(),
         })
     }
 
@@ -385,13 +388,14 @@ impl<'a> VerifierContext<'a> {
     }
 
     pub fn verifier(&self) -> Verifier<'_, LiveSofiReads<'a>> {
-        Verifier {
-            reads: &self.reads,
-            members: &self.members,
-            set_id: self.set_id,
-            network_id: &self.network,
-            parent: self.parent,
-        }
+        Verifier::new(
+            &self.reads,
+            &self.members,
+            self.set_id,
+            &self.network,
+            self.parent,
+            self.accepted.clone(),
+        )
     }
 }
 

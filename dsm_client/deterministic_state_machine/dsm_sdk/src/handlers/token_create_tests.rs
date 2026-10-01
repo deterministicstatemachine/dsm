@@ -128,6 +128,14 @@ async fn the_fee_schedule_reports_an_unfunded_device_as_not_covering_the_fee() {
     );
     assert_eq!(schedule.era_held, d.era_balance());
     assert!(!schedule.fee_covered);
+    assert_eq!(
+        (
+            schedule.token_creation_era_display.as_str(),
+            schedule.era_held_display.as_str()
+        ),
+        ("10.00", "0.00"),
+        "the fee and the holding in ERA as people count it (SoFi Amendment S18)"
+    );
     let msg = refusal(&create(&d.router, &request("SHORT", 0, 1_000)).await);
     assert!(
         msg.contains(&format!("(have {})", schedule.era_held)),
