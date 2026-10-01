@@ -1606,7 +1606,7 @@ mod tests {
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
-        assert_eq!(token_decimals("ERA"), Ok(0));
+        assert_eq!(token_decimals("ERA"), Ok(2));
         assert_eq!(token_decimals("dbtc"), Ok(8));
         let unknown = token_decimals("NOPE").expect_err("no registry entry");
         assert!(unknown.contains("no registry entry"), "{unknown}");
@@ -1714,8 +1714,8 @@ mod tests {
         let mut era = seed("ERA", 264, 0);
         super::enrich_balance_metadata(&mut era, &|_| None).expect("ERA is named");
         assert!(era.protocol_defined);
-        assert_eq!((era.symbol.as_str(), era.decimals), ("ERA", 0));
-        assert_eq!(era.genesis_supply_display, "80000000000");
+        assert_eq!((era.symbol.as_str(), era.decimals), ("ERA", 2));
+        assert_eq!(era.genesis_supply_display, "80000000000.00");
         assert_eq!(
             era.permissions,
             Some(generated::TokenPolicyPermissions {
@@ -1725,7 +1725,7 @@ mod tests {
         );
         assert_eq!(
             era.policy_anchor_b32,
-            "JXPMPGJH45HDTE0ARWE2CTB9E9BWTQZ3T78CE5RFF1RXMR9VKK80"
+            "NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0"
         );
         let mut dbtc = seed("dBTC", 0, 0);
         super::enrich_balance_metadata(&mut dbtc, &|_| None).expect("dBTC is named");
@@ -1883,7 +1883,7 @@ mod history_tests {
         assert_eq!(claim.to_device_id, device.router.device_id_bytes.to_vec());
         assert_eq!(claim.recipient, "ERA reserve (faucet)");
         assert_eq!(claim.amount_signed, 100, "incoming");
-        assert_eq!(claim.display_amount, "100");
+        assert_eq!(claim.display_amount, "1.00");
         assert_eq!(claim.token_id, "ERA");
 
         let peer = crate::util::text_id::encode_base32_crockford(&[0x74u8; 32]);

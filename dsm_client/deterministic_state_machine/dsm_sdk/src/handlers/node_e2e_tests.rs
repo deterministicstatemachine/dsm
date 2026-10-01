@@ -187,7 +187,10 @@ async fn a_transfer_reaches_the_nodes_only_sealed_and_arrives() {
     assert!(b_sync.success, "{:?}", b_sync.errors);
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
-    assert_eq!(p.a.era_balance(), 90);
+    assert_eq!(
+        p.a.era_balance(),
+        crate::economic_fixtures::whole_era(100) - 10
+    );
     assert_eq!(p.b.era_balance(), 10);
 
     let memo = format!("{}->{} #1", p.a.slot, p.b.slot).into_bytes();
@@ -357,8 +360,8 @@ async fn set_up(d: &TestDevice, vault_id: &[u8; 32]) {
         .expect("the setup is admitted");
 }
 
-/// A creates the token and the vault (100 ERA against 1000 TKN at 30 bps)
-/// and B adopts the token: a market B has not set up with.
+/// A creates the token and the vault (100 base units of ERA against 1000 of
+/// TKN, at 30 bps) and B adopts the token: a market B has not set up with.
 async fn open_market_unset(p: &Pair) -> Market {
     let tkn = create_token(&p.a, "TKN", 10_000).await;
     let era = era();
@@ -505,11 +508,15 @@ async fn a_sofi_trade_executes_end_to_end() {
     let p = Pair::boot(500, 200).await;
     let m = open_market(&p).await;
     realized_trade(&p, &m, 10).await;
-    // The vault priced the trade at its reserves: 10 ERA in against 100 ERA
-    // and 1000 TKN, at 30 bps.
+    // The vault priced the trade at its reserves: 10 base units of ERA in
+    // against 100 of ERA and 1000 of TKN, at 30 bps.
     let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
         .expect("the vault prices the trade");
-    assert_eq!(balance(&p.b, &m.era), 190, "the trader paid 10 ERA");
+    assert_eq!(
+        balance(&p.b, &m.era),
+        crate::economic_fixtures::whole_era(200) - 10,
+        "the trader paid 10 base units"
+    );
     assert_eq!(
         balance(&p.b, &m.tkn),
         out,
@@ -913,7 +920,10 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     assert_eq!(next.fulfillment().body.attempts()[0].attempt, 1);
     let out2 = dsm::dlv::route_commit::constant_product_output(10, 110, 1_000 - out1, 30)
         .expect("the vault prices the second trade");
-    assert_eq!(balance(&p.b, &m.era), 180);
+    assert_eq!(
+        balance(&p.b, &m.era),
+        crate::economic_fixtures::whole_era(200) - 20
+    );
     assert_eq!(balance(&p.b, &m.tkn), out1 + out2);
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
@@ -965,7 +975,10 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
         .into_exercise()
         .expect("B's second exercise holds the first key at R1");
     assert_eq!(second.fulfillment().body.position(), q2);
-    assert_eq!(balance(&p.b, &m.era), 180);
+    assert_eq!(
+        balance(&p.b, &m.era),
+        crate::economic_fixtures::whole_era(200) - 20
+    );
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
@@ -1034,7 +1047,10 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
     assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
     assert_eq!(pending_position(&p.b), Some(q));
     assert_eq!(admitted_position(&p.b), position);
-    assert_eq!(balance(&p.b, &m.era), 200);
+    assert_eq!(
+        balance(&p.b, &m.era),
+        crate::economic_fixtures::whole_era(200)
+    );
     assert_eq!(
         complete(&p).await,
         Completion::NotTaken {
@@ -1060,7 +1076,10 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
     assert_eq!(resolve(&p).await, (q, exhausted));
     assert_eq!(pending_position(&p.b), Some(q));
     assert_eq!(admitted_position(&p.b), position);
-    assert_eq!(balance(&p.b, &m.era), 200);
+    assert_eq!(
+        balance(&p.b, &m.era),
+        crate::economic_fixtures::whole_era(200)
+    );
     assert_eq!(balance(&p.b, &m.tkn), 0);
 
     // 3. Every write lands: completion is written and the position realizes.
@@ -1071,7 +1090,10 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
     assert_eq!(admitted_position(&p.b), q);
     let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
         .expect("the vault prices the trade");
-    assert_eq!(balance(&p.b, &m.era), 190);
+    assert_eq!(
+        balance(&p.b, &m.era),
+        crate::economic_fixtures::whole_era(200) - 10
+    );
     assert_eq!(balance(&p.b, &m.tkn), out);
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 
@@ -1316,7 +1338,7 @@ async fn a_realized_trade_shows_in_balances_and_history_at_once() {
     let fee = dsm::core::token::TOKEN_CREATION_FEE_ERA;
     assert_eq!(
         listed(&p.b, "ERA").await,
-        200 - fee,
+        crate::economic_fixtures::whole_era(200) - fee,
         "the fee shows at once"
     );
 
@@ -1328,7 +1350,10 @@ async fn a_realized_trade_shows_in_balances_and_history_at_once() {
         (balance(&p.b, &m.era), balance(&p.b, &m.tkn)),
         "the wallet shows what the head holds"
     );
-    assert_eq!(listed(&p.b, "ERA").await, 190 - fee);
+    assert_eq!(
+        listed(&p.b, "ERA").await,
+        crate::economic_fixtures::whole_era(200) - 10 - fee
+    );
     assert_eq!(listed(&p.b, "TKN").await, out);
 
     let moves = |row: &generated::TransactionInfo| -> Vec<(Vec<u8>, i64)> {
@@ -1475,7 +1500,11 @@ async fn one_order_fills_through_two_vaults_of_the_same_pair() {
     )
     .await;
     assert_eq!(setups(&p.b).await, 2, "B set up with each vault first");
-    assert_eq!(balance(&p.b, &era), 200 - amount, "the whole amount paid");
+    assert_eq!(
+        balance(&p.b, &era),
+        crate::economic_fixtures::whole_era(200) - amount,
+        "the whole amount paid"
+    );
     assert_eq!(balance(&p.b, &tkn), total, "the sum of both legs received");
 
     let held =
@@ -1590,7 +1619,11 @@ async fn every_sofi_route_reaches_its_producer() {
         2,
         "the route set up with each vault first"
     );
-    assert_eq!(balance(&p.b, &era), 190, "the route took 10 ERA");
+    assert_eq!(
+        balance(&p.b, &era),
+        crate::economic_fixtures::whole_era(200) - 10,
+        "the route took 10 base units"
+    );
     assert_eq!(balance(&p.b, &tkb), two, "and gave what its hops priced");
     assert_eq!(balance(&p.b, &tkn), 0, "and kept nothing on the way");
 
@@ -1630,7 +1663,11 @@ async fn every_sofi_route_reaches_its_producer() {
     )
     .await;
     assert_eq!(setups(&p.b).await, 2, "the trade reused its setup");
-    assert_eq!(balance(&p.b, &era), 180, "the trade took 10 ERA");
+    assert_eq!(
+        balance(&p.b, &era),
+        crate::economic_fixtures::whole_era(200) - 20,
+        "the trade took 10 more"
+    );
     assert_eq!(balance(&p.b, &tkn), bought, "and gave what it was quoted");
 
     realized_through(

@@ -246,7 +246,8 @@ mod state_machine_tests {
             .max()
             .unwrap_or(0);
         assert_eq!(
-            era, 300,
+            era,
+            3 * crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
             "current_state must reflect the canonical head's balance"
         );
         assert_eq!(cs.hash, head.root(), "hash is the canonical SMT root");

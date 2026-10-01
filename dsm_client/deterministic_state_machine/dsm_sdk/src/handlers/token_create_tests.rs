@@ -263,7 +263,10 @@ async fn a_created_tokens_amounts_render_at_its_own_decimals() {
         ..Default::default()
     };
     enrich_transaction_display(&mut era).expect("the token's decimals are known");
-    assert_eq!(era.display_amount, "-100", "ERA is whole units");
+    assert_eq!(
+        era.display_amount, "-1.00",
+        "ERA renders at its two decimals"
+    );
 }
 
 /// The policy a created token enforces lives in durable storage, not in the

@@ -863,10 +863,11 @@ fn trace_token_manager_balance_replay(
         }
     }
 
-    if alice.era_balance() != 61 {
+    let moved: u64 = transfers.iter().sum();
+    if alice.era_balance() != ERA_FAUCET_PAYOUT - moved {
         failures.push("final sender balance did not match the trace".into());
     }
-    if bob.era_balance() != 39 {
+    if bob.era_balance() != moved {
         failures.push("final recipient balance did not match the trace".into());
     }
 
