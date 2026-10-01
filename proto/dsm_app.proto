@@ -890,9 +890,13 @@ message TokenBurnResponse {
 // fee, read from the head token.create debits it from and decided by the same
 // check token.create refuses on, so the wizard's word and the refusal agree.
 message TokenFeeScheduleResponse {
-  uint64 token_creation_era = 1;
-  uint64 era_held = 2;
+  uint64 token_creation_era = 1; // base units
+  uint64 era_held = 2;           // base units
   bool fee_covered = 3;
+  // The fee and the holding in ERA as people count it, at the decimals ERA's
+  // committed policy carries (SoFi Amendment S18).
+  string token_creation_era_display = 4;
+  string era_held_display = 5;
 }
 
 // The payload inside a token-adoption QR, and the reply that carries it.
@@ -2804,9 +2808,24 @@ enum SofiSearch {
   SOFI_SEARCH_COMPLETE    = 1; // every candidate vault and its head was established
   SOFI_SEARCH_PARTIAL     = 2; // one was not: a better route may run through it
 }
+// A route's shape (Amendment S19): a chain, each hop feeding the next, or a
+// split, every hop trading the one pair through its own vault.
+enum SofiRouteShape {
+  SOFI_ROUTE_SHAPE_UNSPECIFIED = 0; // no route
+  SOFI_ROUTE_SHAPE_CHAIN       = 1;
+  SOFI_ROUTE_SHAPE_SPLIT       = 2;
+}
 message SofiFindRouteResponse {
   repeated SofiHopV1 hops   = 1; // empty when no route exists among the vaults searched
   SofiSearch         search = 2;
+  // What the route takes and gives as one operation, by the rule a trade is
+  // checked by: a chain gives its last hop's output, a split the sum of its
+  // hops'. Unset with no route.
+  SofiRouteShape shape              = 3;
+  uint64         amount_in          = 4;
+  uint64         amount_out         = 5;
+  string         amount_in_display  = 6;
+  string         amount_out_display = 7;
 }
 
 // sofi.trade (§31): one hop against one vault. A vault the trader has no

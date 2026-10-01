@@ -446,20 +446,20 @@ function Step3({
           {creationFee === undefined
             ? '…'
             : 'feeEra' in creationFee
-              ? `${creationFee.feeEra} ERA (burned)`
+              ? `${creationFee.feeDisplay} ERA (burned)`
               : `not available: ${creationFee.error}`}
         </span>
       </div>
       {creationFee !== undefined && 'feeEra' in creationFee && (
         <div className="sb-kv">
           <span className="sb-kv__k">Your ERA</span>
-          <span className="sb-kv__v">{`${creationFee.eraHeld} ERA`}</span>
+          <span className="sb-kv__v">{`${creationFee.heldDisplay} ERA`}</span>
         </div>
       )}
       {creationFee !== undefined && 'feeEra' in creationFee && !creationFee.feeCovered && (
         <div className="sb-notice" role="status" style={{ marginTop: 8 }}>
           <span>
-            {`This burns ${creationFee.feeEra} ERA and you hold ${creationFee.eraHeld}. Get ERA from the Faucet tab first.`}
+            {`This burns ${creationFee.feeDisplay} ERA and you hold ${creationFee.heldDisplay}. Get ERA from the Faucet tab first.`}
           </span>
         </div>
       )}

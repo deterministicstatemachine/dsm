@@ -93,16 +93,28 @@ export interface Hop {
 }
 
 /**
- * sofi.findRoute (§30, Amendment S16): a proposed hop list over every vault of
- * the two tokens, set up with or not. It carries no authority. An empty list
- * is no route among every vault the tokens' indexes name; a search that found
- * none while some vault could not be read is an error, never "no route".
+ * A proposed route (Amendment S19): its hops, its shape, and what it takes and
+ * gives as one operation, rendered by Rust by the rule a trade is checked by.
+ * A chain gives its last hop's output; a split, the sum of its hops'.
+ */
+export interface Route {
+  hops: Hop[];
+  shape: 'chain' | 'split';
+  amountInDisplay: string;
+  amountOutDisplay: string;
+}
+
+/**
+ * sofi.findRoute (§30, Amendment S16): a proposed route over every vault of
+ * the two tokens, set up with or not. It carries no authority. No hops is no
+ * route among every vault the tokens' indexes name; a search that found none
+ * while some vault could not be read is an error, never "no route".
  */
 export async function findRoute(args: {
   tokenIn: Bytes32;
   tokenOut: Bytes32;
   amountIn: string;
-}): Promise<Hop[]> {
+}): Promise<Route> {
   const payload = await call(
     'sofi.findRoute',
     new pb.SofiFindRouteRequest({
@@ -117,7 +129,8 @@ export async function findRoute(args: {
   if (payload.value.hops.length === 0 && payload.value.search !== pb.SofiSearch.COMPLETE) {
     throw new Error('no route among the liquidity that could be read; some could not be reached, try again');
   }
-  return payload.value.hops.map((h: any) => ({
+  const found = payload.value;
+  const hops = found.hops.map((h: pb.SofiHopV1) => ({
     vaultId: h.vaultId,
     parentRoot: h.parentRoot,
     tokenIn: h.tokenInPolicyCommit,
@@ -127,6 +140,12 @@ export async function findRoute(args: {
     amountInDisplay: h.amountInDisplay,
     amountOutDisplay: h.amountOutDisplay,
   }));
+  return {
+    hops,
+    shape: found.shape === pb.SofiRouteShape.SPLIT ? 'split' : 'chain',
+    amountInDisplay: found.amountInDisplay,
+    amountOutDisplay: found.amountOutDisplay,
+  };
 }
 
 /**

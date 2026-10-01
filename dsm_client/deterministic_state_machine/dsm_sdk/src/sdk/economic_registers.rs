@@ -239,10 +239,21 @@ impl PeerFrontiers for StoredFrontiers {
         device_id: &[u8; 32],
         position: u64,
     ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
-        crate::storage::client_db::economic_lineage::frontier_below(genesis, device_id, position)
-            .map_err(|e| {
-                PeerLineageFailure::Incomplete(format!("the frontier store is unreadable: {e}"))
-            })
+        let frontier = crate::storage::client_db::economic_lineage::frontier_below(
+            genesis, device_id, position,
+        )
+        .map_err(|e| {
+            PeerLineageFailure::Incomplete(format!("the frontier store is unreadable: {e}"))
+        })?;
+        log::info!(
+            "[A8] peer {} below position {position}: walk starts at {}",
+            text_id::encode_base32_crockford(device_id),
+            match &frontier {
+                Some(f) => format!("the recorded frontier at {}", f.economic_position()),
+                None => "the activation root".to_string(),
+            }
+        );
+        Ok(frontier)
     }
 }
 
@@ -259,7 +270,7 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     peer_economic_position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-    validate_peer_lineage(
+    let validated = validate_peer_lineage(
         fetcher,
         expected_network_id,
         peer_genesis,
@@ -267,7 +278,12 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
         peer_economic_position,
         &StoredFrontiers,
         conditional,
-    )
+    )?;
+    log::info!(
+        "[A8] peer {} validated at position {peer_economic_position}",
+        text_id::encode_base32_crockford(peer_devid)
+    );
+    Ok(validated)
 }
 
 /// The RECORDING fetch boundary for recipient prevalidation. It IS the

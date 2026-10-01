@@ -1787,11 +1787,11 @@ pub type HopMovement = (D32, u64, D32, u64);
 /// hop's input to its last hop's output. The producer states the intent this
 /// gives, and RouteValidation checks the hops against it.
 pub fn route_endpoints(hops: &[HopMovement]) -> Result<HopMovement, Invalid> {
-    let (Some(first), Some(last)) = (hops.first(), hops.last()) else {
+    let (Some(first), Some(last), Some(shape)) = (hops.first(), hops.last(), movement_shape(hops))
+    else {
         return Err(Invalid::RouteDoesNotChain { hop: 0 });
     };
-    let split = hops.len() >= 2 && hops.iter().all(|h| h.0 == first.0 && h.2 == first.2);
-    if !split {
+    if shape == RouteShape::Chain {
         return Ok((first.0, first.1, last.2, last.3));
     }
     let mut amount_in = 0u64;
@@ -1820,9 +1820,22 @@ pub fn swap_endpoints(hops: &[SwapHop]) -> Result<HopMovement, Invalid> {
     route_endpoints(&movements)
 }
 
+/// The shape `hops` take by what they move (Amendment S19): a split when
+/// there are two or more and every one trades the first hop's pair, a chain
+/// otherwise. `None` for no hops. [`route_endpoints`] states a route's ends
+/// by it.
+pub fn movement_shape(hops: &[HopMovement]) -> Option<RouteShape> {
+    let first = hops.first()?;
+    if hops.len() >= 2 && hops.iter().all(|h| h.0 == first.0 && h.2 == first.2) {
+        Some(RouteShape::Split)
+    } else {
+        Some(RouteShape::Chain)
+    }
+}
+
 /// The two shapes of a Swap route (Amendment S19).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RouteShape {
+pub enum RouteShape {
     /// Hop j's output is hop j + 1's input (§19.5).
     Chain,
     /// Every hop trades the intent's one pair, through distinct vaults.
@@ -3198,6 +3211,17 @@ mod tests {
             route_endpoints(&[]),
             Err(Invalid::RouteDoesNotChain { hop: 0 })
         );
+        // The shape the endpoints follow, as a quote reports it.
+        assert_eq!(
+            movement_shape(&[(a, 10, b, 90), (b, 90, c, 80)]),
+            Some(RouteShape::Chain)
+        );
+        assert_eq!(movement_shape(&[(a, 10, c, 90)]), Some(RouteShape::Chain));
+        assert_eq!(
+            movement_shape(&[(a, 30, c, 250), (a, 30, c, 260)]),
+            Some(RouteShape::Split)
+        );
+        assert_eq!(movement_shape(&[]), None);
     }
 
     /// The fixture's two hops recut as a split (Amendment S19): both trade the

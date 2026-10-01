@@ -828,6 +828,37 @@ proto3.util.setEnumType(SofiSearch, "dsm.SofiSearch", [
 ]);
 
 /**
+ * A route's shape (Amendment S19): a chain, each hop feeding the next, or a
+ * split, every hop trading the one pair through its own vault.
+ *
+ * @generated from enum dsm.SofiRouteShape
+ */
+export enum SofiRouteShape {
+  /**
+   * no route
+   *
+   * @generated from enum value: SOFI_ROUTE_SHAPE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SOFI_ROUTE_SHAPE_CHAIN = 1;
+   */
+  CHAIN = 1,
+
+  /**
+   * @generated from enum value: SOFI_ROUTE_SHAPE_SPLIT = 2;
+   */
+  SPLIT = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(SofiRouteShape)
+proto3.util.setEnumType(SofiRouteShape, "dsm.SofiRouteShape", [
+  { no: 0, name: "SOFI_ROUTE_SHAPE_UNSPECIFIED" },
+  { no: 1, name: "SOFI_ROUTE_SHAPE_CHAIN" },
+  { no: 2, name: "SOFI_ROUTE_SHAPE_SPLIT" },
+]);
+
+/**
  * @generated from enum dsm.SofiVaultStatus
  */
 export enum SofiVaultStatus {
@@ -7415,11 +7446,15 @@ export class TokenBurnResponse extends Message<TokenBurnResponse> {
  */
 export class TokenFeeScheduleResponse extends Message<TokenFeeScheduleResponse> {
   /**
+   * base units
+   *
    * @generated from field: uint64 token_creation_era = 1;
    */
   tokenCreationEra = protoInt64.zero;
 
   /**
+   * base units
+   *
    * @generated from field: uint64 era_held = 2;
    */
   eraHeld = protoInt64.zero;
@@ -7428,6 +7463,19 @@ export class TokenFeeScheduleResponse extends Message<TokenFeeScheduleResponse> 
    * @generated from field: bool fee_covered = 3;
    */
   feeCovered = false;
+
+  /**
+   * The fee and the holding in ERA as people count it, at the decimals ERA's
+   * committed policy carries (SoFi Amendment S18).
+   *
+   * @generated from field: string token_creation_era_display = 4;
+   */
+  tokenCreationEraDisplay = "";
+
+  /**
+   * @generated from field: string era_held_display = 5;
+   */
+  eraHeldDisplay = "";
 
   constructor(data?: PartialMessage<TokenFeeScheduleResponse>) {
     super();
@@ -7440,6 +7488,8 @@ export class TokenFeeScheduleResponse extends Message<TokenFeeScheduleResponse> 
     { no: 1, name: "token_creation_era", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 2, name: "era_held", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 3, name: "fee_covered", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "token_creation_era_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "era_held_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenFeeScheduleResponse {
@@ -17939,6 +17989,35 @@ export class SofiFindRouteResponse extends Message<SofiFindRouteResponse> {
    */
   search = SofiSearch.UNSPECIFIED;
 
+  /**
+   * What the route takes and gives as one operation, by the rule a trade is
+   * checked by: a chain gives its last hop's output, a split the sum of its
+   * hops'. Unset with no route.
+   *
+   * @generated from field: dsm.SofiRouteShape shape = 3;
+   */
+  shape = SofiRouteShape.UNSPECIFIED;
+
+  /**
+   * @generated from field: uint64 amount_in = 4;
+   */
+  amountIn = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 amount_out = 5;
+   */
+  amountOut = protoInt64.zero;
+
+  /**
+   * @generated from field: string amount_in_display = 6;
+   */
+  amountInDisplay = "";
+
+  /**
+   * @generated from field: string amount_out_display = 7;
+   */
+  amountOutDisplay = "";
+
   constructor(data?: PartialMessage<SofiFindRouteResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -17949,6 +18028,11 @@ export class SofiFindRouteResponse extends Message<SofiFindRouteResponse> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "hops", kind: "message", T: SofiHopV1, repeated: true },
     { no: 2, name: "search", kind: "enum", T: proto3.getEnumType(SofiSearch) },
+    { no: 3, name: "shape", kind: "enum", T: proto3.getEnumType(SofiRouteShape) },
+    { no: 4, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 6, name: "amount_in_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "amount_out_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiFindRouteResponse {

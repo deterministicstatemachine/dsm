@@ -310,10 +310,13 @@ export async function burnToken(args: { tokenId: string; amount: string | number
 
 /** The token-creation fee and this device's standing against it, as Rust reports them. */
 export type TokenCreationFee = {
-  /** The fee, in ERA. */
+  /** The fee, in ERA base units. */
   feeEra: bigint;
-  /** The ERA this device holds, from the head the fee is debited from. */
+  /** The ERA this device holds, in base units, from the head the fee is debited from. */
   eraHeld: bigint;
+  /** The fee and the holding in ERA as people count it, rendered by Rust. */
+  feeDisplay: string;
+  heldDisplay: string;
   /** Whether that pays the fee: the check token.create refuses on. */
   feeCovered: boolean;
 };
@@ -336,5 +339,11 @@ export async function getTokenCreationFee(): Promise<TokenCreationFee> {
     throw new Error(`Expected tokenFeeScheduleResponse, got ${env.payload.case}`);
   }
   const r = env.payload.value;
-  return { feeEra: r.tokenCreationEra, eraHeld: r.eraHeld, feeCovered: r.feeCovered };
+  return {
+    feeEra: r.tokenCreationEra,
+    eraHeld: r.eraHeld,
+    feeDisplay: r.tokenCreationEraDisplay,
+    heldDisplay: r.eraHeldDisplay,
+    feeCovered: r.feeCovered,
+  };
 }

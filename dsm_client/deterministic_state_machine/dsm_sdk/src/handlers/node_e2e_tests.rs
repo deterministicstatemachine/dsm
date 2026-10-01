@@ -1447,7 +1447,7 @@ async fn one_order_fills_through_two_vaults_of_the_same_pair() {
     adopt(&p.b, &tkn).await;
 
     let amount = 60;
-    let quoted = match payload(
+    let route = match payload(
         &invoke(
             &p.b,
             "sofi.findRoute",
@@ -1459,9 +1459,10 @@ async fn one_order_fills_through_two_vaults_of_the_same_pair() {
         )
         .await,
     ) {
-        Payload::SofiFindRouteResponse(r) => r.hops,
+        Payload::SofiFindRouteResponse(r) => r,
         other => panic!("sofi.findRoute answered {other:?}"),
     };
+    let quoted = route.hops.clone();
     assert_eq!(quoted.len(), 2, "split across the two vaults");
     let mut vaults: Vec<Vec<u8>> = quoted.iter().map(|h| h.vault_id.clone()).collect();
     vaults.sort();
@@ -1486,6 +1487,12 @@ async fn one_order_fills_through_two_vaults_of_the_same_pair() {
         total > alone,
         "the split gives {total}, one vault alone {alone}"
     );
+    assert_eq!(
+        (route.shape, route.amount_in, route.amount_out),
+        (generated::SofiRouteShape::Split as i32, amount, total),
+        "the route is quoted as one split: what it takes and the sum it gives"
+    );
+    assert_eq!(route.amount_out_display, entered(&p.b, &tkn, total));
 
     realized_through(
         &p.b,
@@ -1500,6 +1507,24 @@ async fn one_order_fills_through_two_vaults_of_the_same_pair() {
     )
     .await;
     assert_eq!(setups(&p.b).await, 2, "B set up with each vault first");
+    let traded: Vec<_> = history_rows(&p.b)
+        .await
+        .into_iter()
+        .filter(|row| row.tx_type == generated::TransactionType::TxTypeSofiTrade as i32)
+        .collect();
+    assert_eq!(traded.len(), 1, "one row for the one order");
+    let mut named: Vec<&str> = traded[0].recipient.split(", ").collect();
+    named.sort_unstable();
+    let ids = [
+        crate::util::text_id::encode_base32_crockford(&one),
+        crate::util::text_id::encode_base32_crockford(&two),
+    ];
+    let mut both_named: Vec<&str> = ids.iter().map(String::as_str).collect();
+    both_named.sort_unstable();
+    assert_eq!(
+        named, both_named,
+        "the row names both vaults the order filled through"
+    );
     assert_eq!(
         balance(&p.b, &era),
         crate::economic_fixtures::whole_era(200) - amount,
@@ -1565,10 +1590,11 @@ async fn every_sofi_route_reaches_its_producer() {
         adopt(&p.b, token).await;
     }
 
-    let hops = |r: &AppResult| match payload(r) {
-        Payload::SofiFindRouteResponse(r) => r.hops,
+    let routed = |r: &AppResult| match payload(r) {
+        Payload::SofiFindRouteResponse(r) => r,
         other => panic!("sofi.findRoute answered {other:?}"),
     };
+    let hops = |r: &AppResult| routed(r).hops;
     let search = |token_out: &[u8; 32]| {
         args(&generated::SofiFindRouteRequest {
             token_in_policy_commit: era.to_vec(),
@@ -1580,7 +1606,14 @@ async fn every_sofi_route_reaches_its_producer() {
         .expect("the first vault prices its hop");
     let two = dsm::dlv::route_commit::constant_product_output(one, 1_000, 1_000, 30)
         .expect("the second vault prices its hop");
-    let quoted: Vec<_> = hops(&invoke(&p.b, "sofi.findRoute", search(&tkb)).await)
+    let chain = routed(&invoke(&p.b, "sofi.findRoute", search(&tkb)).await);
+    assert_eq!(
+        (chain.shape, chain.amount_in, chain.amount_out),
+        (generated::SofiRouteShape::Chain as i32, 10, two),
+        "a chain gives its last hop's output"
+    );
+    let quoted: Vec<_> = chain
+        .hops
         .into_iter()
         .map(|h| {
             (
@@ -1754,5 +1787,204 @@ async fn every_sofi_route_reaches_its_producer() {
     assert!(
         refusal.starts_with("unknown invoke method: 'sofi.quote'"),
         "the router refuses a method that is no SoFi route: {refusal}"
+    );
+}
+
+/// The reads of a live verifier, counting the owner lineages it walks and
+/// the genesis locators it scans. Every read is the live one.
+struct CountingReads<'a> {
+    live: &'a crate::sdk::sofi_reads::LiveSofiReads<'a>,
+    owner_walks: std::sync::atomic::AtomicUsize,
+    genesis_scans: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingReads<'_> {
+    fn counts(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (
+            self.owner_walks.load(SeqCst),
+            self.genesis_scans.load(SeqCst),
+        )
+    }
+}
+
+impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
+    fn cell(
+        &self,
+        cell: &dsm::route_chain::RoutedCell,
+    ) -> Result<dsm::route_chain::CellEvidence, dsm::sofi::resolve::ReadFailure> {
+        self.live.cell(cell)
+    }
+    fn precommit(
+        &self,
+        id: &[u8; 32],
+    ) -> Result<
+        dsm::sofi::storage::Resolved<
+            dsm::sofi::publication::Signed<dsm::sofi::wire::TraderPrecommitBody>,
+        >,
+        dsm::sofi::resolve::ReadFailure,
+    > {
+        self.live.precommit(id)
+    }
+    fn fulfillment(
+        &self,
+        id: &[u8; 32],
+    ) -> Result<
+        dsm::sofi::storage::Resolved<
+            dsm::sofi::publication::Signed<dsm::sofi::wire::TraderFulfillmentBody>,
+        >,
+        dsm::sofi::resolve::ReadFailure,
+    > {
+        self.live.fulfillment(id)
+    }
+    fn setup_bytes(
+        &self,
+        setup_ref: &[u8; 32],
+    ) -> Result<dsm::sofi::storage::Resolved<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
+        self.live.setup_bytes(setup_ref)
+    }
+    fn stored_bytes(
+        &self,
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
+        self.live.stored_bytes(addr)
+    }
+    fn token_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, dsm::sofi::resolve::ReadFailure> {
+        self.live.token_policy_bytes(policy_commit)
+    }
+    fn vault_genesis_candidates(
+        &self,
+        vault_id: &[u8; 32],
+    ) -> Result<
+        dsm::sofi::storage::Discovered<(dsm::sofi::wire::VaultGenesisPreimage, Vec<u8>)>,
+        dsm::sofi::resolve::ReadFailure,
+    > {
+        self.genesis_scans
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.live.vault_genesis_candidates(vault_id)
+    }
+    fn vault_token_candidates(
+        &self,
+        token: &[u8; 32],
+    ) -> Result<dsm::sofi::storage::Discovered<[u8; 32]>, dsm::sofi::resolve::ReadFailure> {
+        self.live.vault_token_candidates(token)
+    }
+    fn vault_owner(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<
+        dsm::economic::provenance::ValidatedPeerTransition,
+        dsm::economic::provenance::PeerLineageFailure,
+    > {
+        self.owner_walks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.live.vault_owner(genesis, device_id, position)
+    }
+    fn vault_leaves_at(
+        &self,
+        vault_id: &[u8; 32],
+        root: &[u8; 32],
+        keys: &std::collections::BTreeSet<[u8; 32]>,
+    ) -> Result<Option<dsm::sofi::resolve::VaultLeaves>, dsm::sofi::resolve::ReadFailure> {
+        self.live.vault_leaves_at(vault_id, root, keys)
+    }
+    fn trader_root_at(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<
+        (
+            dsm::economic::lineage::ValidatedEconomicRoot,
+            dsm::sofi::wire::ParentClaimRef,
+        ),
+        dsm::economic::provenance::PeerLineageFailure,
+    > {
+        self.live.trader_root_at(genesis, device_id, position)
+    }
+    fn accepted_claim_at(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<dsm::economic::lineage::AcceptedClaim, dsm::economic::provenance::PeerLineageFailure>
+    {
+        self.live.accepted_claim_at(genesis, device_id, position)
+    }
+    fn recorded_generations(
+        &self,
+        vault_id: &[u8; 32],
+    ) -> Result<Vec<dsm::sofi::resolve::RecordedGenerationRow>, dsm::sofi::resolve::ReadFailure>
+    {
+        self.live.recorded_generations(vault_id)
+    }
+    fn record_generation(
+        &self,
+        post: &dsm::sofi::validation::VaultPostState,
+    ) -> Result<(), dsm::sofi::resolve::ReadFailure> {
+        self.live.record_generation(post)
+    }
+    fn keep_completion(
+        &self,
+        cell: &dsm::route_chain::RoutedCell,
+        proof: &dsm::route_chain::CompletionProof,
+    ) -> Result<(), dsm::sofi::resolve::ReadFailure> {
+        self.live.keep_completion(cell, proof)
+    }
+}
+
+/// A quote's verifiers read a vault's genesis from the network once. The
+/// rig's quote took minutes because discovery under each of the pair's
+/// tokens, the chain and the head each read the genesis again: a scan of its
+/// locator and a walk of its owner's lineage every time. B discovers A's
+/// vault under ERA and under TKN, walks its chain, and asks for its genesis
+/// once more; the owner's lineage is walked once and the locator scanned
+/// once, and the vault is still found under both tokens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_request_reads_each_vaults_genesis_once() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market_unset(&p).await;
+    p.b.enter();
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let live = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("live reads");
+    let reads = CountingReads {
+        live: &live,
+        owner_walks: std::sync::atomic::AtomicUsize::new(0),
+        genesis_scans: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let members = crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members");
+    let network = crate::sdk::economic_admission_flow::committed_network_id().expect("network");
+    let verifier = dsm::sofi::resolve::Verifier::new(
+        &reads,
+        &members,
+        set.id(),
+        &network,
+        None,
+        dsm::sofi::resolve::AcceptedGeneses::default(),
+    );
+    let found = |token: &[u8; 32]| match verifier.vaults_of_token(token) {
+        Ok(dsm::sofi::storage::Discovered::Complete(vaults)) => {
+            vaults.iter().map(|v| *v.vault_id()).collect::<Vec<_>>()
+        }
+        other => panic!("discovery under a token: {other:?}"),
+    };
+    assert_eq!(found(&m.era), vec![m.vault_id], "found under ERA");
+    assert_eq!(found(&m.tkn), vec![m.vault_id], "and under TKN");
+    let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
+    assert!(chain.head().is_some(), "walked to its head");
+    assert!(matches!(
+        verifier.vault_genesis(&m.vault_id),
+        Ok(dsm::sofi::resolve::VaultGenesis::Accepted(..))
+    ));
+    assert_eq!(
+        reads.counts(),
+        (1, 1),
+        "one walk of the owner's lineage and one scan of the genesis locator"
     );
 }

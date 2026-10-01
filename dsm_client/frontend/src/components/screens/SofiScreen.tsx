@@ -55,6 +55,13 @@ function entered(label: string, text: string): string {
   return t;
 }
 
+/** How a route goes through its vaults: one hop, a chain, or a split. */
+function routeLabel(route: sofi.Route): string {
+  const n = route.hops.length;
+  if (route.shape === 'split') return `split across ${n} vaults`;
+  return n === 1 ? 'in 1 hop' : `over ${n} hops`;
+}
+
 function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -101,7 +108,7 @@ export default function SofiScreen(): React.JSX.Element {
   const [tokenOutAnchor, setTokenOutAnchorState] = useState('');
   const [amountIn, setAmountInState] = useState('');
   const [minOut, setMinOut] = useState('');
-  const [quote, setQuote] = useState<sofi.Hop[] | null>(null);
+  const [quote, setQuote] = useState<sofi.Route | null>(null);
 
   // A quote is for one set of inputs: any change puts it away.
   const setTokenIn = (v: string) => { setTokenInState(v); setQuote(null); };
@@ -154,32 +161,31 @@ export default function SofiScreen(): React.JSX.Element {
   }, [fx]);
 
   const onQuote = () => run('Quote', async () => {
-    const hops = await sofi.findRoute({
+    const route = await sofi.findRoute({
       tokenIn: id32('token in', tokenIn),
       tokenOut: id32('token out', effectiveTokenOut),
       amountIn: entered('amount in', amountIn),
     });
-    if (hops.length === 0) {
+    if (route.hops.length === 0) {
       setQuote(null);
       throw new Error('no liquidity trades between these two tokens');
     }
-    setQuote(hops);
-    const out = hops[hops.length - 1].amountOutDisplay;
-    setMinOut(out);
-    return `Quoted: ${out} ${nameOf(effectiveTokenOut)} over ${hops.length} hop${hops.length === 1 ? '' : 's'}`;
+    setQuote(route);
+    setMinOut(route.amountOutDisplay);
+    return `Quoted: ${route.amountOutDisplay} ${nameOf(effectiveTokenOut)} ${routeLabel(route)}`;
   }, 'info');
 
   const onTrade = () => run('Trade', async () => {
-    if (!quote || quote.length === 0) throw new Error('quote first');
+    if (!quote || quote.hops.length === 0) throw new Error('quote first');
     const args = {
       tokenIn: id32('token in', tokenIn),
       tokenOut: id32('token out', effectiveTokenOut),
       amountIn: entered('amount in', amountIn),
       minAmountOut: entered('minimum out', minOut),
     };
-    const r = quote.length === 1
-      ? await sofi.trade({ vaultId: quote[0].vaultId, ...args })
-      : await sofi.route({ vaultIds: quote.map((h) => h.vaultId), ...args });
+    const r = quote.hops.length === 1
+      ? await sofi.trade({ vaultId: quote.hops[0].vaultId, ...args })
+      : await sofi.route({ vaultIds: quote.hops.map((h) => h.vaultId), ...args });
     setQuote(null);
     const coin = inBalance ? { ticker: inBalance.symbol, iconUrl: inBalance.iconUrl } : undefined;
     return showPosition('Trade', r, coin);
@@ -223,7 +229,7 @@ export default function SofiScreen(): React.JSX.Element {
     return `Relayed: ${r.cellsWritten} cell${r.cellsWritten === 1 ? '' : 's'} written`;
   });
 
-  const quoteOut = quote && quote.length > 0 ? quote[quote.length - 1].amountOutDisplay : null;
+  const quoteOut = quote && quote.hops.length > 0 ? quote.amountOutDisplay : null;
 
   return (
     <ScreenFrame
@@ -325,14 +331,14 @@ export default function SofiScreen(): React.JSX.Element {
             <section className="sb-card sb-card--dark" aria-label="Quote">
               <div className="sb-card__title">
                 <span>Quote</span>
-                <span className="sb-tag">{quote.length} hop{quote.length === 1 ? '' : 's'}</span>
+                <span className="sb-tag">{routeLabel(quote)}</span>
               </div>
               <div className="sb-hero__label">You get</div>
               <div className="sb-hero__value">
                 {quoteOut}
                 <span className="sb-hero__unit">{nameOf(effectiveTokenOut)}</span>
               </div>
-              {quote.map((h, i) => (
+              {quote.hops.map((h, i) => (
                 <div className="sb-kv" key={`${encodeBase32Crockford(h.vaultId)}-${i}`}>
                   <span className="sb-kv__k">Hop {i + 1}</span>
                   <span className="sb-kv__v sb-kv__v--mono">
@@ -352,7 +358,13 @@ export default function SofiScreen(): React.JSX.Element {
                   onChange={(e) => setMinOut(e.target.value)}
                 />
               </div>
-              {quote.length > 1 && <p className="sb-hint sb-hint--tight">Two hops: each vault took its own fee.</p>}
+              {quote.hops.length > 1 && (
+                <p className="sb-hint sb-hint--tight">
+                  {quote.shape === 'split'
+                    ? 'Split: each vault took its own fee on its share.'
+                    : 'Each hop paid its own vault\'s fee.'}
+                </p>
+              )}
               <p className="sb-hint">A fill below this is refused. Once it lands there is no undo.</p>
               <div className="sb-actions" style={{ margin: 0 }}>
                 <button type="button" className="sb-btn" onClick={() => setQuote(null)} disabled={busy}>Cancel</button>
