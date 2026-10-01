@@ -369,7 +369,7 @@ mod tests {
     use super::*;
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
     use crate::sofi::publication::Publication;
-    use crate::sofi::validation::fixtures::{swap_fixture_n, trader_keys, DEV, G};
+    use crate::sofi::validation::fixtures::{signed_c_q, swap_fixture_n, trader_keys, dev, G};
     use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
     use crate::route_chain::ROUTE_LEN;
     use crate::sofi::wire::AttemptEntry;
@@ -425,17 +425,17 @@ mod tests {
         let bytes = envelope(&f);
         let known = lookup(&p);
         assert_eq!(
-            names_fulfillment_key(&bytes, &G, &DEV, q, &known).map(|s| s.body),
+            names_fulfillment_key(&bytes, &G, &dev(), q, &known).map(|s| s.body),
             Some(f.clone())
         );
-        assert!(names_fulfillment_key(&bytes, &G, &DEV, q + 1, &known).is_none());
-        assert!(names_fulfillment_key(&bytes, &[0x33; 32], &DEV, q, &known).is_none());
+        assert!(names_fulfillment_key(&bytes, &G, &dev(), q + 1, &known).is_none());
+        assert!(names_fulfillment_key(&bytes, &[0x33; 32], &dev(), q, &known).is_none());
         let unknown: BTreeMap<D32, TraderPrecommitBody> = BTreeMap::new();
         assert!(
-            names_fulfillment_key(&bytes, &G, &DEV, q, &unknown).is_none(),
+            names_fulfillment_key(&bytes, &G, &dev(), q, &unknown).is_none(),
             "without P neither the trader nor C_q is known"
         );
-        assert!(names_fulfillment_key(b"not an envelope", &G, &DEV, q, &known).is_none());
+        assert!(names_fulfillment_key(b"not an envelope", &G, &dev(), q, &known).is_none());
     }
 
     /// `K_ful(q)` is named only by a fulfillment the trader signed: its
@@ -455,7 +455,7 @@ mod tests {
         }
         .object_bytes()
         .unwrap();
-        assert!(names_fulfillment_key(&unsigned, &G, &DEV, q, &known).is_none());
+        assert!(names_fulfillment_key(&unsigned, &G, &dev(), q, &known).is_none());
 
         let (other_pk, other_sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
         let foreign = TraderFulfillmentBody::new(
@@ -477,19 +477,19 @@ mod tests {
         }
         .object_bytes()
         .unwrap();
-        assert!(names_fulfillment_key(&foreign_bytes, &G, &DEV, q, &known).is_none());
+        assert!(names_fulfillment_key(&foreign_bytes, &G, &dev(), q, &known).is_none());
 
         // First at the leader, the unsigned F blocks nothing.
         let cells = PositionCells::new(
             &G,
-            &DEV,
+            &dev(),
             q,
             &[0x5E; 32],
             &committed_set(),
             &committed_set_id(),
         )
         .expect("the committed set");
-        let claim = derive::resolution_claim(&p, &f).encode();
+        let claim = signed_c_q(derive::resolution_claim(&p, &f));
         let mut ful = Cell::at(cells.fulfillment());
         ful.write(&unsigned, ROUTE_LEN - 1, &[]);
         ful.write(&envelope(&f), ROUTE_LEN - 1, &[]);
@@ -513,7 +513,7 @@ mod tests {
         let known = lookup(&p);
         let cells = PositionCells::new(
             &G,
-            &DEV,
+            &dev(),
             q,
             &[0x5E; 32],
             &committed_set(),
@@ -549,7 +549,7 @@ mod tests {
         let f = fulfillment(&p, q);
         let bytes = envelope(&f);
         let known = lookup(&p);
-        let claim = derive::resolution_claim(&p, &f).encode();
+        let claim = signed_c_q(derive::resolution_claim(&p, &f));
         let rival = TraderFulfillmentBody::new(
             derive::precommit_id(&p),
             vec![[0x03; 32], [0x04; 32]],
@@ -559,10 +559,10 @@ mod tests {
             key(),
         )
         .unwrap();
-        let other_claim = derive::resolution_claim(&p, &rival).encode();
+        let other_claim = signed_c_q(derive::resolution_claim(&p, &rival));
         let cells = PositionCells::new(
             &G,
-            &DEV,
+            &dev(),
             q,
             &[0x5E; 32],
             &committed_set(),
@@ -609,8 +609,11 @@ mod tests {
         );
         // No fulfillment final at K_ful(q): the root cell's claim is named,
         // and weighed by each F against its own C_q (SoFi Amendment S14).
-        let claim_id = crate::storage_cell::entry_digest(&claim);
-        let other_id = crate::storage_cell::entry_digest(&other_claim);
+        // A conditional claim is named by its derived body (SoFi Amendment S20).
+        let claim_id =
+            crate::storage_cell::entry_digest(&derive::resolution_claim(&p, &f).encode());
+        let other_id =
+            crate::storage_cell::entry_digest(&derive::resolution_claim(&p, &rival).encode());
         assert_eq!(
             reg(&ful_cell(&bytes, 1), &root_cell(&claim, ROUTE_LEN - 1)),
             Ok(Registration::RootTaken { claim: claim_id })

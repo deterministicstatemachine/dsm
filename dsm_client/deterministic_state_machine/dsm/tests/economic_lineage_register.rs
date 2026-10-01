@@ -164,16 +164,26 @@ fn keypair() -> (Vec<u8>, Vec<u8>) {
     dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair")
 }
 
+/// The claimant device's attestation digest: its device id is
+/// `derive_devid(pk, ATT_A)` (DSM Amendment A10).
+const ATT_A: [u8; 32] = [0xA7; 32];
+
+/// The device a key signs for: the id `pk` and [`ATT_A`] derive.
+fn devid_of(pk: &[u8]) -> [u8; 32] {
+    dsm::core::identity::genesis_v2::derive_devid(pk, &ATT_A)
+}
+
 fn body(pk: &[u8], set_id: [u8; 32]) -> EconomicRootClaimBody {
     EconomicRootClaimBody::new(
         G,
-        DEV,
+        devid_of(pk),
         7,
         [0x33; 32],
         [0x44; 32],
         set_id,
         sigalg::SPHINCS_PLUS_SPX256F,
         pk,
+        ATT_A,
     )
     .expect("valid body")
 }
@@ -227,8 +237,8 @@ fn a_claim_signed_for_one_position_does_not_verify_at_another() {
 
     assert_eq!(verified.body().economic_position, 7);
     assert_ne!(
-        economic_root_register_key(&G, &DEV, verified.body().economic_position),
-        economic_root_register_key(&G, &DEV, 8)
+        economic_root_register_key(&G, &devid_of(&pk), verified.body().economic_position),
+        economic_root_register_key(&G, &devid_of(&pk), 8)
     );
 }
 
@@ -278,7 +288,7 @@ fn registering_an_arbitrary_root_yields_nothing_validated() {
     let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a keypair");
     let body = dsm::economic::claim::EconomicRootClaimBody::new(
         G,
-        DEV,
+        devid_of(&pk),
         1,
         [0xEE; 32], // invented
         [0xDD; 32],
@@ -287,6 +297,7 @@ fn registering_an_arbitrary_root_yields_nothing_validated() {
             .storage_set_id,
         dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
         &pk,
+        ATT_A,
     )
     .expect("a claim body");
     let envelope =
@@ -299,7 +310,7 @@ fn registering_an_arbitrary_root_yields_nothing_validated() {
     );
     assert_eq!(
         registered.register_key(),
-        economic_root_register_key(&G, &DEV, 1)
+        economic_root_register_key(&G, &devid_of(&pk), 1)
     );
 
     // There is deliberately NO API turning that into a ValidatedEconomicRoot:

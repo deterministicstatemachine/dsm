@@ -531,8 +531,8 @@ async fn a_sofi_trade_executes_end_to_end() {
 }
 
 /// MR-SOFI-0241, SoFi Amendment S14: a vault key held final by an exercise
-/// whose fulfillment can never register — a rival claim took the trader's
-/// position first — is skipped on that fact alone. The walk reads the key's
+/// whose fulfillment can never register — another claim of the trader's own
+/// took its position first — is skipped on that fact alone. The walk reads the key's
 /// cell and the trader's position pair, and asks for none of the exercise's
 /// validation evidence; the next key is live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -542,7 +542,9 @@ async fn a_key_whose_fulfillment_can_never_register_is_skipped_without_its_evide
     let m = open_market(&p).await;
     let set = canonical_set(NETWORK).expect("the pinned set");
 
-    // A rival claim takes B's next position before B trades.
+    // B's own claim of another fulfillment takes B's next position before B
+    // trades. Only B can sign a claim that occupies its cell (DSM Amendment
+    // A10, SoFi Amendment S20).
     let q = admitted_position(&p.b) + 1;
     let (.., root) = {
         p.b.enter();
@@ -552,18 +554,30 @@ async fn a_key_whose_fulfillment_can_never_register_is_skipped_without_its_evide
     };
     let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
         .expect("B's next position pair");
-    let rival = dsm::sofi::wire::SofiResolutionClaim {
-        genesis: p.b.genesis,
-        device_id: p.b.device_id,
-        position: q,
-        fulfillment_id: [0x77; 32],
-        realize_root: [0x78; 32],
-        void_root: root,
-    }
-    .encode();
+    let rival = {
+        p.b.enter();
+        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
+        let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+        dsm::sofi::signature::sign_resolution_claim(
+            dsm::sofi::wire::SofiResolutionClaim {
+                genesis: p.b.genesis,
+                device_id: p.b.device_id,
+                position: q,
+                fulfillment_id: [0x77; 32],
+                realize_root: [0x78; 32],
+                void_root: root,
+            },
+            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &pk,
+            att_a,
+            &sk,
+        )
+        .expect("B signs its own claim")
+        .encode()
+    };
     let taken = crate::sdk::route_seats::write_recorded(&set, pair.root().routed(), &rival)
         .await
-        .expect("any party may write a claim");
+        .expect("the claim is written along its route");
     assert!(
         taken.reached_leader(),
         "the rival claim holds B's root cell"

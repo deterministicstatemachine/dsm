@@ -139,6 +139,7 @@ async fn a_root_no_transition_explains_is_refused_where_it_sits() {
         profile.storage_set_id,
         dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
         &crate::sdk::signing_authority::current_public_key().expect("the device's AK"),
+        crate::sdk::signing_authority::current_att_a().expect("the device's AttA"),
     )
     .expect("a claim body");
     let claim = dsm::economic::claim_envelope::sign_economic_root_claim(

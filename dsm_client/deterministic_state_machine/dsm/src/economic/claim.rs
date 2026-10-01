@@ -154,13 +154,19 @@ impl EconomicAdmissionManifest {
     }
 }
 
-/// `0x001B` schema 1 — the signed body a trader registers at its economic
+/// `0x001B` schema 2 — the signed body a trader registers at its economic
 /// position.
 ///
 /// `root_register_storage_set_id` is a member of the **signed** body, not
 /// transport context. A claim that did not commit the set it was written to
 /// could be lifted from one network's register into another's, which is
 /// precisely the substitution the network scoping exists to prevent.
+///
+/// `claimant_att_a` is the trader device's `AttA` (DSM Amendment A10): the
+/// claim proves its own authority for the cell, because `DevID = H(AK ‖ AttA)`
+/// and recognition requires `derive_devid(claimant_public_key, claimant_att_a)
+/// == trader_devid`. A key that does not derive the named device signs no
+/// claim that can occupy that device's cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EconomicRootClaimBody {
     pub trader_genesis: [u8; 32],
@@ -171,11 +177,12 @@ pub struct EconomicRootClaimBody {
     pub root_register_storage_set_id: [u8; 32],
     pub signature_alg: u16,
     pub claimant_public_key: Vec<u8>,
+    pub claimant_att_a: [u8; 32],
 }
 
 impl CcbObject for EconomicRootClaimBody {
     const CLASS: u16 = class::ECONOMIC_ROOT_CLAIM_BODY;
-    const SCHEMA: u16 = 1;
+    const SCHEMA: u16 = 2;
 }
 
 impl EconomicRootClaimBody {
@@ -191,6 +198,7 @@ impl EconomicRootClaimBody {
         root_register_storage_set_id: [u8; 32],
         signature_alg: u16,
         claimant_public_key: &[u8],
+        claimant_att_a: [u8; 32],
     ) -> Result<Self, CcbError> {
         let expected = sigalg::public_key_len(signature_alg)
             .ok_or(CcbError::UnknownSignatureAlg { alg: signature_alg })?;
@@ -210,10 +218,11 @@ impl EconomicRootClaimBody {
             root_register_storage_set_id,
             signature_alg,
             claimant_public_key: claimant_public_key.to_vec(),
+            claimant_att_a,
         })
     }
 
-    /// Fields 1..8 in registry order.
+    /// Fields 1..9 in registry order.
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
         push_envelope::<Self>(&mut out);
@@ -225,6 +234,7 @@ impl EconomicRootClaimBody {
         push_digest32(&mut out, &self.root_register_storage_set_id); // 6
         push_u16(&mut out, self.signature_alg); // 7
         push_bytes(&mut out, &self.claimant_public_key)?; // 8
+        push_digest32(&mut out, &self.claimant_att_a); // 9
         Ok(out)
     }
 
