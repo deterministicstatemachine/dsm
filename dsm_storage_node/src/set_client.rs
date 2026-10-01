@@ -11,6 +11,17 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// How long a node waits to connect to a set-mate, and for one answer from
+/// it. A set-mate that accepts a connection and never answers fails the
+/// fetch within these bounds instead of holding the mirror sync, and with it
+/// the node's one-at-a-time sync lock, open. They are transport liveness
+/// bounds, as an unreachable set-mate is: a fetch that times out stores
+/// nothing and orders nothing, so no protocol fact depends on them (storage
+/// spec §1 rule 4).
+pub const SET_MATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const SET_MATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A client pinned to `set_ca_pem`, the storage set's CA certificate.
 pub fn pinned_set_client(set_ca_pem: &[u8]) -> anyhow::Result<Client> {
@@ -27,7 +38,11 @@ pub fn pinned_set_client(set_ca_pem: &[u8]) -> anyhow::Result<Client> {
             .with_root_certificates(root_store)
             .with_no_client_auth();
 
-    Ok(Client::builder().use_preconfigured_tls(config).build()?)
+    Ok(Client::builder()
+        .use_preconfigured_tls(config)
+        .connect_timeout(SET_MATE_CONNECT_TIMEOUT)
+        .timeout(SET_MATE_REQUEST_TIMEOUT)
+        .build()?)
 }
 
 #[cfg(test)]
