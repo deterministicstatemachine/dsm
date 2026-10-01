@@ -1110,6 +1110,17 @@ computed from F and P , no claim that disagrees with F can be F ’s claim.
 **Code**
 Cq is SofiResolutionClaim, CORE/sofi/wire/objects.rs:580, class 0x003A.
 
+> **Amendment S20 (owner, 2026-10-01) — the position pair proves its own authority.** This applies DSM Amendment A10 to the position pair. The ruling, from the 2026-10-01 security pre-audit: "If an object can win/occupy a root position, the object itself proves authority for that position." Before it, anyone could write an unsigned `C_q`, or an `F` under its own key, at another trader's `K_root(q)` and `K_ful(q)`, and take or wedge that position.
+>
+> - **`C_q` is signed by the trader.** `K_root(q)` holds the trader-signed `C_q`, class `0x0062` (`SignedSofiResolutionClaim`), never a bare `CCB(C_q)`. It carries the six fields of `C_q`, then `signature_alg`, the claimant key, the trader device's `AttA`, and a signature over `H(DSM/sofi/resolution-claim-sign/v1 ‖ CCB(C_q) ‖ u16be(alg) ‖ u32be(|key|) ‖ key ‖ AttA)`.
+>   - It occupies the cell only when that signature verifies and `derive_devid(key, AttA)` is the trader's `DevID`. A bare `C_q` is refused by name.
+>   - `C_q` is still computed from `P` and `F`: every comparison is of that body (§19.6, §36), and the cell's claim is identified by the entry digest of the body.
+> - **`F` carries the trader device's `AttA`**, after its key. `F` names `K_ful(q)` only when `derive_devid(F.key, F.AttA)` is the trader's `DevID`. That is decided from `F`'s bytes before `P` is fetched, so a foreign-key `F` neither holds the cell nor makes a reader wait on a `P` it names. With `F.key = P.key` (P conformance 8), it binds `P`'s key too.
+> - **The exercise carries the trader's signed `C_q`.** Recognition requires that its body is the `C_q` of the exercise's `P` and `F`, under the same bound key, and that `derive_devid(F.key, F.AttA)` is `P`'s `DevID`. Anything that can hold a vault key therefore carries everything needed to register its own `F`.
+> - **A relayer never authors `C_q`.** "Any caller MAY relay F" (above) stands, but the relayer carries the trader's signed `C_q` from the exercise, or from the cell, exactly as signed. It does not recompute it.
+>
+> This amends this section (`K_root(q)` holds the signed `C_q`, class `0x0062`), "What it accomplishes", the class registries of §14.2 and §15 (the occupant at `K_root(q)` is `0x0062`), §19.6, the crash table of §25, stages 7 and 8 of §31, §33, §36, and conditions 4 and 8 of §44: wherever a relayer or another caller "completes the cells", it does so with the trader's signed `C_q`. Bytes written in the previous format occupy nothing, and nothing written before this amendment carries over (a clean cut).
+
 **Rule — registration**
 
 FulfillmentRegistered(F ) ⇐⇒ Final(Kful (q), F ) ∧ Final(Kroot (q), Cq ). It is a conclusion Core draws from raw

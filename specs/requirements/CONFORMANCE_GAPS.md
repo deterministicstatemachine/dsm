@@ -2054,16 +2054,55 @@ The quote took 20 s.
 - **The chain walk of a vault the trade consumed, about 19 s.** Two passes over the sibling leg re-read the same four or five cells about four times each.
 - **Establishing the facts, 2.7 s.**
 
+### 6.65 A position cell's occupant proves its own authority (`security/core-root-cell-binding`, pre-audit item 1, 2026-10-01)
+
+**The finding (security pre-audit, 2026-10-01).** `economic::register::root_claim_naming` recognized any claim whose own coordinates derived the cell's key.
+- A single-root claim only had to verify under the key it carried. A conditional `C_q` was recognized with no signature at all.
+- An `F` at `K_ful(q)` only had to carry `P`'s key.
+- So any party could write first at another device's next `K_root(q)` or `K_ful(q)` and occupy it for good. That froze the device's online funds, or registered an operation of the squatter's own at the victim's position.
+- A probe outside the tree showed it: an unsigned `C_q` naming any device was recognized at that device's `K_root(q)`.
+- The explainer already said "only Alice can sign one"; the code did not enforce it.
+
+**The ruling (owner, 2026-10-01; DSM Amendment A10, SoFi Amendment S20):** "If an object can win/occupy a root position, the object itself proves authority for that position."
+
+**What now holds.**
+- **Recognition.** Every occupant carries its key and the device's `AttA`, and is recognized only when its signature verifies and `derive_devid(key, AttA)` is the cell's `DevID`. Nothing is fetched.
+- **The root claim.** It is schema 2 with `claimant_att_a`. `decode_and_verify_economic_root_claim` refuses a key that does not derive `trader_devid` (`KeyIsNotTheNamedDevices`).
+- **`C_q`.** It occupies `K_root(q)` only as `SignedSofiResolutionClaim` (`0x0062`), verified by `sofi::signature::verify_resolution_claim`. A bare `C_q` is refused (`UnsignedConditionalClaim`). A conditional claim at a root cell is identified by its derived body, so readers keep comparing `derive::resolution_claim(P, F)`.
+- **`F`.** It carries `claimant_att_a`. `registration::fulfillment_proves_the_device` decides the binding from `F`'s bytes, and `names_fulfillment_key` applies it before it looks up `P`.
+- **Producers.**
+  - The admission flow signs its root claim with this device's `AttA`.
+  - `sofi_register` signs the trader's `C_q`.
+  - `build_fulfillment` takes the `AttA` and refuses a `P` whose key does not derive its device.
+  - The relay carries the trader's signed `C_q` from the cell and authors none.
+
+**Formal model.** No model changes. The Lean recognition boundary (`lean4/DSMRecognition.lean`, `Authorized`) already required the signature under the owner key the state names. The code now checks that, with the owner key fixed by the DevID derivation.
+
+**Open, on #1096 (SOFI, MR-SOFI-0362).** S20 also makes the exercise carry the trader's signed `C_q`. Without it, a trader whose exercise is final at a vault key but who never publishes its `C_q` leaves that `F` unregistrable. No relayer can author the claim, so the vault waits at that root. `recognize_exercise` will bind the exercise's key to `P`'s device, and `read_registration` will dismiss a foreign-key `F` before fetching its `P`.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0277 | — | Met | Added by Amendment A10. Root claims and `C_q` are recognized only when signed under a key that derives the cell's device. |
+| MR-SOFI-0360 | — | Met | Added by Amendment S20. `K_root(q)` holds the trader-signed `C_q`, and a bare one occupies nothing. |
+| MR-SOFI-0361 | — | Met | Added by Amendment S20. `F` binds its key to the cell's device from its own bytes, before `P` is fetched. |
+| MR-SOFI-0362 | — | Missing | Added by Amendment S20. The exercise does not carry the signed `C_q` yet. |
+
+Mutation controls, each run and restored with `git checkout`:
+- The binding check removed from root-claim recognition: `a_root_claim_under_a_key_that_does_not_derive_the_named_device_names_no_cell` red.
+- A bare `C_q` decoded as an occupant: `an_unsigned_conditional_claim_names_no_cell` red.
+- The binding check removed from `verify_resolution_claim`: `a_conditional_claim_signed_by_another_device_names_no_cell` red.
+- `fulfillment_proves_the_device` removed from `names_fulfillment_key`: `a_fulfillment_under_a_key_that_does_not_derive_the_trader_names_no_cell` red.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 276 | 95 | 95 | 39 | 0 | 29 | 18 |
-| SoFi (MR-SOFI) | 359 | 234 | 86 | 18 | 4 | 17 | 0 |
+| DSM high-level (MR-DSM) | 277 | 96 | 95 | 39 | 0 | 29 | 18 |
+| SoFi (MR-SOFI) | 362 | 236 | 86 | 19 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **939** | **403** | **200** | **114** | **4** | **64** | **154** |
+| **All** | **943** | **406** | **200** | **115** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2347,6 +2386,7 @@ The quote took 20 s.
 | MR-DSM-0274 | Met | `dsm::economic::peer_lineage::PeerFrontier`; `dsm_sdk::storage::client_db::economic_lineage::record_frontier_in_tx`; `dsm_sdk::storage::client_db::economic_lineage::frontier_below` | `dsm_sdk::handlers::frontier_verification_tests::a_receiver_reads_nothing_behind_its_frontier`; `dsm::economic::peer_lineage::tests::a_frontier_at_the_target_is_this_verifiers_fault_not_the_peers` | Re-verified 2026-09-30 (§6.52). A frontier is the payer's activation root or the coordinate a verification reached (`PeerFrontier::reached_by`), recorded with the claim accepted there in the transaction that accepts a step from the payer, and read back only from that store. Its fields are private. |
 | MR-DSM-0275 | Met | `dsm::economic::peer_lineage::validate_peer_lineage`; `dsm_sdk::sdk::economic_registers::StoredFrontiers` | `dsm_sdk::handlers::frontier_verification_tests::a_receiver_reads_nothing_behind_its_frontier`; `dsm_sdk::handlers::frontier_verification_tests::a_credits_source_is_validated_one_hop_back_and_no_further`; `dsm_sdk::handlers::frontier_verification_tests::a_root_no_transition_explains_is_refused_where_it_sits` | Re-verified 2026-09-30 (§6.52). A verification starts at the receiver's frontier and reads no cell at or behind it; a one-hop source's earlier positions are read as claims only, and none of the evidence behind them is read; nothing past a refused position is read. The replay from the activation root, the memo re-walk and the recursion into a source's lineage are gone. |
 | MR-DSM-0276 | Met | `dsm::economic::peer_lineage::ConditionalPositionResolver`; `dsm_sdk::sdk::sofi_reads::VerifierContext::peer_position_resolver` | `dsm_sdk::handlers::node_e2e_tests::a_trader_who_has_traded_can_pay`; `dsm::economic::peer_lineage::tests::a_conditional_position_right_after_the_activation_root_is_invalid` | Re-verified 2026-09-30 (§6.52). A conditional position inside a chain is resolved from SoFi's public objects for that position (S15), and the chain continues from the root it selected; a trader who has traded can pay (P15-9). A conditional position right after the activation root is Invalid: no claim was accepted there for it to name. |
+| MR-DSM-0277 | Met | `dsm::economic::claim_envelope::decode_and_verify_economic_root_claim`; `dsm::economic::claim_envelope::decode_registered_economic_claim`; `dsm::economic::register::root_claim_naming`; `dsm_sdk::sdk::economic_admission_flow` (root claim producer) | `dsm::economic::claim_envelope::tests::a_root_claim_under_a_key_that_does_not_derive_the_named_device_names_no_cell`; `dsm::economic::claim_envelope::tests::a_conditional_claim_signed_by_another_device_names_no_cell`; `dsm::economic::claim_envelope::tests::an_unsigned_conditional_claim_names_no_cell`; `dsm::economic::register::registered_root_construction_tests::a_squatters_claim_written_first_does_not_hold_the_cell` | DSM Amendment A10 (§6.65). Every occupant of a device's position cell carries its key and `AttA` and is recognized only when its signature verifies and `derive_devid(key, AttA)` is the cell's `DevID`, from the bytes in hand. Mutations: each binding check removed turns its named test red. |
 
 ### 8.2 SoFi settlement specification
 
@@ -2711,6 +2751,9 @@ The quote took 20 s.
 | MR-SOFI-0357 | Met | `dsm::sofi::validation::route_endpoints`; `dsm::sofi::validation::swap_endpoints`; `dsm::sofi::validation::validate_swap`; `dsm::sofi::validation::route_shape`; `dsm::sofi::validation::split_sums`; `dsm::sofi::validation::chain_holds`; `dsm_sdk::sdk::sofi_sdk::draft_route`; `dsm::sofi::validation::movement_shape` | `dsm::sofi::validation::tests::a_route_chains_or_splits_and_its_endpoints_follow`; `dsm::sofi::validation::tests::a_split_whose_legs_sum_to_the_intent_is_not_refuted_by_its_shape`; `dsm::sofi::validation::tests::a_split_that_does_not_sum_to_the_intent_is_invalid`; `dsm_sdk::handlers::node_e2e_tests::one_order_fills_through_two_vaults_of_the_same_pair` | SoFi Amendment S19 (§6.53). RouteValidation accepts hops that chain or hops that all trade the intent's pair with inputs and outputs summing to the intent in checked arithmetic (`Invalid::SplitDoesNotSum` otherwise); each hop is priced by its own vault. The producer states the intent by the same rule. `movement_shape` is the shape `route_endpoints` states a route's ends by (§6.56). |
 | MR-SOFI-0358 | Met | `dsm::sofi::validation::trader_movements`; `dsm::sofi::validation::validate_swap` | `dsm_sdk::handlers::node_e2e_tests::one_order_fills_through_two_vaults_of_the_same_pair` | SoFi Amendment S19 (§6.53). On the nodes a split through two vaults of ERA/TKN realizes as one position: B is debited the whole input and credited the sum of both legs, and each vault moved by its own leg alone. |
 | MR-SOFI-0359 | Met | `dsm_sdk::sdk::sofi_flow::find_route`; `dsm_sdk::sdk::sofi_flow::plan`; `dsm_sdk::sdk::sofi_flow::plan_split`; `dsm_sdk::sdk::sofi_flow::trade`; `dsm_sdk::sdk::sofi_flow::route_ends` | `dsm_sdk::handlers::node_e2e_tests::one_order_fills_through_two_vaults_of_the_same_pair` | SoFi Amendment S19 (§6.53). The search weighs each pair of direct vaults as a split beside every single hop and chain and proposes the most; the split share is searched over the inputs both legs price. The trade plans the same split again at the heads it walks; min-out bounds what it accepts. The quote reports the route's total by that rule (§6.56). |
+| MR-SOFI-0360 | Met | `dsm::sofi::wire::objects::SignedSofiResolutionClaim`; `dsm::sofi::signature::verify_resolution_claim`; `dsm::sofi::signature::sign_resolution_claim`; `dsm::economic::register::read_root_cell` (body identity); `dsm_sdk::sdk::sofi_register` (producer); `dsm_sdk::sdk::sofi_relay::carry_pair` | `dsm::economic::claim_envelope::tests::a_conditional_cell_decodes_by_class`; `dsm::economic::claim_envelope::tests::an_unsigned_conditional_claim_names_no_cell`; `dsm::economic::claim_envelope::tests::a_conditional_claim_signed_by_another_device_names_no_cell`; `dsm::economic::register::registered_root_construction_tests::a_held_root_cell_carries_the_exact_bytes_that_hold_it` | SoFi Amendment S20 (§6.65). `K_root(q)` holds the trader-signed `C_q` (`0x0062`); a bare `C_q` is refused by name, and a conditional claim is identified by its derived body. |
+| MR-SOFI-0361 | Met | `dsm::sofi::wire::objects::TraderFulfillmentBody`; `dsm::sofi::registration::fulfillment_proves_the_device`; `dsm::sofi::registration::names_fulfillment_key`; `dsm_sdk::sdk::sofi_sdk::build_fulfillment` | `dsm::sofi::registration::tests::a_fulfillment_under_a_key_that_does_not_derive_the_trader_names_no_cell` | SoFi Amendment S20 (§6.65). The binding is decided from `F`'s bytes before `P` is looked up. Mutation: the check removed → that test red. |
+| MR-SOFI-0362 | Missing | — | — | SoFi Amendment S20 (§6.65). The exercise does not carry the trader's signed `C_q` yet; SOFI builds it on #1096 (recognition, producer, and the relay taking it from the exercise). |
 
 ### 8.3 dBTC native specification
 
