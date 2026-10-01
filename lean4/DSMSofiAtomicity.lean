@@ -1049,7 +1049,9 @@ inductive ParentState where
   | taken
   /-- A conditional claim that selected the opposite branch. -/
   | otherBranch
-  /-- A conditional claim that resolved Invalid: no root was ever selected. -/
+  /-- A conditional claim that selects no root, ever: another claim holds `p`,
+  so it never registered there (CONFORMANCE §6.66 12d), or it resolved
+  Invalid. -/
   | noRoot
   deriving DecidableEq, Repr
 

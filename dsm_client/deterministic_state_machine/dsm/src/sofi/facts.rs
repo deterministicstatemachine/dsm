@@ -497,6 +497,36 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     })
 }
 
+/// The trader parent the ladder reads (§23.3, §6.62): `named` is the claim
+/// `P` names at `position`, `held` what this verifier established the
+/// trader's lineage holds there. A single-root parent carries both claims and
+/// the root, for the ladder to compare. A conditional parent held as `P`
+/// names it selected the root it holds. One that another claim holds never
+/// registered at `position` and never will (pair mutual exclusion), so it
+/// selects no root, ever: terminal, the position Invalid and the key it holds
+/// skipped, never left waiting. `None` while `held` is not established at
+/// `position`: no fact.
+fn parent_position(
+    named: ParentClaimRef,
+    position: u64,
+    held: Option<ResolvedParent>,
+) -> Option<ParentPosition> {
+    let held = held.filter(|held| held.economic_position == position)?;
+    Some(match named {
+        ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot {
+            named,
+            held: held.named,
+            held_root: held.selected_root,
+        },
+        ParentClaimRef::Conditional { .. } if held.named == named => {
+            ParentPosition::ConditionalSelected {
+                selected_root: held.selected_root,
+            }
+        }
+        ParentClaimRef::Conditional { .. } => ParentPosition::ConditionalNoRoot,
+    })
+}
+
 /// The facts of one exercise that need none of its validation evidence
 /// ([`GroundFacts`]), over the reads a verifier makes before it acquires
 /// any: the registration from the position pair, the trader parent from this
@@ -539,23 +569,8 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
     // (DSM Amendment A8; SoFi Amendment S15). A claim `P` carries is never
     // its own authority (§6.62).
     let named = *precommit.parent_claim_ref();
-    let unresolved = || NotEstablished::ParentUnresolved { parent: named };
-    let parent = match reads.parent {
-        Some(held) if held.economic_position == precommit.position() => match named {
-            ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot {
-                named,
-                held: held.named,
-                held_root: held.selected_root,
-            },
-            ParentClaimRef::Conditional { .. } if held.named == named => {
-                ParentPosition::ConditionalSelected {
-                    selected_root: held.selected_root,
-                }
-            }
-            ParentClaimRef::Conditional { .. } => return Err(unresolved()),
-        },
-        Some(..) | None => return Err(unresolved()),
-    };
+    let parent = parent_position(named, precommit.position(), reads.parent)
+        .ok_or(NotEstablished::ParentUnresolved { parent: named })?;
 
     // Every leg of P at the attempt F fixed for it. The attempts cover the
     // legs exactly: that is conformance item 4, decided in hand.
@@ -642,7 +657,8 @@ mod tests {
     use crate::sofi::publication::Publication;
     use crate::sofi::registration::{fulfillment_registered, PositionCells};
     use crate::sofi::resolution::{
-        classify_attempt, resolve_position, walk, AttemptClass, Incomplete, KeyFacts, Resolution,
+        classify_attempt, resolve_position, trader_parent_impossible, walk, AttemptClass,
+        Incomplete, KeyFacts, Resolution,
     };
     use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
     use crate::sofi::validation::trader_credits;
@@ -1061,6 +1077,60 @@ mod tests {
                 parent: *r.exercise.precommit().body.parent_claim_ref()
             })
         );
+    }
+
+    /// Pre-audit item 12, §23.3: a conditional parent counts only as the
+    /// claim the trader's lineage holds at `p`. Held as `P` names it, it
+    /// selected the root it holds. Held by another fulfillment's claim, or by
+    /// an ordinary claim, the claim `P` names never registered at `p` and
+    /// never will: it selects no root, the parent is impossible, and the key
+    /// its exercise holds is skipped rather than left waiting for a parent
+    /// that cannot come. What a walk holds at another position is no fact
+    /// about `p`, and neither is a lineage not walked there.
+    #[test]
+    fn a_conditional_parent_another_claim_holds_selects_no_root() {
+        let (position, root) = (7, [0x77; 32]);
+        let named = ParentClaimRef::Conditional {
+            fulfillment_id: [0xF7; 32],
+        };
+        let held = |claim| {
+            Some(ResolvedParent {
+                economic_position: position,
+                selected_root: root,
+                named: claim,
+            })
+        };
+        assert_eq!(
+            parent_position(named, position, held(named)),
+            Some(ParentPosition::ConditionalSelected {
+                selected_root: root
+            })
+        );
+        for other in [
+            ParentClaimRef::Conditional {
+                fulfillment_id: [0xF8; 32],
+            },
+            ParentClaimRef::SingleRoot {
+                claim_ref: [0xC7; 32],
+            },
+        ] {
+            let parent = parent_position(named, position, held(other));
+            assert_eq!(
+                parent,
+                Some(ParentPosition::ConditionalNoRoot),
+                "{other:?} holds p"
+            );
+            assert!(
+                parent.is_some_and(|parent| trader_parent_impossible(&parent, &root)),
+                "terminal: the position is Invalid and its keys are skipped"
+            );
+        }
+        assert_eq!(
+            parent_position(named, position + 1, held(named)),
+            None,
+            "the claim held at another position"
+        );
+        assert_eq!(parent_position(named, position, None), None);
     }
 
     /// Registration is read from the pair, never assumed: with `C_q` not

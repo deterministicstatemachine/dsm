@@ -580,6 +580,33 @@ fn is_cell_copy_at(entry: &RouteEntry, cell: &RoutedCell, position: usize) -> bo
         && entry.fits(&cell.route)
 }
 
+/// The cell's position-0 copies in the leader's arrival log, in arrival
+/// order: the values the leader link is chosen from (§9 route chains, rule
+/// 3). A reader that must fetch what its recognizer needs before evaluating
+/// the cell fetches it for these, in this order, and for nothing any other
+/// seat holds. Nothing when the leader is unread.
+pub fn leader_copies<'e>(
+    cell: &'e RoutedCell,
+    ev: &'e CellEvidence,
+) -> impl Iterator<Item = RouteEntry> + 'e {
+    leader_log_copies(cell, ev).map(|(.., entry)| entry)
+}
+
+/// [`leader_copies`], each with its index in the leader's log.
+fn leader_log_copies<'e>(
+    cell: &'e RoutedCell,
+    ev: &'e CellEvidence,
+) -> impl Iterator<Item = (usize, RouteEntry)> + 'e {
+    ev.seats
+        .first()
+        .and_then(|leader| leader.values.as_ref())
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(n, bytes)| RouteEntry::decode(bytes).map(|entry| (n, entry)))
+        .filter(move |(.., entry)| is_cell_copy_at(entry, cell, 0))
+}
+
 /// The leader link of a cell: the first recognized value in the leader's
 /// arrival log, stored there as the cell's position-0 copy, with the record
 /// the leader returned for it (§9 route chains, rule 3).
@@ -603,13 +630,7 @@ where
 {
     let leader = ev.seats.first().ok_or(Missing::LeaderUnread)?;
     let log = leader.values.as_ref().ok_or(Missing::LeaderUnread)?;
-    for (n, bytes) in log.iter().enumerate() {
-        let Some(entry) = RouteEntry::decode(bytes) else {
-            continue;
-        };
-        if !is_cell_copy_at(&entry, cell, 0) {
-            continue;
-        }
+    for (n, entry) in leader_log_copies(cell, ev) {
         let Some((id, object)) = recognize(&entry.value) else {
             continue;
         };

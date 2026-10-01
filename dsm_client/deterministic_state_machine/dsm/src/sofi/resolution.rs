@@ -67,7 +67,8 @@ pub enum ParentPosition {
     /// `C_p` resolved and selected this root: `R_realize` when `p` realized,
     /// `R_void` when it voided.
     ConditionalSelected { selected_root: [u8; 32] },
-    /// `C_p` resolved Invalid, so no root was ever selected. Terminal.
+    /// The `C_p` that `P` names selects no root, ever: another claim holds
+    /// `p`, so it never registered there, or it resolved Invalid. Terminal.
     ConditionalNoRoot,
 }
 

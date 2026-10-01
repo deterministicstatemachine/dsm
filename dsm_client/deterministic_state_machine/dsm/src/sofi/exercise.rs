@@ -22,6 +22,7 @@ use crate::route_chain::{
     check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
     CellReading, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
+use super::conformance::closure_object_verifies;
 use super::derive;
 use super::publication::{
     recognize_policy_fulfillment, recognize_precommit, recognize_fulfillment, Signed,
@@ -142,8 +143,18 @@ pub fn recognize_exercise(bytes: &[u8]) -> Option<RecognizedExercise> {
     if fulfillment.body.policy_fulfillment_set() != ids.as_slice() {
         return None;
     }
-    if exercise.closure().len() != preimage.settlement().closure().refs().len() {
+    // The closure is bound to `F` through `E` too (§17.5): each object is the
+    // one its reference in `𝒞_E^pre` names, by the rule conformance item 8
+    // decides it by. Bytes carrying any other object are not this
+    // exercise, so they hold no key and can never stand where it should.
+    let refs = preimage.settlement().closure().refs();
+    if exercise.closure().len() != refs.len() {
         return None;
+    }
+    for (reference, bytes) in refs.iter().zip(exercise.closure()) {
+        if !closure_object_verifies(reference, bytes).is_some_and(|verifies| verifies) {
+            return None;
+        }
     }
     Some(RecognizedExercise {
         fulfillment,

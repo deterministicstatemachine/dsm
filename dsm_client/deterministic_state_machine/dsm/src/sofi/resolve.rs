@@ -21,6 +21,7 @@
 //! lineage walker (`economic::peer_lineage::PeerEvidenceFetcher`), which
 //! walks a foreign lineage the same way.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ccb::StorageSetMembers;
@@ -30,7 +31,7 @@ use crate::economic::register::root_completion;
 use crate::economic::state::EconomicLeafState;
 use crate::economic::tree::EconomicSmt;
 use crate::route_chain::{
-    CellEvidence, CellFact, ChainState, CompletionProof, Missing as CellMissing, RouteEntry,
+    leader_copies, CellEvidence, CellFact, ChainState, CompletionProof, Missing as CellMissing,
     RoutedCell,
 };
 
@@ -52,7 +53,8 @@ use super::lineage::{
 };
 use super::publication::{recognize_fulfillment, recognize_setup, Signed};
 use super::registration::{
-    fulfillment_completion, fulfillment_registered, PositionCells, Registration, RegistrationRead,
+    fulfillment_completion, fulfillment_registered, names_fulfillment_key, PositionCells,
+    Registration, RegistrationRead,
 };
 use super::resolution::{
     skip_without_evidence, walk, AttemptClass, AttemptWalk, KeyFacts, RecordedGeneration,
@@ -102,13 +104,9 @@ pub const SIBLING_DEPTH: usize = 2;
 /// Acquisition rounds before the evidence is `Exhausted`.
 pub const ACQUIRE_ROUNDS: usize = 3;
 
-/// Cells read per leg when acquiring what an attempt skipped past: the same
-/// bound the walk uses, for the same reason. Past it the earlier keys are
-/// unread, never assumed skipped.
-pub const PRIOR_ATTEMPT_BUDGET: usize = WALK_BUDGET;
-
-/// Fulfillment candidates one read of `K_ful(q)` may name before the pair is
-/// unavailable to this verifier: each names a `P` fetched by id (R8).
+/// Fulfillments in the leader's log at `K_ful(q)` whose `P` one read may
+/// fetch before the pair is unavailable to this verifier: each names a `P`
+/// fetched by id (R8).
 pub const NAMED_PRECOMMIT_BUDGET: usize = 64;
 
 /// A read that could not be made: a member did not answer, a local store
@@ -251,19 +249,6 @@ pub trait SofiReads {
         cell: &RoutedCell,
         proof: &CompletionProof,
     ) -> Result<(), ReadFailure>;
-}
-
-/// Every value the cell's copies carry, seat by seat in route order and in
-/// each seat's arrival order: the bytes a recognizer is shown. What does not
-/// decode as a route entry carries nothing.
-pub fn carried_values(evidence: &CellEvidence) -> impl Iterator<Item = Vec<u8>> + '_ {
-    evidence
-        .seats
-        .iter()
-        .filter_map(|seat| seat.values.as_ref())
-        .flatten()
-        .filter_map(|bytes| RouteEntry::decode(bytes))
-        .map(|entry| entry.value)
 }
 
 /// This device's own `R_econ` leaves, checked against the root they claim to
@@ -694,13 +679,17 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// Once registered, the completion proofs of both cells are kept (SoFi
     /// Amendment S10).
     ///
-    /// Recognizing a value at `K_ful(q)` needs the `P` it names: every
-    /// fulfillment envelope any seat holds at the key names one, and those
-    /// are read by id (R8), at most [`NAMED_PRECOMMIT_BUDGET`] of them. A `P`
-    /// the read could not decide leaves the cell undecided — the call fails,
-    /// and a later read can answer — so that no later value is read as the
-    /// first recognized one while an earlier one's `P` is merely not in
-    /// hand. The inner `Err` is what the reads do not yet show.
+    /// Recognizing a value at `K_ful(q)` needs the `P` it names, read by id
+    /// (R8). Only the leader's log decides which value holds the cell: the
+    /// first copy there that names the key (`route_chain::leader_copies`, the
+    /// candidates the leader link is chosen from). So the `P`s read are those
+    /// of the fulfillments in that log, in arrival order, until one names the
+    /// key, and at most [`NAMED_PRECOMMIT_BUDGET`] of them; nothing another
+    /// member holds is read. A `P` the read could not decide leaves the cell
+    /// undecided — the call fails, and a later read can answer — so that no
+    /// later value is read as the first recognized one while an earlier
+    /// one's `P` is merely not in hand. The inner `Err` is what the reads do
+    /// not yet show.
     pub fn read_registration(
         &self,
         genesis: &D32,
@@ -713,34 +702,42 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         let root_evidence = self.reads.cell(cells.root().routed())?;
 
         let mut precommits: BTreeMap<D32, TraderPrecommitBody> = BTreeMap::new();
-        let mut named: Vec<D32> = Vec::new();
-        for value in carried_values(&ful_evidence) {
-            if let Some((.., signed)) = recognize_fulfillment(&value) {
-                let id = *signed.body.precommit_id();
-                if !named.contains(&id) {
-                    named.push(id);
+        let mut fetched = 0;
+        for copy in leader_copies(cells.fulfillment(), &ful_evidence) {
+            let Some((.., signed)) = recognize_fulfillment(&copy.value) else {
+                continue;
+            };
+            if signed.body.position() != position {
+                continue;
+            }
+            let id = *signed.body.precommit_id();
+            if let Entry::Vacant(slot) = precommits.entry(id) {
+                if fetched == NAMED_PRECOMMIT_BUDGET {
+                    return Err(VerifierFailure::Read(format!(
+                        "fulfillment register: the leader's log at K_ful({position}) names more \
+                         precommits than the budget of {NAMED_PRECOMMIT_BUDGET}"
+                    )));
+                }
+                fetched += 1;
+                match self.reads.precommit(&id)? {
+                    Resolved::Kept(precommit) => {
+                        slot.insert(precommit.body);
+                    }
+                    // No `P`, so the value names no key: the leader link is
+                    // past it.
+                    Resolved::None => continue,
+                    Resolved::Unavailable => {
+                        return Err(VerifierFailure::Read(
+                            "fulfillment register: a precommit a candidate names could not be read"
+                                .to_string(),
+                        ))
+                    }
                 }
             }
-        }
-        if named.len() > NAMED_PRECOMMIT_BUDGET {
-            return Err(VerifierFailure::Read(format!(
-                "fulfillment register: {} precommits are named at K_ful({position}), past the \
-                 budget of {NAMED_PRECOMMIT_BUDGET}",
-                named.len()
-            )));
-        }
-        for id in named {
-            match self.reads.precommit(&id)? {
-                Resolved::Kept(precommit) => {
-                    precommits.insert(id, precommit.body);
-                }
-                Resolved::None => {}
-                Resolved::Unavailable => {
-                    return Err(VerifierFailure::Read(
-                        "fulfillment register: a precommit a candidate names could not be read"
-                            .to_string(),
-                    ))
-                }
+            if names_fulfillment_key(&copy.value, genesis, device_id, position, &precommits)
+                .is_some()
+            {
+                break;
             }
         }
 
@@ -776,24 +773,23 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(Ok(registration))
     }
 
-    /// The cells an attempt above zero skips past, read from the committed
-    /// set: for every leg the fulfillment names at attempt `a`, the storage
-    /// fact at `K^(0) … K^(a-1)` of that leg's vault at its parent root.
+    /// The cell an attempt above zero skips past, read from the committed
+    /// set: for every leg the fulfillment names at attempt `a > 0`, the
+    /// storage fact at `K^(a-1)` of that leg's vault at its parent root.
     ///
     /// ONE PATH, SHARED (owner ruling, §44.4). The producer's install (R9)
-    /// and the verifier's resolution (R12) read the same cells the same way,
+    /// and the verifier's resolution (R12) read the same cell the same way,
     /// because they answer the same question: conformance item 5 requires
-    /// the key before this one to have a permanent storage resolution. A key
-    /// whose reads do not decide it yet, or past `budget`, is absent from the
-    /// map, and conformance names it missing. An attempt of zero has no
-    /// earlier key and contributes no entry.
+    /// the key before this one to have a permanent storage resolution
+    /// (§20.2), and that key alone, however many keys come before it. A key
+    /// whose reads do not decide it yet is absent from the map, and
+    /// conformance names it missing. An attempt of zero has no earlier key
+    /// and contributes no entry.
     pub fn acquire_prior_attempts(
         &self,
         precommit: &TraderPrecommitBody,
         fulfillment: &TraderFulfillmentBody,
-        budget: usize,
     ) -> Result<BTreeMap<(D32, u64), CellFact>, VerifierFailure> {
-        let reach = u64::try_from(budget).unwrap_or(u64::MAX);
         let mut cells = BTreeMap::new();
         for entry in fulfillment.attempts() {
             // F naming a leg P does not is conformance item 4's refusal;
@@ -805,16 +801,15 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             else {
                 continue;
             };
-            for earlier in 0..entry.attempt.min(reach) {
-                match self.read_attempt_cell(&leg.vault_id, &leg.parent_root, earlier)? {
-                    Ok(read) => {
-                        cells.insert((entry.vault_id, earlier), read.fact());
-                    }
-                    Err(undecided) => {
-                        log::info!(
-                            "[sofi verifier] K^({earlier}) is not decided yet: {undecided:?}"
-                        )
-                    }
+            let Some(earlier) = entry.attempt.checked_sub(1) else {
+                continue;
+            };
+            match self.read_attempt_cell(&leg.vault_id, &leg.parent_root, earlier)? {
+                Ok(read) => {
+                    cells.insert((entry.vault_id, earlier), read.fact());
+                }
+                Err(undecided) => {
+                    log::info!("[sofi verifier] K^({earlier}) is not decided yet: {undecided:?}")
                 }
             }
         }
@@ -874,11 +869,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             preimage: objects.preimage.clone(),
             closure,
             setups,
-            prior_attempts: self.acquire_prior_attempts(
-                objects.precommit,
-                objects.fulfillment,
-                PRIOR_ATTEMPT_BUDGET,
-            )?,
+            prior_attempts: self.acquire_prior_attempts(objects.precommit, objects.fulfillment)?,
             parent_fulfillment,
         })
     }
@@ -1362,7 +1353,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         // parent is not established yet, which is not a fact about this
         // vault; the second runs once those chains have been walked.
         for pass in 0..2 {
-            let walked = self.walk_chain(
+            let mut walked = self.walk_chain(
                 &*chains,
                 *vault_id,
                 *current,
@@ -1371,6 +1362,11 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 CHAIN_DEPTH,
                 BTreeMap::new(),
             )?;
+            // The budget chunks the walk and never ends it (§23.6): however
+            // many keys junk holds, the walk resumes past them.
+            while let WalkOutcome::Continue { .. } = walked.outcome {
+                walked = self.continue_walk(&*chains, walked, WALK_BUDGET)?;
+            }
             match walked.outcome {
                 WalkOutcome::Consumed { .. } => {
                     let Some(exercise) = walked.consumed else {
@@ -1759,7 +1755,10 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                             }
                         };
                     // `AttemptLive`: every earlier key of this leg's chain is
-                    // skipped, established by walking them.
+                    // skipped, established by walking them. The keys are read
+                    // in chunks of the walk's budget, which never ends the
+                    // walk (§23.6), and then walked once from the first key
+                    // over everything read.
                     let walk = if attempt == 0 {
                         None
                     } else {
@@ -1770,21 +1769,47 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         let Some(below) = depth.checked_sub(1) else {
                             return Ok(Err(not_live));
                         };
-                        let earlier =
-                            usize::try_from(attempt).map_or(WALK_BUDGET, |a| a.min(WALK_BUDGET));
-                        let chain = self.walk_chain(
+                        let chunk_from = |cursor: u64| {
+                            usize::try_from(attempt - cursor)
+                                .map_or(WALK_BUDGET, |keys| keys.min(WALK_BUDGET))
+                        };
+                        let mut chunk = self.walk_chain(
                             chains,
                             leg.vault_id,
                             leg.parent_root,
                             0,
-                            earlier,
+                            chunk_from(0),
                             below,
                             BTreeMap::new(),
                         )?;
-                        if let Some(why) = chain.not_established {
-                            return Ok(Err(why));
+                        loop {
+                            if let Some(why) = chunk.not_established {
+                                return Ok(Err(why));
+                            }
+                            match chunk.outcome {
+                                WalkOutcome::Continue { cursor } if cursor < attempt => {
+                                    chunk = self.walk_chain(
+                                        chains,
+                                        leg.vault_id,
+                                        leg.parent_root,
+                                        cursor,
+                                        chunk_from(cursor),
+                                        below,
+                                        chunk.known,
+                                    )?;
+                                }
+                                WalkOutcome::Continue { .. }
+                                | WalkOutcome::Consumed { .. }
+                                | WalkOutcome::Unresolved { .. }
+                                | WalkOutcome::CounterExhausted { .. } => break,
+                            }
                         }
-                        Some(chain.walk)
+                        let keys_below = usize::try_from(attempt).map_err(|e| {
+                            VerifierFailure::Refused(format!("attempt {attempt}: {e}"))
+                        })?;
+                        Some(walk(&leg.vault_id, &leg.parent_root, 0, keys_below, |a| {
+                            chunk.known.get(&a).and_then(KeyKnown::key_facts)
+                        }))
                     };
                     (cell, walk)
                 }
