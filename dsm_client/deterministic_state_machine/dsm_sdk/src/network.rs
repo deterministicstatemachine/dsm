@@ -93,7 +93,7 @@ pub struct EnvConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodeConfig {
     pub name: String,
-    pub endpoint: String, // e.g., "http://10.0.0.5:8080"
+    pub endpoint: String, // e.g., "https://10.0.0.5:8080"; only https:// is accepted
     /// The member's durable register incarnation, Base32-Crockford over 32
     /// bytes, as that node reports it.
     ///
@@ -178,6 +178,8 @@ pub(crate) fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmErro
 }
 
 /// Validate node endpoints and apply platform-specific hardening.
+/// - Every endpoint is `https://`, on every platform: a member is known by the
+///   certificate it presents, and plain HTTP presents none.
 /// - On Android, disallow localhost/127.0.0.1 unless the TOML sets `allow_localhost = true`,
 ///   because each device would talk to its own loopback and never see each other's messages.
 fn validate_and_normalize_nodes(
@@ -189,6 +191,10 @@ fn validate_and_normalize_nodes(
             "STRICT: env config has zero nodes; at least one node is required.",
             Option::<std::io::Error>::None,
         ));
+    }
+
+    for node in &nodes {
+        crate::sdk::storage_node_sdk::require_https(&node.endpoint)?;
     }
 
     // Fast path: if not android, accept as-is.
@@ -319,12 +325,12 @@ mod tests {
         r#"
 [[nodes]]
 name = "node-a"
-endpoint = "http://10.0.0.1:8080"
+endpoint = "https://10.0.0.1:8080"
 register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 
 [[nodes]]
 name = "node-b"
-endpoint = "http://10.0.0.2:8081"
+endpoint = "https://10.0.0.2:8081"
 register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#
         .to_string()
@@ -335,7 +341,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         let cfg = parse_env_config_toml(&sample_toml()).unwrap();
         assert_eq!(cfg.nodes.len(), 2);
         assert_eq!(cfg.nodes[0].name, "node-a");
-        assert_eq!(cfg.nodes[1].endpoint, "http://10.0.0.2:8081");
+        assert_eq!(cfg.nodes[1].endpoint, "https://10.0.0.2:8081");
     }
 
     #[test]
@@ -360,7 +366,7 @@ dbtc_dust_floor_sats = 1000
 
 [[nodes]]
 name = "n1"
-endpoint = "http://10.0.0.5:9090"
+endpoint = "https://10.0.0.5:9090"
 register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#;
         let cfg = parse_env_config_toml(toml).unwrap();
@@ -376,27 +382,53 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
             register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
             endpoint: endpoint.into(),
         };
-        let reg = NodeRegistry::new(vec![node("a", "http://a"), node("b", "http://b")]);
-        assert_eq!(reg.list_endpoints(), vec!["http://a", "http://b"]);
+        let reg = NodeRegistry::new(vec![node("a", "https://a"), node("b", "https://b")]);
+        assert_eq!(reg.list_endpoints(), vec!["https://a", "https://b"]);
+    }
+
+    fn node_at(name: &str, endpoint: &str) -> NodeConfig {
+        NodeConfig {
+            name: name.into(),
+            register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
+            endpoint: endpoint.into(),
+        }
     }
 
     #[test]
-    fn validate_and_normalize_nodes_non_android_accepts_all() {
+    fn validate_and_normalize_nodes_non_android_accepts_every_https_endpoint() {
         let nodes = vec![
-            NodeConfig {
-                name: "local".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://127.0.0.1:8080".into(),
-            },
-            NodeConfig {
-                name: "remote".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://10.0.0.5:9090".into(),
-            },
+            node_at("local", "https://127.0.0.1:8080"),
+            node_at("remote", "HTTPS://10.0.0.5:9090"),
         ];
         let result = validate_and_normalize_nodes(nodes.clone(), false);
-        assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 2);
+    }
+
+    /// A member is known by its certificate, so an env config naming an
+    /// endpoint that is not `https://` is refused, and the refusal names the
+    /// endpoint. One plain endpoint among https ones refuses the whole config.
+    #[test]
+    fn an_endpoint_that_is_not_https_is_refused() {
+        let incarnation = crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]);
+        let node = |name: &str, endpoint: &str| {
+            format!(
+                "[[nodes]]\nname = \"{name}\"\nendpoint = \"{endpoint}\"\n\
+                 register_incarnation = \"{incarnation}\"\n"
+            )
+        };
+        for endpoint in ["http://10.0.0.5:9090", "10.0.0.5:9090", "ftp://10.0.0.5"] {
+            let refused = parse_env_config_toml(&node("remote", endpoint)).unwrap_err();
+            assert!(
+                refused.to_string().contains(endpoint),
+                "the refusal names {endpoint}: {refused}"
+            );
+        }
+        let mixed = node("a", "https://10.0.0.1:8080") + &node("b", "http://10.0.0.2:8080");
+        let refused = parse_env_config_toml(&mixed).unwrap_err();
+        assert!(
+            refused.to_string().contains("http://10.0.0.2:8080"),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -410,7 +442,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
             nodes: vec![NodeConfig {
                 name: "n1".into(),
                 register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://10.0.0.1:8080".into(),
+                endpoint: "https://10.0.0.1:8080".into(),
             }],
             allow_localhost: false,
             bitcoin_network: Some("signet".into()),

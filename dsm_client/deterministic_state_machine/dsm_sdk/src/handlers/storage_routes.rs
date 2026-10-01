@@ -2926,11 +2926,8 @@ mod tests {
         let mut device = crate::test_support::one_device::Device::start(0x5A).await;
         let members = device.nodes.members();
         let first = members[0].0.clone();
-        let closer = crate::sdk::storage_node_sdk::MemberClient::new(
-            &first,
-            &members[0].1,
-            crate::sdk::storage_node_sdk::build_ca_aware_client().expect("a client"),
-        );
+        let closer = crate::sdk::storage_node_sdk::MemberClient::new(&first, &members[0].1)
+            .expect("a client for the first member");
         closer
             .put_cells(&[(
                 b"DSM/test/storage-status".to_vec(),

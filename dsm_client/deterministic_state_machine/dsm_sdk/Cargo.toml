@@ -159,6 +159,7 @@ serial_test = "3.5.0"
 # on this crate; a dev-dependency back to it is a cycle Cargo allows.
 dsm_storage_node = { path = "../../../dsm_storage_node" }
 axum = "0.8" # serves the node's app in tests (the node's own version)
+axum-server = { version = "0.8", features = ["tls-rustls"] } # serves it over TLS, as the node binary does
 # SELF dev-dependency, enabling `test-utils` for THIS crate's own integration
 # tests (`tests/*.rs`) only. Integration tests are external consumers, so a
 # `cfg(test)` gate is invisible to them and the feature would otherwise never be

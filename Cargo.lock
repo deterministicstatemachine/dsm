@@ -1200,6 +1200,7 @@ dependencies = [
  "arrayref",
  "async-trait",
  "axum",
+ "axum-server",
  "base32",
  "bincode",
  "bip39",

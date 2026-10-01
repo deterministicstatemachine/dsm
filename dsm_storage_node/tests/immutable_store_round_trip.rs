@@ -348,7 +348,10 @@ async fn puts_made_at_once_are_each_taken() {
     .await;
     let first = answers[0].1.clone();
     for (status, addr) in &answers {
-        assert!(status.is_success(), "an identical put was refused: {status}");
+        assert!(
+            status.is_success(),
+            "an identical put was refused: {status}"
+        );
         assert_eq!(addr, &first, "every identical put names the one address");
     }
 }

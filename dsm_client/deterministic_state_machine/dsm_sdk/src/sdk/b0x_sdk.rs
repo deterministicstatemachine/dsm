@@ -160,7 +160,7 @@ pub(crate) fn kept_seal(message_id_b32: &str) -> Result<Vec<u8>, DsmError> {
 /// This device's Kyber secret, re-derived from `Smaster` under `DSM/kyber\0` —
 /// the key pair whose public half its directory entry publishes
 /// (`kyber_identity::local_kyber_public_key`). Never kept.
-fn local_kyber_secret() -> Result<Vec<u8>, DsmError> {
+pub(crate) fn local_kyber_secret() -> Result<Vec<u8>, DsmError> {
     let smaster = crate::init::current_smaster()?;
     let (.., secret) =
         dsm::crypto::kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?;
@@ -171,7 +171,11 @@ fn local_kyber_secret() -> Result<Vec<u8>, DsmError> {
 /// carries, once this device's Kyber secret decapsulates the encapsulation and
 /// the seal opens under the outer message id. The inner envelope carries the
 /// same message id; anything else did not come sealed for this device.
+/// Every error here is about the envelope, never about this device: what
+/// does not open with the device's Kyber secret (`kyber_secret`, from
+/// [`local_kyber_secret`]) never will.
 pub(crate) fn open_sealed(
+    kyber_secret: &[u8],
     env: &dsm::types::proto::Envelope,
 ) -> Result<dsm::types::proto::Envelope, DsmError> {
     let Some(dsm::types::proto::envelope::Payload::Sealed(sealed)) = &env.payload else {
@@ -183,7 +187,7 @@ pub(crate) fn open_sealed(
                 DsmError::invalid_operation("the sealed envelope's message id is malformed")
             })?;
     let shared_secret =
-        dsm::crypto::kyber::kyber_decapsulate(&local_kyber_secret()?, &sealed.kem_ciphertext)?;
+        dsm::crypto::kyber::kyber_decapsulate(kyber_secret, &sealed.kem_ciphertext)?;
     let inner_bytes =
         dsm::crypto::spool_seal::open(&shared_secret, &message_id, &sealed.ciphertext)
             .map_err(|e| DsmError::invalid_operation(format!("spool seal: {e}")))?;
@@ -352,7 +356,9 @@ pub struct B0xSDK {
     pub(crate) device_id: String,
     core_sdk: Arc<CoreSDK>,
     pub(crate) storage_node_endpoints: Vec<String>,
-    http_client: reqwest::Client,
+    /// One client per endpoint, each bound to the member the canonical set
+    /// names there: it accepts only that member's certificate.
+    member_clients: HashMap<String, reqwest::Client>,
     circuit_breaker: CircuitBreaker,
     salt_genesis: [u8; 32],
     salt_device: [u8; 32],
@@ -529,6 +535,17 @@ impl B0xSDK {
         self.quorum_k
     }
 
+    /// The client for the member at `endpoint`, which accepts only that
+    /// member's certificate.
+    fn client_for(&self, endpoint: &str) -> Result<&reqwest::Client, DsmError> {
+        self.member_clients.get(endpoint).ok_or_else(|| {
+            DsmError::network(
+                format!("{endpoint} is not a member endpoint of this inbox"),
+                None::<std::io::Error>,
+            )
+        })
+    }
+
     pub fn new(
         device_id_b32: String,
         core_sdk: Arc<CoreSDK>,
@@ -559,9 +576,31 @@ impl B0xSDK {
             ));
         }
 
-        // Clockless: do not set wall-clock request timeouts here.
-        // Cancellation/limits are owned by the caller task lifetime.
-        let http_client = crate::sdk::storage_node_sdk::build_ca_aware_client()?;
+        // Each endpoint is a member of the canonical set, reached with a
+        // client that accepts only that member's certificate. An endpoint the
+        // set does not name has no member to verify, and is refused.
+        let canonical =
+            crate::sdk::storage_set::canonical_set(dsm::economic::register::BETA_NETWORK_ID)?;
+        let mut member_clients = HashMap::with_capacity(storage_endpoints.len());
+        for endpoint in &storage_endpoints {
+            let member = canonical
+                .members()
+                .iter()
+                .find(|m| m.endpoint.trim_end_matches('/') == endpoint.trim_end_matches('/'))
+                .ok_or_else(|| {
+                    DsmError::network(
+                        format!(
+                            "B0xSDK::new: {endpoint} is not an endpoint of the canonical \
+                             storage set"
+                        ),
+                        None::<std::io::Error>,
+                    )
+                })?;
+            member_clients.insert(
+                endpoint.clone(),
+                crate::sdk::storage_node_sdk::member_client(&member.member_id, endpoint)?,
+            );
+        }
 
         // The delivery fan-out stops at K acknowledging members. K is the
         // register quorum of the network this device is built for — resolved
@@ -587,7 +626,7 @@ impl B0xSDK {
             device_id: device_id_b32,
             core_sdk,
             storage_node_endpoints: storage_endpoints,
-            http_client,
+            member_clients,
             circuit_breaker: CircuitBreaker::new(),
             salt_genesis: Self::derive_salt(b"DSM/b0x-salt-G", &decoded),
             salt_device: Self::derive_salt(b"DSM/b0x-salt-D", &decoded),
@@ -1891,7 +1930,7 @@ impl B0xSDK {
         let mut delay = std::time::Duration::from_millis(retry_config.base_delay_ms);
         loop {
             let resp = self
-                .http_client
+                .client_for(endpoint)?
                 .post(&url)
                 .header("Content-Type", "application/protobuf")
                 .header("x-dsm-message-id", message_id_b32)
@@ -2061,6 +2100,18 @@ impl B0xSDK {
     /// The next call continues from the stored position.
     const MAX_RETRIEVE_PAGES_PER_NODE: usize = 16;
 
+    /// The position after `seq` on a node's spool, when `seq` is one the node
+    /// could hold. A spool position is the node's database sequence number,
+    /// so it and the one after it are at most `i64::MAX`; a number past that
+    /// is not an answer from a spool, and nothing is advanced by it.
+    fn position_after(seq: u64) -> Option<u64> {
+        seq.checked_add(1)
+            .filter(|next| *next <= Self::MAX_SPOOL_POSITION)
+    }
+
+    /// The largest position a node's spool can name.
+    const MAX_SPOOL_POSITION: u64 = i64::MAX as u64;
+
     /// Read the spool at `b0x_address` from every member that answers. `Err`
     /// when no member answered: nothing was read, which is not an empty
     /// inbox. Otherwise the entries found and what the read covers
@@ -2097,6 +2148,9 @@ impl B0xSDK {
             ));
         }
 
+        // This device's key, once for the whole read: without it nothing can
+        // be opened, which is this device's state and not the envelopes'.
+        let kyber_secret = local_kyber_secret()?;
         let mut map: HashMap<String, dsm::types::proto::Envelope> = HashMap::new();
         // Members whose spool was read to an answer. None is not an empty
         // inbox: nothing was read (storage spec §4).
@@ -2110,12 +2164,15 @@ impl B0xSDK {
             let mut cursor = position;
             let mut consumed_run = true;
             let mut failed = false;
+            // Why this node's answer is not a spool's, when it is not:
+            // nothing past it is read or advanced by it.
+            let mut malformed: Option<String> = None;
             let mut pages = 0;
-            while pages < Self::MAX_RETRIEVE_PAGES_PER_NODE {
+            'pages: while pages < Self::MAX_RETRIEVE_PAGES_PER_NODE {
                 pages += 1;
                 let url = format!("{}/api/v2/b0x/retrieve/{}", epc, cursor);
                 let resp = self
-                    .http_client
+                    .client_for(&epc)?
                     .get(&url)
                     .header("Accept", "application/protobuf")
                     .header("x-dsm-b0x-address", b0x_address)
@@ -2155,7 +2212,19 @@ impl B0xSDK {
                 if batch.envelopes.is_empty() || batch.next_seq <= cursor {
                     break;
                 }
+                if batch.next_seq > Self::MAX_SPOOL_POSITION {
+                    malformed = Some(format!(
+                        "next position {} is not a spool position",
+                        batch.next_seq
+                    ));
+                    break;
+                }
                 for sequenced in batch.envelopes {
+                    let Some(after) = Self::position_after(sequenced.seq_num) else {
+                        malformed =
+                            Some(format!("seq {} is not a spool position", sequenced.seq_num));
+                        break 'pages;
+                    };
                     // The node never opens what it holds (storage spec §8);
                     // this device decodes. Bytes that are not a canonical
                     // envelope never will be, so nothing waits on them.
@@ -2167,7 +2236,7 @@ impl B0xSDK {
                                 epc, sequenced.seq_num, e
                             );
                             if consumed_run {
-                                position = position.max(sequenced.seq_num + 1);
+                                position = position.max(after);
                             }
                             continue;
                         }
@@ -2175,28 +2244,37 @@ impl B0xSDK {
                     let id = text_id::encode_base32_crockford(&env.message_id);
                     if b0x_consumed::is_consumed(b0x_address, &id).map_err(local)? {
                         if consumed_run {
-                            position = position.max(sequenced.seq_num + 1);
+                            position = position.max(after);
                         }
-                    } else {
-                        consumed_run = false;
-                        // DSM Amendment A7: open the seal before anything reads
-                        // the envelope. What does not open was not sealed to
-                        // this device and is skipped. What opens says nothing
-                        // about who sealed it: anyone can seal to this device,
-                        // and the sender is whoever the ingestion boundary
-                        // verifies.
-                        match open_sealed(&env) {
-                            Ok(inner) => {
-                                map.entry(envelope_merge_key(&inner)).or_insert(inner);
+                        continue;
+                    }
+                    // DSM Amendment A7: open the seal before anything reads
+                    // the envelope. What opens says nothing about who sealed
+                    // it: anyone can seal to this device, and the sender is
+                    // whoever the ingestion boundary verifies. What does not
+                    // open was not sealed to this device and never will open
+                    // here, so it is passed over like bytes that are not an
+                    // envelope: it holds up nothing behind it.
+                    match open_sealed(&kyber_secret, &env) {
+                        Ok(inner) => {
+                            consumed_run = false;
+                            map.entry(envelope_merge_key(&inner)).or_insert(inner);
+                        }
+                        Err(e) => {
+                            warn!("b0x envelope {} does not open: {}", id, e);
+                            if consumed_run {
+                                position = position.max(after);
                             }
-                            Err(e) => warn!("b0x envelope {} does not open: {}", id, e),
                         }
                     }
                 }
                 cursor = batch.next_seq;
             }
             b0x_consumed::advance_read_position(b0x_address, &epc, position).map_err(local)?;
-            if failed {
+            if let Some(why) = &malformed {
+                warn!("b0x retrieve from {}: {}", epc, why);
+            }
+            if failed || malformed.is_some() {
                 self.circuit_breaker.mark_node_failed(&epc).await;
             } else {
                 answered += 1;
@@ -2713,7 +2791,8 @@ mod tests {
         let sealed = kept_seal(&one.message_id).expect("A kept the sealed send");
         p.b.enter();
         let outer = dsm::envelope::from_canonical_bytes(&sealed).expect("the sealed envelope");
-        let inner = open_sealed(&outer).expect("B opens it");
+        let inner =
+            open_sealed(&local_kyber_secret().expect("B's key"), &outer).expect("B opens it");
         let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &inner.payload else {
             panic!("A's transfer envelope carries a UniversalTx");
         };
@@ -2781,6 +2860,100 @@ mod tests {
             "{:?}",
             entry.kind
         );
+    }
+
+    /// A spool position is a node's database sequence number. The position
+    /// after one a node could hold is the next number; past the largest a
+    /// node can hold there is none, rather than an overflow: the position
+    /// after `u64::MAX` panicked the poller task once, and a node chooses
+    /// the numbers it answers with.
+    #[test]
+    fn a_position_past_what_a_spool_can_hold_is_none() {
+        assert_eq!(B0xSDK::position_after(0), Some(1));
+        assert_eq!(B0xSDK::position_after(41), Some(42));
+        assert_eq!(
+            B0xSDK::position_after(B0xSDK::MAX_SPOOL_POSITION - 1),
+            Some(B0xSDK::MAX_SPOOL_POSITION)
+        );
+        assert_eq!(B0xSDK::position_after(B0xSDK::MAX_SPOOL_POSITION), None);
+        assert_eq!(B0xSDK::position_after(u64::MAX), None);
+    }
+
+    /// A route's read position moves past what will never open for this
+    /// device. An envelope sealed to another key, first on a route, is passed
+    /// over like bytes that are not an envelope, so it holds up nothing behind
+    /// it: the read used to stop there for good, and enough of them on a route
+    /// put everything after them out of reach. On the storage nodes' own app,
+    /// on Postgres, read as a created device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn what_never_opens_for_this_device_holds_up_nothing_behind_it() {
+        use crate::storage::client_db::b0x_consumed;
+        use crate::util::text_id::encode_base32_crockford;
+        use dsm::types::proto::{envelope::Payload, Envelope, Headers, SealedEnvelopeV1};
+
+        let device = crate::test_support::one_device::Device::start(0x6B).await;
+        let mut sdk = B0xSDK::new(
+            encode_base32_crockford(&device.identity.device_id),
+            device.router.core_sdk.clone(),
+            device.fleet.endpoints(),
+        )
+        .expect("the device's spool client");
+        let route = encode_base32_crockford(&rand::random::<[u8; 32]>());
+        for endpoint in device.fleet.endpoints() {
+            assert_eq!(
+                b0x_consumed::read_position(&route, &endpoint).expect("the position"),
+                0,
+                "a new route is read from its start"
+            );
+        }
+
+        // A well-formed sealed envelope, sealed to a key this device does not
+        // hold.
+        let other = dsm::crypto::kyber::generate_kyber_keypair().expect("another device's key");
+        let message_id: [u8; 16] = rand::random();
+        let inner = Envelope {
+            version: 3,
+            headers: Some(Headers {
+                device_id: rand::random::<[u8; 32]>().to_vec(),
+                genesis_hash: rand::random::<[u8; 32]>().to_vec(),
+            }),
+            message_id: message_id.to_vec(),
+            payload: None,
+        }
+        .encode_to_vec();
+        let (shared_secret, kem_ciphertext) =
+            dsm::crypto::kyber::kyber_encapsulate(&other.public_key).expect("encapsulate");
+        let ciphertext =
+            dsm::crypto::spool_seal::seal(&shared_secret, &message_id, &inner).expect("seal");
+        let sealed = Envelope {
+            version: 3,
+            headers: None,
+            message_id: message_id.to_vec(),
+            payload: Some(Payload::Sealed(SealedEnvelopeV1 {
+                kem_ciphertext,
+                ciphertext,
+            })),
+        }
+        .encode_to_vec();
+        let id = encode_base32_crockford(&message_id);
+        for endpoint in device.fleet.endpoints() {
+            sdk.submit_with_retry(&endpoint, &sealed, &route, &id, &B0xRetryConfig::default())
+                .await
+                .expect("the node spools it");
+        }
+
+        let read = sdk
+            .retrieve_from_b0x_v2(&route)
+            .await
+            .expect("the route is read");
+        assert_eq!(read.entries.len(), 0, "nothing opened for this device");
+        for endpoint in device.fleet.endpoints() {
+            assert!(
+                b0x_consumed::read_position(&route, &endpoint).expect("the position") > 0,
+                "the read at {endpoint} stopped at an envelope that will never open here"
+            );
+        }
     }
 
     // ==================================================================
