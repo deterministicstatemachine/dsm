@@ -1401,6 +1401,16 @@ impl AppRouterImpl {
                         }
                     };
 
+                // ── IN HAND, BEFORE ANY READ (MR-DSM-0029, G13) ──────────────
+                // The token's committed policy is state this device holds, so a
+                // transfer the policy does not permit is refused here, before
+                // prevalidation reads the sender's register. The apply checks it
+                // again, under the state-machine lock.
+                if let Err(e) = self.core_sdk.enforce_policy_for_operation(&v.signed_op) {
+                    failures.push(format!("split transfer {name}: {e}"));
+                    continue;
+                }
+
                 // ── PREVALIDATION (3.5b PR4, corrections 3+5+8): every foreign
                 // dependency that CAN be established before local acceptance IS
                 // established here — the sender's validated debit, the binding
