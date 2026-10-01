@@ -497,7 +497,7 @@ impl Items {
 
 /// Whether `bytes` are the object a closure reference names, under that
 /// variant's own rule. `None` when no bytes could ever satisfy the reference.
-fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bool> {
+pub(crate) fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bool> {
     Some(match reference {
         ValidationRef::ContentAddr { object_class, addr } => {
             derive::closure_content_address(*object_class, bytes)? == *addr
