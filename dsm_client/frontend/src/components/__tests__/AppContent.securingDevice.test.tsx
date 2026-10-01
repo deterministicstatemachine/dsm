@@ -22,6 +22,8 @@ describe('AppContent securing device state', () => {
         currentScreen="home"
         navigate={() => {}}
         handleGenerateGenesis={() => {}}
+        cancelPhraseBackup={() => {}}
+        answerPhraseCheck={() => Promise.resolve()}
         unlockToWallet={() => {}}
         menuItems={[]}
         currentMenuIndex={0}

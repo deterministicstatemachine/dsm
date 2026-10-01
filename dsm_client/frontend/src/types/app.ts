@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-export type AppState = 'loading' | 'runtime_loading' | 'needs_genesis' | 'securing_device' | 'publication_pending' | 'wallet_ready' | 'locked' | 'error';
+/**
+ * `backup_phrase`: a new wallet's recovery phrase is on the screen for the user
+ * to write down and check; the wallet is created from it after the check.
+ */
+export type AppState = 'loading' | 'runtime_loading' | 'needs_genesis' | 'backup_phrase' | 'securing_device' | 'publication_pending' | 'wallet_ready' | 'locked' | 'error';
 
 /**
  * Every screen the app has, once. `ScreenType` is derived from this list and
