@@ -6,6 +6,10 @@
 import * as pb from '../../proto/dsm_app_pb';
 import * as dsm from '../index';
 import * as bridge from '../WebViewBridge';
+import { encodeBase32Crockford } from '../../utils/textId';
+
+/** The contact the send screen chose: Alice, by her device id. */
+const ALICE = new Uint8Array(32).fill(0xa1);
 
 function framed(payload: pb.Envelope['payload']): Uint8Array {
   const env = new pb.Envelope({ version: 3, payload }).toBinary();
@@ -26,15 +30,15 @@ describe('sendOnlineTransferSmart', () => {
       }),
     );
 
-    const res = await dsm.sendOnlineTransferSmart('alice', '10', 'lunch', 'RIGB');
+    const res = await dsm.sendOnlineTransferSmart(encodeBase32Crockford(ALICE), '10', 'lunch', 'RIGB');
 
     expect(res).toEqual({ success: true, message: 'sent', newBalance: 90n });
     expect(invoke).toHaveBeenCalledTimes(1);
     const [method, args] = invoke.mock.calls[0];
     expect(method).toBe('wallet.sendSmart');
     const req = pb.OnlineTransferSmartRequest.fromBinary(pb.ArgPack.fromBinary(args as Uint8Array).body);
-    expect({ recipient: req.recipient, amount: req.amount, tokenId: req.tokenId, memo: req.memo }).toEqual({
-      recipient: 'alice',
+    expect({ recipientDeviceId: req.recipientDeviceId, amount: req.amount, tokenId: req.tokenId, memo: req.memo }).toEqual({
+      recipientDeviceId: ALICE,
       amount: '10',
       tokenId: 'RIGB',
       memo: 'lunch',
@@ -46,7 +50,7 @@ describe('sendOnlineTransferSmart', () => {
       framed({ case: 'error', value: new pb.Error({ code: 1, message: 'wallet.sendSmart: the request names no token' }) }),
     );
 
-    const res = await dsm.sendOnlineTransferSmart('alice', '10', undefined, '');
+    const res = await dsm.sendOnlineTransferSmart(encodeBase32Crockford(ALICE), '10', undefined, '');
 
     const req = pb.OnlineTransferSmartRequest.fromBinary(
       pb.ArgPack.fromBinary(invoke.mock.calls[0][1] as Uint8Array).body,

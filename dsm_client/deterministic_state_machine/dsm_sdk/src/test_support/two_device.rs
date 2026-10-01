@@ -234,8 +234,9 @@ impl TestDevice {
 
     /// As [`send`](Self::send), for any asset this device holds, by ticker —
     /// a created token moves through exactly the route ERA does. The request is
-    /// the one the frontend builds (`dsm/transactions.ts`): the recipient in
-    /// Base32, the amount as the display string in the token's own decimals.
+    /// the one the frontend builds (`dsm/transactions.ts`): the recipient by
+    /// its device id, the amount as the display string in the token's own
+    /// decimals.
     /// The SDK owns every protocol field.
     pub async fn send_token(
         &self,
@@ -250,7 +251,7 @@ impl TestDevice {
         self.invoke(
             "wallet.sendSmart",
             &generated::OnlineTransferSmartRequest {
-                recipient: crate::util::text_id::encode_base32_crockford(&to.device_id),
+                recipient_device_id: to.device_id.to_vec(),
                 amount: crate::handlers::wallet_routes::format_base_units_for_display(
                     amount, decimals,
                 ),

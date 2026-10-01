@@ -302,7 +302,7 @@ async fn sequential_admissions_stay_monotonic_across_operation_kinds() {
 async fn a_transfer_naming_no_token_or_a_misspelled_one_is_refused_and_nothing_moves() {
     let p = Pair::boot(100, 0).await;
     let request = |token_id: &str| crate::generated::OnlineTransferSmartRequest {
-        recipient: crate::util::text_id::encode_base32_crockford(&p.b.device_id),
+        recipient_device_id: p.b.device_id.to_vec(),
         amount: "10".to_string(),
         token_id: token_id.to_string(),
         memo: String::new(),
@@ -414,6 +414,85 @@ async fn a_burn_disabled_token_refuses_its_burn() {
         head.pending_economic_admission().is_none(),
         "nothing left pending"
     );
+}
+
+/// Pre-audit item 6 (§6.63): a send pays the contact the user chose, never
+/// whichever contact its alias finds. A holds two contacts named "B": B,
+/// added first, and C, added under the same alias. The user pays each in
+/// turn, 10 ERA to C and then 20 ERA to B, and the wallet sends the request
+/// the frontend builds for each choice ([`chosen_contact_request`]). Each is
+/// paid what was sent to it. Resolving by alias, in whatever order, sends
+/// both payments to the same contact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_send_pays_the_contact_chosen_not_the_first_of_its_alias() {
+    let p = Pair::boot(100, 0).await;
+    let mut c = crate::test_support::two_device::TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.add_contact(&p.a).await;
+    let same_alias =
+        p.a.invoke(
+            "contacts.addManual",
+            &crate::generated::ContactManualAddRequest {
+                alias: p.b.slot.to_string(),
+                device_id: c.device_id.to_vec(),
+                genesis_hash: c.genesis.to_vec(),
+                signing_public_key: c.ak_pk.clone(),
+            },
+        )
+        .await;
+    assert!(
+        same_alias.success,
+        "A adds C under B's alias: {:?}",
+        same_alias.error_message
+    );
+
+    for (chosen, amount) in [(&c, "10"), (&p.b, "20")] {
+        let sent =
+            p.a.invoke(
+                "wallet.sendSmart",
+                &chosen_contact_request(&p.a, chosen, amount),
+            )
+            .await;
+        assert!(
+            sent.success,
+            "the send to {}: {:?}",
+            chosen.slot, sent.error_message
+        );
+    }
+    c.sync().await;
+    p.b.sync().await;
+    assert_eq!(
+        c.era_balance(),
+        economic_fixtures::whole_era(10),
+        "C is paid what was sent to C"
+    );
+    assert_eq!(
+        p.b.era_balance(),
+        economic_fixtures::whole_era(20),
+        "B is paid what was sent to B"
+    );
+}
+
+/// The request the frontend builds when the user chooses `contact` in the
+/// send screen (`SendTab.tsx` → `dsm/transactions.ts`): ERA, the amount as
+/// typed, and the recipient by the chosen contact's device id, the key the
+/// send screen selects it by.
+fn chosen_contact_request(
+    sender: &crate::test_support::two_device::TestDevice,
+    contact: &crate::test_support::two_device::TestDevice,
+    amount: &str,
+) -> crate::generated::OnlineTransferSmartRequest {
+    sender.enter();
+    let chosen = client_db::get_contact_by_device_id(&contact.device_id)
+        .expect("A's contacts")
+        .expect("the chosen contact");
+    crate::generated::OnlineTransferSmartRequest {
+        recipient_device_id: chosen.device_id,
+        amount: amount.to_string(),
+        token_id: "ERA".to_string(),
+        memo: String::new(),
+    }
 }
 
 /// MR-DSM-0074, Amendment A3: a device sends only over relationships it

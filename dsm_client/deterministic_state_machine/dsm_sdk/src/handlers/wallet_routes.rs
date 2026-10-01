@@ -1235,8 +1235,6 @@ impl AppRouterImpl {
             }
 
             "wallet.sendSmart" => {
-                use crate::storage::client_db::get_contact_by_alias;
-
                 // Decode ArgPack from args
                 let arg_pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,
@@ -1253,47 +1251,20 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("decode OnlineTransferSmartRequest failed: {e}")),
                 };
 
-                // 1. Resolve Recipient (Crockford Base32 device_id OR Alias)
-                // Try base32 decode first — only accept if it produces exactly 32 bytes
-                // (a valid device ID). Otherwise fall through to alias lookup, since
-                // short aliases like "ej8w2khr" are valid base32 but decode to <32 bytes.
-                let to_device_id: [u8; 32] = {
-                    let as_device_id =
-                        crate::util::text_id::decode_base32_crockford(&smart_req.recipient)
-                            .filter(|b| b.len() == 32);
-
-                    if let Some(bytes) = as_device_id {
-                        match <[u8; 32]>::try_from(bytes.as_slice()) {
-                            Ok(id) => id,
-                            Err(e) => return err(format!("Recipient device id: {e}")),
+                // 1. The recipient: the device id of the contact the user chose.
+                // Never an alias — an alias is a label two contacts can share
+                // (pre-audit item 6, §6.63). That it is an added contact is
+                // checked where the relationship is read.
+                let to_device_id: [u8; 32] =
+                    match <[u8; 32]>::try_from(smart_req.recipient_device_id.as_slice()) {
+                        Ok(id) => id,
+                        Err(..) => {
+                            return err(format!(
+                                "wallet.sendSmart: the recipient device id is {} bytes, not 32",
+                                smart_req.recipient_device_id.len()
+                            ))
                         }
-                    } else {
-                        match get_contact_by_alias(&smart_req.recipient) {
-                            Ok(Some(c)) => match <[u8; 32]>::try_from(c.device_id.as_slice()) {
-                                Ok(id) => id,
-                                Err(e) => {
-                                    return err(format!(
-                                        "Contact {} has an invalid device id: {e}",
-                                        smart_req.recipient
-                                    ))
-                                }
-                            },
-                            Ok(None) => {
-                                let recipient = &smart_req.recipient;
-                                return err(format!(
-                                    "Recipient not found (not a device id or known alias): \
-                                     {recipient}"
-                                ));
-                            }
-                            Err(e) => {
-                                return err(format!(
-                                    "Recipient {} could not be looked up: {e}",
-                                    smart_req.recipient
-                                ))
-                            }
-                        }
-                    }
-                };
+                    };
 
                 // 2. Parse display amount into canonical base units in the backend.
                 // The token is named exactly: an omitted token is not ERA.
