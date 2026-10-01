@@ -40,11 +40,12 @@ use dsm_storage_node::{db, set_client, AppLimits, AppState, NodeStorageSet};
 /// The network whose pinned register the nodes are.
 const NETWORK: &[u8] = b"dsm-testnet";
 
-/// The deployed fleet's limits (`deploy/nodes/*/config/node.toml`).
+/// The deployed fleet's limits (`dsm_storage_node/config/production.toml`).
 fn deployed_limits() -> AppLimits {
     AppLimits {
         body_limit_bytes: 1_048_576,
         concurrency_limit: 256,
+        request_timeout: std::time::Duration::from_secs(60),
     }
 }
 

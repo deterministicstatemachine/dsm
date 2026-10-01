@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `/api/v2/health` answers ok only over a live Postgres: it checks a
 //! connection out of the pool and runs a query on it, so a node whose store is
-//! down reports 503, never "ok".
+//! down reports 503, never "ok", and says nothing more about its database.
 
 // `#[tokio::test]` builds its runtime with `expect`, as every suite here does.
 #![allow(clippy::disallowed_methods)]
@@ -45,12 +45,14 @@ async fn the_health_route_answers_ok_only_over_a_live_postgres() {
     assert_eq!(body, "ok");
 
     // The store goes away under the running node: no connection can be
-    // checked out, and health says so.
+    // checked out, and health says so, and only so. What went wrong stays in
+    // the node's log; the answer names no host, user, database or driver
+    // message to whoever asks.
     state.db_pool.close();
     let (status, body) = health_of(&app).await;
     // Both halves in one comparison, so a failure prints the whole answer.
     assert_eq!(
-        (status, body.get(..10)),
-        (StatusCode::SERVICE_UNAVAILABLE, Some("postgres: "))
+        (status, body.as_str()),
+        (StatusCode::SERVICE_UNAVAILABLE, "postgres unavailable")
     );
 }

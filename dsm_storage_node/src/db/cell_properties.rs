@@ -305,10 +305,13 @@ async fn bytecommits_close_link_and_prove_on_this_backend() {
     let member = b"dsm-node-props";
     let key = unique_key(0x3C);
     // Other tests share this store: first flush whatever they left pending.
-    let base = db::close_cycle(&pool, member).await.expect("flush");
+    let closing = tokio::sync::Mutex::new(());
+    let base = db::close_cycle(&pool, &closing, member)
+        .await
+        .expect("flush");
 
     let r1 = db::put_cell(&pool, NS, &key, b"one").await.expect("put");
-    let c1 = db::close_cycle(&pool, member)
+    let c1 = db::close_cycle(&pool, &closing, member)
         .await
         .expect("close")
         .expect("a cycle");

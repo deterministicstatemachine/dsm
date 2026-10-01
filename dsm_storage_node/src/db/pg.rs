@@ -512,7 +512,7 @@ async fn verify_schema_layout(client: &deadpool_postgres::Object) -> Result<()> 
 /// `require_durable_commit_posture` additionally refuses to
 /// start a node whose server-level settings could defeat this.
 ///
-/// Cell, index, ByteCommit and spool writes go through this function; the
+/// Cell, index, ByteCommit, mirror and spool writes go through this function; the
 /// immutable store's serializable transaction sets the same posture itself.
 async fn begin_durable_write(
     client: &mut deadpool_postgres::Client,
@@ -662,6 +662,15 @@ pub type DBPool = Pool;
 /// from the host name. `sslmode=prefer` (the Postgres default) would fall
 /// back to plaintext when the server offers no TLS, so every other mode is
 /// held to `require`.
+/// Connections a node holds to Postgres at most. Every request that touches
+/// the store shares them.
+pub const POOL_MAX_SIZE: usize = 32;
+
+/// How long a request waits for one of those connections before it fails,
+/// answered as a node that could not serve it rather than left waiting. A
+/// transport bound, as an unreachable node is (storage spec §1 rule 4).
+pub const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
     use tokio_postgres::config::SslMode;
 
@@ -678,7 +687,11 @@ pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
         pg.ssl_mode(SslMode::Require);
         Manager::from_config(pg, create_tls_connector(), manager_config)
     };
-    Ok(Pool::builder(manager).runtime(Runtime::Tokio1).build()?)
+    Ok(Pool::builder(manager)
+        .max_size(POOL_MAX_SIZE)
+        .wait_timeout(Some(POOL_WAIT_TIMEOUT))
+        .runtime(Runtime::Tokio1)
+        .build()?)
 }
 
 // ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
@@ -857,22 +870,26 @@ pub async fn get_cell_entries(
 /// one — all in one durable transaction. Returns the latest ByteCommit
 /// (the new one, or the existing one if nothing arrived), or `None` if this
 /// node has never closed a cycle and holds no entries.
+///
+/// `closing` is the node's own closer lock: a closer waits on it before it
+/// takes a database connection, so closers queued behind one another hold
+/// none. The advisory lock on [`CLOSE_LOCK`] still keeps closers of the same
+/// database apart across processes.
 pub async fn close_cycle(
     pool: &Pool,
+    closing: &tokio::sync::Mutex<()>,
     member_id: &[u8],
 ) -> Result<Option<dsm::storage_cell::ByteCommit>> {
     use prost::Message;
     if member_id.is_empty() || member_id.len() > dsm::storage_cell::MAX_MEMBER_ID_LEN {
         anyhow::bail!("member id cannot name a ByteCommit");
     }
+    let _one_closer = closing.lock().await;
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
     // One closer at a time; puts are not blocked.
-    tx.execute(
-        "SELECT pg_advisory_xact_lock($1)",
-        &[&0x4453_4D42_434C_4F53_i64],
-    )
-    .await?;
+    tx.execute("SELECT pg_advisory_xact_lock($1)", &[&CLOSE_LOCK])
+        .await?;
     let last = tx
         .query_opt(
             "SELECT commit_pb FROM own_bytecommits ORDER BY cycle_index DESC LIMIT 1",
@@ -900,8 +917,13 @@ pub async fn close_cycle(
     )
     .await?;
     let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
-    let tree =
-        dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)));
+    // The tree is built over every cell the node holds: CPU work, kept off
+    // the threads that serve requests.
+    let smt_root = tokio::task::spawn_blocking(move || {
+        *dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)))
+            .root()
+    })
+    .await?;
     let bytes_used: i64 = tx
         .query_one(
             "SELECT COALESCE((SELECT SUM(LENGTH(value)) FROM cells), 0)::BIGINT
@@ -913,7 +935,7 @@ pub async fn close_cycle(
     let commit = dsm::storage_cell::ByteCommit {
         member_id: member_id.to_vec(),
         cycle_index: cycle,
-        smt_root: *tree.root(),
+        smt_root,
         bytes_used: u64::try_from(bytes_used.max(0))?,
         parent_digest: last.as_ref().map_or([0u8; 32], |c| c.digest()),
     };
@@ -930,6 +952,10 @@ pub async fn close_cycle(
     tx.commit().await?;
     Ok(Some(commit))
 }
+
+/// The advisory lock closers of one database take, so two processes on the
+/// same database never close at once.
+pub const CLOSE_LOCK: i64 = 0x4453_4D42_434C_4F53;
 
 fn decode_commit(bytes: &[u8]) -> Result<dsm::storage_cell::ByteCommit> {
     use prost::Message;
@@ -1032,15 +1058,16 @@ pub async fn cell_commit_proof(
     else {
         return Ok(None);
     };
-    let tree =
-        dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)));
-    Ok(dsm::storage_cell::CellCommitProof::from_tree(
-        &tree,
-        namespace,
-        key,
-        index,
-        running_hash,
-    ))
+    // The tree is built over every cell the node holds: CPU work, kept off
+    // the threads that serve requests.
+    let (namespace, key) = (namespace.to_vec(), *key);
+    Ok(tokio::task::spawn_blocking(move || {
+        let tree = dsm::storage_cell::cell_tree(
+            leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)),
+        );
+        dsm::storage_cell::CellCommitProof::from_tree(&tree, &namespace, &key, index, running_hash)
+    })
+    .await?)
 }
 
 /// Keep a ByteCommit this node fetched from `member_id` itself. Idempotent
@@ -1048,8 +1075,9 @@ pub async fn cell_commit_proof(
 /// beside the first as evidence. Returns whether it was not already held.
 pub async fn mirror_put(pool: &Pool, commit: &dsm::storage_cell::ByteCommit) -> Result<bool> {
     use prost::Message;
-    let client = pool.get().await?;
-    let inserted = client
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    let inserted = tx
         .execute(
             "INSERT INTO bytecommit_mirror (member_id, cycle_index, digest, commit_pb)
              VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
@@ -1061,6 +1089,7 @@ pub async fn mirror_put(pool: &Pool, commit: &dsm::storage_cell::ByteCommit) -> 
             ],
         )
         .await?;
+    tx.commit().await?;
     Ok(inserted == 1)
 }
 

@@ -66,7 +66,7 @@ id = "__NODE_ID__"
 [network]
 listen_addr = "__LISTEN_ADDR__"
 port = 8080
-max_connections = 256
+max_connections = 256    # requests in flight at once, across every route together
 
 [tls]
 cert_path = "/certs/node.crt"
@@ -78,3 +78,5 @@ url = "__DATABASE_URL__"
 
 [http]
 body_limit_bytes = 1048576    # 1 MiB
+request_timeout_secs = 60       # one request, waiting for a slot included; answered 408 after
+header_read_timeout_secs = 10   # a connection that has not sent a request's headers by then is closed

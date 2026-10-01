@@ -41,6 +41,12 @@ struct ServerConfig {
     /// peers to.
     set_ca_path: String,
     body_limit_bytes: usize,
+    /// `[http] request_timeout_secs`: how long one request may take, waiting
+    /// for a slot included.
+    request_timeout_secs: usize,
+    /// `[http] header_read_timeout_secs`: how long a connection has to send
+    /// a request's headers.
+    header_read_timeout_secs: usize,
     database_url: String,
     /// `[[storage_set.members]]` — each member's id and register incarnation.
     storage_set_members: Vec<(String, [u8; 32])>,
@@ -77,6 +83,9 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
 
     let concurrency_limit = optional_positive(&settings, "network.max_connections", 256)?;
     let body_limit_bytes = optional_positive(&settings, "http.body_limit_bytes", 1_048_576)?;
+    let request_timeout_secs = optional_positive(&settings, "http.request_timeout_secs", 60)?;
+    let header_read_timeout_secs =
+        optional_positive(&settings, "http.header_read_timeout_secs", 10)?;
 
     let tls_cert_path = required(&settings, "tls.cert_path")?;
     let tls_key_path = required(&settings, "tls.key_path")?;
@@ -161,6 +170,8 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         tls_key_path,
         set_ca_path,
         body_limit_bytes,
+        request_timeout_secs,
+        header_read_timeout_secs,
         database_url,
         storage_set_members,
         storage_set_endpoints,
@@ -285,6 +296,9 @@ async fn async_main() -> Result<()> {
         dsm_storage_node::AppLimits {
             body_limit_bytes: server_config.body_limit_bytes,
             concurrency_limit: server_config.concurrency_limit,
+            request_timeout: std::time::Duration::from_secs(u64::try_from(
+                server_config.request_timeout_secs,
+            )?),
         },
     );
 
@@ -325,8 +339,12 @@ async fn async_main() -> Result<()> {
         RustlsConfig::from_pem_file(&server_config.tls_cert_path, &server_config.tls_key_path)
             .await
             .context("failed to load TLS certificates")?;
-    axum_server::bind_rustls(server_config.bind_addr, tls_config)
-        .handle(handle)
+    let mut server = axum_server::bind_rustls(server_config.bind_addr, tls_config).handle(handle);
+    dsm_storage_node::bound_connections(
+        server.http_builder(),
+        std::time::Duration::from_secs(u64::try_from(server_config.header_read_timeout_secs)?),
+    );
+    server
         .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
         .context("storage node TLS server error")?;
@@ -419,6 +437,8 @@ url = "postgresql://127.0.0.1:5432/node"
         let whole = load(WHOLE_CONFIG).expect("the whole config loads");
         assert_eq!(whole.concurrency_limit, 256);
         assert_eq!(whole.body_limit_bytes, 1_048_576);
+        assert_eq!(whole.request_timeout_secs, 60);
+        assert_eq!(whole.header_read_timeout_secs, 10);
 
         let with = |extra: &str| format!("{WHOLE_CONFIG}\n{extra}\n");
         let set = load(&with("[http]\nbody_limit_bytes = 4096")).expect("a stated limit loads");
