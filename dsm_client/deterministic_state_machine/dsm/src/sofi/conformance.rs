@@ -907,6 +907,7 @@ mod tests {
             precommit.position() + 1,
             precommit.signature_alg(),
             precommit.claimant_public_key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -927,6 +928,7 @@ mod tests {
             position,
             SIG_ALG,
             key,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -1443,6 +1445,7 @@ mod tests {
             position,
             SIG_ALG,
             pk,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let fulfillment_id = derive::fulfillment_id(&parent);
@@ -1509,6 +1512,7 @@ mod tests {
             P_POS,
             SIG_ALG,
             pk(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         assert_eq!(

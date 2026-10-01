@@ -46,11 +46,24 @@ impl PrecommitLookup for BTreeMap<D32, TraderPrecommitBody> {
     }
 }
 
+/// Whether `F` proves its own authority for a cell of `device_id` (DSM
+/// Amendment A10, SoFi Amendment S20): its key, with the `AttA` it carries,
+/// derives that device. Decided from `F`'s bytes alone, so a reader applies
+/// it before fetching anything `F` names.
+pub fn fulfillment_proves_the_device(body: &TraderFulfillmentBody, device_id: &D32) -> bool {
+    crate::core::identity::genesis_v2::derive_devid(
+        body.claimant_public_key(),
+        body.claimant_att_a(),
+    ) == *device_id
+}
+
 /// An object naming `K_ful(q)` of trader `(G, DevID)`: a fulfillment
-/// envelope that recognizes (R8), whose body's position is `q`, and whose
-/// `P` — fetched by the id the body names — is that trader's. A fulfillment
-/// of another trader or another position written at this key is nothing:
-/// neither a rival nor a winner, however early it arrived.
+/// envelope that recognizes (R8), whose body's position is `q`, whose key and
+/// `AttA` derive `DevID` ([`fulfillment_proves_the_device`]), and whose `P` —
+/// fetched by the id the body names — is that trader's. A fulfillment of
+/// another trader or another position, or one under a key that does not
+/// derive the trader's device, written at this key is nothing: neither a
+/// rival nor a winner, however early it arrived.
 pub fn names_fulfillment_key(
     bytes: &[u8],
     genesis: &D32,
@@ -60,6 +73,9 @@ pub fn names_fulfillment_key(
 ) -> Option<Signed<TraderFulfillmentBody>> {
     let signed = recognize_fulfillment(bytes)?.1;
     if signed.body.position() != position {
+        return None;
+    }
+    if !fulfillment_proves_the_device(&signed.body, device_id) {
         return None;
     }
     let precommit = precommits.precommit(signed.body.precommit_id())?;
@@ -398,6 +414,7 @@ mod tests {
             position,
             ALG,
             key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -438,6 +455,73 @@ mod tests {
         assert!(names_fulfillment_key(b"not an envelope", &G, &dev(), q, &known).is_none());
     }
 
+    /// DSM Amendment A10, SoFi Amendment S20: `F` proves its own authority
+    /// for `K_ful(q)`. A squatter that publishes its own `P` naming the
+    /// victim's device, and an `F` of it — each verifying under the
+    /// squatter's key — names no cell of the victim's, with the squatter's
+    /// `AttA` or the victim's, even with that `P` in hand: the key does not
+    /// derive the victim's device, decided from `F`'s bytes alone.
+    #[test]
+    fn a_fulfillment_under_a_key_that_does_not_derive_the_trader_names_no_cell() {
+        let p = swap_fixture_n(2).precommit;
+        let q = p.position() + 1;
+        let (squatter_pk, squatter_sk) =
+            crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let squatters_p = TraderPrecommitBody::new(
+            *p.genesis(),
+            *p.device_id(),
+            p.position(),
+            *p.parent_claim_ref(),
+            *p.external_commitment(),
+            p.legs().to_vec(),
+            *p.realize_root(),
+            *p.void_root(),
+            *p.storage_set_id(),
+            ALG,
+            &squatter_pk,
+        )
+        .unwrap();
+        let known = lookup(&squatters_p);
+        for att_a in [[0x5A; 32], crate::sofi::validation::fixtures::TRADER_ATT_A] {
+            let squat = TraderFulfillmentBody::new(
+                derive::precommit_id(&squatters_p),
+                vec![[0x01; 32], [0x02; 32]],
+                squatters_p
+                    .legs()
+                    .iter()
+                    .map(|l| AttemptEntry {
+                        vault_id: l.vault_id,
+                        attempt: 0,
+                    })
+                    .collect(),
+                q,
+                ALG,
+                &squatter_pk,
+                att_a,
+            )
+            .unwrap();
+            assert!(!fulfillment_proves_the_device(&squat, &dev()));
+            let bytes = Publication::Fulfillment {
+                body: &squat,
+                signature: &crate::crypto::sphincs::sphincs_sign(
+                    &squatter_sk,
+                    &derive::fulfillment_signing_digest(&squat),
+                )
+                .unwrap(),
+            }
+            .object_bytes()
+            .unwrap();
+            assert!(
+                names_fulfillment_key(&bytes, &G, &dev(), q, &known).is_none(),
+                "a squatter's F names no cell of the victim's"
+            );
+        }
+        // The trader's own F of its own P names the cell.
+        let f = fulfillment(&p, q);
+        assert!(fulfillment_proves_the_device(&f, &dev()));
+        assert!(names_fulfillment_key(&envelope(&f), &G, &dev(), q, &lookup(&p)).is_some());
+    }
+
     /// `K_ful(q)` is named only by a fulfillment the trader signed: its
     /// signature verifies under the key its body commits, and that key is the
     /// one its `P` commits. An unsigned or foreign-key `F` naming the right
@@ -465,6 +549,7 @@ mod tests {
             q,
             ALG,
             &other_pk,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let foreign_bytes = Publication::Fulfillment {
@@ -557,6 +642,7 @@ mod tests {
             q,
             ALG,
             key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let other_claim = signed_c_q(derive::resolution_claim(&p, &rival));

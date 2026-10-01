@@ -870,6 +870,7 @@ mod tests {
             P_POS + 1,
             SIG_ALG,
             &[0x01; 64],
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -1349,6 +1350,7 @@ mod tests {
             P_POS + 2,
             SIG_ALG,
             &[0x01; 64],
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         assert!(matches!(
