@@ -16,6 +16,7 @@ import { join } from 'path';
 import { answerFromRustRecord } from '../../../tests/helpers/rustIngressRecord';
 import { dsmClient } from '../../../services/dsmClient';
 import { practiceMode, PRACTICE_CONTACT_ALIAS, PRACTICE_CONTACT_DEVICE_ID } from '../practiceMode';
+import { encodeBase32Crockford } from '../../../utils/textId';
 
 const client = dsmClient as unknown as Record<string, (...args: any[]) => Promise<any>>;
 
@@ -50,6 +51,38 @@ describe('practice mode answers as the real calls do', () => {
     expect(offline).toEqual({ accepted: false, result: expect.stringContaining('names no token') });
     const online = await client.sendOnlineTransferSmart(PRACTICE_CONTACT_DEVICE_ID, '5', undefined, '');
     expect(online).toEqual({ success: false, message: expect.stringContaining('names no token') });
+  });
+
+  // It answered `ok` where the real call answers `accepted`, which the contacts
+  // store read as a refusal, and stored one fixed practice id for every device.
+  it('adds a contact in the shape the real addContact answers, under the ids of the card Rust read', async () => {
+    const card = {
+      deviceId: new Uint8Array(32).fill(0xb0),
+      genesisHash: new Uint8Array(32).fill(0xb1),
+      signingPublicKey: new Uint8Array(64).fill(0xb2),
+    };
+    const contactId = encodeBase32Crockford(card.deviceId);
+    const added = await client.addContact({ alias: ' bob ', ...card });
+    expect(added.accepted).toBeTruthy();
+    expect(added).toEqual(expect.objectContaining({ contactId, alias: 'bob' }));
+    const { contacts } = await client.getContacts();
+    expect(contacts.map((c: any) => c.alias)).toEqual([PRACTICE_CONTACT_ALIAS, 'bob']);
+    expect(contacts[1]).toEqual(expect.objectContaining({
+      deviceId: contactId,
+      genesisHash: encodeBase32Crockford(card.genesisHash),
+      signingPublicKey: encodeBase32Crockford(card.signingPublicKey),
+    }));
+  });
+
+  it('names a contact added with no alias as Rust does: by its device id', async () => {
+    const deviceId = new Uint8Array(32).fill(0xc0);
+    const added = await client.addContact({
+      alias: '',
+      deviceId,
+      genesisHash: new Uint8Array(32).fill(0xc1),
+      signingPublicKey: new Uint8Array(64).fill(0xc2),
+    });
+    expect(added).toEqual(expect.objectContaining({ alias: encodeBase32Crockford(deviceId).slice(0, 8) }));
   });
 
   it('refuses moving offline cash: practice never touches the real allocation', async () => {
