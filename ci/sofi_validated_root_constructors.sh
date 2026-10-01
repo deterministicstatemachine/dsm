@@ -268,10 +268,36 @@ if ! grep -qE 'established: &Established' <<<"$sig"; then
   echo "$sig"
   exit 1
 fi
-if ! grep -qE '^\s*resolve_position\(' <(awk '/^pub fn advance_resolved\(/{f=1} f{print} f&&/^\}/{exit}' "$sofi_lineage") \
-   && ! grep -qE 'resolve_position\(' <(awk '/^pub fn advance_resolved\(/{f=1} f{print} f&&/^\}/{exit}' "$sofi_lineage"); then
-  echo "[FAIL] advance_resolved does not run the ladder (resolve_position) itself"
-  exit 1
+# The ladder runs inside the advance: in advance_resolved itself, or in
+# derive_resolved, the private helper advance_resolved and
+# advance_peer_resolved share (DSM Amendment A8, SoFi Amendment S15). The
+# helper must be private, must run the ladder, and must be called from
+# nowhere but those two advances, so no caller can name a verdict.
+advance_body=$(awk '/^pub fn advance_resolved\(/{f=1} f{print} f&&/^\}/{exit}' "$sofi_lineage")
+helper_body=$(awk '/^fn derive_resolved[(<]/{f=1} f{print} f&&/^\}/{exit}' "$sofi_lineage")
+if ! grep -qE 'resolve_position\(' <<<"$advance_body"; then
+  if ! grep -qE 'derive_resolved\(' <<<"$advance_body"; then
+    echo "[FAIL] advance_resolved does not run the ladder (resolve_position), itself or through derive_resolved"
+    exit 1
+  fi
+  if [ -z "$helper_body" ]; then
+    echo "[FAIL] advance_resolved calls derive_resolved, which is not a private fn in $sofi_lineage"
+    exit 1
+  fi
+  if ! grep -qE 'resolve_position\(' <<<"$helper_body"; then
+    echo "[FAIL] derive_resolved does not run the ladder (resolve_position)"
+    exit 1
+  fi
+  callers=$(awk '/^(pub(\([a-z]+\))? )?fn [a-z_0-9]+/{name=$0; sub(/^(pub(\([a-z]+\))? )?fn /,"",name); sub(/[(<].*/,"",name)} /derive_resolved\(/ && !/fn derive_resolved/{print name}' "$sofi_lineage" | sort -u)
+  outside=$(awk '!/^(advance_resolved|advance_peer_resolved)$/' <<<"$callers")
+  if [ -n "$outside" ]; then
+    echo "[FAIL] derive_resolved runs the ladder for a caller other than the two advances: $outside"
+    exit 1
+  fi
+  if grep -rqE 'derive_resolved\(' "$core/dsm/src" --include='*.rs' --exclude="$(basename "$sofi_lineage")"; then
+    echo "[FAIL] derive_resolved is called outside $sofi_lineage"
+    exit 1
+  fi
 fi
 if ! grep -q 'pub(crate) fn resolve_position' "$resolution"; then
   echo "[FAIL] resolve_position is not pub(crate): the ladder is the advance's to run"
