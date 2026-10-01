@@ -33,6 +33,8 @@ pub mod contacts_routes;
 #[cfg(test)]
 mod faucet_flow_tests;
 pub mod faucet_routes;
+#[cfg(test)]
+mod frontier_verification_tests;
 pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;

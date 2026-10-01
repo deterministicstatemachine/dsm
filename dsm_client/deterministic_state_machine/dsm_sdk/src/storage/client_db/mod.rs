@@ -444,7 +444,14 @@ fn get_database_path() -> Result<PathBuf> {
 /// signed operation), `recipient_staged_receipt` (keyed by the commitment),
 /// `recipient_pair` and the two observation tables replace it, and the
 /// sender of each object is the contact whose key verified it.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 26;
+///
+/// 27: `peer_frontier` replaces `peer_economic_lineage` (DSM Amendment A8).
+/// A row is this receiver's frontier for a peer: a coordinate it
+/// authenticated on the way to a step it accepted, with the claim it
+/// accepted there. It is written only in the transaction that accepts the
+/// step, and nothing behind it is read again, so there is no Invalid
+/// re-walk and no `closure_stored` watermark.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 27;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -745,25 +752,19 @@ fn create_schema(conn: &Connection) -> Result<()> {
             state_ccb  BLOB NOT NULL        -- exact leaf-state CCB bytes
         );
 
-        -- Device-local memo of peer economic coordinates THIS verifier
-        -- validated (5H validated caching). A cache of the verifier's OWN
-        -- conclusions: never authority over a live register read, and an
-        -- Invalid verdict from a cached start deletes the peer's rows and
-        -- re-walks from the activation root.
-        CREATE TABLE IF NOT EXISTS peer_economic_lineage(
+        -- This receiver's frontiers (DSM Amendment A8): for each peer, the
+        -- coordinates it authenticated on the way to a step it accepted
+        -- from that peer, each with the claim it accepted there. Written
+        -- only in the transaction that accepts the step. A verification
+        -- starts at the latest one below its target and never reads
+        -- behind it.
+        CREATE TABLE IF NOT EXISTS peer_frontier(
             peer_genesis        BLOB NOT NULL,      -- 32B
             peer_devid          BLOB NOT NULL,      -- 32B
-            validated_position  INTEGER NOT NULL,
-            validated_root      BLOB NOT NULL,      -- 32B
-            -- ECONOMIC-DAG durability watermark ONLY: 1 means every object of
-            -- the evidence closure this validation consumed was read back
-            -- `Stored`. It says NOTHING about EK-step ancestry, which
-            -- advances independently through relationship steps (including
-            -- BLE steps that never touch R_econ) — EK durability is memoized
-            -- per exact address in immutable_stored_memo, never inferred
-            -- from an economic position.
-            closure_stored   INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(peer_genesis, peer_devid, validated_position)
+            economic_position   INTEGER NOT NULL,
+            economic_root       BLOB NOT NULL,      -- 32B
+            accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
+            PRIMARY KEY(peer_genesis, peer_devid, economic_position)
         );
 
         -- The device's per-relationship per-SIGNER content-addressed EK step

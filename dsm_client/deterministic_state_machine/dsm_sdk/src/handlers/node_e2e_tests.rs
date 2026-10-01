@@ -600,6 +600,33 @@ async fn a_key_whose_fulfillment_can_never_register_is_skipped_without_its_evide
     assert!(indexes.len() <= 1, "one index read, P's: {indexes:?}");
 }
 
+/// A trader who has traded can still pay (P15-9). B's history holds a SoFi
+/// position, realized; B then pays A ordinary ERA, and A accepts it. A's walk
+/// of B's lineage passes the resolved SoFi position on Core's own verdict of
+/// the exercise, and the payment's source is B's later single-root position,
+/// not the SoFi position (the owner's 2026-09-18 ruling).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_trader_who_has_traded_can_pay() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let a_before = p.a.era_balance();
+    let b_before = p.b.era_balance();
+    let sent = p.b.send(&p.a, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    assert_eq!(p.b.era_balance(), b_before - 5, "the trader paid");
+    assert_eq!(
+        p.a.era_balance(),
+        a_before + 5,
+        "the payee accepted the payment"
+    );
+}
+
 /// B's own exercise re-aimed at the vault's next generation: `P` names the
 /// next parent root, `F` names attempt 0 there, the witnesses derive from the
 /// re-aimed `P`, and `sign` signs both new bodies' digests. Signed by B, every

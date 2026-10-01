@@ -39,7 +39,7 @@ use crate::sdk::economic_admission_flow::{
     admitted_self_loop_operation, committed_network_id, producer_tree_and_pre_state,
     validated_root_or_activate, BuiltOn,
 };
-use crate::sdk::economic_registers::{resolve_peer_with_cache, LiveRegisterResolver};
+use crate::sdk::economic_registers::{resolve_peer, LiveRegisterResolver};
 use crate::sdk::sofi_advance::{
     complete_pending_fulfillment, fulfill, own_closure_objects, own_parent_claim,
     resolve_pending_position, Advanced, Completion, FulfillRequest,
@@ -1206,12 +1206,14 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
         runtime: tokio::runtime::Handle::current(),
         expected_network_id: network.clone(),
     };
-    let parent = resolve_peer_with_cache(
+    let ctx = VerifierContext::new(set, None, None)?;
+    let parent = resolve_peer(
         &resolver,
         &network,
         &intent.trader_genesis,
         &intent.trader_device_id,
         parent_position,
+        &ctx.peer_position_resolver(),
     )
     .map_err(|failure| {
         refuse(format!(
@@ -1219,7 +1221,6 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
         ))
     })?;
     let parent_root = parent.validated_root().economic_root();
-    let ctx = VerifierContext::new(set, None, None)?;
     let registration = ctx
         .verifier()
         .read_registration(

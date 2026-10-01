@@ -138,15 +138,20 @@ async fn a_transfer_admits_on_both_sides_with_a_register_backed_release() {
     assert_eq!(facts.recipient_economic_position, 1);
     assert_eq!(facts.recipient_devid, p.b.device_id);
 
-    // The economic watermark for the SENDER's walked closure.
-    assert!(
-        client_db::economic_lineage::peer_closure_stored(
-            &p.a.genesis,
-            &p.a.device_id,
-            facts_sender_position(&p),
-        )
-        .unwrap(),
-        "the walked sender closure is memoized Stored"
+    // The sender's coordinate this acceptance verified is B's frontier for A
+    // from now on (DSM Amendment A8).
+    let sender_position = facts_sender_position(&p);
+    let frontier = client_db::economic_lineage::frontier_below(
+        &p.a.genesis,
+        &p.a.device_id,
+        sender_position + 1,
+    )
+    .unwrap()
+    .expect("the accepted sender coordinate is B's frontier for A");
+    assert_eq!(
+        frontier.economic_position(),
+        sender_position,
+        "B's frontier for A is the coordinate its acceptance verified"
     );
 
     // Sender side: finalized on the release (generation semantics), and its
