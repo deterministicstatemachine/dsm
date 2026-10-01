@@ -1187,7 +1187,7 @@ For example,
 H(DSM/consume resource/v1 ∥ x)
 should not be confused with
 
-H(DSM/smt-key/v1 ∥ x).
+H(DSM/smt-key ∥ x).
 The prefixes are called domain separators.
 They make semantically different hash operations live in cryptographically different namespaces.
 Thus the same raw field cannot accidentally be interpreted as two different protocol object types.
@@ -1474,7 +1474,10 @@ A real 256-bit SMT has a logical depth of 256.
 DSM can derive a bilateral relationship key deterministically.
 For devices A and B:
 
-kA↔B = H(DSM/smt-key/v1 ∥ min(DevIDA , DevIDB ) ∥ max(DevIDA , DevIDB )).
+kA↔B = H(DSM/smt-key ∥ min(DevIDA , DevIDB ) ∥ max(DevIDA , DevIDB )).
+
+> **Amendment A9 (owner, 2026-09-30) — the relationship-key tag.** The domain tag of a relationship's SMT key is `DSM/smt-key`. The `/v1` suffix this section and §16 carried was an error: relationship keys have no `/v1` namespace, and no key derived under `DSM/smt-key` migrates.
+
 Because the device IDs are canonically sorted:
 
 kA↔B = kB↔A .
