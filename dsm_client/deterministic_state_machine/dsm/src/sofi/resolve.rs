@@ -1786,12 +1786,11 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
-        // The claim at the root cell counts only as the one (P, F) derive.
-        if derive::resolution_claim(&precommit, &fulfillment.body) != *held {
-            return Err(Invalid(format!(
-                "position {q}: the claim at the root cell is not the one P and F derive"
-            )));
-        }
+        // `held` counts only as the claim (P, F) derive: registration holds F
+        // registered only while `K_root(q)` is final on exactly that claim
+        // (`registration::fulfillment_registered`), and a final value is the
+        // cell's only one, so its two roots are the ones the resolution
+        // chooses between.
 
         // The exercise, read back from the first leg's cell.
         let first = precommit

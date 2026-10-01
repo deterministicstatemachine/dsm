@@ -1666,6 +1666,43 @@ mod tests {
     /// this operation is in order — positions chain, roots match, the claim is
     /// the one `P` names — and it is still refused, because the token it would
     /// credit was never adopted here. Nobody adopts on the receiver's behalf.
+    /// SoFi Amendment S15 (MR-SOFI-0348): adoption is the trader's own
+    /// construction predicate, not part of resolving its position for anyone
+    /// else. The facts the trader's own advance refuses for want of an
+    /// adoption advance another verifier's walk to the same root and the same
+    /// accepted claim, with no adoption state of the trader's in hand.
+    #[test]
+    fn another_verifier_resolves_the_position_without_the_traders_adoptions() {
+        let (fx, _) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let credits = trader_credits(&fx.preimage, &fx.evidence).unwrap();
+        let facts = established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized);
+        let bare = DeviceState::new(G, DEV, vec![0x01; 32]);
+        let previous_root = previous(*p.void_root());
+        assert_eq!(
+            advance_resolved(&previous_root, &p, &f, p.parent_claim_ref(), &facts, &bare),
+            Err(AdvanceError::TokenNotAdopted {
+                policy_commit: credits[0]
+            })
+        );
+        let peer = advance_peer_resolved(&previous_root, &p, &f, p.parent_claim_ref(), &facts)
+            .expect("another verifier resolves the position");
+        let adopter = bare.adopt_token(credits[0]).unwrap();
+        let own = advance_resolved(
+            &previous_root,
+            &p,
+            &f,
+            p.parent_claim_ref(),
+            &facts,
+            &adopter,
+        )
+        .expect("the trader that adopted it advances");
+        assert_eq!(peer.resolution, Resolution::Realized);
+        assert_eq!(peer.root, own.root);
+        assert_eq!(peer.claim, own.claim);
+    }
+
     #[test]
     fn a_realized_position_crediting_an_unadopted_token_is_refused() {
         let (fx, _) = realized_rig();
