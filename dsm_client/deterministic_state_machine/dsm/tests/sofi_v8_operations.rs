@@ -219,6 +219,7 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
         6,
         0x0001,
         &pk,
+        [0xA7; 32],
     )
     .unwrap();
 

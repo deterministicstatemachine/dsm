@@ -736,7 +736,11 @@ mod tests {
         ful.write(&envelope, ROUTE_LEN - 1, &[]);
         let mut root = Cell::at(cells.root().routed());
         if let Some(claim) = root_holds {
-            root.write(&claim.encode(), ROUTE_LEN - 1, &[]);
+            root.write(
+                &crate::sofi::validation::fixtures::signed_c_q(claim),
+                ROUTE_LEN - 1,
+                &[],
+            );
         }
         let lookup = BTreeMap::from([(derive::precommit_id(p), p.clone())]);
         fulfillment_registered(&cells, &ful.evidence(), &root.evidence(), &lookup).unwrap()

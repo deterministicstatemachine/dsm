@@ -416,6 +416,7 @@ pub(crate) mod fixtures {
             p.position() + 1,
             ALG,
             key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let x = SofiExercise::new(
@@ -615,6 +616,7 @@ mod tests {
             fb.position(),
             ALG,
             &other_pk,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let foreign_sig = crate::crypto::sphincs::sphincs_sign(

@@ -806,6 +806,18 @@ async fn finish_locked(
     {
         Some((_, bytes)) => bytes,
         None => {
+            // The claim proves its own authority for this device's cell: it
+            // carries the AttA under which this key derives the device id
+            // (DSM Amendment A10). A key that does not derive it would sign a
+            // claim recognition refuses, so none is signed.
+            let att_a = crate::sdk::signing_authority::current_att_a()
+                .map_err(|e| storage_err("signing authority", e))?;
+            if dsm::core::identity::genesis_v2::derive_devid(&public_key, &att_a) != devid {
+                return Err(DsmError::invalid_operation(
+                    "root claim: this device's key and AttA do not derive its device id — \
+                     local identity incoherent; refusing to sign a claim for its cell",
+                ));
+            }
             let body = dsm::economic::claim::EconomicRootClaimBody::new(
                 genesis,
                 devid,
@@ -815,6 +827,7 @@ async fn finish_locked(
                 set.id(),
                 dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
                 &public_key,
+                att_a,
             )
             .map_err(|e| storage_err("root claim body", e))?;
             let bytes = sign_economic_root_claim(&body, &secret_key)

@@ -83,7 +83,9 @@ pub enum RootClaimSettlement {
     Final,
     /// Another claim holds the cell's leader link. No other value will ever
     /// be final there (storage spec §9 finality 2), so this claim never will.
-    Lost { holder: RegisteredEconomicClaim },
+    Lost {
+        holder: Box<RegisteredEconomicClaim>,
+    },
     /// The cell is not decided for this claim yet: open, held by this claim
     /// but not final, or the evidence in hand does not decide it. A network
     /// status, retried with the same bytes.
@@ -105,9 +107,9 @@ pub async fn root_claim_settlement(
             state: ChainState::Final,
             ..
         }) if id == ours => RootClaimSettlement::Final,
-        Ok(CellReading::Held { id, object, .. }) if id != ours => {
-            RootClaimSettlement::Lost { holder: object }
-        }
+        Ok(CellReading::Held { id, object, .. }) if id != ours => RootClaimSettlement::Lost {
+            holder: Box::new(object),
+        },
         Ok(CellReading::Held { state, .. }) => {
             RootClaimSettlement::Pending(format!("the claim holds the cell, {state:?}"))
         }

@@ -239,6 +239,10 @@ pub mod class {
     /// `𝒞_E^pre` and accepted only because it hashes to the leaf the core
     /// states.
     pub const SOFI_TRADER_PRE_BALANCE: u16 = 0x0061;
+    /// `0x0062` — `C_q` as it occupies `K_root(q)`: the derived claim and the
+    /// trader's signature over it, under a key the claim's own `AttA` binds
+    /// to its `DevID` (DSM Amendment A10, SoFi Amendment S20).
+    pub const SOFI_SIGNED_RESOLUTION_CLAIM: u16 = 0x0062;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

@@ -830,7 +830,7 @@ mod tests {
     use crate::sofi::wire::{VaultCreation, VaultGenesisPreimage, VAULT_STATUS_ACTIVE};
 
     const G: D32 = [0x11; 32];
-    const DEV: D32 = [0x22; 32];
+    use crate::sofi::validation::fixtures::dev;
     const P_POS: u64 = 5;
     const SIG_ALG: u16 = 0x0001;
 
@@ -841,7 +841,7 @@ mod tests {
     fn precommit(void_root: D32, realize_root: D32) -> TraderPrecommitBody {
         TraderPrecommitBody::new(
             G,
-            DEV,
+            dev(),
             P_POS,
             ParentClaimRef::SingleRoot { claim_ref: d(0x66) },
             d(0xEE),
@@ -870,6 +870,7 @@ mod tests {
             P_POS + 1,
             SIG_ALG,
             &[0x01; 64],
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -972,7 +973,7 @@ mod tests {
     /// A receiver whose adoptions the advance never consults, for the same
     /// two cases.
     fn bare_receiver() -> DeviceState {
-        DeviceState::new(G, DEV, vec![0x01; 32])
+        DeviceState::new(G, dev(), vec![0x01; 32])
     }
 
     /// The fixture's own one-hop swap, and a receiver that HAS adopted what
@@ -982,7 +983,7 @@ mod tests {
     /// literal no settlement could produce.
     fn realized_rig() -> (Fixture, DeviceState) {
         let fx = swap_fixture_n(1);
-        let mut receiver = DeviceState::new(G, DEV, vec![0x01; 32]);
+        let mut receiver = DeviceState::new(G, dev(), vec![0x01; 32]);
         for policy_commit in trader_credits(&fx.preimage, &fx.evidence).unwrap() {
             receiver = receiver.adopt_token(policy_commit).unwrap();
         }
@@ -1017,7 +1018,7 @@ mod tests {
             ),
             (
                 G,
-                DEV,
+                dev(),
                 P_POS + 1,
                 derive::claim_ref(&derive::resolution_claim(&p, &f).encode())
             )
@@ -1353,6 +1354,7 @@ mod tests {
             P_POS + 2,
             SIG_ALG,
             &[0x01; 64],
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         assert!(matches!(
@@ -1446,7 +1448,7 @@ mod tests {
     fn genesis_state(reserve_a: u64, reserve_b: u64, generation: u64) -> VaultStateLeaf {
         VaultStateLeaf {
             owner_genesis: G,
-            owner_device_id: DEV,
+            owner_device_id: dev(),
             create_position: P_POS,
             market_policy: market().2,
             fee_policy: d(0x32),
@@ -1473,7 +1475,7 @@ mod tests {
         let state = genesis_state(1_000, 2_000, 0);
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
-            owner_device_id: DEV,
+            owner_device_id: dev(),
             create_position: P_POS,
             state: state.clone(),
         };
@@ -1497,7 +1499,7 @@ mod tests {
             derive::vault_state_key(&vault_id),
             derive::vault_state_leaf_value(&preimage.state).unwrap(),
         );
-        with_a_relationship.insert(derive::relationship_key(&G, &DEV, &vault_id), d(0x5B));
+        with_a_relationship.insert(derive::relationship_key(&G, &dev(), &vault_id), d(0x5B));
         assert_ne!(creation.genesis_root, with_a_relationship.root());
     }
 
@@ -1515,8 +1517,8 @@ mod tests {
         );
         assert_eq!(state.encode().unwrap(), leaf.encode());
         assert_eq!(
-            state.leaf_key(&G, &DEV),
-            derive::relationship_key(&G, &DEV, &d(0xC1))
+            state.leaf_key(&G, &dev()),
+            derive::relationship_key(&G, &dev(), &d(0xC1))
         );
         // It carries no amount, so it can never be read as a credit needing a
         // funding source.
@@ -1536,14 +1538,14 @@ mod tests {
         assert_eq!(state.class(), crate::ccb::class::SOFI_VAULT_CREATION);
         assert_eq!(state.encode().unwrap(), record.encode());
         assert_eq!(
-            state.leaf_key(&G, &DEV),
-            derive::vault_creation_key(&G, &DEV, &d(0xC1))
+            state.leaf_key(&G, &dev()),
+            derive::vault_creation_key(&G, &dev(), &d(0xC1))
         );
         // NOT the storage locator: an economic address and a storage
         // coordinate are different namespaces, and one derivation serving both
         // is how they collide.
         assert_ne!(
-            state.leaf_key(&G, &DEV),
+            state.leaf_key(&G, &dev()),
             derive::vault_genesis_locator(&d(0xC1))
         );
         assert_eq!(state.credit_amount(), None);
@@ -1682,7 +1684,7 @@ mod tests {
         let f = fulfillment(&p);
         let credits = trader_credits(&fx.preimage, &fx.evidence).unwrap();
         let facts = established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized);
-        let bare = DeviceState::new(G, DEV, vec![0x01; 32]);
+        let bare = DeviceState::new(G, dev(), vec![0x01; 32]);
         let previous_root = previous(*p.void_root());
         assert_eq!(
             advance_resolved(&previous_root, &p, &f, p.parent_claim_ref(), &facts, &bare),
@@ -1717,7 +1719,7 @@ mod tests {
         let facts = established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized);
 
         // A receiver that has adopted NOTHING.
-        let bare = DeviceState::new(G, DEV, vec![0x01; 32]);
+        let bare = DeviceState::new(G, dev(), vec![0x01; 32]);
         assert!(!bare.has_adopted(&credits[0]));
         assert_eq!(
             advance_resolved(
@@ -1861,7 +1863,7 @@ mod tests {
         );
 
         // A receiver that adopted the OUTPUT only — not the intermediate.
-        let receiver = DeviceState::new(G, DEV, vec![0x01; 32])
+        let receiver = DeviceState::new(G, dev(), vec![0x01; 32])
             .adopt_token(hops[1].token_out)
             .unwrap();
         assert!(!receiver.has_adopted(&intermediate));
@@ -1930,7 +1932,7 @@ pub(crate) mod genesis_acceptance {
     use super::*;
     use crate::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
     use crate::sofi::validation::fixtures::{
-        committed, token_policy_bytes_with, tokens, trader_keys, DEV, G, P_CREATE,
+        committed, token_policy_bytes_with, tokens, trader_keys, dev, G, P_CREATE,
     };
     use crate::sofi::wire::{VaultCreation, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED};
     use crate::types::operations::Operation;
@@ -1962,7 +1964,7 @@ pub(crate) mod genesis_acceptance {
         let release = ReleasePolicy::beta_owner_local_full_close();
         let state = VaultStateLeaf {
             owner_genesis: G,
-            owner_device_id: DEV,
+            owner_device_id: dev(),
             create_position: P_CREATE,
             market_policy: addr(crate::ccb::class::MARKET_POLICY, &market_bytes),
             fee_policy: addr(crate::ccb::class::FEE_POLICY, &fee.encode()),
@@ -1982,7 +1984,7 @@ pub(crate) mod genesis_acceptance {
     fn creation_of(state: VaultStateLeaf, market_bytes: Vec<u8>, pair: (D32, D32)) -> Creation {
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
-            owner_device_id: DEV,
+            owner_device_id: dev(),
             create_position: P_CREATE,
             state,
         };
@@ -2024,7 +2026,7 @@ pub(crate) mod genesis_acceptance {
             &c.preimage_bytes,
             &OwnerCreation {
                 genesis: &G,
-                device_id: &DEV,
+                device_id: &dev(),
                 position,
                 operation: &c.operation,
             },
