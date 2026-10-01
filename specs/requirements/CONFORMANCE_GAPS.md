@@ -1986,6 +1986,41 @@ Mutation controls, run on 2026-10-01 and restored byte for byte, each with a nam
 - main's sequential `committed_at` and `read_cell`: 1 of 33 in flight;
 - only the per-mirror reads sequential again: 18 of 33.
 
+### 6.58 One trade walks each vault owner's lineage once; the route's steps are logged (`fix/sofi-trade-shared-geneses-and-route-reads`, 2026-10-01)
+
+**Found on the rig retest (fleet on c74ad8dc1, APK = main c74ad8dc1).**
+- A quote took 41 s (1.5–2.5 min before §6.56).
+- A 2-leg split trade (120 ERA → 856.95 RIGT, realized at position 7) took 271 s, against 13 m 50 s on the old fleet. Of that:
+  - **Three rounds of owner walks**, 37–52 s each. Each round walked both vault owners' lineages from activation (DSM Amendment A8 log lines). One ran for the trade's plan at the heads, one for its completion, one for its settle: each verifier context started with an empty memo.
+  - **106 s with no log line**, the cell reads of §6.57.
+
+**The decision (owner, 2026-10-01).** Key the memo "on the vault id plus a hash of the exact genesis bytes", so that the "cache verdict is bound to the exact genesis evidence, not just the ID". Reuse it through the whole trade: "Local position bumps shouldn't flush it." The owner's conditions, relayed by STORAGE the same day:
+- one operation's lifetime;
+- a verified result only, never an unavailable or partial one;
+- a mutation test showing that changed evidence forces a fresh verification.
+
+**The change.**
+- A verdict is kept under the vault id and the immutable address of the exact genesis bytes (`DSM/sofi/vault-genesis-object/v1`). Acceptance requires those bytes to equal what the owner's creation carried.
+- The genesis locator is read on every call. Only the walk of the owner's lineage that bound those bytes is reused, and only for those bytes. A vault id fixes the owner and `p_create`, so the provenance cannot vary under it.
+- One memo per operation: quote, vault list, trade, close, resolve. It is shared by every context the operation builds (`VerifierContext::sharing`); a new operation starts empty. The trade's own setups and pending position do not reset it.
+- Step boundaries are logged at info:
+  - a route read's values, closes, mirror syncs and committed state;
+  - a route write's leader and seats;
+  - a trade's setup, heads, draft, completion and settle.
+
+  Nothing reads a clock (`ci/no_clock_and_no_json.sh` passes). The log's own timestamps time each step.
+
+**Not changed.** Whether a walk should record a frontier for the vault owner, so a later trade does not walk from activation at all. That is DSM Amendment A8 territory and the owner's question.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-SOFI-0353 | Met | Met | One operation walks each vault owner's lineage once, for the exact genesis bytes. |
+
+Mutation controls, run on 2026-10-01 and restored byte for byte, each with a named test red:
+- The verdict keyed by the vault id alone: `a_genesis_verdict_is_reused_only_for_the_bytes_it_bound` red. One changed byte found the cached verdict (`Some`) against `None`.
+- No verdict stored: `an_operations_verifiers_share_the_geneses_it_accepted` red, with `(2, 2)` walks and reads against `(1, 2)`.
+- Each context given a fresh memo, on the context-level form of the sharing test: red ("a later context of the same operation stands on what it accepted"). That form was replaced by the counted one when the locator became a read on every call.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -2636,7 +2671,7 @@ Mutation controls, run on 2026-10-01 and restored byte for byte, each with a nam
 | MR-SOFI-0350 | Met | `dsm::sofi::derive::vault_token_locator`; `dsm::sofi::publication::Publication::locators`; `dsm_sdk::sdk::sofi_flow::create_vault` | `dsm::sofi::publication::tests::vault_objects_land_where_the_verifier_looks`; `dsm_sdk::handlers::node_e2e_tests::discovery_passes_over_what_is_not_a_vault_of_the_token`; `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer` | SoFi Amendment S16 (§6.53). The genesis publication carries the market policy its state commits and is indexed under the genesis locator and under `vault_token_locator(t)` for each token of the pair; a market that is not the committed one indexes nothing (`SofiWireError::MarketNotCommitted`). |
 | MR-SOFI-0351 | Met | `dsm::sofi::resolve::Verifier::vaults_of_token`; `dsm_sdk::sdk::sofi_reads::LiveSofiReads` (its token candidate scan) | `dsm_sdk::handlers::node_e2e_tests::discovery_passes_over_what_is_not_a_vault_of_the_token` | SoFi Amendment S16 (§6.53). Every candidate under the locator goes through `vault_genesis` (bound to the owner's validated creation) and is kept only when the accepted market pairs the token. On the nodes, junk bytes, a genesis naming an owner position where no vault was created, and a real vault of another pair appended under ERA's locator are all passed over. |
 | MR-SOFI-0352 | Met | `dsm::sofi::resolve::Verifier::vaults_of_token`; `dsm_sdk::sdk::sofi_flow::find_route` | `dsm_sdk::handlers::node_e2e_tests::discovery_passes_over_what_is_not_a_vault_of_the_token`; `dsm_sdk::handlers::node_e2e_tests::a_route_search_that_cannot_see_its_vaults_says_so` | SoFi Amendment S16 (§6.53). A genesis naming an owner position not yet reached, a read that is not made, or a head not established leaves the discovery `Partial`; the vaults the reads established are still found and priced. |
-| MR-SOFI-0353 | Met | `dsm_sdk::sdk::sofi_flow::find_route`; `dsm_sdk::sdk::sofi_flow::vaults_of`; `dsm_sdk::handlers::sofi_routes`; `dsm::sofi::resolve::Verifier::vault_genesis` | `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer`; `dsm_sdk::handlers::node_e2e_tests::a_route_search_that_cannot_see_its_vaults_says_so`; `dsm_sdk::handlers::node_e2e_tests::a_request_reads_each_vaults_genesis_once` | SoFi Amendment S16 (§6.53). The search reads the two tokens' indexes, not the trader's relationships; B, set up with nothing, is quoted ERA→TKN→TKB and ERA→TKN, and its history records no setup until it trades. `SofiFindRouteResponse.search` says whether the discovery was complete. A request reads each vault's genesis once (§6.56). |
+| MR-SOFI-0353 | Met | `dsm_sdk::sdk::sofi_flow::find_route`; `dsm_sdk::sdk::sofi_flow::vaults_of`; `dsm_sdk::handlers::sofi_routes`; `dsm::sofi::resolve::Verifier::vault_genesis`; `dsm_sdk::sdk::sofi_reads::VerifierContext::sharing` | `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer`; `dsm_sdk::handlers::node_e2e_tests::a_route_search_that_cannot_see_its_vaults_says_so`; `dsm_sdk::handlers::node_e2e_tests::a_request_reads_each_vaults_genesis_once`; `dsm::sofi::resolve::tests::a_genesis_verdict_is_reused_only_for_the_bytes_it_bound`; `dsm_sdk::handlers::node_e2e_tests::an_operations_verifiers_share_the_geneses_it_accepted` | SoFi Amendment S16 (§6.53). The search reads the two tokens' indexes, not the trader's relationships; B, set up with nothing, is quoted ERA→TKN→TKB and ERA→TKN, and its history records no setup until it trades. `SofiFindRouteResponse.search` says whether the discovery was complete. A request reads each vault's genesis once (§6.56). One operation walks each vault owner's lineage once, for the exact genesis bytes (§6.58). |
 | MR-SOFI-0354 | Met | `dsm_sdk::sdk::sofi_flow::set_up_with`; `dsm_sdk::sdk::sofi_flow::check_route`; `dsm_sdk::sdk::sofi_flow::trade`; `dsm_sdk::sdk::sofi_flow::close` | `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer`; `dsm_sdk::handlers::node_e2e_tests::a_realized_trade_shows_in_balances_and_history_at_once`; `dsm_sdk::handlers::node_e2e_tests::one_order_fills_through_two_vaults_of_the_same_pair` | SoFi Amendment S16 (§6.53). A route through two vaults B has no setup with admits two setups, then the route; the next trade through one of them admits none; the owner's first close admits its own. The route is priced at the walked heads before any setup is admitted for it. |
 | MR-SOFI-0355 | Met | `dsm_sdk::sdk::sofi_flow::owned_vaults`; `dsm::sofi::resolve::LocalLeaves::vault_creations`; `dsm_sdk::handlers::sofi_routes` | `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer`; `dsm_sdk::handlers::node_e2e_tests::one_order_fills_through_two_vaults_of_the_same_pair` | SoFi Amendment S16 (§6.53). `sofi.vaults` reads the VaultCreation leaves of the device's validated root and walks each vault to its head: the reserves, fee, generation and status the owner sees are the head's, after other traders' trades and the owner's close. |
 | MR-SOFI-0356 | Met | `dsm::sofi::resolve::Verifier::parent_for`; `dsm::sofi::resolve::parent_named`; `dsm::sofi::resolve::Verifier::chain_until`; `dsm::economic::peer_lineage::peer_root_at`; `dsm_sdk::sdk::sofi_reads::LiveSofiReads` (its trader root read) | `dsm::sofi::resolve::tests::only_the_position_and_fulfillment_p_names_resolve_its_parent`; `dsm::economic::peer_lineage::tests::a_frontier_recorded_at_the_position_is_its_root_and_nothing_is_read`; `dsm::economic::peer_lineage::tests::the_activation_root_names_no_parent`; `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer`; `dsm_sdk::handlers::node_e2e_tests::one_order_fills_through_two_vaults_of_the_same_pair` | SoFi Amendment S16 (§6.53). A walk meeting another trader's exercise whose P names a conditional parent resolves it through `peer_root_at` (the frontier-relative segment, the position itself resolved by S15); the parent counts only as the position and fulfillment P names. Resolving a position bounds each vault's chain at the parent its leg names (`chain_until`). Known cost: §6.53. |
