@@ -6,17 +6,13 @@ import type { AppState } from '../types/app';
 import logger from '../utils/logger';
 import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 import { addDsmEventListener } from '../dsm/WebViewBridge';
+import { recoveryPhraseStore } from '../runtime/recoveryPhraseStore';
 
 type Args = {
   appState: AppState;
   setAppState: (s: AppState) => void;
   setError: (s: string | null) => void;
   setSecuringProgress: (p: number) => void;
-  /**
-   * Called with the freshly generated BIP39 mnemonic (Genesis v2) so the UI can show it for
-   * backup. The mnemonic is the ONLY recovery path; the host never persists it.
-   */
-  onMnemonicGenerated?: (mnemonic: string) => void;
 };
 
 export function useGenesisFlow({
@@ -24,9 +20,9 @@ export function useGenesisFlow({
   setAppState,
   setError,
   setSecuringProgress,
-  onMnemonicGenerated,
 }: Args) {
   const genesisInFlight = useRef(false);
+  const phraseInFlight = useRef<Promise<void> | null>(null);
   const interruptedMessage = 'Device securing was interrupted. Do not leave the screen until finished. Initialization was wiped and must be started again so the device key material is not corrupted.';
 
   // Abort device-key initialisation if the user navigates away during securing.
@@ -86,27 +82,54 @@ export function useGenesisFlow({
     return unsub;
   }, [interruptedMessage, setAppState, setError, setSecuringProgress]);
 
-  const handleGenerateGenesis = useCallback(async () => {
-    if (genesisInFlight.current) {
+  // Canonical Genesis v2 (whitepaper §2.5): the BIP39 mnemonic is the sole root — no random
+  // genesis entropy, no silicon — and the ONLY way to recover the wallet. INITIALIZE generates
+  // it and puts it on the screen for the user to write down; the wallet is created from it only
+  // once the user has picked the checked words back out (createWalletFromPhrase).
+  const handleGenerateGenesis = useCallback((): Promise<void> => {
+    if (genesisInFlight.current || phraseInFlight.current) {
       logger.debug('FRONTEND: handleGenerateGenesis already running; skipping');
+      return phraseInFlight.current ?? Promise.resolve();
+    }
+    logger.info('FRONTEND: Generating the recovery phrase for a new wallet');
+    const run = (async () => {
+      try {
+        const { generateMnemonic } = await import('../dsm/WebViewBridge');
+        const mnemonic = await generateMnemonic();
+        if (!mnemonic || mnemonic.trim().split(/\s+/).length < 12) {
+          throw new Error('Genesis: failed to generate a valid recovery mnemonic');
+        }
+        recoveryPhraseStore.begin(mnemonic);
+        setAppState('backup_phrase');
+      } catch (err) {
+        logger.error('FRONTEND: Recovery phrase generation failed', err);
+        setError(err instanceof Error ? err.message : 'Recovery phrase generation failed');
+        setAppState('error');
+      } finally {
+        phraseInFlight.current = null;
+      }
+    })();
+    phraseInFlight.current = run;
+    return run;
+  }, [setAppState, setError]);
+
+  /** Leave the backup without creating a wallet; the phrase is forgotten. */
+  const cancelPhraseBackup = useCallback(() => {
+    recoveryPhraseStore.clear();
+    setAppState('needs_genesis');
+  }, [setAppState]);
+
+  /** Create the wallet from the phrase the user wrote down and checked (answerPhraseCheck). */
+  const createWalletFromPhrase = useCallback(async () => {
+    if (genesisInFlight.current) {
+      logger.debug('FRONTEND: createWalletFromPhrase already running; skipping');
       return;
     }
-    logger.info('FRONTEND: handleGenerateGenesis called');
+    const mnemonic = recoveryPhraseStore.mnemonic();
+    logger.info('FRONTEND: Creating the wallet from the checked recovery phrase');
     try {
       genesisInFlight.current = true;
-      logger.info('FRONTEND: Triggering canonical mnemonic-rooted Genesis v2');
-
-      const { createGenesisViaRouter, generateMnemonic } = await import('../dsm/WebViewBridge');
-
-      // Canonical Genesis v2 (whitepaper §2.5): the BIP39 mnemonic is the sole root — no random
-      // genesis entropy, no silicon. Generate it, surface it for the user to back up, then create
-      // the wallet from it. The mnemonic is the ONLY way to recover the wallet.
-      const mnemonic = await generateMnemonic();
-      if (!mnemonic || mnemonic.trim().split(/\s+/).length < 12) {
-        throw new Error('Genesis: failed to generate a valid recovery mnemonic');
-      }
-      onMnemonicGenerated?.(mnemonic);
-
+      const { createGenesisViaRouter } = await import('../dsm/WebViewBridge');
       const envelopeBytes = await createGenesisViaRouter(mnemonic);
       logger.debug('FRONTEND: createGenesisViaRouter returned bytes', envelopeBytes?.length);
 
@@ -141,8 +164,17 @@ export function useGenesisFlow({
       }
     } finally {
       genesisInFlight.current = false;
+      recoveryPhraseStore.clear();
     }
-  }, [setAppState, setError, setSecuringProgress, onMnemonicGenerated]);
+  }, [setAppState, setError, setSecuringProgress]);
 
-  return { handleGenerateGenesis };
+  /** A word picked for the current check; the last match creates the wallet. */
+  const answerPhraseCheck = useCallback((choice: string): Promise<void> => {
+    if (recoveryPhraseStore.answer(choice) === 'complete') {
+      return createWalletFromPhrase();
+    }
+    return Promise.resolve();
+  }, [createWalletFromPhrase]);
+
+  return { handleGenerateGenesis, cancelPhraseBackup, answerPhraseCheck };
 }

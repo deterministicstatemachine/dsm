@@ -42,8 +42,14 @@ export function useNativeSessionBridge({ themes, setThemeIndex }: Args): NativeS
     // Any transient `needs_genesis` (or `runtime_loading`/`loading`) reported
     // during the finalize race window is swallowed so the INITIALIZE screen
     // never flashes between the progress bar and the home screen.
+    //
+    // `backup_phrase` is held the same way: the session reports `needs_genesis`
+    // the whole time the user is writing the recovery phrase down, because no
+    // wallet exists until the phrase is checked. Its exits are the user's own
+    // (cancel → needs_genesis) or genesis's (securing_device, wallet_ready,
+    // error).
     if (
-      currentAppState === 'securing_device' &&
+      (currentAppState === 'securing_device' || currentAppState === 'backup_phrase') &&
       (nextAppState === 'needs_genesis' ||
         nextAppState === 'runtime_loading' ||
         nextAppState === 'loading')
