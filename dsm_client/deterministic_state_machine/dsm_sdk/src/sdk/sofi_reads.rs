@@ -8,12 +8,13 @@
 //! runs on the SDK's multi-thread runtime from the verifier's synchronous
 //! call (`block_in_place`), which is the shape the peer walk already has.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
 use dsm::ccb::StorageSetMembers;
-use dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR;
+use dsm::common::domain_tags::{TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR};
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
+use dsm::economic::peer_lineage::peer_root_at;
 use dsm::economic::provenance::{PeerLineageFailure, ValidatedPeerTransition};
 use dsm::route_chain::{CellEvidence, CompletionProof, RoutedCell};
 use dsm::sofi::derive;
@@ -25,11 +26,15 @@ use dsm::sofi::resolve::{
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
-use dsm::sofi::wire::{TraderFulfillmentBody, TraderPrecommitBody, VaultGenesisPreimage};
+use dsm::sofi::wire::{
+    ParentClaimRef, TraderFulfillmentBody, TraderPrecommitBody, VaultGenesisPreimage,
+};
 use dsm::types::error::DsmError;
 
 use crate::sdk::economic_admission_flow::committed_network_id;
-use crate::sdk::economic_registers::{anchored_policy_bytes, resolve_peer, LiveRegisterResolver};
+use crate::sdk::economic_registers::{
+    anchored_policy_bytes, resolve_peer, LiveRegisterResolver, StoredFrontiers,
+};
 use crate::sdk::route_seats::{keep_completion, read_cell, NodeSeats};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes, LOCATOR_BUDGET};
 use crate::sdk::storage_io::{read_stored_bytes, resolve_locator_all};
@@ -87,6 +92,11 @@ pub struct LiveSofiReads<'a> {
     /// This device's `(genesis, device_id)` when it verifies as a trader:
     /// the one identity its own admitted store answers for.
     own: Option<(D32, D32)>,
+    /// The roots frontier-relative verification established for other
+    /// traders' positions, by `(genesis, device_id, position)`, kept for this
+    /// context's life: they are verified, so a walk that meets one trader's
+    /// exercises again does not walk that lineage again.
+    roots: std::sync::Mutex<BTreeMap<(D32, D32, u64), (ValidatedEconomicRoot, ParentClaimRef)>>,
 }
 
 impl<'a> LiveSofiReads<'a> {
@@ -96,6 +106,7 @@ impl<'a> LiveSofiReads<'a> {
             runtime: tokio::runtime::Handle::current(),
             network: committed_network_id()?,
             own,
+            roots: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -149,6 +160,14 @@ impl<'a> LiveSofiReads<'a> {
     }
 }
 
+/// A vault genesis preimage recognized from its bytes, with those bytes:
+/// bytes that do not decode as one are no candidate under either of the
+/// indexes a genesis is published under.
+fn recognize_genesis(bytes: &[u8]) -> Option<(VaultGenesisPreimage, Vec<u8>)> {
+    let preimage = VaultGenesisPreimage::decode(bytes).ok()?;
+    Some((preimage, bytes.to_vec()))
+}
+
 impl SofiReads for LiveSofiReads<'_> {
     fn cell(&self, cell: &RoutedCell) -> Result<CellEvidence, ReadFailure> {
         let seats = NodeSeats::new(self.set).map_err(|e| ReadFailure(format!("seats: {e}")))?;
@@ -192,11 +211,30 @@ impl SofiReads for LiveSofiReads<'_> {
                 &locator,
                 LOCATOR_BUDGET,
                 |bytes| {
-                    let preimage = VaultGenesisPreimage::decode(bytes).ok()?;
-                    Some((
-                        derive::vault_genesis_locator(&preimage.vault_id()),
-                        (preimage, bytes.to_vec()),
-                    ))
+                    recognize_genesis(bytes).map(|(preimage, bytes)| {
+                        (
+                            derive::vault_genesis_locator(&preimage.vault_id()),
+                            (preimage, bytes),
+                        )
+                    })
+                },
+            ),
+        )
+    }
+
+    fn vault_token_candidates(&self, token: &D32) -> Result<Discovered<D32>, ReadFailure> {
+        let locator = derive::vault_token_locator(token);
+        self.read(
+            "vault token candidates",
+            resolve_locator_all(
+                self.set,
+                TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR.source_bytes(),
+                &locator,
+                LOCATOR_BUDGET,
+                // Every genesis preimage under the locator is a candidate;
+                // Core accepts it and checks its market (Amendment S16).
+                |bytes| {
+                    recognize_genesis(bytes).map(|(preimage, ..)| (locator, preimage.vault_id()))
                 },
             ),
         )
@@ -220,6 +258,42 @@ impl SofiReads for LiveSofiReads<'_> {
         Ok(sofi_vault_head::leaves_at(vault_id, root, keys)
             .map_err(|e| ReadFailure(format!("vault head: {e}")))?
             .map(|(.., leaves)| leaves))
+    }
+
+    fn trader_root_at(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure> {
+        let key = (*genesis, *device_id, position);
+        let cache = || {
+            self.roots
+                .lock()
+                .map_err(|e| PeerLineageFailure::Incomplete(format!("the root cache: {e}")))
+        };
+        if let Some(known) = cache()?.get(&key) {
+            return Ok(*known);
+        }
+        let members = as_ccb_members(self.set)
+            .map_err(|e| PeerLineageFailure::Incomplete(format!("the storage set: {e}")))?;
+        let conditional = PeerPositionResolver {
+            reads: self,
+            members: &members,
+            set_id: self.set.id(),
+            network_id: &self.network,
+        };
+        let known = peer_root_at(
+            &self.peer_resolver(),
+            &self.network,
+            genesis,
+            device_id,
+            position,
+            &StoredFrontiers,
+            &conditional,
+        )?;
+        cache()?.insert(key, known);
+        Ok(known)
     }
 
     fn accepted_claim_at(

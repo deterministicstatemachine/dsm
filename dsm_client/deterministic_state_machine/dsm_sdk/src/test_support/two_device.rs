@@ -191,17 +191,24 @@ impl TestDevice {
         dsm::core::bilateral_transaction_manager::compute_smt_key(&self.device_id, &peer.device_id)
     }
 
-    /// Fund with economic ancestry: `amount / 100` faucet claims (the fixed
-    /// payout). Amounts must be multiples of 100 — a fixture asking for
-    /// anything else is asking for value the protocol cannot issue.
-    pub async fn fund_admitted(&self, amount: u64) {
+    /// Fund with economic ancestry: `whole_era` ERA, in faucet claims of the
+    /// fixed payout (100.00 ERA each). Amounts must be multiples of the
+    /// payout — a fixture asking for anything else is asking for value the
+    /// protocol cannot issue. Balances read back in base units.
+    pub async fn fund_admitted(&self, whole_era: u64) {
+        let scale = 10u64.pow(
+            dsm::core::token::era_policy::era_policy()
+                .expect("ERA's policy")
+                .decimals,
+        );
+        let payout = dsm::economic::native_reserve::ERA_FAUCET_PAYOUT / scale;
         assert!(
-            amount.is_multiple_of(100),
-            "fund_admitted: amounts are multiples of the 100-ERA faucet payout"
+            whole_era.is_multiple_of(payout),
+            "fund_admitted: amounts are multiples of the {payout}-ERA faucet payout"
         );
         self.enter();
         let core = self.router().core_sdk.clone();
-        for claim in 0..(amount / 100) {
+        for claim in 0..(whole_era / payout) {
             crate::sdk::faucet_claim_flow::claim_era_faucet(&core, economic_fixtures::NETWORK)
                 .await
                 .unwrap_or_else(|e| panic!("funding claim {claim}: {e}"));

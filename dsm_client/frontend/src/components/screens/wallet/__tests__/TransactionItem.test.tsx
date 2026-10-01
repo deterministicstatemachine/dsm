@@ -60,6 +60,30 @@ describe('TransactionItem renders the row Rust reported', () => {
     expect(container.querySelector('.bilateral-badge')).toBeNull();
   });
 
+  test('a SoFi event shows every token it moved, each with its own sign, and its vault', () => {
+    const tx = buildTx({
+      txType: 'sofi_trade',
+      type: undefined,
+      amount: BigInt(0),
+      displayAmount: '',
+      tokenId: '',
+      recipient: 'RK10195E',
+      moves: [
+        { policyCommit: 'ERACOMMIT', tokenId: 'ERA', amount: BigInt(-50), displayAmount: '-50.00' },
+        { policyCommit: 'RIGTCOMMIT', tokenId: 'RIGT', amount: BigInt(332665), displayAmount: '3326.65' },
+      ],
+    });
+    const { container } = render(<TransactionItem tx={tx} expandedTxId={null} onToggle={() => {}} />);
+    expect(container.querySelector('.transaction-type')!.textContent).toBe('TRADE');
+    const lines = Array.from(container.querySelectorAll('.transaction-amount-line'));
+    expect(lines.map((l) => l.querySelector('.transaction-amount-value')!.textContent)).toEqual(['-50.00', '+3326.65']);
+    expect(lines.map((l) => l.querySelector('.transaction-amount-token')!.textContent)).toEqual(['ERA', 'RIGT']);
+    expect(lines[0].className).toContain('outgoing');
+    expect(lines[1].className).toContain('incoming');
+    expect(container.querySelector('.transaction-recipient-label')!.textContent).toBe('Vault');
+    expect(container.querySelector('.transaction-recipient-value')!.textContent).toBe('RK10195E');
+  });
+
   test('expanded view shows full (un-truncated) from/to/txhash', () => {
     const tx = buildTx();
     const { container } = render(

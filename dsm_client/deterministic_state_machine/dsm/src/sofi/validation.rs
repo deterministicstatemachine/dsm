@@ -82,6 +82,9 @@ pub enum Invalid {
     /// A hop's input is not the previous hop's output, or the route's ends are
     /// not the intent's.
     RouteDoesNotChain { hop: usize },
+    /// A split route's hops do not sum to the intent's input and output
+    /// (SoFi Amendment S19).
+    SplitDoesNotSum,
     /// A token is not one of its vault's pair.
     TokenIsNotInTheVaultPair { hop: usize },
     /// The operation crosses a vault pinned to another storage set.
@@ -1774,6 +1777,119 @@ fn check_vault_write_set(
     )
 }
 
+/// What one hop moves: `(token_in, amount_in, token_out, amount_out)`.
+pub type HopMovement = (D32, u64, D32, u64);
+
+/// A route's endpoints from what its hops move (Amendment S19), in the same
+/// shape: `(token_in, amount_in, token_out, exact_out)`. A split — two or
+/// more hops that all trade the first hop's pair — sums its hops' inputs and
+/// outputs, in checked arithmetic; any other route is a chain, from its first
+/// hop's input to its last hop's output. The producer states the intent this
+/// gives, and RouteValidation checks the hops against it.
+pub fn route_endpoints(hops: &[HopMovement]) -> Result<HopMovement, Invalid> {
+    let (Some(first), Some(last)) = (hops.first(), hops.last()) else {
+        return Err(Invalid::RouteDoesNotChain { hop: 0 });
+    };
+    let split = hops.len() >= 2 && hops.iter().all(|h| h.0 == first.0 && h.2 == first.2);
+    if !split {
+        return Ok((first.0, first.1, last.2, last.3));
+    }
+    let mut amount_in = 0u64;
+    let mut exact_out = 0u64;
+    for hop in hops {
+        amount_in = amount_in
+            .checked_add(hop.1)
+            .ok_or(Invalid::CheckedArithmetic {
+                what: "a split's input",
+            })?;
+        exact_out = exact_out
+            .checked_add(hop.3)
+            .ok_or(Invalid::CheckedArithmetic {
+                what: "a split's output",
+            })?;
+    }
+    Ok((first.0, amount_in, first.2, exact_out))
+}
+
+/// [`route_endpoints`] of a Swap route's hops.
+pub fn swap_endpoints(hops: &[SwapHop]) -> Result<HopMovement, Invalid> {
+    let movements: Vec<HopMovement> = hops
+        .iter()
+        .map(|h| (h.token_in, h.amount_in, h.token_out, h.amount_out))
+        .collect();
+    route_endpoints(&movements)
+}
+
+/// The two shapes of a Swap route (Amendment S19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteShape {
+    /// Hop j's output is hop j + 1's input (§19.5).
+    Chain,
+    /// Every hop trades the intent's one pair, through distinct vaults.
+    Split,
+}
+
+/// Which shape `hops` take: a split when there are two or more and every one
+/// trades the intent's pair, a chain otherwise. `None` for no hops.
+fn route_shape(intent: &SwapIntent, hops: &[SwapHop]) -> Option<RouteShape> {
+    if hops.is_empty() {
+        return None;
+    }
+    let pair = |hop: &SwapHop| hop.token_in == intent.token_in && hop.token_out == intent.token_out;
+    if hops.len() >= 2 && hops.iter().all(pair) {
+        Some(RouteShape::Split)
+    } else {
+        Some(RouteShape::Chain)
+    }
+}
+
+/// A chain's ends are the intent's, and each hop feeds the next exactly.
+fn chain_holds(intent: &SwapIntent, hops: &[SwapHop]) -> Vec<Result<(), Refusal>> {
+    let mut checks = Vec::new();
+    if let (Some(first), Some(last)) = (hops.first(), hops.last()) {
+        checks.push(require(
+            first.token_in == intent.token_in && first.amount_in == intent.amount_in,
+            Invalid::RouteDoesNotChain { hop: 0 },
+        ));
+        checks.push(require(
+            last.token_out == intent.token_out && last.amount_out == intent.exact_out,
+            Invalid::RouteDoesNotChain {
+                hop: hops.len() - 1,
+            },
+        ));
+    }
+    for (i, pair) in hops.windows(2).enumerate() {
+        checks.push(require(
+            pair[0].token_out == pair[1].token_in && pair[0].amount_out == pair[1].amount_in,
+            Invalid::RouteDoesNotChain { hop: i + 1 },
+        ));
+    }
+    checks
+}
+
+/// A split's hops sum to the intent's input and output, in checked
+/// arithmetic (Amendment S19).
+fn split_sums(intent: &SwapIntent, hops: &[SwapHop]) -> Result<(), Refusal> {
+    let mut amount_in = 0u64;
+    let mut amount_out = 0u64;
+    for hop in hops {
+        amount_in = amount_in
+            .checked_add(hop.amount_in)
+            .ok_or(Refusal::Invalid(Invalid::CheckedArithmetic {
+                what: "a split's input",
+            }))?;
+        amount_out = amount_out
+            .checked_add(hop.amount_out)
+            .ok_or(Refusal::Invalid(Invalid::CheckedArithmetic {
+                what: "a split's output",
+            }))?;
+    }
+    require(
+        amount_in == intent.amount_in && amount_out == intent.exact_out,
+        Invalid::SplitDoesNotSum,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_swap(
     verdict: &mut Verdict,
@@ -1784,31 +1900,24 @@ fn validate_swap(
     hops: &[SwapHop],
 ) {
     let e = *precommit.external_commitment();
-    // The route's ends are the intent's, and each hop feeds the next exactly.
-    // None of this needs evidence, so it is decided whatever the verifier holds.
+    // The route's ends are the intent's, and its hops either chain or split
+    // (Amendment S19). None of this needs evidence, so it is decided whatever
+    // the verifier holds.
     verdict.note(require(
         intent.token_in != intent.token_out,
         Invalid::RouteDoesNotChain { hop: 0 },
     ));
-    let (Some(first), Some(last)) = (hops.first(), hops.last()) else {
-        verdict.note(Err(Refusal::Invalid(Invalid::RouteDoesNotChain { hop: 0 })));
-        return;
-    };
-    verdict.note(require(
-        first.token_in == intent.token_in && first.amount_in == intent.amount_in,
-        Invalid::RouteDoesNotChain { hop: 0 },
-    ));
-    verdict.note(require(
-        last.token_out == intent.token_out && last.amount_out == intent.exact_out,
-        Invalid::RouteDoesNotChain {
-            hop: hops.len() - 1,
-        },
-    ));
-    for (i, pair) in hops.windows(2).enumerate() {
-        verdict.note(require(
-            pair[0].token_out == pair[1].token_in && pair[0].amount_out == pair[1].amount_in,
-            Invalid::RouteDoesNotChain { hop: i + 1 },
-        ));
+    match route_shape(&intent, hops) {
+        Some(RouteShape::Split) => verdict.note(split_sums(&intent, hops)),
+        Some(RouteShape::Chain) => {
+            for check in chain_holds(&intent, hops) {
+                verdict.note(check);
+            }
+        }
+        None => {
+            verdict.note(Err(Refusal::Invalid(Invalid::RouteDoesNotChain { hop: 0 })));
+            return;
+        }
     }
 
     // P's legs are exactly the operation's DLV parents, with the same roots.
@@ -3059,6 +3168,79 @@ mod tests {
         assert_eq!(
             route_invalid_in_hand(&precommit, &bent),
             Some(Invalid::RouteDoesNotChain { hop: 1 })
+        );
+    }
+
+    /// SoFi Amendment S19: a route's endpoints by Core's one rule. A chain
+    /// runs from its first hop's input to its last hop's output; a split
+    /// trades one pair through every hop and sums them; the sums are
+    /// checked.
+    #[test]
+    fn a_route_chains_or_splits_and_its_endpoints_follow() {
+        let (a, b, c) = ([0x0A; 32], [0x0B; 32], [0x0C; 32]);
+        assert_eq!(
+            route_endpoints(&[(a, 10, b, 90), (b, 90, c, 80)]),
+            Ok((a, 10, c, 80)),
+            "a chain"
+        );
+        assert_eq!(
+            route_endpoints(&[(a, 30, c, 250), (a, 30, c, 260)]),
+            Ok((a, 60, c, 510)),
+            "a split sums its legs"
+        );
+        assert_eq!(
+            route_endpoints(&[(a, u64::MAX, c, 1), (a, 1, c, 1)]),
+            Err(Invalid::CheckedArithmetic {
+                what: "a split's input",
+            })
+        );
+        assert_eq!(
+            route_endpoints(&[]),
+            Err(Invalid::RouteDoesNotChain { hop: 0 })
+        );
+    }
+
+    /// The fixture's two hops recut as a split (Amendment S19): both trade the
+    /// intent's pair, A for C, their inputs and outputs summing to `sums`.
+    fn as_split(f: &Fixture, sums: impl FnOnce(u64, u64) -> (u64, u64)) -> SettlementPreimage {
+        with_swap(f, |hops, amount_in, exact_out| {
+            let (pair_in, pair_out) = (hops[0].token_in, hops[1].token_out);
+            hops[0].token_out = pair_out;
+            hops[1].token_in = pair_in;
+            let (total_in, total_out) = (
+                hops[0].amount_in + hops[1].amount_in,
+                hops[0].amount_out + hops[1].amount_out,
+            );
+            (*amount_in, *exact_out) = sums(total_in, total_out);
+        })
+    }
+
+    /// A split whose legs sum to the intent is no chain, and its shape
+    /// refutes nothing in hand.
+    #[test]
+    fn a_split_whose_legs_sum_to_the_intent_is_not_refuted_by_its_shape() {
+        let f = swap_fixture_n(2);
+        let split = as_split(&f, |total_in, total_out| (total_in, total_out));
+        let precommit = rebind(&f, &split);
+        let refuted = route_invalid_in_hand(&precommit, &split);
+        assert!(
+            !matches!(
+                refuted,
+                Some(Invalid::RouteDoesNotChain { .. } | Invalid::SplitDoesNotSum)
+            ),
+            "a split is a route: {refuted:?}"
+        );
+    }
+
+    /// A split whose legs do not sum to the intent is Invalid, decided in hand.
+    #[test]
+    fn a_split_that_does_not_sum_to_the_intent_is_invalid() {
+        let f = swap_fixture_n(2);
+        let short = as_split(&f, |total_in, total_out| (total_in, total_out + 1));
+        let precommit = rebind(&f, &short);
+        assert_eq!(
+            route_invalid_in_hand(&precommit, &short),
+            Some(Invalid::SplitDoesNotSum)
         );
     }
 

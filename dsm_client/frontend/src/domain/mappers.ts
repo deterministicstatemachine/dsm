@@ -91,7 +91,21 @@ const TX_TYPES: Record<number, DomainTxType> = {
   [TransactionType.TX_TYPE_ONLINE]: 'online',
   [TransactionType.TX_TYPE_DBTC_MINT]: 'dbtc_mint',
   [TransactionType.TX_TYPE_DBTC_BURN]: 'dbtc_burn',
+  [TransactionType.TX_TYPE_TOKEN_CREATE]: 'token_create',
+  [TransactionType.TX_TYPE_VAULT_CREATE]: 'vault_create',
+  [TransactionType.TX_TYPE_SOFI_SETUP]: 'sofi_setup',
+  [TransactionType.TX_TYPE_SOFI_TRADE]: 'sofi_trade',
+  [TransactionType.TX_TYPE_SOFI_CLOSE]: 'sofi_close',
 };
+
+/** The token and SoFi events: rows that name every token they moved. */
+const EVENT_TYPES: ReadonlySet<DomainTxType> = new Set<DomainTxType>([
+  'token_create',
+  'vault_create',
+  'sofi_setup',
+  'sofi_trade',
+  'sofi_close',
+]);
 
 function txBytes32(t: TransactionInfo, field: string, bytes: Uint8Array): string {
   if (!(bytes instanceof Uint8Array) || bytes.length !== 32) {
@@ -124,6 +138,27 @@ export function mapTransactions(list: TransactionInfo[]): DomainTransaction[] {
     const txType = TX_TYPES[t.txType];
     if (!txType) {
       throw new Error(`STRICT: transaction ${t.id || '(no id)'} has type ${t.txType}, which the wire does not name`);
+    }
+    if (EVENT_TYPES.has(txType)) {
+      return {
+        txId: txText(t, 'id', t.id),
+        txHash: txBytes32(t, 'tx hash', t.txHash),
+        txType,
+        amount: t.amountSigned,
+        displayAmount: t.displayAmount,
+        tokenId: t.tokenId,
+        recipient: txText(t, 'subject', t.recipient),
+        status: txText(t, 'status', t.status),
+        fromDeviceId: txBytes32(t, 'device id', t.fromDeviceId),
+        toDeviceId: txBytes32(t, 'device id', t.toDeviceId),
+        receiptVerified: t.receiptVerified,
+        moves: t.moves.map((m) => ({
+          policyCommit: txBytes32(t, 'moved token', m.policyCommit),
+          tokenId: txText(t, 'moved token id', m.tokenId),
+          amount: m.amountSigned,
+          displayAmount: txText(t, 'moved amount', m.displayAmount),
+        })),
+      };
     }
     return {
       txId: txText(t, 'id', t.id),

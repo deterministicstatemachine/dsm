@@ -117,6 +117,11 @@ pub const TAG_DSM_SOFI_VAULT_ID: TaggedHashDomain<'static> =
 /// indexed (Part II §11).
 pub const TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/vault-genesis-locator/v1");
+/// `H(tag ‖ t)` — the locator under which the genesis preimage of every
+/// vault whose market pairs token `t` (its policy commit) is indexed, so a
+/// vault is found by its tokens (SoFi Amendment S16).
+pub const TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-token-locator/v1");
 /// Immutable-store namespace of the EXACT `VaultGenesisPreimage` bytes
 /// (Part II §10): `addr = immutable_addr(tag, bytes)`; the reader recomputes
 /// it and `vault_id()` from the bytes.
@@ -204,6 +209,7 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_PREIMAGE_LOCATOR,
     TAG_DSM_SOFI_VAULT_ID,
     TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
+    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
     TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
     TAG_DSM_SOFI_SETUP_OBJECT,
     TAG_DSM_SOFI_PRECOMMIT_OBJECT,

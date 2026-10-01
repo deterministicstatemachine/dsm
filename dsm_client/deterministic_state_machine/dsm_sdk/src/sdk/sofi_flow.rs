@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use dsm::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
-use dsm::dlv::route_commit::constant_product_output_classified;
+use dsm::dlv::route_commit::{constant_product_output_classified, ConstantProductRefusal};
 use dsm::economic::keys::balance_key;
 use dsm::economic::lineage::{AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
@@ -26,7 +26,10 @@ use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::resolve::{Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
 use dsm::sofi::storage::Discovered;
-use dsm::sofi::validation::{close_vault_post, swap_vault_post, Evidence, EvidenceNeeds, Policies};
+use dsm::sofi::validation::{
+    close_vault_post, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds, HopMovement,
+    Policies,
+};
 use dsm::sofi::wire::{
     next_attempt, next_position, CoreEntry, DlvCore, SwapHop, TraderCore, VaultGenesisPreimage,
     VaultStateLeaf, VAULT_STATUS_ACTIVE,
@@ -35,6 +38,7 @@ use dsm::types::device_state::{BalanceDelta, BalanceDirection};
 use dsm::types::error::DsmError;
 
 use crate::sdk::core_sdk::CoreSDK;
+use crate::sdk::realized_records::{record_realized, Moved, Realized};
 use crate::sdk::economic_admission_flow::{
     admitted_self_loop_operation, committed_network_id, producer_tree_and_pre_state,
     validated_root_or_activate, BuiltOn,
@@ -91,17 +95,11 @@ pub struct VaultCreated {
     pub position: u64,
 }
 
-/// `sofi.setup` (§29).
+/// A setup with one vault (§29), admitted ahead of the first operation
+/// through it (Amendment S16).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetupIntent {
-    pub vault_id: D32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetUp {
-    /// ρ.
-    pub setup_ref: D32,
-    pub position: u64,
+struct SetupIntent {
+    vault_id: D32,
 }
 
 /// `sofi.findRoute` (§30): path search over walked heads.
@@ -110,6 +108,25 @@ pub struct FindRouteIntent {
     pub token_in_policy_commit: D32,
     pub token_out_policy_commit: D32,
     pub amount_in: u64,
+}
+
+/// What `sofi.findRoute` searched (Amendment S16): every vault the two token
+/// indexes name, or not every one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Search {
+    /// Every candidate vault, and the head of each, was established.
+    Complete,
+    /// A candidate vault, or its head, was not established: a better route
+    /// may run through it.
+    Partial,
+}
+
+/// The best route over the vaults the search established, and how complete
+/// the search was. An empty `hops` is no route among them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteFound {
+    pub hops: Vec<Hop>,
+    pub search: Search,
 }
 
 /// One hop of a proposed route, priced at the vault's walked head. Carries no
@@ -130,6 +147,8 @@ pub struct Hop {
 pub struct TradeIntent {
     pub vault_ids: Vec<D32>,
     pub token_in_policy_commit: D32,
+    /// The token the trader asks for: the route must give it.
+    pub token_out_policy_commit: D32,
     pub amount_in: u64,
     pub min_amount_out: u64,
 }
@@ -217,7 +236,8 @@ fn identity(core: &CoreSDK) -> Result<(D32, D32), DsmError> {
 /// §28: the owner's creation. The three policy objects and the genesis
 /// preimage are published and read back `Stored` first: a genesis nobody's
 /// creation carried is refused by `genesis_accepted`, so publishing first
-/// asserts nothing, and it means the vault is findable the moment it exists.
+/// asserts nothing, and it means the vault is findable — by its id and by
+/// each of its two tokens (Amendment S16) — the moment it exists.
 /// Then the creation runs through the Core transition, debiting both
 /// reserves as one write set.
 pub async fn create_vault(
@@ -229,12 +249,12 @@ pub async fn create_vault(
     let validated = validated_root_or_activate(core)?;
     let create_position = next_position(validated.economic_position()).map_err(refuse)?;
 
-    let market = MarketPolicy::beta_constant_product(
+    let pair = MarketPolicy::beta_constant_product(
         intent.token_a_policy_commit,
         intent.token_b_policy_commit,
     )
-    .map_err(refuse)?
-    .encode();
+    .map_err(refuse)?;
+    let market = pair.encode();
     let fee = FeePolicy::new(intent.fee_bps).map_err(refuse)?.encode();
     let release = ReleasePolicy::beta_owner_local_full_close().encode();
     let policies = [
@@ -275,7 +295,16 @@ pub async fn create_vault(
         state,
     };
     let produced = build_vault_create(&preimage, &market).map_err(refuse)?;
-    let published = publish(set, &Publication::VaultGenesis(&preimage)).await?;
+    // Indexed under its genesis locator and under each token of its pair, so
+    // any trader finds it by the tokens it trades (Amendment S16).
+    let published = publish(
+        set,
+        &Publication::VaultGenesis {
+            preimage: &preimage,
+            market: &pair,
+        },
+    )
+    .await?;
     require_stored("vault genesis", &published)?;
 
     let operation = produced
@@ -297,7 +326,7 @@ pub async fn create_vault(
     // The genesis names `create_position`, the successor of the predecessor
     // it was built on: the admission is refused before the advance unless
     // that is still the predecessor this device stands on.
-    let (.., admitted) = admitted_self_loop_operation(
+    let (outcome, admitted) = admitted_self_loop_operation(
         core,
         operation,
         &deltas,
@@ -307,8 +336,25 @@ pub async fn create_vault(
         Some(BuiltOn::of(&validated)),
     )
     .await?;
+    let vault_id = preimage.vault_id();
+    let moved: Vec<Moved> = deltas
+        .iter()
+        .map(|d| Moved {
+            policy_commit: d.policy_commit,
+            direction: d.direction,
+            amount: d.amount,
+        })
+        .collect();
+    record_realized(
+        &outcome.new_device_state,
+        Realized::VaultCreate,
+        &vault_id,
+        admitted.economic_position,
+        Some(&vault_id),
+        &moved,
+    );
     Ok(VaultCreated {
-        vault_id: preimage.vault_id(),
+        vault_id,
         position: admitted.economic_position,
     })
 }
@@ -342,12 +388,9 @@ fn own_claim_ref(admitted: &AdmittedEconomicPosition) -> Result<D32, DsmError> {
 
 /// §29: the setup body is built against this device's validated predecessor,
 /// published and read back `Stored`, then carried by the trader's transition,
-/// which inserts `h⁰`.
-pub async fn setup(
-    core: &CoreSDK,
-    set: &StorageSet,
-    intent: &SetupIntent,
-) -> Result<SetUp, DsmError> {
+/// which inserts `h⁰`. Run by [`set_up_with`] ahead of the first operation
+/// through the vault (Amendment S16).
+async fn setup(core: &CoreSDK, set: &StorageSet, intent: &SetupIntent) -> Result<(), DsmError> {
     let (genesis, device_id) = identity(core)?;
     let admitted = economic_lineage::get_admitted()
         .map_err(|e| storage("load admitted", e))?
@@ -405,7 +448,7 @@ pub async fn setup(
     // The setup is built against `validated`: the admission is refused
     // before the advance unless that is still the predecessor this device
     // stands on.
-    let (.., admitted) = admitted_self_loop_operation(
+    let (outcome, admitted) = admitted_self_loop_operation(
         core,
         operation,
         &[],
@@ -415,10 +458,15 @@ pub async fn setup(
         Some(BuiltOn::of(&validated)),
     )
     .await?;
-    Ok(SetUp {
-        setup_ref,
-        position: admitted.economic_position,
-    })
+    record_realized(
+        &outcome.new_device_state,
+        Realized::Setup,
+        &setup_ref,
+        admitted.economic_position,
+        Some(&intent.vault_id),
+        &[],
+    );
+    Ok(())
 }
 
 // ── §30 Finding the head of a vault ────────────────────────────────────────
@@ -638,78 +686,348 @@ fn price_hop(
     Ok((hop, post))
 }
 
-/// §30 and the path search of `sofi.findRoute`: the best route of one or two
-/// hops (the beta `ROUTE_MAX_LEGS`) from `token_in` to `token_out` through
-/// vaults this device is set up with — every leg names this device's setup
-/// with its vault — each hop quoted at its vault's walked head. A vault whose
-/// head cannot be established is an error: a search that could not see every
-/// vault this device is set up with has not searched. Over established heads,
-/// no route is an empty list.
+/// One hop as planned at its vault's head: what goes in and what comes out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Planned {
+    token_in: D32,
+    amount_in: u64,
+    token_out: D32,
+    amount_out: u64,
+}
+
+impl Planned {
+    fn movement(&self) -> HopMovement {
+        (
+            self.token_in,
+            self.amount_in,
+            self.token_out,
+            self.amount_out,
+        )
+    }
+}
+
+/// What `vault` gives for `amount_in` of `token_in` at its head: `None` for
+/// an amount too small to move it. Any other refusal is an error.
+fn leg_out(vault: &VaultAtHead, token_in: &D32, amount_in: u64) -> Result<Option<u64>, DsmError> {
+    let (_, in_is_a) = other_token(&vault.policies, token_in)
+        .ok_or_else(|| refuse("the vault does not trade that token"))?;
+    let (reserve_in, reserve_out) = if in_is_a {
+        (vault.state.reserve_a, vault.state.reserve_b)
+    } else {
+        (vault.state.reserve_b, vault.state.reserve_a)
+    };
+    match constant_product_output_classified(
+        amount_in,
+        reserve_in,
+        reserve_out,
+        vault.policies.fee.fee_bps(),
+    ) {
+        Ok(out) => Ok(Some(out)),
+        Err(ConstantProductRefusal::OutputZero) => Ok(None),
+        Err(other) => Err(refuse(other.as_str())),
+    }
+}
+
+/// The least input in `1..=max` that `vault` prices, by bisection: a larger
+/// input never gives less.
+fn least_priced(vault: &VaultAtHead, token_in: &D32, max: u64) -> Result<Option<u64>, DsmError> {
+    if leg_out(vault, token_in, max)?.is_none() {
+        return Ok(None);
+    }
+    let (mut lo, mut hi) = (1u64, max);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match leg_out(vault, token_in, mid)? {
+            Some(..) => hi = mid,
+            None => lo = mid + 1,
+        }
+    }
+    Ok(Some(lo))
+}
+
+/// The split of `amount_in` of `token_in` across `one` and `two`, which both
+/// trade it for `token_out`, that gives the most (Amendment S19): each leg
+/// priced at its own vault's head, the share searched over the inputs both
+/// legs price. `None` when no split prices both legs.
+fn plan_split(
+    one: &VaultAtHead,
+    two: &VaultAtHead,
+    token_in: D32,
+    token_out: D32,
+    amount_in: u64,
+) -> Result<Option<[Planned; 2]>, DsmError> {
+    if amount_in < 2 {
+        return Ok(None);
+    }
+    let (Some(least_one), Some(least_two)) = (
+        least_priced(one, &token_in, amount_in - 1)?,
+        least_priced(two, &token_in, amount_in - 1)?,
+    ) else {
+        return Ok(None);
+    };
+    let (mut lo, mut hi) = (least_one, amount_in - least_two);
+    if lo > hi {
+        return Ok(None);
+    }
+    let legs = |x: u64| -> Result<(u64, u64), DsmError> {
+        let first = leg_out(one, &token_in, x)?
+            .ok_or_else(|| refuse("a split leg below the first vault's least price"))?;
+        let second = leg_out(two, &token_in, amount_in - x)?
+            .ok_or_else(|| refuse("a split leg below the second vault's least price"))?;
+        Ok((first, second))
+    };
+    let total = |x: u64| -> Result<u64, DsmError> {
+        let (first, second) = legs(x)?;
+        first
+            .checked_add(second)
+            .ok_or_else(|| refuse("a split's output overflows"))
+    };
+    // The total is concave in the share, up to the price's floor: narrow
+    // by thirds, then take the best of what is left.
+    while hi - lo > 2 {
+        let m1 = lo + (hi - lo) / 3;
+        let m2 = hi - (hi - lo) / 3;
+        if total(m1)? < total(m2)? {
+            lo = m1 + 1;
+        } else {
+            hi = m2;
+        }
+    }
+    let mut best = (lo, total(lo)?);
+    for x in lo + 1..=hi {
+        let t = total(x)?;
+        if t > best.1 {
+            best = (x, t);
+        }
+    }
+    let (first, second) = legs(best.0)?;
+    Ok(Some([
+        Planned {
+            token_in,
+            amount_in: best.0,
+            token_out,
+            amount_out: first,
+        },
+        Planned {
+            token_in,
+            amount_in: amount_in - best.0,
+            token_out,
+            amount_out: second,
+        },
+    ]))
+}
+
+/// The hops through `vaults` in order, each feeding the next.
+fn plan_chain(
+    vaults: &[&VaultAtHead],
+    token_in: D32,
+    amount_in: u64,
+) -> Result<Vec<Planned>, DsmError> {
+    let mut token = token_in;
+    let mut amount = amount_in;
+    let mut out = Vec::with_capacity(vaults.len());
+    for (index, vault) in vaults.iter().enumerate() {
+        let (token_out, amount_out) = quote(vault, &token, amount, index)?;
+        out.push(Planned {
+            token_in: token,
+            amount_in: amount,
+            token_out,
+            amount_out,
+        });
+        token = token_out;
+        amount = amount_out;
+    }
+    Ok(out)
+}
+
+/// A route through `vaults` at their heads (Amendment S19): split across
+/// them when there are two and both trade `token_in` for the same token,
+/// chained otherwise.
+fn plan(vaults: &[&VaultAtHead], token_in: D32, amount_in: u64) -> Result<Vec<Planned>, DsmError> {
+    if let [one, two] = vaults {
+        if let (Some((a, ..)), Some((b, ..))) = (
+            other_token(&one.policies, &token_in),
+            other_token(&two.policies, &token_in),
+        ) {
+            if a == b {
+                return plan_split(one, two, token_in, a, amount_in)?
+                    .map(Vec::from)
+                    .ok_or_else(|| refuse("the amount does not split across the two vaults"));
+            }
+        }
+    }
+    plan_chain(vaults, token_in, amount_in)
+}
+
+/// What a planned route gives the trader: its output token and amount, by
+/// Core's one rule for a chain's or a split's endpoints.
+fn planned_out(planned: &[Planned]) -> Result<(D32, u64), DsmError> {
+    let movements: Vec<HopMovement> = planned.iter().map(Planned::movement).collect();
+    let (.., token_out, exact_out) =
+        route_endpoints(&movements).map_err(|why| refuse(format!("{why:?}")))?;
+    Ok((token_out, exact_out))
+}
+
+/// The vaults whose market pairs `token`, from its token index (Amendment
+/// S16): accepted by Core, never taken from the index. A discovery that is
+/// not complete marks the search partial.
+fn vaults_of(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    token: &D32,
+    search: &mut Search,
+) -> Result<Vec<D32>, DsmError> {
+    let vaults = match verifier.vaults_of_token(token).map_err(verifier_error)? {
+        Discovered::Complete(vaults) => vaults,
+        Discovered::Partial(vaults) => {
+            *search = Search::Partial;
+            vaults
+        }
+    };
+    Ok(vaults.iter().map(|accepted| *accepted.vault_id()).collect())
+}
+
+/// §30 and the path search of `sofi.findRoute` (Amendment S16): the best
+/// route of one or two hops (the beta `ROUTE_MAX_LEGS`) from `token_in` to
+/// `token_out`. The vaults come from the two tokens' indexes — those that
+/// pair the tokens directly, and a vault of each that share their other
+/// token — and are not limited to the vaults this device is set up with; a
+/// quote needs no setup. Each hop is priced at its vault's walked head. A
+/// vault, or a head, that is not established is left out and makes the
+/// search `Partial`; over what was established, no route is an empty list.
 pub async fn find_route(
     core: &CoreSDK,
     set: &StorageSet,
     intent: &FindRouteIntent,
-) -> Result<Vec<Hop>, DsmError> {
+) -> Result<RouteFound, DsmError> {
     let standing = standing(core)?;
     let ctx = standing.context(set)?;
     let verifier = ctx.verifier();
-    let mut heads = Vec::new();
-    for leaf in standing.local.relationships() {
-        let (head, ..) = vault_at_head(set, &verifier, &leaf.vault_id)
-            .await
-            .map_err(|e| {
-                storage(
-                    "findRoute",
-                    format!(
-                        "the head of vault {} is not established: {e}",
-                        crate::util::text_id::encode_base32_crockford(&leaf.vault_id)
-                    ),
-                )
-            })?;
-        if head.state.status == VAULT_STATUS_ACTIVE {
-            heads.push(head);
-        }
-    }
-    let hop = |vault: &VaultAtHead, token_in: D32, amount_in: u64, index: usize| {
-        quote(vault, &token_in, amount_in, index).map(|(token_out, amount_out)| Hop {
-            vault_id: vault.vault_id,
-            parent_root: vault.root,
-            token_in_policy_commit: token_in,
-            token_out_policy_commit: token_out,
-            amount_in,
-            amount_out,
-        })
-    };
-    let mut routes: Vec<Vec<Hop>> = Vec::new();
-    for (index, first) in heads.iter().enumerate() {
-        // A vault that does not trade the token, or cannot price it, is not a
-        // first hop.
-        let Ok(one) = hop(first, intent.token_in_policy_commit, intent.amount_in, 0) else {
-            continue;
-        };
-        if one.token_out_policy_commit == intent.token_out_policy_commit {
-            routes.push(vec![one]);
+    let mut search = Search::Complete;
+    let firsts = vaults_of(&verifier, &intent.token_in_policy_commit, &mut search)?;
+    let seconds = vaults_of(&verifier, &intent.token_out_policy_commit, &mut search)?;
+    let mut heads: BTreeMap<D32, VaultAtHead> = BTreeMap::new();
+    for vault_id in firsts.iter().chain(seconds.iter()) {
+        if heads.contains_key(vault_id) {
             continue;
         }
-        for (other, second) in heads.iter().enumerate() {
-            if other == index {
-                continue;
-            }
-            if let Ok(two) = hop(second, one.token_out_policy_commit, one.amount_out, 1) {
-                if two.token_out_policy_commit == intent.token_out_policy_commit {
-                    routes.push(vec![one.clone(), two]);
+        match vault_at_head(set, &verifier, vault_id).await {
+            Ok((head, ..)) => {
+                if head.state.status == VAULT_STATUS_ACTIVE {
+                    heads.insert(*vault_id, head);
                 }
             }
+            // A head the reads did not establish may be the best route.
+            Err(DsmError::Storage { .. }) => search = Search::Partial,
+            // A head refused is no vault to trade through.
+            Err(..) => {}
         }
     }
-    // The route that gives the most; no route leaves the list empty.
-    let mut best: Vec<Hop> = Vec::new();
-    for route in routes {
-        if route.last().map(|hop| hop.amount_out) > best.last().map(|hop| hop.amount_out) {
-            best = route;
+    // Every candidate route over the established heads: each vault of the
+    // input token alone, each chain through a vault of each token, and each
+    // split across two vaults of the pair (Amendment S19).
+    let (token_in, token_out) = (
+        intent.token_in_policy_commit,
+        intent.token_out_policy_commit,
+    );
+    let mut candidates: Vec<Vec<&VaultAtHead>> = Vec::new();
+    let direct: Vec<&VaultAtHead> = firsts
+        .iter()
+        .filter_map(|id| heads.get(id))
+        .filter(|vault| matches!(other_token(&vault.policies, &token_in), Some((t, ..)) if t == token_out))
+        .collect();
+    for (i, one) in direct.iter().enumerate() {
+        candidates.push(vec![one]);
+        for two in &direct[i + 1..] {
+            candidates.push(vec![one, two]);
         }
     }
-    Ok(best)
+    for first in firsts.iter().filter_map(|id| heads.get(id)) {
+        let Some((middle, ..)) = other_token(&first.policies, &token_in) else {
+            continue;
+        };
+        if middle == token_out {
+            continue;
+        }
+        for second in seconds.iter().filter_map(|id| heads.get(id)) {
+            if second.vault_id != first.vault_id
+                && matches!(other_token(&second.policies, &middle), Some((t, ..)) if t == token_out)
+            {
+                candidates.push(vec![first, second]);
+            }
+        }
+    }
+    // The route that gives the most; a candidate that cannot carry the
+    // amount is not a route, and no route leaves the list empty.
+    let mut best: Option<(u64, Vec<Hop>)> = None;
+    for vaults in candidates {
+        let Ok(planned) = plan(&vaults, token_in, intent.amount_in) else {
+            continue;
+        };
+        let (gives, out) = planned_out(&planned)?;
+        if gives != token_out {
+            continue;
+        }
+        if best.as_ref().is_some_and(|(most, ..)| *most >= out) {
+            continue;
+        }
+        let hops = vaults
+            .iter()
+            .zip(&planned)
+            .map(|(vault, p)| Hop {
+                vault_id: vault.vault_id,
+                parent_root: vault.root,
+                token_in_policy_commit: p.token_in,
+                token_out_policy_commit: p.token_out,
+                amount_in: p.amount_in,
+                amount_out: p.amount_out,
+            })
+            .collect();
+        best = Some((out, hops));
+    }
+    let hops = match best {
+        Some((.., hops)) => hops,
+        None => Vec::new(),
+    };
+    Ok(RouteFound { hops, search })
+}
+
+/// `sofi.vaults`: one vault this device created, at its walked head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedVault {
+    pub vault_id: D32,
+    pub token_a_policy_commit: D32,
+    pub token_b_policy_commit: D32,
+    pub reserve_a: u64,
+    pub reserve_b: u64,
+    pub fee_bps: u32,
+    pub generation: u64,
+    pub status: u16,
+}
+
+/// `sofi.vaults`: every vault this device created — the creation records its
+/// validated root commits — each walked to its head (§30), so the owner sees
+/// the live reserves, fee, generation and status without closing. A vault
+/// whose head is not established is an error: the list would not be the
+/// owner's vaults as they stand.
+pub async fn owned_vaults(core: &CoreSDK, set: &StorageSet) -> Result<Vec<OwnedVault>, DsmError> {
+    let standing = standing(core)?;
+    let ctx = standing.context(set)?;
+    let verifier = ctx.verifier();
+    let mut out = Vec::new();
+    for creation in standing.local.vault_creations() {
+        let (vault, ..) = vault_at_head(set, &verifier, &creation.vault_id).await?;
+        out.push(OwnedVault {
+            vault_id: vault.vault_id,
+            token_a_policy_commit: *vault.policies.market.token_a(),
+            token_b_policy_commit: *vault.policies.market.token_b(),
+            reserve_a: vault.state.reserve_a,
+            reserve_b: vault.state.reserve_b,
+            fee_bps: vault.policies.fee.fee_bps(),
+            generation: vault.state.generation,
+            status: vault.state.status,
+        });
+    }
+    Ok(out)
 }
 
 // ── §31 A trade and a multihop route ───────────────────────────────────────
@@ -913,7 +1231,7 @@ fn relationship_base(standing: &Standing, vault_id: &D32) -> Result<D32, DsmErro
         .local
         .relationship(vault_id)
         .map(|leaf| leaf.leaf)
-        .ok_or_else(|| refuse("no relationship with this vault: set up with it first"))
+        .ok_or_else(|| refuse("no relationship with this vault: its setup is not admitted"))
 }
 
 /// The context a draft takes.
@@ -1076,32 +1394,68 @@ async fn complete_and_settle(
     settle(core, set).await
 }
 
-/// `sofi.trade` and `sofi.route` (§31): a route through `intent.vault_ids`
-/// in hop order, priced at each vault's walked head.
-pub async fn trade(
+/// Amendment S16: the setup with each of `vault_ids` this device has none
+/// with, admitted in order before the operation that needs it — one
+/// transaction per vault, a position of its own that every later leg through
+/// that vault names by `ρ` (§16, §29). A vault this device is already set up
+/// with is passed over, so later trades reuse their setup.
+pub(crate) async fn set_up_with(
     core: &CoreSDK,
     set: &StorageSet,
+    vault_ids: &[D32],
+) -> Result<(), DsmError> {
+    for vault_id in vault_ids {
+        match standing(core)?.local.relationship(vault_id) {
+            Some(..) => {}
+            None => {
+                setup(
+                    core,
+                    set,
+                    &SetupIntent {
+                        vault_id: *vault_id,
+                    },
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The route through `intent.vault_ids` at each vault's walked head, and
+/// that this device can receive what it gives: checked before a setup is
+/// admitted for it, so a route that cannot be built admits nothing.
+async fn check_route(
+    core: &CoreSDK,
+    set: &StorageSet,
+    standing: &Standing,
     intent: &TradeIntent,
-) -> Result<PositionOutcome, DsmError> {
-    let standing = standing(core)?;
+) -> Result<(), DsmError> {
     let ctx = standing.context(set)?;
     let verifier = ctx.verifier();
-    let mut token = intent.token_in_policy_commit;
-    let mut amount = intent.amount_in;
-    let mut hops = Vec::new();
-    let mut cores = Vec::new();
-    let mut vaults = Vec::new();
-    for (index, vault_id) in intent.vault_ids.iter().enumerate() {
-        let (vault, ..) = vault_at_head(set, &verifier, vault_id).await?;
-        let setup_ref =
-            own_setup_ref(set, &standing.genesis, &standing.device_id, vault_id).await?;
-        let base = relationship_base(&standing, vault_id)?;
-        let (hop, post) = price_hop(&vault, token, amount, setup_ref, index)?;
-        cores.push(vault_core(&standing, &vault, &post, base)?);
-        vaults.push((*vault_id, base));
-        token = hop.token_out;
-        amount = hop.amount_out;
-        hops.push(hop);
+    let mut vaults = Vec::with_capacity(intent.vault_ids.len());
+    for vault_id in &intent.vault_ids {
+        vaults.push(vault_at_head(set, &verifier, vault_id).await?.0);
+    }
+    let refs: Vec<&VaultAtHead> = vaults.iter().collect();
+    let (token, amount) = planned_out(&plan(
+        &refs,
+        intent.token_in_policy_commit,
+        intent.amount_in,
+    )?)?;
+    received(core, intent, &token, amount)
+}
+
+/// A route's output is the token the trader asked for, at least its minimum,
+/// in a token this device adopted.
+fn received(
+    core: &CoreSDK,
+    intent: &TradeIntent,
+    token: &D32,
+    amount: u64,
+) -> Result<(), DsmError> {
+    if *token != intent.token_out_policy_commit {
+        return Err(refuse("the route does not give the token asked for"));
     }
     if amount < intent.min_amount_out {
         return Err(refuse(format!(
@@ -1112,10 +1466,57 @@ pub async fn trade(
     let head = core
         .device_head()
         .ok_or_else(|| storage("device head", "none"))?;
-    if !head.has_adopted(&token) {
+    if !head.has_adopted(token) {
         return Err(refuse(
             "the output token is not adopted: adopt it before receiving it",
         ));
+    }
+    Ok(())
+}
+
+/// `sofi.trade` and `sofi.route` (§31): a route through `intent.vault_ids`
+/// in hop order, priced at each vault's walked head. A vault this device has
+/// no setup with is set up with first (Amendment S16).
+pub async fn trade(
+    core: &CoreSDK,
+    set: &StorageSet,
+    intent: &TradeIntent,
+) -> Result<PositionOutcome, DsmError> {
+    {
+        let standing = standing(core)?;
+        let unset = intent
+            .vault_ids
+            .iter()
+            .any(|vault_id| standing.local.relationship(vault_id).is_none());
+        if unset {
+            check_route(core, set, &standing, intent).await?;
+        }
+    }
+    set_up_with(core, set, &intent.vault_ids).await?;
+    let standing = standing(core)?;
+    let ctx = standing.context(set)?;
+    let verifier = ctx.verifier();
+    let mut heads = Vec::with_capacity(intent.vault_ids.len());
+    for vault_id in &intent.vault_ids {
+        heads.push(vault_at_head(set, &verifier, vault_id).await?.0);
+    }
+    // A chain, or a split across two vaults of the pair (Amendment S19),
+    // planned again at the heads walked now.
+    let refs: Vec<&VaultAtHead> = heads.iter().collect();
+    let planned = plan(&refs, intent.token_in_policy_commit, intent.amount_in)?;
+    let (token, amount) = planned_out(&planned)?;
+    received(core, intent, &token, amount)?;
+    let mut hops = Vec::new();
+    let mut cores = Vec::new();
+    let mut vaults = Vec::new();
+    for (index, (vault, p)) in heads.iter().zip(&planned).enumerate() {
+        let setup_ref =
+            own_setup_ref(set, &standing.genesis, &standing.device_id, &vault.vault_id).await?;
+        let base = relationship_base(&standing, &vault.vault_id)?;
+        let (hop, post) = price_hop(vault, p.token_in, p.amount_in, setup_ref, index)?;
+        cores.push(vault_core(&standing, vault, &post, base)?);
+        vaults.push((vault.vault_id, base));
+        hops.push(hop);
     }
     let movements = [
         (token, amount, 0),
@@ -1130,22 +1531,39 @@ pub async fn trade(
 
 // ── §32 Closing a vault ────────────────────────────────────────────────────
 
-/// `sofi.close` (§32): the owner's full close of its own vault, a one-hop
-/// route under its release policy that credits both reserves.
-pub async fn close(
-    core: &CoreSDK,
-    set: &StorageSet,
-    intent: &CloseIntent,
-) -> Result<PositionOutcome, DsmError> {
-    let standing = standing(core)?;
-    let ctx = standing.context(set)?;
-    let verifier = ctx.verifier();
-    let (vault, ..) = vault_at_head(set, &verifier, &intent.vault_id).await?;
+/// Only the vault's origin owner closes it (§19.7).
+fn only_the_owner(standing: &Standing, vault: &VaultAtHead) -> Result<(), DsmError> {
     if vault.state.owner_genesis != standing.genesis
         || vault.state.owner_device_id != standing.device_id
     {
         return Err(refuse("only the vault's origin owner closes it"));
     }
+    Ok(())
+}
+
+/// `sofi.close` (§32): the owner's full close of its own vault, a one-hop
+/// route under its release policy that credits both reserves. The owner's
+/// first Close sets up with its vault first (Amendment S16).
+pub async fn close(
+    core: &CoreSDK,
+    set: &StorageSet,
+    intent: &CloseIntent,
+) -> Result<PositionOutcome, DsmError> {
+    {
+        let standing = standing(core)?;
+        if standing.local.relationship(&intent.vault_id).is_none() {
+            let ctx = standing.context(set)?;
+            let verifier = ctx.verifier();
+            let (vault, ..) = vault_at_head(set, &verifier, &intent.vault_id).await?;
+            only_the_owner(&standing, &vault)?;
+        }
+    }
+    set_up_with(core, set, &[intent.vault_id]).await?;
+    let standing = standing(core)?;
+    let ctx = standing.context(set)?;
+    let verifier = ctx.verifier();
+    let (vault, ..) = vault_at_head(set, &verifier, &intent.vault_id).await?;
+    only_the_owner(&standing, &vault)?;
     let setup_ref = own_setup_ref(
         set,
         &standing.genesis,

@@ -25,6 +25,7 @@
 //! key is in hand.
 
 use crate::ccb::class;
+use crate::ccb::state::MarketPolicy;
 use crate::common::domain_tags::{
     TAG_DSM_FEE_POLICY_OBJECT, TAG_DSM_MARKET_POLICY_OBJECT, TAG_DSM_RELEASE_POLICY_OBJECT,
     TAG_DSM_SOFI_DLV_POLICY_FULFILLMENT, TAG_DSM_SOFI_FULFILLMENT_ID,
@@ -33,6 +34,7 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_REL_INDEX, TAG_DSM_SOFI_SETUP_OBJECT, TAG_DSM_SOFI_SETUP_REF,
     TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
     TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
 };
 use crate::crypto::domain::TaggedHashDomain;
 use crate::storage_object::immutable_addr;
@@ -103,9 +105,14 @@ pub enum Publication<'a> {
         signature: &'a [u8],
     },
     /// A vault's genesis preimage, bare, indexed under
-    /// `vault_genesis_locator(v)` (§28 step 4). Its acceptance binds it to
+    /// `vault_genesis_locator(v)` (§28 step 4) and under
+    /// `vault_token_locator(t)` for each token `t` of `market`, the market
+    /// policy its state commits (Amendment S16). Its acceptance binds it to
     /// the owner's validated creation, so publishing it asserts nothing.
-    VaultGenesis(&'a VaultGenesisPreimage),
+    VaultGenesis {
+        preimage: &'a VaultGenesisPreimage,
+        market: &'a MarketPolicy,
+    },
     /// One of the three policy objects a vault state commits, bare, found by
     /// the address the state names.
     VaultPolicy {
@@ -152,7 +159,7 @@ impl Publication<'_> {
                 body.signature_alg(),
                 signature,
             ),
-            Self::VaultGenesis(preimage) => preimage.encode(),
+            Self::VaultGenesis { preimage, .. } => preimage.encode(),
             Self::VaultPolicy { bytes, .. } => Ok(bytes.to_vec()),
             Self::TraderPreBalance(balance) => Ok(balance.encode()),
         }
@@ -166,7 +173,7 @@ impl Publication<'_> {
             Self::Preimage(_) => TAG_DSM_SOFI_PREIMAGE_OBJECT,
             Self::PolicyFulfillment(_) => TAG_DSM_SOFI_POLICY_FULFILLMENT_OBJECT,
             Self::Fulfillment { .. } => TAG_DSM_SOFI_FULFILLMENT_OBJECT,
-            Self::VaultGenesis(..) => TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+            Self::VaultGenesis { .. } => TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
             Self::VaultPolicy { class, .. } => match class {
                 VaultPolicyClass::Market => TAG_DSM_MARKET_POLICY_OBJECT,
                 VaultPolicyClass::Fee => TAG_DSM_FEE_POLICY_OBJECT,
@@ -218,10 +225,27 @@ impl Publication<'_> {
                 index_namespace: TAG_DSM_SOFI_FULFILLMENT_ID.source_bytes(),
                 locator: derive::fulfillment_id(body),
             }],
-            Self::VaultGenesis(preimage) => vec![Locator {
-                index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
-                locator: derive::vault_genesis_locator(&preimage.vault_id()),
-            }],
+            Self::VaultGenesis { preimage, market } => {
+                // The tokens a vault is found by are the ones its state
+                // commits: a market that is not the committed one would
+                // index the vault under tokens it does not trade.
+                let committed = immutable_addr(TAG_DSM_MARKET_POLICY_OBJECT, &market.encode());
+                if committed != preimage.state.market_policy {
+                    return Err(SofiWireError::MarketNotCommitted);
+                }
+                let token = |t: &D32| Locator {
+                    index_namespace: TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR.source_bytes(),
+                    locator: derive::vault_token_locator(t),
+                };
+                vec![
+                    Locator {
+                        index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                        locator: derive::vault_genesis_locator(&preimage.vault_id()),
+                    },
+                    token(market.token_a()),
+                    token(market.token_b()),
+                ]
+            }
             Self::VaultPolicy { .. } | Self::TraderPreBalance(_) => Vec::new(),
         })
     }
@@ -558,12 +582,13 @@ mod tests {
     /// A vault policy is published where the verifier fetches it: at the
     /// address a vault state names, which `policy_object_address` derives
     /// from the class and the bytes. The genesis preimage lands under its
-    /// own namespace and is indexed under the vault's genesis locator.
+    /// own namespace and is indexed under the vault's genesis locator and
+    /// under the token locator of each token of its pair (Amendment S16).
     #[test]
     fn vault_objects_land_where_the_verifier_looks() {
-        let market = crate::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x41))
-            .unwrap()
-            .encode();
+        let pair =
+            crate::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x41)).unwrap();
+        let market = pair.encode();
         let fee = crate::ccb::state::FeePolicy::new(30).unwrap().encode();
         let release = crate::ccb::state::ReleasePolicy::beta_owner_local_full_close().encode();
         for (policy_class, bytes) in [
@@ -606,7 +631,10 @@ mod tests {
             create_position: 7,
             state,
         };
-        let genesis = Publication::VaultGenesis(&preimage);
+        let genesis = Publication::VaultGenesis {
+            preimage: &preimage,
+            market: &pair,
+        };
         assert_eq!(
             genesis.address().unwrap(),
             immutable_addr(
@@ -616,10 +644,33 @@ mod tests {
         );
         assert_eq!(
             genesis.locators().unwrap(),
-            vec![Locator {
-                index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
-                locator: derive::vault_genesis_locator(&preimage.vault_id()),
-            }]
+            vec![
+                Locator {
+                    index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                    locator: derive::vault_genesis_locator(&preimage.vault_id()),
+                },
+                Locator {
+                    index_namespace: TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR.source_bytes(),
+                    locator: derive::vault_token_locator(&d(0x40)),
+                },
+                Locator {
+                    index_namespace: TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR.source_bytes(),
+                    locator: derive::vault_token_locator(&d(0x41)),
+                },
+            ]
+        );
+
+        // A market the state does not commit would index the vault under
+        // tokens it does not trade: nothing is indexed.
+        let other =
+            crate::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x42)).unwrap();
+        assert_eq!(
+            Publication::VaultGenesis {
+                preimage: &preimage,
+                market: &other,
+            }
+            .locators(),
+            Err(SofiWireError::MarketNotCommitted)
         );
     }
 }

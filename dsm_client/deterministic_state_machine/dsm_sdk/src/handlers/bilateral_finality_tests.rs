@@ -17,6 +17,7 @@
 //! release, R7 byte-identical checkpoint replay, R11 one deleter for the gate.
 //! R5/R6 live beside the code they pin (`storage_routes` / `core_sdk`).
 
+use crate::economic_fixtures::whole_era;
 use crate::storage::client_db as cdb;
 use crate::test_support::two_device::{assert_incomplete, Pair, TestDevice};
 use dsm::types::proto as generated;
@@ -340,7 +341,7 @@ async fn r1_role_reversal_applies_once_on_a_and_finalizes_on_b() {
     let rel = p.a.rel_key_with(&p.b);
     generation(&p.a, &p.b, 10).await;
     generation(&p.a, &p.b, 10).await;
-    assert_eq!(p.b.era_balance(), 120);
+    assert_eq!(p.b.era_balance(), whole_era(100) + 20);
 
     // A pins B's head at exactly the child B journaled on its second apply —
     // learned from B's delta, authenticated by sig_b — and that is the parent
@@ -372,8 +373,12 @@ async fn r1_role_reversal_applies_once_on_a_and_finalizes_on_b() {
 
     generation(&p.b, &p.a, 5).await;
 
-    assert_eq!(p.a.era_balance(), 985, "A credited exactly once");
-    assert_eq!(p.b.era_balance(), 115);
+    assert_eq!(
+        p.a.era_balance(),
+        whole_era(1_000) - 20 + 5,
+        "A credited exactly once"
+    );
+    assert_eq!(p.b.era_balance(), whole_era(100) + 20 - 5);
     p.a.enter();
     assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
     assert_eq!(
@@ -466,7 +471,7 @@ async fn r2b_the_certificate_releases_the_recipient() {
         "B released by the certificate: {status:?}"
     );
     generation(&p.b, &p.a, 5).await;
-    assert_eq!(p.a.era_balance(), 995);
+    assert_eq!(p.a.era_balance(), whole_era(1_000) - 10 + 5);
 }
 
 // =====================================================================
@@ -507,7 +512,7 @@ async fn r3_sender_stays_gated_until_the_checkpoint_reaches_quorum() {
     assert_eq!(status.send_block_reason, pending_catchup());
     let refused = p.a.send(&p.b, 1).await;
     assert!(!refused.success, "second A->B must be refused");
-    assert_eq!(p.a.era_balance(), 990, "no second debit");
+    assert_eq!(p.a.era_balance(), whole_era(1_000) - 10, "no second debit");
 
     // Fleet back: the sweep replays the exact certificate, quorum, release.
     p.nodes.restore_spools(&down).await;
@@ -558,7 +563,7 @@ async fn a_send_before_the_previous_step_finalizes_is_gated_never_marked_for_res
         !cdb::cert_resync_blocks_send(&rel).expect("resync state"),
         "the relationship is not marked for resync"
     );
-    assert_eq!(p.a.era_balance(), 990, "no second debit");
+    assert_eq!(p.a.era_balance(), whole_era(1_000) - 10, "no second debit");
 
     // The step finalizes; the relationship sends again.
     let b_sync = p.b.sync().await;
@@ -825,7 +830,7 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
         vec![cdb::OUTBOX_GC_PENDING.to_string()]
     );
     assert_eq!(proposal_statuses(&rel).len(), 1, "no second proposal");
-    assert_eq!(p.a.era_balance(), 990, "no second debit");
+    assert_eq!(p.a.era_balance(), whole_era(1_000) - 10, "no second debit");
     // The replay re-posts to members that already held the first delivery;
     // a node deduplicates nothing (storage spec §8), so those hold it twice.
     // What matters is that every copy anywhere is the frozen envelope under

@@ -250,7 +250,10 @@ async fn a_credits_source_is_validated_one_hop_back_and_no_further() {
     assert!(paid.success, "{:?}", paid.error_message);
     let credited = p.a.sync().await;
     assert!(credited.success, "{:?}", credited.errors);
-    assert_eq!(p.a.era_balance(), 130);
+    assert_eq!(
+        p.a.era_balance(),
+        crate::economic_fixtures::whole_era(100) + 30
+    );
     let sent = p.a.send(&p.b, 20).await;
     assert!(sent.success, "{:?}", sent.error_message);
 

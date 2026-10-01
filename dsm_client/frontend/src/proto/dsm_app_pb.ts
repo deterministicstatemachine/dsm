@@ -120,6 +120,44 @@ export enum TransactionType {
    * @generated from enum value: TX_TYPE_DBTC_BURN = 6;
    */
   TX_TYPE_DBTC_BURN = 6,
+
+  /**
+   * Token and SoFi events, written when their position realizes. Each names
+   * every token it moved, with its amount, in TransactionInfo.moves.
+   *
+   * a token created; its ERA fee paid
+   *
+   * @generated from enum value: TX_TYPE_TOKEN_CREATE = 7;
+   */
+  TX_TYPE_TOKEN_CREATE = 7,
+
+  /**
+   * a vault created; both reserves paid in
+   *
+   * @generated from enum value: TX_TYPE_VAULT_CREATE = 8;
+   */
+  TX_TYPE_VAULT_CREATE = 8,
+
+  /**
+   * set up with a vault; no token moves
+   *
+   * @generated from enum value: TX_TYPE_SOFI_SETUP = 9;
+   */
+  TX_TYPE_SOFI_SETUP = 9,
+
+  /**
+   * a trade or route realized
+   *
+   * @generated from enum value: TX_TYPE_SOFI_TRADE = 10;
+   */
+  TX_TYPE_SOFI_TRADE = 10,
+
+  /**
+   * the owner's close realized; both reserves credited
+   *
+   * @generated from enum value: TX_TYPE_SOFI_CLOSE = 11;
+   */
+  TX_TYPE_SOFI_CLOSE = 11,
 }
 // Retrieve enum metadata with: proto3.getEnumType(TransactionType)
 proto3.util.setEnumType(TransactionType, "dsm.TransactionType", [
@@ -129,6 +167,11 @@ proto3.util.setEnumType(TransactionType, "dsm.TransactionType", [
   { no: 4, name: "TX_TYPE_ONLINE" },
   { no: 5, name: "TX_TYPE_DBTC_MINT" },
   { no: 6, name: "TX_TYPE_DBTC_BURN" },
+  { no: 7, name: "TX_TYPE_TOKEN_CREATE" },
+  { no: 8, name: "TX_TYPE_VAULT_CREATE" },
+  { no: 9, name: "TX_TYPE_SOFI_SETUP" },
+  { no: 10, name: "TX_TYPE_SOFI_TRADE" },
+  { no: 11, name: "TX_TYPE_SOFI_CLOSE" },
 ]);
 
 /**
@@ -750,6 +793,66 @@ proto3.util.setEnumType(BleFrameType, "dsm.BleFrameType", [
   { no: 12, name: "BLE_FRAME_TYPE_BILATERAL_CONFIRM" },
   { no: 13, name: "BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST" },
   { no: 14, name: "BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE" },
+]);
+
+/**
+ * How much of the token indexes the search established (Amendment S16).
+ *
+ * @generated from enum dsm.SofiSearch
+ */
+export enum SofiSearch {
+  /**
+   * @generated from enum value: SOFI_SEARCH_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * every candidate vault and its head was established
+   *
+   * @generated from enum value: SOFI_SEARCH_COMPLETE = 1;
+   */
+  COMPLETE = 1,
+
+  /**
+   * one was not: a better route may run through it
+   *
+   * @generated from enum value: SOFI_SEARCH_PARTIAL = 2;
+   */
+  PARTIAL = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(SofiSearch)
+proto3.util.setEnumType(SofiSearch, "dsm.SofiSearch", [
+  { no: 0, name: "SOFI_SEARCH_UNSPECIFIED" },
+  { no: 1, name: "SOFI_SEARCH_COMPLETE" },
+  { no: 2, name: "SOFI_SEARCH_PARTIAL" },
+]);
+
+/**
+ * @generated from enum dsm.SofiVaultStatus
+ */
+export enum SofiVaultStatus {
+  /**
+   * @generated from enum value: SOFI_VAULT_STATUS_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SOFI_VAULT_STATUS_ACTIVE = 1;
+   */
+  ACTIVE = 1,
+
+  /**
+   * closed by its owner; it has no successor
+   *
+   * @generated from enum value: SOFI_VAULT_STATUS_RETIRED = 2;
+   */
+  RETIRED = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(SofiVaultStatus)
+proto3.util.setEnumType(SofiVaultStatus, "dsm.SofiVaultStatus", [
+  { no: 0, name: "SOFI_VAULT_STATUS_UNSPECIFIED" },
+  { no: 1, name: "SOFI_VAULT_STATUS_ACTIVE" },
+  { no: 2, name: "SOFI_VAULT_STATUS_RETIRED" },
 ]);
 
 /**
@@ -17205,12 +17308,9 @@ export class Envelope extends Message<Envelope> {
     case: "sofiVaultCreatedResponse";
   } | {
     /**
-     * @generated from field: dsm.SofiSetupResponse sofi_setup_response = 121;
-     */
-    value: SofiSetupResponse;
-    case: "sofiSetupResponse";
-  } | {
-    /**
+     * 121 was sofi_setup_response: the setup is the first step of the first
+     * operation through a vault, never a route of its own (SoFi Amendment S16).
+     *
      * @generated from field: dsm.SofiFindRouteResponse sofi_find_route_response = 122;
      */
     value: SofiFindRouteResponse;
@@ -17236,6 +17336,14 @@ export class Envelope extends Message<Envelope> {
      */
     value: SealedEnvelopeV1;
     case: "sealed";
+  } | {
+    /**
+     * sofi.vaults: the owner's vaults at their walked heads.
+     *
+     * @generated from field: dsm.SofiVaultsResponse sofi_vaults_response = 126;
+     */
+    value: SofiVaultsResponse;
+    case: "sofiVaultsResponse";
   } | {
     /**
      * Reply to `token.forget`.
@@ -17353,11 +17461,11 @@ export class Envelope extends Message<Envelope> {
     { no: 116, name: "token_burn_response", kind: "message", T: TokenBurnResponse, oneof: "payload" },
     { no: 117, name: "token_fee_schedule_response", kind: "message", T: TokenFeeScheduleResponse, oneof: "payload" },
     { no: 120, name: "sofi_vault_created_response", kind: "message", T: SofiVaultCreatedResponse, oneof: "payload" },
-    { no: 121, name: "sofi_setup_response", kind: "message", T: SofiSetupResponse, oneof: "payload" },
     { no: 122, name: "sofi_find_route_response", kind: "message", T: SofiFindRouteResponse, oneof: "payload" },
     { no: 123, name: "sofi_position_response", kind: "message", T: SofiPositionResponse, oneof: "payload" },
     { no: 124, name: "sofi_relay_response", kind: "message", T: SofiRelayResponse, oneof: "payload" },
     { no: 125, name: "sealed", kind: "message", T: SealedEnvelopeV1, oneof: "payload" },
+    { no: 126, name: "sofi_vaults_response", kind: "message", T: SofiVaultsResponse, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -17574,25 +17682,25 @@ export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
   tokenBPolicyCommit = new Uint8Array(0);
 
   /**
-   * > 0
-   *
-   * @generated from field: uint64 reserve_a = 3;
-   */
-  reserveA = protoInt64.zero;
-
-  /**
-   * > 0
-   *
-   * @generated from field: uint64 reserve_b = 4;
-   */
-  reserveB = protoInt64.zero;
-
-  /**
    * < 10000
    *
    * @generated from field: uint32 fee_bps = 5;
    */
   feeBps = 0;
+
+  /**
+   * token units, > 0
+   *
+   * @generated from field: string reserve_a_entered = 6;
+   */
+  reserveAEntered = "";
+
+  /**
+   * token units, > 0
+   *
+   * @generated from field: string reserve_b_entered = 7;
+   */
+  reserveBEntered = "";
 
   constructor(data?: PartialMessage<SofiCreateVaultRequest>) {
     super();
@@ -17604,9 +17712,9 @@ export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "token_a_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_b_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "reserve_a", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 4, name: "reserve_b", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 5, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "reserve_a_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "reserve_b_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiCreateVaultRequest {
@@ -17672,92 +17780,9 @@ export class SofiVaultCreatedResponse extends Message<SofiVaultCreatedResponse> 
 }
 
 /**
- * sofi.setup (§29): set up with a vault once, before trading against it.
- *
- * @generated from message dsm.SofiSetupRequest
- */
-export class SofiSetupRequest extends Message<SofiSetupRequest> {
-  /**
-   * @generated from field: bytes vault_id = 1;
-   */
-  vaultId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<SofiSetupRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SofiSetupRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiSetupRequest {
-    return new SofiSetupRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiSetupRequest {
-    return new SofiSetupRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiSetupRequest {
-    return new SofiSetupRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SofiSetupRequest | PlainMessage<SofiSetupRequest> | undefined, b: SofiSetupRequest | PlainMessage<SofiSetupRequest> | undefined): boolean {
-    return proto3.util.equals(SofiSetupRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.SofiSetupResponse
- */
-export class SofiSetupResponse extends Message<SofiSetupResponse> {
-  /**
-   * ρ
-   *
-   * @generated from field: bytes setup_ref = 1;
-   */
-  setupRef = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint64 position = 2;
-   */
-  position = protoInt64.zero;
-
-  constructor(data?: PartialMessage<SofiSetupResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SofiSetupResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "setup_ref", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiSetupResponse {
-    return new SofiSetupResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiSetupResponse {
-    return new SofiSetupResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiSetupResponse {
-    return new SofiSetupResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: SofiSetupResponse | PlainMessage<SofiSetupResponse> | undefined, b: SofiSetupResponse | PlainMessage<SofiSetupResponse> | undefined): boolean {
-    return proto3.util.equals(SofiSetupResponse, a, b);
-  }
-}
-
-/**
- * sofi.findRoute (§30, §27): path search over walked vault heads. A hop list
- * carries no authority.
+ * sofi.findRoute (§30, §27, Amendment S16): path search over the vaults the
+ * two tokens' indexes name, each at its walked head. Not limited to the vaults
+ * the trader is set up with; a quote needs no setup, and carries no authority.
  *
  * @generated from message dsm.SofiFindRouteRequest
  */
@@ -17773,9 +17798,11 @@ export class SofiFindRouteRequest extends Message<SofiFindRouteRequest> {
   tokenOutPolicyCommit = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 amount_in = 3;
+   * token units of token_in, > 0
+   *
+   * @generated from field: string amount_in_entered = 4;
    */
-  amountIn = protoInt64.zero;
+  amountInEntered = "";
 
   constructor(data?: PartialMessage<SofiFindRouteRequest>) {
     super();
@@ -17787,7 +17814,7 @@ export class SofiFindRouteRequest extends Message<SofiFindRouteRequest> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "token_in_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_out_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "amount_in_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiFindRouteRequest {
@@ -17834,14 +17861,32 @@ export class SofiHopV1 extends Message<SofiHopV1> {
   tokenOutPolicyCommit = new Uint8Array(0);
 
   /**
+   * base units
+   *
    * @generated from field: uint64 amount_in = 5;
    */
   amountIn = protoInt64.zero;
 
   /**
+   * base units
+   *
    * @generated from field: uint64 amount_out = 6;
    */
   amountOut = protoInt64.zero;
+
+  /**
+   * rendered by Rust from token_in's decimals
+   *
+   * @generated from field: string amount_in_display = 7;
+   */
+  amountInDisplay = "";
+
+  /**
+   * rendered by Rust from token_out's decimals
+   *
+   * @generated from field: string amount_out_display = 8;
+   */
+  amountOutDisplay = "";
 
   constructor(data?: PartialMessage<SofiHopV1>) {
     super();
@@ -17857,6 +17902,8 @@ export class SofiHopV1 extends Message<SofiHopV1> {
     { no: 4, name: "token_out_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 6, name: "amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 7, name: "amount_in_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "amount_out_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiHopV1 {
@@ -17881,11 +17928,16 @@ export class SofiHopV1 extends Message<SofiHopV1> {
  */
 export class SofiFindRouteResponse extends Message<SofiFindRouteResponse> {
   /**
-   * empty when no route exists
+   * empty when no route exists among the vaults searched
    *
    * @generated from field: repeated dsm.SofiHopV1 hops = 1;
    */
   hops: SofiHopV1[] = [];
+
+  /**
+   * @generated from field: dsm.SofiSearch search = 2;
+   */
+  search = SofiSearch.UNSPECIFIED;
 
   constructor(data?: PartialMessage<SofiFindRouteResponse>) {
     super();
@@ -17896,6 +17948,7 @@ export class SofiFindRouteResponse extends Message<SofiFindRouteResponse> {
   static readonly typeName = "dsm.SofiFindRouteResponse";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "hops", kind: "message", T: SofiHopV1, repeated: true },
+    { no: 2, name: "search", kind: "enum", T: proto3.getEnumType(SofiSearch) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiFindRouteResponse {
@@ -17916,7 +17969,8 @@ export class SofiFindRouteResponse extends Message<SofiFindRouteResponse> {
 }
 
 /**
- * sofi.trade (§31): one hop against one vault.
+ * sofi.trade (§31): one hop against one vault. A vault the trader has no
+ * setup with is set up with first, in the same call (Amendment S16).
  *
  * @generated from message dsm.SofiTradeRequest
  */
@@ -17932,14 +17986,25 @@ export class SofiTradeRequest extends Message<SofiTradeRequest> {
   tokenInPolicyCommit = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 amount_in = 3;
+   * token units of the input token, > 0
+   *
+   * @generated from field: string amount_in_entered = 5;
    */
-  amountIn = protoInt64.zero;
+  amountInEntered = "";
 
   /**
-   * @generated from field: uint64 min_amount_out = 4;
+   * token units of the output token
+   *
+   * @generated from field: string min_amount_out_entered = 6;
    */
-  minAmountOut = protoInt64.zero;
+  minAmountOutEntered = "";
+
+  /**
+   * the token the trader asks for; the route must give it
+   *
+   * @generated from field: bytes token_out_policy_commit = 7;
+   */
+  tokenOutPolicyCommit = new Uint8Array(0);
 
   constructor(data?: PartialMessage<SofiTradeRequest>) {
     super();
@@ -17951,8 +18016,9 @@ export class SofiTradeRequest extends Message<SofiTradeRequest> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_in_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 4, name: "min_amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "amount_in_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "min_amount_out_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "token_out_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiTradeRequest {
@@ -17974,7 +18040,8 @@ export class SofiTradeRequest extends Message<SofiTradeRequest> {
 
 /**
  * sofi.route (§31): a multihop route, all or none, through distinct vaults in
- * hop order (at most ROUTE_MAX_LEGS).
+ * hop order (at most ROUTE_MAX_LEGS), setting up first with any vault the
+ * trader has no setup with (Amendment S16).
  *
  * @generated from message dsm.SofiRouteRequest
  */
@@ -17990,14 +18057,25 @@ export class SofiRouteRequest extends Message<SofiRouteRequest> {
   tokenInPolicyCommit = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 amount_in = 3;
+   * token units of the input token, > 0
+   *
+   * @generated from field: string amount_in_entered = 5;
    */
-  amountIn = protoInt64.zero;
+  amountInEntered = "";
 
   /**
-   * @generated from field: uint64 min_amount_out = 4;
+   * token units of the output token
+   *
+   * @generated from field: string min_amount_out_entered = 6;
    */
-  minAmountOut = protoInt64.zero;
+  minAmountOutEntered = "";
+
+  /**
+   * the token the trader asks for; the route must give it
+   *
+   * @generated from field: bytes token_out_policy_commit = 7;
+   */
+  tokenOutPolicyCommit = new Uint8Array(0);
 
   constructor(data?: PartialMessage<SofiRouteRequest>) {
     super();
@@ -18009,8 +18087,9 @@ export class SofiRouteRequest extends Message<SofiRouteRequest> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "vault_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 2, name: "token_in_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 4, name: "min_amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "amount_in_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "min_amount_out_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "token_out_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiRouteRequest {
@@ -18031,7 +18110,8 @@ export class SofiRouteRequest extends Message<SofiRouteRequest> {
 }
 
 /**
- * sofi.close (§32): the owner closes its own vault under its release policy.
+ * sofi.close (§32): the owner closes its own vault under its release policy,
+ * setting up with it first if it has not (Amendment S16).
  *
  * @generated from message dsm.SofiCloseRequest
  */
@@ -18066,6 +18146,186 @@ export class SofiCloseRequest extends Message<SofiCloseRequest> {
 
   static equals(a: SofiCloseRequest | PlainMessage<SofiCloseRequest> | undefined, b: SofiCloseRequest | PlainMessage<SofiCloseRequest> | undefined): boolean {
     return proto3.util.equals(SofiCloseRequest, a, b);
+  }
+}
+
+/**
+ * sofi.vaults: every vault this device created, walked to its head, so the
+ * owner sees the live reserves without closing.
+ *
+ * @generated from message dsm.SofiVaultsRequest
+ */
+export class SofiVaultsRequest extends Message<SofiVaultsRequest> {
+  constructor(data?: PartialMessage<SofiVaultsRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiVaultsRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiVaultsRequest {
+    return new SofiVaultsRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiVaultsRequest {
+    return new SofiVaultsRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiVaultsRequest {
+    return new SofiVaultsRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiVaultsRequest | PlainMessage<SofiVaultsRequest> | undefined, b: SofiVaultsRequest | PlainMessage<SofiVaultsRequest> | undefined): boolean {
+    return proto3.util.equals(SofiVaultsRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SofiOwnedVaultV1
+ */
+export class SofiOwnedVaultV1 extends Message<SofiOwnedVaultV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_a_policy_commit = 2;
+   */
+  tokenAPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_b_policy_commit = 3;
+   */
+  tokenBPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: string token_a_symbol = 4;
+   */
+  tokenASymbol = "";
+
+  /**
+   * @generated from field: string token_b_symbol = 5;
+   */
+  tokenBSymbol = "";
+
+  /**
+   * base units
+   *
+   * @generated from field: uint64 reserve_a = 6;
+   */
+  reserveA = protoInt64.zero;
+
+  /**
+   * base units
+   *
+   * @generated from field: uint64 reserve_b = 7;
+   */
+  reserveB = protoInt64.zero;
+
+  /**
+   * @generated from field: string reserve_a_display = 8;
+   */
+  reserveADisplay = "";
+
+  /**
+   * @generated from field: string reserve_b_display = 9;
+   */
+  reserveBDisplay = "";
+
+  /**
+   * @generated from field: uint32 fee_bps = 10;
+   */
+  feeBps = 0;
+
+  /**
+   * trades and closes the vault has taken
+   *
+   * @generated from field: uint64 generation = 11;
+   */
+  generation = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.SofiVaultStatus status = 12;
+   */
+  status = SofiVaultStatus.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<SofiOwnedVaultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiOwnedVaultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_a_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_b_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "token_a_symbol", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "token_b_symbol", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "reserve_a", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 7, name: "reserve_b", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 8, name: "reserve_a_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "reserve_b_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 10, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 11, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 12, name: "status", kind: "enum", T: proto3.getEnumType(SofiVaultStatus) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiOwnedVaultV1 {
+    return new SofiOwnedVaultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiOwnedVaultV1 {
+    return new SofiOwnedVaultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiOwnedVaultV1 {
+    return new SofiOwnedVaultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiOwnedVaultV1 | PlainMessage<SofiOwnedVaultV1> | undefined, b: SofiOwnedVaultV1 | PlainMessage<SofiOwnedVaultV1> | undefined): boolean {
+    return proto3.util.equals(SofiOwnedVaultV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SofiVaultsResponse
+ */
+export class SofiVaultsResponse extends Message<SofiVaultsResponse> {
+  /**
+   * @generated from field: repeated dsm.SofiOwnedVaultV1 vaults = 1;
+   */
+  vaults: SofiOwnedVaultV1[] = [];
+
+  constructor(data?: PartialMessage<SofiVaultsResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SofiVaultsResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vaults", kind: "message", T: SofiOwnedVaultV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiVaultsResponse {
+    return new SofiVaultsResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SofiVaultsResponse {
+    return new SofiVaultsResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SofiVaultsResponse {
+    return new SofiVaultsResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SofiVaultsResponse | PlainMessage<SofiVaultsResponse> | undefined, b: SofiVaultsResponse | PlainMessage<SofiVaultsResponse> | undefined): boolean {
+    return proto3.util.equals(SofiVaultsResponse, a, b);
   }
 }
 
@@ -21433,6 +21693,14 @@ export class TransactionInfo extends Message<TransactionInfo> {
    */
   displayAmount = "";
 
+  /**
+   * A token or SoFi event: every token it moved, with its signed amount.
+   * Empty for a transfer, which moves the one token above.
+   *
+   * @generated from field: repeated dsm.TokenMove moves = 18;
+   */
+  moves: TokenMove[] = [];
+
   constructor(data?: PartialMessage<TransactionInfo>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21455,6 +21723,7 @@ export class TransactionInfo extends Message<TransactionInfo> {
     { no: 15, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 16, name: "receipt_verified", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 17, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 18, name: "moves", kind: "message", T: TokenMove, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TransactionInfo {
@@ -21471,6 +21740,67 @@ export class TransactionInfo extends Message<TransactionInfo> {
 
   static equals(a: TransactionInfo | PlainMessage<TransactionInfo> | undefined, b: TransactionInfo | PlainMessage<TransactionInfo> | undefined): boolean {
     return proto3.util.equals(TransactionInfo, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.TokenMove
+ */
+export class TokenMove extends Message<TokenMove> {
+  /**
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * the token's ticker
+   *
+   * @generated from field: string token_id = 2;
+   */
+  tokenId = "";
+
+  /**
+   * base units: positive credited, negative debited
+   *
+   * @generated from field: sint64 amount_signed = 3;
+   */
+  amountSigned = protoInt64.zero;
+
+  /**
+   * rendered by Rust from the token's decimals
+   *
+   * @generated from field: string display_amount = 4;
+   */
+  displayAmount = "";
+
+  constructor(data?: PartialMessage<TokenMove>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenMove";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "amount_signed", kind: "scalar", T: 18 /* ScalarType.SINT64 */ },
+    { no: 4, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenMove {
+    return new TokenMove().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenMove {
+    return new TokenMove().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenMove {
+    return new TokenMove().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenMove | PlainMessage<TokenMove> | undefined, b: TokenMove | PlainMessage<TokenMove> | undefined): boolean {
+    return proto3.util.equals(TokenMove, a, b);
   }
 }
 

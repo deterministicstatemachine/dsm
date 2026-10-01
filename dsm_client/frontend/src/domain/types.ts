@@ -40,7 +40,29 @@ export type DomainContact = {
 };
 
 /** The history types Rust writes (`TransactionInfo.tx_type`). */
-export type DomainTxType = 'faucet' | 'bilateral_offline' | 'online' | 'dbtc_mint' | 'dbtc_burn';
+export type DomainTxType =
+  | 'faucet'
+  | 'bilateral_offline'
+  | 'online'
+  | 'dbtc_mint'
+  | 'dbtc_burn'
+  | 'token_create'
+  | 'vault_create'
+  | 'sofi_setup'
+  | 'sofi_trade'
+  | 'sofi_close';
+
+/** One token a token or SoFi event moved, as Rust reported it. */
+export type DomainTokenMove = {
+  /** Base32 Crockford policy commit: the token's identity. */
+  policyCommit: string;
+  /** The token's ticker, display only. */
+  tokenId: string;
+  /** Signed base units: negative is paid out. */
+  amount: bigint;
+  /** Signed display form rendered by Rust. */
+  displayAmount: string;
+};
 
 /**
  * One wallet history row, exactly as `wallet.history` reports it. Every
@@ -72,4 +94,10 @@ export type DomainTransaction = {
   memo?: string;
   stitchedReceipt?: Uint8Array;
   receiptVerified: boolean;
+  /**
+   * A token or SoFi event: every token it moved. Such a row has no single
+   * token or amount of its own, and its `recipient` is the vault or token it
+   * is about.
+   */
+  moves?: DomainTokenMove[];
 };

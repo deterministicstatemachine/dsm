@@ -59,4 +59,7 @@ name = "storage_node"
 path = "src/main.rs"
 
 [dev-dependencies]
+# Parse the node's own sources for clock reads (tests/no_clock_reads.rs).
+proc-macro2 = "1"
 rcgen = "0.14.8"
+syn = { version = "2", features = ["full", "visit"] }

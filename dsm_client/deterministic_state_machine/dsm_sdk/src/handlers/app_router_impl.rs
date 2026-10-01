@@ -2535,8 +2535,8 @@ impl AppRouter for AppRouterImpl {
                 self.handle_token_invoke(i).await
             }
             // SoFi (SoFi §27): the only way the app reaches SoFi.
-            "sofi.createVault" | "sofi.setup" | "sofi.findRoute" | "sofi.trade" | "sofi.route"
-            | "sofi.close" | "sofi.relay" | "sofi.resolve" => self.handle_sofi_invoke(i).await,
+            "sofi.createVault" | "sofi.findRoute" | "sofi.trade" | "sofi.route" | "sofi.close"
+            | "sofi.relay" | "sofi.resolve" | "sofi.vaults" => self.handle_sofi_invoke(i).await,
             // BLE
             // Bilateral reconcile
             // Faucet

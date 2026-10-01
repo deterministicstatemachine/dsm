@@ -3,7 +3,7 @@ import {
   mapContactList,
   mapTransactions,
 } from '../mappers';
-import { TransactionInfo, TransactionType } from '../../proto/dsm_app_pb';
+import { TokenMove, TransactionInfo, TransactionType } from '../../proto/dsm_app_pb';
 import { toBase32Crockford } from '../../dsm/decoding';
 
 describe('domain mappers', () => {
@@ -109,6 +109,50 @@ describe('domain mappers', () => {
       expect(() => mapTransactions([row({ txType: TransactionType.TX_TYPE_FAUCET })])).toThrow(
         /faucet claim tx_ROW names a sender device/,
       );
+    });
+
+    // A token or SoFi event names every token it moved, with Rust's signed
+    // display form for each; it has no single token or amount of its own.
+    it('maps a SoFi trade with every token it moved', () => {
+      const [trade] = mapTransactions([
+        row({
+          txType: TransactionType.TX_TYPE_SOFI_TRADE,
+          tokenId: '',
+          amount: 0n,
+          amountSigned: 0n,
+          displayAmount: '',
+          recipient: 'VAULTID',
+          moves: [
+            new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amountSigned: -10n, displayAmount: '-10' }),
+            new TokenMove({ policyCommit: b(0x42), tokenId: 'TKN', amountSigned: 90n, displayAmount: '90' }),
+          ],
+        }),
+      ]);
+      expect(trade.txType).toBe('sofi_trade');
+      expect(trade.recipient).toBe('VAULTID');
+      expect(trade.moves).toEqual([
+        { policyCommit: toBase32Crockford(b(0x41)), tokenId: 'ERA', amount: -10n, displayAmount: '-10' },
+        { policyCommit: toBase32Crockford(b(0x42)), tokenId: 'TKN', amount: 90n, displayAmount: '90' },
+      ]);
+    });
+
+    it('maps a setup, which moves no token', () => {
+      const [setup] = mapTransactions([
+        row({ txType: TransactionType.TX_TYPE_SOFI_SETUP, tokenId: '', displayAmount: '', moves: [] }),
+      ]);
+      expect(setup.txType).toBe('sofi_setup');
+      expect(setup.moves).toEqual([]);
+    });
+
+    it('refuses an event movement Rust did not render', () => {
+      expect(() =>
+        mapTransactions([
+          row({
+            txType: TransactionType.TX_TYPE_VAULT_CREATE,
+            moves: [new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amountSigned: -100n, displayAmount: '' })],
+          }),
+        ]),
+      ).toThrow(/carries no moved amount/);
     });
 
     it('refuses a row missing a field Rust always writes', () => {

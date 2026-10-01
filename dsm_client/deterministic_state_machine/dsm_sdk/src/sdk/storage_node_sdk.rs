@@ -97,10 +97,23 @@ fn read_ca_certs(path: &str) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, DsmEr
     Ok(certs)
 }
 
+/// How long a member has to accept a connection.
+const MEMBER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long one request to a member may take, end to end. A member that
+/// accepts a connection and never answers is then a member that did not
+/// answer, which every flow already handles, rather than a write that hangs
+/// with no error. A transport bound only: nothing in DSM's validity or
+/// ordering reads it.
+const MEMBER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Build a client from resolved material: the expensive step (TLS
 /// configuration, connection pool), run only when the material changes.
 fn build_client_from(material: &CaMaterial) -> Result<reqwest::Client, DsmError> {
-    let mut builder = reqwest::Client::builder().user_agent("DSM-SDK/1.0");
+    let mut builder = reqwest::Client::builder()
+        .user_agent("DSM-SDK/1.0")
+        .connect_timeout(MEMBER_CONNECT_TIMEOUT)
+        .timeout(MEMBER_REQUEST_TIMEOUT);
     for (cert_path, bytes) in &material.certs {
         let cert = reqwest::Certificate::from_pem(bytes).map_err(|e| {
             ca_error(format!(

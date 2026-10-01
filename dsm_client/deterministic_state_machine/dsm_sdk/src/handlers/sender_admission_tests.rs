@@ -131,18 +131,19 @@ fn outbox_status(rel: &[u8; 32]) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
-    // Faucet position 1 (+100), then an ADMITTED burn of 40 at position 2.
+    // Faucet position 1 (+100.00 ERA), then an ADMITTED burn of 40 base units
+    // at position 2.
     // Then the decisive check: a FOREIGN walk of positions 1..2, crossing a
     // reserve release AND a pure debit in one lineage.
     let d = Device::funded(0xC1).await;
     let burned = invoke(&d.router, "token.burn", &burn_request("ERA", 40)).await;
     match payload(&burned) {
         crate::generated::envelope::Payload::TokenBurnResponse(r) => {
-            assert_eq!(r.new_balance, 60)
+            assert_eq!(r.new_balance, economic_fixtures::whole_era(100) - 40)
         }
         other => panic!("expected TokenBurnResponse, got {other:?}"),
     }
-    assert_eq!(d.era_balance(), 60);
+    assert_eq!(d.era_balance(), economic_fixtures::whole_era(100) - 40);
     let head = d.core().device_head().expect("head");
     assert!(head.pending_economic_admission().is_none(), "unfenced");
     let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
@@ -213,7 +214,11 @@ async fn a_stale_admission_snapshot_is_refused_not_committed() {
         head_before,
         "nothing advanced"
     );
-    assert_eq!(d.era_balance(), 90, "only the overtaking burn debited");
+    assert_eq!(
+        d.era_balance(),
+        economic_fixtures::whole_era(100) - 10,
+        "only the overtaking burn debited"
+    );
 }
 
 /// A refused advance leaves NOTHING: no head movement, no fence, no admitted
@@ -229,7 +234,12 @@ async fn a_refused_advance_leaves_no_trace() {
             .expect("frozen artifacts")
             .len();
 
-    let refused = invoke(&d.router, "token.burn", &burn_request("ERA", 101)).await;
+    let refused = invoke(
+        &d.router,
+        "token.burn",
+        &burn_request("ERA", economic_fixtures::whole_era(100) + 1),
+    )
+    .await;
     assert!(
         !refused.success,
         "a burn beyond the balance must be refused"
@@ -242,7 +252,7 @@ async fn a_refused_advance_leaves_no_trace() {
         "no fence survived"
     );
     assert_eq!(admitted_position(), 1, "no admitted movement");
-    assert_eq!(d.era_balance(), 100);
+    assert_eq!(d.era_balance(), economic_fixtures::whole_era(100));
     assert_eq!(
         client_db::frozen_publication_artifact::list_unpublished_artifacts(u32::MAX)
             .expect("frozen artifacts")
@@ -277,7 +287,10 @@ async fn sequential_admissions_stay_monotonic_across_operation_kinds() {
     assert_eq!(admitted_position(), 4);
 
     let head = d.core().device_head().expect("head");
-    assert_eq!(head.balance(&era()), 90 - fee);
+    assert_eq!(
+        head.balance(&era()),
+        economic_fixtures::whole_era(100) - 10 - fee
+    );
     assert_eq!(head.balance(&seq.policy_commit), 480);
 }
 
@@ -299,11 +312,11 @@ async fn a_transfer_naming_no_token_or_a_misspelled_one_is_refused_and_nothing_m
     assert!(!unnamed.success, "an omitted token is not ERA");
     let msg = unnamed.error_message.unwrap_or_default();
     assert!(msg.contains("names no token"), "got: {msg}");
-    assert_eq!(p.a.era_balance(), 100);
+    assert_eq!(p.a.era_balance(), economic_fixtures::whole_era(100));
 
     let folded = p.a.invoke("wallet.sendSmart", &request("era")).await;
     assert!(!folded.success, "`era` does not name ERA");
-    assert_eq!(p.a.era_balance(), 100);
+    assert_eq!(p.a.era_balance(), economic_fixtures::whole_era(100));
     assert_eq!(p.b.era_balance(), 0);
 }
 
@@ -435,7 +448,11 @@ async fn a_send_to_a_device_that_is_not_a_contact_moves_nothing() {
         "refused because C is not a contact, not for another reason: {why}"
     );
     p.a.enter();
-    assert_eq!(p.a.era_balance(), 100, "nothing was debited");
+    assert_eq!(
+        p.a.era_balance(),
+        economic_fixtures::whole_era(100),
+        "nothing was debited"
+    );
     assert_eq!(admitted_position(), position, "no position was admitted");
     let head = p.a.router().core_sdk.device_head().expect("head");
     assert!(
@@ -800,7 +817,11 @@ async fn token_routes_admit_create_and_burn_end_to_end() {
         crate::generated::envelope::Payload::TokenCreateResponse(t) => t,
         other => panic!("expected TokenCreateResponse, got {other:?}"),
     };
-    assert_eq!(d.era_balance(), 100 - fee, "exactly the fee, burned");
+    assert_eq!(
+        d.era_balance(),
+        economic_fixtures::whole_era(100) - fee,
+        "exactly the fee, burned"
+    );
     assert_eq!(
         admitted_position(),
         2,
@@ -846,7 +867,11 @@ async fn token_routes_admit_create_and_burn_end_to_end() {
         other => panic!("expected TokenCreateResponse, got {other:?}"),
     };
     assert_eq!(resp2.token_id, resp.token_id, "one commitment, one token");
-    assert_eq!(d.era_balance(), 100 - fee, "no second fee");
+    assert_eq!(
+        d.era_balance(),
+        economic_fixtures::whole_era(100) - fee,
+        "no second fee"
+    );
     assert_eq!(
         admitted_position(),
         2,
@@ -856,7 +881,10 @@ async fn token_routes_admit_create_and_burn_end_to_end() {
     // The admitted burn ROUTE (position 3).
     let burned = invoke(&d.router, "token.burn", &burn_request("ERA", 25)).await;
     assert!(burned.success, "{:?}", burned.error_message);
-    assert_eq!(d.era_balance(), 100 - fee - 25);
+    assert_eq!(
+        d.era_balance(),
+        economic_fixtures::whole_era(100) - fee - 25
+    );
     assert_eq!(
         admitted_position(),
         3,
@@ -880,7 +908,7 @@ async fn a_transfer_registers_the_senders_root_at_the_next_position() {
     assert!(b_sync.success, "{:?}", b_sync.errors);
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
-    assert_eq!(p.a.era_balance(), 90);
+    assert_eq!(p.a.era_balance(), economic_fixtures::whole_era(100) - 10);
 
     p.a.enter();
     let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
@@ -957,7 +985,7 @@ async fn a_failed_finish_holds_the_creation_and_resume_completes_the_same_admiss
     assert_eq!(admitted_position(), 1, "nothing admitted");
     assert_eq!(
         d.era_balance(),
-        100 - fee,
+        economic_fixtures::whole_era(100) - fee,
         "forward-only: the committed fee stands"
     );
     let frozen = client_db::frozen_publication_artifact::list_unpublished_artifacts(u32::MAX)
@@ -1123,7 +1151,7 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
     );
     assert_eq!(
         p.a.era_balance(),
-        90,
+        economic_fixtures::whole_era(100) - 10,
         "forward-only: the committed debit stands"
     );
     assert_eq!(
@@ -1231,11 +1259,17 @@ async fn a_creation_built_on_a_predecessor_the_device_no_longer_stands_on_is_ref
     } else {
         (held_token, era(), 100, 10)
     };
+    // The reserves as the user enters them: token units of each token.
+    let entered = |token: &[u8; 32], base: u64| {
+        let (.., decimals) =
+            crate::handlers::wallet_routes::token_of_commit(token).expect("a known token");
+        crate::handlers::wallet_routes::format_base_units_for_display(base, decimals)
+    };
     let request = crate::generated::SofiCreateVaultRequest {
         token_a_policy_commit: token_a.to_vec(),
         token_b_policy_commit: token_b.to_vec(),
-        reserve_a,
-        reserve_b,
+        reserve_a_entered: entered(&token_a, reserve_a),
+        reserve_b_entered: entered(&token_b, reserve_b),
         fee_bps: 30,
     };
 
