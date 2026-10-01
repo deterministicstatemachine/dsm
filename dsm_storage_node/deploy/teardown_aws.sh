@@ -43,7 +43,7 @@ if [ "${FORCE}" = false ] && [ -n "${SSH_KEY}" ]; then
     if [ -n "${IPS}" ]; then
         for IP in ${IPS}; do
             printf "  Stopping %s... " "${IP}"
-            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+            ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes \
                 -i "${SSH_KEY}" "ubuntu@${IP}" \
                 "cd /opt/dsm-storage && docker compose -f docker-compose.node.yml down 2>/dev/null" \
                 2>/dev/null && echo "done" || echo "skipped (unreachable)"
