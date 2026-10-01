@@ -73,9 +73,11 @@ async fn objects(
 }
 
 /// Carry the position pair of a registered-or-not fulfillment along the
-/// route of `s(q)`: `F` in the envelope it was published in, and `C_q`
-/// derived from the two verified objects. It establishes no registration —
-/// Core derives that from the cells (R10).
+/// route of `s(q)`: `F` in the envelope it was published in, and the
+/// trader's signed `C_q` exactly as `K_root(q)` holds it. A relayer cannot
+/// sign `C_q` (SoFi Amendment S20), so it carries the trader's own bytes:
+/// recognized at the cell, and with the body `(P, F)` derive. It establishes
+/// no registration — Core derives that from the cells (R10).
 pub async fn relay_position_pair(
     set: &StorageSet,
     fulfillment_id: &D32,
@@ -102,7 +104,27 @@ async fn carry_pair(
     }
     .object_bytes()
     .map_err(refuse)?;
-    let claim = dsm::sofi::derive::resolution_claim(&precommit.body, &fulfillment.body).encode();
+    let derived = dsm::sofi::derive::resolution_claim(&precommit.body, &fulfillment.body);
+    let seats = NodeSeats::new(set)?;
+    let evidence = read_cell(&seats, cells.root().routed()).await;
+    let claim = match dsm::economic::register::read_root_cell(cells.root(), &evidence) {
+        Ok(dsm::route_chain::CellReading::Held {
+            object: dsm::economic::claim_envelope::RegisteredEconomicClaim::ConditionalSofi(held),
+            value,
+            ..
+        }) if held == derived => value,
+        Ok(_) => {
+            return Err(refuse(
+                "K_root(q) holds no C_q of this fulfillment signed by its trader; only the \
+                 trader can write it",
+            ))
+        }
+        Err(missing) => {
+            return Err(refuse(format!(
+                "K_root(q) is not decided yet, so the trader's C_q is not in hand: {missing:?}"
+            )))
+        }
+    };
     write_recorded_position(set, &cells, &f_bytes, &claim).await
 }
 

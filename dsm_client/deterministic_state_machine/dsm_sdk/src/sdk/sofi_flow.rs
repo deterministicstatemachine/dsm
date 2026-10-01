@@ -1392,8 +1392,9 @@ async fn exercise_draft(
             live_attempt(&verifier, &chains, &leg.vault_id, &leg.parent_root)?,
         ));
     }
-    let produced =
-        build_fulfillment(&checked, precommit_signature.clone(), &attempts).map_err(refuse)?;
+    let att_a = crate::sdk::signing_authority::current_att_a()?;
+    let produced = build_fulfillment(&checked, precommit_signature.clone(), &attempts, att_a)
+        .map_err(refuse)?;
     let fulfillment_signature = sign(produced.signs.bytes())?;
 
     // Stages 4 and 5.

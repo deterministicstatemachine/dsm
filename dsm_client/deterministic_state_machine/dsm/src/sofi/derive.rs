@@ -14,14 +14,15 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_ATOMIC_EXT_MULTIVAULT_V5, TAG_DSM_SOFI_ATOMIC_EXT_V4, TAG_DSM_SOFI_DLV_CORE_V3,
     TAG_DSM_SOFI_DLV_POLICY_FULFILLMENT, TAG_DSM_SOFI_FULFILLMENT, TAG_DSM_SOFI_FULFILLMENT_ID,
     TAG_DSM_SOFI_FULFILLMENT_SIGN, TAG_DSM_SOFI_PREIMAGE_LOCATOR, TAG_DSM_SOFI_REL_GENESIS,
-    TAG_DSM_SOFI_REL_INDEX, TAG_DSM_SOFI_REL_KEY, TAG_DSM_SOFI_REL_LEAF,
-    TAG_DSM_SOFI_ROUTE_LEG_SET, TAG_DSM_SOFI_SETTLEMENT_CORE_V3, TAG_DSM_SOFI_SETUP_ID,
-    TAG_DSM_SOFI_SETUP_REF, TAG_DSM_SOFI_SETUP_SIGN, TAG_DSM_SOFI_VAULT_CREATION_KEY,
-    TAG_DSM_SOFI_STORAGE_SEED_V4, TAG_DSM_SOFI_SUCC_ATTEMPT, TAG_DSM_SOFI_SUCC_CELL_V2,
-    TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_ROUTE_DIGEST,
-    TAG_DSM_SOFI_TRADER_PRECOMMIT_SIGN, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID,
-    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR, TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
-    TAG_DSM_SOFI_VAULT_LEAF_STATE, TAG_DSM_SOFI_VAULT_STATE_KEY,
+    TAG_DSM_SOFI_RESOLUTION_CLAIM_SIGN, TAG_DSM_SOFI_REL_INDEX, TAG_DSM_SOFI_REL_KEY,
+    TAG_DSM_SOFI_REL_LEAF, TAG_DSM_SOFI_ROUTE_LEG_SET, TAG_DSM_SOFI_SETTLEMENT_CORE_V3,
+    TAG_DSM_SOFI_SETUP_ID, TAG_DSM_SOFI_SETUP_REF, TAG_DSM_SOFI_SETUP_SIGN,
+    TAG_DSM_SOFI_VAULT_CREATION_KEY, TAG_DSM_SOFI_STORAGE_SEED_V4, TAG_DSM_SOFI_SUCC_ATTEMPT,
+    TAG_DSM_SOFI_SUCC_CELL_V2, TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID,
+    TAG_DSM_SOFI_ROUTE_DIGEST, TAG_DSM_SOFI_TRADER_PRECOMMIT_SIGN,
+    TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
+    TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT, TAG_DSM_SOFI_VAULT_LEAF_STATE,
+    TAG_DSM_SOFI_VAULT_STATE_KEY,
 };
 use crate::common::domain_tags::TAG_DSM_ECONOMIC_LEAF_STATE;
 use crate::storage_object::immutable_addr;
@@ -230,6 +231,30 @@ pub fn resolution_claim(
         realize_root: *precommit.realize_root(),
         void_root: *precommit.void_root(),
     }
+}
+
+/// `m_C = H(resolution-claim-sign/v1 ‖ CCB(C_q) ‖ u16be(alg) ‖ u32be(|key|) ‖
+/// key ‖ AttA)` — what the trader signs so `C_q` can occupy `K_root(q)`
+/// (SoFi Amendment S20). The key and `AttA` are inside the digest, so a
+/// signature cannot be moved to a claim presenting another binding.
+pub fn resolution_claim_signing_digest(
+    claim: &SofiResolutionClaim,
+    signature_alg: u16,
+    claimant_public_key: &[u8],
+    claimant_att_a: &D32,
+) -> D32 {
+    // A declared algorithm fixes the key width far below u32::MAX.
+    let key_len = claimant_public_key.len() as u32;
+    h(
+        TAG_DSM_SOFI_RESOLUTION_CLAIM_SIGN,
+        &[
+            &claim.encode(),
+            &signature_alg.to_be_bytes(),
+            &key_len.to_be_bytes(),
+            claimant_public_key,
+            claimant_att_a,
+        ],
+    )
 }
 
 // ── successor attempts and routing seed ────────────────────────────────────
