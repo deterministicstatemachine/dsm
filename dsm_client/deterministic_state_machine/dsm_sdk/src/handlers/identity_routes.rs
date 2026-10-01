@@ -249,7 +249,6 @@ mod tests {
             genesis_hash: vec![0xB1; 32],
             signing_public_key: vec![0xB2; 64],
             preferred_alias: "bob".into(),
-            ..Default::default()
         };
         let code = code_of(&card);
         assert_eq!(
