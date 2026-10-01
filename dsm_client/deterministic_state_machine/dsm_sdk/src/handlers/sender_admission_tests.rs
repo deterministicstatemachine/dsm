@@ -64,6 +64,13 @@ fn create_request(
     }
 }
 
+/// A token whose policy refuses every transfer.
+fn non_transferable_request(ticker: &str) -> crate::generated::TokenCreateRequest {
+    let mut request = create_request(ticker, 2, 1_000);
+    request.transferable = false;
+    request
+}
+
 fn payload(result: &AppResult) -> crate::generated::envelope::Payload {
     assert!(result.success, "{:?}", result.error_message);
     crate::generated::Envelope::decode(&result.data[1..])
@@ -396,17 +403,65 @@ async fn a_burn_disabled_token_refuses_its_burn() {
     );
 }
 
+/// MR-DSM-0074, Amendment A3: a device sends only over relationships it
+/// has pre-added. A device A never added as a contact cannot be sent to:
+/// `wallet.sendSmart` refuses it, nothing is debited, no position is
+/// admitted and nothing is left pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_send_to_a_device_that_is_not_a_contact_moves_nothing() {
+    let p = Pair::boot(100, 0).await;
+    let stranger = crate::test_support::two_device::TestDevice::create("C", 0x0C);
+    p.a.enter();
+    assert!(
+        client_db::get_contact_by_device_id(&stranger.device_id)
+            .expect("A's contacts")
+            .is_none(),
+        "C is not A's contact"
+    );
+    let position = admitted_position();
+
+    let sent = p.a.send(&stranger, 10).await;
+    assert!(
+        !sent.success,
+        "a device that is not a contact cannot be sent to: {:?}",
+        sent.error_message
+    );
+    let Some(why) = sent.error_message.clone() else {
+        panic!("a refused send names its reason")
+    };
+    assert!(
+        why.contains("must be an added contact"),
+        "refused because C is not a contact, not for another reason: {why}"
+    );
+    p.a.enter();
+    assert_eq!(p.a.era_balance(), 100, "nothing was debited");
+    assert_eq!(admitted_position(), position, "no position was admitted");
+    let head = p.a.router().core_sdk.device_head().expect("head");
+    assert!(
+        head.pending_economic_admission().is_none(),
+        "nothing left pending"
+    );
+}
+
 /// SoFi §49: `transferable` governs every transfer. A token created
 /// non-transferable refuses `wallet.send` as an operation its policy does not
 /// permit, and nothing moves; a transferable created token moves through the
 /// same handler (`token_adoption_tests::an_adopted_token_resolves_on_the_receiving_device`).
+/// The receiving device refuses it too, whatever its sender checked: B's
+/// canonical apply of a transfer A signed, with B's pinned head for A as its
+/// parent, runs the token's committed policy before any acceptance is built
+/// (G7: the policy is honoured on every transfer, at both ends).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_non_transferable_token_refuses_its_transfer() {
     let p = Pair::boot(100, 0).await;
-    let mut request = create_request("NOTX", 2, 1_000);
-    request.transferable = false;
-    let created = invoke(p.a.router(), "token.create", &request).await;
+    let created = invoke(
+        p.a.router(),
+        "token.create",
+        &non_transferable_request("NOTX"),
+    )
+    .await;
     match payload(&created) {
         crate::generated::envelope::Payload::TokenCreateResponse(_) => {}
         other => panic!("expected TokenCreateResponse, got {other:?}"),
@@ -443,6 +498,291 @@ async fn a_non_transferable_token_refuses_its_transfer() {
         head.pending_economic_admission().is_none(),
         "nothing left pending"
     );
+
+    p.b.enter();
+    let adopted = p
+        .b
+        .router()
+        .query(crate::bridge::AppQuery {
+            path: "tokens.addByAnchor".to_string(),
+            params: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
+        })
+        .await;
+    assert!(
+        adopted.success,
+        "B adopts NOTX: {:?}",
+        adopted.error_message
+    );
+    p.a.enter();
+    let b_contact = client_db::get_contact_by_device_id(&p.b.device_id)
+        .expect("A's contacts")
+        .expect("A holds B as a contact");
+    let tip = crate::handlers::app_router_impl::contact_relationship_tip(&b_contact)
+        .expect("A's relationship tip with B");
+    let unsigned = dsm::types::operations::Operation::Transfer {
+        to_device_id: p.b.device_id.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(25),
+        token_id: b"NOTX".to_vec(),
+        policy_commit: row.policy_commit,
+        mode: dsm::types::operations::TransactionMode::Unilateral,
+        nonce: crate::handlers::app_router_impl::transfer_nonce(&tip, 25, "NOTX", &p.b.device_id),
+        recipient: b_contact.public_key.clone(),
+        to: crate::util::text_id::encode_base32_crockford(&p.b.device_id).into_bytes(),
+        message: String::new(),
+        signature: Vec::new(),
+        authority_policy: None,
+    };
+    let canonical = unsigned.to_bytes();
+    let a_key = crate::sdk::signing_authority::current_public_key().expect("A's key");
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &crate::sdk::signing_authority::current_secret_key().expect("A's signing key"),
+        &canonical,
+    )
+    .expect("A signs");
+    let signed =
+        dsm::types::operations::Operation::decode_and_bind_signed(&canonical, &signature, &a_key)
+            .expect("A's signature binds");
+
+    p.b.enter();
+    let rel_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&p.b.device_id, &p.a.device_id);
+    let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+        &p.b.device_id,
+        &p.a.device_id,
+    );
+    let entropy = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_TEST_TIP,
+        &canonical,
+    );
+    let child = crate::sdk::core_sdk::successor_child_tip(
+        &rel_key,
+        &parent,
+        &p.b.device_id,
+        &signed.to_bytes(),
+        &entropy,
+    );
+    let refused = p.b.router().core_sdk.apply_incoming_transfer_staged(
+        signed,
+        &crate::types::identifiers::TransactionId::new("notx-to-b"),
+        &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+        &canonical,
+        parent,
+        child,
+        entropy,
+        |_, _| {
+            Err::<(), _>(dsm::types::error::DsmError::invalid_operation(
+                "reached acceptance: the policy did not refuse",
+            ))
+        },
+        |_, _, _| {
+            Err(dsm::types::error::DsmError::invalid_operation(
+                "reached the accept transaction: the policy did not refuse",
+            ))
+        },
+        None,
+    );
+    let why = match refused {
+        Err(e) => e.to_string(),
+        Ok(outcome) => panic!("B applied a non-transferable transfer: {outcome:?}"),
+    };
+    assert!(
+        why.contains("Operation not permitted"),
+        "B refuses by the policy's operation restriction: {why}"
+    );
+    let b_head = p.b.router().core_sdk.device_head().expect("B's head");
+    assert_eq!(b_head.balance(&row.policy_commit), 0, "nothing reached B");
+}
+
+/// G13, MR-DSM-0029: the receiver reads the payer's register only after every
+/// check it can decide from what it holds. A hostile sender does what its
+/// wallet refuses to do: it signs a transfer of its non-transferable token to
+/// B, advances its own head over it, and signs the step's receipt with its
+/// per-step EK. Both halves reach B's boundary and bind. B's sync refuses the
+/// pair by the token's committed policy, which B holds, and no member is asked
+/// for a cell while it does: nothing of the sender's register is read for a
+/// transfer B refuses in hand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is_read() {
+    use crate::handlers::recipient_dispatch::{ingest_evidence_half, ingest_transfer_half};
+    use crate::storage::client_db::recipient_staging::{self, PairState};
+    use crate::test_support::receipts::Party;
+    use dsm::types::device_state::{BalanceDelta, BalanceDirection};
+    use dsm::types::receipt_types::{compute_receipt_challenge_response_target, StitchedReceiptV2};
+
+    let p = Pair::boot(100, 0).await;
+    let created = invoke(
+        p.a.router(),
+        "token.create",
+        &non_transferable_request("NOTX"),
+    )
+    .await;
+    match payload(&created) {
+        crate::generated::envelope::Payload::TokenCreateResponse(_) => {}
+        other => panic!("expected TokenCreateResponse, got {other:?}"),
+    }
+    p.a.enter();
+    let row = client_db::token_registry::get_token_by_ticker("NOTX")
+        .expect("registry read")
+        .expect("registry row committed with the advance");
+    let sender_position = admitted_position() + 1;
+    p.b.enter();
+    let adopted = p
+        .b
+        .router()
+        .query(crate::bridge::AppQuery {
+            path: "tokens.addByAnchor".to_string(),
+            params: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
+        })
+        .await;
+    assert!(
+        adopted.success,
+        "B adopts NOTX: {:?}",
+        adopted.error_message
+    );
+
+    // A's transfer, signed as its send would sign it.
+    p.a.enter();
+    let b_contact = client_db::get_contact_by_device_id(&p.b.device_id)
+        .expect("A's contacts")
+        .expect("A holds B as a contact");
+    let tip = crate::handlers::app_router_impl::contact_relationship_tip(&b_contact)
+        .expect("A's relationship tip with B");
+    let unsigned = dsm::types::operations::Operation::Transfer {
+        to_device_id: p.b.device_id.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(25),
+        token_id: b"NOTX".to_vec(),
+        policy_commit: row.policy_commit,
+        mode: dsm::types::operations::TransactionMode::Unilateral,
+        nonce: crate::handlers::app_router_impl::transfer_nonce(&tip, 25, "NOTX", &p.b.device_id),
+        recipient: b_contact.public_key.clone(),
+        to: crate::util::text_id::encode_base32_crockford(&p.b.device_id).into_bytes(),
+        message: String::new(),
+        signature: Vec::new(),
+        authority_policy: None,
+    };
+    let canonical = unsigned.to_bytes();
+    let a_key = crate::sdk::signing_authority::current_public_key().expect("A's key");
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &crate::sdk::signing_authority::current_secret_key().expect("A's signing key"),
+        &canonical,
+    )
+    .expect("A signs");
+    let signed =
+        dsm::types::operations::Operation::decode_and_bind_signed(&canonical, &signature, &a_key)
+            .expect("A's signature binds");
+
+    // A's own step over it, and the step's receipt, signed by A's per-step EK
+    // as its wallet signs a send's receipt.
+    let rel_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&p.a.device_id, &p.b.device_id);
+    let outcome =
+        p.a.router()
+            .core_sdk
+            .device_head()
+            .expect("A's head")
+            .advance(
+                rel_key,
+                p.b.device_id,
+                signed.clone(),
+                &[BalanceDelta {
+                    policy_commit: row.policy_commit,
+                    direction: BalanceDirection::Debit,
+                    amount: 25,
+                }],
+                None,
+                None,
+            )
+            .expect("A's head advances over its own transfer");
+    let mut receipt = StitchedReceiptV2::of_step(
+        p.a.genesis,
+        p.a.device_id,
+        p.b.device_id,
+        &outcome,
+        None,
+        &crate::sdk::app_state::AppState::get_device_tree_commitment()
+            .expect("A's Device Tree commitment"),
+    )
+    .expect("the step's receipt");
+    let (a, b) = (Party::from_seed(0x0A), Party::from_seed(0x0B));
+    assert_eq!(a.device_id(), p.a.device_id, "the harness's A is seed 0x0A");
+    let commitment = receipt.compute_commitment().expect("the commitment");
+    let target = compute_receipt_challenge_response_target(&commitment, &commitment);
+    let c_pre = dsm::core::bilateral_transaction_manager::compute_precommit(
+        &tip,
+        &canonical,
+        &outcome.transition_entropy(),
+    );
+    let answer = a.answer(&b, &receipt.parent_tip, &c_pre, &target);
+    receipt.set_ek_pk_a(answer.ek_pk);
+    receipt.set_ek_cert_a(answer.ek_cert);
+    receipt.set_kyber_ct_a(answer.kyber_ct);
+    receipt.add_sig_a(answer.sig);
+    let receipt_bytes = receipt.to_full_protobuf().expect("the signed receipt");
+    let transfer_bytes = dsm::types::proto::OnlineTransferRequest {
+        signature,
+        canonical_operation_bytes: canonical,
+        sender_economic_position: sender_position,
+        sender_debit_mutation_index: 0,
+    }
+    .encode_to_vec();
+
+    // Both halves reach B's boundary on B's route for A, and bind.
+    p.b.enter();
+    let a_contact = client_db::get_contact_by_device_id(&p.a.device_id)
+        .expect("B's contacts")
+        .expect("B holds A as a contact");
+    let route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+        &p.b.genesis,
+        &p.b.device_id,
+        &crate::handlers::app_router_impl::contact_relationship_tip(&a_contact)
+            .expect("B's relationship tip with A"),
+    )
+    .expect("B's route for A");
+    ingest_transfer_half(
+        &transfer_bytes,
+        &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+        &route,
+        &client_db::derive_submission_id(&commitment),
+    )
+    .expect("the transfer half is ingested");
+    ingest_evidence_half(
+        &receipt_bytes,
+        &route,
+        &crate::util::text_id::encode_base32_crockford(&commitment[..16]),
+    )
+    .expect("the evidence half is ingested");
+    let pairs = recipient_staging::pairs_in_flight().expect("pairs");
+    assert!(
+        matches!(pairs.as_slice(), [pair] if pair.state == PairState::Bound),
+        "the pair binds"
+    );
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let synced = p.b.sync().await;
+    for node in &p.nodes.nodes {
+        for request in node.requests() {
+            assert!(
+                !request.starts_with("GET /api/v2/cell/"),
+                "{} was asked for a cell while B refused a transfer it holds the policy for: \
+                 {request}",
+                node.member_id
+            );
+        }
+    }
+    assert!(
+        synced
+            .errors
+            .iter()
+            .any(|e| e.contains("Operation not permitted")),
+        "B refuses by the policy's operation restriction: {:?}",
+        synced.errors
+    );
+    p.b.enter();
+    let b_head = p.b.router().core_sdk.device_head().expect("B's head");
+    assert_eq!(b_head.balance(&row.policy_commit), 0, "nothing reached B");
 }
 
 /// Token creation through its route, end to end: the fee debit and the

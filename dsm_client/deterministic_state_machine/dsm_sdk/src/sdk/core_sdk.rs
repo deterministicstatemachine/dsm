@@ -1075,7 +1075,7 @@ impl CoreSDK {
     /// permits it. A creation's supply cap is evaluated against the
     /// circulating supply derived HERE, where the chain is reachable, never
     /// in the pure context builder.
-    fn enforce_policy_for_operation(
+    pub(crate) fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
     ) -> Result<(), DsmError> {
