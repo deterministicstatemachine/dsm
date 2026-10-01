@@ -40,6 +40,7 @@ pub mod core_sdk;
 pub mod identity_publication; // publication-quorum lifecycle for device identities
 pub mod inbox_poller;
 pub mod kyber_identity; // ML-KEM identity binding for online contact establishment (§11.1)
+pub mod realized_records;
 pub mod session_manager; // Native-first session state projection
 pub mod signing_authority;
 pub mod sofi_advance;

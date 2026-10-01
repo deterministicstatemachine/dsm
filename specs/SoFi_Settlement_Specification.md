@@ -671,6 +671,7 @@ is Unavailable, never Invalid.
 | PrecommitId | P |
 | `preimage_locator(E)` | P(E) |
 | `vault_genesis_locator(v)` | the vault genesis preimage |
+| `vault_token_locator(t)` | the genesis preimage of each vault whose market pairs token `t` (Amendment S16) |
 | ρ | the setup body |
 | PolicyFulfillmentIdj | Gj |
 | the auxiliary reference | auxiliary evidence candidates |
@@ -754,6 +755,7 @@ TAG_DSM_SOFI_ROUTE_DIGEST                     DSM/sofi/route-digest/v1          
 TAG_DSM_SOFI_PREIMAGE_LOCATOR                 DSM/sofi/preimage-locator/v1              locator of P (E)
 TAG_DSM_SOFI_VAULT_ID                         DSM/sofi/vault-id/v1                      v
 TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR            DSM/sofi/vault-genesis-locator/v1         locator of vault genesis
+TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR              DSM/sofi/vault-token-locator/v1           locator of the vaults of a token (Amendment S16)
 TAG_DSM_SOFI_VAULT_CREATION_KEY               DSM/sofi/vault-creation-key/v1            key of the creation leaf
 TAG_DSM_SOFI_VAULT_STATE_KEY                  DSM/sofi/vault-state-key/v1               key of the vault state leaf
 TAG_DSM_SOFI_VAULT_LEAF_STATE                 DSM/sofi/vault-leaf-state/v1              DLV leaf values
@@ -846,6 +848,7 @@ trader relationship     under DSM/economic-leaf-state/v1 over the trader relatio
 value
 Xroute                  H(route-digest/v1; CCB(RouteDigestPreimage))                                    :89
 vault genesis locator   H(vault-genesis-locator/v1; v)                                                  :94
+vault token locator     H(vault-token-locator/v1; t), t a token's policy commit (Amendment S16)          vault_token_locator
 vault creation key      H(vault-creation-key/v1; Go ∥ DevIDo ∥ v)                                       :104
 kT,v                    H(rel-key/v1; G ∥ DevID ∥ v)                                                    :112
 σ                       H(setup-id/v1; G ∥ DevID ∥ u64be(p) ∥ v)                                        :118
@@ -1720,6 +1723,16 @@ for a = 0, 1, . . . . walk (CORE/sofi/resolution.rs:412) classifies each attempt
 to the next. An unresolved attempt ends the walk: the head is Rn and that attempt is live.
 4. The head’s vault state leaf gives the reserves and policies that price the next hop.
 
+> **Amendment S16 (owner, 2026-10-01) — a vault is found by its tokens, and its setup is the first step of the first trade through it.** Phone-rig finding, 2026-10-01: `sofi.findRoute` searched only the vaults the trader had already set up with, so a trader could not find a vault without being told it, and the rig's first trade went through only because the trader set up by hand. This amends §11, §14.1, §15, §27, §28, §29, §30, §31 and §32.
+>
+> - **The token index.** Creating a vault also indexes its genesis preimage under `vault_token_locator(t) = H(vault-token-locator/v1; t)` for each of the two tokens `t` of its market pair, where `t` is the token's policy commit (§28 step 4). It is an index like every other (§11): public and append-only, anyone may append, a read returns the addresses in append order, and the member interprets nothing.
+> - **Discovery carries no authority.** A reader keeps a candidate only when the preimage is accepted as the vault's genesis, bound to the owner's validated creation by `genesis_accepted` (§28 step 5), and the market policy that acceptance resolves pairs `t`. Anything else under the locator is not a vault of `t`, and is passed over. A candidate whose bytes, or whose owner's lineage, the reads do not establish leaves the discovery partial, never Invalid. The vaults the reads did establish are found all the same.
+> - **Path search.** `sofi.findRoute` reads the token index of the input token and of the output token. It takes the vaults that pair them directly and, for two hops (`ROUTE_MAX_LEGS`), a vault of the input token and a vault of the output token that share their other token. It walks each one's head by §30 and prices each hop there. Path search finds its vaults by these two indexes and their heads by §30, and uses nothing else. It is not limited to the vaults the trader has set up with, and a quote needs no setup. A route found over a partial discovery says so. A quote carries no authority: the trade walks and prices each head again (§31 stage 2), and the trader's minimum output bounds what it accepts.
+> - **The setup is still a transaction.** §16 and §29 stand: a trader sets up once per vault before its first operation against that vault, the setup body is published and `Stored`, and the trader's transition carries `SofiSetup` as a position of its own, which every later leg through that vault names by `ρ`. What changes is who starts it. When the trader has no setup with a vault on the route, the first trade or route through that vault admits the setup transaction first, one per such vault in hop order, and then builds the trade on the position after the last of them. Later trades reuse the setup. The owner's first Close of its own vault does the same (§32).
+> - **Routes (§27).** `sofi.setup` is no longer a route of its own: the setup is the first step of the operation that needs it, run by the producer of `sofi.trade`, `sofi.route` and `sofi.close`. In its place, `sofi.vaults` lists the vaults the device created — the creation records its own validated root commits — each walked to its head by §30, so the owner sees the live reserves without closing (owner ruling, 2026-10-01). The app still reaches SoFi through eight routes.
+> - **Another trader's conditional parent.** A walk that meets an exercise whose `P` names its trader's conditional position as its parent resolves that position from SoFi's public objects through frontier-relative verification of the trader's lineage (DSM Amendment A8, Amendment S15), exactly as it resolves one inside a lineage it verifies; it does not wait on the trader. Without it, any trader's second trade through a vault stalls every other device's walk of that vault.
+> - **What it does not change.** The vault side, the walk, the resolution and every predicate are unchanged. Setting up is an ordinary admitted transition, so a setup admitted ahead of a trade that then fails, or is never built, stands as the trader's position. The next trade through that vault reuses it.
+
 <!-- spec-section: SOFI-031 -->
 ### 31 A trade and a multihop route
 A single vault trade is a route with one hop. A multihop route is one operation whose hops run through distinct vaults,
@@ -1752,6 +1765,13 @@ of those vaults’ next attempt goes live. There is no partial route and no coor
 
 The vault side needs no action. Once a hop is consumed, that vault’s head is its Vj◦ post root, and the owner and
 every later trader find it by walking.
+
+> **Amendment S19 (owner, 2026-10-01) — a route chains or splits.** Owner ruling during the phone-rig run, on two vaults of one pair filling one order: "It should be no different. It just happens to be the same token," and "It should work either way." Two vaults of the same token pair are no different from two vaults of different pairs, and one order may be filled through both. This amends §19.5 and §31, and changes only what a Swap route's hops may be.
+>
+> - **Two shapes.** A Swap route's hops either chain — the output token and amount of hop j are the input token and amount of hop j + 1, as §19.5 states — or split: every hop trades the route's one pair, from the intent's input token to its output token, through distinct vaults. A route of one hop is both.
+> - **A split's endpoints.** The hops' inputs sum to the intent's `amount_in`, and their outputs sum to its `exact_out`, in checked arithmetic. Each hop is priced by its own vault's constant product at its own head, exactly as a chained hop is (§19.5), and each vault takes its own fee.
+> - **Everything else is unchanged.** The trader's core moves the intent's two endpoints only (one debit of `amount_in`, one credit of `exact_out`) and advances one relationship per vault. The route is one operation: every hop lands at its own vault's cell, the route realizes only when every hop does, and one defeated hop voids it all ("multihop is all or none", above). `ROUTE_MAX_LEGS` bounds both shapes.
+> - **Who chooses the split.** The producer: `sofi.findRoute` weighs a split across two vaults of the pair beside every single hop and chain, and proposes whichever gives the trader the most. The trade prices the same split again at the heads it walks. Neither carries authority; RouteValidation checks the hops as stated.
 
 > **Recommendation (owner, 2026-09-23) — not a rule.** Every vault must honour the policy of each of its tokens; that is a rule, not a choice (§49, MR-SOFI-0311). Within those policies, owners are encouraged to set up their vaults for a token in line with the rest of the market for that token, with only minor differences, so that their liquidity is usable by multihop routes and other traders' paths. Nothing enforces this, and no check depends on it.
 

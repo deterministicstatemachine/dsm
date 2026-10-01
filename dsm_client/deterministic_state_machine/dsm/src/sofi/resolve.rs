@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ccb::StorageSetMembers;
-use crate::economic::lineage::AcceptedClaim;
+use crate::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use crate::economic::provenance::{PeerLineageFailure, ValidatedPeerTransition};
 use crate::economic::register::root_completion;
 use crate::economic::state::EconomicLeafState;
@@ -189,6 +189,12 @@ pub trait SofiReads {
         &self,
         vault_id: &D32,
     ) -> Result<Discovered<(VaultGenesisPreimage, Vec<u8>)>, ReadFailure>;
+    /// The vault named by every preimage published under token `t`'s vault
+    /// token locator that decodes as a vault genesis preimage, in append
+    /// order (Amendment S16). Candidates only: [`Verifier::vaults_of_token`]
+    /// accepts each genesis and checks its market before it is a vault of
+    /// `t`.
+    fn vault_token_candidates(&self, token: &D32) -> Result<Discovered<D32>, ReadFailure>;
     /// The owner's transition at its creation position, validated by the
     /// peer lineage walk.
     fn vault_owner(
@@ -206,6 +212,18 @@ pub trait SofiReads {
         root: &D32,
         keys: &BTreeSet<D32>,
     ) -> Result<Option<VaultLeaves>, ReadFailure>;
+    /// The root trader `(genesis, device_id)`'s lineage selected AT
+    /// `position`, and the reference a later `P` names it by, by
+    /// frontier-relative verification of that lineage (DSM Amendment A8;
+    /// SoFi Amendment S15): a conditional position resolved from SoFi's
+    /// public objects. What a walk resolves another trader's conditional
+    /// parent with.
+    fn trader_root_at(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure>;
     /// The claim lineage validation accepted at `position` of trader
     /// `(genesis, device_id)`: from this device's own admitted store when the
     /// trader is this device, and from the peer lineage walk otherwise —
@@ -340,13 +358,13 @@ impl LocalLeaves {
         Ok(out)
     }
 
-    /// Every relationship leaf this device holds: the vaults it is set up
-    /// with.
-    pub fn relationships(&self) -> Vec<super::wire::TraderRelationshipLeaf> {
+    /// Every vault this device created: the creation record its validated
+    /// root commits for each one (P15-12), in key order.
+    pub fn vault_creations(&self) -> Vec<super::wire::VaultCreation> {
         let mut out = Vec::new();
         for state in self.leaves.values() {
-            if let EconomicLeafState::Relationship(leaf) = state {
-                out.push(*leaf);
+            if let EconomicLeafState::VaultCreation(creation) = state {
+                out.push(*creation);
             }
         }
         out
@@ -370,6 +388,13 @@ impl core::fmt::Display for LeavesDoNotRecomputeTheRoot {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// Whether a discovery examined every candidate and established each one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanExtent {
+    Whole,
+    Short,
 }
 
 /// What this verifier established about vault `v`'s genesis (SoFi §19.8;
@@ -434,8 +459,10 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     pub network_id: &'a [u8],
     /// What this verifier itself resolved at a conditional position: what a
     /// `P` naming that fulfillment as its parent was built on. Core reads
-    /// what it selected; nothing else resolves a parent, and a conditional
-    /// parent this verifier did not resolve is not established.
+    /// what it selected. Another trader's conditional parent is resolved by
+    /// frontier-relative verification of that trader's lineage
+    /// ([`SofiReads::trader_root_at`]); one neither resolves is not
+    /// established.
     pub parent: Option<ResolvedParent>,
 }
 
@@ -1068,6 +1095,56 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         }
     }
 
+    /// Amendment S16: the vaults whose market pairs `token`, found under its
+    /// vault token locator, in the order the index names them.
+    ///
+    /// Discovery carries no authority. A candidate is kept only when its
+    /// genesis is accepted — bound to the owner's validated creation by
+    /// [`Self::vault_genesis`] — and the market that acceptance resolves
+    /// pairs `token`; anything else appended under the locator is passed
+    /// over. A candidate whose genesis or owner's lineage the reads do not
+    /// establish yet, or a scan that stopped short, makes the discovery
+    /// `Partial`: the vaults it kept are vaults of `token` all the same.
+    pub fn vaults_of_token(
+        &self,
+        token: &D32,
+    ) -> Result<Discovered<AcceptedVaultGenesis>, VerifierFailure> {
+        let (candidates, mut scan) = match self.reads.vault_token_candidates(token) {
+            Ok(Discovered::Complete(candidates)) => (candidates, ScanExtent::Whole),
+            Ok(Discovered::Partial(candidates)) => (candidates, ScanExtent::Short),
+            // The index read was not made: nothing established, and nothing
+            // refuted (storage §4).
+            Err(ReadFailure(..)) => (Vec::new(), ScanExtent::Short),
+        };
+        let mut examined = BTreeSet::new();
+        let mut vaults = Vec::new();
+        for vault_id in candidates {
+            if !examined.insert(vault_id) {
+                continue;
+            }
+            match self.vault_genesis(&vault_id) {
+                Ok(VaultGenesis::Accepted(accepted)) => {
+                    let market = accepted.market();
+                    if market.token_a() == token || market.token_b() == token {
+                        vaults.push(*accepted);
+                    }
+                }
+                // Not a vault anyone created, or a genesis refused: not a
+                // vault of `token`.
+                Ok(VaultGenesis::NotPublished | VaultGenesis::Refused(_))
+                | Err(VerifierFailure::Refused(_)) => {}
+                // Not established yet: it may be a vault of `token`.
+                Ok(VaultGenesis::OwnerUnresolved(_)) | Err(VerifierFailure::Read(_)) => {
+                    scan = ScanExtent::Short
+                }
+            }
+        }
+        Ok(match scan {
+            ScanExtent::Whole => Discovered::Complete(vaults),
+            ScanExtent::Short => Discovered::Partial(vaults),
+        })
+    }
+
     /// `GenesisAccepted` over one candidate, reading the token policies the
     /// predicate names as missing. It consults at most the two tokens of the
     /// market, and a policy it names again after it was supplied is not the
@@ -1111,10 +1188,24 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// time — the exercise the walk classifies `Consumed` at the head, and
     /// the post state `vault_post_states` recomputes from it.
     pub fn chain(&self, vault_id: &D32) -> Result<VaultChain, VerifierFailure> {
-        self.chain_to_depth(*vault_id, SIBLING_DEPTH)
+        self.chain_to_depth(*vault_id, SIBLING_DEPTH, None)
     }
 
-    fn chain_to_depth(&self, vault_id: D32, depth: usize) -> Result<VaultChain, VerifierFailure> {
+    /// `vault_id`'s canonical chain, extended only until it names `root`:
+    /// what resolving a position whose leg was built on `root` needs, and no
+    /// further. A position's facts never depend on the generations after the
+    /// parent its leg names, and walking past them could meet an exercise
+    /// whose own parent is the position being resolved.
+    pub fn chain_until(&self, vault_id: &D32, root: &D32) -> Result<VaultChain, VerifierFailure> {
+        self.chain_to_depth(*vault_id, SIBLING_DEPTH, Some(root))
+    }
+
+    fn chain_to_depth(
+        &self,
+        vault_id: D32,
+        depth: usize,
+        until: Option<&D32>,
+    ) -> Result<VaultChain, VerifierFailure> {
         let genesis = match self.vault_genesis(&vault_id)? {
             VaultGenesis::Accepted(genesis) => *genesis,
             // Not established yet. The chain is empty, and an empty chain
@@ -1155,6 +1246,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         chains.insert(vault_id, chain.clone());
         let mut extended = 0;
         while extended < GENERATION_BUDGET {
+            if until.is_some_and(|root| chain.names(root)) {
+                break;
+            }
             extended += 1;
             // The chain is non-empty here, but say so in the type rather
             // than in a panic: an empty chain means nothing was
@@ -1292,7 +1386,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             // repeating would read the same cells and stall the same way.
             // The chain is handed over either way — the resolver, not this
             // loop, decides what it means.
-            let sibling = self.chain_to_depth(leg.vault_id, depth - 1)?;
+            let sibling = self.chain_to_depth(leg.vault_id, depth - 1, None)?;
             learned |= sibling.names(&leg.parent_root);
             chains.insert(leg.vault_id, sibling);
         }
@@ -1496,7 +1590,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         let ground = match establish_ground(&GroundReads {
             exercise,
             registration: &read.registration,
-            parent: self.parent,
+            parent: self.parent_for(exercise),
             legs: &legs,
         }) {
             Ok(ground) => ground,
@@ -1669,10 +1763,67 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             registration: &read.registration,
             conformance: &conformance,
             evidence: &evidence,
-            parent: self.parent,
+            parent: self.parent_for(exercise),
             legs,
         };
         Ok(establish(&reads))
+    }
+
+    /// The conditional parent `exercise`'s `P` names, resolved: this
+    /// verifier's own resolution when it is the one `P` names, and otherwise
+    /// the root the trader's lineage selected at that position, by
+    /// frontier-relative verification of the lineage (DSM Amendment A8; SoFi
+    /// Amendment S15). `None` for a single-root parent, which needs no
+    /// resolution, and for a conditional one the reads do not establish:
+    /// the facts then report it unresolved, and nothing is refuted.
+    fn parent_for(&self, exercise: &RecognizedExercise) -> Option<ResolvedParent> {
+        let precommit = &exercise.precommit().body;
+        let ParentClaimRef::Conditional { fulfillment_id } = precommit.parent_claim_ref() else {
+            return None;
+        };
+        let position = precommit.position();
+        if let Some(own) = self.parent {
+            if own.fulfillment_id == *fulfillment_id && own.economic_position == position {
+                return Some(own);
+            }
+        }
+        match self
+            .reads
+            .trader_root_at(precommit.genesis(), precommit.device_id(), position)
+        {
+            Ok((root, named)) => parent_named(
+                position,
+                fulfillment_id,
+                root.economic_position(),
+                root.economic_root(),
+                named,
+            ),
+            // The reads do not establish the lineage at that position yet.
+            Err(..) => None,
+        }
+    }
+}
+
+/// The parent a `P` at `position` names by `fulfillment_id`, when the trader's
+/// lineage, verified to that position, selected `root` at `root_position` and
+/// is named there by `named`: only the very position `P` names, held by that
+/// very fulfillment, resolves it. Anything else is not the parent `P` names.
+fn parent_named(
+    position: u64,
+    fulfillment_id: &D32,
+    root_position: u64,
+    root: D32,
+    named: ParentClaimRef,
+) -> Option<ResolvedParent> {
+    match named {
+        ParentClaimRef::Conditional {
+            fulfillment_id: held,
+        } if held == *fulfillment_id && root_position == position => Some(ResolvedParent {
+            economic_position: position,
+            selected_root: root,
+            fulfillment_id: *fulfillment_id,
+        }),
+        ParentClaimRef::Conditional { .. } | ParentClaimRef::SingleRoot { .. } => None,
     }
 }
 
@@ -1821,11 +1972,15 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 ))
             })?;
 
-        // Each vault's canonical chain, and the facts over them.
+        // Each vault's canonical chain as far as the parent the leg names,
+        // and the facts over them.
         let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
         for leg in precommit.legs() {
             if let std::collections::btree_map::Entry::Vacant(slot) = chains.entry(leg.vault_id) {
-                slot.insert(self.chain(&leg.vault_id).map_err(read)?);
+                slot.insert(
+                    self.chain_until(&leg.vault_id, &leg.parent_root)
+                        .map_err(read)?,
+                );
             }
         }
         let established = self
@@ -1869,5 +2024,47 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             | AdvanceError::PreimageIsNotThisOperation { .. }
             | AdvanceError::Counter(..) => Invalid(format!("position {q}: {e}")),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SoFi Amendment S16: another trader's conditional parent resolves only
+    /// to the position `P` names, held by the fulfillment `P` names.
+    #[test]
+    fn only_the_position_and_fulfillment_p_names_resolve_its_parent() {
+        let (position, wanted, root) = (7, [0xF7; 32], [0x77; 32]);
+        let held = |fulfillment_id| ParentClaimRef::Conditional { fulfillment_id };
+        assert_eq!(
+            parent_named(position, &wanted, position, root, held(wanted)),
+            Some(ResolvedParent {
+                economic_position: position,
+                selected_root: root,
+                fulfillment_id: wanted,
+            })
+        );
+        assert_eq!(
+            parent_named(position, &wanted, position, root, held([0xF8; 32])),
+            None,
+            "another fulfillment holds the position"
+        );
+        assert_eq!(
+            parent_named(position, &wanted, position + 1, root, held(wanted)),
+            None,
+            "the root of another position"
+        );
+        assert_eq!(
+            parent_named(
+                position,
+                &wanted,
+                position,
+                root,
+                ParentClaimRef::SingleRoot { claim_ref: wanted }
+            ),
+            None,
+            "an ordinary position is no conditional parent"
+        );
     }
 }

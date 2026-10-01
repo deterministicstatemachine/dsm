@@ -278,6 +278,10 @@ pub enum SofiWireError {
     /// A `TraderPreBalance` of zero. A zero balance is an absent leaf, which
     /// needs no object, so an object holding zero has no canonical bytes.
     ZeroPreBalance,
+    /// A vault genesis published with a market policy that is not the one
+    /// its state commits: the vault would be indexed under tokens it does
+    /// not trade (SoFi Amendment S16).
+    MarketNotCommitted,
 }
 
 impl core::fmt::Display for SofiWireError {
@@ -340,6 +344,10 @@ impl core::fmt::Display for SofiWireError {
             Self::ZeroPreBalance => write!(
                 f,
                 "a balance of zero is an absent leaf and has no TraderPreBalance"
+            ),
+            Self::MarketNotCommitted => write!(
+                f,
+                "the market policy is not the one the vault genesis commits"
             ),
         }
     }

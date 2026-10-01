@@ -170,7 +170,8 @@ mod tests {
     // -1 with the client-edited storage node list: its placement seed was the
     // network hash domain's only input.
     // +1 with the TraderPreBalance object namespace (SoFi Amendment S12).
-    const EXPECTED_TAG_COUNT: usize = 351;
+    // +1 with the vault token locator (SoFi Amendment S16).
+    const EXPECTED_TAG_COUNT: usize = 352;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

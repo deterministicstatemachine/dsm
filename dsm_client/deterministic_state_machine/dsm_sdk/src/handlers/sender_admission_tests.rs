@@ -1231,11 +1231,17 @@ async fn a_creation_built_on_a_predecessor_the_device_no_longer_stands_on_is_ref
     } else {
         (held_token, era(), 100, 10)
     };
+    // The reserves as the user enters them: token units of each token.
+    let entered = |token: &[u8; 32], base: u64| {
+        let (.., decimals) =
+            crate::handlers::wallet_routes::token_of_commit(token).expect("a known token");
+        crate::handlers::wallet_routes::format_base_units_for_display(base, decimals)
+    };
     let request = crate::generated::SofiCreateVaultRequest {
         token_a_policy_commit: token_a.to_vec(),
         token_b_policy_commit: token_b.to_vec(),
-        reserve_a,
-        reserve_b,
+        reserve_a_entered: entered(&token_a, reserve_a),
+        reserve_b_entered: entered(&token_b, reserve_b),
         fee_bps: 30,
     };
 

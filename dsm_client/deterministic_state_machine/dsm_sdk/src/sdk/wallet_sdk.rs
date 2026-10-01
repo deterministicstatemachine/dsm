@@ -1001,6 +1001,7 @@ mod tests {
             memo: String::new(),
             receipt_verified: false,
             display_amount: "1".to_string(),
+            moves: Vec::new(),
         };
 
         let msg = crate::generated::WalletHistoryResponse {
