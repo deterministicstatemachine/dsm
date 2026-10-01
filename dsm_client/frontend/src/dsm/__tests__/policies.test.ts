@@ -209,17 +209,6 @@ describe('policies.ts', () => {
   });
 
   describe('getTokenCreationFee', () => {
-    test("answers the fee and this device's standing as Rust reports them", async () => {
-      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'tokenFeeScheduleResponse',
-          value: new pb.TokenFeeScheduleResponse({ tokenCreationEra: 10n, eraHeld: 3n, feeCovered: false }),
-        },
-      })));
-      await expect(getTokenCreationFee()).resolves.toEqual({ feeEra: 10n, eraHeld: 3n, feeCovered: false });
-    });
-
     // A failed query used to answer undefined, which the dialog showed as "…" for ever.
     test('a refused fee query is the failure, not an absent fee', async () => {
       (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({

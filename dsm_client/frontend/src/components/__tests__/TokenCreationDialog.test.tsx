@@ -101,14 +101,22 @@ describe('TokenCreationDialog coin artwork', () => {
 
 
 describe('TokenCreationDialog creation fee', () => {
-  const standing = (eraHeld: bigint, feeCovered: boolean) => ({ feeEra: 10n, eraHeld, feeCovered });
+  // What Rust reports for these base-unit amounts at ERA's two decimals.
+  const shown: Record<string, string> = { '0': '0.00', '100': '1.00', '1000': '10.00' };
+  const standing = (eraHeld: bigint, feeCovered: boolean) => ({
+    feeEra: 1000n,
+    eraHeld,
+    feeDisplay: shown['1000'],
+    heldDisplay: shown[eraHeld.toString()],
+    feeCovered,
+  });
 
   async function toReview() {
     fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'ART' } });
     fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
     fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
     fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    await screen.findByText('10 ERA (burned)');
+    await screen.findByText('10.00 ERA (burned)');
   }
 
   beforeEach(() => {
@@ -122,9 +130,9 @@ describe('TokenCreationDialog creation fee', () => {
     render(<TokenCreationDialog onClose={jest.fn()} />);
     await toReview();
 
-    expect(screen.getByText('0 ERA')).toBeInTheDocument();
+    expect(screen.getByText('0.00 ERA')).toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent(
-      'This burns 10 ERA and you hold 0. Get ERA from the Faucet tab first.',
+      'This burns 10.00 ERA and you hold 0.00. Get ERA from the Faucet tab first.',
     );
     // The review step burns ERA; getting ERA is the faucet's, not this step's.
     expect(screen.queryByRole('button', { name: /claim/i })).toBeNull();
@@ -137,7 +145,7 @@ describe('TokenCreationDialog creation fee', () => {
     render(<TokenCreationDialog onClose={jest.fn()} />);
     await toReview();
 
-    expect(screen.getByText('100 ERA')).toBeInTheDocument();
+    expect(screen.getByText('1.00 ERA')).toBeInTheDocument();
     expect(screen.queryByText(/This burns/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Burn ERA' })).toBeEnabled();
   });
@@ -162,11 +170,11 @@ describe('TokenCreationDialog creation fee', () => {
       .mockResolvedValueOnce(standing(100n, true));
     render(<TokenCreationDialog onClose={jest.fn()} />);
     await toReview();
-    expect(screen.getByText('0 ERA')).toBeInTheDocument();
+    expect(screen.getByText('0.00 ERA')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
-    expect(await screen.findByText('100 ERA')).toBeInTheDocument();
+    expect(await screen.findByText('1.00 ERA')).toBeInTheDocument();
     expect(screen.queryByText(/This burns/)).toBeNull();
     expect(getTokenCreationFee).toHaveBeenCalledTimes(2);
   });

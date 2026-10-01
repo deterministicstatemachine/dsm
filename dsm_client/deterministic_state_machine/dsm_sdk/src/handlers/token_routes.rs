@@ -926,11 +926,19 @@ impl AppRouterImpl {
                     return err("tokens.getFeeSchedule: no device head".into());
                 };
                 let era_held = era_held_for_creation_fee(&head);
+                let decimals = match dsm::core::token::era_policy::era_policy() {
+                    Ok(era) => era.decimals,
+                    Err(e) => return err(format!("tokens.getFeeSchedule: {e}")),
+                };
+                let shown =
+                    |base| super::wallet_routes::format_base_units_for_display(base, decimals);
                 pack_envelope_ok(generated::envelope::Payload::TokenFeeScheduleResponse(
                     generated::TokenFeeScheduleResponse {
                         token_creation_era: dsm::core::token::TOKEN_CREATION_FEE_ERA,
                         era_held,
                         fee_covered: creation_fee_covered(era_held),
+                        token_creation_era_display: shown(dsm::core::token::TOKEN_CREATION_FEE_ERA),
+                        era_held_display: shown(era_held),
                     },
                 ))
             }
@@ -1402,7 +1410,7 @@ impl AppRouterImpl {
                     crate::sdk::realized_records::Realized::TokenCreate,
                     &policy_commit,
                     admitted.economic_position,
-                    Some(&policy_commit),
+                    &[policy_commit],
                     &moved,
                 );
 

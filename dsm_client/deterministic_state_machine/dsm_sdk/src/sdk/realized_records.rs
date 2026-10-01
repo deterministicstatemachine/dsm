@@ -171,14 +171,14 @@ fn project(head: &DeviceState, device_txt: &str, policy_commit: &D32) -> Result<
 
 /// Record `what`, realized at `position` with `head` as the device's head:
 /// its history row, identified by `event` (the vault, setup, token or
-/// fulfillment it is), naming `subject` and every token in `moved`, and the
+/// fulfillment it is), naming each of `subjects` and every token in `moved`, and the
 /// projection of each token it moved rebuilt from `head`.
 pub(crate) fn record_realized(
     head: &DeviceState,
     what: Realized,
     event: &D32,
     position: u64,
-    subject: Option<&D32>,
+    subjects: &[D32],
     moved: &[Moved],
 ) {
     let device_txt = b32(&head.devid());
@@ -197,8 +197,9 @@ pub(crate) fn record_realized(
         "economic_position".to_string(),
         position.to_string().into_bytes(),
     );
-    if let Some(subject) = subject {
-        metadata.insert(SUBJECT_KEY.to_string(), b32(subject).into_bytes());
+    if !subjects.is_empty() {
+        let named: Vec<String> = subjects.iter().map(|s| b32(s)).collect();
+        metadata.insert(SUBJECT_KEY.to_string(), named.join(", ").into_bytes());
     }
     let row = TransactionRecord {
         tx_id: format!("{}_{}", what.tx_type(), b32(event)),

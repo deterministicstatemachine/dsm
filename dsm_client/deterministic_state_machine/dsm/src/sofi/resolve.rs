@@ -464,6 +464,39 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     /// ([`SofiReads::trader_root_at`]); one neither resolves is not
     /// established.
     pub parent: Option<ResolvedParent>,
+    /// The vault geneses this request's verifiers accepted. Each is read
+    /// from the network the first time one of them needs it and stood on
+    /// after: a quote or a trade reads a vault's genesis once, not once for
+    /// each token's discovery, each chain and each head. Only an acceptance
+    /// is kept; anything not established is read again.
+    accepted: AcceptedGeneses,
+}
+
+/// Vault geneses accepted from the network, by vault id: what the verifiers
+/// of one request share ([`Verifier::new`]).
+pub type AcceptedGeneses = std::sync::Arc<std::sync::Mutex<BTreeMap<D32, AcceptedVaultGenesis>>>;
+
+impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
+    /// A verifier over `reads` and the pinned set, standing on the geneses
+    /// `accepted` holds: ones this request's verifiers accepted from the
+    /// network, or none.
+    pub fn new(
+        reads: &'a R,
+        members: &'a StorageSetMembers,
+        set_id: D32,
+        network_id: &'a [u8],
+        parent: Option<ResolvedParent>,
+        accepted: AcceptedGeneses,
+    ) -> Self {
+        Self {
+            reads,
+            members,
+            set_id,
+            network_id,
+            parent,
+            accepted,
+        }
+    }
 }
 
 /// Where a walk over one parent's attempt chain ended, with the exercise
@@ -1046,6 +1079,23 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// creation carried are accepted. Every candidate names the same owner
     /// and `p_create`, because `v` derives from them.
     pub fn vault_genesis(&self, vault_id: &D32) -> Result<VaultGenesis, VerifierFailure> {
+        let memo = || {
+            self.accepted.lock().map_err(|e| {
+                VerifierFailure::Read(format!("vault genesis: the accepted geneses: {e}"))
+            })
+        };
+        if let Some(accepted) = memo()?.get(vault_id) {
+            return Ok(VaultGenesis::Accepted(Box::new(accepted.clone())));
+        }
+        let established = self.read_vault_genesis(vault_id)?;
+        if let VaultGenesis::Accepted(accepted) = &established {
+            memo()?.insert(*vault_id, (**accepted).clone());
+        }
+        Ok(established)
+    }
+
+    /// [`Self::vault_genesis`] read from the network.
+    fn read_vault_genesis(&self, vault_id: &D32) -> Result<VaultGenesis, VerifierFailure> {
         // A candidate the scan could not establish may be the owner's
         // genesis, so only a complete scan says it is not published
         // (storage §4).
@@ -1181,7 +1231,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// set and the budget allow, recording each generation it establishes.
     ///
     /// The chain starts where every chain starts, at the accepted genesis
-    /// (§30 step 1), read from the network every time: the generations this
+    /// (§30 step 1), read from the network by this verifier: the generations this
     /// device recorded before are its own memo, anchored at that genesis and
     /// linked one to the next ([`VaultChain::from_recorded`]) before they
     /// are stood on. Past the memo the chain grows by one consumption at a
@@ -1864,13 +1914,14 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
             }),
             ParentClaimRef::SingleRoot { .. } => None,
         };
-        let verifier = Verifier {
-            reads: self.reads,
-            members: self.members,
-            set_id: self.set_id,
-            network_id: self.network_id,
-            parent: resolved,
-        };
+        let verifier = Verifier::new(
+            self.reads,
+            self.members,
+            self.set_id,
+            self.network_id,
+            resolved,
+            AcceptedGeneses::default(),
+        );
         let advanced = verifier.peer_position(previous, parent, held)?;
         Ok((advanced.root, advanced.claim))
     }

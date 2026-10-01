@@ -18,6 +18,7 @@ use crate::sdk::sofi_flow::{
     CloseIntent, CreateVaultIntent, FindRouteIntent, PositionOutcome, PositionState, RelayIntent,
     Search, TradeIntent,
 };
+use dsm::sofi::validation::RouteShape;
 
 /// The most hops a route may have (`ROUTE_MAX_LEGS`, SoFi §31).
 const ROUTE_MAX_LEGS: usize = dsm::sofi::wire::ROUTE_MAX_LEGS;
@@ -220,11 +221,30 @@ impl AppRouterImpl {
             Search::Complete => generated::SofiSearch::Complete,
             Search::Partial => generated::SofiSearch::Partial,
         };
+        let mut response = generated::SofiFindRouteResponse {
+            hops,
+            search: search as i32,
+            ..Default::default()
+        };
+        if let Some(ends) = found.ends {
+            let (amount_in_display, amount_out_display) = match (
+                shown(ends.amount_in, &intent.token_in_policy_commit, ROUTE),
+                shown(ends.amount_out, &intent.token_out_policy_commit, ROUTE),
+            ) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => return err(e),
+            };
+            response.shape = match ends.shape {
+                RouteShape::Chain => generated::SofiRouteShape::Chain,
+                RouteShape::Split => generated::SofiRouteShape::Split,
+            } as i32;
+            response.amount_in = ends.amount_in;
+            response.amount_out = ends.amount_out;
+            response.amount_in_display = amount_in_display;
+            response.amount_out_display = amount_out_display;
+        }
         pack_envelope_ok(generated::envelope::Payload::SofiFindRouteResponse(
-            generated::SofiFindRouteResponse {
-                hops,
-                search: search as i32,
-            },
+            response,
         ))
     }
 

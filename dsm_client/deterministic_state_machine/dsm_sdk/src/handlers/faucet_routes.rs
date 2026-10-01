@@ -72,12 +72,22 @@ impl AppRouterImpl {
                     .await
                 {
                     Ok(outcome) => {
+                        // The message shows ERA as people count it, at the
+                        // decimals its committed policy carries (SoFi
+                        // Amendment S18); `tokens_received` stays base units.
+                        let shown = match dsm::core::token::era_policy::era_policy() {
+                            Ok(era) => super::wallet_routes::format_base_units_for_display(
+                                outcome.tokens_received,
+                                era.decimals,
+                            ),
+                            Err(e) => return err(format!("faucet.claim: {e}")),
+                        };
                         let resp = generated::FaucetClaimResponse {
                             success: true,
                             tokens_received: outcome.tokens_received,
                             message: format!(
-                                "claimed {} ERA (economic position {})",
-                                outcome.tokens_received, outcome.economic_position
+                                "claimed {shown} ERA (economic position {})",
+                                outcome.economic_position
                             ),
                         };
                         pack_envelope_ok(generated::envelope::Payload::FaucetClaimResponse(resp))
