@@ -574,13 +574,23 @@ impl SetClient {
             .find(|m| m.member_id.as_bytes() == member_id)
     }
 
+    // Every set-wide call asks all members at once and keeps their answers
+    // in member order: a phone pays one network latency for the set, not
+    // one per member, and nothing a member answers changes.
+
     /// Put an immutable object at every member. Returns how many members
     /// took it; `Stored` is Core's reading of the members afterwards, never
     /// this count.
     pub async fn put_immutable(&self, namespace: TaggedHashDomain<'_>, payload: &[u8]) -> u32 {
+        let answers = futures::future::join_all(
+            self.members
+                .iter()
+                .map(|member| member.put_immutable(namespace, payload)),
+        )
+        .await;
         let mut took = 0u32;
-        for member in &self.members {
-            match member.put_immutable(namespace, payload).await {
+        for (member, answer) in self.members.iter().zip(answers) {
+            match answer {
                 Ok(()) => took += 1,
                 Err(e) => log::warn!("immutable put: {} did not take it: {e}", member.member_id),
             }
@@ -590,11 +600,8 @@ impl SetClient {
 
     /// What every member answered at `addr`, in member order.
     pub async fn get_immutable(&self, addr: &[u8; 32]) -> Vec<ObjectRead> {
-        let mut reads = Vec::with_capacity(self.members.len());
-        for member in &self.members {
-            reads.push(member.get_immutable(addr).await);
-        }
-        reads
+        futures::future::join_all(self.members.iter().map(|member| member.get_immutable(addr)))
+            .await
     }
 
     /// The first member's bytes that re-hash to `addr` under the namespace
@@ -602,8 +609,9 @@ impl SetClient {
     /// to serve an object, never substitute one. `None` when no member holds
     /// such bytes.
     pub async fn fetch_verified(&self, addr: &[u8; 32]) -> Option<Vec<u8>> {
-        for member in &self.members {
-            let ObjectRead::Bytes { namespace, payload } = member.get_immutable(addr).await else {
+        let reads = self.get_immutable(addr).await;
+        for (member, read) in self.members.iter().zip(reads) {
+            let ObjectRead::Bytes { namespace, payload } = read else {
                 continue;
             };
             let Ok(domain) = TaggedHashDomain::try_new(&namespace) else {
@@ -627,9 +635,15 @@ impl SetClient {
     /// Append `addr` under `locator` at every member. Returns how many took
     /// it.
     pub async fn append_index(&self, namespace: &[u8], locator: &[u8; 32], addr: &[u8; 32]) -> u32 {
+        let answers = futures::future::join_all(
+            self.members
+                .iter()
+                .map(|member| member.append_index(namespace, locator, addr)),
+        )
+        .await;
         let mut took = 0u32;
-        for member in &self.members {
-            match member.append_index(namespace, locator, addr).await {
+        for (member, answer) in self.members.iter().zip(answers) {
+            match answer {
                 Ok(()) => took += 1,
                 Err(e) => log::warn!("index append: {} did not take it: {e}", member.member_id),
             }
@@ -647,8 +661,8 @@ impl SetClient {
         max_per_member: usize,
     ) -> Vec<Option<Vec<[u8; 32]>>> {
         const PAGE: i64 = 256;
-        let mut reads = Vec::with_capacity(self.members.len());
-        for member in &self.members {
+        // Each member's pages follow one another; the members are read at once.
+        futures::future::join_all(self.members.iter().map(|member| async move {
             let mut addrs: Vec<[u8; 32]> = Vec::new();
             let mut after = 0i64;
             let mut answered = false;
@@ -669,9 +683,9 @@ impl SetClient {
                     break;
                 }
             }
-            reads.push(answered.then_some(addrs));
-        }
-        reads
+            answered.then_some(addrs)
+        }))
+        .await
     }
 
     /// Put `value` at a cell at every member, each put its own transaction.
@@ -680,9 +694,12 @@ impl SetClient {
     /// (`sdk::route_seats`). Returns how many members took it.
     pub async fn put_cell(&self, namespace: &[u8], key: &[u8; 32], value: &[u8]) -> u32 {
         let entry = [(namespace.to_vec(), *key, value.to_vec())];
+        let answers =
+            futures::future::join_all(self.members.iter().map(|member| member.put_cells(&entry)))
+                .await;
         let mut took = 0u32;
-        for member in &self.members {
-            match member.put_cells(&entry).await {
+        for (member, answer) in self.members.iter().zip(answers) {
+            match answer {
                 Ok(records) => {
                     log::debug!(
                         "cell put at {}: {} arrival record",
@@ -700,11 +717,12 @@ impl SetClient {
     /// Everything every member holds at a cell, in member order; `None`
     /// where a member did not answer.
     pub async fn get_cell(&self, namespace: &[u8], key: &[u8; 32]) -> Vec<Option<Vec<Vec<u8>>>> {
-        let mut reads = Vec::with_capacity(self.members.len());
-        for member in &self.members {
-            reads.push(member.get_cell(namespace, key).await);
-        }
-        reads
+        futures::future::join_all(
+            self.members
+                .iter()
+                .map(|member| member.get_cell(namespace, key)),
+        )
+        .await
     }
 }
 
@@ -735,6 +753,111 @@ mod tests {
             certs,
         })
         .expect("the storage client builds from the bundled CA");
+    }
+
+    /// A relay in front of one member: it holds the first connection it
+    /// accepts until every relay of the set holds one, then carries the bytes
+    /// both ways. A client that asked the members one at a time would wait at
+    /// the first relay for ever; one that asks them at once is answered.
+    async fn relay(
+        scheme: &str,
+        target: String,
+        all_in: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a relay port");
+        let port = listener.local_addr().expect("its address").port();
+        tokio::spawn(async move {
+            let mut gate = Some(all_in);
+            loop {
+                let (mut inbound, ..) = listener.accept().await.expect("the relay accepts");
+                let held = gate.take();
+                let target = target.clone();
+                tokio::spawn(async move {
+                    if let Some(held) = held {
+                        held.wait().await;
+                    }
+                    let mut outbound = tokio::net::TcpStream::connect(&target)
+                        .await
+                        .expect("the relay reaches its member");
+                    // The connection ends when either side closes it.
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
+                    {
+                        log::debug!("relay: {e}");
+                    }
+                });
+            }
+        });
+        format!("{scheme}://127.0.0.1:{port}")
+    }
+
+    /// `set` with every member reached through its own [`relay`], all held
+    /// until each has a connection.
+    async fn relayed(
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> crate::sdk::storage_set::StorageSet {
+        let all_in = std::sync::Arc::new(tokio::sync::Barrier::new(set.members().len()));
+        let mut members = Vec::new();
+        for member in set.members() {
+            let (scheme, target) = member
+                .endpoint
+                .split_once("://")
+                .expect("an endpoint names its scheme");
+            members.push(crate::sdk::storage_set::StorageMember {
+                endpoint: relay(scheme, target.to_string(), all_in.clone()).await,
+                ..member.clone()
+            });
+        }
+        crate::sdk::storage_set::StorageSet::new(members).expect("the relayed set")
+    }
+
+    /// A set-wide read or write asks every member at once. On the rig a
+    /// trade's settle spent most of its minute fetching objects member after
+    /// member: five round trips per object over a phone's network. Each
+    /// member here sits behind a relay that answers only once every member
+    /// has been asked, so a client that waits for one member before asking
+    /// the next is never answered. The object put directly is read through
+    /// the relays from every member, and a put through them is taken by every
+    /// member. On the storage node's own app, on Postgres.
+    #[test]
+    #[serial_test::serial]
+    fn a_set_asks_every_member_at_once() {
+        let _fleet = crate::test_support::one_device::Fleet::start();
+        let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+            .expect("the pinned set");
+        let ns = dsm::crypto::domain::TaggedHashDomain::try_new(b"DSM/test/every-member-at-once")
+            .expect("a domain");
+        let everyone = set.members().len();
+        crate::runtime::get_runtime().block_on(async {
+            let direct = super::SetClient::new(&set).expect("a client");
+            assert_eq!(
+                direct.put_immutable(ns, b"held by every member").await as usize,
+                everyone
+            );
+            let addr = dsm::storage_object::immutable_addr(ns, b"held by every member");
+
+            let reads = super::SetClient::new(&relayed(&set).await)
+                .expect("a client")
+                .get_immutable(&addr)
+                .await;
+            assert_eq!(
+                reads
+                    .iter()
+                    .filter(|read| matches!(read, super::ObjectRead::Bytes { .. }))
+                    .count(),
+                everyone,
+                "every member answered the read, each asked while the others were"
+            );
+            let took = super::SetClient::new(&relayed(&set).await)
+                .expect("a client")
+                .put_immutable(ns, b"put through the relays")
+                .await;
+            assert_eq!(
+                took as usize, everyone,
+                "every member took the put, each asked while the others were"
+            );
+        });
     }
 
     /// A write the member did not take is not acknowledged. The same running
