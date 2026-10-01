@@ -29,11 +29,12 @@ const ERA_POLICY_PROTO: [u8; 40] = [
     0x03, b'E', b'R', b'A', //
     // alias "ERA".
     0x00, 0x03, b'E', b'R', b'A', //
-    // decimals: whole ERA.
-    0x00, //
-    // genesis supply: 80,000,000,000 (u128, big-endian; owner, 2026-09-26).
+    // decimals: two (SoFi Amendment S18, owner 2026-10-01).
+    0x02, //
+    // genesis supply: 80,000,000,000.00 ERA, which is 8,000,000,000,000 base
+    // units (u128, big-endian; owner 2026-09-26, in base units since S18).
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
-    0x00, 0x00, 0x00, 0x12, 0xA0, 0x5F, 0x20, 0x00, //
+    0x00, 0x00, 0x07, 0x46, 0xA5, 0x28, 0x80, 0x00, //
     // description: none; icon: none.
     0x00, 0x00, 0x00, 0x00, //
     // recipient allowlist: none (kind NONE, count 0).
@@ -84,7 +85,7 @@ mod tests {
         );
         assert_eq!(
             crate::utils::text_id::encode_base32_crockford(&era_policy_commit()),
-            "JXPMPGJH45HDTE0ARWE2CTB9E9BWTQZ3T78CE5RFF1RXMR9VKK80"
+            "NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0"
         );
     }
 
@@ -97,7 +98,7 @@ mod tests {
         assert_eq!(decoded.encode_to_vec(), era_policy_bytes());
     }
 
-    /// Every field of ERA's policy, as SoFi Amendment S11 fixes it.
+    /// Every field of ERA's policy, as SoFi Amendments S11 and S18 fix it.
     #[test]
     fn eras_policy_states_what_the_specification_fixes() {
         assert_eq!(
@@ -105,8 +106,8 @@ mod tests {
             &TokenPolicy {
                 ticker: "ERA".into(),
                 alias: "ERA".into(),
-                decimals: 0,
-                genesis_supply: 80_000_000_000,
+                decimals: 2,
+                genesis_supply: 8_000_000_000_000,
                 release: Release::Faucet,
                 description: None,
                 icon_url: None,

@@ -1847,11 +1847,11 @@ Known cost: the first time a receiver meets a payer it validates the payer's seg
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
 | DSM high-level (MR-DSM) | 276 | 94 | 96 | 39 | 0 | 29 | 18 |
-| SoFi (MR-SOFI) | 348 | 223 | 86 | 18 | 4 | 17 | 0 |
+| SoFi (MR-SOFI) | 349 | 223 | 87 | 18 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 60 | 18 | 61 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **928** | **386** | **201** | **119** | **4** | **64** | **154** |
+| **All** | **929** | **386** | **202** | **119** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2488,6 +2488,7 @@ Known cost: the first time a receiver meets a payer it validates the payer's seg
 | MR-SOFI-0346 | Partial | `dsm::sofi::resolve::Verifier::peer_position`; `dsm_sdk::sdk::economic_registers::resolve_peer` | `dsm_sdk::handlers::frontier_verification_tests::a_receiver_reads_nothing_behind_its_frontier`; `dsm_sdk::handlers::node_e2e_tests::a_trader_who_has_traded_can_pay` | SoFi Amendment S15 (wording made exact 2026-09-30: the setup positions the legs name are inside the segment and read through A8). The resolver reads q's position pair, P, the first leg's cell, the vault chains and q's evidence, and the trader's accepted claims at its setup positions through `resolve_peer`, which DSM core's walk bounds to the frontier (that test). Partial: no request-log test of the resolver's own read set yet. |
 | MR-SOFI-0347 | Met | `dsm_sdk::sdk::economic_registers::resolve_peer`; `dsm::sofi::validation::setup_valid` | `dsm_sdk::handlers::node_e2e_tests::a_trader_who_has_traded_can_pay`; `dsm::sofi::validation::tests::a_setup_on_a_lineage_known_invalid_is_invalid` | SoFi Amendment S15 (`feat/frontier-relative-peer-verification`). `SofiReads::accepted_claim_at` reads another trader's accepted claim at a setup position through `resolve_peer`, DSM core's frontier-relative walk with this resolver; the whole-lineage walk (`resolve_peer_with_cache`) no longer exists. A payee resolving a trader's SoFi position runs SetupValid this way in the P15-9 node test. |
 | MR-SOFI-0348 | Met | `dsm::sofi::lineage::advance_resolved`; `dsm::sofi::lineage::advance_peer_resolved` | `dsm::sofi::lineage::tests::a_realized_position_crediting_an_unadopted_token_is_refused`; `dsm::sofi::lineage::tests::another_verifier_resolves_the_position_without_the_traders_adoptions`; `dsm::sofi::lineage::tests::a_void_needs_no_adoption` | SoFi Amendment S15. The trader's own advance refuses a realized position crediting a token it has not adopted; another verifier's `advance_peer_resolved` derives the same root and accepted claim from the same facts with no adoption state of the trader's. Mutation: the adoption check run on the peer path → `another_verifier_resolves_the_position_without_the_traders_adoptions` red. |
+| MR-SOFI-0349 | Partial | `dsm::core::token::era_policy::era_policy`; `dsm::economic::native_reserve::ERA_FAUCET_PAYOUT`; `dsm::core::token::token_state_manager::TOKEN_CREATION_FEE_ERA`; `dsm_sdk::handlers::wallet_routes::parse_display_amount_to_base_units` | `dsm::core::token::era_policy::tests::eras_policy_states_what_the_specification_fixes`; `dsm::core::token::era_policy::tests::eras_commitment_is_derived_from_its_bytes_and_is_the_specifications` | SoFi Amendment S18 (2026-10-01). ERA's policy carries decimals 2 and its supply in base units, the faucet pays 10,000 base units and the creation fee is 1,000, and sends take amounts in whole tokens with the point. Partial: the SoFi routes' amount fields (createVault, findRoute, trade, route) and their screen still take base units. |
 
 ### 8.3 dBTC native specification
 
