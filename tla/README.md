@@ -386,11 +386,13 @@ are derived from the leg reads; FulfillmentConformance and RouteValidation are
 separate three-valued Core predicates and registration supplies no truth value
 for either. Early cell occupancy is reachable (`_EarlyCellReachable`,
 `_EarlyOccupancyReachable`); early cell consumption is not
-(`EarlyCellCannotCauseConsumption`). One arm the walk gained here, and the Core
-walk gained in rebuild step R12 (`ImpossibleArm::PositionLost`): an exercise
-final at a key whose F can never register, because its trader's position
-already holds another claim, is skipped (`LostPosition`, spec §21.1;
-`_LostPositionDropped`).
+(`EarlyCellCannotCauseConsumption`). One skip the walk gained here, and the
+Core walk gained in rebuild step R12: an exercise final at a key whose F can
+never register, because its trader's position already holds another claim, is
+skipped (`LostPosition`, spec §21.1; `_LostPositionDropped`). SoFi Amendment
+S14 made it a skip of its own, `SkipReason::RejectedFinalInadmissible`, beside
+`RouteImpossible` and never an arm of it, since `RouteImpossible(P, E)` takes
+no F.
 
 **The recognition boundary at a cell (P1 of §42.3).** The cells model keeps
 hostile bytes: `G` is bytes any caller may send that no recognition rebuilds
@@ -464,7 +466,7 @@ carry the full invariant set and must pass.
 | fulfillment | `_EarlyCellReachable` | *claim:* no key holds an exercise before registration | `EarlyCellNeverOccupied` |
 | fulfillment | `_GuaranteedSuccessClaim` | *claim:* valid, canonical F never Voids | `RegisteredValidFulfillmentNeverVoids` |
 | fulfillment | `_LockingPolicyFulfillments` | non-locking witnesses | `PolicyFulfillmentNeverLocks` |
-| fulfillment | `_LostPositionDropped` | arm (v): an exercise whose F can never register is skipped (R12) | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_LostPositionDropped` | the S14 skip: an exercise whose F can never register is skipped (R12) | `ObjectiveRejectionImpliesSkipped` |
 | fulfillment | `_MalformedFulfillmentRegisters` | *claim:* a malformed F never registers | `MalformedFulfillmentNeverRegisters` |
 | fulfillment | `_OccupancyIsConsumption` | final legs consume with no Core predicate | `EarlyCellCannotCauseConsumption` |
 | fulfillment | `_OccupancyIsConsumptionInvalid` | final legs of an Invalid route consume | `InvalidStoredNeverAdmitted` |

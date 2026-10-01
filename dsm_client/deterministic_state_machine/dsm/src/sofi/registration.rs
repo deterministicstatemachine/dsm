@@ -217,6 +217,13 @@ pub enum Registration {
         fulfillment: Signed<TraderFulfillmentBody>,
         settled_at: PositionCell,
     },
+    /// No fulfillment is final at `K_ful(q)`, and `K_root(q)` is held by the
+    /// claim whose entry digest is `claim`: final, or holding the leader link,
+    /// so no other value will ever be final there (§9 finality 2). An `F` at
+    /// `q` whose own `C_q` is another claim can never register (SoFi
+    /// Amendment S14); one whose `C_q` it is waits for its fulfillment to be
+    /// relayed.
+    RootTaken { claim: D32 },
     /// Not registered yet: a cell is open, or the value holding it is not
     /// final yet.
     Unresolved,
@@ -325,7 +332,15 @@ fn registration_of(
             state: ChainState::LeaderHeld | ChainState::Preserved,
             ..
         }
-        | CellReading::Open => return Ok(Registration::Unresolved),
+        | CellReading::Open => {
+            // No fulfillment is final at K_ful(q) yet. The position may still
+            // have gone to a claim at K_root(q), and whatever holds it is the
+            // claim every F at q is measured against (SoFi Amendment S14).
+            return Ok(match read_root_cell(&cells.root, root_evidence)? {
+                CellReading::Held { id, .. } => Registration::RootTaken { claim: id },
+                CellReading::Open => Registration::Unresolved,
+            });
+        }
     };
     // The root cell's reading identifies its claim by the entry digest of
     // its exact bytes, so `C_q` holds the cell exactly when the ids agree.
@@ -592,16 +607,38 @@ mod tests {
             reg(&final_ful, &root_cell(b"not a claim", ROUTE_LEN - 1)),
             Ok(Registration::Unresolved)
         );
+        // No fulfillment final at K_ful(q): the root cell's claim is named,
+        // and weighed by each F against its own C_q (SoFi Amendment S14).
+        let claim_id = crate::storage_cell::entry_digest(&claim);
+        let other_id = crate::storage_cell::entry_digest(&other_claim);
         assert_eq!(
             reg(&ful_cell(&bytes, 1), &root_cell(&claim, ROUTE_LEN - 1)),
-            Ok(Registration::Unresolved)
+            Ok(Registration::RootTaken { claim: claim_id })
         );
         assert_eq!(
             reg(
                 &ful_cell(b"garbage", ROUTE_LEN - 1),
                 &root_cell(&claim, ROUTE_LEN - 1)
             ),
-            Ok(Registration::Unresolved)
+            Ok(Registration::RootTaken { claim: claim_id })
+        );
+        for last in [0, ROUTE_LEN - 1] {
+            assert_eq!(
+                reg(
+                    &ful_cell(b"garbage", ROUTE_LEN - 1),
+                    &root_cell(&other_claim, last)
+                ),
+                Ok(Registration::RootTaken { claim: other_id }),
+                "no fulfillment final, another claim at K_root(q) through position {last}"
+            );
+        }
+        assert_eq!(
+            reg(
+                &ful_cell(b"garbage", ROUTE_LEN - 1),
+                &root_cell(b"not a claim", ROUTE_LEN - 1)
+            ),
+            Ok(Registration::Unresolved),
+            "no fulfillment and no claim: nothing is decided"
         );
         let mut unread_root = root_cell(&claim, ROUTE_LEN - 1);
         unread_root.seats[0].values = None;

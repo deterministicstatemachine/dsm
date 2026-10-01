@@ -731,7 +731,11 @@ pub async fn resolve_pending_position(
                 "position {q} is held by a claim other than the pending fulfillment"
             )))
         }
-        Registration::Unresolved => return not_yet(NotResolved::NotRegistered),
+        // No fulfillment is final at q yet; the root cell's claim is weighed
+        // once this device's own fulfillment is read back there.
+        Registration::RootTaken { .. } | Registration::Unresolved => {
+            return not_yet(NotResolved::NotRegistered)
+        }
     };
     let precommit = match fetch_precommit(set, fulfillment.body.precommit_id()).await? {
         Resolved::Kept(precommit) => precommit.body,
