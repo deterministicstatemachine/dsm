@@ -118,9 +118,8 @@ pub async fn root_claim_settlement(
 
 /// The LIVE provenance resolver: raw reads of the register cells Core names,
 /// the native reserve walked from its genesis state, immutable objects
-/// re-hash-verified, peer lineages resolved through the Core walker with the
-/// device-local validated-start memo (never authority: an `Invalid` from a
-/// memo start discards the memo and re-walks from the activation root).
+/// re-hash-verified, and peer lineages verified by Core from this device's
+/// frontier for each peer (DSM Amendment A8).
 pub struct LiveRegisterResolver<'a> {
     pub set: &'a StorageSet,
     pub runtime: tokio::runtime::Handle,

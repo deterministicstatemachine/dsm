@@ -491,7 +491,7 @@ impl Verifier<'_> {
             }),
             Some((position, root, accepted)) => Ok(ChainPoint {
                 root: authenticated_root(position, root),
-                accepted: Some(accepted.clone()),
+                accepted: Some(*accepted),
             }),
         }
     }
