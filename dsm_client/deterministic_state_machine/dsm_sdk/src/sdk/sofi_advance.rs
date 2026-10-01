@@ -38,7 +38,7 @@ use dsm::sofi::lineage::{advance_resolved, descendant_fence, AdvanceError};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
-use dsm::sofi::resolve::Acquired;
+use dsm::sofi::resolve::{AcceptedGeneses, Acquired};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::validation::{trader_balance_changes, trader_post_states, vault_post_states};
 use dsm::sofi::wire::{
@@ -289,8 +289,12 @@ impl OwnStanding {
         })
     }
 
-    fn context<'a>(&'a self, set: &'a StorageSet) -> Result<VerifierContext<'a>, DsmError> {
-        VerifierContext::new(set, Some(self.own), Some(&self.admitted))
+    fn context<'a>(
+        &'a self,
+        set: &'a StorageSet,
+        accepted: &AcceptedGeneses,
+    ) -> Result<VerifierContext<'a>, DsmError> {
+        VerifierContext::sharing(set, Some(self.own), Some(&self.admitted), accepted)
     }
 }
 
@@ -528,6 +532,7 @@ async fn pending_objects(
 pub async fn complete_pending_fulfillment(
     core: &CoreSDK,
     set: &StorageSet,
+    accepted: &AcceptedGeneses,
 ) -> Result<Completion, DsmError> {
     let (pending, fulfillment_id) = pending_fulfillment(core)?;
     let position = pending.economic_position;
@@ -554,7 +559,7 @@ pub async fn complete_pending_fulfillment(
     descendant_fence(admitted.predecessor_claim(), &pending.pre_economic_root)
         .map_err(|e| refuse(e.to_string()))?;
     let standing = OwnStanding::of(core, admitted)?;
-    let ctx = standing.context(set)?;
+    let ctx = standing.context(set, accepted)?;
     let installed = match install_pair(&ctx, set, &request).await? {
         Ok(installed) => installed,
         Err(why) => return not_taken(why),
@@ -681,6 +686,7 @@ fn post_leaf_cache(
 pub async fn resolve_pending_position(
     core: &CoreSDK,
     set: &StorageSet,
+    accepted: &AcceptedGeneses,
 ) -> Result<Advanced, DsmError> {
     let (pending, fulfillment_id) = pending_fulfillment(core)?;
     let q = pending.economic_position;
@@ -712,7 +718,7 @@ pub async fn resolve_pending_position(
     // device only ever writes its own claims at its own positions, so any
     // other outcome is a local incoherence, not a race to wait out.
     let standing = OwnStanding::of(core, admitted)?;
-    let ctx = standing.context(set)?;
+    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let registration = match verifier
         .read_registration(&genesis, &device_id, q, &validated.economic_root())

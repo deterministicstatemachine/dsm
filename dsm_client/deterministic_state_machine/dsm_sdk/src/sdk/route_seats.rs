@@ -189,6 +189,7 @@ async fn from_leader<S: RouteSeats, const N: usize>(
             .collect();
         match seats.put_entries(route.leader(), &batch).await {
             Ok(records) => {
+                log::info!("route write: the leader took {} values", records.len());
                 for (&i, put) in missing.iter().zip(records) {
                     links[i] = Some(put);
                 }
@@ -238,7 +239,10 @@ async fn write_along<S: RouteSeats, const N: usize>(
             .map(|e| (e.namespace.clone(), e.key, e.encode()))
             .collect();
         let slots: Vec<ChainSlot> = match seats.put_entries(seat, &batch).await {
-            Ok(records) => records.into_iter().map(ChainSlot::Link).collect(),
+            Ok(records) => {
+                log::info!("route write: the seat at position {position} took the chain");
+                records.into_iter().map(ChainSlot::Link).collect()
+            }
             Err(e) => {
                 log::warn!("route write: the seat at position {position} did not answer: {e}");
                 vec![ChainSlot::NoResponse; N]
@@ -422,7 +426,7 @@ pub async fn write_recorded_position(
             ])
         }
         (ful, root) => {
-            log::debug!(
+            log::info!(
                 "position write: recorded fulfillment {}, recorded claim {}; starting at the leader",
                 ful.is_some(),
                 root.is_some()
@@ -518,8 +522,30 @@ fn agreed(member: &[u8], cycle: u64, held: &[Vec<ByteCommit>]) -> Option<ByteCom
     found.cloned()
 }
 
+/// `member`'s ByteCommit at `cycle` as every mirror at `mirrors` that
+/// answers holds it, asked all at once.
+async fn agreed_at<S: RouteSeats>(
+    seats: &S,
+    mirrors: &[Vec<u8>],
+    member: &[u8],
+    cycle: u64,
+) -> Option<ByteCommit> {
+    let held: Vec<Vec<ByteCommit>> = futures::future::join_all(
+        mirrors
+            .iter()
+            .map(|mirror| seats.mirrored(mirror, member, cycle)),
+    )
+    .await
+    .into_iter()
+    .flatten()
+    .collect();
+    agreed(member, cycle, &held)
+}
+
 /// `member`'s ByteCommit at `cycle` as the mirrors at `mirrors` hold it,
-/// with `member`'s proof for the cell against it.
+/// with `member`'s proof for the cell against it. The ByteCommit, its parent
+/// and the proof are asked for at once: each is a round trip to a node, and
+/// none depends on another's answer.
 async fn committed_at<S: RouteSeats>(
     seats: &S,
     mirrors: &[Vec<u8>],
@@ -528,32 +554,24 @@ async fn committed_at<S: RouteSeats>(
     namespace: &[u8],
     key: &[u8; 32],
 ) -> Option<CommittedAt> {
-    let mut held = Vec::with_capacity(mirrors.len());
-    for mirror in mirrors {
-        if let Some(commits) = seats.mirrored(mirror, member, cycle).await {
-            held.push(commits);
-        }
-    }
-    let commit = agreed(member, cycle, &held)?;
     // The member's previous ByteCommit, from the same mirrors, for the
     // chain link (§14 rule 3). Cycle 1 has none: its parent is zero.
-    let parent = match cycle.checked_sub(1).filter(|previous| *previous >= 1) {
-        None => None,
-        Some(previous) => {
-            let mut held = Vec::with_capacity(mirrors.len());
-            for mirror in mirrors {
-                if let Some(commits) = seats.mirrored(mirror, member, previous).await {
-                    held.push(commits);
-                }
+    let previous = cycle.checked_sub(1).filter(|previous| *previous >= 1);
+    let (commit, parent, proof) = futures::future::join3(
+        agreed_at(seats, mirrors, member, cycle),
+        async {
+            match previous {
+                None => Some(None),
+                Some(previous) => agreed_at(seats, mirrors, member, previous).await.map(Some),
             }
-            Some(agreed(member, previous, &held)?)
-        }
-    };
-    let proof = seats.proof(member, namespace, key, cycle).await?;
+        },
+        seats.proof(member, namespace, key, cycle),
+    )
+    .await;
     Some(CommittedAt {
-        commit,
-        parent,
-        proof,
+        commit: commit?,
+        parent: parent?,
+        proof: proof?,
     })
 }
 
@@ -568,6 +586,9 @@ async fn committed_at<S: RouteSeats>(
 /// (§9 route chains, rule 4).
 pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvidence {
     let (route, namespace, key) = (cell.route(), cell.namespace(), cell.key());
+    // Each phase logs where it ends; the log's own timestamps time it. The
+    // cell is named by its key's first five bytes (eight characters).
+    let short = crate::util::text_id::encode_base32_crockford(&key[..5]);
     // Every seat is asked at once, and the answers stay in route order: a
     // seat that does not answer costs one timeout, not one per seat.
     let values: Vec<Option<Vec<Vec<u8>>>> = futures::future::join_all(
@@ -577,6 +598,11 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
             .map(|seat| seats.read_values(seat, namespace, key)),
     )
     .await;
+    log::info!(
+        "route read {short}: values from {} of {} seats",
+        values.iter().filter(|v| v.is_some()).count(),
+        values.len()
+    );
     let cycles: Vec<Option<u64>> =
         futures::future::join_all(route.seats().iter().zip(&values).map(
             |(seat, held)| async move {
@@ -588,51 +614,75 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
             },
         ))
         .await;
+    log::info!(
+        "route read {short}: cycles closed at {} seats",
+        cycles.iter().filter(|c| c.is_some()).count()
+    );
     let members = seats.members();
     if cycles.iter().any(Option::is_some) {
         futures::future::join_all(members.iter().map(|member| seats.sync_mirror(member))).await;
+        log::info!(
+            "route read {short}: mirrors synced at {} members",
+            members.len()
+        );
     }
     let leader = route.leader();
     let leader_cycle = cycles.first().copied().flatten();
-    let mut evidence = Vec::with_capacity(values.len());
-    for (position, (seat, (held, cycle))) in route
-        .seats()
-        .iter()
-        .zip(values.into_iter().zip(cycles))
-        .enumerate()
-    {
-        let others: Vec<Vec<u8>> = members
+    // Every seat's committed state, and its view of the leader, is gathered
+    // at once; the evidence stays in route order.
+    let members = &members;
+    let evidence = futures::future::join_all(
+        route
+            .seats()
             .iter()
-            .filter(|m| m.as_slice() != seat.as_slice())
-            .cloned()
-            .collect();
-        let committed = match cycle {
-            Some(t) => committed_at(seats, &others, seat, t, namespace, key).await,
-            None => None,
-        };
-        let leader_view = (position > 0 && cycle.is_some())
-            .then_some(leader_cycle)
-            .flatten();
-        let leader_seen = match leader_view {
-            Some(t) => {
-                committed_at(
-                    seats,
-                    core::slice::from_ref(seat),
-                    leader,
-                    t,
-                    namespace,
-                    key,
+            .zip(values.into_iter().zip(cycles))
+            .enumerate()
+            .map(|(position, (seat, (held, cycle)))| async move {
+                let others: Vec<Vec<u8>> = members
+                    .iter()
+                    .filter(|m| m.as_slice() != seat.as_slice())
+                    .cloned()
+                    .collect();
+                let leader_view = (position > 0 && cycle.is_some())
+                    .then_some(leader_cycle)
+                    .flatten();
+                let (committed, leader_seen) = futures::future::join(
+                    async {
+                        match cycle {
+                            Some(t) => committed_at(seats, &others, seat, t, namespace, key).await,
+                            None => None,
+                        }
+                    },
+                    async {
+                        match leader_view {
+                            Some(t) => {
+                                committed_at(
+                                    seats,
+                                    core::slice::from_ref(seat),
+                                    leader,
+                                    t,
+                                    namespace,
+                                    key,
+                                )
+                                .await
+                            }
+                            None => None,
+                        }
+                    },
                 )
-                .await
-            }
-            None => None,
-        };
-        evidence.push(SeatEvidence {
-            values: held,
-            committed,
-            leader_seen,
-        });
-    }
+                .await;
+                SeatEvidence {
+                    values: held,
+                    committed,
+                    leader_seen,
+                }
+            }),
+    )
+    .await;
+    log::info!(
+        "route read {short}: committed state from {} seats",
+        evidence.iter().filter(|e| e.committed.is_some()).count()
+    );
     CellEvidence { seats: evidence }
 }
 
@@ -1021,6 +1071,141 @@ mod tests {
                 continued.slots[position]
             );
         }
+    }
+
+    /// The real seats, with the committed-state requests a read makes (every
+    /// mirrored ByteCommit and every proof) counted while they are in flight.
+    struct Watched<'a> {
+        seats: &'a NodeSeats,
+        in_flight: std::sync::atomic::AtomicUsize,
+        most_at_once: std::sync::atomic::AtomicUsize,
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Watched<'_> {
+        async fn watch<T>(&self, call: impl core::future::Future<Output = T>) -> T {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.most_at_once.fetch_max(now, SeqCst);
+            self.asked.fetch_add(1, SeqCst);
+            // Hand control back once before the request goes out, so every
+            // request the read has already started is counted in flight.
+            tokio::task::yield_now().await;
+            let answer = call.await;
+            self.in_flight.fetch_sub(1, SeqCst);
+            answer
+        }
+    }
+
+    impl RouteSeats for Watched<'_> {
+        fn members(&self) -> Vec<Vec<u8>> {
+            self.seats.members()
+        }
+
+        async fn put_entries(
+            &self,
+            member: &[u8],
+            entries: &[CellPut],
+        ) -> Result<Vec<ArrivalRecord>, String> {
+            self.seats.put_entries(member, entries).await
+        }
+
+        async fn read_values(
+            &self,
+            member: &[u8],
+            namespace: &[u8],
+            key: &[u8; 32],
+        ) -> Option<Vec<Vec<u8>>> {
+            self.seats.read_values(member, namespace, key).await
+        }
+
+        async fn close(&self, member: &[u8]) -> Option<u64> {
+            self.seats.close(member).await
+        }
+
+        async fn sync_mirror(&self, member: &[u8]) {
+            self.seats.sync_mirror(member).await
+        }
+
+        async fn mirrored(
+            &self,
+            mirror: &[u8],
+            member: &[u8],
+            cycle: u64,
+        ) -> Option<Vec<ByteCommit>> {
+            self.watch(self.seats.mirrored(mirror, member, cycle)).await
+        }
+
+        async fn proof(
+            &self,
+            member: &[u8],
+            namespace: &[u8],
+            key: &[u8; 32],
+            cycle: u64,
+        ) -> Option<CellCommitProof> {
+            self.watch(self.seats.proof(member, namespace, key, cycle))
+                .await
+        }
+    }
+
+    /// A cell read asks for every seat's committed state at once (each
+    /// mirrored ByteCommit, each parent, each proof, and each later seat's
+    /// view of the leader) instead of one round trip after another, so a
+    /// phone pays one network latency for that stage, not one per request.
+    /// The evidence gathered that way still reads the written value Final.
+    /// On the storage node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_cell_read_asks_for_every_seats_committed_state_at_once() {
+        use dsm::route_chain::{CellReading, ChainState};
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+        let (_nodes, _config, set, cell) = pinned(0x34).await;
+        let seats = NodeSeats::new(&set).expect("seats");
+        let mut quiet = |_: &[WriteReport; 1]| Ok(());
+        let [written] = from_leader(&seats, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
+            .await
+            .expect("a report");
+        assert!(
+            written
+                .slots
+                .iter()
+                .all(|slot| matches!(slot, ChainSlot::Link(..))),
+            "the write reaches every seat: {:?}",
+            written.slots
+        );
+
+        let watched = Watched {
+            seats: &seats,
+            in_flight: AtomicUsize::new(0),
+            most_at_once: AtomicUsize::new(0),
+            asked: AtomicUsize::new(0),
+        };
+        let evidence = read_cell(&watched, &cell).await;
+        let asked = watched.asked.load(SeqCst);
+        assert!(
+            asked >= 2 * cell.route().seats().len(),
+            "every seat's committed state is asked for: {asked} requests"
+        );
+        assert_eq!(
+            watched.most_at_once.load(SeqCst),
+            asked,
+            "of {asked} committed-state requests, fewer were in flight together"
+        );
+
+        let reading = dsm::route_chain::evaluate(&cell, &evidence, |bytes: &[u8]| {
+            (bytes == b"V").then(|| (dsm::storage_cell::entry_digest(bytes), ()))
+        });
+        assert!(
+            matches!(
+                reading,
+                Ok(CellReading::Held {
+                    state: ChainState::Final,
+                    ..
+                })
+            ),
+            "the value written to every seat reads Final: {reading:?}"
+        );
     }
 
     #[test]

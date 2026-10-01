@@ -24,7 +24,7 @@ use dsm::sofi::derive;
 use dsm::sofi::publication::{Publication, VaultPolicyClass};
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
-use dsm::sofi::resolve::{Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
+use dsm::sofi::resolve::{AcceptedGeneses, Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{
     close_vault_post, movement_shape, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds,
@@ -402,7 +402,12 @@ fn own_claim_ref(admitted: &AdmittedEconomicPosition) -> Result<D32, DsmError> {
 /// published and read back `Stored`, then carried by the trader's transition,
 /// which inserts `h⁰`. Run by [`set_up_with`] ahead of the first operation
 /// through the vault (Amendment S16).
-async fn setup(core: &CoreSDK, set: &StorageSet, intent: &SetupIntent) -> Result<(), DsmError> {
+async fn setup(
+    core: &CoreSDK,
+    set: &StorageSet,
+    intent: &SetupIntent,
+    accepted: &AcceptedGeneses,
+) -> Result<(), DsmError> {
     let (genesis, device_id) = identity(core)?;
     let admitted = economic_lineage::get_admitted()
         .map_err(|e| storage("load admitted", e))?
@@ -410,7 +415,7 @@ async fn setup(core: &CoreSDK, set: &StorageSet, intent: &SetupIntent) -> Result
             refuse("no admitted position: a setup names the claim registered at its position")
         })?;
     let validated = validated_root_or_activate(core)?;
-    let ctx = VerifierContext::new(set, Some((genesis, device_id)), Some(&admitted))?;
+    let ctx = VerifierContext::sharing(set, Some((genesis, device_id)), Some(&admitted), accepted)?;
     match ctx
         .verifier()
         .vault_genesis(&intent.vault_id)
@@ -628,11 +633,16 @@ async fn vault_at_head(
 impl Standing {
     /// This device as the verifier: its identity and the position it
     /// resolved itself, over the pinned set.
-    fn context<'a>(&'a self, set: &'a StorageSet) -> Result<VerifierContext<'a>, DsmError> {
-        VerifierContext::new(
+    fn context<'a>(
+        &'a self,
+        set: &'a StorageSet,
+        accepted: &AcceptedGeneses,
+    ) -> Result<VerifierContext<'a>, DsmError> {
+        VerifierContext::sharing(
             set,
             Some((self.genesis, self.device_id)),
             Some(&self.admitted),
+            accepted,
         )
     }
 }
@@ -936,8 +946,9 @@ pub async fn find_route(
     set: &StorageSet,
     intent: &FindRouteIntent,
 ) -> Result<RouteFound, DsmError> {
+    let accepted = &AcceptedGeneses::default();
     let standing = standing(core)?;
-    let ctx = standing.context(set)?;
+    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let mut search = Search::Complete;
     let firsts = vaults_of(&verifier, &intent.token_in_policy_commit, &mut search)?;
@@ -1048,8 +1059,9 @@ pub struct OwnedVault {
 /// whose head is not established is an error: the list would not be the
 /// owner's vaults as they stand.
 pub async fn owned_vaults(core: &CoreSDK, set: &StorageSet) -> Result<Vec<OwnedVault>, DsmError> {
+    let accepted = &AcceptedGeneses::default();
     let standing = standing(core)?;
-    let ctx = standing.context(set)?;
+    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let mut out = Vec::new();
     for creation in standing.local.vault_creations() {
@@ -1294,10 +1306,14 @@ fn context<'a>(
 /// A position read after the route's cells are written, as the route reports
 /// it. A position that does not resolve within the rounds is
 /// `RetriesExhausted`: the network status, recording nothing.
-async fn settle(core: &CoreSDK, set: &StorageSet) -> Result<PositionOutcome, DsmError> {
+async fn settle(
+    core: &CoreSDK,
+    set: &StorageSet,
+    accepted: &AcceptedGeneses,
+) -> Result<PositionOutcome, DsmError> {
     let mut last = None;
     for round in 1..=RESOLVE_ROUNDS {
-        match resolve_pending_position(core, set).await? {
+        match resolve_pending_position(core, set, accepted).await? {
             Advanced::Installed {
                 resolution,
                 validated,
@@ -1341,9 +1357,10 @@ async fn exercise_draft(
     set: &StorageSet,
     standing: &Standing,
     draft: UncheckedDraft,
+    accepted: &AcceptedGeneses,
 ) -> Result<PositionOutcome, DsmError> {
     // Stage 3.
-    let ctx = standing.context(set)?;
+    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let evidence = match verifier
         .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
@@ -1413,7 +1430,7 @@ async fn exercise_draft(
         },
     )
     .await?;
-    complete_and_settle(core, set).await
+    complete_and_settle(core, set, accepted).await
 }
 
 /// Stages 7 to 10 for the pending position: the install and the exercise
@@ -1425,11 +1442,16 @@ async fn exercise_draft(
 async fn complete_and_settle(
     core: &CoreSDK,
     set: &StorageSet,
+    accepted: &AcceptedGeneses,
 ) -> Result<PositionOutcome, DsmError> {
-    if let Completion::NotTaken { position, why } = complete_pending_fulfillment(core, set).await? {
+    log::info!("[sofi] position: completing its fulfillment");
+    if let Completion::NotTaken { position, why } =
+        complete_pending_fulfillment(core, set, accepted).await?
+    {
         log::info!("[sofi] position {position}: stages 7 and 8 not taken by the network this pass: {why:?}");
     }
-    settle(core, set).await
+    log::info!("[sofi] position: settling");
+    settle(core, set, accepted).await
 }
 
 /// Amendment S16: the setup with each of `vault_ids` this device has none
@@ -1441,6 +1463,7 @@ pub(crate) async fn set_up_with(
     core: &CoreSDK,
     set: &StorageSet,
     vault_ids: &[D32],
+    accepted: &AcceptedGeneses,
 ) -> Result<(), DsmError> {
     for vault_id in vault_ids {
         match standing(core)?.local.relationship(vault_id) {
@@ -1452,6 +1475,7 @@ pub(crate) async fn set_up_with(
                     &SetupIntent {
                         vault_id: *vault_id,
                     },
+                    accepted,
                 )
                 .await?;
             }
@@ -1468,8 +1492,9 @@ async fn check_route(
     set: &StorageSet,
     standing: &Standing,
     intent: &TradeIntent,
+    accepted: &AcceptedGeneses,
 ) -> Result<(), DsmError> {
-    let ctx = standing.context(set)?;
+    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let mut vaults = Vec::with_capacity(intent.vault_ids.len());
     for vault_id in &intent.vault_ids {
@@ -1520,6 +1545,9 @@ pub async fn trade(
     set: &StorageSet,
     intent: &TradeIntent,
 ) -> Result<PositionOutcome, DsmError> {
+    // One memo for the whole operation: the check, the setups, the plan at
+    // the heads and the settle each read a vault's genesis from it.
+    let accepted = &AcceptedGeneses::default();
     {
         let standing = standing(core)?;
         let unset = intent
@@ -1527,17 +1555,23 @@ pub async fn trade(
             .iter()
             .any(|vault_id| standing.local.relationship(vault_id).is_none());
         if unset {
-            check_route(core, set, &standing, intent).await?;
+            check_route(core, set, &standing, intent, accepted).await?;
         }
     }
-    set_up_with(core, set, &intent.vault_ids).await?;
+    set_up_with(core, set, &intent.vault_ids, accepted).await?;
+    // Each stage logs where it ends; the log's own timestamps time it.
+    log::info!(
+        "[sofi] trade: set up with each of {} vaults",
+        intent.vault_ids.len()
+    );
     let standing = standing(core)?;
-    let ctx = standing.context(set)?;
+    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let mut heads = Vec::with_capacity(intent.vault_ids.len());
     for vault_id in &intent.vault_ids {
         heads.push(vault_at_head(set, &verifier, vault_id).await?.0);
     }
+    log::info!("[sofi] trade: walked {} vault heads", heads.len());
     // A chain, or a split across two vaults of the pair (Amendment S19),
     // planned again at the heads walked now.
     let refs: Vec<&VaultAtHead> = heads.iter().collect();
@@ -1564,7 +1598,8 @@ pub async fn trade(
     let public_key = crate::sdk::signing_authority::current_public_key()?;
     let ctx = context(&standing, set, &public_key, trader)?;
     let draft = draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)?;
-    exercise_draft(core, set, &standing, draft).await
+    log::info!("[sofi] trade: drafted {} hops", planned.len());
+    exercise_draft(core, set, &standing, draft, accepted).await
 }
 
 // ── §32 Closing a vault ────────────────────────────────────────────────────
@@ -1587,18 +1622,19 @@ pub async fn close(
     set: &StorageSet,
     intent: &CloseIntent,
 ) -> Result<PositionOutcome, DsmError> {
+    let accepted = &AcceptedGeneses::default();
     {
         let standing = standing(core)?;
         if standing.local.relationship(&intent.vault_id).is_none() {
-            let ctx = standing.context(set)?;
+            let ctx = standing.context(set, accepted)?;
             let verifier = ctx.verifier();
             let (vault, ..) = vault_at_head(set, &verifier, &intent.vault_id).await?;
             only_the_owner(&standing, &vault)?;
         }
     }
-    set_up_with(core, set, &[intent.vault_id]).await?;
+    set_up_with(core, set, &[intent.vault_id], accepted).await?;
     let standing = standing(core)?;
-    let ctx = standing.context(set)?;
+    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let (vault, ..) = vault_at_head(set, &verifier, &intent.vault_id).await?;
     only_the_owner(&standing, &vault)?;
@@ -1643,7 +1679,7 @@ pub async fn close(
         &standing.local,
     )
     .map_err(refuse)?;
-    exercise_draft(core, set, &standing, draft).await
+    exercise_draft(core, set, &standing, draft, accepted).await
 }
 
 // ── §33 Relaying ───────────────────────────────────────────────────────────
@@ -1716,7 +1752,7 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
 /// `sofi.resolve`: finish this device's pending fulfillment from what storage
 /// holds — install and exercise, idempotently — and resolve it.
 pub async fn resolve(core: &CoreSDK, set: &StorageSet) -> Result<PositionOutcome, DsmError> {
-    complete_and_settle(core, set).await
+    complete_and_settle(core, set, &AcceptedGeneses::default()).await
 }
 
 #[cfg(test)]

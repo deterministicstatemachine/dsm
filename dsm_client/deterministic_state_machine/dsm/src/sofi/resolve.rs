@@ -472,9 +472,34 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     accepted: AcceptedGeneses,
 }
 
-/// Vault geneses accepted from the network, by vault id: what the verifiers
-/// of one request share ([`Verifier::new`]).
-pub type AcceptedGeneses = std::sync::Arc<std::sync::Mutex<BTreeMap<D32, AcceptedVaultGenesis>>>;
+/// Vault geneses one operation accepted from the network, keyed by the vault
+/// and the address of the exact genesis bytes the acceptance bound to the
+/// owner's creation: what the verifiers of one operation share
+/// ([`Verifier::new`]). A verdict is reused only for those bytes.
+pub type AcceptedGeneses =
+    std::sync::Arc<std::sync::Mutex<BTreeMap<(D32, D32), AcceptedVaultGenesis>>>;
+
+/// The evidence a genesis verdict is bound to: the immutable address of the
+/// exact preimage bytes, which acceptance requires to equal the bytes the
+/// owner's creation carried.
+fn genesis_evidence(bytes: &[u8]) -> D32 {
+    crate::storage_object::immutable_addr(
+        crate::common::domain_tags::TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+        bytes,
+    )
+}
+
+/// What this operation already accepted for `vault_id`, among the bytes the
+/// locator scan just read: a verdict keyed by those exact bytes, or nothing.
+fn remembered<'m, 'c, T>(
+    memo: &'m BTreeMap<(D32, D32), T>,
+    vault_id: &D32,
+    candidates: impl IntoIterator<Item = &'c [u8]>,
+) -> Option<&'m T> {
+    candidates
+        .into_iter()
+        .find_map(|bytes| memo.get(&(*vault_id, genesis_evidence(bytes))))
+}
 
 impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
     /// A verifier over `reads` and the pinned set, standing on the geneses
@@ -1084,25 +1109,19 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 VerifierFailure::Read(format!("vault genesis: the accepted geneses: {e}"))
             })
         };
-        if let Some(accepted) = memo()?.get(vault_id) {
-            return Ok(VaultGenesis::Accepted(Box::new(accepted.clone())));
-        }
-        let established = self.read_vault_genesis(vault_id)?;
-        if let VaultGenesis::Accepted(accepted) = &established {
-            memo()?.insert(*vault_id, (**accepted).clone());
-        }
-        Ok(established)
-    }
-
-    /// [`Self::vault_genesis`] read from the network.
-    fn read_vault_genesis(&self, vault_id: &D32) -> Result<VaultGenesis, VerifierFailure> {
         // A candidate the scan could not establish may be the owner's
         // genesis, so only a complete scan says it is not published
-        // (storage §4).
+        // (storage §4). The scan is read every time; what this operation
+        // reuses is only the walk that bound those exact bytes to the
+        // owner's creation.
         let (candidates, complete) = match self.reads.vault_genesis_candidates(vault_id)? {
             Discovered::Complete(candidates) => (candidates, true),
             Discovered::Partial(candidates) => (candidates, false),
         };
+        let scanned = candidates.iter().map(|(.., bytes)| bytes.as_slice());
+        if let Some(accepted) = remembered(&*memo()?, vault_id, scanned) {
+            return Ok(VaultGenesis::Accepted(Box::new(accepted.clone())));
+        }
         let not_published = || {
             if complete {
                 Ok(VaultGenesis::NotPublished)
@@ -1134,7 +1153,10 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         let mut refused = None;
         for (.., bytes) in &candidates {
             match self.accept_with_policies(bytes, &owner)? {
-                Ok(accepted) => return Ok(VaultGenesis::Accepted(Box::new(accepted))),
+                Ok(accepted) => {
+                    memo()?.insert((*vault_id, genesis_evidence(bytes)), accepted.clone());
+                    return Ok(VaultGenesis::Accepted(Box::new(accepted)));
+                }
                 Err(GenesisInvalid::NotTheCreationTheOwnerMade) => {}
                 Err(why) => refused = Some(why),
             }
@@ -2084,6 +2106,31 @@ mod tests {
 
     /// SoFi Amendment S16: another trader's conditional parent resolves only
     /// to the position `P` names, held by the fulfillment `P` names.
+    /// A genesis verdict this operation reached is reused only for the
+    /// exact bytes it bound to the owner's creation: the same bytes under the
+    /// same vault find it; one changed byte, or the same bytes under another
+    /// vault, find nothing, and are verified afresh.
+    #[test]
+    fn a_genesis_verdict_is_reused_only_for_the_bytes_it_bound() {
+        let (vault, other) = ([0x5A; 32], [0x5B; 32]);
+        let accepted = b"the exact genesis preimage bytes".to_vec();
+        let mut changed = accepted.clone();
+        changed[0] ^= 1;
+        let mut memo = BTreeMap::new();
+        memo.insert((vault, genesis_evidence(&accepted)), "verdict");
+        assert_eq!(
+            remembered(&memo, &vault, [accepted.as_slice()]),
+            Some(&"verdict")
+        );
+        assert_eq!(
+            remembered(&memo, &vault, [changed.as_slice(), accepted.as_slice()]),
+            Some(&"verdict"),
+            "found among other candidates"
+        );
+        assert_eq!(remembered(&memo, &vault, [changed.as_slice()]), None);
+        assert_eq!(remembered(&memo, &other, [accepted.as_slice()]), None);
+    }
+
     #[test]
     fn only_the_position_and_fulfillment_p_names_resolve_its_parent() {
         let (position, wanted, root) = (7, [0xF7; 32], [0x77; 32]);
