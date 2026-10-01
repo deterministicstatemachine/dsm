@@ -2021,6 +2021,39 @@ Mutation controls, run on 2026-10-01 and restored byte for byte, each with a nam
 - No verdict stored: `an_operations_verifiers_share_the_geneses_it_accepted` red, with `(2, 2)` walks and reads against `(1, 2)`.
 - Each context given a fresh memo, on the context-level form of the sharing test: red ("a later context of the same operation stands on what it accepted"). That form was replaced by the counted one when the locator became a read on every call.
 
+### 6.59 A set-wide storage call asks every member at once; the settle's steps are logged (`perf/sofi-settle-rounds`, 2026-10-01)
+
+**Found on the rig (APK = main 0d36d207b).** Three trades took 126–129 s each, and the settle was 70–80 s of every one:
+- It resolved in its first round; no "not resolved" round was logged.
+- Inside that one resolution, about 1–2 s of fast cell reads alternated with 6–12 s of silence, five times over.
+- The silence was the SDK's set-wide storage client (`SetClient`). Every object read and put, index read and append, and cell read and put asked the five members one after another. An object read during the settle carries SPHINCS+ signatures, so over a phone's network each object cost five round trips in a row.
+
+**The change.**
+- Every `SetClient` call asks all members at once and keeps their answers in member order. Nothing a member answers changes.
+- `fetch_verified` reads every member at once and keeps the first answer, in member order, whose bytes re-hash to the address.
+- The settle logs where each stage ends: registration read, precommit fetched, exercise read back, each leg's vault walked, facts established, advanced.
+- Core logs each generation a chain establishes.
+- Nothing reads a clock (`ci/no_clock_and_no_json.sh` passes). The log's own timestamps time each stage.
+
+**Test.** `dsm_sdk::sdk::storage_node_sdk::tests::a_set_asks_every_member_at_once`. Each member sits behind a relay that holds its first connection until every member has one. A client that waits for one member before asking the next is never answered. The object put directly is read through the relays from every member, and a put through them is taken by every member.
+
+**Mutation control (2026-10-01, restored byte for byte).** `get_immutable` asking the members in turn: the test is red, with 1 of 5 members answering.
+
+**The rig after the change** (APK = this branch). The same kind of trade, a chain ERA → RIGT → HOP with no setup, realized at C's position 13 in **53 s**, against 126–129 s:
+
+| Stage | Before | After |
+|---|---|---|
+| Draft → completing | 14.5 s | 4 s |
+| Completing | 16 s | 6.3 s |
+| Settle | 70–80 s | 28.7 s |
+
+The quote took 20 s.
+
+**What remains**, from the step logs:
+- **Owner walks from activation, 11 s.** Whether a walk records a frontier for the vault owner is the owner's question, under DSM Amendment A8.
+- **The chain walk of a vault the trade consumed, about 19 s.** Two passes over the sibling leg re-read the same four or five cells about four times each.
+- **Establishing the facts, 2.7 s.**
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
