@@ -48,6 +48,9 @@ async fn a_receiver_that_never_added_the_token_is_not_credited_until_it_adopts()
     p.a.enter();
     let sent = p.a.send_token(&p.b, "ADPT", 100).await;
     assert!(sent.success, "{:?}", sent.error_message);
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
     let refused_sync = p.b.sync().await;
     assert!(refused_sync.success, "{:?}", refused_sync.errors);
     assert_eq!(
@@ -55,6 +58,18 @@ async fn a_receiver_that_never_added_the_token_is_not_credited_until_it_adopts()
         0,
         "B is not credited a token it never adopted"
     );
+    // Adoption is state B holds, so the transfer is held before B reads
+    // anything of A's register (Amendment A4, MR-DSM-0029).
+    for node in &p.nodes.nodes {
+        for request in node.requests() {
+            assert!(
+                !request.starts_with("GET /api/v2/cell/"),
+                "{} was asked for a cell while B held a transfer of a token it never \
+                 adopted: {request}",
+                node.member_id
+            );
+        }
+    }
 
     // B adopts through the production route: the adoption leaf is committed
     // to B's head (root moves), no ERA is spent.
