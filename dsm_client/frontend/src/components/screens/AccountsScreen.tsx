@@ -345,6 +345,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
               <button
                 type="button"
                 className="sb-btn"
+                data-tour="add-token"
                 onClick={() => { setAddingAnchor(''); setError(null); setSuccessMsg(null); }}
               >
                 + Add Token (CPTA)

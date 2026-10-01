@@ -246,7 +246,7 @@ const ContactsTabScreen: React.FC<Props> = () => {
               </button>
             </div>
           ) : (
-            <section className="sb-card">
+            <section className="sb-card" data-tour="contact-list">
               {contacts.map((c, i) => {
                 const isOpen = selected === i;
                 const toggle = () => setSelected(isOpen ? null : i);
