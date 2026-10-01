@@ -10,7 +10,7 @@ android	dsm_sdk::bridge::get_all_balances_strict	reached	REACHED	a direct call f
 android	dsm::core::bridge::install_app_router	reached	REACHED	a call from the SDK into the core crate
 android	dsm_sdk::handlers::app_router_impl::AppRouterImpl::AppRouter::query	reached	REACHED_VIA_DISPATCH	app-router dispatch: the router is constructed where the SDK starts
 android	dsm_sdk::handlers::app_router_impl::AppRouterImpl::AppRouter::invoke	reached	REACHED_VIA_DISPATCH	app-router dispatch
-android	dsm::economic::peer_lineage::WalkingResolver::ProvenanceResolver::anchored_policy_bytes	reached	REACHED_VIA_DISPATCH	trait dispatch on a constructed resolver
+android	dsm::economic::peer_lineage::OneHop::ProvenanceResolver::anchored_policy_bytes	reached	REACHED_VIA_DISPATCH	trait dispatch on a constructed resolver
 android	dsm::sofi::smt::fold::EconomicHashes::SmtHashes::leaf	reached	REACHED_VIA_DISPATCH	an associated trait function dispatched on as a type argument
 android	dsm::economic::write_set::build_write_set	reached	REACHED_VIA_DISPATCH	a cross-module call reached through the router
 android	dsm_sdk::bridge::install_anchor_appliance_factory	indeterminate	IND_UNINDEXED_ARTIFACT	only the anchor crate calls it, which the map cannot index here
