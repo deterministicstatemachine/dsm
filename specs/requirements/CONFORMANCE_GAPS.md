@@ -2106,6 +2106,41 @@ This is the owner's beta security pre-audit, item 2 (P0), audited at main `07679
 
 **Fix:** commit `1ef20cf7a` on `security/beta-pre-audit`; `make lint` exit 0.
 
+### 6.63 A send names its recipient by device id, never by alias (`security/beta-pre-audit`, pre-audit item 6, 2026-10-01)
+
+This is the owner's beta security pre-audit, item 6 (P0), audited at main `076792eac`. CORE reported it and verified it at the code. It is not recorded elsewhere in this file.
+
+| Field | Record |
+|---|---|
+| Severity | High; the owner's list places it in P0. |
+| Files | `proto/dsm_app.proto` · `OnlineTransferSmartRequest`. `dsm_sdk/src/handlers/wallet_routes.rs` · `wallet.sendSmart`. `dsm_sdk/src/storage/client_db/contacts.rs` · `get_contact_by_alias`, now removed. Frontend: `src/dsm/transactions.ts` · `sendOnlineTransferSmart` and `src/components/screens/wallet/SendTab.tsx`. |
+| Exploit | The send screen chose a contact by its device id but sent that contact's alias. `wallet.sendSmart` resolved the alias with `SELECT … WHERE alias = ?1` and took the first row, and aliases are not unique (`idx_contacts_alias` is a plain index). With two contacts named "Bob", a send to the second paid whichever had been added first. A contact who gets added under the alias of someone the user pays receives that person's payments. |
+| Violates | A transfer is made over a relationship, and a relationship is keyed by the counterparty's device (MR-DSM-0074: a device sends only over relationships it has pre-added). A label is not an identity. |
+| Verification | CORE verified it at the code on 2026-10-01. The adversarial test below reproduced it on the old wire: the user chose C, and C received 0. |
+| Closure condition | The wire carries only the recipient's 32-byte device id. The SDK resolves nothing by alias. The frontend sends the device id of the contact the user chose. |
+| Status | Closed. |
+
+**The change.**
+- **Wire.** `OnlineTransferSmartRequest` reserves field 1, `recipient` (alias or Base32 text), and names the recipient by `bytes recipient_device_id = 5 [(dsm_fixed_len)=32]`. This is a clean cut, as beta allows.
+- **SDK.** `wallet.sendSmart` takes those 32 bytes or refuses the request. Whether the device is an added contact is checked where the relationship is read, as before. `get_contact_by_alias` had no caller left and is removed with its test. The non-unique alias index stays: nothing resolves through it.
+- **Frontend.** `sendOnlineTransferSmart` takes the chosen contact's device id: the Base32 key the send screen selects the contact by, decoded to bytes as the offline send already did. `SendTab` passes `selectedContactKey`. Practice mode's simulated sends find the recipient by device id only.
+
+**Test.** `dsm_sdk::handlers::sender_admission_tests::a_send_pays_the_contact_chosen_not_the_first_of_its_alias`.
+- A holds two contacts named "B": B, added first, then C, added under the same alias.
+- The user pays C 10 ERA, then B 20 ERA, each through the request the frontend builds for that choice.
+- Each is paid what was sent to it.
+- On the old wire, the request named the alias and C received 0.
+
+**Mutation controls (2026-10-01, restored byte for byte).**
+- The handler resolved the recipient through its alias, taking the first contact sharing the chosen contact's alias. The test went red: both payments went to one contact, and the second was refused, "relationship is not send-ready".
+- An earlier, single-send form of the test stayed green under that mutation, because the contact order happened to favor the chosen one. That is why the test pays both contacts.
+
+**Suites.**
+- SDK: `sender_admission_tests` including the new test.
+- Frontend: type-check clean, and 7 touched suites, 51 tests (`onlineTransfer`, `E2E.sendOnlineTransfer`, `E2E.transferProof`, `EnhancedWalletScreen.events`, `practiceMode`, `SendTab.offline`, `SendTab.offlineFunding`).
+
+**Fix:** commit `cacecdf1d` on `security/beta-pre-audit`; `make lint` exit 0, frontend lint clean.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
