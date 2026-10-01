@@ -674,6 +674,11 @@ fn post_leaf_cache(
     Ok(cache.into_iter().map(|(k, (v, ccb))| (k, v, ccb)).collect())
 }
 
+/// A vault or position named in a log line by its first five bytes.
+fn short_id(id: &D32) -> String {
+    crate::util::text_id::encode_base32_crockford(&id[..5])
+}
+
 /// Stages 9 and 10 of §31: resolve the device's pending position from raw
 /// reads (R12) and, once it is decided, advance the validated lineage through
 /// `advance_resolved` and make it durable in the one admit transaction —
@@ -744,10 +749,13 @@ pub async fn resolve_pending_position(
             return not_yet(NotResolved::NotRegistered)
         }
     };
+    // Each stage logs where it ends; the log's own timestamps time it.
+    log::info!("[sofi settle] position {q}: its registration read");
     let precommit = match fetch_precommit(set, fulfillment.body.precommit_id()).await? {
         Resolved::Kept(precommit) => precommit.body,
         Resolved::None | Resolved::Unavailable => return not_yet(NotResolved::PrecommitNotStored),
     };
+    log::info!("[sofi settle] position {q}: its precommit fetched");
 
     // The exercise, read back from the first leg's cell: the object the
     // ladder resolves, and the one a restarted device has not kept.
@@ -779,6 +787,7 @@ pub async fn resolve_pending_position(
     // itself, and the canonical chain of each vault a leg names — walked
     // forward from the genesis or from the generations this device already
     // recorded, so a parent past genesis is decided rather than deferred.
+    log::info!("[sofi settle] position {q}: its exercise read back");
     let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
     for leg in precommit.legs() {
         if chains.contains_key(&leg.vault_id) {
@@ -788,6 +797,10 @@ pub async fn resolve_pending_position(
             leg.vault_id,
             verifier.chain(&leg.vault_id).map_err(verifier_error)?,
         );
+        log::info!(
+            "[sofi settle] position {q}: vault {} walked",
+            short_id(&leg.vault_id)
+        );
     }
     let established = match verifier
         .establish_own(&chains, &exercise, &registration)
@@ -796,6 +809,7 @@ pub async fn resolve_pending_position(
         Ok(established) => established,
         Err(why) => return not_yet(NotResolved::Facts(why)),
     };
+    log::info!("[sofi settle] position {q}: its facts established");
 
     // Stage 10. Every input to `advance_resolved` is this device's own: the
     // validated predecessor, the claim it registered at p, the facts Core
@@ -811,7 +825,10 @@ pub async fn resolve_pending_position(
         &established,
         &head,
     ) {
-        Ok(advanced) => advanced,
+        Ok(advanced) => {
+            log::info!("[sofi settle] position {q}: advanced");
+            advanced
+        }
         Err(AdvanceError::FactsIncomplete(incomplete)) => {
             return not_yet(NotResolved::Ladder(incomplete))
         }

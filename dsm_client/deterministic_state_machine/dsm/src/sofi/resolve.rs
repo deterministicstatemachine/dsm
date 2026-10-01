@@ -1332,6 +1332,11 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 break;
             };
             self.reads.record_generation(&post)?;
+            log::info!(
+                "[sofi verifier] vault {}: generation {} established",
+                short_id(&vault_id),
+                post.generation()
+            );
             chain.extend(&post).map_err(|e| {
                 VerifierFailure::Refused(format!(
                     "chain: the consumption does not extend the chain: {e}"
