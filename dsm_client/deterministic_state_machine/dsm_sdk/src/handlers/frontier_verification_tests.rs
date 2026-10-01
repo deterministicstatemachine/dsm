@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Frontier-relative verification (DSM Amendment A8, owner ruling
-//! 2026-09-30) on the storage nodes. A verifier starts at its own frontier
-//! for a peer, validates every step from there from that step's own
-//! evidence, checks a credit's source one hop back and no further, and reads
-//! nothing behind its frontier.
+//! Frontier-relative verification (DSM Amendment A8, owner rulings
+//! 2026-09-30 and 2026-10-01) on the storage nodes. A verifier starts at its
+//! own frontier for a peer, validates every step from there from that step's
+//! own evidence, validates a credit's source through the source's own
+//! segment back to a frontier it holds for the source, records the
+//! frontiers it reached with the acceptance, and reads nothing behind a
+//! frontier.
 
 use serial_test::serial;
 
@@ -377,6 +379,146 @@ async fn a_sources_segment_stops_at_the_frontier_the_receiver_holds() {
         assert!(
             !asked.contains(read),
             "B read C's cell behind the frontier it holds for C: {read}"
+        );
+    }
+}
+
+/// C's three-device setup: A and B as a pair, C booted on the same fleet,
+/// all three contacts of each other, and C funded.
+async fn three_devices() -> (Pair, TestDevice) {
+    let p = Pair::boot(100, 0).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    for peer in [&p.a, &p.b] {
+        c.add_contact(peer).await;
+        peer.add_contact(&c).await;
+    }
+    c.fund_admitted(100).await;
+    (p, c)
+}
+
+/// C pays A `amount`, A takes it in, and the position C admitted the debit
+/// at.
+async fn c_pays_a(p: &Pair, c: &TestDevice, amount: u64) -> u64 {
+    let sent = c.send(&p.a, amount).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let credited = p.a.sync().await;
+    assert!(credited.success, "{:?}", credited.errors);
+    c.enter();
+    client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("C admitted its debit to A")
+        .0
+}
+
+/// The reads of C's root cells at positions `1..=through`, in C's own
+/// order, as the members log them.
+fn cs_cells_through(c: &TestDevice, through: u64) -> Vec<String> {
+    c.enter();
+    let mut parent = dsm::economic::tree::empty_economic_root();
+    let mut reads = Vec::new();
+    for position in 1..=through {
+        reads.push(cell_read(&c.genesis, &c.device_id, position, &parent));
+        parent = admitted(position).0;
+    }
+    reads
+}
+
+/// A source's frontier is cached with the acceptance (owner 2026-10-01:
+/// "Cache/update validated frontiers so subsequent interactions validate
+/// only the new suffix"). C has never paid B. C pays A and A pays B: B
+/// validates C's segment to the paying step and records its frontier for C
+/// there with the acceptance. C pays A again and A pays B again: B walks C
+/// from that frontier, reading C's cells past it and none at or behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_sources_frontier_is_recorded_and_the_next_credit_walks_only_its_suffix() {
+    let (p, c) = three_devices().await;
+    let first_source = c_pays_a(&p, &c, 30).await;
+    let sent = p.a.send(&p.b, 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let received = p.b.sync().await;
+    assert!(received.success, "{:?}", received.errors);
+    assert_eq!(p.b.era_balance(), 20);
+    p.b.enter();
+    let frontier =
+        client_db::economic_lineage::frontier_below(&c.genesis, &c.device_id, first_source + 1)
+            .expect("the frontier store")
+            .expect("B's frontier for C, recorded from the source's segment alone");
+    assert_eq!(
+        frontier.economic_position(),
+        first_source,
+        "B's frontier for C is the source step its acceptance validated"
+    );
+
+    let second_source = c_pays_a(&p, &c, 10).await;
+    let again = p.a.send(&p.b, 5).await;
+    assert!(again.success, "{:?}", again.error_message);
+    let behind = cs_cells_through(&c, first_source);
+    let past = cs_cells_through(&c, second_source)
+        .pop()
+        .expect("C's cell at its second paying step");
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let received = p.b.sync().await;
+    assert!(received.success, "{:?}", received.errors);
+    assert_eq!(p.b.era_balance(), 25);
+    let asked = requests(&p.nodes);
+    assert!(
+        asked.contains(&past),
+        "B read C's second paying step, past its frontier"
+    );
+    for read in &behind {
+        assert!(
+            !asked.contains(read),
+            "B read C's cell at or behind the frontier its first acceptance recorded: {read}"
+        );
+    }
+}
+
+/// One walk validates a source's segment once. C pays A twice, and A pays
+/// B out of both: validating A's segment, B walks C to the first paying
+/// step, and the walk to the second starts there. Every member is asked for
+/// each of C's cells at or behind the first paying step exactly as often as
+/// for C's second paying step, which any walk reads once: never once more
+/// for the second source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn one_walk_validates_a_sources_segment_once() {
+    let (p, c) = three_devices().await;
+    let first_source = c_pays_a(&p, &c, 30).await;
+    let second_source = c_pays_a(&p, &c, 10).await;
+    assert!(second_source > first_source);
+    let sent = p.a.send(&p.b, 35).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let behind = cs_cells_through(&c, first_source);
+    let second = cs_cells_through(&c, second_source)
+        .pop()
+        .expect("C's cell at its second paying step");
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let received = p.b.sync().await;
+    assert!(received.success, "{:?}", received.errors);
+    assert_eq!(p.b.era_balance(), 35);
+    let per_member = |read: &String| -> Vec<usize> {
+        p.nodes
+            .nodes
+            .iter()
+            .map(|n| n.requests().iter().filter(|r| *r == read).count())
+            .collect()
+    };
+    let once = per_member(&second);
+    assert!(
+        once.iter().any(|n| *n > 0),
+        "B validated C's second paying step"
+    );
+    for read in &behind {
+        assert_eq!(
+            per_member(read),
+            once,
+            "B walked C's segment through {read} more often than C's second paying step"
         );
     }
 }
