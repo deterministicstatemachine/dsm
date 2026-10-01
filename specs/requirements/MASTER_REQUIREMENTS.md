@@ -15,7 +15,7 @@ Every extraction in this round is taken against exactly these bytes:
 | File | `git hash-object` | Lines |
 |---|---|---|
 | `specs/DSM_High_Level_Explainer.md` | `e11c80e9b75b04a30b4be07eadba024fc1f0262e` | 4314 |
-| `specs/SoFi_Settlement_Specification.md` | `cc3673a51180f579eb16a429b6093c885983e1eb` | 2656 |
+| `specs/SoFi_Settlement_Specification.md` | `9f7a2fd1fefed9b95db75ddff8f8f2cc8608cbde` | 2656 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
 | `specs/DSM_Storage_Node_Specification.md` | `415a9b9c67c7a2b4b6df78b0af85fb3bc7282ae8` | 636 |
 
@@ -804,7 +804,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-SOFI-0343 | obligation | explicit | A final DLV cell whose exercise carries a fulfillment that can never register, because `K_root(q)` for its position is final on a claim other than its own `C_q`, is skipped (`RejectedFinalInadmissible`). The skip is not an arm of `RouteImpossible`, reads no validation evidence, creates no Void and no Invalid, and once it holds it holds forever. | amendment: SoFi Amendment S14 (2026-09-30) | owner | none |
 | MR-SOFI-0344 | obligation | explicit | Another trader's conditional position q is resolved from SoFi's public proof-carrying objects for q alone (the claim final at K_root(q), the registration pair, P and F, the exercise read back from the first leg's cell, and the vault cells and canonical chains the facts need, with their finality evidence) by the ladder over the facts Core establishes from them. The result is the one root q selected (P.realize_root when Realized, the root authenticated at q − 1 when Void), Invalid, or not established yet. | amendment: SoFi Amendment S15 (2026-09-30) | owner | none |
 | MR-SOFI-0345 | invariant | explicit | The claim final at K_root(q) counts, for a verifier resolving q, only as the claim (P, F) derive: its two roots are the ones the resolution chooses between. | amendment: SoFi Amendment S15 (2026-09-30) | owner | none |
-| MR-SOFI-0346 | prohibition | explicit | Resolving another trader's position q reads no private object of the trader's and no position of the trader's other than q and the root authenticated at q − 1, and has no fallback that walks the trader's lineage. | amendment: SoFi Amendment S15 (2026-09-30) | owner | none |
+| MR-SOFI-0346 | prohibition | explicit | Resolving another trader's position q reads no private object of the trader's and no position of the trader's outside the verifier's frontier-to-parent segment (within it, only q, the root authenticated at q − 1, and the trader's accepted claims at the setup positions its legs name, read through DSM Amendment A8), and has no fallback that walks the trader's lineage. | amendment: SoFi Amendment S15 (2026-09-30) | owner | none |
 | MR-SOFI-0347 | obligation | explicit | SetupValid reads the trader's accepted claim at a setup's position by frontier-relative verification of the trader's lineage (DSM Amendment A8), never by replaying the trader's history to genesis or recursing behind a step's one-hop evidence. | amendment: SoFi Amendment S15 (2026-09-30) | owner | none |
 | MR-SOFI-0348 | invariant | explicit | Adoption is a construction predicate of the trader's own transition, enforced when the trader installs a realized position; a later verifier resolving which root a historical position selected does not re-run it, and that resolution requires no adoption leaf or other private trader state. | amendment: SoFi Amendment S15 (2026-09-30) | owner | none |
 
