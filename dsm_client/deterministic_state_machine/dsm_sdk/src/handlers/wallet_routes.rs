@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Wallet and balance route handlers for AppRouterImpl.
 //!
-//! Handles: `balance.get`, `balance.list`, `wallet.history`, `wallet.send`, `wallet.sendSmart`,
-//! `wallet.sendOffline`
+//! Handles: `balance.get`, `balance.list`, `wallet.history`, `wallet.amount`, `wallet.send`,
+//! `wallet.sendSmart`, `wallet.sendOffline`
 
 use dsm::types::proto as generated;
 use prost::Message;
@@ -551,6 +551,42 @@ pub(crate) fn parse_display_amount_to_base_units(
         .map_err(|e| format!("amount out of range: {e}"))
 }
 
+/// `wallet.amount`: one amount in both its forms, by the two functions above.
+///
+/// The unit is a token Rust knows, at the decimals of its committed policy by
+/// the lookup a send of it uses, or a stated count of decimals no greater than
+/// a policy may commit. The amount is typed text, parsed exactly as a send
+/// parses it, or canonical base units. A client that asks here converts
+/// nothing itself, so an amount it shows and the same amount sent can never
+/// disagree about what a unit is.
+pub(crate) fn wallet_amount(
+    req: generated::WalletAmountRequest,
+) -> Result<generated::WalletAmountResponse, String> {
+    use dsm::economic::token_policy::MAX_DECIMALS;
+    use generated::wallet_amount_request::{Amount, Unit};
+
+    let decimals = match req.unit {
+        Some(Unit::TokenId(token_id)) => token_decimals(&token_id)?,
+        Some(Unit::Decimals(decimals)) if decimals <= MAX_DECIMALS => decimals,
+        Some(Unit::Decimals(decimals)) => {
+            return Err(format!(
+                "{decimals} decimals exceed the {MAX_DECIMALS} a policy may commit"
+            ))
+        }
+        None => return Err("the request names no unit: a token or its decimals".to_string()),
+    };
+    let base_units = match req.amount {
+        Some(Amount::Entered(text)) => parse_display_amount_to_base_units(&text, decimals)?,
+        Some(Amount::BaseUnits(base_units)) => base_units,
+        None => return Err("the request names no amount".to_string()),
+    };
+    Ok(generated::WalletAmountResponse {
+        base_units,
+        display_amount: format_base_units_for_display(base_units, decimals),
+        decimals,
+    })
+}
+
 pub(crate) fn encode_offline_transfer_operation_canonical(
     to_device_id: &[u8; 32],
     amount: u64,
@@ -960,6 +996,29 @@ impl AppRouterImpl {
 
                 let resp = generated::BalancesListResponse { balances: items };
                 pack_envelope_ok(generated::envelope::Payload::BalancesListResponse(resp))
+            }
+
+            // -------- wallet.amount --------
+            "wallet.amount" => {
+                let req = match generated::ArgPack::decode(&*q.params) {
+                    Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
+                        match generated::WalletAmountRequest::decode(&*pack.body) {
+                            Ok(req) => req,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.amount: decode WalletAmountRequest failed: {e}"
+                                ))
+                            }
+                        }
+                    }
+                    _ => return err("wallet.amount: expected ArgPack(codec=PROTO)".into()),
+                };
+                match wallet_amount(req) {
+                    Ok(reply) => {
+                        pack_envelope_ok(generated::envelope::Payload::WalletAmountResponse(reply))
+                    }
+                    Err(e) => err(format!("wallet.amount: {e}")),
+                }
             }
 
             _ => err(format!("unknown wallet query path: {}", q.path)),
@@ -1398,7 +1457,7 @@ mod tests {
         canonicalize_token_id, encode_offline_transfer_operation_canonical,
         ensure_default_visible_balances, format_base_units_for_display,
         format_signed_base_units_for_display, merge_balance_projections,
-        parse_display_amount_to_base_units, token_decimals,
+        parse_display_amount_to_base_units, token_decimals, wallet_amount,
     };
     use crate::storage::client_db::BalanceProjectionRecord;
     use dsm::types::proto as generated;
@@ -1575,6 +1634,92 @@ mod tests {
     #[test]
     fn parse_display_amount_to_base_units_rejects_fractional_whole_tokens() {
         assert!(parse_display_amount_to_base_units("1.5", 0).is_err());
+    }
+
+    /// `wallet.amount` counts ERA at the decimals of ERA's committed policy,
+    /// in both directions, by the functions a send and a balance use.
+    #[test]
+    fn wallet_amount_counts_era_by_its_committed_policy() {
+        use generated::wallet_amount_request::{Amount, Unit};
+        let era = |amount| {
+            wallet_amount(generated::WalletAmountRequest {
+                unit: Some(Unit::TokenId("ERA".to_string())),
+                amount: Some(amount),
+            })
+            .expect("ERA is counted")
+        };
+        let decimals = dsm::core::token::era_policy::era_policy()
+            .expect("ERA's committed policy")
+            .decimals;
+
+        let typed = era(Amount::Entered("25".to_string()));
+        assert_eq!(typed.decimals, decimals);
+        assert_eq!(
+            typed.base_units,
+            parse_display_amount_to_base_units("25", decimals).expect("25 parses")
+        );
+        assert_eq!(
+            typed.display_amount,
+            format_base_units_for_display(typed.base_units, decimals)
+        );
+        // ERA carries two decimals (SoFi Amendment S18).
+        assert_eq!(
+            (typed.base_units, typed.display_amount.as_str()),
+            (2_500, "25.00")
+        );
+
+        let held = era(Amount::BaseUnits(97_500));
+        assert_eq!(
+            (held.base_units, held.display_amount.as_str(), held.decimals),
+            (97_500, "975.00", decimals)
+        );
+    }
+
+    /// A stated count of decimals is counted by the same rule. More decimals
+    /// than a policy may commit are refused, as is an amount the unit cannot
+    /// hold and a request that names no unit or no amount.
+    #[test]
+    fn wallet_amount_at_stated_decimals_and_what_it_refuses() {
+        use generated::wallet_amount_request::{Amount, Unit};
+        let ask = |unit, amount| wallet_amount(generated::WalletAmountRequest { unit, amount });
+
+        let whole = ask(
+            Some(Unit::Decimals(0)),
+            Some(Amount::Entered("5".to_string())),
+        )
+        .expect("whole units");
+        assert_eq!(
+            (
+                whole.base_units,
+                whole.display_amount.as_str(),
+                whole.decimals
+            ),
+            (5, "5", 0)
+        );
+
+        let past_policy = ask(
+            Some(Unit::Decimals(
+                dsm::economic::token_policy::MAX_DECIMALS + 1,
+            )),
+            Some(Amount::BaseUnits(1)),
+        )
+        .expect_err("more decimals than a policy may commit");
+        assert!(past_policy.contains("a policy may commit"), "{past_policy}");
+
+        let three_places = ask(
+            Some(Unit::TokenId("ERA".to_string())),
+            Some(Amount::Entered("1.234".to_string())),
+        )
+        .expect_err("three places of ERA");
+        assert!(
+            three_places.contains("exceeds 2 fractional digits"),
+            "{three_places}"
+        );
+
+        let no_unit = ask(None, Some(Amount::BaseUnits(1))).expect_err("no unit");
+        assert!(no_unit.contains("names no unit"), "{no_unit}");
+        let no_amount = ask(Some(Unit::Decimals(2)), None).expect_err("no amount");
+        assert!(no_amount.contains("names no amount"), "{no_amount}");
     }
 
     #[test]

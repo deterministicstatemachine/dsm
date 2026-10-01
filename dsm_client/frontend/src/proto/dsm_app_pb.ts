@@ -17396,6 +17396,14 @@ export class Envelope extends Message<Envelope> {
     case: "sofiVaultsResponse";
   } | {
     /**
+     * wallet.amount: an amount in both its forms, local-only.
+     *
+     * @generated from field: dsm.WalletAmountResponse wallet_amount_response = 127;
+     */
+    value: WalletAmountResponse;
+    case: "walletAmountResponse";
+  } | {
+    /**
      * Reply to `token.forget`.
      *
      * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
@@ -17516,6 +17524,7 @@ export class Envelope extends Message<Envelope> {
     { no: 124, name: "sofi_relay_response", kind: "message", T: SofiRelayResponse, oneof: "payload" },
     { no: 125, name: "sealed", kind: "message", T: SealedEnvelopeV1, oneof: "payload" },
     { no: 126, name: "sofi_vaults_response", kind: "message", T: SofiVaultsResponse, oneof: "payload" },
+    { no: 127, name: "wallet_amount_response", kind: "message", T: WalletAmountResponse, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -21683,6 +21692,147 @@ export class BalancesListResponse extends Message<BalancesListResponse> {
 
   static equals(a: BalancesListResponse | PlainMessage<BalancesListResponse> | undefined, b: BalancesListResponse | PlainMessage<BalancesListResponse> | undefined): boolean {
     return proto3.util.equals(BalancesListResponse, a, b);
+  }
+}
+
+/**
+ * wallet.amount: one amount in both its forms, converted by the one rule Rust
+ * owns (see BalanceGetResponse.display_amount). A client holding an amount in
+ * one form that must show or count it in the other asks here; it converts
+ * nothing itself. The guided tour's practice wallet keeps its figures this way.
+ *
+ * @generated from message dsm.WalletAmountRequest
+ */
+export class WalletAmountRequest extends Message<WalletAmountRequest> {
+  /**
+   * What the amount is counted in.
+   *
+   * @generated from oneof dsm.WalletAmountRequest.unit
+   */
+  unit: {
+    /**
+     * A token Rust knows: the decimals of its committed policy, by the same
+     * lookup a send of that token uses.
+     *
+     * @generated from field: string token_id = 1;
+     */
+    value: string;
+    case: "tokenId";
+  } | {
+    /**
+     * A stated count of decimals, for a token no policy on this device
+     * commits: the tour's practice coin. At most a policy's maximum.
+     *
+     * @generated from field: uint32 decimals = 2;
+     */
+    value: number;
+    case: "decimals";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  /**
+   * @generated from oneof dsm.WalletAmountRequest.amount
+   */
+  amount: {
+    /**
+     * As a person typed it, in token units, parsed as a send parses it.
+     *
+     * @generated from field: string entered = 3;
+     */
+    value: string;
+    case: "entered";
+  } | {
+    /**
+     * Canonical base units.
+     *
+     * @generated from field: uint64 base_units = 4;
+     */
+    value: bigint;
+    case: "baseUnits";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<WalletAmountRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.WalletAmountRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "unit" },
+    { no: 2, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */, oneof: "unit" },
+    { no: 3, name: "entered", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "amount" },
+    { no: 4, name: "base_units", kind: "scalar", T: 4 /* ScalarType.UINT64 */, oneof: "amount" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): WalletAmountRequest {
+    return new WalletAmountRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): WalletAmountRequest {
+    return new WalletAmountRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): WalletAmountRequest {
+    return new WalletAmountRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: WalletAmountRequest | PlainMessage<WalletAmountRequest> | undefined, b: WalletAmountRequest | PlainMessage<WalletAmountRequest> | undefined): boolean {
+    return proto3.util.equals(WalletAmountRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.WalletAmountResponse
+ */
+export class WalletAmountResponse extends Message<WalletAmountResponse> {
+  /**
+   * canonical base units
+   *
+   * @generated from field: uint64 base_units = 1;
+   */
+  baseUnits = protoInt64.zero;
+
+  /**
+   * the same amount, rendered by Rust
+   *
+   * @generated from field: string display_amount = 2;
+   */
+  displayAmount = "";
+
+  /**
+   * the decimals both forms are at
+   *
+   * @generated from field: uint32 decimals = 3;
+   */
+  decimals = 0;
+
+  constructor(data?: PartialMessage<WalletAmountResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.WalletAmountResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "base_units", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): WalletAmountResponse {
+    return new WalletAmountResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): WalletAmountResponse {
+    return new WalletAmountResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): WalletAmountResponse {
+    return new WalletAmountResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: WalletAmountResponse | PlainMessage<WalletAmountResponse> | undefined, b: WalletAmountResponse | PlainMessage<WalletAmountResponse> | undefined): boolean {
+    return proto3.util.equals(WalletAmountResponse, a, b);
   }
 }
 
