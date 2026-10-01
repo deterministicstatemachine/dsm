@@ -2124,6 +2124,60 @@ Each trade's history row names both of its vaults.
 - **The trade's owner walks from activation: 8–12 s.** Before a draft, each vault's owner lineage is walked from its activation root. Whether a walk records a frontier for a vault owner is the owner's question (DSM Amendment A8).
 - **ByteCommit reads inside each cell read: STORAGE's.** In one node-harness resolution they were 770 of the 980 requests: each seat's latest ByteCommit, mirrors and proofs, read again for every cell. A read of one member's ByteCommit at one height could be kept the same way.
 
+### 6.61 A trade's independent reads and writes overlap; a storage node aborts concurrent object puts (`perf/sofi-trade-read-once-and-overlap`, 2026-10-01)
+
+**Where the 27 s went.** The rig's chain trade at position 16 (§6.60) broke down as follows:
+- **8.5 s** walking both vault owners' lineages from activation, one after the other.
+- **6.8 s** completing: the position pair, then one exercise per leg, one after another.
+- **5.3 s** settling.
+- **1.7 s** publishing objects one at a time.
+- **About 4 s** in drafting, the UI, and the gaps between them.
+
+The owner chose to overlap the independent pieces before touching settlement semantics again or optimizing the A8 frontier.
+
+**The change.**
+- **Each vault's head is walked at once** (`sofi_flow::chains_at_once`). Each vault gets its own scoped thread over the one verifier. A vault's walk reads its owner's lineage and its own cells; it needs nothing that another vault's walk finds first. The context's kept reads are shared, and neither `ReadOnce` nor Core's genesis memo is locked across a read. The chains come back in hop order, and a panicking walk panics the trade, as it would in line.
+- **Each leg's exercise is written at once** (`sofi_exercise::write_exercise`). P's legs name strictly ascending vault ids (`TraderPrecommitBody`, R15-4), so every leg is its own cell on its own route. A cell put takes a per-key advisory lock at READ COMMITTED. The writes come back in the order F names them.
+- **An object fetch keeps the first answer whose bytes re-hash to the address** (`SetClient::fetch_verified`). Every member is still asked at once, but the slowest member is no longer waited for. Any bytes that re-hash are the object's bytes, so which member served them changes nothing.
+
+**Withdrawn: publishing a produced operation's objects at once.** Every object a trade publishes has its own locators, so no index's append order depended on the order of publication. But the trade failed. The members answered some puts with HTTP 500, too few members held the object, and `Stored` was refused. The cause is the storage-node finding below.
+
+**Test.** `dsm_sdk::sdk::storage_node_sdk::tests::a_fetch_passes_over_a_member_that_answers_first_with_other_bytes`.
+- The first member is replaced by a responder that answers at once with other bytes under the object's namespace.
+- The other members are reached only after it has answered.
+- The fetch returns the bytes the members hold.
+
+Mutation (2026-10-01, restored byte for byte): the re-hash check was reduced to a namespace check. The test went red, returning the substituting member's bytes.
+
+The concurrent walks and leg writes run in every node-suite trade, chain and split.
+
+**Finding: a storage node aborts concurrent object puts (open; STORAGE's).**
+
+| Field | Record |
+|---|---|
+| Severity | High: availability under concurrent load |
+| Files | `dsm_storage_node/src/db/pg.rs` · `insert_immutable_object_if_absent` (l. 538); `api/objects/immutable.rs` (the 500 at l. 131) |
+| Failure mode | Each put runs as a SERIALIZABLE transaction: `SELECT … FOR UPDATE`, then `INSERT`. There is no retry on SQLSTATE 40001. Under serializable isolation, Postgres aborts concurrent inserts, even of different addresses ("could not serialize access due to read/write dependencies among transactions"), and the node answers 500. When an object ends up held by fewer than three members, it is not `Stored`, and the operation that needed it fails closed. This applies whether the puts come from one client or from several. |
+| Requirement | The storage failure model allows a node to omit messages, and object misresponses affect availability only. So this is an implementation defect in availability, not a protocol violation. Ordinary concurrency causes the omissions, and the 3-of-5 `Stored` rule (§5 rule 6) turns them into failed operations. |
+| Verification | Verified by probe, on one node over the shipped Postgres backend. Of 16 distinct objects put concurrently, 6 were refused with 500. Of the same number put one at a time, none were refused. The Postgres log gained exactly 6 serialization failures. All 276 such failures in the local log are on this insert or its commit, and they date back to 2026-09-25, before this branch. |
+| Closure condition | The node either retries the transaction on 40001 (bounded) or inserts idempotently at READ COMMITTED (`INSERT … ON CONFLICT DO NOTHING`, then compare what is held). The fleet is redeployed. |
+| Evidence required | A test that puts concurrent distinct objects at one node and requires every one to be taken, and that goes red under a mutation removing the retry or restoring the abort. |
+| Fix | Not here. Reported to STORAGE through CORE, 2026-10-01. |
+
+**On the rig** (three phones, APK = this branch, the GCP fleet). Phone C traded twice.
+
+| Trade | Trade, pressed to realized | Head walks | Completing | Settle |
+|---|---|---|---|---|
+| Chain, ERA → RIGT → HOP: 20 ERA in, 106.95 HOP out. Position 17. | 23 s | 6.1 s | 4.4 s | 4.6 s |
+| Split, RIGT → ERA: 600 RIGT in, 32.63 ERA out. B's vault 300.75 → 16.54; A's vault 299.25 → 16.09. Position 18. | 19 s | 3.7 s | 4.4 s | 4.9 s |
+| §6.60, before this change: chain at position 16 | 27 s | 8.5 s | 6.8 s | 5.3 s |
+
+- Both owner walks started within 1 ms of each other.
+- The two leg writes landed 32 ms and 50 ms apart.
+- C's balances moved by exactly the quoted amounts: ERA 250.09 → 262.72, HOP 414.80 → 521.75, RIGT 653.94 → 53.94.
+- Each trade's history row names both of its vaults.
+- Quotes took 10–12 s, unchanged. A quote's owner walks happen inside Core's `vaults_of_token`, one candidate after another. Overlapping them would need threads in Core, or the SDK repeating Core's discovery rule, so this pass leaves them alone.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
