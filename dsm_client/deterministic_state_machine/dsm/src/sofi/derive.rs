@@ -20,8 +20,8 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_STORAGE_SEED_V4, TAG_DSM_SOFI_SUCC_ATTEMPT, TAG_DSM_SOFI_SUCC_CELL_V2,
     TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_ROUTE_DIGEST,
     TAG_DSM_SOFI_TRADER_PRECOMMIT_SIGN, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID,
-    TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT, TAG_DSM_SOFI_VAULT_LEAF_STATE,
-    TAG_DSM_SOFI_VAULT_STATE_KEY,
+    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR, TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
+    TAG_DSM_SOFI_VAULT_LEAF_STATE, TAG_DSM_SOFI_VAULT_STATE_KEY,
 };
 use crate::common::domain_tags::TAG_DSM_ECONOMIC_LEAF_STATE;
 use crate::storage_object::immutable_addr;
@@ -113,6 +113,13 @@ pub fn route_digest(preimage: &RouteDigestPreimage) -> Result<D32, SofiWireError
 /// `H(vault-genesis-locator/v1 ‖ v)`.
 pub fn vault_genesis_locator(vault_id: &D32) -> D32 {
     h(TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, &[vault_id])
+}
+
+/// `H(vault-token-locator/v1 ‖ t)` — where the genesis of every vault whose
+/// market pairs token `t` is indexed (SoFi Amendment S16). `t` is the
+/// token's policy commit.
+pub fn vault_token_locator(token_policy_commit: &D32) -> D32 {
+    h(TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR, &[token_policy_commit])
 }
 
 /// `H(vault-creation-key/v1 ‖ G_o ‖ DevID_o ‖ v)` — where the owner's

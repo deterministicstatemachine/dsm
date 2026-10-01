@@ -568,24 +568,29 @@ async fn committed_at<S: RouteSeats>(
 /// (§9 route chains, rule 4).
 pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvidence {
     let (route, namespace, key) = (cell.route(), cell.namespace(), cell.key());
-    let mut values = Vec::with_capacity(route.seats().len());
-    for seat in route.seats() {
-        values.push(seats.read_values(seat, namespace, key).await);
-    }
-    let mut cycles = Vec::with_capacity(values.len());
-    for (seat, held) in route.seats().iter().zip(&values) {
-        let holds_any = held.as_ref().is_some_and(|v| !v.is_empty());
-        cycles.push(if holds_any {
-            seats.close(seat).await
-        } else {
-            None
-        });
-    }
+    // Every seat is asked at once, and the answers stay in route order: a
+    // seat that does not answer costs one timeout, not one per seat.
+    let values: Vec<Option<Vec<Vec<u8>>>> = futures::future::join_all(
+        route
+            .seats()
+            .iter()
+            .map(|seat| seats.read_values(seat, namespace, key)),
+    )
+    .await;
+    let cycles: Vec<Option<u64>> =
+        futures::future::join_all(route.seats().iter().zip(&values).map(
+            |(seat, held)| async move {
+                if held.as_ref().is_some_and(|v| !v.is_empty()) {
+                    seats.close(seat).await
+                } else {
+                    None
+                }
+            },
+        ))
+        .await;
     let members = seats.members();
     if cycles.iter().any(Option::is_some) {
-        for member in &members {
-            seats.sync_mirror(member).await;
-        }
+        futures::future::join_all(members.iter().map(|member| seats.sync_mirror(member))).await;
     }
     let leader = route.leader();
     let leader_cycle = cycles.first().copied().flatten();

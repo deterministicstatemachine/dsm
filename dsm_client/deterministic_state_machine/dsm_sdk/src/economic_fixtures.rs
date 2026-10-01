@@ -62,6 +62,18 @@ pub fn use_test_storage_dir() {
 /// else can never produce an admitted position.
 pub const NETWORK: &[u8] = b"dsm-testnet";
 
+/// `whole` ERA in base units, at ERA's committed decimals (SoFi Amendment
+/// S18): a test that speaks in ERA states its amounts through this, so it
+/// keeps its meaning whatever ERA's decimals are.
+pub fn whole_era(whole: u64) -> u64 {
+    whole
+        * 10u64.pow(
+            dsm::core::token::era_policy::era_policy()
+                .expect("ERA's policy")
+                .decimals,
+        )
+}
+
 /// The device's environment config, pointed at one node set. Dropping it
 /// removes the config, so a later test that forgets to point the SDK at its
 /// own nodes fails to load a config rather than reaching this set's.

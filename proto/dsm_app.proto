@@ -76,6 +76,13 @@ enum TransactionType {
   TX_TYPE_ONLINE           = 4; // Online transfer
   TX_TYPE_DBTC_MINT        = 5; // BTC→dBTC deposit (mint)
   TX_TYPE_DBTC_BURN        = 6; // dBTC→BTC withdrawal (burn)
+  // Token and SoFi events, written when their position realizes. Each names
+  // every token it moved, with its amount, in TransactionInfo.moves.
+  TX_TYPE_TOKEN_CREATE     = 7;  // a token created; its ERA fee paid
+  TX_TYPE_VAULT_CREATE     = 8;  // a vault created; both reserves paid in
+  TX_TYPE_SOFI_SETUP       = 9;  // set up with a vault; no token moves
+  TX_TYPE_SOFI_TRADE       = 10; // a trade or route realized
+  TX_TYPE_SOFI_CLOSE       = 11; // the owner's close realized; both reserves credited
 }
 
 message EvidenceOracle {
@@ -2668,13 +2675,16 @@ message Envelope {
     TokenFeeScheduleResponse          token_fee_schedule_response      = 117;
     // SoFi routes (SoFi §27), local-only like the token responses.
     SofiVaultCreatedResponse          sofi_vault_created_response      = 120;
-    SofiSetupResponse                 sofi_setup_response              = 121;
+    // 121 was sofi_setup_response: the setup is the first step of the first
+    // operation through a vault, never a route of its own (SoFi Amendment S16).
     SofiFindRouteResponse             sofi_find_route_response         = 122;
     SofiPositionResponse              sofi_position_response           = 123;
     SofiRelayResponse                 sofi_relay_response              = 124;
     // A sealed spool payload (DSM Amendment A7). The envelope that carries it
     // has a message id and nothing else a node could read: no headers.
     SealedEnvelopeV1                  sealed                           = 125;
+    // sofi.vaults: the owner's vaults at their walked heads.
+    SofiVaultsResponse                sofi_vaults_response             = 126;
 
 
     // Reply to `token.forget`.
@@ -2690,6 +2700,8 @@ message Envelope {
   // device's strict envelope validator reads this oneof and these reservations
   // from the compiled proto; storage nodes do not open envelopes.
   reserved 114;
+  reserved 121;
+  reserved "sofi_setup_response";
   reserved 115; // was token_mint_response: there is no minting after genesis (SoFi §48)
   reserved 98; // was reconciliation_response: bilateral.reconcile had no caller
   // 88 and 89 were storage_node_stats_response and storage_node_manage_response:
@@ -2741,7 +2753,10 @@ message DeviceDirectoryEntryV1 {
 // The app reaches SoFi only through these routes (handlers/sofi_routes.rs).
 // Requests carry the user's intent; producers assemble, Core decides, and a
 // route never interprets a storage read (SoFi §26). Token commits are 32-byte
-// policy_commits; vault ids are 32 bytes; amounts are base units.
+// policy_commits; vault ids are 32 bytes. An amount the user enters travels as
+// the text entered, in token units with the token's decimals ("1000.50"), and
+// the SDK parses it against the decimals of the token's committed policy; an
+// amount the SDK reports is base units with its display form beside it.
 
 // sofi.createVault (§28). The beta market family is constant product with
 // exact input and the beta release family is the owner's full close, so the
@@ -2750,63 +2765,106 @@ message DeviceDirectoryEntryV1 {
 message SofiCreateVaultRequest {
   bytes  token_a_policy_commit = 1 [(dsm_fixed_len)=32]; // token_a < token_b, bytewise
   bytes  token_b_policy_commit = 2 [(dsm_fixed_len)=32];
-  uint64 reserve_a             = 3;                      // > 0
-  uint64 reserve_b             = 4;                      // > 0
+  // 3 and 4 were reserve_a and reserve_b in base units.
+  reserved 3, 4;
+  reserved "reserve_a", "reserve_b";
   uint32 fee_bps               = 5;                      // < 10000
+  string reserve_a_entered     = 6;                      // token units, > 0
+  string reserve_b_entered     = 7;                      // token units, > 0
 }
 message SofiVaultCreatedResponse {
   bytes  vault_id = 1 [(dsm_fixed_len)=32];
   uint64 position = 2; // the owner's economic position that carries the creation
 }
 
-// sofi.setup (§29): set up with a vault once, before trading against it.
-message SofiSetupRequest {
-  bytes vault_id = 1 [(dsm_fixed_len)=32];
-}
-message SofiSetupResponse {
-  bytes  setup_ref = 1 [(dsm_fixed_len)=32]; // ρ
-  uint64 position  = 2;
-}
-
-// sofi.findRoute (§30, §27): path search over walked vault heads. A hop list
-// carries no authority.
+// sofi.findRoute (§30, §27, Amendment S16): path search over the vaults the
+// two tokens' indexes name, each at its walked head. Not limited to the vaults
+// the trader is set up with; a quote needs no setup, and carries no authority.
 message SofiFindRouteRequest {
   bytes  token_in_policy_commit  = 1 [(dsm_fixed_len)=32];
   bytes  token_out_policy_commit = 2 [(dsm_fixed_len)=32];
-  uint64 amount_in               = 3;
+  // 3 was amount_in in base units.
+  reserved 3;
+  reserved "amount_in";
+  string amount_in_entered       = 4; // token units of token_in, > 0
 }
 message SofiHopV1 {
   bytes  vault_id                = 1 [(dsm_fixed_len)=32];
   bytes  parent_root             = 2 [(dsm_fixed_len)=32]; // the walked head the hop prices against
   bytes  token_in_policy_commit  = 3 [(dsm_fixed_len)=32];
   bytes  token_out_policy_commit = 4 [(dsm_fixed_len)=32];
-  uint64 amount_in               = 5;
-  uint64 amount_out              = 6;
+  uint64 amount_in               = 5; // base units
+  uint64 amount_out              = 6; // base units
+  string amount_in_display       = 7; // rendered by Rust from token_in's decimals
+  string amount_out_display      = 8; // rendered by Rust from token_out's decimals
+}
+// How much of the token indexes the search established (Amendment S16).
+enum SofiSearch {
+  SOFI_SEARCH_UNSPECIFIED = 0;
+  SOFI_SEARCH_COMPLETE    = 1; // every candidate vault and its head was established
+  SOFI_SEARCH_PARTIAL     = 2; // one was not: a better route may run through it
 }
 message SofiFindRouteResponse {
-  repeated SofiHopV1 hops = 1; // empty when no route exists
+  repeated SofiHopV1 hops   = 1; // empty when no route exists among the vaults searched
+  SofiSearch         search = 2;
 }
 
-// sofi.trade (§31): one hop against one vault.
+// sofi.trade (§31): one hop against one vault. A vault the trader has no
+// setup with is set up with first, in the same call (Amendment S16).
 message SofiTradeRequest {
   bytes  vault_id               = 1 [(dsm_fixed_len)=32];
   bytes  token_in_policy_commit = 2 [(dsm_fixed_len)=32];
-  uint64 amount_in              = 3;
-  uint64 min_amount_out         = 4;
+  // 3 and 4 were amount_in and min_amount_out in base units.
+  reserved 3, 4;
+  reserved "amount_in", "min_amount_out";
+  string amount_in_entered      = 5; // token units of the input token, > 0
+  string min_amount_out_entered = 6; // token units of the output token
+  bytes  token_out_policy_commit = 7 [(dsm_fixed_len)=32]; // the token the trader asks for; the route must give it
 }
 
 // sofi.route (§31): a multihop route, all or none, through distinct vaults in
-// hop order (at most ROUTE_MAX_LEGS).
+// hop order (at most ROUTE_MAX_LEGS), setting up first with any vault the
+// trader has no setup with (Amendment S16).
 message SofiRouteRequest {
   repeated bytes vault_ids      = 1 [(dsm_fixed_len)=32];
   bytes  token_in_policy_commit = 2 [(dsm_fixed_len)=32];
-  uint64 amount_in              = 3;
-  uint64 min_amount_out         = 4;
+  reserved 3, 4;
+  reserved "amount_in", "min_amount_out";
+  string amount_in_entered      = 5; // token units of the input token, > 0
+  string min_amount_out_entered = 6; // token units of the output token
+  bytes  token_out_policy_commit = 7 [(dsm_fixed_len)=32]; // the token the trader asks for; the route must give it
 }
 
-// sofi.close (§32): the owner closes its own vault under its release policy.
+// sofi.close (§32): the owner closes its own vault under its release policy,
+// setting up with it first if it has not (Amendment S16).
 message SofiCloseRequest {
   bytes vault_id = 1 [(dsm_fixed_len)=32];
+}
+
+// sofi.vaults: every vault this device created, walked to its head, so the
+// owner sees the live reserves without closing.
+message SofiVaultsRequest {}
+enum SofiVaultStatus {
+  SOFI_VAULT_STATUS_UNSPECIFIED = 0;
+  SOFI_VAULT_STATUS_ACTIVE      = 1;
+  SOFI_VAULT_STATUS_RETIRED     = 2; // closed by its owner; it has no successor
+}
+message SofiOwnedVaultV1 {
+  bytes           vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes           token_a_policy_commit = 2 [(dsm_fixed_len)=32];
+  bytes           token_b_policy_commit = 3 [(dsm_fixed_len)=32];
+  string          token_a_symbol        = 4;
+  string          token_b_symbol        = 5;
+  uint64          reserve_a             = 6; // base units
+  uint64          reserve_b             = 7; // base units
+  string          reserve_a_display     = 8;
+  string          reserve_b_display     = 9;
+  uint32          fee_bps               = 10;
+  uint64          generation            = 11; // trades and closes the vault has taken
+  SofiVaultStatus status                = 12;
+}
+message SofiVaultsResponse {
+  repeated SofiOwnedVaultV1 vaults = 1;
 }
 
 // sofi.resolve (§27): resolve and advance the device's pending position.
@@ -3449,6 +3507,15 @@ message TransactionInfo {
   // Display form of `amount_signed`, rendered by Rust from the token's
   // registry decimals. `amount`/`amount_signed` stay canonical base units.
   string display_amount = 17;
+  // A token or SoFi event: every token it moved, with its signed amount.
+  // Empty for a transfer, which moves the one token above.
+  repeated TokenMove moves = 18;
+}
+message TokenMove {
+  bytes  policy_commit  = 1 [(dsm_fixed_len)=32];
+  string token_id       = 2; // the token's ticker
+  sint64 amount_signed  = 3; // base units: positive credited, negative debited
+  string display_amount = 4; // rendered by Rust from the token's decimals
 }
 message WalletHistoryResponse { repeated TransactionInfo transactions = 1; }
 message ContactsListResponse  { repeated ContactAddResponse contacts = 1; }

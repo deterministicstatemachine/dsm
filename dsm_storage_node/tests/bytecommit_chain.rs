@@ -345,6 +345,39 @@ async fn a_node_in_no_set_refuses_a_mirror_sync() {
     assert_eq!(sync(&app(state)).await, StatusCode::CONFLICT);
 }
 
+/// A set-mate that accepts the connection and never answers fails the sync
+/// within the set client's bounds, instead of holding the sync, and the
+/// node's one-at-a-time sync lock, open. The node answers BAD_GATEWAY, and
+/// the next sync is answered too: the lock was released.
+#[tokio::test]
+async fn a_set_mate_that_never_answers_fails_the_sync_and_frees_it() {
+    let (silent, silent_url) = listener().await;
+    // Accepts every connection and answers none of them.
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = silent.accept().await {
+            held.push(socket);
+        }
+    });
+    let b = app(node_state(
+        "bc_silent_b",
+        "dsm-node-b",
+        &["dsm-node-a", "dsm-node-b"],
+        &[("dsm-node-a", &silent_url)],
+    )
+    .await);
+    let within = dsm_storage_node::set_client::SET_MATE_REQUEST_TIMEOUT * 3;
+    for attempt in 0..2 {
+        let answered = match tokio::time::timeout(within, sync(&b)).await {
+            Ok(status) => status,
+            Err(elapsed) => {
+                panic!("sync {attempt} hung on a set-mate that never answers: {elapsed}")
+            }
+        };
+        assert_eq!(answered, StatusCode::BAD_GATEWAY, "sync {attempt}");
+    }
+}
+
 /// A set-mate that does not answer at its configured endpoint fails the
 /// sync; the node does not report the sync as done.
 #[tokio::test]

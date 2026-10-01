@@ -46,10 +46,10 @@ const CREATED = {
 const balances = [
   row({
     tokenId: 'ERA',
-    baseUnits: 264n,
-    displayAmount: '264',
+    baseUnits: 26400n,
+    displayAmount: '264.00',
     protocolDefined: true,
-    genesisSupplyDisplay: '80000000000',
+    genesisSupplyDisplay: '80000000000.00',
     policyAnchorB32: 'ERAANCHOR0000',
     anchorFingerprint: 'ERAANCHO',
   }),
@@ -454,7 +454,7 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     (dsmClient.getAllBalances as jest.Mock).mockResolvedValue(balances);
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByText('ERA'));
-    expect((await screen.findByText('Total Supply')).nextElementSibling).toHaveTextContent('80000000000 ERA');
+    expect((await screen.findByText('Total Supply')).nextElementSibling).toHaveTextContent('80000000000.00 ERA');
     expect(screen.getByText('Defined By').nextElementSibling).toHaveTextContent('the protocol');
     expect(screen.queryByText('Burn')).toBeNull();
     expect(screen.queryByText('Transfer')).toBeNull();

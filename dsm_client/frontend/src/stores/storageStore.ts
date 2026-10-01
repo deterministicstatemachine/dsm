@@ -5,6 +5,13 @@ import { useSyncExternalStore } from 'react';
 import { getStorageStatus } from '../dsm/storage';
 import type { StorageStatus } from '../dsm/types';
 import { listVaults, type VaultSummary } from '../services/bitcoinTap';
+import { vaults as listSofiVaults, type OwnedVault } from '../dsm/sofi';
+
+/** The owner's liquidity vaults at their walked heads (sofi.vaults). */
+export type SofiVaultsView =
+  | { state: 'loading' }
+  | { state: 'ready'; vaults: OwnedVault[] }
+  | { state: 'error'; message: string };
 
 type StorageStoreSnapshot = {
   status: StorageStatus | null;
@@ -12,6 +19,7 @@ type StorageStoreSnapshot = {
   statusError: string | null;
   dlvs: VaultSummary[];
   dlvLoading: boolean;
+  sofiVaults: SofiVaultsView;
 };
 
 class StorageStore {
@@ -21,6 +29,7 @@ class StorageStore {
     statusError: null,
     dlvs: [],
     dlvLoading: true,
+    sofiVaults: { state: 'loading' },
   };
 
   private listeners = new Set<() => void>();
@@ -60,6 +69,21 @@ class StorageStore {
       console.warn('[StorageStore] refreshDlvsAndPresence error:', error?.message || error);
       this.setState({ dlvLoading: false });
     }
+  };
+
+  /**
+   * Ask the SDK for this device's liquidity vaults, each at its head. Either
+   * outcome lands in the snapshot: the vaults, or why they are not in hand.
+   */
+  refreshSofiVaults = (): void => {
+    this.setState({ sofiVaults: { state: 'loading' } });
+    listSofiVaults().then(
+      (vaults) => this.setState({ sofiVaults: { state: 'ready', vaults } }),
+      (e: unknown) =>
+        this.setState({
+          sofiVaults: { state: 'error', message: e instanceof Error ? e.message : String(e) },
+        }),
+    );
   };
 
   private setState(patch: Partial<StorageStoreSnapshot>): void {

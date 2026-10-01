@@ -2,7 +2,7 @@
 // Reusable transaction row component for overview and history tabs. Renders
 // the row exactly as Rust reported it.
 import React from 'react';
-import { txTypeLabel, txTypeDetail, formatTxAmount } from './helpers';
+import { txTypeLabel, txTypeDetail, formatTxAmount, eventSubjectLabel } from './helpers';
 import ArrowIcon from '../../icons/ArrowIcon';
 import { TokenMark } from '../../TokenMark';
 import StitchedReceiptDetails from '../../receipts/StitchedReceiptDetails';
@@ -40,16 +40,32 @@ function TransactionItemInner({ tx, expandedTxId, onToggle }: Props): React.JSX.
           <ArrowIcon direction={isExpanded ? 'up' : 'down'} size={14} color={isExpanded ? 'var(--stateboy-dark)' : 'var(--stateboy-gray)'} />
         </div>
       </div>
-      <div className={`transaction-amount-line ${isOutgoing ? 'outgoing' : 'incoming'}`}>
-        <TokenMark ticker={tx.tokenId} className="sb-coin sb-coin--sm" />
-        <span className="transaction-amount-value">
-          {isOutgoing ? '-' : '+'}{formatTxAmount(tx)}
-        </span>
-        <span className="transaction-amount-token">{tx.tokenId}</span>
-      </div>
+      {tx.moves ? (
+        // A token or SoFi event: every token it moved, each with its sign.
+        tx.moves.map((m) => {
+          const out = m.displayAmount.startsWith('-');
+          return (
+            <div key={m.policyCommit} className={`transaction-amount-line ${out ? 'outgoing' : 'incoming'}`}>
+              <TokenMark ticker={m.tokenId} className="sb-coin sb-coin--sm" />
+              <span className="transaction-amount-value">{out ? m.displayAmount : `+${m.displayAmount}`}</span>
+              <span className="transaction-amount-token">{m.tokenId}</span>
+            </div>
+          );
+        })
+      ) : (
+        <div className={`transaction-amount-line ${isOutgoing ? 'outgoing' : 'incoming'}`}>
+          <TokenMark ticker={tx.tokenId} className="sb-coin sb-coin--sm" />
+          <span className="transaction-amount-value">
+            {isOutgoing ? '-' : '+'}{formatTxAmount(tx)}
+          </span>
+          <span className="transaction-amount-token">{tx.tokenId}</span>
+        </div>
+      )}
       <div className="transaction-details">
         <div className="transaction-recipient">
-          <span className="transaction-recipient-label">{isOutgoing ? 'To' : 'From'}</span>
+          <span className="transaction-recipient-label">
+            {tx.moves ? eventSubjectLabel(tx.txType) : isOutgoing ? 'To' : 'From'}
+          </span>
           <span className="transaction-recipient-value">{tx.recipient}</span>
         </div>
       </div>

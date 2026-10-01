@@ -527,17 +527,17 @@ pub fn draft_route(
     ctx: &TraderContext<'_>,
     local: &LocalLeaves,
 ) -> Result<UncheckedDraft, BuildError> {
-    let (first, last) = match (hops.first(), hops.last()) {
-        (Some(f), Some(l)) => (*f, *l),
-        (None, ..) | (.., None) => {
-            return Err(BuildError::Wire(SofiWireError::Cardinality {
-                field: "swap hops",
-                min: 1,
-                max: usize::MAX,
-                got: 0,
-            }))
-        }
-    };
+    if hops.is_empty() {
+        return Err(BuildError::Wire(SofiWireError::Cardinality {
+            field: "swap hops",
+            min: 1,
+            max: usize::MAX,
+            got: 0,
+        }));
+    }
+    // A chain's ends, or a split's pair and sums (Amendment S19).
+    let (token_in, amount_in, token_out, exact_out) =
+        dsm::sofi::validation::swap_endpoints(&hops).map_err(BuildError::StaticallyInvalid)?;
     let mut sorted_cores = cores;
     sorted_cores.sort_by_key(|c| *c.vault_id());
     let core_digests: Vec<D32> = sorted_cores
@@ -557,10 +557,10 @@ pub fn draft_route(
         .pre_balances(&ctx.trader_core)
         .map_err(|why| BuildError::LocalLeaves(why.to_string()))?;
     let settlement = SettlementBody::Swap {
-        token_in: first.token_in,
-        amount_in: first.amount_in,
-        token_out: last.token_out,
-        exact_out: last.amount_out,
+        token_in,
+        amount_in,
+        token_out,
+        exact_out,
         hops,
         trader_core: derive::trader_core_digest(&ctx.trader_core.encode()?),
         dlv_cores: core_digests,

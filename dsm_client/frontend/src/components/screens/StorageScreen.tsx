@@ -10,7 +10,9 @@ import { useDpadNav } from "../../hooks/useDpadNav";
 import {
   storageStore,
   useStorageStore,
+  type SofiVaultsView,
 } from "../../stores/storageStore";
+import { encodeBase32Crockford } from "../../utils/textId";
 import { formatBtc, type VaultSummary } from "../../services/bitcoinTap";
 import { Notice, ScreenFrame, ScreenTabs } from "../common/ScreenFrame";
 import { InfoTip } from "../common/InfoTip";
@@ -31,6 +33,7 @@ const StorageScreen: React.FC = () => {
   useEffect(() => {
     void storageStore.refreshStatus();
     void storageStore.refreshDlvsAndPresence();
+    storageStore.refreshSofiVaults();
   }, []);
 
   // --- D-pad navigation: the tabs ---
@@ -44,9 +47,12 @@ const StorageScreen: React.FC = () => {
   const refresh = useCallback(() => {
     void storageStore.refreshStatus();
     if (activeTab === "dlvs") void storageStore.refreshDlvsAndPresence();
+    if (activeTab === "dlvs") storageStore.refreshSofiVaults();
   }, [activeTab]);
 
-  const busy = activeTab === "dlvs" ? storage.dlvLoading : storage.statusLoading;
+  const busy = activeTab === "dlvs"
+    ? storage.dlvLoading || storage.sofiVaults.state === "loading"
+    : storage.statusLoading;
 
   return (
     <ScreenFrame
@@ -92,12 +98,18 @@ const StorageScreen: React.FC = () => {
       )}
 
       {activeTab === "dlvs" && (
-        <DlvTab
-          dlvLoading={storage.dlvLoading}
-          dlvs={storage.dlvs}
-          expandedDlv={expandedDlv}
-          setExpandedDlv={setExpandedDlv}
-        />
+        <>
+          <SofiVaultsSection
+            view={storage.sofiVaults}
+            onRetry={storageStore.refreshSofiVaults}
+          />
+          <DlvTab
+            dlvLoading={storage.dlvLoading}
+            dlvs={storage.dlvs}
+            expandedDlv={expandedDlv}
+            setExpandedDlv={setExpandedDlv}
+          />
+        </>
       )}
     </ScreenFrame>
   );
@@ -136,8 +148,67 @@ const StatusTab: React.FC<{
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// DLV Tab — real vault data from bitcoin.vault.list
+// dBTC vaults — real vault data from bitcoin.vault.list
 // ═══════════════════════════════════════════════════════════════════════
+
+function shortVault(id: string): string {
+  return id.length <= 12 ? id : `${id.slice(0, 12)}…`;
+}
+
+/**
+ * The owner's liquidity vaults (sofi.vaults), each walked to its head: the
+ * live reserves without closing.
+ */
+const SofiVaultsSection: React.FC<{
+  view: SofiVaultsView;
+  onRetry: () => void;
+}> = ({ view, onRetry }) => {
+  if (view.state === "loading") {
+    return <div className="sb-empty">Walking your liquidity vaults…</div>;
+  }
+  if (view.state === "error") {
+    return (
+      <>
+        <Notice kind="error">{view.message}</Notice>
+        <div className="sb-actions">
+          <button type="button" className="sb-btn sb-btn--primary" onClick={onRetry}>
+            Try Again
+          </button>
+        </div>
+      </>
+    );
+  }
+  if (view.vaults.length === 0) {
+    return <div className="sb-empty">You have created no liquidity vaults.</div>;
+  }
+  return (
+    <section className="sb-card" aria-label="Liquidity vaults">
+      <div className="sb-card__title">
+        <span>Liquidity vaults</span>
+        <span>{view.vaults.length}</span>
+      </div>
+      {view.vaults.map((v) => {
+        const id = encodeBase32Crockford(v.vaultId);
+        const open = v.status === "active";
+        return (
+          <div className="sb-row" key={id} style={open ? undefined : { opacity: 0.6 }}>
+            <div className="sb-row__main">
+              <div className="sb-row__title">{v.symbolA} / {v.symbolB}</div>
+              <div className="sb-row__sub sb-mono">
+                {shortVault(id)} · {v.feeBps} bps · generation {v.generation.toString()}
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div><span className={`sb-tag${open ? " sb-tag--solid" : " sb-tag--dim"}`}>{open ? "Active" : "Closed"}</span></div>
+              <div className="sb-row__amount">{v.reserveADisplay} {v.symbolA}</div>
+              <div className="sb-row__amount">{v.reserveBDisplay} {v.symbolB}</div>
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+};
 
 const STATE_LABELS: Record<string, string> = {
   limbo: "Limbo",
@@ -171,10 +242,10 @@ const DlvTab: React.FC<{
   expandedDlv: string | null;
   setExpandedDlv: (v: string | null) => void;
 }> = ({ dlvLoading, dlvs, expandedDlv, setExpandedDlv }) => {
-  if (dlvLoading) return <div className="sb-empty">Scanning DLVs…</div>;
+  if (dlvLoading) return <div className="sb-empty">Scanning dBTC vaults…</div>;
 
   if (dlvs.length === 0) {
-    return <div className="sb-empty">No DLVs found for this device.</div>;
+    return <div className="sb-empty">No dBTC vaults on this device.</div>;
   }
 
   const live = dlvs.filter((d) => d.state === "active" || d.state === "limbo");

@@ -1285,8 +1285,6 @@ impl AppRouterImpl {
                 };
 
                 let fee_amount = dsm::core::token::TOKEN_CREATION_FEE_ERA;
-                let dev_id = creator_device_id;
-                let device_txt = crate::util::text_id::encode_base32_crockford(&dev_id);
 
                 // Reject insufficient ERA BEFORE anything is committed. The
                 // advance's checked_sub is the backstop; this is the clear
@@ -1372,7 +1370,7 @@ impl AppRouterImpl {
                 // genesis release (`0x005F`), beside the ERA fee debit, as one
                 // write set (SoFi §51). The registry row rides the SAME
                 // transaction via the composed in-tx writer.
-                let outcome =
+                let (outcome, admitted) =
                     match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
                         &self.core_sdk,
                         create_op,
@@ -1384,57 +1382,29 @@ impl AppRouterImpl {
                     )
                     .await
                     {
-                        Ok((o, ..)) => o,
+                        Ok(done) => done,
                         Err(e) => return err(format!("token.create: {e}")),
                     };
 
-                // Projections for BOTH assets the advance moved.
-                {
-                    if let Err(e) =
-                        crate::storage::client_db::build_balance_projection_from_device_head(
-                            &device_txt,
-                            &ticker,
-                            &policy_commit,
-                            &outcome.new_device_state,
-                            genesis_u64,
-                            0,
-                        )
-                        .and_then(|record| {
-                            crate::storage::client_db::upsert_balance_projection(&record)
-                        })
-                    {
-                        log::warn!(
-                            "[token.create] projection write failed for {ticker} (canonical state \
-                             is correct; a repair sweep will reconcile): {e}"
-                        );
-                    }
-                }
-                if fee_amount > 0 {
-                    if let Some(era_commit) =
-                        dsm::core::token::builtin_policy_commit_for_token("ERA")
-                    {
-                        let era_after = outcome.new_device_state.balance(&era_commit);
-                        if let Err(e) = crate::storage::client_db::get_locked_balance(
-                            &device_txt,
-                            "ERA",
-                        )
-                        .and_then(|locked| {
-                            crate::storage::client_db::build_balance_projection_from_device_head(
-                                &device_txt,
-                                "ERA",
-                                &era_commit,
-                                &outcome.new_device_state,
-                                era_after,
-                                locked,
-                            )
-                        })
-                        .and_then(|record| {
-                            crate::storage::client_db::upsert_balance_projection(&record)
-                        }) {
-                            log::warn!("[token.create] ERA projection write failed: {e}");
-                        }
-                    }
-                }
+                // The creation is the event the wallet shows: its history row
+                // naming the ERA fee paid and the supply credited, and the
+                // projection of both tokens rebuilt from the new head.
+                let moved: Vec<crate::sdk::realized_records::Moved> = deltas
+                    .iter()
+                    .map(|d| crate::sdk::realized_records::Moved {
+                        policy_commit: d.policy_commit,
+                        direction: d.direction,
+                        amount: d.amount,
+                    })
+                    .collect();
+                crate::sdk::realized_records::record_realized(
+                    &outcome.new_device_state,
+                    crate::sdk::realized_records::Realized::TokenCreate,
+                    &policy_commit,
+                    admitted.economic_position,
+                    Some(&policy_commit),
+                    &moved,
+                );
 
                 let resp = generated::TokenCreateResponse {
                     success: true,

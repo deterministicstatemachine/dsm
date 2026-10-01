@@ -39,6 +39,132 @@ pub fn token_decimals(token_id: &str) -> Result<u32, String> {
     }
 }
 
+/// The wire type of a token or SoFi event row, by its stored type.
+fn event_type(stored: &str) -> Option<generated::TransactionType> {
+    use crate::sdk::realized_records::Realized;
+    [
+        Realized::TokenCreate,
+        Realized::VaultCreate,
+        Realized::Setup,
+        Realized::Trade,
+        Realized::Close,
+    ]
+    .into_iter()
+    .find(|kind| kind.tx_type() == stored)
+    .map(|kind| match kind {
+        Realized::TokenCreate => generated::TransactionType::TxTypeTokenCreate,
+        Realized::VaultCreate => generated::TransactionType::TxTypeVaultCreate,
+        Realized::Setup => generated::TransactionType::TxTypeSofiSetup,
+        Realized::Trade => generated::TransactionType::TxTypeSofiTrade,
+        Realized::Close => generated::TransactionType::TxTypeSofiClose,
+    })
+}
+
+/// The stored type of a token or SoFi event's wire type; `None` for every
+/// other type.
+fn event_type_name(kind: generated::TransactionType) -> Option<&'static str> {
+    use crate::sdk::realized_records::Realized;
+    match kind {
+        generated::TransactionType::TxTypeTokenCreate => Some(Realized::TokenCreate.tx_type()),
+        generated::TransactionType::TxTypeVaultCreate => Some(Realized::VaultCreate.tx_type()),
+        generated::TransactionType::TxTypeSofiSetup => Some(Realized::Setup.tx_type()),
+        generated::TransactionType::TxTypeSofiTrade => Some(Realized::Trade.tx_type()),
+        generated::TransactionType::TxTypeSofiClose => Some(Realized::Close.tx_type()),
+        generated::TransactionType::TxTypeUnspecified
+        | generated::TransactionType::TxTypeFaucet
+        | generated::TransactionType::TxTypeBilateralOffline
+        | generated::TransactionType::TxTypeOnline
+        | generated::TransactionType::TxTypeDbtcMint
+        | generated::TransactionType::TxTypeDbtcBurn => None,
+    }
+}
+
+/// A token or SoFi event's history row (phone-rig rulings, 2026-10-01): every
+/// token it moved, signed, and the vault or token it is about. A row whose
+/// movements, ids or subject do not decode is corrupt, and an error.
+fn event_transaction(
+    t: &crate::storage::client_db::TransactionRecord,
+    kind: generated::TransactionType,
+) -> Result<generated::TransactionInfo, String> {
+    use crate::sdk::realized_records::{decode_moves, MOVES_KEY, SUBJECT_KEY};
+    use dsm::types::device_state::BalanceDirection;
+    let corrupt = |what: String| format!("wallet.history: event {}: {what}", t.tx_id);
+    let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
+        crate::util::text_id::decode_base32_crockford(text)
+            .filter(|b| b.len() == 32)
+            .ok_or_else(|| corrupt(format!("its {what} is not 32 bytes")))
+    };
+    let stored = t
+        .metadata
+        .get(MOVES_KEY)
+        .ok_or_else(|| corrupt("names no token movements".to_string()))?;
+    let mut moves = Vec::new();
+    for m in decode_moves(stored).map_err(corrupt)? {
+        let (token_id, ..) = token_of_commit(&m.policy_commit).map_err(corrupt)?;
+        let magnitude = i64::try_from(m.amount)
+            .map_err(|e| corrupt(format!("a movement exceeds a signed amount: {e}")))?;
+        moves.push(generated::TokenMove {
+            policy_commit: m.policy_commit.to_vec(),
+            token_id,
+            amount_signed: match m.direction {
+                BalanceDirection::Credit => magnitude,
+                BalanceDirection::Debit => -magnitude,
+            },
+            // Filled at the encoding boundary by enrich_transaction_display.
+            display_amount: String::new(),
+        });
+    }
+    let subject = match t.metadata.get(SUBJECT_KEY) {
+        Some(bytes) => String::from_utf8(bytes.clone())
+            .map_err(|e| corrupt(format!("its subject is not text: {e}")))?,
+        None => String::new(),
+    };
+    Ok(generated::TransactionInfo {
+        id: format!("tx_{}", t.tx_hash),
+        from_device_id: bytes32("device id", &t.from_device)?,
+        to_device_id: bytes32("device id", &t.to_device)?,
+        token_id: String::new(),
+        amount: t.amount,
+        tx_hash: bytes32("event id", &t.tx_hash)?,
+        amount_signed: 0,
+        tx_type: kind as i32,
+        status: t.status.clone(),
+        recipient: subject,
+        stitched_receipt: Vec::new(),
+        memo: String::new(),
+        // An event carries no stitched receipt to verify.
+        receipt_verified: t.proof_data.as_ref().is_some_and(|b| {
+            receipt_state_holds(
+                b,
+                t.metadata
+                    .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
+            )
+        }),
+        display_amount: String::new(),
+        moves,
+    })
+}
+
+/// A token named by its policy commit: its ticker and the decimals of its
+/// committed policy. ERA and dBTC are built in; any other token is the one
+/// this device's registry holds under that commit.
+pub(crate) fn token_of_commit(policy_commit: &[u8; 32]) -> Result<(String, u32), String> {
+    if let Some(builtin) =
+        dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(policy_commit)
+    {
+        return Ok((builtin.to_string(), token_decimals(builtin)?));
+    }
+    let row = crate::storage::client_db::token_registry::get_token_by_policy_commit(policy_commit)
+        .map_err(|e| format!("token registry unreadable: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "no registry entry for token {}; its decimals are unknown",
+                crate::util::text_id::encode_base32_crockford(policy_commit)
+            )
+        })?;
+    Ok((row.ticker, row.decimals))
+}
+
 /// A signed amount rendered for display, sign included.
 ///
 /// Transaction history shows outgoing amounts negative. The magnitude is
@@ -61,6 +187,19 @@ pub fn format_signed_base_units_for_display(amount: i64, decimals: u32) -> Strin
 /// `amount_signed == 0`, so fall back to the unsigned magnitude rather than
 /// rendering every historical row as zero.
 pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) -> Result<(), String> {
+    // An event shows each token it moved, from that token's committed
+    // decimals; it has no single amount of its own.
+    if let Ok(kind) = generated::TransactionType::try_from(tx.tx_type) {
+        if event_type_name(kind).is_some() {
+            for m in tx.moves.iter_mut() {
+                let commit = <[u8; 32]>::try_from(m.policy_commit.as_slice())
+                    .map_err(|e| format!("a token movement's policy commit: {e}"))?;
+                let (.., decimals) = token_of_commit(&commit)?;
+                m.display_amount = format_signed_base_units_for_display(m.amount_signed, decimals);
+            }
+            return Ok(());
+        }
+    }
     let decimals = token_decimals(&tx.token_id)?;
     tx.display_amount = if tx.amount_signed != 0 {
         format_signed_base_units_for_display(tx.amount_signed, decimals)
@@ -579,6 +718,10 @@ impl AppRouterImpl {
                 let txs: Result<Vec<generated::TransactionInfo>, String> = sqlite_txs
                     .into_iter()
                     .map(|t| {
+                        // A token or SoFi event names every token it moved.
+                        if let Some(event) = event_type(&t.tx_type) {
+                            return event_transaction(&t, event);
+                        }
                         // PROTO SAFETY:
                         // TransactionInfo.id is a `string` in dsm_app.proto and must be valid UTF-8.
                         // Some older records may contain non-UTF8 bytes (or otherwise invalid)
@@ -731,6 +874,8 @@ impl AppRouterImpl {
                                         .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
                                 )
                             }),
+                            // A transfer moves the one token above.
+                            moves: Vec::new(),
                         })
                     })
                     .collect();
@@ -1461,7 +1606,7 @@ mod tests {
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
-        assert_eq!(token_decimals("ERA"), Ok(0));
+        assert_eq!(token_decimals("ERA"), Ok(2));
         assert_eq!(token_decimals("dbtc"), Ok(8));
         let unknown = token_decimals("NOPE").expect_err("no registry entry");
         assert!(unknown.contains("no registry entry"), "{unknown}");
@@ -1569,8 +1714,8 @@ mod tests {
         let mut era = seed("ERA", 264, 0);
         super::enrich_balance_metadata(&mut era, &|_| None).expect("ERA is named");
         assert!(era.protocol_defined);
-        assert_eq!((era.symbol.as_str(), era.decimals), ("ERA", 0));
-        assert_eq!(era.genesis_supply_display, "80000000000");
+        assert_eq!((era.symbol.as_str(), era.decimals), ("ERA", 2));
+        assert_eq!(era.genesis_supply_display, "80000000000.00");
         assert_eq!(
             era.permissions,
             Some(generated::TokenPolicyPermissions {
@@ -1580,7 +1725,7 @@ mod tests {
         );
         assert_eq!(
             era.policy_anchor_b32,
-            "JXPMPGJH45HDTE0ARWE2CTB9E9BWTQZ3T78CE5RFF1RXMR9VKK80"
+            "NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0"
         );
         let mut dbtc = seed("dBTC", 0, 0);
         super::enrich_balance_metadata(&mut dbtc, &|_| None).expect("dBTC is named");
@@ -1738,7 +1883,7 @@ mod history_tests {
         assert_eq!(claim.to_device_id, device.router.device_id_bytes.to_vec());
         assert_eq!(claim.recipient, "ERA reserve (faucet)");
         assert_eq!(claim.amount_signed, 100, "incoming");
-        assert_eq!(claim.display_amount, "100");
+        assert_eq!(claim.display_amount, "1.00");
         assert_eq!(claim.token_id, "ERA");
 
         let peer = crate::util::text_id::encode_base32_crockford(&[0x74u8; 32]);

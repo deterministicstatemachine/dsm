@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The SoFi screen sends intent only: the anchors the balances carry, decoded
-// to the 32 bytes SoFi names a token by, and the amounts as typed.
+// to the 32 bytes SoFi names a token by, and the amounts as typed, in token
+// units, for Rust to parse. It shows the amounts Rust renders.
 
 import React from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -12,7 +13,6 @@ const findRoute = jest.fn();
 const trade = jest.fn();
 const route = jest.fn();
 const createVault = jest.fn();
-const setup = jest.fn();
 const close = jest.fn();
 const resolve = jest.fn();
 const relay = jest.fn();
@@ -21,7 +21,6 @@ jest.mock('../../../dsm/sofi', () => ({
   trade: (...a: unknown[]) => trade(...a),
   route: (...a: unknown[]) => route(...a),
   createVault: (...a: unknown[]) => createVault(...a),
-  setup: (...a: unknown[]) => setup(...a),
   close: (...a: unknown[]) => close(...a),
   resolve: (...a: unknown[]) => resolve(...a),
   relay: (...a: unknown[]) => relay(...a),
@@ -103,7 +102,7 @@ describe('SofiScreen', () => {
 
   it('quotes with the decoded anchors and trades one hop through sofi.trade', async () => {
     findRoute.mockResolvedValueOnce([
-      { vaultId: VAULT_1, parentRoot: new Uint8Array(32), tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: 25n, amountOut: 40n },
+      { vaultId: VAULT_1, parentRoot: new Uint8Array(32), tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: 25n, amountOut: 40n, amountInDisplay: '25', amountOutDisplay: '40' },
     ]);
     trade.mockResolvedValueOnce({ position: 7n, state: 'realized' });
     render(<SofiScreen />);
@@ -114,7 +113,7 @@ describe('SofiScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Quote' }));
 
     await waitFor(() => expect(findRoute).toHaveBeenCalledTimes(1));
-    expect(findRoute).toHaveBeenCalledWith({ tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: 25n });
+    expect(findRoute).toHaveBeenCalledWith({ tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: '25' });
     const quote = await screen.findByRole('region', { name: 'Quote' });
     expect(within(quote).getByText('40')).toBeInTheDocument();
     expect(screen.getByLabelText('Minimum out')).toHaveValue('40');
@@ -122,7 +121,7 @@ describe('SofiScreen', () => {
     fireEvent.change(screen.getByLabelText('Minimum out'), { target: { value: '39' } });
     fireEvent.click(screen.getByRole('button', { name: 'Trade' }));
     await waitFor(() => expect(trade).toHaveBeenCalledTimes(1));
-    expect(trade).toHaveBeenCalledWith({ vaultId: VAULT_1, tokenIn: ERA_BYTES, amountIn: 25n, minAmountOut: 39n });
+    expect(trade).toHaveBeenCalledWith({ vaultId: VAULT_1, tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: '25', minAmountOut: '39' });
     expect(route).not.toHaveBeenCalled();
     expect(await screen.findByText('Realized at position 7')).toBeInTheDocument();
     expect(play).toHaveBeenCalledWith(expect.objectContaining({ anim: 'confirm', title: 'Trade realized' }));
@@ -131,8 +130,8 @@ describe('SofiScreen', () => {
 
   it('trades two hops through sofi.route, and says so when the trade is void', async () => {
     findRoute.mockResolvedValueOnce([
-      { vaultId: VAULT_1, parentRoot: new Uint8Array(32), tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: 25n, amountOut: 40n },
-      { vaultId: VAULT_2, parentRoot: new Uint8Array(32), tokenIn: PLAY_BYTES, tokenOut: ERA_BYTES, amountIn: 40n, amountOut: 24n },
+      { vaultId: VAULT_1, parentRoot: new Uint8Array(32), tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: 25n, amountOut: 40n, amountInDisplay: '25', amountOutDisplay: '40' },
+      { vaultId: VAULT_2, parentRoot: new Uint8Array(32), tokenIn: PLAY_BYTES, tokenOut: ERA_BYTES, amountIn: 40n, amountOut: 24n, amountInDisplay: '40', amountOutDisplay: '24' },
     ]);
     route.mockResolvedValueOnce({ position: 8n, state: 'void' });
     render(<SofiScreen />);
@@ -145,20 +144,20 @@ describe('SofiScreen', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Trade' }));
     await waitFor(() => expect(route).toHaveBeenCalledTimes(1));
-    expect(route).toHaveBeenCalledWith({ vaultIds: [VAULT_1, VAULT_2], tokenIn: ERA_BYTES, amountIn: 25n, minAmountOut: 24n });
+    expect(route).toHaveBeenCalledWith({ vaultIds: [VAULT_1, VAULT_2], tokenIn: ERA_BYTES, tokenOut: ERA_BYTES, amountIn: '25', minAmountOut: '24' });
     expect(trade).not.toHaveBeenCalled();
     expect(await screen.findByText(/Void: another trade won the race/)).toBeInTheDocument();
     expect(play).toHaveBeenCalledWith(expect.objectContaining({ anim: 'trace', tone: 'neutral' }));
   });
 
-  it('refuses an amount that is not a whole number, without calling out', async () => {
+  it('sends an amount in token units as entered, for Rust to parse', async () => {
     render(<SofiScreen />);
-    fireEvent.change(screen.getByLabelText('You pay'), { target: { value: '2.5' } });
+    fireEvent.change(screen.getByLabelText('You pay'), { target: { value: ' 2.5 ' } });
     await pickToken('Token in', 'ERA');
     await pickToken('Token out', 'PLAY');
     fireEvent.click(screen.getByRole('button', { name: 'Quote' }));
-    expect(await screen.findByText(/amount in must be a whole number of base units/)).toBeInTheDocument();
-    expect(findRoute).not.toHaveBeenCalled();
+    await waitFor(() => expect(findRoute).toHaveBeenCalledTimes(1));
+    expect(findRoute).toHaveBeenCalledWith({ tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: '2.5' });
   });
 
   it('creates liquidity with the pair ordered bytewise and the reserves following their tokens', async () => {
@@ -175,24 +174,22 @@ describe('SofiScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create Liquidity Vault' }));
 
     await waitFor(() => expect(createVault).toHaveBeenCalledTimes(1));
-    expect(createVault).toHaveBeenCalledWith({ tokenA: ERA_BYTES, tokenB: PLAY_BYTES, reserveA: 100n, reserveB: 500n, feeBps: 25 });
+    expect(createVault).toHaveBeenCalledWith({ tokenA: ERA_BYTES, tokenB: PLAY_BYTES, reserveA: '100', reserveB: '500', feeBps: 25 });
     const created = await screen.findByRole('status', { name: 'Liquidity vault created' });
     expect(within(created).getByText(encodeBase32Crockford(VAULT_1))).toBeInTheDocument();
     expect(screen.getByLabelText('Vault id')).toHaveValue(encodeBase32Crockford(VAULT_1));
     expect(play).toHaveBeenCalledWith(expect.objectContaining({ anim: 'vault', title: 'Liquidity vault created' }));
   });
 
-  it('sets up with, and closes, liquidity by its id; resolve is on the header', async () => {
-    setup.mockResolvedValueOnce({ setupRef: new Uint8Array(32), position: 4n });
+  it('closes liquidity by its id, with no setup of its own to press; resolve is on the header', async () => {
     close.mockResolvedValueOnce({ position: 5n, state: 'realized' });
     resolve.mockResolvedValueOnce({ position: 6n, state: 'retriesExhausted' });
     render(<SofiScreen />);
     fireEvent.click(screen.getByRole('button', { name: 'Liquidity' }));
 
     fireEvent.change(screen.getByLabelText('Vault id'), { target: { value: encodeBase32Crockford(VAULT_2) } });
-    fireEvent.click(screen.getByRole('button', { name: 'Set up' }));
-    await waitFor(() => expect(setup).toHaveBeenCalledWith(VAULT_2));
-    expect(await screen.findByText('Set up with the vault (position 4)')).toBeInTheDocument();
+    // The first trade, or the owner's first close, sets up on its own (SoFi Amendment S16).
+    expect(screen.queryByRole('button', { name: 'Set up' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(close).toHaveBeenCalledWith(VAULT_2));

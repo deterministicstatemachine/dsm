@@ -748,7 +748,7 @@ async fn bearer_pair() -> (
             "wallet.loadOffline",
             &crate::generated::OfflineCashRequest {
                 token_id: "ERA".to_string(),
-                amount: "20".to_string(),
+                amount: "20.00".to_string(),
             },
         )
         .await;
@@ -789,7 +789,7 @@ async fn a_bearer_step_proves_its_whole_write_set_and_commits_on_both() {
     assert!(kinds.contains(&ReceiptLeaf::AnchorState), "{kinds:?}");
     assert!(
         kinds.contains(&ReceiptLeaf::OfflineAllocation {
-            pre_amount: 20,
+            pre_amount: crate::economic_fixtures::whole_era(20),
             pre_sequence: 1,
         }),
         "the allocation's pre-state is the load: {kinds:?}"
@@ -1868,7 +1868,11 @@ async fn an_online_send_waits_for_the_offline_step_in_flight() {
         !refused.success,
         "A sent online with its offline step in flight"
     );
-    assert_eq!(pair.a.era_balance(), 1_000, "a refused send debited");
+    assert_eq!(
+        pair.a.era_balance(),
+        crate::economic_fixtures::whole_era(1_000),
+        "a refused send debited"
+    );
 
     b.device.enter();
     b.handler
@@ -1880,7 +1884,11 @@ async fn an_online_send_waits_for_the_offline_step_in_flight() {
         !refused.success,
         "B sent online while it held A's offline proposal"
     );
-    assert_eq!(pair.b.era_balance(), 1_000, "a refused send debited");
+    assert_eq!(
+        pair.b.era_balance(),
+        crate::economic_fixtures::whole_era(1_000),
+        "a refused send debited"
+    );
 
     a.device.enter();
     let cancellation = a

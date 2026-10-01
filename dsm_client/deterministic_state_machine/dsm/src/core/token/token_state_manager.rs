@@ -19,8 +19,9 @@ use crate::types::error::DsmError;
 /// conservation guard must be able to validate it. The guard is a pure function
 /// over `(operation, deltas)`; a fee it cannot see is a fee it cannot enforce,
 /// and a fee that a runtime map could change is not a protocol rule. The SDK's
-/// schedule now READS this value, so there is exactly one authority.
-pub const TOKEN_CREATION_FEE_ERA: u64 = 10;
+/// schedule now READS this value, so there is exactly one authority. In base
+/// units: 10.00 ERA at ERA's two decimals (SoFi Amendment S18).
+pub const TOKEN_CREATION_FEE_ERA: u64 = 1_000;
 
 /// Display-only ticker resolution for non-builtin (CPTA-anchored) tokens.
 ///

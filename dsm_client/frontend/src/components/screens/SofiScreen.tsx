@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // path: src/components/screens/SofiScreen.tsx
 // SoFi (SoFi §27) on the StateBoy frame: swap one token for another through
-// sovereign liquidity, create and close liquidity of your own, set up with
-// it, resolve a pending position. A token is named by its policy commit, the CPTA anchor the
+// sovereign liquidity, create and close liquidity of your own, resolve a
+// pending position. A token is named by its policy commit, the CPTA anchor the
 // wallet's balances carry (the SDK renders policy_anchor_b32 from those same
-// 32 bytes); the app sends intent only and Core decides.
+// 32 bytes); the app sends intent only and Core decides. Amounts are entered
+// in token units and Rust parses and renders them; the first trade through a
+// vault sets up with it on its own (SoFi Amendment S16).
 
 import React, { useCallback, useMemo, useState } from 'react';
 import * as sofi from '../../dsm/sofi';
@@ -39,10 +41,18 @@ function bytesLess(a: Uint8Array, b: Uint8Array): boolean {
   return a.length < b.length;
 }
 
-function amount(label: string, text: string): bigint {
+/** A count the user enters: a fee in basis points, a position. */
+function whole(label: string, text: string): bigint {
   const t = text.trim();
-  if (!/^\d+$/.test(t)) throw new Error(`${label} must be a whole number of base units`);
+  if (!/^\d+$/.test(t)) throw new Error(`${label} must be a whole number`);
   return BigInt(t);
+}
+
+/** An amount the user enters, as entered: Rust parses it in token units. */
+function entered(label: string, text: string): string {
+  const t = text.trim();
+  if (t === '') throw new Error(`${label} is required`);
+  return t;
 }
 
 function messageOf(e: unknown): string {
@@ -147,26 +157,29 @@ export default function SofiScreen(): React.JSX.Element {
     const hops = await sofi.findRoute({
       tokenIn: id32('token in', tokenIn),
       tokenOut: id32('token out', effectiveTokenOut),
-      amountIn: amount('amount in', amountIn),
+      amountIn: entered('amount in', amountIn),
     });
     if (hops.length === 0) {
       setQuote(null);
       throw new Error('no liquidity trades between these two tokens');
     }
     setQuote(hops);
-    const out = hops[hops.length - 1].amountOut;
-    setMinOut(out.toString());
-    return `Quoted: ${out.toString()} ${nameOf(effectiveTokenOut)} over ${hops.length} hop${hops.length === 1 ? '' : 's'}`;
+    const out = hops[hops.length - 1].amountOutDisplay;
+    setMinOut(out);
+    return `Quoted: ${out} ${nameOf(effectiveTokenOut)} over ${hops.length} hop${hops.length === 1 ? '' : 's'}`;
   }, 'info');
 
   const onTrade = () => run('Trade', async () => {
     if (!quote || quote.length === 0) throw new Error('quote first');
-    const tin = id32('token in', tokenIn);
-    const ain = amount('amount in', amountIn);
-    const min = amount('minimum out', minOut);
+    const args = {
+      tokenIn: id32('token in', tokenIn),
+      tokenOut: id32('token out', effectiveTokenOut),
+      amountIn: entered('amount in', amountIn),
+      minAmountOut: entered('minimum out', minOut),
+    };
     const r = quote.length === 1
-      ? await sofi.trade({ vaultId: quote[0].vaultId, tokenIn: tin, amountIn: ain, minAmountOut: min })
-      : await sofi.route({ vaultIds: quote.map((h) => h.vaultId), tokenIn: tin, amountIn: ain, minAmountOut: min });
+      ? await sofi.trade({ vaultId: quote[0].vaultId, ...args })
+      : await sofi.route({ vaultIds: quote.map((h) => h.vaultId), ...args });
     setQuote(null);
     const coin = inBalance ? { ticker: inBalance.symbol, iconUrl: inBalance.iconUrl } : undefined;
     return showPosition('Trade', r, coin);
@@ -177,14 +190,14 @@ export default function SofiScreen(): React.JSX.Element {
     const b = id32('token B', tokenB);
     // The pair is ordered bytewise (§28); order it for the user.
     const [lo, hi, rLo, rHi] = bytesLess(a, b)
-      ? [a, b, amount('reserve A', reserveA), amount('reserve B', reserveB)]
-      : [b, a, amount('reserve B', reserveB), amount('reserve A', reserveA)];
+      ? [a, b, entered('reserve A', reserveA), entered('reserve B', reserveB)]
+      : [b, a, entered('reserve B', reserveB), entered('reserve A', reserveA)];
     const r = await sofi.createVault({
       tokenA: lo,
       tokenB: hi,
       reserveA: rLo,
       reserveB: rHi,
-      feeBps: Number(amount('fee', feeBps)),
+      feeBps: Number(whole('fee', feeBps)),
     });
     const id = encodeBase32Crockford(r.vaultId);
     setCreatedVault(id);
@@ -197,11 +210,6 @@ export default function SofiScreen(): React.JSX.Element {
     return `Vault created: ${id}`;
   });
 
-  const onSetup = () => run('Set up', async () => {
-    const r = await sofi.setup(id32('vault', vaultId));
-    return `Set up with the vault (position ${r.position})`;
-  });
-
   const onClose = () => run('Close', async () => showPosition('Close', await sofi.close(id32('vault', vaultId))));
 
   const onResolve = () => run('Resolve', async () => showPosition('Resolve', await sofi.resolve()));
@@ -210,12 +218,12 @@ export default function SofiScreen(): React.JSX.Element {
     const r = await sofi.relay({
       traderGenesis: id32('trader genesis', relayGenesis),
       traderDeviceId: id32('trader device', relayDevice),
-      position: amount('position', relayPosition),
+      position: whole('position', relayPosition),
     });
     return `Relayed: ${r.cellsWritten} cell${r.cellsWritten === 1 ? '' : 's'} written`;
   });
 
-  const quoteOut = quote && quote.length > 0 ? quote[quote.length - 1].amountOut : null;
+  const quoteOut = quote && quote.length > 0 ? quote[quote.length - 1].amountOutDisplay : null;
 
   return (
     <ScreenFrame
@@ -226,6 +234,7 @@ export default function SofiScreen(): React.JSX.Element {
           <p>Sovereign finance: sovereign liquidity and trades that settle between devices, with no exchange in the middle.</p>
           <p><b>Swap</b> trades one token for another through sovereign liquidity at its price. Quote first: you see the exact amount before you confirm. A trade lands at a position, or is void if another trade won the race, and then nothing moved.</p>
           <p>Your fee can increase if the trade needs a hop through a second vault to be secured: each vault takes its own fee. The quote shows it before you confirm.</p>
+          <p>The first trade through a vault sets you up with it first, as a step of its own. Later trades reuse it.</p>
           <p><b>Liquidity</b> puts two of your tokens into a liquidity vault of your own: sovereign liquidity. Every trade against it pays the fee you set, and you can close it and take the reserves back.</p>
           <p><b>Resolve</b> advances a position this device still has pending, after a trade that did not finish.</p>
         </InfoTip>
@@ -255,7 +264,7 @@ export default function SofiScreen(): React.JSX.Element {
                 <input
                   id="sofi-amount-in"
                   type="text"
-                  inputMode="numeric"
+                  inputMode="decimal"
                   className="sb-input sb-input--mono"
                   placeholder="0"
                   value={amountIn}
@@ -272,10 +281,10 @@ export default function SofiScreen(): React.JSX.Element {
               </div>
               <div className="sb-hint sb-hint--tight">
                 {inBalance
-                  ? `Available: ${inBalance.displayAmount} ${inBalance.symbol}. Amounts here are base units (${inBalance.decimals} decimals).`
+                  ? `Available: ${inBalance.displayAmount} ${inBalance.symbol}.`
                   : tokenOptions.length === 0
                     ? 'No token here carries an anchor to trade by yet.'
-                    : 'Pick the token you pay with. Amounts are base units.'}
+                    : 'Pick the token you pay with.'}
               </div>
             </div>
 
@@ -320,23 +329,24 @@ export default function SofiScreen(): React.JSX.Element {
               </div>
               <div className="sb-hero__label">You get</div>
               <div className="sb-hero__value">
-                {quoteOut.toString()}
+                {quoteOut}
                 <span className="sb-hero__unit">{nameOf(effectiveTokenOut)}</span>
               </div>
               {quote.map((h, i) => (
                 <div className="sb-kv" key={`${encodeBase32Crockford(h.vaultId)}-${i}`}>
                   <span className="sb-kv__k">Hop {i + 1}</span>
                   <span className="sb-kv__v sb-kv__v--mono">
-                    {middleTruncate(encodeBase32Crockford(h.vaultId), 8, 6)} · {h.amountIn.toString()} {nameOf(encodeBase32Crockford(h.tokenIn))} → {h.amountOut.toString()} {nameOf(encodeBase32Crockford(h.tokenOut))}
+                    {middleTruncate(encodeBase32Crockford(h.vaultId), 8, 6)} · {h.amountInDisplay} {nameOf(encodeBase32Crockford(h.tokenIn))} → {h.amountOutDisplay} {nameOf(encodeBase32Crockford(h.tokenOut))}
                   </span>
                 </div>
               ))}
+
               <div className="sb-field" style={{ marginTop: 10, marginBottom: 6 }}>
                 <label htmlFor="sofi-min-out">Minimum out</label>
                 <input
                   id="sofi-min-out"
                   type="text"
-                  inputMode="numeric"
+                  inputMode="decimal"
                   className="sb-input sb-input--mono"
                   value={minOut}
                   onChange={(e) => setMinOut(e.target.value)}
@@ -377,7 +387,7 @@ export default function SofiScreen(): React.JSX.Element {
                 <input
                   id="sofi-reserve-a"
                   type="text"
-                  inputMode="numeric"
+                  inputMode="decimal"
                   className="sb-input sb-input--mono"
                   placeholder="0"
                   value={reserveA}
@@ -392,7 +402,7 @@ export default function SofiScreen(): React.JSX.Element {
                 <input
                   id="sofi-reserve-b"
                   type="text"
-                  inputMode="numeric"
+                  inputMode="decimal"
                   className="sb-input sb-input--mono"
                   placeholder="0"
                   value={reserveB}
@@ -412,7 +422,7 @@ export default function SofiScreen(): React.JSX.Element {
                 onChange={(e) => setFeeBps(e.target.value)}
               />
             </div>
-            <p className="sb-hint">Both reserves leave your balance into the vault, in base units. Every trade against it pays this fee.</p>
+            <p className="sb-hint">Both reserves leave your balance into the vault. Every trade against it pays this fee.</p>
             <button
               type="button"
               className="sb-btn sb-btn--primary sb-btn--block"
@@ -437,11 +447,8 @@ export default function SofiScreen(): React.JSX.Element {
                 spellCheck={false}
               />
             </div>
-            <div className="sb-actions" style={{ margin: 0 }}>
-              <button type="button" className="sb-btn" onClick={onSetup} disabled={busy || !vaultId.trim()}>Set up</button>
-              <button type="button" className="sb-btn" onClick={onClose} disabled={busy || !vaultId.trim()}>Close</button>
-            </div>
-            <p className="sb-hint sb-hint--tight">Set up once with a liquidity vault before trading against it. Close is for a vault of your own.</p>
+            <button type="button" className="sb-btn sb-btn--block" onClick={onClose} disabled={busy || !vaultId.trim()}>Close</button>
+            <p className="sb-hint sb-hint--tight">Close is for a vault of your own: both reserves come back to you. Storage → DLVs lists your vaults with their live reserves.</p>
           </section>
 
           <Disclosure summary="Advanced: relay a fulfillment">

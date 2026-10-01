@@ -40,16 +40,17 @@ use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
 use dsm::sofi::resolve::Acquired;
 use dsm::sofi::storage::Resolved;
-use dsm::sofi::validation::{trader_post_states, vault_post_states};
+use dsm::sofi::validation::{trader_balance_changes, trader_post_states, vault_post_states};
 use dsm::sofi::wire::{
-    next_position, ParentClaimRef, SettlementPreimage, TraderFulfillmentBody, TraderPrecommitBody,
-    ValidationRef,
+    next_position, ParentClaimRef, SettlementBody, SettlementPreimage, TraderFulfillmentBody,
+    TraderPrecommitBody, ValidationRef,
 };
 use dsm::types::device_state::RelationshipChainState;
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
 
 use crate::sdk::core_sdk::CoreSDK;
+use crate::sdk::realized_records::{record_realized, Moved, Realized};
 use crate::sdk::economic_admission_flow::validated_root_or_activate;
 use crate::sdk::route_seats::{read_cell, NodeSeats};
 use crate::sdk::sofi_exercise::{build_exercise, write_exercise, LegWrite};
@@ -821,10 +822,29 @@ pub async fn resolve_pending_position(
     // cache must recompute the root before it is written.
     let current = economic_lineage::load_leaf_cache().map_err(|e| storage("leaf cache", e))?;
     let mut vault_heads = Vec::new();
+    let mut realized = None;
     let leaves = match (advanced.resolution, &established) {
         (Resolution::Realized, Established::Facts(facts)) => {
             let post = trader_post_states(&precommit, facts.preimage(), facts.evidence())
                 .map_err(|e| refuse(format!("post states: {e:?}")))?;
+            // What realized, and every token it moved, from the same
+            // evidence: what the history row names once the position is
+            // installed.
+            let what = match facts.preimage().settlement() {
+                SettlementBody::Close { .. } => Realized::Close,
+                SettlementBody::Swap { .. } => Realized::Trade,
+            };
+            let mut moved = Vec::new();
+            for change in trader_balance_changes(&precommit, facts.preimage(), facts.evidence())
+                .map_err(|e| refuse(format!("balance changes: {e:?}")))?
+            {
+                moved.extend(Moved::between(
+                    change.policy_commit,
+                    change.before,
+                    change.after,
+                ));
+            }
+            realized = Some((what, moved));
             // The vaults moved too, and this device is the one that resolved
             // it: the post state each leg selected is kept so the NEXT trade
             // against that vault has evidence to stand on (§44.4). Recomputed
@@ -860,6 +880,22 @@ pub async fn resolve_pending_position(
         &set.id(),
         &vault_heads,
     )?;
+    // A realized route is the event the wallet shows: its history row, and
+    // the projection of every token it moved rebuilt from the installed
+    // head. A void route moved nothing and has none.
+    if let Some((what, moved)) = realized {
+        let installed = core
+            .device_head()
+            .ok_or_else(|| storage("device head", "none after the install"))?;
+        record_realized(
+            &installed,
+            what,
+            &fulfillment_id,
+            q,
+            Some(&first.vault_id),
+            &moved,
+        );
+    }
     Ok(Advanced::Installed {
         resolution: advanced.resolution,
         effect: advanced.effect,

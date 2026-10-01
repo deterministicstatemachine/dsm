@@ -124,18 +124,18 @@ async fn decimals_survive_a_restart_for_a_held_token() {
     assert_eq!(t.display_amount, "500.00");
 }
 
-/// Builtins keep their exact values: ERA whole units, dBTC in satoshis, no
-/// policy icon, and each its protocol-defined anchor.
+/// Builtins keep their exact values: ERA at two decimals (SoFi Amendment S18),
+/// dBTC in satoshis, no policy icon, and each its protocol-defined anchor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn builtin_tokens_keep_their_metadata() {
     let d = Device::funded(0x83).await;
     let rows = wire_rows(&d.router).await;
     let era = row(&rows, "ERA");
-    assert_eq!(era.decimals, 0);
+    assert_eq!(era.decimals, 2);
     assert_eq!(era.symbol, "ERA");
-    assert_eq!(era.available, 100);
-    assert_eq!(era.display_amount, "100");
+    assert_eq!(era.available, crate::economic_fixtures::whole_era(100));
+    assert_eq!(era.display_amount, "100.00");
     let dbtc = row(&rows, "dBTC");
     assert_eq!(dbtc.decimals, 8);
     assert_eq!(dbtc.symbol, "dBTC");

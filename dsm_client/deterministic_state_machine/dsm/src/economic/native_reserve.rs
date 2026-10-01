@@ -73,14 +73,15 @@ use crate::types::proto as generated;
 
 type D32 = [u8; 32];
 
-/// The whole distributable ERA supply of one network at genesis. Nothing is
-/// minted after it; every unit in circulation was released from it.
-pub const ERA_RESERVE_GENESIS_SUPPLY: u64 = 80_000_000_000;
+/// The whole distributable ERA supply of one network at genesis, in base
+/// units: 80,000,000,000.00 ERA at ERA's two decimals (SoFi Amendment S18).
+/// Nothing is minted after it; every unit in circulation was released from it.
+pub const ERA_RESERVE_GENESIS_SUPPLY: u64 = 8_000_000_000_000;
 
-/// What one beta faucet claim releases. ERA is whole-unit (`decimals = 0`),
-/// so this is literally 100 ERA. The claim names no amount: the beta claim
-/// policy fixes it, and the accepting transition refuses any other delta.
-pub const ERA_FAUCET_PAYOUT: u64 = 100;
+/// What one beta faucet claim releases, in base units: 100.00 ERA (SoFi
+/// Amendment S18). The claim names no amount: the beta claim policy fixes it,
+/// and the accepting transition refuses any other delta.
+pub const ERA_FAUCET_PAYOUT: u64 = 10_000;
 
 /// Matches the proto's `dsm_max_len`; prost does not enforce it, so this
 /// module does.
@@ -849,7 +850,7 @@ mod tests {
 
     #[test]
     fn the_envelope_round_trips_and_is_strict() {
-        let release = signed(&genesis(), 100);
+        let release = signed(&genesis(), ERA_FAUCET_PAYOUT);
         let bytes = release.envelope_bytes.clone();
         // Decodable-but-non-canonical: unknown field, silently skipped by
         // prost, caught only by the re-encode comparison.
@@ -1041,7 +1042,7 @@ mod tests {
             release_constructible(&r0, &zero),
             Err(ReleaseRefusal::ZeroRelease)
         );
-        let (release, pk) = signed_with_key(&r0, 100);
+        let (release, pk) = signed_with_key(&r0, ERA_FAUCET_PAYOUT);
         let r1 = release_constructible(&r0, &release).expect("constructible");
         // Every unit that left the reserve is accounted to the recipient the
         // body names, and that recipient is the signer.
@@ -1057,7 +1058,7 @@ mod tests {
     fn a_release_must_succeed_exactly_its_parent() {
         let r0 = genesis();
         let (pk, sk) = keypair();
-        let mut wrong_root = body(&r0, 100, &pk);
+        let mut wrong_root = body(&r0, ERA_FAUCET_PAYOUT, &pk);
         wrong_root.parent_root = [0xEE; 32];
         let wrong_root =
             decode_and_verify_release(&sign_release(&wrong_root, &sk).unwrap()).unwrap();
@@ -1065,21 +1066,21 @@ mod tests {
             release_constructible(&r0, &wrong_root),
             Err(ReleaseRefusal::ParentRootMismatch)
         );
-        let mut wrong_gen = body(&r0, 100, &pk);
+        let mut wrong_gen = body(&r0, ERA_FAUCET_PAYOUT, &pk);
         wrong_gen.generation = 2;
         let wrong_gen = decode_and_verify_release(&sign_release(&wrong_gen, &sk).unwrap()).unwrap();
         assert_eq!(
             release_constructible(&r0, &wrong_gen),
             Err(ReleaseRefusal::GenerationIsNotSuccessor)
         );
-        let mut other = body(&r0, 100, &pk);
+        let mut other = body(&r0, ERA_FAUCET_PAYOUT, &pk);
         other.reserve_id = era_reserve_id(b"othernet");
         let other = decode_and_verify_release(&sign_release(&other, &sk).unwrap()).unwrap();
         assert_eq!(
             release_constructible(&r0, &other),
             Err(ReleaseRefusal::NamesAnotherReserve)
         );
-        let mut foreign = body(&r0, 100, &pk);
+        let mut foreign = body(&r0, ERA_FAUCET_PAYOUT, &pk);
         foreign.storage_set_id = [0x77; 32];
         let foreign = decode_and_verify_release(&sign_release(&foreign, &sk).unwrap()).unwrap();
         assert_eq!(
@@ -1097,7 +1098,7 @@ mod tests {
     #[test]
     fn finality_without_the_deterministic_leader_is_impossible() {
         let r0 = genesis();
-        let release = signed(&r0, 100);
+        let release = signed(&r0, ERA_FAUCET_PAYOUT);
         let x = release.envelope_bytes.clone();
         let (at, mut skipped_leader) = successor_cell(&r0);
         skipped_leader.write(&x, ROUTE_LEN - 1, &[0]);
@@ -1130,7 +1131,7 @@ mod tests {
     #[test]
     fn unrecognized_bytes_never_occupy_the_cell() {
         let r0 = genesis();
-        let release = signed(&r0, 100);
+        let release = signed(&r0, ERA_FAUCET_PAYOUT);
         // Signed, canonical, succeeding R_0 — and releasing more than exists.
         let too_much = signed(&r0, ERA_RESERVE_GENESIS_SUPPLY + 1);
         let (at, mut cell) = successor_cell(&r0);
@@ -1153,8 +1154,8 @@ mod tests {
     #[test]
     fn additional_replicas_do_not_alter_the_winner() {
         let r0 = genesis();
-        let a = signed(&r0, 100);
-        let b = signed(&r0, 100);
+        let a = signed(&r0, ERA_FAUCET_PAYOUT);
+        let b = signed(&r0, ERA_FAUCET_PAYOUT);
         let child_a = release_constructible(&r0, &a).unwrap();
         let (at, mut cell) = successor_cell(&r0);
         cell.write(&a.envelope_bytes, 0, &[]);
@@ -1183,7 +1184,7 @@ mod tests {
     #[test]
     fn a_final_release_has_a_completion_proof_that_checks() {
         let r0 = genesis();
-        let release = signed(&r0, 100);
+        let release = signed(&r0, ERA_FAUCET_PAYOUT);
         let (at, mut cell) = successor_cell(&r0);
         cell.write(&release.envelope_bytes, 1, &[]);
         assert_eq!(successor_completion(&at, &cell.evidence()), Ok(None));
@@ -1206,7 +1207,7 @@ mod tests {
     #[test]
     fn the_walk_advances_through_final_releases_and_stops_at_the_head() {
         let r0 = genesis();
-        let rel1 = signed(&r0, 100);
+        let rel1 = signed(&r0, ERA_FAUCET_PAYOUT);
         let r1 = release_constructible(&r0, &rel1).unwrap();
         let rel2 = signed(&r1, ERA_FAUCET_PAYOUT);
         let r2 = release_constructible(&r1, &rel2).unwrap();
@@ -1267,7 +1268,7 @@ mod tests {
             })
         );
         assert_eq!(visited, 0, "nothing final was read");
-        let rel1 = signed(&r0, 100);
+        let rel1 = signed(&r0, ERA_FAUCET_PAYOUT);
         let r1 = release_constructible(&r0, &rel1).unwrap();
         let stop = walk_lineage(
             r0,
