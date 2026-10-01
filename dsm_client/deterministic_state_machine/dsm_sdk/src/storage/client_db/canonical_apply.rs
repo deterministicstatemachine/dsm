@@ -35,8 +35,9 @@ pub struct CanonicalApplyRecord {
     pub operation_digest: [u8; 32],
     pub sender_device: [u8; 32],
     pub recipient_device: [u8; 32],
-    /// BLAKE3 of the op nonce — recipient-device-wide replay scope (matches the
-    /// existing `spent_nonces` rule; no relationship/sender scoping).
+    /// `relationship_nonce_hash(relationship_key, nonce)`: the op nonce, scoped
+    /// to its relationship as `spent_nonces` keys it, so a transfer of another
+    /// relationship never collides with it (security pre-audit item 5).
     pub nonce_hash: [u8; 32],
     /// The EXECUTING device's (B's) authoritative pre-state root produced by the
     /// state mutation (`advance_outcome.parent_r_a`).

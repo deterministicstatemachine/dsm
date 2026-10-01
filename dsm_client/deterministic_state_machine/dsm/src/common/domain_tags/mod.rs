@@ -171,7 +171,9 @@ mod tests {
     // network hash domain's only input.
     // +1 with the TraderPreBalance object namespace (SoFi Amendment S12).
     // +1 with the vault token locator (SoFi Amendment S16).
-    const EXPECTED_TAG_COUNT: usize = 353;
+    // +1 with the signed resolution claim's digest (SoFi Amendment S20), and
+    // +1 with the relationship-scoped transfer nonce (pre-audit item 5).
+    const EXPECTED_TAG_COUNT: usize = 354;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
