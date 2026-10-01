@@ -812,6 +812,8 @@ The audit's "P's key is never bound to the trader" (High, confirmed at `dsm/src/
 
 **Open (dependency boundary, not closed here).** A verifier binds P's key to the claim P names and checks that claim against P's own `(G, DevID, p, root)`. It does not establish that the claim is the one registered at `K_root(p)`. A foreign verifier cannot route that cell: it needs the root at `p − 1`, which P does not carry. The trader's own verifier uses its frozen claim. The key → device binding that would close this from the bytes in hand (the `AttA` shape of §6.26) is the audit's K_root recognizer finding, and needs an owner ruling on the claim and precommit formats. MR-SOFI-0144 stays Partial on it.
 
+**Update (2026-10-01, §6.62).** The parent P names is now checked against what the trader's lineage holds at `K_root(p)`, the claim final there and its root, established by this verifier's own admitted position or by the A8 walk. The walk routes the cell from its own authenticated root at `p − 1`. Still open: the key-to-device binding at `K_root` (pre-audit item 1, CORE).
+
 Tests: `dsm::sofi::conformance::tests::a_precommit_under_a_key_its_parent_claim_does_not_carry_does_not_conform`, `dsm::sofi::conformance::tests::a_parent_claim_of_another_position_or_root_does_not_conform`, `dsm::sofi::conformance::tests::a_parent_that_is_not_a_verifying_claim_does_not_conform`, `dsm::sofi::conformance::tests::a_parent_the_closure_does_not_reference_does_not_conform`, `dsm::sofi::conformance::tests::a_conditional_parent_binds_p_to_the_key_of_the_f_that_installed_it`, `dsm::sofi::validation::tests::a_precommit_naming_a_parent_its_closure_does_not_carry_is_invalid`, and the node e2e trades (`dsm_sdk::handlers::node_e2e_tests::a_sofi_trade_executes_end_to_end`, `dsm_sdk::handlers::node_e2e_tests::a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_bytes_alone` — a second trade on a resolved conditional parent). Mutations, each observed red on its named test: rule 2 removed from `validate` and from conformance; the single-root key check; each of the genesis, device, position and root checks; the conditional key, position and id checks; the claim's signature check; the producer's closure emptied; the parent F not fetched; `C_p` routed by `P.void_root`.
 
 ### 6.28 The placeholder and wiring sweep (#992–#1008, 2026-09-25)
@@ -2054,6 +2056,56 @@ The quote took 20 s.
 - **The chain walk of a vault the trade consumed, about 19 s.** Two passes over the sibling leg re-read the same four or five cells about four times each.
 - **Establishing the facts, 2.7 s.**
 
+### 6.62 A trader's single-root parent is what its lineage holds at `K_root(p)`, never a claim P carries (`security/beta-pre-audit`, pre-audit item 2, 2026-10-01)
+
+This is the owner's beta security pre-audit, item 2 (P0), audited at main `076792eac`. CORE reported it and verified it at the code. The finding updates §6.27's Open paragraph and MR-SOFI-0144; it does not duplicate them.
+
+| Field | Record |
+|---|---|
+| Severity | Critical |
+| Files | `dsm/src/sofi/facts.rs` · `establish_ground`, the parent arm. `dsm/src/sofi/resolution.rs` · `ParentPosition`, `trader_parent_compatible`, `trader_parent_impossible`. `dsm/src/sofi/resolve.rs` · `Verifier::parent_for`, `PeerPositionResolver`. `lean4/DSMSofiAtomicity.lean` · `ParentState`. |
+| Exploit | A trader signs a single-root claim for its own position `p`. The claim names a root the trader never held, with invented `TraderPreBalance`s under it. The trader names that claim as P's parent, though it is never final at its `K_root(p)`. Conformance verified the claim under the key the claim itself carries, and checked it against P's own `(G, DevID, p, root)`. The facts then mapped every single-root parent to compatible (`facts.rs:523`; `resolution.rs:478`, `SingleRoot => true`). The swap realized, and walkers classified the exercise Consumed. A vault paid out against a balance the trader's lineage never held, and an attacker who owns a vault can mint the same way on Close. |
+| Violates | SoFi §17.1 P conformance rules 2–3 (the parent P extends). DSM Amendment A8 and SoFi Amendment S15: a parent is the authoritative claim at the lineage's position, authenticated from the verifier's frontier. MR-SOFI-0144. |
+| Verification | CORE verified it at the code on 2026-10-01. The adversarial tests below reproduce it: they resolve `Ok(Realized)` under the old acceptance. |
+| Closure condition | A single-root parent counts only as what the trader's lineage holds at `p`: the claim final at `K_root(p)`, and the root that claim installed. The verifier establishes this itself, from its own admitted position or by the frontier-relative walk (`peer_root_at`). That is the check A8 and S15 already use; nothing separate is added. A parent held exactly as P names it is compatible. Anything else final there makes the position Invalid and the vault's key skipped. A parent not yet established is no fact. |
+| Status | Closed for the self-authenticating parent. One dependency stays open, pre-audit item 1 (CORE): until whatever is final at `K_root(p)` must be signed by the key that derives the trader's DevID, a squatter can occupy the trader's `K_root(p)`, and the walk then returns the squatter's claim. Item 3's two-wallet gap, a colluding source admitting its own invented root, is CORE's and is with the owner. |
+
+**The change.**
+- `ResolvedParent` carries the claim that holds `K_root(p)` (`named`) beside the root. `ResolvedParent::of` now covers single-root admitted positions too.
+- `ParentPosition::SingleRoot { named, held, held_root }` carries its evidence, and the ladder computes from it:
+  - compatible is `named == held && held_root == pre_root`;
+  - impossible is the negation.
+
+  The literal arms `SingleRoot => true` and `SingleRoot => false` are gone.
+- `Verifier::parent_for` establishes every parent. It uses this verifier's admitted position when that is the claim P names, and otherwise `trader_root_at`, the A8 walk. The facts decide whether what is held is what P names.
+- Inside a walk, the S15 resolver hands over the walk's own authenticated root and accepted claim at `q − 1`, for both kinds of parent.
+- §6.27's routing limit, "a foreign verifier cannot route that cell", is answered by the walk: it routes `K_root(p)` from its own authenticated root at `p − 1`.
+
+**Tests.**
+- `dsm::sofi::facts::tests::a_parent_claim_the_trader_does_not_hold_at_p_never_realizes`: another claim is final at `p`. The position is Invalid, and the vault's key is Skipped.
+- `dsm::sofi::facts::tests::a_parent_at_another_root_than_the_trader_holds_never_realizes`
+- `dsm::sofi::facts::tests::a_single_root_parent_not_established_at_p_is_no_fact`
+- `dsm::sofi::resolve::tests::what_a_walk_holds_counts_only_at_the_position_it_reached`
+- The ladder's property tests (`the_trader_parent_arm_is_monotone` and the exhaustive ladder sets) now enumerate a held, a not-held and a held-elsewhere single-root parent.
+- Lean `DSMSofiAtomicity.single_root_parent_not_held_is_invalid`, with the new case `ParentState.singleNotHeld`.
+
+**Mutation controls (2026-10-01, restored byte for byte).**
+
+| Mutation | Result |
+|---|---|
+| The facts ignore what is held | Both forged-parent tests red |
+| The ladder drops the claim comparison | The claim test red |
+| An unestablished parent is treated as held | The not-established test red |
+| Lean: `.singleNotHeld` removed from `parentImpossible` | The theorem, and the model's partition theorem, fail to check |
+
+**Suites.**
+- `dsm` `sofi::`: 240 passed, 0 failed (237, plus the 3 new tests).
+- SDK node and handler suites: 80 passed, 0 failed. Realized trades pass on both parent paths: the trader's own admitted position, and the A8 walk for another trader's parent.
+- Lean: `DSMSofiAtomicity.lean` kernel-checks, sorry-free.
+- Guard: clean.
+
+**Fix:** commit `1ef20cf7a` on `security/beta-pre-audit`; `make lint` exit 0.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -2495,7 +2547,7 @@ The quote took 20 s.
 | MR-SOFI-0141 | Met | `dsm::sofi::wire::objects::TraderPrecommitBody` | `dsm::sofi_v8_independent::every_object_matches_the_independent_encoder_and_round_trips` | — |
 | MR-SOFI-0142 | Partial | `dsm::sofi::registration::fulfillment_registered`; `dsm::economic::register::root_claim_naming`; `dsm::types::operations::Operation` | — | No Operation variant carries P and K_root recognizes only registered claims, but no test shows that P at K_root counts as nothing, that several P from one parent coexist, or that storing P is not exercise; the cited write_set test covers only setup, creation and fulfillment. |
 | MR-SOFI-0143 | Met | `dsm::sofi::validation::validate` (CoreIdentityMismatch, L712-717) | `dsm::sofi::validation::tests::precommit_roots_that_do_not_match_the_cores_are_invalid` | — |
-| MR-SOFI-0144 | Partial | `dsm::sofi::validation::validate` (`ParentReferenceNotInClosure`); `dsm::sofi::conformance::fulfillment_conformance` (item 1); `dsm_sdk::sdk::sofi_sdk::pre_e_closure`; `dsm_sdk::sdk::sofi_advance::own_parent_claim` | `dsm::sofi::validation::tests::a_precommit_naming_a_parent_its_closure_does_not_carry_is_invalid`; `dsm::sofi::conformance::tests::a_parent_the_closure_does_not_reference_does_not_conform`; `dsm::sofi::conformance::tests::a_parent_claim_of_another_position_or_root_does_not_conform` | The typed parent reference in `𝒞_E^pre` is enforced, and the producer names its own frozen claim. A foreign verifier checks the claim P names against P's `(G, DevID, p, root)` but cannot establish that it is the one registered at `K_root(p)` (§6.27 Open). |
+| MR-SOFI-0144 | Partial | `dsm::sofi::validation::validate` (`ParentReferenceNotInClosure`); `dsm::sofi::conformance::fulfillment_conformance` (item 1); `dsm_sdk::sdk::sofi_sdk::pre_e_closure`; `dsm_sdk::sdk::sofi_advance::own_parent_claim` | `dsm::sofi::validation::tests::a_precommit_naming_a_parent_its_closure_does_not_carry_is_invalid`; `dsm::sofi::conformance::tests::a_parent_the_closure_does_not_reference_does_not_conform`; `dsm::sofi::conformance::tests::a_parent_claim_of_another_position_or_root_does_not_conform`; `dsm::sofi::facts::tests::a_parent_claim_the_trader_does_not_hold_at_p_never_realizes`; `dsm::sofi::facts::tests::a_parent_at_another_root_than_the_trader_holds_never_realizes`; `dsm::sofi::facts::tests::a_single_root_parent_not_established_at_p_is_no_fact` | The typed parent reference in `𝒞_E^pre` is enforced, and the producer names its own frozen claim. Since 2026-10-01 (§6.62), the parent P names is checked against what the trader's lineage holds at `K_root(p)`: the claim final there and its root, established by the verifier's own admitted position or by the A8 walk. A parent the trader does not hold makes the position Invalid and its key skipped. The row stays Partial until pre-audit item 1 binds whatever is final at `K_root(p)` to the trader's DevID key (CORE). |
 | MR-SOFI-0145 | Met | `dsm::economic::register::read_root_cell`; `dsm::route_chain::evaluate`; `dsm_sdk::sdk::sofi_advance::final_root_cell` | `dsm::economic::register::registered_root_construction_tests::a_final_root_claim_has_a_completion_proof_that_checks`; `dsm::sofi::registration::tests::registration_needs_both_cells_final_and_the_root_on_this_claim`; `dsm::route_chain::tests::the_state_is_the_count_of_valid_links` | dsm_sdk sofi_advance.rs has no tests; Core's root-cell reading needs a three-link chain, and the named dsm tests show that the leader's copy alone is not final. |
 | MR-SOFI-0146 | Met | `dsm::sofi::validation`; `dsm::sofi::lineage::descendant_fence` | `dsm::sofi::lineage::tests::a_resolved_predecessor_admits_only_the_root_it_selected`; `dsm::sofi::lineage::tests::nothing_descends_from_an_unresolved_conditional_predecessor` | — |
 | MR-SOFI-0147 | Met | `dsm::sofi::validation::validate` (recompute_e check, L700-709) | `dsm::sofi::validation::tests::a_preimage_e_does_not_commit_to_is_invalid` | — |
