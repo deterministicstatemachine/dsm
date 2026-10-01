@@ -414,6 +414,7 @@ mod tests {
             POS + 1,
             ALG,
             key,
+            [0xA7; 32],
         )
         .unwrap()
     }

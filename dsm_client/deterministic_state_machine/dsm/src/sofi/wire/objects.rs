@@ -493,6 +493,12 @@ pub struct AttemptEntry {
 }
 
 /// `F` — the trader's exercise. Never restates a field of `P`.
+///
+/// `claimant_att_a` is the trader device's `AttA`. `F` occupies `K_ful(q)`,
+/// so it proves its own authority for that position (DSM Amendment A10, SoFi
+/// Amendment S20): `derive_devid(claimant_public_key, claimant_att_a)` must
+/// be the device whose cell it is, decided from these bytes before `P` is
+/// fetched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraderFulfillmentBody {
     precommit_id: D32,
@@ -501,6 +507,7 @@ pub struct TraderFulfillmentBody {
     position: u64,
     signature_alg: u16,
     claimant_public_key: Vec<u8>,
+    claimant_att_a: D32,
 }
 
 impl TraderFulfillmentBody {
@@ -511,6 +518,7 @@ impl TraderFulfillmentBody {
         position: u64,
         signature_alg: u16,
         claimant_public_key: &[u8],
+        claimant_att_a: D32,
     ) -> Result<Self, SofiWireError> {
         check_count(
             "policy fulfillment set",
@@ -530,6 +538,7 @@ impl TraderFulfillmentBody {
             position,
             signature_alg,
             claimant_public_key: claimant_public_key.to_vec(),
+            claimant_att_a,
         })
     }
 
@@ -551,6 +560,9 @@ impl TraderFulfillmentBody {
     pub fn claimant_public_key(&self) -> &[u8] {
         &self.claimant_public_key
     }
+    pub fn claimant_att_a(&self) -> &D32 {
+        &self.claimant_att_a
+    }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -567,6 +579,7 @@ impl TraderFulfillmentBody {
         }
         push_u64(&mut out, self.position);
         push_key(&mut out, self.signature_alg, &self.claimant_public_key);
+        push_digest32(&mut out, &self.claimant_att_a);
         out
     }
 
@@ -589,8 +602,9 @@ impl TraderFulfillmentBody {
         }
         let position = c.u64()?;
         let (alg, key) = read_key(&mut c)?;
-        let v =
-            Self::new(precommit_id, set, attempts, position, alg, &key).map_err(wire_invalid)?;
+        let att_a = c.digest32()?;
+        let v = Self::new(precommit_id, set, attempts, position, alg, &key, att_a)
+            .map_err(wire_invalid)?;
         finish(&c, v)
     }
 }

@@ -385,6 +385,7 @@ mod tests {
             p.position() + 1,
             ALG,
             key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
