@@ -189,6 +189,7 @@ async fn from_leader<S: RouteSeats, const N: usize>(
             .collect();
         match seats.put_entries(route.leader(), &batch).await {
             Ok(records) => {
+                log::info!("route write: the leader took {} values", records.len());
                 for (&i, put) in missing.iter().zip(records) {
                     links[i] = Some(put);
                 }
@@ -238,7 +239,10 @@ async fn write_along<S: RouteSeats, const N: usize>(
             .map(|e| (e.namespace.clone(), e.key, e.encode()))
             .collect();
         let slots: Vec<ChainSlot> = match seats.put_entries(seat, &batch).await {
-            Ok(records) => records.into_iter().map(ChainSlot::Link).collect(),
+            Ok(records) => {
+                log::info!("route write: the seat at position {position} took the chain");
+                records.into_iter().map(ChainSlot::Link).collect()
+            }
             Err(e) => {
                 log::warn!("route write: the seat at position {position} did not answer: {e}");
                 vec![ChainSlot::NoResponse; N]
@@ -422,7 +426,7 @@ pub async fn write_recorded_position(
             ])
         }
         (ful, root) => {
-            log::debug!(
+            log::info!(
                 "position write: recorded fulfillment {}, recorded claim {}; starting at the leader",
                 ful.is_some(),
                 root.is_some()
@@ -582,6 +586,9 @@ async fn committed_at<S: RouteSeats>(
 /// (§9 route chains, rule 4).
 pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvidence {
     let (route, namespace, key) = (cell.route(), cell.namespace(), cell.key());
+    // Each phase logs where it ends; the log's own timestamps time it. The
+    // cell is named by its key's first five bytes (eight characters).
+    let short = crate::util::text_id::encode_base32_crockford(&key[..5]);
     // Every seat is asked at once, and the answers stay in route order: a
     // seat that does not answer costs one timeout, not one per seat.
     let values: Vec<Option<Vec<Vec<u8>>>> = futures::future::join_all(
@@ -591,6 +598,11 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
             .map(|seat| seats.read_values(seat, namespace, key)),
     )
     .await;
+    log::info!(
+        "route read {short}: values from {} of {} seats",
+        values.iter().filter(|v| v.is_some()).count(),
+        values.len()
+    );
     let cycles: Vec<Option<u64>> =
         futures::future::join_all(route.seats().iter().zip(&values).map(
             |(seat, held)| async move {
@@ -602,9 +614,17 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
             },
         ))
         .await;
+    log::info!(
+        "route read {short}: cycles closed at {} seats",
+        cycles.iter().filter(|c| c.is_some()).count()
+    );
     let members = seats.members();
     if cycles.iter().any(Option::is_some) {
         futures::future::join_all(members.iter().map(|member| seats.sync_mirror(member))).await;
+        log::info!(
+            "route read {short}: mirrors synced at {} members",
+            members.len()
+        );
     }
     let leader = route.leader();
     let leader_cycle = cycles.first().copied().flatten();
@@ -659,6 +679,10 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
             }),
     )
     .await;
+    log::info!(
+        "route read {short}: committed state from {} seats",
+        evidence.iter().filter(|e| e.committed.is_some()).count()
+    );
     CellEvidence { seats: evidence }
 }
 
