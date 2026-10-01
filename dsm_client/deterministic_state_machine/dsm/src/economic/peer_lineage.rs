@@ -1211,6 +1211,38 @@ mod tests {
         }
     }
 
+    /// Owner ruling 2026-10-01 (pre-audit item 3): a credit's source whose
+    /// ancestry exceeds the walk budget before reaching a frontier this
+    /// verifier holds is `Incomplete`, never accepted on weaker evidence, and
+    /// nothing past the spent budget is read.
+    #[test]
+    fn a_source_walk_past_the_budget_is_incomplete_and_reads_nothing() {
+        let fetcher = CountingCells {
+            inner: ConditionalCellFetcher {
+                position: 3,
+                writes: Vec::new(),
+                last: crate::route_chain::ROUTE_LEN - 1,
+            },
+            reads: std::cell::Cell::new(0),
+        };
+        let verifier = Verifier {
+            fetcher: &fetcher,
+            expected_network_id: NETWORK,
+            register: Register::resolve(&fetcher, NETWORK).expect("the network's register"),
+            frontiers: &NoneRecorded,
+            conditional: &NoResolution,
+            steps_remaining: std::cell::Cell::new(0),
+        };
+        match verifier.source_step(&PEER_G, &PEER_D, 3) {
+            Err(PeerLineageFailure::Incomplete(why)) => {
+                assert!(why.contains("budget exhausted"), "{why}")
+            }
+            Err(other) => panic!("a spent budget is Incomplete, got {other:?}"),
+            Ok(_) => panic!("a spent budget validated a source"),
+        }
+        assert_eq!(fetcher.reads.get(), 0, "nothing of the source was read");
+    }
+
     /// DSM Amendment A8, `peer_root_at`: a frontier this receiver recorded AT
     /// the position is the answer, and nothing of the peer is read: the walk
     /// stands below `position + 1`, which the recorded frontier already is. A
