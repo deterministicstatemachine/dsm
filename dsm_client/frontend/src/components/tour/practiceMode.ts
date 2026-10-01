@@ -5,16 +5,19 @@
 // While the tour runs, the real screens stay on screen but the calls they make
 // for the things a beginner tries (balances, contacts, history, sending, the
 // faucet, adding a contact) are answered from a small in-memory practice
-// wallet. Every other call whose name says it changes state is refused. When
-// the tour ends, the real client is put back exactly as it was, so nothing the
-// user does in the tour ever reaches the device's real state.
+// wallet. That is a convenience. What keeps the real wallet untouched is the
+// bridge: entering practice puts it in its sandbox (bridge/practiceGate.ts),
+// where only reads reach native code, whatever module makes the call. When the
+// tour ends, the real client and the bridge are put back exactly as they were.
 //
 // Every figure the practice wallet shows is Rust's. It asks `wallet.amount` to
 // parse what the user typed and to render each balance it keeps, as the real
 // wallet's figures are parsed and rendered, so practice ERA counts as ERA does.
 
 import { dsmClient } from '../../services/dsmClient';
+import { enterPracticeSandbox, leavePracticeSandbox } from '../../bridge/practiceGate';
 import { walletAmount } from '../../dsm/amount';
+import { encodeBase32Crockford } from '../../utils/textId';
 import type { AmountForms } from '../../dsm/amount';
 import type {
   DomainContact,
@@ -24,16 +27,6 @@ import type {
 import type { TokenBalanceView } from '../../dsm/types';
 
 export type PracticeEvent = 'sent' | 'claimed' | 'contactAdded';
-
-export const PRACTICE_BLOCKED_MESSAGE =
-  'Practice mode: this is switched off until the tour ends. Your real wallet is untouched.';
-
-/** Calls whose names start like this change state, so practice mode refuses them. */
-const STATE_CHANGING =
-  /^(send|load|unload|create|claim|add|remove|delete|publish|withdraw|deposit|swap|import|export|mint|burn|update|accept|reject|register|approve|revoke|write|reset|close|open|unlock|lock|execute|submit|broadcast|sign|pair|unpair|sync|reconcile|recover|restore|enroll|admit|fund|redeem|transfer|post|put|store|bind|advance|commit|finalize|apply|generate|start|stop|cancel|retry|refresh|clear|forget|rotate|set)/;
-
-/** Real even in practice: display preferences only. */
-const ALWAYS_REAL = new Set(['getPreference', 'setPreference']);
 
 // Practice ids use only Base32 Crockford characters, so any code that decodes
 // an id keeps working.
@@ -249,27 +242,26 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
         message: `Practice: claimed ${paid.displayAmount} ERA`,
       };
     },
-    addContact: async (input: { alias: string; genesisHash: string | Uint8Array; deviceId: string | Uint8Array }) => {
+    // Answers in the shape the real addContact does (AddContactResult), for the
+    // card Rust read from the contact code the user entered.
+    addContact: async (input: { alias: string; deviceId: Uint8Array; genesisHash: Uint8Array; signingPublicKey: Uint8Array }) => {
       await pause(400);
+      const contactId = encodeBase32Crockford(input.deviceId);
+      // As Rust names a contact added with no alias: by its device id's first eight characters.
+      const alias = input.alias.trim() || contactId.slice(0, 8);
       state.contacts.push({
-        alias: input.alias,
-        genesisHash: typeof input.genesisHash === 'string' ? input.genesisHash : practiceId('PRACT1CEGENES1S'),
-        deviceId: typeof input.deviceId === 'string' ? input.deviceId : practiceId('PRACT1CEDEV1CE'),
-        signingPublicKey: practiceId('PRACT1CEKEY'),
+        alias,
+        deviceId: contactId,
+        genesisHash: encodeBase32Crockford(input.genesisHash),
+        signingPublicKey: encodeBase32Crockford(input.signingPublicKey),
         pairing: 'idle',
         genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',
       });
       emit('contactAdded');
-      return { ok: true };
+      return { accepted: true, contactId, alias };
     },
-  };
-}
-
-function refused(name: string): AnyFn {
-  return async () => {
-    throw new Error(`${PRACTICE_BLOCKED_MESSAGE} (${name})`);
   };
 }
 
@@ -286,18 +278,12 @@ class PracticeMode {
     if (this.state) return;
     const state = freshState();
     this.state = state;
+    enterPracticeSandbox();
     const client = dsmClient as unknown as Record<string, unknown>;
-    const simulated = simulations(state, (event) => this.listeners.forEach((listener) => listener(event)));
-    for (const key of Object.keys(client)) {
-      const value = client[key];
-      if (typeof value !== 'function' || ALWAYS_REAL.has(key)) continue;
-      if (Object.prototype.hasOwnProperty.call(simulated, key)) {
-        this.originals.set(key, value);
-        client[key] = simulated[key];
-      } else if (STATE_CHANGING.test(key)) {
-        this.originals.set(key, value);
-        client[key] = refused(key);
-      }
+    const answers = simulations(state, (event) => this.listeners.forEach((listener) => listener(event)));
+    for (const key of Object.keys(answers)) {
+      this.originals.set(key, client[key]);
+      client[key] = answers[key];
     }
   }
 
@@ -309,6 +295,7 @@ class PracticeMode {
     });
     this.originals.clear();
     this.state = null;
+    leavePracticeSandbox();
   }
 
   onEvent(listener: (event: PracticeEvent) => void): () => void {

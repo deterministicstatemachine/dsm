@@ -12,59 +12,19 @@
 //! writes and holds equal to the live ingress. A request Rust has no recorded
 //! answer for is the bridge's error, so these tests pass only on Rust's answers.
 
-import { readFileSync } from 'fs';
 import { join } from 'path';
-import * as pb from '../../../proto/dsm_app_pb';
+import { answerFromRustRecord } from '../../../tests/helpers/rustIngressRecord';
 import { dsmClient } from '../../../services/dsmClient';
 import { practiceMode, PRACTICE_CONTACT_ALIAS, PRACTICE_CONTACT_DEVICE_ID } from '../practiceMode';
 
 const client = dsmClient as unknown as Record<string, (...args: any[]) => Promise<any>>;
 
-type RecordedAnswer = { request: Uint8Array; response: Uint8Array };
-
-/** Rust's record: length-prefixed pairs of an IngressRequest and the IngressResponse the JNI handed back. */
-function rustRecord(): RecordedAnswer[] {
-  const bytes = new Uint8Array(readFileSync(join(__dirname, 'fixtures/wallet_amount.ingress.bin')));
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let at = 0;
-  const part = (): Uint8Array => {
-    const length = view.getUint32(at);
-    const out = bytes.slice(at + 4, at + 4 + length);
-    at += 4 + length;
-    return out;
-  };
-  const answers: RecordedAnswer[] = [];
-  while (at < bytes.length) answers.push({ request: part(), response: part() });
-  return answers;
-}
-
-const sameBytes = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.every((v, i) => v === b[i]);
-
-/** The app's bridge, answering the native ingress from Rust's record and nothing else. */
-function answerFromRustRecord(): void {
-  const record = rustRecord();
-  window.DsmBridge = {
-    sendMessageBin: async (bytes: Uint8Array): Promise<Uint8Array> => {
-      const call = pb.BridgeRpcRequest.fromBinary(bytes);
-      const payload = call.payload.case === 'bytes' ? call.payload.value.data : new Uint8Array(0);
-      const answer = call.method === 'nativeBoundaryIngress'
-        ? record.find((recorded) => sameBytes(recorded.request, payload))
-        : undefined;
-      if (!answer) {
-        const message = `Rust has no recorded answer to this ${call.method} request`;
-        return new pb.BridgeRpcResponse({ result: { case: 'error', value: { errorCode: 1, message } } }).toBinary();
-      }
-      return new pb.BridgeRpcResponse({
-        result: { case: 'success', value: { data: new Uint8Array(answer.response) } },
-      }).toBinary();
-    },
-  };
-}
+const RECORD = join(__dirname, 'fixtures/wallet_amount.ingress.bin');
 
 const eraRow = async () => (await client.getAllBalances()).find((r: any) => r.tokenId === 'ERA');
 
 describe('practice mode answers as the real calls do', () => {
-  beforeAll(() => answerFromRustRecord());
+  beforeAll(() => answerFromRustRecord(RECORD));
   beforeEach(() => practiceMode.enter());
   afterEach(() => practiceMode.leave());
 
@@ -99,7 +59,7 @@ describe('practice mode answers as the real calls do', () => {
 });
 
 describe('practice ERA counts as Rust counts ERA', () => {
-  beforeAll(() => answerFromRustRecord());
+  beforeAll(() => answerFromRustRecord(RECORD));
   beforeEach(() => practiceMode.enter());
   afterEach(() => practiceMode.leave());
 
