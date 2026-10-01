@@ -2324,6 +2324,21 @@ This is the owner's beta security pre-audit, item 12 (P1): "cheap garbage must n
 
 **Fix:** commit `96b870fdd` on `security/beta-pre-audit`.
 
+### 6.67 Core decoders bounded by their input, and a transfer nonce spent in its relationship only (`security/core-decoders-and-nonce-scope`, pre-audit items 15 and 5, 2026-10-01)
+
+**Item 15: decoders whose work a count in the bytes decided.**
+- **The operation decoder.** `types/operations.rs` `dec_vec_bytes` preallocated `Vec::with_capacity(n)` from a 4-byte count the sender writes, before any element decoded. A recovery operation claiming `u32::MAX` authority signatures asked for about 103 GB. That is a capacity-overflow panic on a 32-bit target, and on 64-bit an abort wherever the allocator refuses. It is reached through BLE prepare `operation_data` (out of scope this round) and any other operation decode. The vector now grows only as elements decode from bytes in hand.
+- **The proof decoders.** `common/device_tree.rs` `DevTreeProof::from_bytes` and `merkle/sparse_merkle_tree.rs` `SmtInclusionProof::from_bytes` checked `offset + count * 32` in `usize`. On a 32-bit target, count `2^27` wraps that to the input length, and the copies after it index past the input (a panic). The checks are now computed in `u64`.
+- **Tests:** `a_count_the_remaining_bytes_cannot_carry_is_refused`, `a_proof_naming_more_siblings_than_it_carries_is_refused` and `an_inclusion_proof_naming_more_siblings_than_it_carries_is_refused` feed the hostile inputs.
+- **What the dev host cannot show.** The failures were 32-bit or allocator-specific. On this 64-bit macOS host the old code also returned an error for these inputs, because macOS reserves memory lazily, so no mutation turns these tests red there. The fixes are structural: no allocation is sized by an unread count, and no length arithmetic can wrap. An armv7 run of the same tests would show the old behaviour.
+- **Not in this round's scope:** `recovery/capsule.rs` sizes `HashMap::with_capacity` from capsule counts (recovery), and the phone's storage response sizes belong to STORAGE (`storage_node_sdk.rs`, `b0x_sdk.rs`).
+
+**Item 5: a nonce spent across every relationship.**
+- **The finding.** `spent_nonces` and the canonical apply's identity lookup keyed a transfer's nonce by `H(nonce)` alone, across every relationship. A sender's nonce is `H(DSM/nonce ‖ tip ‖ amount ‖ token ‖ recipient)`, and a relationship's first tip derives from public identifiers. So contact Y could predict contact X's first payment to V, send V a small real transfer carrying that nonce, and V would drop X's payment as decided. X is debited, V is never credited, and the relationship stays blocked.
+- **The fix.** The explainer names no nonce rule; replay is refused by the relationship's (relationship, parent) record (MR-DSM-0170). A nonce is now spent under `relationship_nonce_hash(rel_key, nonce) = H(DSM/relationship-nonce/v1 ‖ rel_key ‖ nonce)` in the apply's identity, in `spent_nonces` and in staging. A replay of the same transfer is still refused, because it carries the same nonce in the same relationship. The unused device-wide `is_nonce_spent` and `mark_nonce_spent` are deleted.
+- **Test:** `a_nonce_spent_in_one_relationship_is_not_spent_in_another`.
+- **Mutation control:** `relationship_nonce_hash` made to ignore the relationship key turns that test red.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

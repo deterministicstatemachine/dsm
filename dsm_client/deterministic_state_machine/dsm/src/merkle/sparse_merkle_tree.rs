@@ -634,7 +634,11 @@ impl SmtInclusionProof {
         }
         let count = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
         offset += 4;
-        if data.len() < offset + count * 32 {
+        // In u64: on a 32-bit target `count * 32` wraps for a hostile count,
+        // and a wrapped length would pass this check while the copies below
+        // index past the input.
+        let needed = offset as u64 + count as u64 * 32;
+        if (data.len() as u64) < needed {
             return None;
         }
         let mut siblings = Vec::with_capacity(count);
@@ -645,7 +649,7 @@ impl SmtInclusionProof {
         }
         // Canonical decode requires full byte exhaustion: reject trailing bytes
         // so a proof has exactly one byte encoding. (issue #450)
-        if offset + count * 32 != data.len() {
+        if needed != data.len() as u64 {
             return None;
         }
         Some(SmtInclusionProof {
@@ -664,6 +668,22 @@ impl SmtInclusionProof {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// An inclusion proof that names more siblings than it carries is
+    /// refused. The count `2^27` has a byte length that wraps to 0 on a
+    /// 32-bit target, so a length check in `usize` would accept it there.
+    #[test]
+    fn an_inclusion_proof_naming_more_siblings_than_it_carries_is_refused() {
+        for count in [0x0800_0000u32, u32::MAX] {
+            let mut bytes = vec![0x5A; 32];
+            bytes.push(0x00);
+            bytes.extend_from_slice(&count.to_le_bytes());
+            assert!(
+                SmtInclusionProof::from_bytes(&bytes).is_none(),
+                "count {count:#x}"
+            );
+        }
+    }
 
     /// The tree as it was computed before it kept its nodes: every leaf, split
     /// at each of the 256 levels, on every call. The reference each kept root

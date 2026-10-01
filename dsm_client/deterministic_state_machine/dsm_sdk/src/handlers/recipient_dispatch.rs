@@ -224,7 +224,11 @@ pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRe
     let staged = StagedTransfer {
         op_id: transfer_object_id(&op.to_bytes()),
         sender,
-        nonce_hash: crate::storage::codecs::hash_blake3_bytes(nonce),
+        // Spent in this relationship only, as the apply spends it.
+        nonce_hash: crate::storage::client_db::relationship_nonce_hash(
+            &dsm::core::bilateral_transaction_manager::compute_smt_key(&here, &sender),
+            nonce,
+        ),
         canonical_operation_bytes: req.canonical_operation_bytes,
         signature: req.signature,
     };
