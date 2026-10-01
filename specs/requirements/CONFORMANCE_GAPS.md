@@ -2124,7 +2124,7 @@ Each trade's history row names both of its vaults.
 - **The trade's owner walks from activation: 8–12 s.** Before a draft, each vault's owner lineage is walked from its activation root. Whether a walk records a frontier for a vault owner is the owner's question (DSM Amendment A8).
 - **ByteCommit reads inside each cell read: STORAGE's.** In one node-harness resolution they were 770 of the 980 requests: each seat's latest ByteCommit, mirrors and proofs, read again for every cell. A read of one member's ByteCommit at one height could be kept the same way.
 
-### 6.61 A trade's independent reads and writes overlap; a storage node aborts concurrent object puts (`perf/sofi-trade-read-once-and-overlap`, 2026-10-01)
+### 6.61 A trade's independent reads and writes overlap (`perf/sofi-trade-read-once-and-overlap`, 2026-10-01)
 
 **Where the 27 s went.** The rig's chain trade at position 16 (§6.60) broke down as follows:
 - **8.5 s** walking both vault owners' lineages from activation, one after the other.
@@ -2140,7 +2140,7 @@ The owner chose to overlap the independent pieces before touching settlement sem
 - **Each leg's exercise is written at once** (`sofi_exercise::write_exercise`). P's legs name strictly ascending vault ids (`TraderPrecommitBody`, R15-4), so every leg is its own cell on its own route. A cell put takes a per-key advisory lock at READ COMMITTED. The writes come back in the order F names them.
 - **An object fetch keeps the first answer whose bytes re-hash to the address** (`SetClient::fetch_verified`). Every member is still asked at once, but the slowest member is no longer waited for. Any bytes that re-hash are the object's bytes, so which member served them changes nothing.
 
-**Withdrawn: publishing a produced operation's objects at once.** Every object a trade publishes has its own locators, so no index's append order depended on the order of publication. But the trade failed. The members answered some puts with HTTP 500, too few members held the object, and `Stored` was refused. The cause is the storage-node finding below.
+**Withdrawn: publishing a produced operation's objects at once.** Every object a trade publishes has its own locators, so no index's append order depended on the order of publication. But the trade failed. The members answered some puts with HTTP 500, too few members held the object, and `Stored` was refused. The cause is the node's concurrent-put abort, set out below.
 
 **Test.** `dsm_sdk::sdk::storage_node_sdk::tests::a_fetch_passes_over_a_member_that_answers_first_with_other_bytes`.
 - The first member is replaced by a responder that answers at once with other bytes under the object's namespace.
@@ -2151,18 +2151,14 @@ Mutation (2026-10-01, restored byte for byte): the re-hash check was reduced to 
 
 The concurrent walks and leg writes run in every node-suite trade, chain and split.
 
-**Finding: a storage node aborts concurrent object puts (open; STORAGE's).**
+**Why publication was withdrawn: the storage node's concurrent-put abort, which is STORAGE's.** The node runs each immutable put as a SERIALIZABLE transaction and does not retry on SQLSTATE 40001 (`dsm_storage_node/src/db/pg.rs` · `insert_immutable_object_if_absent`). It answers the aborted put with HTTP 500.
 
-| Field | Record |
-|---|---|
-| Severity | High: availability under concurrent load |
-| Files | `dsm_storage_node/src/db/pg.rs` · `insert_immutable_object_if_absent` (l. 538); `api/objects/immutable.rs` (the 500 at l. 131) |
-| Failure mode | Each put runs as a SERIALIZABLE transaction: `SELECT … FOR UPDATE`, then `INSERT`. There is no retry on SQLSTATE 40001. Under serializable isolation, Postgres aborts concurrent inserts, even of different addresses ("could not serialize access due to read/write dependencies among transactions"), and the node answers 500. When an object ends up held by fewer than three members, it is not `Stored`, and the operation that needed it fails closed. This applies whether the puts come from one client or from several. |
-| Requirement | The storage failure model allows a node to omit messages, and object misresponses affect availability only. So this is an implementation defect in availability, not a protocol violation. Ordinary concurrency causes the omissions, and the 3-of-5 `Stored` rule (§5 rule 6) turns them into failed operations. |
-| Verification | Verified by probe, on one node over the shipped Postgres backend. Of 16 distinct objects put concurrently, 6 were refused with 500. Of the same number put one at a time, none were refused. The Postgres log gained exactly 6 serialization failures. All 276 such failures in the local log are on this insert or its commit, and they date back to 2026-09-25, before this branch. |
-| Closure condition | The node either retries the transaction on 40001 (bounded) or inserts idempotently at READ COMMITTED (`INSERT … ON CONFLICT DO NOTHING`, then compare what is held). The fleet is redeployed. |
-| Evidence required | A test that puts concurrent distinct objects at one node and requires every one to be taken, and that goes red under a mutation removing the retry or restoring the abort. |
-| Fix | Not here. Reported to STORAGE through CORE, 2026-10-01. |
+A probe on one node over the shipped Postgres backend:
+- 16 distinct objects put concurrently: 6 refused.
+- The same objects put one at a time: none refused.
+- The Postgres log gained exactly 6 serialization failures.
+
+STORAGE owns the finding and its fix, the concurrent-distinct-puts test and the mutation control. They record it on their branch for the combined security PR (2026-10-01). Publishing at once comes back once the fixed node is deployed.
 
 **On the rig** (three phones, APK = this branch, the GCP fleet). Phone C traded twice.
 
