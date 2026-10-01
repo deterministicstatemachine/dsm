@@ -16,6 +16,9 @@ import * as pb from '../proto/dsm_app_pb';
 import * as dsm from '../dsm/index';
 import { emit, initializeEventBridge } from '../dsm/EventBridge';
 import { encodeBase32Crockford } from '../utils/textId';
+
+/** The contact the sends name: Bob, by his device id. */
+const BOB_DEVICE_ID = encodeBase32Crockford(new Uint8Array(32).fill(0xb0));
 import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 
 // ─────────────────────────── Constants ───────────────────────────
@@ -268,14 +271,14 @@ describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send sc
     onlineTransferOverride = () => makeOnlineResponseEnvelope(true, 'transfer ok', 500n);
 
     // A unique amount per test avoids dedup.
-    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(1000 + testIndex), undefined, 'ERA');
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(1000 + testIndex), undefined, 'ERA');
     expect(res.success).toBe(true);
   });
 
   test('failure response returns success=false when inner OnlineTransferResponse.success=false', async () => {
     onlineTransferOverride = () => makeOnlineResponseEnvelope(false, 'insufficient funds', 0n);
 
-    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(2000 + testIndex), undefined, 'ERA');
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(2000 + testIndex), undefined, 'ERA');
     expect(res.success).toBe(false);
     expect(res.message).toContain('insufficient funds');
   });
@@ -292,7 +295,7 @@ describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send sc
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(3000 + testIndex), undefined, 'ERA');
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(3000 + testIndex), undefined, 'ERA');
     expect(res.success).toBe(false);
     expect(String(res.message)).toMatch(/internal error|DSM error/);
   });
@@ -309,7 +312,7 @@ describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send sc
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(4000 + testIndex), undefined, 'ERA');
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(4000 + testIndex), undefined, 'ERA');
     expect(res.success).toBe(false);
     expect(String(res.message)).toMatch(/Expected onlineTransferResponse|unexpected/i);
   });
@@ -328,7 +331,7 @@ describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send sc
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransferSmart('bob', BigInt(5000 + testIndex), undefined, 'ERA');
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(5000 + testIndex), undefined, 'ERA');
     expect(res.success).toBe(false);
     expect(String(res.message)).toContain('quota exceeded');
   });

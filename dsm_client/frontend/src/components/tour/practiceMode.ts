@@ -35,6 +35,8 @@ const PAD = '0'.repeat(52);
 const practiceId = (stem: string): string => (stem + PAD).slice(0, 52);
 
 export const PRACTICE_CONTACT_ALIAS = 'alice';
+/** The practice contact's device id: what the send screen names a recipient by. */
+export const PRACTICE_CONTACT_DEVICE_ID = practiceId('PRACT1CEA11CE');
 export const PRACTICE_FAUCET_AMOUNT = 100;
 
 type PracticeState = {
@@ -58,7 +60,7 @@ function freshState(): PracticeState {
     contacts: [
       {
         alias: PRACTICE_CONTACT_ALIAS,
-        deviceId: practiceId('PRACT1CEA11CE'),
+        deviceId: PRACTICE_CONTACT_DEVICE_ID,
         genesisHash: practiceId('PRACT1CEA11CEGENES1S'),
         signingPublicKey: practiceId('PRACT1CEA11CEKEY'),
         // Practice contacts are never paired over BLE.
@@ -126,7 +128,7 @@ function recordSend(state: PracticeState, to: string, tokenId: string, amount: s
   state.sequence += 1;
   const txId = `practice-${state.sequence}`;
   const units = wholeAmount(amount) ?? BigInt(0);
-  const contact = state.contacts.find((c) => c.alias === to || c.deviceId === to);
+  const contact = state.contacts.find((c) => c.deviceId === to);
   state.history = [
     {
       txId,
@@ -156,14 +158,14 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
     getAllBalances: async () => state.balances.map((b) => ({ ...b })),
     getContacts: async () => ({ contacts: state.contacts.map((c) => ({ ...c })) }),
     getWalletHistory: async () => ({ transactions: [...state.history] }),
-    sendOnlineTransferSmart: async (recipientAlias: string, scaledAmountStr: string | number | bigint, memo?: string, tokenId?: string) => {
+    sendOnlineTransferSmart: async (recipientDeviceId: string, scaledAmountStr: string | number | bigint, memo?: string, tokenId?: string) => {
       await pause(700);
       // As Rust answers: a send that names no token is refused, never sent as ERA.
       if (!tokenId) return { success: false, message: 'wallet.sendSmart: the request names no token' };
       const token = tokenId;
       const result = debit(state, token, scaledAmountStr);
       if (!result.ok) return { success: false, error: { message: result.message } };
-      recordSend(state, recipientAlias, token, scaledAmountStr, memo, 'online');
+      recordSend(state, recipientDeviceId, token, scaledAmountStr, memo, 'online');
       emit('sent');
       return { success: true, newBalance: result.balance };
     },

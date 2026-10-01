@@ -3382,10 +3382,17 @@ message RelationshipFinalizedV1 {
 }
 
 message OnlineTransferSmartRequest {
-  string recipient = 1; // Alias or Base32 ID
+  // The recipient was once named by alias or Base32 text. An alias is a label
+  // two contacts can share, so a send named by one could pay the wrong contact
+  // (pre-audit item 6, CONFORMANCE §6.63).
+  reserved 1;
+  reserved "recipient";
   string amount = 2; // Decimal string
   string token_id = 3;
   string memo = 4;
+  // The contact the user chose, by its device id: the one identity a contact
+  // is keyed by.
+  bytes recipient_device_id = 5 [(dsm_fixed_len)=32];
 }
 
 // wallet.sendOffline: what the user asked for, and nothing the SDK works out
