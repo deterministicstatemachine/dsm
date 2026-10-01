@@ -110,11 +110,10 @@ async fn put_immutable(
         let expected_bytes = dsm::utils::text_id::decode_base32_crockford(expected.trim())
             .ok_or(StatusCode::BAD_REQUEST)?;
         if expected_bytes != addr {
+            // The caller's text is not logged: what it sent is its own, and
+            // the node's log records only what the node computed.
             log::warn!(
-                "immutable put: expected-addr mismatch (caller encoder disagrees): \
-                 expected={} computed={}",
-                expected,
-                addr_b32
+                "immutable put: expected-addr mismatch (caller encoder disagrees): computed={addr_b32}"
             );
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }

@@ -60,7 +60,7 @@ echo "==> [3/5] Waiting for SSH readiness..."
 MAX_WAIT=300
 for IP in "${IPS_ARRAY[@]}"; do
     ELAPSED=0; printf "    Waiting for %s..." "${IP}"
-    while ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+    while ! ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes \
           -i "${SSH_KEY}" "ubuntu@${IP}" "test -f /opt/dsm-storage/.bootstrap-done" 2>/dev/null; do
         sleep 5; ELAPSED=$((ELAPSED + 5))
         [ "${ELAPSED}" -ge "${MAX_WAIT}" ] && echo " TIMEOUT" && exit 1
