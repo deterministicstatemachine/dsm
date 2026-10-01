@@ -512,8 +512,8 @@ async fn verify_schema_layout(client: &deadpool_postgres::Object) -> Result<()> 
 /// `require_durable_commit_posture` additionally refuses to
 /// start a node whose server-level settings could defeat this.
 ///
-/// Cell, index, ByteCommit, mirror and spool writes go through this function; the
-/// immutable store's serializable transaction sets the same posture itself.
+/// Cell, index, ByteCommit, mirror, immutable and spool writes go through
+/// this function.
 async fn begin_durable_write(
     client: &mut deadpool_postgres::Client,
 ) -> Result<deadpool_postgres::Transaction<'_>> {
@@ -541,47 +541,36 @@ pub async fn insert_immutable_object_if_absent(
     namespace: &[u8],
     payload: &[u8],
 ) -> Result<ImmutablePutOutcome> {
-    use tokio_postgres::IsolationLevel;
-
+    // Read committed and idempotent: the insert takes the address only if no
+    // tuple holds it, and a put that finds it held reads what is there. Two
+    // puts of different objects never contend, and two puts at one address
+    // wait for each other at the insert, so no put fails for having run
+    // beside another (a serializable put did, under concurrent load).
     let mut client = pool.get().await?;
-    let tx = client
-        .build_transaction()
-        .isolation_level(IsolationLevel::Serializable)
-        .start()
-        .await?;
-    tx.batch_execute("SET LOCAL synchronous_commit = on")
-        .await?;
-
-    let row = tx
-        .query_opt(
-            "SELECT namespace, payload FROM immutable_objects WHERE addr_b32 = $1 FOR UPDATE",
-            &[&addr_b32],
+    let tx = begin_durable_write(&mut client).await?;
+    let inserted = tx
+        .execute(
+            "INSERT INTO immutable_objects (addr_b32, namespace, payload)
+             VALUES ($1, $2, $3) ON CONFLICT (addr_b32) DO NOTHING",
+            &[&addr_b32, &namespace, &payload],
         )
         .await?;
-
-    let outcome = match row {
-        Some(r) => {
-            let ns: Vec<u8> = r.get(0);
-            let pl: Vec<u8> = r.get(1);
-            if ns == namespace && pl == payload {
-                ImmutablePutOutcome::AlreadyExistsIdentical
-            } else {
-                ImmutablePutOutcome::Conflict
-            }
-        }
-        None => {
-            let stmt = tx
-                .prepare_cached(
-                    "INSERT INTO immutable_objects (addr_b32, namespace, payload)
-                     VALUES ($1, $2, $3)",
-                )
-                .await?;
-            tx.execute(&stmt, &[&addr_b32, &namespace, &payload])
-                .await?;
-            ImmutablePutOutcome::Inserted
+    let outcome = if inserted == 1 {
+        ImmutablePutOutcome::Inserted
+    } else {
+        let held = tx
+            .query_one(
+                "SELECT namespace, payload FROM immutable_objects WHERE addr_b32 = $1",
+                &[&addr_b32],
+            )
+            .await?;
+        let (ns, pl): (Vec<u8>, Vec<u8>) = (held.get(0), held.get(1));
+        if ns == namespace && pl == payload {
+            ImmutablePutOutcome::AlreadyExistsIdentical
+        } else {
+            ImmutablePutOutcome::Conflict
         }
     };
-
     tx.commit().await?;
     Ok(outcome)
 }
