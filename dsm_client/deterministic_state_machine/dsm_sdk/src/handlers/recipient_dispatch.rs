@@ -685,7 +685,11 @@ mod tests {
         let sealed = crate::sdk::b0x_sdk::kept_seal(original_id).expect("A kept the sealed send");
         p.b.enter();
         let outer = dsm::envelope::from_canonical_bytes(&sealed).expect("the sealed envelope");
-        let mut inner = crate::sdk::b0x_sdk::open_sealed(&outer).expect("B opens it");
+        let mut inner = crate::sdk::b0x_sdk::open_sealed(
+            &crate::sdk::b0x_sdk::local_kyber_secret().expect("B's key"),
+            &outer,
+        )
+        .expect("B opens it");
         let id = crate::util::text_id::decode_base32_crockford(message_id).expect("a Base32 id");
         inner.message_id = id.clone();
         let Some(pb::envelope::Payload::UniversalTx(tx)) = &mut inner.payload else {

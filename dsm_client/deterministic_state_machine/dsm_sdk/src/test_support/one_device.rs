@@ -26,7 +26,7 @@ impl Device {
     pub async fn start(seed: u8) -> Self {
         economic_fixtures::use_test_storage_dir();
         let nodes = NodeSet::start().await;
-        let fleet = economic_fixtures::point_sdk_at(&nodes.members());
+        let fleet = economic_fixtures::point_sdk_at(&nodes.members(), nodes.ca_pem());
         let (router, identity) = economic_fixtures::empty_router_with(&fleet, seed, false).await;
         Self {
             nodes,
@@ -75,7 +75,7 @@ impl Fleet {
         let nodes = std::thread::spawn(|| crate::runtime::get_runtime().block_on(NodeSet::start()))
             .join()
             .expect("start the nodes");
-        let config = economic_fixtures::point_sdk_at(&nodes.members());
+        let config = economic_fixtures::point_sdk_at(&nodes.members(), nodes.ca_pem());
         Self { nodes, config }
     }
 

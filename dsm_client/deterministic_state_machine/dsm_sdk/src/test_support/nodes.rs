@@ -9,7 +9,11 @@
 //! is checked at start-up against the register incarnation its database holds,
 //! and it serves exactly the app the binary serves
 //! (`dsm_storage_node::build_app`, with the deployed fleet's limits), bound to
-//! a local port.
+//! a local port over TLS, as the binary serves it. Each node set has a CA of
+//! its own, and each node a certificate from it naming its member and the
+//! loopback address it is served at, as the fleet's certificates name their
+//! member and IP (`dsm_storage_node/deploy/generate_node_configs.sh`). A
+//! device trusts that CA and nothing else ([`NodeSet::ca_pem`]).
 //!
 //! The nodes are the network's pinned register members, one node each. A node
 //! draws its incarnation when it first starts on an empty database; these
@@ -128,8 +132,60 @@ async fn restore_incarnation(pool: &db::DBPool, incarnation: &[u8; 32]) {
 
 /// A node's serving task and the signal that stops it.
 struct Serving {
-    stop: Arc<tokio::sync::Notify>,
+    handle: axum_server::Handle<SocketAddr>,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// A node set's CA: it issues every node's certificate, every set-mate is
+/// pinned to it, and a device trusts it and nothing else.
+struct TestCa {
+    issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
+    pem: Vec<u8>,
+}
+
+impl TestCa {
+    fn new() -> Self {
+        let key = rcgen::KeyPair::generate().expect("the CA's key");
+        let mut params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("the CA's parameters");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "DSM-Storage-CA (test node set)");
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let pem = params
+            .self_signed(&key)
+            .expect("the CA's certificate")
+            .pem();
+        Self {
+            issuer: rcgen::Issuer::new(params, key),
+            pem: pem.into_bytes(),
+        }
+    }
+
+    /// The TLS a node serves `member_id` with: a certificate from this CA
+    /// naming the member, as a DNS name, and the loopback address.
+    async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
+        let key = rcgen::KeyPair::generate().expect("the node's key");
+        let mut params =
+            rcgen::CertificateParams::new(vec![member_id.to_string(), "127.0.0.1".to_string()])
+                .expect("the node's parameters");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, member_id);
+        let cert = params
+            .signed_by(&key, &self.issuer)
+            .expect("the node's certificate");
+        axum_server::tls_rustls::RustlsConfig::from_pem(
+            cert.pem().into_bytes(),
+            key.serialize_pem().into_bytes(),
+        )
+        .await
+        .expect("the node's TLS")
+    }
 }
 
 /// Serve the binary's app for `state` on `listener` until stopped. Every
@@ -137,6 +193,7 @@ struct Serving {
 /// and the path: what an operator of this node can see the node was asked.
 fn serve(
     listener: tokio::net::TcpListener,
+    tls: axum_server::tls_rustls::RustlsConfig,
     state: Arc<AppState>,
     requests: Arc<Mutex<Vec<String>>>,
 ) -> Serving {
@@ -154,15 +211,18 @@ fn serve(
                 }
             },
         ));
-    let stop = Arc::new(tokio::sync::Notify::new());
-    let signal = stop.clone();
+    let handle = axum_server::Handle::new();
+    let server =
+        axum_server::from_tcp_rustls(listener.into_std().expect("the node's listener"), tls)
+            .expect("the node's TLS server")
+            .handle(handle.clone());
     let task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move { signal.notified().await })
+        server
+            .serve(app.into_make_service())
             .await
             .expect("serve node");
     });
-    Serving { stop, task }
+    Serving { handle, task }
 }
 
 /// One node.
@@ -171,6 +231,7 @@ pub struct Node {
     pub endpoint: String,
     pub incarnation: [u8; 32],
     address: SocketAddr,
+    tls: axum_server::tls_rustls::RustlsConfig,
     state: Arc<AppState>,
     serving: Option<Serving>,
     requests: Arc<Mutex<Vec<String>>>,
@@ -227,7 +288,7 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         if let Some(serving) = self.serving.take() {
-            serving.stop.notify_one();
+            serving.handle.shutdown();
         }
     }
 }
@@ -235,6 +296,7 @@ impl Drop for Node {
 /// The network's pinned register members, one node each.
 pub struct NodeSet {
     pub nodes: Vec<Node>,
+    ca_pem: Vec<u8>,
 }
 
 /// The process's rustls provider, installed as the node binary's `main`
@@ -306,12 +368,9 @@ impl NodeSet {
             .map(|p| (p.member_id.clone(), endpoint_of(&p.address)))
             .collect();
 
-        // The set's CA, the one anchor every member pins its peers to.
-        let set_ca_pem = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .expect("generate the set's CA")
-            .cert
-            .pem()
-            .into_bytes();
+        // The set's CA: it issues every node's certificate, and every member
+        // pins its peers to it.
+        let ca = TestCa::new();
 
         // Phase 2: each node, with the set checked against its own register,
         // serving the binary's app.
@@ -326,24 +385,36 @@ impl NodeSet {
                 AppState::new(
                     p.member_id.clone(),
                     p.pool,
-                    set_client::pinned_set_client(&set_ca_pem).expect("pinned set client"),
+                    set_client::pinned_set_client(&ca.pem).expect("pinned set client"),
                 )
                 .expect("app state")
                 .with_storage_set(set),
             );
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let serving = serve(p.listener, state.clone(), requests.clone());
+            let tls = ca.tls_for(&p.member_id).await;
+            let serving = serve(p.listener, tls.clone(), state.clone(), requests.clone());
             nodes.push(Node {
                 member_id: p.member_id,
                 endpoint,
                 incarnation: p.incarnation,
                 address: p.address,
+                tls,
                 state,
                 serving: Some(serving),
                 requests,
             });
         }
-        Self { nodes }
+        Self {
+            nodes,
+            ca_pem: ca.pem,
+        }
+    }
+
+    /// The PEM of this node set's CA: what a device's env config names in
+    /// `custom_ca_certs` to reach these nodes, as the bundled config names the
+    /// fleet's.
+    pub fn ca_pem(&self) -> &[u8] {
+        &self.ca_pem
     }
 
     /// Every node as `(member id, endpoint, register incarnation)`, in pin
@@ -368,7 +439,7 @@ impl NodeSet {
                 .serving
                 .take()
                 .unwrap_or_else(|| panic!("node {member_id} is already down"));
-            serving.stop.notify_one();
+            serving.handle.shutdown();
             serving.task.await.expect("node task");
         }
     }
@@ -382,7 +453,12 @@ impl NodeSet {
             let listener = tokio::net::TcpListener::bind(node.address)
                 .await
                 .expect("rebind node address");
-            node.serving = Some(serve(listener, node.state.clone(), node.requests.clone()));
+            node.serving = Some(serve(
+                listener,
+                node.tls.clone(),
+                node.state.clone(),
+                node.requests.clone(),
+            ));
         }
     }
 
@@ -499,5 +575,5 @@ struct Prepared {
 }
 
 fn endpoint_of(address: &SocketAddr) -> String {
-    format!("http://{address}")
+    format!("https://{address}")
 }

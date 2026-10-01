@@ -2054,6 +2054,54 @@ The quote took 20 s.
 - **The chain walk of a vault the trade consumed, about 19 s.** Two passes over the sibling leg re-read the same four or five cells about four times each.
 - **Establishing the facts, 2.7 s.**
 
+### 6.62 Security pre-audit, storage: what a client can hold on a node, who a member is, and an inbox junk cannot wedge (`fix/storage-dos-and-transport-hardening`, 2026-10-01)
+
+CORE's pre-audit at main 076792eac assigned items 7, 8, 10 and 11 to storage (owner, 2026-10-01: reduce the unknowns, build adversarial tests, close what is provably wrong). Each gate below was mutation-tested: the gate was removed, the named test went red, and the gate was restored.
+
+**Item 10, the node.**
+
+| What was wrong | Now | Test | Mutation control |
+|---|---|---|---|
+| `ConcurrencyLimitLayer` on an axum router is one limit per route | One `GlobalConcurrencyLimitLayer` for the node | `dsm_storage_node::resource_limits::one_count_of_requests_in_flight_holds_across_every_route` | per-route limit → red |
+| No request or body timeout | `TimeoutLayer` outside the limit (408), `[http] request_timeout_secs` | `…::a_request_whose_body_never_arrives_is_answered_408` | disabled → red |
+| No header-read bound; axum-server gave hyper no timer, so no bound could be kept | `bound_connections`: a timer and a header-read bound, `[http] header_read_timeout_secs` | `…::a_connection_that_never_finishes_its_headers_is_closed` | no bound → red; no timer → red (hyper drops the connection at once, which the test refuses as too early) |
+| No pool bound; queued closers each held a connection waiting on the advisory lock | Pool of 32 with a 10 s wait; closers queue on `AppState::closing` before taking a connection | `…::closers_waiting_their_turn_leave_the_pool_to_everyone_else` | lock taken and dropped → red |
+| A set-mate's answer was read unbounded | Read no further than the largest `ByteCommitV4` (221 bytes, from its fields) | `dsm_storage_node::bytecommit_chain::a_set_mate_whose_answer_never_ends_is_read_no_further_than_a_byte_commit` | uncapped → red |
+| Concurrent immutable puts of different objects failed with 500 (SERIALIZABLE, no retry on 40001); measured by SOFI, 6 of 16 | Read committed, `ON CONFLICT DO NOTHING`, then the held tuple is read to tell identical from conflicting | `dsm_storage_node::immutable_store_round_trip::puts_made_at_once_are_each_taken` | the serializable put → red, 29 of 64 refused |
+| Health answered the Postgres driver's error text | `postgres unavailable`; the error is logged | `dsm_storage_node::health::the_health_route_answers_ok_only_over_a_live_postgres` | old text → red |
+| A spool key was kept as the writer spelled it; Base32 Crockford reads several spellings as one key | Kept under its canonical spelling | `dsm_storage_node::api::transport::b0x::tests::a_message_sent_under_another_spelling_of_its_key_reaches_its_spool` | raw key → red |
+
+Also, without a dedicated test:
+- the store-wide SMT builds for a close and a proof run on `spawn_blocking`;
+- the mirror write goes through `begin_durable_write`;
+- the immutable put logs no caller header text;
+- deploy: SSH `accept-new`; `node.key` owned by the image's uid and gid at 600, not 644; both services' logs rotate (5 × 50 MB).
+
+The timeouts are `Duration`s handed to the HTTP and pool libraries. `no_clock_reads` stays green.
+
+**Items 7 and 8, the device.**
+- `https://` only: in the env config loader, and in every member client (`storage_node_sdk::require_https`).
+- Each member client trusts only the CAs the env config names, with no system store. It accepts only a certificate that names the member id as a DNS subject alternative name, whatever address it dialled (`NamesTheMember`). `MemberClient::new(member_id, endpoint)` builds its own client, so a member's name and the identity its connection checks cannot disagree. The inbox client holds one such client per member endpoint.
+- The SDK test harness serves its nodes over TLS from a per-set CA, each certificate naming its member and `127.0.0.1`, as the fleet's do; there is no localhost exception. The five live fleet certificates were read in a TLS handshake (2026-10-01): each carries `DNS:dsm-node-N` for its own member, issued by `DSM-Storage-CA`.
+- Tests:
+  - `dsm_sdk::sdk::storage_node_sdk::tests::a_members_latest_bytecommit_is_its_own_or_there_is_none`: a client for `dsm-node-2` at `dsm-node-1`'s node is refused on the certificate before any request. Mutation: verifying the dialled address → red.
+  - `dsm_sdk::network::tests::an_endpoint_that_is_not_https_is_refused` and `dsm_sdk::sdk::storage_node_sdk::tests::a_member_endpoint_that_is_not_https_gets_no_client`. Mutation: `http://` accepted → both red.
+  - `…::no_client_is_built_without_a_named_ca_or_for_an_unnameable_member`.
+- Transport errors now carry their causes, so a refused certificate says why.
+
+**Item 11, the inbox.**
+- A node-supplied spool position is read only when a spool could hold it (`B0xSDK::position_after`): `u64::MAX + 1` panicked the poller task, and a position past `i64::MAX` aborted the whole read. Test: `dsm_sdk::sdk::b0x_sdk::tests::a_position_past_what_a_spool_can_hold_is_none`. Mutation: unchecked → red.
+- An envelope that does not open with this device's key is passed over like bytes that are not an envelope, so it no longer stops the read position for good. The key is derived once per read; an unavailable key fails the read as this device's state. Test: `…::what_never_opens_for_this_device_holds_up_nothing_behind_it`. Mutation: no advance → red.
+- The poller's running flag is cleared however its task ends. Test: `dsm_sdk::sdk::inbox_poller::tests::a_poller_that_panics_is_no_longer_running`. Mutation: never cleared → red.
+
+**Open, for the owner (not built):**
+- **Paging the cell GET.** It contradicts MR-STOR-0029, "a get returns everything".
+- **Write budgets** per key, per source or global. The credits and spend-gate subsystems are Missing.
+- **Capping the mirror's distinct ByteCommits per member and cycle.** Spec §14 rule 6 keeps every one.
+- **Committing the CA with the storage set.** It is configured today.
+
+**Open, SOFI's sync design:** in `pull_and_process_inbox`, an entry that never becomes a transfer counts against the sync's limit and is never consumed. Routes the limit leaves unread are not reported, and reporting them would make every limit-capped sync fail (`inbox_incomplete` stops the sync). Both depend on what a limit-capped sync means.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

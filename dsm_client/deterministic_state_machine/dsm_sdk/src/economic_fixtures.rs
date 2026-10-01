@@ -79,6 +79,7 @@ pub fn whole_era(whole: u64) -> u64 {
 /// own nodes fails to load a config rather than reaching this set's.
 pub struct FleetGuard {
     config_path: std::path::PathBuf,
+    ca_path: std::path::PathBuf,
 }
 
 impl FleetGuard {
@@ -95,11 +96,10 @@ impl FleetGuard {
 
 impl Drop for FleetGuard {
     fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.config_path) {
-            eprintln!(
-                "fleet config {} was not removed: {e}",
-                self.config_path.display()
-            );
+        for path in [&self.config_path, &self.ca_path] {
+            if let Err(e) = std::fs::remove_file(path) {
+                eprintln!("fleet config {} was not removed: {e}", path.display());
+            }
         }
     }
 }
@@ -108,12 +108,18 @@ impl Drop for FleetGuard {
 /// `(member id, endpoint, register incarnation)`, in pin order — what
 /// `NodeSet::members` reports. The config lives at one path for the process;
 /// the loader reads it on every load, so each test's nodes replace the last.
-pub fn point_sdk_at(members: &[(String, String, [u8; 32])]) -> FleetGuard {
+pub fn point_sdk_at(members: &[(String, String, [u8; 32])], ca_pem: &[u8]) -> FleetGuard {
     let config_path =
         std::env::temp_dir().join(format!("dsm_sdk_fleet_{}.toml", std::process::id()));
-    let mut cfg = String::from(
+    // The fleet's CA beside the config, named relative to it, as the bundled
+    // config names the CA bundled beside it.
+    let ca_name = format!("dsm_sdk_fleet_{}.ca.pem", std::process::id());
+    let ca_path = std::env::temp_dir().join(&ca_name);
+    std::fs::write(&ca_path, ca_pem).expect("write the fleet's CA");
+    let mut cfg = format!(
         "allow_localhost = true\n\
-         bitcoin_network = \"signet\"\n",
+         bitcoin_network = \"signet\"\n\
+         custom_ca_certs = [\"{ca_name}\"]\n"
     );
     for (member_id, endpoint, incarnation) in members {
         cfg.push_str(&format!(
@@ -130,7 +136,10 @@ pub fn point_sdk_at(members: &[(String, String, [u8; 32])]) -> FleetGuard {
         Some(path_text.as_str()),
         "the env config path was set to another file first"
     );
-    FleetGuard { config_path }
+    FleetGuard {
+        config_path,
+        ca_path,
+    }
 }
 
 /// The network's PINNED root-register member ids, in pin order.

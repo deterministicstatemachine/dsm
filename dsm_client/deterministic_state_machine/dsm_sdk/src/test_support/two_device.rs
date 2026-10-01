@@ -337,7 +337,7 @@ impl Pair {
         // Fresh nodes per pair: each test gets empty registers, so no earlier
         // test's claims sit where this one will write.
         let nodes = NodeSet::start().await;
-        let fleet = economic_fixtures::point_sdk_at(&nodes.members());
+        let fleet = economic_fixtures::point_sdk_at(&nodes.members(), nodes.ca_pem());
         let mut a = TestDevice::create("A", 0x0A);
         let mut b = TestDevice::create("B", 0x0B);
         a.boot(&fleet).await;
