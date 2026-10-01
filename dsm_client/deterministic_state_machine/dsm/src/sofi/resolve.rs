@@ -1846,21 +1846,20 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(establish(&reads))
     }
 
-    /// The conditional parent `exercise`'s `P` names, resolved: this
-    /// verifier's own resolution when it is the one `P` names, and otherwise
-    /// the root the trader's lineage selected at that position, by
-    /// frontier-relative verification of the lineage (DSM Amendment A8; SoFi
-    /// Amendment S15). `None` for a single-root parent, which needs no
-    /// resolution, and for a conditional one the reads do not establish:
-    /// the facts then report it unresolved, and nothing is refuted.
+    /// What the trader's lineage holds at the position `exercise`'s `P`
+    /// names as its parent — the claim final at its `K_root(p)` and the root
+    /// that claim installed — as this verifier establishes it: its own
+    /// admitted position when that is the claim `P` names, and otherwise the
+    /// frontier-relative walk of the trader's lineage (DSM Amendment A8; SoFi
+    /// Amendment S15). Whether what is held is what `P` names is the facts'
+    /// to decide (§6.62). `None` while the reads do not establish the lineage
+    /// at that position: the facts then report the parent unresolved, and
+    /// nothing is refuted.
     fn parent_for(&self, exercise: &RecognizedExercise) -> Option<ResolvedParent> {
         let precommit = &exercise.precommit().body;
-        let ParentClaimRef::Conditional { fulfillment_id } = precommit.parent_claim_ref() else {
-            return None;
-        };
         let position = precommit.position();
         if let Some(own) = self.parent {
-            if own.fulfillment_id == *fulfillment_id && own.economic_position == position {
+            if own.named == *precommit.parent_claim_ref() && own.economic_position == position {
                 return Some(own);
             }
         }
@@ -1868,9 +1867,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             .reads
             .trader_root_at(precommit.genesis(), precommit.device_id(), position)
         {
-            Ok((root, named)) => parent_named(
+            Ok((root, named)) => held_at(
                 position,
-                fulfillment_id,
                 root.economic_position(),
                 root.economic_root(),
                 named,
@@ -1881,27 +1879,21 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     }
 }
 
-/// The parent a `P` at `position` names by `fulfillment_id`, when the trader's
-/// lineage, verified to that position, selected `root` at `root_position` and
-/// is named there by `named`: only the very position `P` names, held by that
-/// very fulfillment, resolves it. Anything else is not the parent `P` names.
-fn parent_named(
+/// What a trader's lineage holds at `position`, from a walk that reached
+/// `root_position`: the claim `named` final there and the `root` it
+/// installed. A walk that reached another position holds nothing at this
+/// one.
+fn held_at(
     position: u64,
-    fulfillment_id: &D32,
     root_position: u64,
     root: D32,
     named: ParentClaimRef,
 ) -> Option<ResolvedParent> {
-    match named {
-        ParentClaimRef::Conditional {
-            fulfillment_id: held,
-        } if held == *fulfillment_id && root_position == position => Some(ResolvedParent {
-            economic_position: position,
-            selected_root: root,
-            fulfillment_id: *fulfillment_id,
-        }),
-        ParentClaimRef::Conditional { .. } | ParentClaimRef::SingleRoot { .. } => None,
-    }
+    (root_position == position).then_some(ResolvedParent {
+        economic_position: position,
+        selected_root: root,
+        named,
+    })
 }
 
 /// Resolves another trader's conditional position for a frontier-relative
@@ -1930,17 +1922,15 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
         ),
         PeerLineageFailure,
     > {
-        // When `q − 1` was itself a SoFi position, the walk resolved it and
-        // `previous` is the root that resolution selected: what a `P` naming
-        // that fulfillment as its parent was built on.
-        let resolved = match parent {
-            ParentClaimRef::Conditional { fulfillment_id } => Some(ResolvedParent {
-                economic_position: previous.economic_position(),
-                selected_root: previous.economic_root(),
-                fulfillment_id: *fulfillment_id,
-            }),
-            ParentClaimRef::SingleRoot { .. } => None,
-        };
+        // The walk authenticated `q − 1` itself: `parent` is the claim it
+        // accepted there and `previous` the root it holds — for a SoFi
+        // position, the root that resolution selected. What a `P` at `q`
+        // names as its parent is compared against exactly that (§6.62).
+        let resolved = Some(ResolvedParent {
+            economic_position: previous.economic_position(),
+            selected_root: previous.economic_root(),
+            named: *parent,
+        });
         let verifier = Verifier::new(
             self.reads,
             self.members,
@@ -2136,38 +2126,34 @@ mod tests {
         assert_eq!(remembered(&memo, &other, [accepted.as_slice()]), None);
     }
 
+    /// What a walk holds counts only at the position it reached: there it is
+    /// the claim final at `K_root(p)` and its root, whichever kind of claim
+    /// that is, for the facts to compare with what `P` names (§6.62); a walk
+    /// that reached another position holds nothing at `p`.
     #[test]
-    fn only_the_position_and_fulfillment_p_names_resolve_its_parent() {
-        let (position, wanted, root) = (7, [0xF7; 32], [0x77; 32]);
-        let held = |fulfillment_id| ParentClaimRef::Conditional { fulfillment_id };
-        assert_eq!(
-            parent_named(position, &wanted, position, root, held(wanted)),
-            Some(ResolvedParent {
-                economic_position: position,
-                selected_root: root,
-                fulfillment_id: wanted,
-            })
-        );
-        assert_eq!(
-            parent_named(position, &wanted, position, root, held([0xF8; 32])),
-            None,
-            "another fulfillment holds the position"
-        );
-        assert_eq!(
-            parent_named(position, &wanted, position + 1, root, held(wanted)),
-            None,
-            "the root of another position"
-        );
-        assert_eq!(
-            parent_named(
-                position,
-                &wanted,
-                position,
-                root,
-                ParentClaimRef::SingleRoot { claim_ref: wanted }
-            ),
-            None,
-            "an ordinary position is no conditional parent"
-        );
+    fn what_a_walk_holds_counts_only_at_the_position_it_reached() {
+        let (position, root) = (7, [0x77; 32]);
+        for named in [
+            ParentClaimRef::Conditional {
+                fulfillment_id: [0xF7; 32],
+            },
+            ParentClaimRef::SingleRoot {
+                claim_ref: [0xC7; 32],
+            },
+        ] {
+            assert_eq!(
+                held_at(position, position, root, named),
+                Some(ResolvedParent {
+                    economic_position: position,
+                    selected_root: root,
+                    named,
+                })
+            );
+            assert_eq!(
+                held_at(position, position + 1, root, named),
+                None,
+                "the root of another position"
+            );
+        }
     }
 }

@@ -945,7 +945,11 @@ mod tests {
             registered: true,
             conformance: Validation::Valid,
             position_lost: false,
-            parent: ParentPosition::SingleRoot,
+            parent: ParentPosition::SingleRoot {
+                named: *p.parent_claim_ref(),
+                held: *p.parent_claim_ref(),
+                held_root: *p.void_root(),
+            },
             parent_pre_root: *p.void_root(),
             validation: match shape {
                 Shape::Invalid => Validation::Invalid,

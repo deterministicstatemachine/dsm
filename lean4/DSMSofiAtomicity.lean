@@ -1034,8 +1034,15 @@ resolved (the fence, Section 22); an object supplied from outside may name
 one, guessing which branch `p` will take, and rungs 1 and 2 of the ladder
 classify it (Section 24). -/
 inductive ParentState where
-  /-- An ordinary single-root claim; P conformance pinned its root at ingress. -/
+  /-- An ordinary single-root claim the trader holds at `p`: the claim final at
+  its `K_root(p)` is the one P names, at the root P was built on, as the
+  verifier itself established it. A claim P carries is never its own
+  authority (CONFORMANCE §6.62). -/
   | single
+  /-- An ordinary single-root claim the trader does NOT hold at `p`: another
+  claim, or the claim P names at another root, is final at its `K_root(p)`.
+  P was built on a position the trader never held. Terminal (§6.62). -/
+  | singleNotHeld
   /-- A conditional claim whose branch selection is not yet known. -/
   | openBranch
   /-- A conditional claim that selected the root P was built on. -/
@@ -1054,6 +1061,7 @@ def parentCompatible : ParentState → Bool
 def parentImpossible : ParentState → Bool
   | .otherBranch => true
   | .noRoot => true
+  | .singleNotHeld => true
   | _ => false
 
 def parentPending : ParentState → Bool
@@ -1590,6 +1598,17 @@ theorem terminal_parent_with_no_root_is_invalid_without_evidence {x : Facts} {le
     -- validation evidence still missing.
     (_hun : x.validation = .unavailable) : resolve x legs e = .invalid := by
   exact (conditional_parent_on_another_branch_is_invalid hreg (by rw [hno]; rfl)).1
+
+/-- CONFORMANCE §6.62: an ordinary parent the trader does not hold at `p` —
+another claim, or the claim P names at another root, final at its
+`K_root(p)` — makes the position Invalid and its route never consumed,
+whatever its legs and evidence say. A claim P carries is never its own
+authority, so a vault is never drained against a balance the trader's
+lineage never held. -/
+theorem single_root_parent_not_held_is_invalid {x : Facts} {legs : List Nat} {e : Nat}
+    (hreg : x.registered = true) (hp : x.parent = .singleNotHeld) :
+    resolve x legs e = .invalid ∧ ConsumedRoute x legs e = false :=
+  conditional_parent_on_another_branch_is_invalid hreg (by rw [hp]; rfl)
 
 /-- A concrete position on a branch its parent never took: registered, valid,
 every leg final on this E, Complete — and still Invalid, because `p` selected
@@ -2632,6 +2651,7 @@ theorem later_setups_confer_no_authority (p k q k0 : Nat) (rest : List (Nat × N
 #print axioms conditional_parent_pending_keeps_the_position_pending
 #print axioms conditional_parent_on_another_branch_is_invalid
 #print axioms terminal_parent_with_no_root_is_invalid_without_evidence
+#print axioms single_root_parent_not_held_is_invalid
 #print axioms the_trader_parent_rungs_are_not_vacuous
 #print axioms trader_parent_arm_is_monotone
 #print axioms fulfillment_atomic_all_or_none

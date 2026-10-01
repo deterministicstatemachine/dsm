@@ -38,7 +38,7 @@
 
 use crate::route_chain::{CellFact, ChainState};
 use super::conformance::Validation;
-use super::wire::next_attempt;
+use super::wire::{next_attempt, ParentClaimRef};
 
 /// What a verifier has established about the predecessor position `p` that `P`
 /// names as its trader parent `T0`.
@@ -51,9 +51,19 @@ use super::wire::next_attempt;
 /// (Amendment S7). An unresolved parent is never a fact Core is handed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentPosition {
-    /// `T0` is an ordinary single-root claim. P conformance already bound
-    /// `T°.pre_root` to that exact registered root at ingress.
-    SingleRoot,
+    /// `T0` is an ordinary single-root claim. `named` is the claim `P` names;
+    /// `held` is the claim final at the trader's `K_root(p)` and `held_root`
+    /// the root it installed, as this verifier itself established them: its
+    /// own admitted position, or the frontier-relative walk of the trader's
+    /// lineage (DSM Amendment A8; SoFi Amendment S15). A claim `P` carries is
+    /// never its own authority: `P` was built on a position the trader held
+    /// only when the trader holds exactly what `P` names, at the root `P` was
+    /// built on (§6.62).
+    SingleRoot {
+        named: ParentClaimRef,
+        held: ParentClaimRef,
+        held_root: [u8; 32],
+    },
     /// `C_p` resolved and selected this root: `R_realize` when `p` realized,
     /// `R_void` when it voided.
     ConditionalSelected { selected_root: [u8; 32] },
@@ -469,13 +479,17 @@ impl RouteFacts<'_> {
     }
 }
 
-/// `TraderParentCompatible(P)`: the parent either is an ordinary claim, or is
-/// a conditional claim that selected exactly the root this operation was built
-/// on. The parent is always resolved here: Core resolves only over complete
+/// `TraderParentCompatible(P)`: the parent is an ordinary claim the trader
+/// holds at `p`, at exactly the root this operation was built on, or a
+/// conditional claim that selected exactly that root. The parent is always resolved here: Core resolves only over complete
 /// facts, the predecessor's resolution among them (Amendment S7).
 pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
     match parent {
-        ParentPosition::SingleRoot => true,
+        ParentPosition::SingleRoot {
+            named,
+            held,
+            held_root,
+        } => named == held && held_root == parent_pre_root,
         ParentPosition::ConditionalSelected { selected_root } => selected_root == parent_pre_root,
         ParentPosition::ConditionalNoRoot => false,
     }
@@ -483,14 +497,19 @@ pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 
 
 /// `TraderParentImpossible(P)`: the parent is terminal and did not select the
 /// root this operation was built on — either it selected nothing (Invalid), or
-/// it selected the other branch.
+/// it selected the other branch — or it is an ordinary claim the trader does
+/// not hold at `p`, or holds at another root.
 ///
 /// Objective and monotone.
 pub fn trader_parent_impossible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
     match parent {
         ParentPosition::ConditionalNoRoot => true,
         ParentPosition::ConditionalSelected { selected_root } => selected_root != parent_pre_root,
-        ParentPosition::SingleRoot => false,
+        ParentPosition::SingleRoot {
+            named,
+            held,
+            held_root,
+        } => named != held || held_root != parent_pre_root,
     }
 }
 
@@ -1123,6 +1142,30 @@ mod tests {
     const OTHER_E: [u8; 32] = [0x11; 32];
     const PRE: [u8; 32] = [0x99; 32];
     const OTHER_ROOT: [u8; 32] = [0x77; 32];
+    /// The ordinary parent claim a `P` names.
+    const NAMED: ParentClaimRef = ParentClaimRef::SingleRoot {
+        claim_ref: [0x66; 32],
+    };
+    /// An ordinary parent the trader holds at `p`, at `PRE`.
+    const HELD: ParentPosition = ParentPosition::SingleRoot {
+        named: NAMED,
+        held: NAMED,
+        held_root: PRE,
+    };
+    /// An ordinary parent `P` names while another claim holds `p`.
+    const NOT_HELD: ParentPosition = ParentPosition::SingleRoot {
+        named: NAMED,
+        held: ParentClaimRef::SingleRoot {
+            claim_ref: [0x67; 32],
+        },
+        held_root: PRE,
+    };
+    /// The claim `P` names, held at another root than `P` was built on.
+    const HELD_ELSEWHERE: ParentPosition = ParentPosition::SingleRoot {
+        named: NAMED,
+        held: NAMED,
+        held_root: OTHER_ROOT,
+    };
     /// The vault whose attempt keys the walk tests walk, at parent `PRE`.
     const V: [u8; 32] = [0x5A; 32];
 
@@ -1298,7 +1341,7 @@ mod tests {
             registered: true,
             conformance: Valid,
             position_lost: false,
-            parent: ParentPosition::SingleRoot,
+            parent: HELD,
             parent_pre_root: PRE,
             validation: Valid,
             storage_resolved: true,
@@ -1443,7 +1486,9 @@ mod tests {
     fn the_trader_parent_arm_is_monotone() {
         for root in [PRE, OTHER_ROOT] {
             for parent in [
-                ParentPosition::SingleRoot,
+                HELD,
+                NOT_HELD,
+                HELD_ELSEWHERE,
                 ParentPosition::ConditionalNoRoot,
                 ParentPosition::ConditionalSelected { selected_root: PRE },
                 ParentPosition::ConditionalSelected {
@@ -1907,7 +1952,7 @@ mod tests {
 
         let lost = around(&legs, Valid, Valid)
             .into_iter()
-            .find(|f| f.position_lost && f.parent == ParentPosition::SingleRoot)
+            .find(|f| f.position_lost && f.parent == HELD)
             .expect("a lost position among the facts");
         assert_eq!(
             skip_without_evidence(&ground_of(&lost), &legs[0]),
@@ -2044,7 +2089,9 @@ mod tests {
             CellFact::Open,
         ];
         let parents = [
-            ParentPosition::SingleRoot,
+            HELD,
+            NOT_HELD,
+            HELD_ELSEWHERE,
             ParentPosition::ConditionalSelected { selected_root: PRE },
             ParentPosition::ConditionalSelected {
                 selected_root: OTHER_ROOT,
@@ -2228,7 +2275,7 @@ mod tests {
                     registered: true,
                     conformance: Valid,
                     position_lost: false,
-                    parent: ParentPosition::SingleRoot,
+                    parent: HELD,
                     parent_pre_root: PRE,
                     validation,
                     storage_resolved: true,
@@ -2281,7 +2328,7 @@ mod tests {
                     registered: true,
                     conformance: Valid,
                     position_lost: false,
-                    parent: ParentPosition::SingleRoot,
+                    parent: HELD,
                     parent_pre_root: PRE,
                     validation: Invalid,
                     storage_resolved: true,
@@ -2336,7 +2383,7 @@ mod tests {
                     registered: true,
                     conformance: Valid,
                     position_lost: false,
-                    parent: ParentPosition::SingleRoot,
+                    parent: HELD,
                     parent_pre_root: PRE,
                     validation: Invalid,
                     storage_resolved: true,
@@ -2389,7 +2436,9 @@ mod tests {
             for position_lost in [true, false] {
                 for storage_resolved in [true, false] {
                     for parent in [
-                        ParentPosition::SingleRoot,
+                        HELD,
+                        NOT_HELD,
+                        HELD_ELSEWHERE,
                         ParentPosition::ConditionalSelected { selected_root: PRE },
                         ParentPosition::ConditionalSelected {
                             selected_root: OTHER_ROOT,
@@ -2587,7 +2636,7 @@ mod tests {
                     registered: true,
                     conformance: Valid,
                     position_lost: false,
-                    parent: ParentPosition::SingleRoot,
+                    parent: HELD,
                     parent_pre_root: PRE,
                     validation: Invalid,
                     storage_resolved: true,
