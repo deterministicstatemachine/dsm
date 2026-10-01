@@ -46,8 +46,8 @@ function step(fields: Partial<PendingBilateralDto>): PendingBilateralDto {
     direction: 'incoming',
     phase: 'pending_user_action',
     counterpartyDeviceId: 'KT4ZBZ8SXD73HR6HH3S2SB27E7HNQG9NR49G55CSX09GM0FCFW1G',
-    amount: 6n,
-    displayAmount: '6',
+    amount: 600n,
+    displayAmount: '6.00',
     tokenId: 'ERA',
     commitmentHash: '392XXK8ZMME2EZ7G26VJ0VDKWPHE2ZF6AD3TD9Q7PN4DJGHEHTM0',
     cancellable: false,
@@ -66,7 +66,7 @@ describe('an incoming step awaiting this user, after a restart', () => {
     render(<BilateralTransferDialog walletReady />);
 
     await waitFor(() => expect(screen.getByText('Incoming Offline Transfer')).toBeTruthy());
-    expect(screen.getByText('6 ERA')).toBeTruthy();
+    expect(screen.getByText('6.00 ERA')).toBeTruthy();
     expect(screen.getByText(/KT4ZBZ8SXD73/)).toBeTruthy();
   });
 
