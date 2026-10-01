@@ -1025,8 +1025,26 @@ impl ProvenanceResolver for NoFurtherHop<'_, '_> {
 mod tests {
     use super::*;
 
+    use crate::economic::claim_envelope::device_fixture::{device, signed_conditional, Device};
+
     const PEER_G: [u8; 32] = [0x11; 32];
-    const PEER_D: [u8; 32] = [0x22; 32];
+
+    /// The peer device: its id is derived from its key and AttA, so the
+    /// claims it signs name its own cells (DSM Amendment A10).
+    fn peer() -> &'static Device {
+        static PEER: std::sync::OnceLock<Device> = std::sync::OnceLock::new();
+        PEER.get_or_init(|| device([0xA7; 32]).expect("the peer device"))
+    }
+
+    fn peer_d() -> [u8; 32] {
+        peer().devid
+    }
+
+    /// `claim` as the peer's root cell holds it: signed by the peer device
+    /// (SoFi Amendment S20).
+    fn peer_c_q(claim: SofiResolutionClaim) -> Vec<u8> {
+        signed_conditional(claim, peer()).expect("the peer signs its own C_q")
+    }
     const NETWORK: &[u8] = b"dsm-testnet";
 
     /// A fetcher over the network's pinned register set that serves one root
@@ -1100,7 +1118,7 @@ mod tests {
         fn below(position: u64) -> Self {
             Self(PeerFrontier::rehydrate_recorded(
                 PEER_G,
-                PEER_D,
+                peer_d(),
                 position - 1,
                 [0x77; 32],
                 ParentClaimRef::SingleRoot {
@@ -1157,7 +1175,7 @@ mod tests {
     fn conditional_claim(position: u64) -> SofiResolutionClaim {
         SofiResolutionClaim {
             genesis: PEER_G,
-            device_id: PEER_D,
+            device_id: peer_d(),
             position,
             fulfillment_id: [0xF1; 32],
             realize_root: [0xA1; 32],
@@ -1227,12 +1245,16 @@ mod tests {
             claim_ref: [0xF6; 32],
         };
         let recorded = Recorded(PeerFrontier::rehydrate_recorded(
-            PEER_G, PEER_D, position, [0x66; 32], accepted,
+            PEER_G,
+            peer_d(),
+            position,
+            [0x66; 32],
+            accepted,
         ));
         let fetcher = CountingCells {
             inner: ConditionalCellFetcher {
                 position,
-                writes: vec![conditional_claim(position).encode()],
+                writes: vec![peer_c_q(conditional_claim(position))],
                 last: crate::route_chain::ROUTE_LEN - 1,
             },
             reads: std::cell::Cell::new(0),
@@ -1241,7 +1263,7 @@ mod tests {
             &fetcher,
             NETWORK,
             &PEER_G,
-            &PEER_D,
+            &peer_d(),
             position,
             &recorded,
             &NoResolution,
@@ -1268,7 +1290,7 @@ mod tests {
             &fetcher,
             NETWORK,
             &PEER_G,
-            &PEER_D,
+            &peer_d(),
             0,
             &NoneRecorded,
             &NoResolution,
@@ -1292,14 +1314,14 @@ mod tests {
         let position = 4;
         let fetcher = ConditionalCellFetcher {
             position,
-            writes: vec![conditional_claim(position).encode()],
+            writes: vec![peer_c_q(conditional_claim(position))],
             last: crate::route_chain::ROUTE_LEN - 1,
         };
         let err = validate_peer_lineage(
             &fetcher,
             NETWORK,
             &PEER_G,
-            &PEER_D,
+            &peer_d(),
             position,
             &Recorded::below(position),
             &NoResolution,
@@ -1329,9 +1351,10 @@ mod tests {
     #[test]
     fn a_claim_naming_other_coordinates_never_holds_the_root_cell() {
         let position = 3;
+        let other = device([0x5A; 32]).expect("another device");
         let foreign = SofiResolutionClaim {
             genesis: [0x99; 32],
-            device_id: [0x88; 32],
+            device_id: other.devid,
             position,
             fulfillment_id: [0xF1; 32],
             realize_root: [0xA1; 32],
@@ -1339,7 +1362,7 @@ mod tests {
         };
         let ours = SofiResolutionClaim {
             genesis: PEER_G,
-            device_id: PEER_D,
+            device_id: peer_d(),
             ..foreign
         };
         let walk = |writes: Vec<Vec<u8>>| {
@@ -1351,7 +1374,7 @@ mod tests {
                 },
                 NETWORK,
                 &PEER_G,
-                &PEER_D,
+                &peer_d(),
                 position,
                 &Recorded::below(position),
                 &NoResolution,
@@ -1359,14 +1382,17 @@ mod tests {
         };
         assert!(
             matches!(
-                walk(vec![foreign.encode()]),
+                walk(vec![signed_conditional(foreign, &other).expect("its own C_q")]),
                 Err(PeerLineageFailure::Incomplete(ref m)) if m.contains("no claim holds")
             ),
             "a cell holding only a foreign claim is open"
         );
         assert!(
             matches!(
-                walk(vec![foreign.encode(), ours.encode()]),
+                walk(vec![
+                    signed_conditional(foreign, &other).expect("its own C_q"),
+                    peer_c_q(ours),
+                ]),
                 Err(PeerLineageFailure::Unresolved(_))
             ),
             "the foreign claim first at the leader does not stop this trader's claim"
@@ -1382,14 +1408,14 @@ mod tests {
         for last in [0, 1] {
             let fetcher = ConditionalCellFetcher {
                 position,
-                writes: vec![conditional_claim(position).encode()],
+                writes: vec![peer_c_q(conditional_claim(position))],
                 last,
             };
             let outcome = validate_peer_lineage(
                 &fetcher,
                 NETWORK,
                 &PEER_G,
-                &PEER_D,
+                &peer_d(),
                 position,
                 &Recorded::below(position),
                 &NoResolution,
@@ -1474,14 +1500,14 @@ mod tests {
         let claim = conditional_claim(position);
         let fetcher = ConditionalCellFetcher {
             position,
-            writes: vec![claim.encode()],
+            writes: vec![peer_c_q(claim)],
             last: crate::route_chain::ROUTE_LEN - 1,
         };
         let outcome = validate_peer_lineage(
             &fetcher,
             NETWORK,
             &PEER_G,
-            &PEER_D,
+            &peer_d(),
             position,
             &Recorded::below(position),
             &NoResolution,
@@ -1511,14 +1537,14 @@ mod tests {
     fn a_conditional_position_right_after_the_activation_root_is_invalid() {
         let fetcher = ConditionalCellFetcher {
             position: 1,
-            writes: vec![conditional_claim(1).encode()],
+            writes: vec![peer_c_q(conditional_claim(1))],
             last: crate::route_chain::ROUTE_LEN - 1,
         };
         let outcome = validate_peer_lineage(
             &fetcher,
             NETWORK,
             &PEER_G,
-            &PEER_D,
+            &peer_d(),
             2,
             &NoneRecorded,
             &NoResolution,
@@ -1537,14 +1563,14 @@ mod tests {
         let position = 3;
         let fetcher = ConditionalCellFetcher {
             position,
-            writes: vec![conditional_claim(position).encode()],
+            writes: vec![peer_c_q(conditional_claim(position))],
             last: crate::route_chain::ROUTE_LEN - 1,
         };
         let outcome = validate_peer_lineage(
             &fetcher,
             NETWORK,
             &PEER_G,
-            &PEER_D,
+            &peer_d(),
             position - 1,
             &Recorded::below(position),
             &NoResolution,

@@ -187,7 +187,20 @@ pub async fn install_fulfillment<R: SofiReads>(
         signature: request.fulfillment_signature,
     }
     .object_bytes()?;
-    let claim_bytes = derive::resolution_claim(request.precommit, request.fulfillment).encode();
+    // C_q occupies K_root(q) only signed by this trader device, under the key
+    // and AttA that derive its device id (DSM Amendment A10, SoFi Amendment
+    // S20). The signer refuses a key that does not derive the device C_q
+    // names.
+    let (public_key, secret_key) = crate::sdk::signing_authority::current_keypair()?;
+    let att_a = crate::sdk::signing_authority::current_att_a()?;
+    let claim_bytes = dsm::sofi::signature::sign_resolution_claim(
+        derive::resolution_claim(request.precommit, request.fulfillment),
+        request.precommit.signature_alg(),
+        &public_key,
+        att_a,
+        &secret_key,
+    )?
+    .encode();
     let reports = write_recorded_position(set, &cells, &fulfillment_bytes, &claim_bytes).await?;
     let [ful, root] = &reports;
     if !(ful.reached_leader() && root.reached_leader()) {

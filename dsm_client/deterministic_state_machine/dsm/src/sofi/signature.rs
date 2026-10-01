@@ -36,7 +36,10 @@
 //! encoding; the binding comes from outside it.
 
 use super::derive;
-use super::wire::{SofiSetupBody, TraderFulfillmentBody, TraderPrecommitBody};
+use super::wire::{
+    SignedSofiResolutionClaim, SofiResolutionClaim, SofiSetupBody, TraderFulfillmentBody,
+    TraderPrecommitBody,
+};
 use crate::ccb::genesis::sigalg;
 use crate::types::operations::Operation;
 
@@ -74,6 +77,11 @@ pub enum SignatureError {
     /// The body is signed and the envelope is not, so a disagreement is
     /// refused rather than resolved in the envelope's favour.
     EnvelopeAlgDisagreesWithBody { envelope: u16, body: u16 },
+    /// The key does not derive the device the object names:
+    /// `derive_devid(key, AttA) != DevID`. A key and an `AttA` carried by the
+    /// object prove authority only for the device they derive (DSM Amendment
+    /// A10).
+    NotTheNamedDevice { what: &'static str },
 }
 
 impl core::fmt::Display for SignatureError {
@@ -115,6 +123,11 @@ impl core::fmt::Display for SignatureError {
                      pre-commit and a trader fulfillment carry a trader signature"
                 )
             }
+            Self::NotTheNamedDevice { what } => write!(
+                f,
+                "the {what} is signed by a key that, with the AttA it carries, does not \
+                 derive the device it names"
+            ),
             Self::EnvelopeAlgDisagreesWithBody { envelope, body } => {
                 write!(
                     f,
@@ -204,6 +217,71 @@ pub fn verify_fulfillment(
         &derive::fulfillment_signing_digest(body),
         signature,
     )
+}
+
+/// `C_q` proves its own authority for `K_root(q)` (DSM Amendment A10, SoFi
+/// Amendment S20): its signature verifies under the key it carries, over a
+/// digest that commits that key and the carried `AttA`, and the key with that
+/// `AttA` derives the device the claim names. Decided from the bytes in hand;
+/// nothing is fetched.
+pub fn verify_resolution_claim(signed: &SignedSofiResolutionClaim) -> Result<(), SignatureError> {
+    verify_bytes(
+        "SofiResolutionClaim",
+        signed.signature_alg(),
+        signed.claimant_public_key(),
+        &derive::resolution_claim_signing_digest(
+            signed.claim(),
+            signed.signature_alg(),
+            signed.claimant_public_key(),
+            signed.claimant_att_a(),
+        ),
+        signed.signature(),
+    )?;
+    if crate::core::identity::genesis_v2::derive_devid(
+        signed.claimant_public_key(),
+        signed.claimant_att_a(),
+    ) != signed.claim().device_id
+    {
+        return Err(SignatureError::NotTheNamedDevice {
+            what: "SofiResolutionClaim",
+        });
+    }
+    Ok(())
+}
+
+/// Sign `C_q` as the trader device it names. Refused when the key and `AttA`
+/// do not derive that device, so no producer emits a claim that recognition
+/// would refuse.
+pub fn sign_resolution_claim(
+    claim: SofiResolutionClaim,
+    signature_alg: u16,
+    claimant_public_key: &[u8],
+    claimant_att_a: [u8; 32],
+    claimant_secret_key: &[u8],
+) -> Result<SignedSofiResolutionClaim, crate::types::error::DsmError> {
+    if crate::core::identity::genesis_v2::derive_devid(claimant_public_key, &claimant_att_a)
+        != claim.device_id
+    {
+        return Err(SignatureError::NotTheNamedDevice {
+            what: "SofiResolutionClaim",
+        }
+        .into());
+    }
+    let digest = derive::resolution_claim_signing_digest(
+        &claim,
+        signature_alg,
+        claimant_public_key,
+        &claimant_att_a,
+    );
+    let signature = crate::crypto::sphincs::sphincs_sign(claimant_secret_key, &digest)?;
+    SignedSofiResolutionClaim::new(
+        claim,
+        signature_alg,
+        claimant_public_key,
+        claimant_att_a,
+        &signature,
+    )
+    .map_err(|e| crate::types::error::DsmError::invalid_operation(e.to_string()))
 }
 
 /// `m_P` — a precommit signs its own body (F2 stage 1).
