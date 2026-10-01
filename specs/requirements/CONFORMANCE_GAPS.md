@@ -1862,6 +1862,15 @@ Known cost: the first time a receiver meets a payer it validates the payer's seg
 | MR-STOR-0094 | Missing (no SDK caller) | Met | Mirrors must agree; Core checks the chain link and the root itself. |
 | MR-STOR-0134 | Missing (copy counters) | Partial | No-response empties are recorded and never count; taken empties are not built. |
 
+**MR-STOR-0008 enforced.**
+- Its "no enforcing test" was accurate for the node: `ci/no_clock_and_no_json.sh` scans line by line, and it exempted the spool (`api/transport/b0x.rs`) and a rate limiter that no longer exists.
+- `dsm_storage_node::no_clock_reads` parses every node source with `syn`, reading `use` trees whole and macro bodies token by token, and refuses any clock or timer.
+- Its self-test covers a grouped import, a renamed import, a glob, a macro body, and a comment and string that must not count. A first token-window draft missed `use tokio::{sync::Mutex, time}`; that self-test caught it.
+- Mutation controls, each red and then restored:
+  - a `tokio::time` sleep imported through a group, in the spool;
+  - `std::time::Instant::now()` in `db/pg.rs`.
+- The script's two node exemptions are removed. A clock read in the spool now also fails it (checked, then restored).
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -1869,9 +1878,9 @@ Known cost: the first time a receiver meets a payer it validates the payer's seg
 | DSM high-level (MR-DSM) | 276 | 94 | 96 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 348 | 223 | 86 | 18 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
-| Storage node (MR-STOR) | 158 | 64 | 19 | 56 | 0 | 18 | 1 |
+| Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **928** | **390** | **202** | **114** | **4** | **64** | **154** |
+| **All** | **928** | **391** | **201** | **114** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -2528,7 +2537,7 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | MR-STOR-0005 | Partial | dsm_storage_node · crate-wide (no key/sign symbols) | no test found | True today; no gate or test fails if a key or signing path is added |
 | MR-STOR-0006 | Met | `dsm_storage_node::api::transport::b0x::router`; `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm_storage_node::api::transport::b0x::tests::bytes_the_node_cannot_read_are_kept_and_returned_unopened`; `dsm_storage_node::api::objects::immutable::tests::proto_decodable_bytes_are_just_bytes` | The legacy object store, PaidK, `device_auth` and the registry are deleted (#992, §6.28; re-examined 2026-09-27, §6.36 H). The node decodes nothing it holds and branches on no content. |
 | MR-STOR-0007 | Met | `dsm_storage_node::api::transport::b0x::router`; `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm_storage_node::api::transport::b0x::tests::bytes_the_node_cannot_read_are_kept_and_returned_unopened`; `dsm_storage_node::api::objects::immutable::tests::proto_decodable_bytes_are_just_bytes` | As MR-STOR-0006. |
-| MR-STOR-0008 | Partial | dsm_storage_node · crate-wide (logical ticks, BIGSERIAL) | no test found | No clock reads; no enforcing test. The set client now bounds how long a node waits for a set-mate (connect 5 s, request 10 s; §6.53). A fetch that times out stores nothing and orders nothing, so no protocol fact reads the clock. |
+| MR-STOR-0008 | Met | `dsm_storage_node::db::pg::put_cell`; `dsm_storage_node::db::pg::close_cycle` | `dsm_storage_node::no_clock_reads::no_node_source_reads_a_clock`; `dsm_storage_node::no_clock_reads::a_clock_read_is_found_and_a_comment_or_string_is_not` | Enforced 2026-10-01 (§6.53). Arrival order is a database sequence and a cycle closes when asked. Every node source is parsed, and no path, `use` tree or macro body names a clock or a timer (`Instant`, `SystemTime`, `UNIX_EPOCH`, `chrono`, `tokio::time`). The set client's connect and request bounds are a `Duration` given to the HTTP client: a fetch that times out stores and orders nothing. |
 | MR-STOR-0009 | Met | `dsm_storage_node::api::objects::bytecommit::mirror_sync`; `dsm_storage_node::set_client::pinned_set_client` | `dsm_storage_node::bytecommit_chain::a_set_mate_mirrors_by_fetching_from_the_member_itself`; `dsm_storage_node::bytecommit_chain::an_impostor_at_a_set_mates_endpoint_is_not_mirrored` | There is no gossip, election or vote between nodes. A node's one exchange with a set-mate is mirror sync: it fetches that member's ByteCommits from it, at the endpoint its own configuration names, and decides nothing (storage §14). |
 | MR-STOR-0010 | Met | `dsm_storage_node::api::transport::b0x::router`; `dsm_storage_node::api::objects::immutable::put_immutable` | `dsm_storage_node::api::transport::b0x::tests::bytes_the_node_cannot_read_are_kept_and_returned_unopened`; `dsm_storage_node::api::objects::immutable::tests::proto_decodable_bytes_are_just_bytes` | As MR-STOR-0006. |
 | MR-STOR-0011 | Partial | dsm_storage_node · crate-wide | no test found | True today; not regression-proof |

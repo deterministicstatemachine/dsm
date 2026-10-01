@@ -63,8 +63,6 @@ common_allow_globs=(
 # other operational controls. They remain subject to the JSON/encoding/version gates.
 clock_allow_globs=(
   "${common_allow_globs[@]}"
-  --glob '!**/api/infra/rate_limit.rs'                                     # transport-layer DoS rate limiting (permitted)
-  --glob '!**/api/transport/b0x.rs'                                        # transport-layer rate limiting (permitted)
   --glob '!**/jni/ble_events.rs'                                           # BLE event buffering / runtime wakeups
   --glob '!**/deterministic_state_machine/dsm_sdk/src/sdk/bluetooth_transport.rs'  # BLE retries / ACK timeouts / reconnect backoff
   --glob '!**/deterministic_state_machine/dsm_sdk/src/bluetooth/pairing_orchestrator.rs' # BLE handshake freshness / retry windows
