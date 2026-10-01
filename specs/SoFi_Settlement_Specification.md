@@ -1539,6 +1539,14 @@ Skipped(K)                              RejectedFinalSingleLeg ∨ RejectedFinal
 **Code**
 route_impossible, CORE/sofi/resolution.rs:253, returning ImpossibleArm from the same file.
 
+> **Amendment S14 (owner, 2026-09-30) — a final cell whose fulfillment can never register is skipped.** One trader's fulfillments for one position can each win a DLV key: the exercise for attempt 0 goes final at `K^(0)` while the fulfillment naming attempt 1 registers at `q`. The fulfillment that `K^(0)`'s exercise carries can then never register, because a different claim at `q` makes it inadmissible (Section 21.1). `K^(0)` holds a final value that no registered fulfillment names, none of the skips above applies to it, and the walk over the DLV parent's attempts would stop there forever.
+>
+> - **The skip.** `RejectedFinalInadmissible(K, F, E)` holds when `StorageFinalE(K, E)`, the exercise final at `K` carries `F`, and `K_root(q)` for `F`'s position `q` is final on a claim other than `F`'s own `C_q`: another fulfillment's claim, or an ordinary transition. `Skipped(K)` is `RejectedFinalSingleLeg ∨ RejectedFinalRoute ∨ RejectedFinalInadmissible`.
+> - **Not an arm of `RouteImpossible`.** Which fulfillment lost the position is a fact about `F`, and `RouteImpossible(P, E)` stays scoped to `P` and `E`, with its four arms.
+> - **No validation evidence.** Registration at `q` is a storage fact; the skip needs neither `RouteValidation` nor `FulfillmentConformance`.
+> - **No Void and no Invalid.** The skip only frees the DLV key. Position `q` resolves through the claim that holds it, never through `F`.
+> - **Permanent.** A position that went to another claim never comes back (PairMutualExclusion), so once the skip holds it holds forever.
+
 
 <!-- spec-section: SOFI-023-6 -->
 #### 23.6 The walk
@@ -1595,6 +1603,14 @@ resolve_position, CORE/sofi/resolution.rs:284; effect_of, :92.
 
 > **Amendment S7 (owner, 2026-09-23) — no Pending.** A predicate has two values, Valid and Invalid, and network status is separate (Amendment S3). A trader position resolves Realized, Void or Invalid, and nothing else. Core resolves only over complete facts: F registered at q, both predicates evaluated, every required storage fact final, and the predecessor resolved. Until the facts are complete the SDK keeps reading, relaying and retrying within its budget; when the retries are exhausted the attempt fails on the network. That failure is not a resolution: it is never recorded, never becomes Invalid or Void, and a later attempt may succeed. A position whose evidence never appears stays unresolved, which is a fact about the world, not a result. Wherever this specification says Pending or Unavailable of a position or a predicate, read it this way. Amendments S1 and S5 stand; the challenge rule that ends an unresolved position is outside beta.
 
+
+> **Amendment S15 (owner, 2026-09-30) — a trader's position resolved from public objects.** A verifier that meets another trader's conditional position `q` (DSM Amendment A8: inside its frontier-to-parent segment of that trader's root chain) derives the root `q` selected from SoFi's public proof-carrying objects for `q` alone: the claim final at `K_root(q)`, the registration pair, `P` and `F`, the exercise read back from the first leg's cell, and the vault cells and canonical chains the facts need, with the finality evidence of each. The ladder runs over the facts Core establishes from them, exactly as for the trader's own position.
+>
+> - **The result.** The one root `q` selected — `P.realize_root` when Realized, the root authenticated at `q − 1` when Void — or Invalid, or not established yet (Amendment S3).
+> - **The claim at `K_root(q)`.** It counts only as the claim `(P, F)` derive: its two roots are the ones the resolution chooses between.
+> - **What it reads.** No private object of the trader's, and no position of the trader's other than `q` and the root the verifier authenticated at `q − 1`. It has no fallback that walks the trader's lineage.
+> - **SetupValid.** The trader's accepted claim at a setup's position (Amendments S9 and S13) is read by frontier-relative verification of the trader's lineage (DSM Amendment A8), never by replaying the trader's history to genesis or recursing behind a step's one-hop evidence.
+> - **Adoption.** Where the trader's own transition requires that a realized position credit only tokens its device adopted before, that is a construction predicate of the trader's own state transition, enforced when the trader installs the realized position. Adoption is not part of frontier-relative resolution of a historical position: a later verifier resolving which root `q` selected does not re-run the trader's adoption check, and this resolution requires no adoption leaf or other private trader state.
 
 <!-- spec-section: SOFI-025 -->
 ### 25 Crash and recovery
