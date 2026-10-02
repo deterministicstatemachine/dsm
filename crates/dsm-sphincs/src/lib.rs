@@ -1,58 +1,60 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! SPHINCS+ (BLAKE3-only) — DSM Module
+//! SPHINCS+ for DSM: the FIPS 205 (SLH-DSA) structure, instantiated with BLAKE3.
 //!
-//! **SECURITY NOTICE:** This is a custom SPHINCS+ implementation using BLAKE3
-//! instead of SHA2/SHAKE. It has NOT been formally audited by a third party.
-//! Do NOT use in production for financial or security-critical applications
-//! until a formal cryptographic audit has been completed.
+//! This crate is the one SPHINCS+ implementation in DSM. The host
+//! (`dsm::crypto::sphincs`) and the RP2350 anchor firmware both link it, so a
+//! signature produced by either verifies under the other by construction.
 //!
-//! This module implements SPHINCS+ using **BLAKE3** for all hash, PRF,
-//! and thash operations. The structure (FORS + WOTS+ + Hypertree) and
-//! sizes match the standardized parameter sets. We expose six presets:
+//! # Structure (construction version 2)
 //!
-//! - `SphincsVariant::SPX128s`  (n=16, h=63,  d=7,  a=12, k=14) → sig  7_856 bytes
-//! - `SphincsVariant::SPX128f`  (n=16, h=66,  d=22, a=6,  k=33) → sig 17_088 bytes
-//! - `SphincsVariant::SPX192s`  (n=24, h=63,  d=7,  a=14, k=17) → sig 16_224 bytes
-//! - `SphincsVariant::SPX192f`  (n=24, h=66,  d=22, a=8,  k=33) → sig 35_664 bytes
-//! - `SphincsVariant::SPX256s`  (n=32, h=64,  d=8,  a=14, k=22) → sig 29_792 bytes
-//! - `SphincsVariant::SPX256f`  (n=32, h=68,  d=17, a=9,  k=35) → sig 49_856 bytes
+//! Every algorithm follows FIPS 205 §5–§10: WOTS+ (`wots_pkgen`, `wots_sign`,
+//! `wots_pk_from_sig`, with the public key compressed by `T_len` under its own
+//! `WOTS_PK` address), XMSS (`xmss_node`, `xmss_sign`, `xmss_pk_from_sig`), the
+//! hypertree (`ht_sign`, `ht_verify`) and FORS (`fors_sk_gen`, `fors_node`,
+//! `fors_sign`, `fors_pk_from_sig`). The address is the FIPS 205 32-byte ADRS:
 //!
-//! # Security Assumptions
-//! - Security is derived from the *hash function only*. We use BLAKE3 in keyed
-//!   mode for PRFs and thash, and unkeyed for message hashing / H_msg expanson.
-//! - PRFs: BLAKE3 keyed hash; domain separation via address encoding.
-//! - thash: BLAKE3 keyed hash; domain separation via address + pub_seed.
-//! - WOTS+: w = 16; length computed per n following spec; checksum included.
-//! - FORS: k trees of height a; signature contains k secret-leaf values and
-//!   k authentication paths; the k roots are compressed into the FORS pk with thash.
-//! - Hypertree: D layers; bottom FORS pk is signed by WOTS+ (leaf), then each
-//!   layer authenticates upwards with Merkle authentication paths.
+//! ```text
+//! word 0      layer
+//! words 1..3  tree (96 bits; DSM trees fit in the low 64)
+//! word 4      type   0 WOTS_HASH, 1 WOTS_PK, 2 TREE, 3 FORS_TREE,
+//!                    4 FORS_ROOTS, 5 WOTS_PRF, 6 FORS_PRF
+//! word 5      key pair            (WOTS_*, FORS_*)
+//! word 6      chain | tree height (WOTS_HASH, WOTS_PRF | TREE, FORS_*)
+//! word 7      hash  | tree index  (WOTS_HASH | TREE, FORS_TREE, FORS_PRF)
+//! ```
 //!
-//! # Performance Characteristics
-//! - Keygen builds only the **top-layer** Merkle tree fully (2^(h/D) leaves).
-//! - Sign computes FORS auth paths (2^a per tree in the naive builder here).
-//!   This is correct and simple; you can replace with a streaming treehash
-//!   algorithm later to reduce memory/CPU.
-//! - Verify is fast (single path per layer).
+//! Changing the type clears words 5–7 (`setTypeAndClear`). Every hash call in
+//! a key generation, a signature or a verification therefore has its own
+//! address: a FORS key belongs to the hypertree leaf that signs it (key pair =
+//! leaf index, tree index = `i·2^a + j`), secret values are drawn under their
+//! own PRF types, tree heights count from the leaves, and WOTS+ public-key
+//! compression is not a hashtree node. The unit tests record every call and
+//! hold each of these.
 //!
-//! # DSM Integration Guidance
-//! - Choose a **variant** at the callsite and pass it to every API:
-//!   - `generate_keypair(variant)`
-//!   - `sign(variant, sk, message)`
-//!   - `verify(variant, pk, message, signature)`
-//! - Store keys in DSM as returned here:
-//!   - `pk = pub_seed || root`  (2n bytes)
-//!   - `sk = sk_seed || sk_prf || pub_seed || root` (4n bytes)
-//! - Use `sizes(variant)` to allocate buffers before I/O.
+//! # BLAKE3 instantiation
 //!
-//! # Important
-//! This file intentionally does **not** depend on PQClean or other SHA2/SHAKE
-//! codepaths; *everything is BLAKE3*. The signature sizes match the structural
-//! parameter sets by keeping the same tree shapes/wots params.
+//! This is not FIPS 205: the hash family is BLAKE3, not SHAKE or SHA-2, so no
+//! FIPS 205 test vector applies. The structure gives a SPHINCS+-style proof
+//! the separation it assumes; the instantiation itself awaits an independent
+//! cryptographic review.
 //!
-//! # Errors
-//! All fallible operations return `DsmError`.
+//! ```text
+//! PRF(PK.seed, SK.seed, ADRS)  = BLAKE3-keyed(derive_key(PRF ctx, SK.seed), PK.seed ‖ ADRS)[..n]
+//! F / H / T_l(PK.seed, ADRS, M) = BLAKE3-keyed(derive_key(THASH ctx, PK.seed), ADRS ‖ M)[..n]
+//! PRF_msg(SK.prf, opt_rand, M) = BLAKE3-keyed(derive_key(PRF_MSG ctx, SK.prf), opt_rand ‖ M)[..n]
+//! H_msg(R, PK.seed, PK.root, M) = BLAKE3-derive-key-mode(H_MSG ctx; R ‖ PK.seed ‖ PK.root ‖ M), m bytes (XOF)
+//! ```
+//!
+//! Signing is deterministic (FIPS 205 §10.2.1 with `opt_rand = PK.seed`), and
+//! a signature is verified before it is returned, so a fault during signing
+//! never releases a signature over a corrupted hypertree. An empty message is
+//! refused. There is no FIPS 205 context string: DSM signs its own
+//! domain-separated digests.
+//!
+//! Keys are `pk = PK.seed ‖ PK.root` (2n bytes) and
+//! `sk = SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root` (4n bytes). Key generation from
+//! a 32-byte seed expands it with ChaCha20 into `SK.seed ‖ SK.prf ‖ PK.seed`.
 
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
@@ -62,7 +64,7 @@ use alloc::vec::Vec;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// no_std error type for this crate (replaces the host `DsmError`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,10 +73,10 @@ pub enum Error {
     Crypto(&'static str),
 }
 
-// Tracing is unavailable in no_std; this is a no-op (kept so call sites compile).
-macro_rules! sphincs_trace {
-    ($($arg:tt)*) => {};
-}
+/// The version of the construction: the address layout and the BLAKE3
+/// instantiation above. Version 1, retired, gave every leaf of a bottom tree
+/// one FORS key and shared addresses between unrelated hash calls.
+pub const CONSTRUCTION_VERSION: u16 = 2;
 
 // ========================== Parameters & Sizes ===============================
 
@@ -88,43 +90,51 @@ pub enum SphincsVariant {
     SPX256f,
 }
 
+/// `lg_w`: WOTS+ digits are base 16.
+const LG_W: usize = 4;
+const W: u32 = 16;
+
 #[derive(Clone, Copy, Debug)]
 struct Params {
-    n: usize,    // hash length (bytes)
-    h: usize,    // total merkle height
-    d: usize,    // hypertree layers
-    a: usize,    // FORS tree height
-    k: usize,    // number of FORS trees
-    w: usize,    // WOTS base (fixed 16)
-    len1: usize, // WOTS len1
-    len2: usize, // WOTS len2
-    wots_len: usize,
-    wots_bytes: usize,
-    pk_bytes: usize,     // 2n
-    sk_bytes: usize,     // 4n
-    sig_bytes: usize,    // n (R) + k*(a+1)*n + d*wots_bytes + h*n
-    layer_height: usize, // h/d
+    n: usize,
+    h: usize,
+    d: usize,
+    /// `h'`, the height of one XMSS tree.
+    hp: usize,
+    a: usize,
+    k: usize,
+    len1: usize,
+    len2: usize,
+    len: usize,
+    /// `ceil(k·a / 8)`: the FORS message digest.
+    md_bytes: usize,
+    /// `ceil((h − h') / 8)`: the tree index.
+    tree_bytes: usize,
+    /// `ceil(h' / 8)`: the leaf index.
+    leaf_bytes: usize,
+    /// `m`, the length of `H_msg`'s output.
+    m: usize,
+    pk_bytes: usize,
+    sk_bytes: usize,
+    sig_bytes: usize,
 }
 
-fn compute_wots_len2(len1: usize, w: usize) -> usize {
-    // Standard WOTS+: len2 = floor(log_w(len1*(w-1))) + 1, i.e. the number of
-    // base-`w` digits of the maximum checksum `len1*(w-1)`. Computed with integer
-    // arithmetic (no `f64::log2`, which is unavailable in no_std). Byte-identical
-    // to the float formula for these parameter sets (n=16/24/32 → 3).
-    let max_checksum = (len1 * (w - 1)) as u64;
+/// `len2 = floor(log_w(len1·(w − 1))) + 1`: the number of base-`w` digits of
+/// the largest checksum, computed in integers (no `f64` in no_std).
+fn compute_wots_len2(len1: usize) -> usize {
+    let max_checksum = (len1 * (W as usize - 1)) as u64;
     let mut len2 = 0usize;
-    let mut p: u64 = 1; // w^0
+    let mut p: u64 = 1;
     while p <= max_checksum {
-        p *= w as u64;
+        p *= u64::from(W);
         len2 += 1;
     }
     len2
 }
 
 fn param_set(v: SphincsVariant) -> Params {
-    // canonical shapes from the SPHINCS+ spec (we keep tree shapes identical)
-    // and compute sizes; hashing is BLAKE3-only (keyed/unkeyed), but sizes match.
-    let (n, h, d, a, k) = match v {
+    // FIPS 205 Table 2.
+    let (n, h, d, a, k): (usize, usize, usize, usize, usize) = match v {
         SphincsVariant::SPX128s => (16, 63, 7, 12, 14),
         SphincsVariant::SPX128f => (16, 66, 22, 6, 33),
         SphincsVariant::SPX192s => (24, 63, 7, 14, 17),
@@ -132,31 +142,30 @@ fn param_set(v: SphincsVariant) -> Params {
         SphincsVariant::SPX256s => (32, 64, 8, 14, 22),
         SphincsVariant::SPX256f => (32, 68, 17, 9, 35),
     };
-    let w = 16usize;
-    let len1 = 2 * n; // ceil(8n / log2(w)) with log2(16)=4  => 2n exactly
-    let len2 = compute_wots_len2(len1, w);
-    let wots_len = len1 + len2;
-    let wots_bytes = wots_len * n;
-    let pk_bytes = 2 * n;
-    let sk_bytes = 4 * n;
-    let layer_height = h / d;
-    let sig_bytes =
-        n /*R*/ + k * (a + 1) * n /*FORS*/ + d * wots_bytes /*WOTS per layer*/ + h * n /*auth*/;
+    let hp = h / d;
+    let len1 = 8 * n / LG_W;
+    let len2 = compute_wots_len2(len1);
+    let len = len1 + len2;
+    let md_bytes = (k * a).div_ceil(8);
+    let tree_bytes = (h - hp).div_ceil(8);
+    let leaf_bytes = hp.div_ceil(8);
     Params {
         n,
         h,
         d,
+        hp,
         a,
         k,
-        w,
         len1,
         len2,
-        wots_len,
-        wots_bytes,
-        pk_bytes,
-        sk_bytes,
-        sig_bytes,
-        layer_height,
+        len,
+        md_bytes,
+        tree_bytes,
+        leaf_bytes,
+        m: md_bytes + tree_bytes + leaf_bytes,
+        pk_bytes: 2 * n,
+        sk_bytes: 4 * n,
+        sig_bytes: n + k * (a + 1) * n + (h + d * len) * n,
     }
 }
 
@@ -167,78 +176,59 @@ pub fn sizes(v: SphincsVariant) -> (usize, usize, usize) {
 
 // =============================== Address ====================================
 
-#[derive(Clone, Copy, Debug, Default)]
-struct SpxAddress {
-    // 8 x 32-bit words as in the spec; we keep it simple and encode all parts here
+const WOTS_HASH: u32 = 0;
+const WOTS_PK: u32 = 1;
+const TREE: u32 = 2;
+const FORS_TREE: u32 = 3;
+const FORS_ROOTS: u32 = 4;
+const WOTS_PRF: u32 = 5;
+const FORS_PRF: u32 = 6;
+
+/// The FIPS 205 ADRS as eight big-endian words (layout in the crate docs).
+#[derive(Clone, Copy, Debug)]
+struct Adrs {
     w: [u32; 8],
 }
 
-// ── ADDRESS LAYOUT, and the aliasing invariant ────────────────────────
-//
-// w[0]      layer
-// w[1..2]   tree
-// w[3]      type
-// w[4]      keypair          — WOTS(0), FORS_TREE(4), FORS_PK(5)
-// w[5]      chain | tree_height
-//             chain       — WOTS(0) only
-//             tree_height — HASHTREE(2), FORS_TREE(4)
-// w[6]      hash  | tree_index
-//             hash        — WOTS(0) only
-//             tree_index  — HASHTREE(2), FORS_TREE(4)
-// w[7]      reserved (always 0)
-//
-// THE INVARIANT: two fields may share a word only if no address TYPE sets
-// both. w[5] and w[6] each pair a WOTS-only field with a HASHTREE/FORS-only
-// field, so the type sets are disjoint. w[4] is keypair alone.
-//
-// This layout replaced one where `keypair` and `tree_index` BOTH wrote
-// w[5], justified by a comment claiming they belonged to different address
-// types. That was true of WOTS and HASHTREE and false of FORS_TREE, which
-// sets keypair (the tree number), tree_height AND tree_index — three
-// type-dependent fields into two words. The tree number was overwritten by
-// the leaf index before the secret was derived, so all k FORS trees drew
-// from ONE pool of 2^a secrets and FORS few-time security did not hold.
-// The verifier reproduced the same address, so signatures verified and the
-// whole suite passed. `fors_independence_tests` pins it now.
-impl SpxAddress {
+impl Adrs {
     fn new() -> Self {
         Self { w: [0; 8] }
-    }
-    fn set_type(&mut self, t: u32) {
-        self.w[3] = t;
     }
     fn set_layer(&mut self, layer: u32) {
         self.w[0] = layer;
     }
     fn set_tree(&mut self, tree: u64) {
-        self.w[1] = (tree >> 32) as u32;
-        self.w[2] = tree as u32;
+        self.w[1] = 0;
+        self.w[2] = (tree >> 32) as u32;
+        self.w[3] = tree as u32;
+    }
+    /// `setTypeAndClear`: the type, with every type-specific word cleared.
+    fn set_type_and_clear(&mut self, t: u32) {
+        self.w[4] = t;
+        self.w[5] = 0;
+        self.w[6] = 0;
+        self.w[7] = 0;
     }
     fn set_keypair(&mut self, keypair: u32) {
         self.w[5] = keypair;
     }
+    fn keypair(&self) -> u32 {
+        self.w[5]
+    }
     fn set_chain(&mut self, chain: u32) {
         self.w[6] = chain;
     }
-    fn set_hash(&mut self, h: u32) {
-        self.w[7] = h;
+    fn set_tree_height(&mut self, z: u32) {
+        self.w[6] = z;
     }
-    fn set_tree_height(&mut self, h: u32) {
-        self.w[4] = h;
+    fn set_hash(&mut self, j: u32) {
+        self.w[7] = j;
     }
     fn set_tree_index(&mut self, i: u32) {
-        // Word 6. `set_chain` also writes word 6, but a chain address is only
-        // ever written on a type-0/1 WOTS address and a tree index is only ever
-        // written on a type-2 hashtree or type-4 FORS address, so the two never
-        // coexist. Word 5 (`keypair`) must stay untouched here: FORS carries the
-        // tree number there while indexing leaves.
-        self.w[6] = i;
+        self.w[7] = i;
     }
-    #[allow(dead_code)]
-    fn copy_subtree_from(&mut self, other: &SpxAddress) {
-        self.w[0] = other.w[0];
-        self.w[1] = other.w[1];
-        self.w[2] = other.w[2];
+    fn tree_index(&self) -> u32 {
+        self.w[7]
     }
     fn as_bytes(&self) -> [u8; 32] {
         let mut out = [0u8; 32];
@@ -251,603 +241,488 @@ impl SpxAddress {
 
 // =============================== Hash/PRF ===================================
 
-/// Domain tag for the SPHINCS+ KDF — byte-identical to the DSM crypto layer's
-/// `TAG_DSM_SPHINCS_KDF`, so signatures verify across both implementations.
-const TAG_DSM_SPHINCS_KDF: &str = "DSM/sphincs-kdf";
+/// BLAKE3 KDF contexts, one per role. Each is fixed and unique to that role.
+const CONTEXT_PRF: &str = "DSM/sphincs/v2/prf";
+const CONTEXT_THASH: &str = "DSM/sphincs/v2/thash";
+const CONTEXT_PRF_MSG: &str = "DSM/sphincs/v2/prf-msg";
+const CONTEXT_H_MSG: &str = "DSM/sphincs/v2/h-msg";
 
-fn blake3_kdf(out_len: usize, inputs: &[&[u8]]) -> Vec<u8> {
-    // dsm_domain_hasher(tag): BLAKE3 ‖ tag bytes ‖ 0x00 (matches the host impl).
-    let mut h = blake3::Hasher::new();
-    h.update(TAG_DSM_SPHINCS_KDF.as_bytes());
-    h.update(&[0u8]);
-    for inp in inputs {
-        h.update(inp);
-    }
-    let mut out = vec![0u8; out_len];
-    let mut xof = h.finalize_xof();
-    xof.fill(&mut out);
-    out
+/// What every hash call of one key needs: `n`, `PK.seed` and the tweakable
+/// hash's key, derived once from `PK.seed`.
+struct PublicCtx {
+    n: usize,
+    pk_seed: Vec<u8>,
+    thash_key: [u8; 32],
 }
 
-/// Construct a BLAKE3 keyed hasher with a strictly 32-byte key, regardless of
-/// the SPHINCS+ parameter set's `n`.
-///
-/// **Issue #184 Finding #4 resolution.** Previously this function silently
-/// zero-padded short keys to 32 bytes, leaking known-zero key material to
-/// any attacker who knew the selected parameter set (`n < 32` for SPX128/192
-/// variants). With BLAKE3's keyed mode, a key with predictable bytes degrades
-/// the PRF strength below what SPHINCS+'s security proof requires.
-///
-/// Fix: for keys shorter than 32 bytes, expand via `blake3::derive_key` — the
-/// canonical BLAKE3 KDF — with a fixed domain context. Keys that are already
-/// 32+ bytes are passed through unchanged (preserves SPX256 behavior; SPX256
-/// is the production-default variant, so this preserves all KAT digests).
-///
-/// The domain context `"DSM/sphincs-key-expand"` is unique to this use to
-/// prevent cross-domain collisions with any other BLAKE3 KDF call.
-fn blake3_keyed(n: usize, key: &[u8], inputs: &[&[u8]]) -> Vec<u8> {
-    let keyarr: [u8; 32] = if key.len() >= 32 {
-        let mut k = [0u8; 32];
-        k.copy_from_slice(&key[..32]);
-        k
-    } else {
-        // Expand short key material to 32 bytes via BLAKE3's canonical KDF
-        // instead of zero-padding. Domain-separated context prevents
-        // cross-domain reuse.
-        blake3::derive_key("DSM/sphincs-key-expand", key)
-    };
-    let mut h = blake3::Hasher::new_keyed(&keyarr);
-    for inp in inputs {
-        h.update(inp);
+impl PublicCtx {
+    fn new(n: usize, pk_seed: &[u8]) -> Self {
+        Self {
+            n,
+            pk_seed: pk_seed.to_vec(),
+            thash_key: blake3::derive_key(CONTEXT_THASH, pk_seed),
+        }
+    }
+}
+
+/// The PRF's key, derived once from `SK.seed`, cleared on drop.
+struct SecretCtx {
+    prf_key: Zeroizing<[u8; 32]>,
+}
+
+impl SecretCtx {
+    fn new(sk_seed: &[u8]) -> Self {
+        Self {
+            prf_key: Zeroizing::new(blake3::derive_key(CONTEXT_PRF, sk_seed)),
+        }
+    }
+}
+
+fn keyed(n: usize, key: &[u8; 32], inputs: &[&[u8]]) -> Vec<u8> {
+    let mut h = blake3::Hasher::new_keyed(key);
+    for input in inputs {
+        h.update(input);
     }
     let mut out = vec![0u8; n];
     out.copy_from_slice(&h.finalize().as_bytes()[..n]);
     out
 }
 
-fn prf_addr(n: usize, sk_seed: &[u8], addr: &SpxAddress) -> Vec<u8> {
-    blake3_keyed(n, sk_seed, &[&addr.as_bytes()])
+/// `F`, `H` and `T_l`: the tweakable hash over `ADRS ‖ M`.
+fn thash(pc: &PublicCtx, adrs: &Adrs, inputs: &[&[u8]]) -> Vec<u8> {
+    let a = adrs.as_bytes();
+    #[cfg(test)]
+    trace::record(&a, trace::ROLE_THASH, inputs);
+    let mut pieces: Vec<&[u8]> = Vec::with_capacity(1 + inputs.len());
+    pieces.push(&a);
+    pieces.extend_from_slice(inputs);
+    keyed(pc.n, &pc.thash_key, &pieces)
 }
 
-fn thash(n: usize, pub_seed: &[u8], addr: &SpxAddress, inputs: &[&[u8]]) -> Vec<u8> {
-    // Build a slice of byte-slices beginning with the encoded address, followed by inputs
-    let addr_bytes = addr.as_bytes();
-    let mut pieces: Vec<&[u8]> = Vec::with_capacity(1 + inputs.len());
-    pieces.push(&addr_bytes);
-    pieces.extend_from_slice(inputs);
-    blake3_keyed(n, pub_seed, &pieces)
+/// `PRF(PK.seed, SK.seed, ADRS)`: a secret value, cleared on drop.
+fn prf(pc: &PublicCtx, sc: &SecretCtx, adrs: &Adrs) -> Zeroizing<Vec<u8>> {
+    let a = adrs.as_bytes();
+    #[cfg(test)]
+    trace::record(&a, trace::ROLE_PRF, &[]);
+    Zeroizing::new(keyed(pc.n, &sc.prf_key, &[&pc.pk_seed, &a]))
+}
+
+/// `PRF_msg(SK.prf, opt_rand, M)`: the randomizer `R`.
+fn prf_msg(n: usize, sk_prf: &[u8], opt_rand: &[u8], m: &[u8]) -> Vec<u8> {
+    let key = Zeroizing::new(blake3::derive_key(CONTEXT_PRF_MSG, sk_prf));
+    keyed(n, &key, &[opt_rand, m])
+}
+
+/// `H_msg(R, PK.seed, PK.root, M)`: `m` bytes.
+fn h_msg(p: &Params, r: &[u8], pk_seed: &[u8], pk_root: &[u8], m: &[u8]) -> Vec<u8> {
+    let mut h = blake3::Hasher::new_derive_key(CONTEXT_H_MSG);
+    h.update(r);
+    h.update(pk_seed);
+    h.update(pk_root);
+    h.update(m);
+    let mut out = vec![0u8; p.m];
+    h.finalize_xof().fill(&mut out);
+    out
+}
+
+// ============================ Encoding helpers ==============================
+
+/// FIPS 205 Algorithm 4, `base_2b`: `out_len` integers of `b` bits each,
+/// most significant first. `x` holds at least `ceil(out_len·b / 8)` bytes.
+fn base_2b(x: &[u8], b: usize, out_len: usize) -> Vec<u32> {
+    let mut input = 0usize;
+    let mut bits = 0usize;
+    let mut total: u64 = 0;
+    let mask = (1u64 << b) - 1;
+    let mut out = Vec::with_capacity(out_len);
+    for _ in 0..out_len {
+        while bits < b {
+            total = (total << 8) | u64::from(x[input]);
+            input += 1;
+            bits += 8;
+        }
+        bits -= b;
+        out.push(((total >> bits) & mask) as u32);
+        total &= (1u64 << bits) - 1;
+    }
+    out
+}
+
+/// FIPS 205 Algorithm 2, `toInt`, over at most 8 bytes.
+fn to_int(x: &[u8]) -> u64 {
+    x.iter().fold(0u64, |acc, b| (acc << 8) | u64::from(*b))
+}
+
+/// FIPS 205 Algorithm 3, `toByte`: the low `len` bytes of `x`, big-endian.
+fn to_byte(x: u64, len: usize) -> Vec<u8> {
+    x.to_be_bytes()[8 - len..].to_vec()
+}
+
+/// The `len` base-`w` digits WOTS+ signs: the message's `len1` and the
+/// checksum's `len2` (FIPS 205 Algorithm 7, lines 1–9).
+fn wots_digits(p: &Params, m: &[u8]) -> Vec<u32> {
+    let mut digits = base_2b(m, LG_W, p.len1);
+    let csum: u32 = digits.iter().map(|d| (W - 1) - d).sum();
+    let shift = (8 - ((p.len2 * LG_W) % 8)) % 8;
+    let csum_bytes = to_byte(u64::from(csum) << shift, (p.len2 * LG_W).div_ceil(8));
+    digits.extend(base_2b(&csum_bytes, LG_W, p.len2));
+    digits
 }
 
 // ================================ WOTS+ =====================================
 
-fn base_w_16(out_len: usize, bytes: &[u8]) -> Vec<u8> {
-    // Convert to base-16 (nibbles)
-    let mut out = Vec::with_capacity(out_len);
-    for b in bytes {
-        out.push(b >> 4);
-        if out.len() == out_len {
-            break;
-        }
-        out.push(b & 0x0F);
-        if out.len() == out_len {
-            break;
-        }
+/// FIPS 205 Algorithm 5, `chain`: `s` steps from step `i`.
+fn chain(pc: &PublicCtx, x: &[u8], i: u32, s: u32, adrs: &mut Adrs) -> Vec<u8> {
+    let mut tmp = x.to_vec();
+    for j in i..i + s {
+        adrs.set_hash(j);
+        tmp = thash(pc, adrs, &[&tmp]);
     }
-    while out.len() < out_len {
-        out.push(0);
-    }
-    out
+    tmp
 }
 
-fn wots_len2_checksum(len1: usize, base: &[u8], w: usize) -> Vec<u8> {
-    // cs = sum (w-1 - base[i])
-    // Be robust to shorter base input in tests; production passes base.len()==len1.
-    let mut cs: usize = 0;
-    let take = core::cmp::min(len1, base.len());
-    for b in base.iter().take(take) {
-        cs += (w - 1) - (*b as usize);
-    }
-    // represent cs in base-w with len2 digits (most significant first)
-    // since w=16, we can emit nibbles from high to low.
-    let mut digits = Vec::new();
-    let mut x = cs;
-    while x > 0 {
-        digits.push((x % 16) as u8);
-        x /= 16;
-    }
-    digits.reverse();
-    digits
+/// The address a WOTS+ secret value is drawn under.
+fn wots_sk_adrs(adrs: &Adrs) -> Adrs {
+    let mut sk_adrs = *adrs;
+    sk_adrs.set_type_and_clear(WOTS_PRF);
+    sk_adrs.set_keypair(adrs.keypair());
+    sk_adrs
 }
 
-fn wots_gen_sk_element(p: &Params, sk_seed: &[u8], addr: &SpxAddress) -> Vec<u8> {
-    // addr should already have chain set by caller
-    prf_addr(p.n, sk_seed, addr)
+/// `T_len` under the key pair's own `WOTS_PK` address.
+fn wots_compress(pc: &PublicCtx, adrs: &Adrs, tops: &[u8]) -> Vec<u8> {
+    let mut pk_adrs = *adrs;
+    pk_adrs.set_type_and_clear(WOTS_PK);
+    pk_adrs.set_keypair(adrs.keypair());
+    thash(pc, &pk_adrs, &[tops])
 }
 
-fn wots_chain(
-    p: &Params,
-    start: &[u8],
-    start_step: usize,
-    steps: usize,
-    pub_seed: &[u8],
-    addr: &SpxAddress,
-) -> Vec<u8> {
-    let mut val = start.to_vec();
-    let mut a = *addr;
-    for j in start_step..(start_step + steps) {
-        a.set_hash(j as u32);
-        val = thash(p.n, pub_seed, &a, &[&val]);
+/// FIPS 205 Algorithm 6, `wots_pkGen`. `adrs` is a `WOTS_HASH` address with
+/// its key pair set.
+fn wots_pkgen(p: &Params, pc: &PublicCtx, sc: &SecretCtx, adrs: &Adrs) -> Vec<u8> {
+    let mut sk_adrs = wots_sk_adrs(adrs);
+    let mut chain_adrs = *adrs;
+    let mut tops = Vec::with_capacity(p.len * p.n);
+    for i in 0..p.len as u32 {
+        sk_adrs.set_chain(i);
+        let sk = prf(pc, sc, &sk_adrs);
+        chain_adrs.set_chain(i);
+        tops.extend(chain(pc, &sk, 0, W - 1, &mut chain_adrs));
     }
-    val
+    wots_compress(pc, adrs, &tops)
 }
 
-fn wots_gen_pk_vec(p: &Params, sk_seed: &[u8], pub_seed: &[u8], addr: &SpxAddress) -> Vec<u8> {
-    // produce the vector (wots_len elements, each n bytes)
-    let mut a = *addr;
-    let mut out = vec![0u8; p.wots_bytes];
-    for i in 0..p.wots_len {
-        a.set_chain(i as u32);
-        let sk_i = wots_gen_sk_element(p, sk_seed, &a);
-        let pk_i = wots_chain(p, &sk_i, 0, p.w - 1, pub_seed, &a);
-        out[i * p.n..(i + 1) * p.n].copy_from_slice(&pk_i);
-    }
-    out
-}
-
-fn wots_sig(
-    p: &Params,
-    msg: &[u8], // n bytes (message digest)
-    sk_seed: &[u8],
-    pub_seed: &[u8],
-    addr: &SpxAddress,
-) -> Vec<u8> {
-    // message base-w representation
-    let mut base = base_w_16(p.len1, msg);
-    // checksum with fixed len2 = 3 typically; we normalize to exactly len2 digits
-    let mut cs = wots_len2_checksum(p.len1, &base, p.w);
-    // left-pad checksum to len2
-    match cs.len().cmp(&p.len2) {
-        core::cmp::Ordering::Less => {
-            let mut pad = vec![0u8; p.len2 - cs.len()];
-            pad.extend_from_slice(&cs);
-            cs = pad;
-        }
-        core::cmp::Ordering::Greater => {
-            cs = cs[cs.len() - p.len2..].to_vec();
-        }
-        core::cmp::Ordering::Equal => {}
-    }
-    base.extend_from_slice(&cs);
-    debug_assert_eq!(base.len(), p.wots_len);
-
-    // sign: for each i, compute chain(sk_i, 0 -> base[i])
-    let mut sig = vec![0u8; p.wots_bytes];
-    let mut a = *addr;
-    for i in 0..p.wots_len {
-        a.set_chain(i as u32);
-        let sk_i = wots_gen_sk_element(p, sk_seed, &a);
-        let s_i = wots_chain(p, &sk_i, 0, base[i] as usize, pub_seed, &a);
-        sig[i * p.n..(i + 1) * p.n].copy_from_slice(&s_i);
+/// FIPS 205 Algorithm 7, `wots_sign`.
+fn wots_sign(p: &Params, pc: &PublicCtx, sc: &SecretCtx, m: &[u8], adrs: &Adrs) -> Vec<u8> {
+    let mut sk_adrs = wots_sk_adrs(adrs);
+    let mut chain_adrs = *adrs;
+    let mut sig = Vec::with_capacity(p.len * p.n);
+    for (i, digit) in wots_digits(p, m).into_iter().enumerate() {
+        sk_adrs.set_chain(i as u32);
+        let sk = prf(pc, sc, &sk_adrs);
+        chain_adrs.set_chain(i as u32);
+        sig.extend(chain(pc, &sk, 0, digit, &mut chain_adrs));
     }
     sig
 }
 
-fn wots_pk_from_sig(
+/// FIPS 205 Algorithm 8, `wots_pkFromSig`.
+fn wots_pk_from_sig(p: &Params, pc: &PublicCtx, sig: &[u8], m: &[u8], adrs: &Adrs) -> Vec<u8> {
+    let mut chain_adrs = *adrs;
+    let mut tops = Vec::with_capacity(p.len * p.n);
+    for (i, digit) in wots_digits(p, m).into_iter().enumerate() {
+        chain_adrs.set_chain(i as u32);
+        tops.extend(chain(
+            pc,
+            &sig[i * p.n..(i + 1) * p.n],
+            digit,
+            W - 1 - digit,
+            &mut chain_adrs,
+        ));
+    }
+    wots_compress(pc, adrs, &tops)
+}
+
+// ================================ XMSS ======================================
+
+/// FIPS 205 Algorithm 9, `xmss_node`: the node at height `z`, index `i`.
+fn xmss_node(
     p: &Params,
-    sig: &[u8], // wots_bytes
-    msg: &[u8], // n bytes
-    pub_seed: &[u8],
-    addr: &SpxAddress,
+    pc: &PublicCtx,
+    sc: &SecretCtx,
+    i: u32,
+    z: u32,
+    adrs: &mut Adrs,
 ) -> Vec<u8> {
-    let mut base = base_w_16(p.len1, msg);
-    let mut cs = wots_len2_checksum(p.len1, &base, p.w);
-    match cs.len().cmp(&p.len2) {
-        core::cmp::Ordering::Less => {
-            let mut pad = vec![0u8; p.len2 - cs.len()];
-            pad.extend_from_slice(&cs);
-            cs = pad;
-        }
-        core::cmp::Ordering::Greater => {
-            cs = cs[cs.len() - p.len2..].to_vec();
-        }
-        core::cmp::Ordering::Equal => {}
+    if z == 0 {
+        adrs.set_type_and_clear(WOTS_HASH);
+        adrs.set_keypair(i);
+        return wots_pkgen(p, pc, sc, adrs);
     }
-    base.extend_from_slice(&cs);
-
-    let mut out_vec = vec![0u8; p.wots_bytes];
-    let mut a = *addr;
-    for i in 0..p.wots_len {
-        a.set_chain(i as u32);
-        let in_i = &sig[i * p.n..(i + 1) * p.n];
-        // remaining steps = (w-1 - base[i])
-        let pk_i = wots_chain(
-            p,
-            in_i,
-            base[i] as usize,
-            (p.w - 1) - base[i] as usize,
-            pub_seed,
-            &a,
-        );
-        out_vec[i * p.n..(i + 1) * p.n].copy_from_slice(&pk_i);
-    }
-    out_vec
+    let left = xmss_node(p, pc, sc, 2 * i, z - 1, adrs);
+    let right = xmss_node(p, pc, sc, 2 * i + 1, z - 1, adrs);
+    adrs.set_type_and_clear(TREE);
+    adrs.set_tree_height(z);
+    adrs.set_tree_index(i);
+    thash(pc, adrs, &[&left, &right])
 }
 
-// =============== l-tree (compress WOTS pk vector to single n-byte) ==========
-
-fn l_tree(p: &Params, pub_seed: &[u8], addr: &SpxAddress, pk_vec: &mut [u8]) -> Vec<u8> {
-    // pk_vec = len entries of n bytes
-    let mut a = *addr;
-    a.set_type(2); // HASHTREE domain (distinct from FORS/WOTS types)
-    let mut count = p.wots_len;
-    let mut layer = 0u32;
-    while count > 1 {
-        let mut idx = 0usize;
-        let mut write = 0usize;
-        while idx + 1 < count {
-            a.set_tree_height(layer);
-            a.set_tree_index((idx / 2) as u32);
-            let left = &pk_vec[idx * p.n..(idx + 1) * p.n];
-            let right = &pk_vec[(idx + 1) * p.n..(idx + 2) * p.n];
-            let combined = thash(p.n, pub_seed, &a, &[left, right]);
-            pk_vec[write * p.n..(write + 1) * p.n].copy_from_slice(&combined);
-            idx += 2;
-            write += 1;
-        }
-        if idx < count {
-            // odd node, carry
-            if write != idx {
-                // Use a temporary buffer to avoid borrow conflicts
-                let src = pk_vec[idx * p.n..(idx + 1) * p.n].to_vec();
-                pk_vec[write * p.n..(write + 1) * p.n].copy_from_slice(&src);
-            }
-            write += 1;
-        }
-        count = write;
-        layer += 1;
-    }
-    pk_vec[..p.n].to_vec()
-}
-
-fn wots_leaf(p: &Params, sk_seed: &[u8], pub_seed: &[u8], tree_addr: &SpxAddress) -> Vec<u8> {
-    // generate WOTS pk vec → l-tree → leaf (n bytes)
-    // we derive a WOTS address beneath the given tree address
-    let mut waddr = *tree_addr;
-    waddr.set_type(0); // WOTS
-    let mut pk_vec = wots_gen_pk_vec(p, sk_seed, pub_seed, &waddr);
-    l_tree(p, pub_seed, tree_addr, &mut pk_vec)
-}
-
-// ================================ FORS ======================================
-
-#[derive(Debug, Clone)]
-struct ForsSig {
-    // flat encoding: for each tree t:
-    //   SK_leaf (n bytes) || auth_path (a * n bytes)
-    bytes: Vec<u8>,
-}
-
-fn fors_tree_leaf(
+/// FIPS 205 Algorithm 10, `xmss_sign`: the WOTS+ signature, then the
+/// authentication path.
+fn xmss_sign(
     p: &Params,
-    sk_seed: &[u8],
-    pub_seed: &[u8],
-    addr: &SpxAddress,
-    leaf_idx: u32,
+    pc: &PublicCtx,
+    sc: &SecretCtx,
+    m: &[u8],
+    idx: u32,
+    adrs: &mut Adrs,
 ) -> Vec<u8> {
-    let mut a = *addr;
-    a.set_tree_index(leaf_idx);
-    let sk = prf_addr(p.n, sk_seed, &a);
-    thash(p.n, pub_seed, &a, &[&sk])
+    let mut auth = Vec::with_capacity(p.hp * p.n);
+    for j in 0..p.hp as u32 {
+        let sibling = (idx >> j) ^ 1;
+        auth.extend(xmss_node(p, pc, sc, sibling, j, adrs));
+    }
+    adrs.set_type_and_clear(WOTS_HASH);
+    adrs.set_keypair(idx);
+    let mut sig = wots_sign(p, pc, sc, m, adrs);
+    sig.extend(auth);
+    sig
 }
 
-fn build_auth_path_and_root(
+/// FIPS 205 Algorithm 11, `xmss_pkFromSig`.
+fn xmss_pk_from_sig(
     p: &Params,
-    pub_seed: &[u8],
-    addr: &SpxAddress,
-    leaves: &mut [u8], // count * n
-    idx: usize,
-    height: usize,
-) -> (Vec<u8>, Vec<u8>) {
-    // Compute auth path for leaf idx and root (pairwise reduction)
-    // leaves are level 0
-    let _count = leaves.len() / p.n;
-    let _a = *addr;
-    let mut auth = vec![0u8; height * p.n];
-
-    let mut current = leaves.to_vec();
-    let mut layer = 0usize;
-    let mut node_index = idx;
-
-    while current.len() > p.n {
-        // sibling index
-        let sibling = if node_index.is_multiple_of(2) {
-            node_index + 1
+    pc: &PublicCtx,
+    idx: u32,
+    sig: &[u8],
+    m: &[u8],
+    adrs: &mut Adrs,
+) -> Vec<u8> {
+    let (wots, auth) = sig.split_at(p.len * p.n);
+    adrs.set_type_and_clear(WOTS_HASH);
+    adrs.set_keypair(idx);
+    let mut node = wots_pk_from_sig(p, pc, wots, m, adrs);
+    adrs.set_type_and_clear(TREE);
+    adrs.set_tree_index(idx);
+    for k in 0..p.hp {
+        let sibling = &auth[k * p.n..(k + 1) * p.n];
+        adrs.set_tree_height(k as u32 + 1);
+        if (idx >> k).is_multiple_of(2) {
+            adrs.set_tree_index(adrs.tree_index() / 2);
+            node = thash(pc, adrs, &[&node, sibling]);
         } else {
-            node_index - 1
-        };
-        let sib_bytes = &current[sibling * p.n..(sibling + 1) * p.n];
-        // write layer-th auth node
-        auth[layer * p.n..(layer + 1) * p.n].copy_from_slice(sib_bytes);
-
-        // reduce current level
-        let next_count = (current.len() / p.n).div_ceil(2);
-        let mut next = vec![0u8; next_count * p.n];
-
-        for (write, j) in (0..(current.len() / p.n)).step_by(2).enumerate() {
-            let left = &current[j * p.n..(j + 1) * p.n];
-            let right = if j + 1 < (current.len() / p.n) {
-                &current[(j + 1) * p.n..(j + 2) * p.n]
-            } else {
-                left
-            };
-            let mut th = *addr;
-            th.set_tree_height(layer as u32);
-            th.set_tree_index((j / 2) as u32);
-            // CRITICAL FIX: Always hash as [left, right] - this is correct since j is the left child index
-            // The ordering matters for thash domain separation but we're already using the parent index
-            let hnode = thash(p.n, pub_seed, &th, &[left, right]);
-            next[write * p.n..(write + 1) * p.n].copy_from_slice(&hnode);
+            adrs.set_tree_index((adrs.tree_index() - 1) / 2);
+            node = thash(pc, adrs, &[sibling, &node]);
         }
-
-        current = next;
-        node_index /= 2;
-        layer += 1;
-    }
-
-    (auth, current)
-}
-
-fn fors_sign(
-    p: &Params,
-    mhash: &[u8], // n bytes
-    sk_seed: &[u8],
-    pub_seed: &[u8],
-    addr: &SpxAddress,
-) -> (ForsSig, Vec<u8>) {
-    // Derive k indices from mhash (k * a bits)
-    let indices = message_to_indices(p, mhash);
-    // For each tree, build leaves and auth path
-    let leaf_count = 1usize << p.a;
-    let mut a = *addr;
-    a.set_type(4); // FORS TREE
-
-    let mut sig_bytes = Vec::with_capacity(p.k * (1 + p.a) * p.n);
-    let mut roots_concat = Vec::with_capacity(p.k * p.n);
-
-    for (t, idx_u32) in indices.iter().enumerate() {
-        a.set_keypair(t as u32); // Set keypair for each FORS tree
-                                 // Build leaves for tree t
-        let mut leaves = vec![0u8; leaf_count * p.n];
-        for i in 0..leaf_count {
-            a.set_tree_index(i as u32);
-            let leaf = fors_tree_leaf(p, sk_seed, pub_seed, &a, i as u32);
-            leaves[i * p.n..(i + 1) * p.n].copy_from_slice(&leaf);
-        }
-
-        // Secret leaf value (sk), then auth path for the chosen index
-        let idx = *idx_u32 as usize;
-        a.set_tree_height(0); // Set tree height for leaf operations
-        a.set_tree_index(idx as u32);
-        let sk_leaf = prf_addr(p.n, sk_seed, &a);
-        sig_bytes.extend_from_slice(&sk_leaf);
-
-        let (auth, root) = build_auth_path_and_root(p, pub_seed, &a, &mut leaves, idx, p.a);
-        sig_bytes.extend_from_slice(&auth);
-        roots_concat.extend_from_slice(&root);
-    }
-
-    // compress k roots into FORS pk with domain-separated thash
-    let mut pk_addr = *addr;
-    pk_addr.set_type(5); // FORS PK
-    let fors_pk = thash(p.n, pub_seed, &pk_addr, &[&roots_concat]);
-
-    (ForsSig { bytes: sig_bytes }, fors_pk)
-}
-
-fn fors_pk_from_sig(
-    p: &Params,
-    mhash: &[u8],
-    sig: &ForsSig,
-    pub_seed: &[u8],
-    addr: &SpxAddress,
-) -> Vec<u8> {
-    let indices = message_to_indices(p, mhash);
-    let mut roots_concat = Vec::with_capacity(p.k * p.n);
-    let mut offset = 0usize;
-
-    let mut a = *addr;
-    a.set_type(4); // FORS TREE
-
-    for (t, idx_u32) in indices.iter().enumerate() {
-        a.set_keypair(t as u32); // Set keypair for each FORS tree
-        let idx = *idx_u32 as usize;
-        let sk_leaf = &sig.bytes[offset..offset + p.n];
-        offset += p.n;
-
-        // Hash the leaf with proper address (tree_height=0, tree_index=idx)
-        a.set_tree_height(0);
-        a.set_tree_index(idx as u32);
-        let mut node = thash(p.n, pub_seed, &a, &[sk_leaf]);
-
-        // ascend using auth path
-        for h in 0..p.a {
-            let auth = &sig.bytes[offset..offset + p.n];
-            offset += p.n;
-
-            let mut th = a;
-            th.set_tree_height(h as u32);
-            // Parent index is floor(idx / 2^(h + 1)). Using the same
-            // convention as the signer ensures identical domain separation.
-            th.set_tree_index((idx >> (h + 1)) as u32);
-
-            if ((idx >> h) & 1) == 0 {
-                node = thash(p.n, pub_seed, &th, &[&node, auth]);
-            } else {
-                node = thash(p.n, pub_seed, &th, &[auth, &node]);
-            }
-        }
-
-        roots_concat.extend_from_slice(&node);
-    }
-
-    let mut pk_addr = *addr;
-    pk_addr.set_type(5);
-    thash(p.n, pub_seed, &pk_addr, &[&roots_concat])
-}
-
-fn message_to_indices(p: &Params, mhash: &[u8]) -> Vec<u32> {
-    // Use k*a bits from mhash. If not enough, expand with BLAKE3 XOF.
-    let need_bits = p.k * p.a;
-    let mut bytes = mhash.to_vec();
-    if bytes.len() * 8 < need_bits {
-        let extra = blake3_kdf(need_bits.div_ceil(8) - bytes.len(), &[mhash]);
-        bytes.extend_from_slice(&extra);
-    }
-
-    let mut out = Vec::with_capacity(p.k);
-    let mut bitpos = 0usize;
-    for _ in 0..p.k {
-        let mut idx = 0u32;
-        for _ in 0..p.a {
-            let byte = bytes[bitpos / 8];
-            let bit = (byte >> (7 - (bitpos % 8))) & 1;
-            idx = (idx << 1) | (bit as u32);
-            bitpos += 1;
-        }
-        out.push(idx);
-    }
-    out
-}
-
-// ============================== Merkle Helpers ==============================
-
-fn compute_root_with_auth(
-    p: &Params,
-    leaf: &[u8],
-    auth_path: &[u8], // a sequence of p.layer_height * n bytes for that layer
-    pub_seed: &[u8],
-    addr: &SpxAddress,
-    mut idx: usize,
-) -> Vec<u8> {
-    // Reconstruct Merkle root from leaf and authentication path.
-    // Ordering MUST reflect the leaf index parity at each height: if the current
-    // node is a right child, sibling goes on the left (sibling || node); otherwise
-    // (node || sibling).
-    let mut a = *addr;
-    // Internal hashtree nodes carry no keypair — see build_merkle_and_auth.
-    a.set_keypair(0);
-    let mut node = leaf.to_vec();
-    for h in 0..p.layer_height {
-        a.set_tree_height(h as u32);
-        // Parent index (for address domain separation)
-        a.set_tree_index((idx >> 1) as u32);
-        let sibling = &auth_path[h * p.n..(h + 1) * p.n];
-        if (idx & 1) == 1 {
-            // current node is right child
-            node = thash(p.n, pub_seed, &a, &[sibling, &node]);
-        } else {
-            // current node is left child
-            node = thash(p.n, pub_seed, &a, &[&node, sibling]);
-        }
-        idx >>= 1;
     }
     node
 }
 
-fn build_merkle_and_auth(
-    p: &Params,
-    leaf_count: usize,
-    leaf_fn: &mut dyn FnMut(usize) -> Vec<u8>,
-    pub_seed: &[u8],
-    addr: &SpxAddress,
-    idx: usize,
-) -> (Vec<u8>, Vec<u8>) {
-    let mut leaves = vec![0u8; leaf_count * p.n];
-    for i in 0..leaf_count {
-        let v = leaf_fn(i);
-        leaves[i * p.n..(i + 1) * p.n].copy_from_slice(&v);
-    }
-    // An internal hypertree node belongs to the tree, not to any one WOTS
-    // keypair beneath it: key generation builds this tree from an address with
-    // no keypair set, so signing must clear the leaf's keypair to reach the same
-    // root. Previously `set_tree_index` erased word 5 and hid the discrepancy.
-    // This clear is confined to the hypertree — `build_auth_path_and_root` is
-    // shared with FORS, which carries its tree number in the keypair word and
-    // must keep it in internal nodes for the k trees to stay independent.
-    let mut taddr = *addr;
-    taddr.set_keypair(0);
-    let (auth, root) =
-        build_auth_path_and_root(p, pub_seed, &taddr, &mut leaves, idx, p.layer_height);
-    (auth, root)
+// ============================== Hypertree ===================================
+
+/// The leaf index into the next layer's tree, and that tree's index.
+fn next_layer(p: &Params, tree: u64) -> (u32, u64) {
+    ((tree & ((1u64 << p.hp) - 1)) as u32, tree >> p.hp)
 }
 
-// ===================== H_msg: derive (mhash, tree, leaf) ====================
+/// FIPS 205 Algorithm 12, `ht_sign`.
+fn ht_sign(
+    p: &Params,
+    pc: &PublicCtx,
+    sc: &SecretCtx,
+    m: &[u8],
+    idx_tree: u64,
+    idx_leaf: u32,
+) -> Vec<u8> {
+    let mut adrs = Adrs::new();
+    adrs.set_tree(idx_tree);
+    let mut sig = xmss_sign(p, pc, sc, m, idx_leaf, &mut adrs);
+    let mut root = xmss_pk_from_sig(p, pc, idx_leaf, &sig, m, &mut adrs);
+    let mut tree = idx_tree;
+    for j in 1..p.d {
+        let (leaf, next) = next_layer(p, tree);
+        tree = next;
+        adrs.set_layer(j as u32);
+        adrs.set_tree(tree);
+        let layer_sig = xmss_sign(p, pc, sc, &root, leaf, &mut adrs);
+        if j < p.d - 1 {
+            root = xmss_pk_from_sig(p, pc, leaf, &layer_sig, &root, &mut adrs);
+        }
+        sig.extend(layer_sig);
+    }
+    sig
+}
 
-fn h_msg_expand(p: &Params, r: &[u8], pk: &[u8], m: &[u8]) -> (Vec<u8>, u64, u32) {
-    // Output mhash (n bytes), tree (64-bit), leaf (32-bit, truncated to layer range)
-    // Tree is masked to (h - h/d) bits, leaf to h/d bits
-    let need = p.n + 8 + 4;
-    let x = blake3_kdf(need, &[r, pk, m]);
-    let mhash = x[0..p.n].to_vec();
-    let mut tree_bytes = [0u8; 8];
-    tree_bytes.copy_from_slice(&x[p.n..p.n + 8]);
-    let tree_raw = u64::from_be_bytes(tree_bytes);
-    // Mask tree to (h - layer_height) bits
-    let tree_bits = p.h - p.layer_height;
-    let tree = if tree_bits < 64 {
-        tree_raw & ((1u64 << tree_bits) - 1)
-    } else {
-        tree_raw
-    };
-    let mut leaf_bytes = [0u8; 4];
-    leaf_bytes.copy_from_slice(&x[p.n + 8..p.n + 12]);
-    let leaf_raw = u32::from_be_bytes(leaf_bytes);
-    let leaf = leaf_raw & ((1u32 << p.layer_height) - 1);
-    (mhash, tree, leaf)
+/// FIPS 205 Algorithm 13, `ht_verify`.
+fn ht_verify(
+    p: &Params,
+    pc: &PublicCtx,
+    m: &[u8],
+    sig: &[u8],
+    idx_tree: u64,
+    idx_leaf: u32,
+    pk_root: &[u8],
+) -> bool {
+    let layer_bytes = (p.len + p.hp) * p.n;
+    let mut adrs = Adrs::new();
+    adrs.set_tree(idx_tree);
+    let mut node = xmss_pk_from_sig(p, pc, idx_leaf, &sig[..layer_bytes], m, &mut adrs);
+    let mut tree = idx_tree;
+    for j in 1..p.d {
+        let (leaf, next) = next_layer(p, tree);
+        tree = next;
+        adrs.set_layer(j as u32);
+        adrs.set_tree(tree);
+        node = xmss_pk_from_sig(
+            p,
+            pc,
+            leaf,
+            &sig[j * layer_bytes..(j + 1) * layer_bytes],
+            &node,
+            &mut adrs,
+        );
+    }
+    node.ct_eq(pk_root).unwrap_u8() == 1
+}
+
+// ================================ FORS ======================================
+
+/// FIPS 205 Algorithm 14, `fors_skGen`: secret leaf `idx` of the FORS key
+/// `adrs` names (its key pair is the hypertree leaf that signs it).
+fn fors_sk_gen(pc: &PublicCtx, sc: &SecretCtx, adrs: &Adrs, idx: u32) -> Zeroizing<Vec<u8>> {
+    let mut sk_adrs = *adrs;
+    sk_adrs.set_type_and_clear(FORS_PRF);
+    sk_adrs.set_keypair(adrs.keypair());
+    sk_adrs.set_tree_index(idx);
+    prf(pc, sc, &sk_adrs)
+}
+
+/// FIPS 205 Algorithm 15, `fors_node`: the node at height `z`, index `i`,
+/// counted across all `k` trees.
+fn fors_node(pc: &PublicCtx, sc: &SecretCtx, i: u32, z: u32, adrs: &mut Adrs) -> Vec<u8> {
+    if z == 0 {
+        let sk = fors_sk_gen(pc, sc, adrs, i);
+        adrs.set_tree_height(0);
+        adrs.set_tree_index(i);
+        return thash(pc, adrs, &[&sk]);
+    }
+    let left = fors_node(pc, sc, 2 * i, z - 1, adrs);
+    let right = fors_node(pc, sc, 2 * i + 1, z - 1, adrs);
+    adrs.set_tree_height(z);
+    adrs.set_tree_index(i);
+    thash(pc, adrs, &[&left, &right])
+}
+
+/// FIPS 205 Algorithm 16, `fors_sign`.
+fn fors_sign(p: &Params, pc: &PublicCtx, sc: &SecretCtx, md: &[u8], adrs: &mut Adrs) -> Vec<u8> {
+    let mut sig = Vec::with_capacity(p.k * (p.a + 1) * p.n);
+    for (i, idx) in base_2b(md, p.a, p.k).into_iter().enumerate() {
+        let tree = i as u32;
+        sig.extend_from_slice(&fors_sk_gen(pc, sc, adrs, (tree << p.a) + idx));
+        for j in 0..p.a {
+            let sibling = (idx >> j) ^ 1;
+            sig.extend(fors_node(
+                pc,
+                sc,
+                (tree << (p.a - j)) + sibling,
+                j as u32,
+                adrs,
+            ));
+        }
+    }
+    sig
+}
+
+/// FIPS 205 Algorithm 17, `fors_pkFromSig`.
+fn fors_pk_from_sig(p: &Params, pc: &PublicCtx, sig: &[u8], md: &[u8], adrs: &mut Adrs) -> Vec<u8> {
+    let step = (p.a + 1) * p.n;
+    let mut roots = Vec::with_capacity(p.k * p.n);
+    for (i, idx) in base_2b(md, p.a, p.k).into_iter().enumerate() {
+        let (sk, auth) = sig[i * step..(i + 1) * step].split_at(p.n);
+        adrs.set_tree_height(0);
+        adrs.set_tree_index(((i as u32) << p.a) + idx);
+        let mut node = thash(pc, adrs, &[sk]);
+        for j in 0..p.a {
+            let sibling = &auth[j * p.n..(j + 1) * p.n];
+            adrs.set_tree_height(j as u32 + 1);
+            if (idx >> j).is_multiple_of(2) {
+                adrs.set_tree_index(adrs.tree_index() / 2);
+                node = thash(pc, adrs, &[&node, sibling]);
+            } else {
+                adrs.set_tree_index((adrs.tree_index() - 1) / 2);
+                node = thash(pc, adrs, &[sibling, &node]);
+            }
+        }
+        roots.extend(node);
+    }
+    let mut roots_adrs = *adrs;
+    roots_adrs.set_type_and_clear(FORS_ROOTS);
+    roots_adrs.set_keypair(adrs.keypair());
+    thash(pc, &roots_adrs, &[&roots])
+}
+
+// =============================== Digest =====================================
+
+/// `H_msg`'s output split as FIPS 205 Algorithm 19 lines 6–10 split it.
+struct Indices {
+    md: Vec<u8>,
+    idx_tree: u64,
+    idx_leaf: u32,
+}
+
+fn split_digest(p: &Params, digest: &[u8]) -> Indices {
+    let (md, rest) = digest.split_at(p.md_bytes);
+    let (tree, rest) = rest.split_at(p.tree_bytes);
+    let leaf = &rest[..p.leaf_bytes];
+    let tree_bits = (p.h - p.hp) as u32;
+    let tree_mask = 1u64
+        .checked_shl(tree_bits)
+        .map_or(u64::MAX, |bound| bound - 1);
+    Indices {
+        md: md.to_vec(),
+        idx_tree: to_int(tree) & tree_mask,
+        idx_leaf: (to_int(leaf) & ((1u64 << p.hp) - 1)) as u32,
+    }
+}
+
+/// The FORS address of the key that signs at `(idx_tree, idx_leaf)`.
+fn fors_adrs(at: &Indices) -> Adrs {
+    let mut adrs = Adrs::new();
+    adrs.set_tree(at.idx_tree);
+    adrs.set_type_and_clear(FORS_TREE);
+    adrs.set_keypair(at.idx_leaf);
+    adrs
 }
 
 // =============================== Key Material ===============================
 
 #[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SphincsKeyPair {
-    pub public_key: Vec<u8>, // pub_seed || root
-    pub secret_key: Vec<u8>, // sk_seed || sk_prf || pub_seed || root
+    pub public_key: Vec<u8>, // PK.seed || PK.root
+    pub secret_key: Vec<u8>, // SK.seed || SK.prf || PK.seed || PK.root
 }
 
+/// FIPS 205 Algorithm 18, `slh_keygen_internal`, from seeds ChaCha20 draws
+/// from `seed32`.
 pub fn generate_keypair_from_seed(
     v: SphincsVariant,
     seed32: &[u8; 32],
 ) -> Result<SphincsKeyPair, Error> {
     let p = param_set(v);
     let mut sk = vec![0u8; p.sk_bytes];
-    let mut pk = vec![0u8; p.pk_bytes];
     let mut rng = ChaCha20Rng::from_seed(*seed32);
     rng.fill_bytes(&mut sk[..3 * p.n]);
-    let (sk_seed, _sk_prf, pub_seed) = (&sk[..p.n], &sk[p.n..2 * p.n], &sk[2 * p.n..3 * p.n]);
-
-    let leaf_count = 1usize << p.layer_height;
-    let mut addr_top = SpxAddress::new();
-    addr_top.set_type(2);
-    addr_top.set_layer((p.d - 1) as u32);
-    addr_top.set_tree(0);
-
-    let (_auth_dummy, root) = build_merkle_and_auth(
-        &p,
-        leaf_count,
-        &mut |i| {
-            let mut leaf_addr = addr_top;
-            leaf_addr.set_keypair(i as u32);
-            wots_leaf(&p, sk_seed, pub_seed, &leaf_addr)
-        },
-        pub_seed,
-        &addr_top,
-        0,
-    );
-
-    pk[..p.n].copy_from_slice(pub_seed);
-    pk[p.n..2 * p.n].copy_from_slice(&root);
-    sk[3 * p.n..4 * p.n].copy_from_slice(&root);
-
+    let (sk_seed, rest) = sk.split_at(p.n);
+    let pk_seed = &rest[p.n..2 * p.n];
+    let pc = PublicCtx::new(p.n, pk_seed);
+    let sc = SecretCtx::new(sk_seed);
+    let mut adrs = Adrs::new();
+    adrs.set_layer((p.d - 1) as u32);
+    let root = xmss_node(&p, &pc, &sc, 0, p.hp as u32, &mut adrs);
+    let mut pk = Vec::with_capacity(p.pk_bytes);
+    pk.extend_from_slice(pk_seed);
+    pk.extend_from_slice(&root);
+    sk[3 * p.n..].copy_from_slice(&root);
     Ok(SphincsKeyPair {
         public_key: pk,
         secret_key: sk,
@@ -856,19 +731,17 @@ pub fn generate_keypair_from_seed(
 
 // =============================== Sign/Verify ================================
 
-fn sig_randomizer(p: &Params, sk_prf: &[u8], m: &[u8]) -> Vec<u8> {
-    // Deterministic "randomness" R = H(sk_prf || m)
-    blake3_keyed(p.n, sk_prf, &[m])
-}
-
-/// Sign: returns a signature with exact size for the chosen variant.
-/// Layout:
-///   sig = R (n)
-///       || FORS_SIG (k * (a+1) * n)
-///       || for layer in 0..d-1: WOTS_SIG (wots_bytes) || AUTH_PATH (layer_height * n)
+/// FIPS 205 Algorithm 19, `slh_sign_internal`, deterministic
+/// (`opt_rand = PK.seed`). Layout:
+///
+/// ```text
+/// sig = R (n) ‖ SIG_FORS (k·(a+1)·n) ‖ SIG_HT (d·(len + h')·n)
+/// ```
+///
+/// The signature is verified before it is returned.
 pub fn sign(
     v: SphincsVariant,
-    sk: &[u8], // sk_seed || sk_prf || pub_seed || root
+    sk: &[u8], // SK.seed || SK.prf || PK.seed || PK.root
     m: &[u8],
 ) -> Result<Vec<u8>, Error> {
     if m.is_empty() {
@@ -878,99 +751,45 @@ pub fn sign(
     if sk.len() != p.sk_bytes {
         return Err(Error::Crypto("Bad secret key size"));
     }
+    let (sk_seed, rest) = sk.split_at(p.n);
+    let (sk_prf, public) = rest.split_at(p.n);
+    let (pk_seed, pk_root) = public.split_at(p.n);
+    let pc = PublicCtx::new(p.n, pk_seed);
+    let sc = SecretCtx::new(sk_seed);
 
-    let (sk_seed, sk_prf, pub_seed, root) = (
-        &sk[..p.n],
-        &sk[p.n..2 * p.n],
-        &sk[2 * p.n..3 * p.n],
-        &sk[3 * p.n..4 * p.n],
-    );
+    let r = prf_msg(p.n, sk_prf, pk_seed, m);
+    let at = split_digest(&p, &h_msg(&p, &r, pk_seed, pk_root, m));
+    let mut adrs = fors_adrs(&at);
+    let fors_sig = fors_sign(&p, &pc, &sc, &at.md, &mut adrs);
+    let fors_pk = fors_pk_from_sig(&p, &pc, &fors_sig, &at.md, &mut adrs);
+    let ht_sig = ht_sign(&p, &pc, &sc, &fors_pk, at.idx_tree, at.idx_leaf);
 
-    // 1) Generate R
-    let r = sig_randomizer(&p, sk_prf, m);
-
-    // 2) H_msg → (mhash, tree, leaf)
-    let mut pk = vec![0u8; p.pk_bytes];
-    pk[..p.n].copy_from_slice(pub_seed);
-    pk[p.n..2 * p.n].copy_from_slice(root);
-
-    let (mhash, tree, leaf_idx) = h_msg_expand(&p, &r, &pk, m);
-
-    // 3) FORS sign
-    let mut addr_fors = SpxAddress::new();
-    addr_fors.set_type(4); // FORS TREE
-    addr_fors.set_layer(0);
-    addr_fors.set_tree(tree);
-    let (fors_sig, fors_pk) = fors_sign(&p, &mhash, sk_seed, pub_seed, &addr_fors);
-    sphincs_trace!("SIGN FORS pk: {:?}", &fors_pk[..p.n.min(8)]);
-
-    // 4) Hypertree signing: D layers, start leaf = leaf_idx, tree = tree
     let mut sig = Vec::with_capacity(p.sig_bytes);
-    sig.extend_from_slice(&r);
-    sig.extend_from_slice(&fors_sig.bytes);
-
-    let mut current_root = fors_pk;
-
-    let mut cur_tree = tree;
-    let mut cur_leaf = leaf_idx as usize;
-
-    for layer in 0..p.d {
-        // a) WOTS sign current_root at (layer, cur_tree, cur_leaf)
-        let mut waddr = SpxAddress::new();
-        waddr.set_type(0); // WOTS
-        waddr.set_layer(layer as u32);
-        waddr.set_tree(cur_tree);
-        waddr.set_keypair(cur_leaf as u32);
-
-        if layer == 0 {
-            sphincs_trace!(
-                "SIGN Layer 0 current_root (message to sign): {:?}",
-                &current_root[..p.n.min(8)]
-            );
-        }
-
-        let wsig = wots_sig(&p, &current_root, sk_seed, pub_seed, &waddr);
-        sig.extend_from_slice(&wsig);
-
-        // b) Authentication path for that leaf in this layer's Merkle tree
-        let leaf_count = 1usize << p.layer_height;
-
-        let mut taddr = waddr;
-        taddr.set_type(2); // hashtree
-
-        let (auth, root_l) = build_merkle_and_auth(
-            &p,
-            leaf_count,
-            &mut |i| {
-                let mut la = taddr;
-                la.set_keypair(i as u32);
-                let leaf = wots_leaf(&p, sk_seed, pub_seed, &la);
-                if layer == 0 && i == cur_leaf {
-                    sphincs_trace!("SIGN Layer 0 leaf at index {}: {:?}", i, &leaf[..8]);
-                }
-                leaf
-            },
-            pub_seed,
-            &taddr,
-            cur_leaf,
-        );
-        sig.extend_from_slice(&auth);
-
-        current_root = root_l;
-
-        // derive next layer's indices
-        let mask = (1usize << p.layer_height) - 1;
-        cur_leaf = (cur_tree as usize) & mask;
-        cur_tree >>= p.layer_height as u32;
+    sig.extend(r);
+    sig.extend(fors_sig);
+    sig.extend(ht_sig);
+    if !ht_verify(
+        &p,
+        &pc,
+        &fors_pk,
+        &sig[p.n + p.k * (p.a + 1) * p.n..],
+        at.idx_tree,
+        at.idx_leaf,
+        pk_root,
+    ) {
+        return Err(Error::Crypto(
+            "the signature does not verify under its own key: a fault during signing, or a secret \
+             key whose root is not its own",
+        ));
     }
-
-    debug_assert_eq!(sig.len(), p.sig_bytes);
     Ok(sig)
 }
 
+/// FIPS 205 Algorithm 20, `slh_verify_internal`. A key or signature of the
+/// wrong length for `v` does not verify.
 pub fn verify(
     v: SphincsVariant,
-    pk: &[u8], // pub_seed || root
+    pk: &[u8], // PK.seed || PK.root
     m: &[u8],
     sig: &[u8],
 ) -> Result<bool, Error> {
@@ -981,86 +800,22 @@ pub fn verify(
     if pk.len() != p.pk_bytes || sig.len() != p.sig_bytes {
         return Ok(false);
     }
-    let (pub_seed, root) = (&pk[..p.n], &pk[p.n..2 * p.n]);
-
-    // parse signature
-    let mut off = 0usize;
-    let r = &sig[off..off + p.n];
-    off += p.n;
-
-    let fors_sig_bytes = p.k * (p.a + 1) * p.n;
-    let fors_bytes = &sig[off..off + fors_sig_bytes];
-    off += fors_sig_bytes;
-
-    let (mhash, tree, leaf_idx) = h_msg_expand(&p, r, pk, m);
-
-    let mut addr_fors = SpxAddress::new();
-    addr_fors.set_type(4);
-    addr_fors.set_layer(0);
-    addr_fors.set_tree(tree);
-
-    let fors_sig = ForsSig {
-        bytes: fors_bytes.to_vec(),
-    };
-    let mut current_root = fors_pk_from_sig(&p, &mhash, &fors_sig, pub_seed, &addr_fors);
-    sphincs_trace!("VERIFY FORS pk: {:?}", &current_root[..p.n.min(8)]);
-
-    let mut cur_tree = tree;
-    let mut cur_leaf = leaf_idx as usize;
-
-    for layer in 0..p.d {
-        // Read WOTS sig
-        let wsig = &sig[off..off + p.wots_bytes];
-        off += p.wots_bytes;
-
-        // Read auth path for this layer
-        let auth = &sig[off..off + p.layer_height * p.n];
-        off += p.layer_height * p.n;
-
-        // Rebuild leaf: take WOTS sig, derive pk_vec back from message=current_root
-        let mut waddr = SpxAddress::new();
-        waddr.set_type(0);
-        waddr.set_layer(layer as u32);
-        waddr.set_tree(cur_tree);
-        waddr.set_keypair(cur_leaf as u32);
-
-        let pk_vec = wots_pk_from_sig(&p, wsig, &current_root, pub_seed, &waddr);
-
-        if layer == 0 {
-            sphincs_trace!("VERIFY Layer 0 pk_vec[0..8]: {:?}", &pk_vec[..8]);
-            sphincs_trace!(
-                "VERIFY Layer 0 current_root (message): {:?}",
-                &current_root[..p.n.min(8)]
-            );
-        }
-
-        // compress via l-tree
-        // Copy address but keep layer/tree/keypair, only change type to HASHTREE
-        let mut taddr = waddr;
-        taddr.set_type(2);
-        let mut tmp = pk_vec.clone();
-        let leaf = l_tree(&p, pub_seed, &taddr, &mut tmp);
-
-        if layer == 0 {
-            sphincs_trace!(
-                "VERIFY Layer 0 leaf at index {}: {:?}",
-                cur_leaf,
-                &leaf[..8]
-            );
-        }
-
-        // ascend with auth path to get this layer root (pass leaf index for ordering)
-        let root_l = compute_root_with_auth(&p, &leaf, auth, pub_seed, &taddr, cur_leaf);
-        current_root = root_l;
-
-        // derive next layer's indices
-        let mask = (1usize << p.layer_height) - 1;
-        cur_leaf = (cur_tree as usize) & mask;
-        cur_tree >>= p.layer_height as u32;
-    }
-
-    let ok = current_root.ct_eq(root).unwrap_u8() == 1;
-    Ok(ok)
+    let (pk_seed, pk_root) = pk.split_at(p.n);
+    let pc = PublicCtx::new(p.n, pk_seed);
+    let (r, rest) = sig.split_at(p.n);
+    let (fors_sig, ht_sig) = rest.split_at(p.k * (p.a + 1) * p.n);
+    let at = split_digest(&p, &h_msg(&p, r, pk_seed, pk_root, m));
+    let mut adrs = fors_adrs(&at);
+    let fors_pk = fors_pk_from_sig(&p, &pc, fors_sig, &at.md, &mut adrs);
+    Ok(ht_verify(
+        &p,
+        &pc,
+        &fors_pk,
+        ht_sig,
+        at.idx_tree,
+        at.idx_leaf,
+        pk_root,
+    ))
 }
 
 // =========================== Public Size Helpers ============================
@@ -1087,6 +842,61 @@ pub fn sphincs_sign(sk: &[u8], msg: &[u8]) -> Result<Vec<u8>, Error> {
 pub fn sphincs_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<bool, Error> {
     verify(SphincsVariant::SPX256f, pk, msg, sig)
 }
+
+// ============================ Call recording ================================
+
+/// Every hash call of a key generation, a signature or a verification,
+/// recorded by its address in this crate's unit tests only, so the tests
+/// can assert on the construction's structure rather than on a round trip
+/// (a defect the signer and the verifier share survives every round trip).
+#[cfg(test)]
+mod trace {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    pub(super) const ROLE_THASH: u8 = 1;
+    pub(super) const ROLE_PRF: u8 = 2;
+
+    /// Each address seen, with the digest of the role and input it was
+    /// first hashed with, and every address later hashed with another.
+    #[derive(Default)]
+    pub(super) struct Calls {
+        pub(super) by_adrs: HashMap<[u8; 32], [u8; 32]>,
+        pub(super) reused: Vec<[u8; 32]>,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Calls>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn record(adrs: &[u8; 32], role: u8, inputs: &[&[u8]]) {
+        ACTIVE.with(|active| {
+            if let Some(calls) = active.borrow_mut().as_mut() {
+                let mut h = blake3::Hasher::new();
+                h.update(&[role]);
+                for input in inputs {
+                    h.update(input);
+                }
+                let digest = *h.finalize().as_bytes();
+                match calls.by_adrs.get(adrs) {
+                    Some(first) if *first != digest => calls.reused.push(*adrs),
+                    Some(_) => {}
+                    None => {
+                        calls.by_adrs.insert(*adrs, digest);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Run `f` with recording on, and return what it recorded.
+    pub(super) fn capture<T>(f: impl FnOnce() -> T) -> (T, Option<Calls>) {
+        ACTIVE.with(|active| *active.borrow_mut() = Some(Calls::default()));
+        let out = f();
+        (out, ACTIVE.with(|active| active.borrow_mut().take()))
+    }
+}
+
 // ================================= Tests ====================================
 
 #[cfg(test)]
@@ -1094,653 +904,364 @@ mod tests {
     #![allow(clippy::disallowed_methods, clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    #[test]
-    fn sizes_match_known() {
-        assert_eq!(signature_bytes(SphincsVariant::SPX128s), 7_856);
-        assert_eq!(signature_bytes(SphincsVariant::SPX128f), 17_088);
-        assert_eq!(signature_bytes(SphincsVariant::SPX192s), 16_224);
-        assert_eq!(signature_bytes(SphincsVariant::SPX192f), 35_664);
-        assert_eq!(signature_bytes(SphincsVariant::SPX256s), 29_792);
-        assert_eq!(signature_bytes(SphincsVariant::SPX256f), 49_856);
+    const DEPLOYED: [SphincsVariant; 2] = [SphincsVariant::SPX128f, SphincsVariant::SPX256f];
+    const ALL: [SphincsVariant; 6] = [
+        SphincsVariant::SPX128s,
+        SphincsVariant::SPX128f,
+        SphincsVariant::SPX192s,
+        SphincsVariant::SPX192f,
+        SphincsVariant::SPX256s,
+        SphincsVariant::SPX256f,
+    ];
 
-        assert_eq!(public_key_bytes(SphincsVariant::SPX256f), 64);
-        assert_eq!(secret_key_bytes(SphincsVariant::SPX256f), 128);
+    fn key(v: SphincsVariant, fill: u8) -> SphincsKeyPair {
+        generate_keypair_from_seed(v, &[fill; 32]).expect("key generation")
     }
 
-    #[test]
-    fn sign_verify_each_variant() -> Result<(), Error> {
-        let variants: &[SphincsVariant] = if cfg!(debug_assertions) {
-            // Fast variants in debug to keep `cargo test` quick; release covers all 6.
-            &[SphincsVariant::SPX128f, SphincsVariant::SPX256f]
-        } else {
-            &[
-                SphincsVariant::SPX128s,
-                SphincsVariant::SPX128f,
-                SphincsVariant::SPX192s,
-                SphincsVariant::SPX192f,
-                SphincsVariant::SPX256s,
-                SphincsVariant::SPX256f,
-            ]
-        };
-
-        for v in variants {
-            let kp = generate_keypair_from_seed(*v, &[7u8; 32])?;
-            let m = b"test message";
-            let sig = sign(*v, &kp.secret_key, m)?;
-            assert_eq!(sig.len(), signature_bytes(*v));
-            let ok = verify(*v, &kp.public_key, m, &sig)?;
-            assert!(ok);
-            let bad = verify(*v, &kp.public_key, b"oops", &sig)?;
-            assert!(!bad);
-        }
-        Ok(())
+    fn word(adrs: &[u8; 32], i: usize) -> u32 {
+        u32::from_be_bytes(adrs[i * 4..(i + 1) * 4].try_into().expect("a word"))
     }
 
-    #[test]
-    fn deterministic_seeded_keygen() -> Result<(), Error> {
-        let v = if cfg!(debug_assertions) {
-            SphincsVariant::SPX128s
-        } else {
-            SphincsVariant::SPX256f
-        };
-        let seed = [42u8; 32];
-        let kp1 = generate_keypair_from_seed(v, &seed)?;
-        let kp2 = generate_keypair_from_seed(v, &seed)?;
-        assert_eq!(kp1.public_key, kp2.public_key);
-        assert_eq!(kp1.secret_key, kp2.secret_key);
-        Ok(())
-    }
-
-    #[test]
-    fn wots_base_and_checksum() {
-        // sanity: 0xFF00AB → nibbles check
-        let v = SphincsVariant::SPX128s;
+    /// The indices `sk` signs `m` at, from the signature's own `R`.
+    fn indices_of(v: SphincsVariant, kp: &SphincsKeyPair, m: &[u8], sig: &[u8]) -> Indices {
         let p = param_set(v);
-        let data = [0xFFu8, 0x00, 0xAB];
-        let bw = super::base_w_16(6, &data);
-        assert_eq!(bw, vec![0x0F, 0x0F, 0x00, 0x00, 0x0A, 0x0B]);
-
-        let cs = super::wots_len2_checksum(p.len1, &bw[..p.len1.min(bw.len())], p.w);
-        assert!(!cs.is_empty());
+        let pk = &kp.public_key;
+        split_digest(&p, &h_msg(&p, &sig[..p.n], &pk[..p.n], &pk[p.n..], m))
     }
 
     #[test]
-    fn fors_sign_verify_round_trip() -> Result<(), Error> {
-        // Test that FORS sign/verify produces consistent pk
-        let v = SphincsVariant::SPX128s;
-        let p = param_set(v);
-        let sk_seed = vec![1u8; p.n];
-        let pub_seed = vec![2u8; p.n];
-        let mhash = vec![3u8; p.n];
-
-        let mut addr = SpxAddress::new();
-        addr.set_type(4);
-        addr.set_layer(0);
-        addr.set_tree(0);
-
-        let (fors_sig, fors_pk_sign) = super::fors_sign(&p, &mhash, &sk_seed, &pub_seed, &addr);
-        let fors_pk_verify = super::fors_pk_from_sig(&p, &mhash, &fors_sig, &pub_seed, &addr);
-
-        assert_eq!(fors_pk_sign, fors_pk_verify, "FORS pk mismatch!");
-        Ok(())
-    }
-
-    // ======================== Security-Critical Tests ========================
-    // Additional tests for attack vectors and edge cases
-
-    #[test]
-    fn rejects_single_bit_flip_in_signature() {
-        let v = SphincsVariant::SPX128f;
-        let kp = generate_keypair_from_seed(v, &[7u8; 32]).unwrap();
-        let msg = b"test message for bit flip test";
-        let mut sig = sign(v, &kp.secret_key, msg).unwrap();
-
-        // Flip a bit early in signature (randomness R - first 32 bytes in SPX256s)
-        // This should affect the message hash expansion and invalidate verification
-        sig[16] ^= 0x01;
-
-        let result = verify(v, &kp.public_key, msg, &sig).unwrap();
-        assert!(
-            !result,
-            "Single bit flip in randomness R must invalidate signature"
-        );
-    }
-
-    #[test]
-    fn rejects_wrong_public_key() {
-        let v = SphincsVariant::SPX128f;
-        let kp1 = generate_keypair_from_seed(v, &[7u8; 32]).unwrap();
-        let kp2 = generate_keypair_from_seed(v, &[9u8; 32]).unwrap();
-        let msg = b"test message";
-        let sig = sign(v, &kp1.secret_key, msg).unwrap();
-
-        // Try to verify with wrong public key
-        let result = verify(v, &kp2.public_key, msg, &sig).unwrap();
-        assert!(!result, "Signature must not verify with wrong public key");
-    }
-
-    #[test]
-    fn rejects_signature_replay_on_different_message() {
-        let v = SphincsVariant::SPX128f;
-        let kp = generate_keypair_from_seed(v, &[7u8; 32]).unwrap();
-        let msg1 = b"original message";
-        let msg2 = b"different message";
-
-        let sig = sign(v, &kp.secret_key, msg1).unwrap();
-        let result = verify(v, &kp.public_key, msg2, &sig).unwrap();
-
-        assert!(!result, "Signature must not verify for different message");
-    }
-
-    #[test]
-    fn rejects_all_zero_signature() {
-        let v = SphincsVariant::SPX128f;
-        let kp = generate_keypair_from_seed(v, &[7u8; 32]).unwrap();
-        let msg = b"test message";
-        let sig_len = signature_bytes(v);
-        let zero_sig = vec![0u8; sig_len];
-
-        let result = verify(v, &kp.public_key, msg, &zero_sig).unwrap();
-        assert!(!result, "All-zero signature must not verify");
-    }
-
-    #[test]
-    fn rejects_truncated_signature() {
-        let v = SphincsVariant::SPX128f;
-        let kp = generate_keypair_from_seed(v, &[7u8; 32]).unwrap();
-        let msg = b"test message";
-        let sig = sign(v, &kp.secret_key, msg).unwrap();
-
-        // Try with truncated signature
-        let truncated = &sig[..sig.len() - 100];
-        let result = verify(v, &kp.public_key, msg, truncated);
-
-        // Should either reject via size check or fail verification
-        match result {
-            Ok(false) => {} // Valid rejection
-            Err(_) => {}    // Error rejection is also acceptable
-            Ok(true) => panic!("Truncated signature must not verify!"),
+    fn sizes_and_digest_lengths_are_fips_205s() {
+        let expected = [
+            (SphincsVariant::SPX128s, 7_856, 30),
+            (SphincsVariant::SPX128f, 17_088, 34),
+            (SphincsVariant::SPX192s, 16_224, 39),
+            (SphincsVariant::SPX192f, 35_664, 42),
+            (SphincsVariant::SPX256s, 29_792, 47),
+            (SphincsVariant::SPX256f, 49_856, 49),
+        ];
+        for (v, sig, m) in expected {
+            let p = param_set(v);
+            assert_eq!(signature_bytes(v), sig, "{v:?} signature");
+            assert_eq!(p.m, m, "{v:?} H_msg length");
+            assert_eq!(p.len2, 3, "{v:?} len2");
+            assert_eq!(public_key_bytes(v), 2 * p.n);
+            assert_eq!(secret_key_bytes(v), 4 * p.n);
         }
     }
 
     #[test]
-    fn message_prefix_extension_attack() {
-        // Verify that message with prefix doesn't validate against longer message
-        let v = SphincsVariant::SPX128f;
-        let kp = generate_keypair_from_seed(v, &[7u8; 32]).unwrap();
-        let msg_short = b"short";
-        let msg_long = b"short and longer message";
-
-        let sig = sign(v, &kp.secret_key, msg_short).unwrap();
-        let result = verify(v, &kp.public_key, msg_long, &sig).unwrap();
-
-        assert!(!result, "Signature must not verify for extended message");
+    fn the_address_is_the_fips_205_layout() {
+        let mut adrs = Adrs::new();
+        adrs.set_layer(0x0102_0304);
+        adrs.set_tree(0x1112_1314_1516_1718);
+        adrs.set_type_and_clear(WOTS_HASH);
+        adrs.set_keypair(0x2122_2324);
+        adrs.set_chain(0x3132_3334);
+        adrs.set_hash(0x4142_4344);
+        let mut expected = Adrs::new().as_bytes();
+        expected[..4].copy_from_slice(&[1, 2, 3, 4]);
+        expected[8..16].copy_from_slice(&[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
+        expected[20..24].copy_from_slice(&[0x21, 0x22, 0x23, 0x24]);
+        expected[24..28].copy_from_slice(&[0x31, 0x32, 0x33, 0x34]);
+        expected[28..32].copy_from_slice(&[0x41, 0x42, 0x43, 0x44]);
+        assert_eq!(adrs.as_bytes(), expected);
     }
 
     #[test]
-    fn truncated_public_key_rejection() {
-        let v = SphincsVariant::SPX128f;
-        let kp = generate_keypair_from_seed(v, &[7u8; 32]).unwrap();
-        let msg = b"test message";
-        let sig = sign(v, &kp.secret_key, msg).unwrap();
-
-        // Truncate public key
-        let truncated_pk = &kp.public_key[..kp.public_key.len() - 10];
-        let result = verify(v, truncated_pk, msg, &sig);
-
-        // Should reject due to size
-        assert!(
-            result.is_err() || !result.unwrap(),
-            "Truncated public key must be rejected"
-        );
+    fn changing_the_address_type_clears_every_type_specific_word() {
+        let mut adrs = Adrs::new();
+        adrs.set_layer(3);
+        adrs.set_tree(9);
+        adrs.set_type_and_clear(WOTS_HASH);
+        adrs.set_keypair(5);
+        adrs.set_chain(6);
+        adrs.set_hash(7);
+        adrs.set_type_and_clear(TREE);
+        let bytes = adrs.as_bytes();
+        assert_eq!(word(&bytes, 0), 3);
+        assert_eq!(word(&bytes, 3), 9);
+        assert_eq!(word(&bytes, 4), TREE);
+        assert_eq!(&bytes[20..], &[0u8; 12]);
     }
-}
-
-// __POSTFIX_SCAN_BEGIN__
-#[cfg(test)]
-mod postfix_malleability_scan {
-    #![allow(clippy::disallowed_methods, clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
 
     #[test]
-    #[ignore = "slow: SPX256s keygen/sign + full-signature bit sweep (~250s); run with --ignored"]
-    fn sphincs_postfix_malleability() {
-        // SPX256s by design: the el59 probe offsets below (10592 = R+FORS,
-        // 2400 = per-layer stride, 8 layers, 59*32) are SPX256s-layout-specific.
-        let v = SphincsVariant::SPX256s;
-        let kp = generate_keypair_from_seed(v, &[0x5C; 32]).unwrap();
-        let msg = [0xA7u8; 32];
-        let sig = sign(v, &kp.secret_key, &msg).unwrap();
+    fn base_2b_and_the_wots_checksum_follow_fips_205() {
+        assert_eq!(base_2b(&[0x12, 0x34], 4, 4), [1, 2, 3, 4]);
+        assert_eq!(base_2b(&[0xAB, 0xCD, 0xEF], 6, 4), [42, 60, 55, 47]);
+        let p = param_set(SphincsVariant::SPX128f);
+        // A zero message: every digit 0, checksum len1·15 = 480 = 0x1E0.
+        let digits = wots_digits(&p, &[0u8; 16]);
+        assert_eq!(digits.len(), p.len);
+        assert!(digits[..p.len1].iter().all(|d| *d == 0));
+        assert_eq!(&digits[p.len1..], &[1, 14, 0]);
+    }
 
-        // Happy path must still hold after the l_tree fix.
-        assert!(
-            verify(v, &kp.public_key, &msg, &sig).unwrap(),
-            "honest signature must verify after fix"
-        );
-
-        let valid_after_flip = |pos: usize, bit: u8| -> bool {
-            let mut s = sig.clone();
-            s[pos] ^= bit;
-            verify(v, &kp.public_key, &msg, &s).unwrap()
-        };
-
-        // 1) Full-signature single-bit sweep. A dropped byte frees all its bits,
-        //    so one bit per position detects any unchecked byte anywhere.
-        let mut weak: Vec<usize> = Vec::new();
-        for pos in 0..sig.len() {
-            if valid_after_flip(pos, 0x01) {
-                weak.push(pos);
-            }
-        }
-
-        // 2) Re-probe the exact offsets the pre-fix diagnostic flagged: WOTS
-        //    element 59 across all 8 hypertree layers, all 8 bits each.
-        let mut el59_still: Vec<(usize, u8)> = Vec::new();
-        for l in 0..8usize {
-            let pos = 10592 + l * 2400 + 59 * 32;
-            for b in 0..8u8 {
-                if valid_after_flip(pos, 1u8 << b) {
-                    el59_still.push((l, b));
+    /// No address is hashed twice with different inputs, or under two roles,
+    /// across a key generation, three signatures and their verifications.
+    /// This is the separation a SPHINCS+-style proof assumes; version 1
+    /// failed it at the WOTS+ compression (the hashtree's own addresses), at
+    /// the FORS leaves (height 0 shared with the first internal level) and
+    /// at every PRF call (the secret drawn under its chain's address).
+    #[test]
+    fn every_hash_call_has_its_own_address() {
+        for v in DEPLOYED {
+            let ((), recorded) = trace::capture(|| {
+                let kp = key(v, 0x5A);
+                for m in [&b"first"[..], &b"second"[..], &b"third"[..]] {
+                    let sig = sign(v, &kp.secret_key, m).unwrap();
+                    assert!(verify(v, &kp.public_key, m, &sig).unwrap());
                 }
-            }
-        }
-
-        println!("POSTFIX sig_len={}", sig.len());
-        println!("POSTFIX full_sweep_malleable_count={}", weak.len());
-        if !weak.is_empty() {
-            let head: Vec<usize> = weak.iter().take(24).cloned().collect();
-            println!("POSTFIX malleable_positions_first24={:?}", head);
-        }
-        println!("POSTFIX el59_all_layers_still_malleable={:?}", el59_still);
-
-        assert!(
-            weak.is_empty(),
-            "malleable byte positions remain: {}",
-            weak.len()
-        );
-        assert!(
-            el59_still.is_empty(),
-            "element59 offsets still malleable: {:?}",
-            el59_still
-        );
-    }
-}
-// __POSTFIX_SCAN_END__
-
-#[cfg(test)]
-mod fors_independence_tests {
-    use super::*;
-
-    /// THE FORS TREES MUST BE INDEPENDENT.
-    ///
-    /// FORS is a FEW-TIME signature. Its whole security argument is that the `k`
-    /// trees draw from `k` disjoint secret pools: one signature reveals one leaf
-    /// per tree, and forgery requires covering leaves the signer never opened.
-    /// If the trees share a pool, every signature reveals `k` secrets out of a
-    /// single `2^a` set and the margin the scheme is built on is gone.
-    ///
-    /// The address is what separates them. Two FORS trees differ only by their
-    /// tree number, so if that number does not survive into the address the
-    /// secret is derived from, the trees are the same tree.
-    ///
-    /// This test fixes the leaf index and varies ONLY the tree number. It must
-    /// see different secrets.
-    #[test]
-    fn two_fors_trees_must_not_share_a_secret_at_the_same_leaf_index() {
-        let p = param_set(SphincsVariant::SPX128f);
-        let sk_seed = [0x11u8; 32];
-
-        // Same everything except the FORS tree number.
-        let addr_for = |tree_number: u32| {
-            let mut a = SpxAddress::new();
-            a.set_type(4); // FORS TREE
-            a.set_layer(0);
-            a.set_tree(0);
-            a.set_keypair(tree_number);
-            a
-        };
-
-        const LEAF: u32 = 5;
-        let mut secrets = std::collections::HashSet::new();
-        for tree_number in 0..(p.k as u32) {
-            let mut a = addr_for(tree_number);
-            a.set_tree_height(0);
-            a.set_tree_index(LEAF);
-            secrets.insert(prf_addr(p.n, &sk_seed, &a));
-        }
-
-        assert_eq!(
-            secrets.len(),
-            p.k,
-            "all {} FORS trees produced {} distinct secrets at leaf index {LEAF} — \
-             they are drawing from ONE pool, so a single signature reveals {} of the \
-             {} secrets in it and FORS few-time security does not hold",
-            p.k,
-            secrets.len(),
-            p.k,
-            1usize << p.a,
-        );
-    }
-
-    /// The same property at the public-leaf level, through the function the
-    /// signer actually calls.
-    #[test]
-    fn fors_tree_leaves_differ_across_tree_numbers() {
-        let p = param_set(SphincsVariant::SPX128f);
-        let sk_seed = [0x33u8; 32];
-        let pub_seed = [0x44u8; 32];
-
-        for leaf in [0u32, 1, 7, 31, 63] {
-            let mut a0 = SpxAddress::new();
-            a0.set_type(4);
-            a0.set_keypair(0);
-            let mut a1 = SpxAddress::new();
-            a1.set_type(4);
-            a1.set_keypair(1);
-
-            assert_ne!(
-                fors_tree_leaf(&p, &sk_seed, &pub_seed, &a0, leaf),
-                fors_tree_leaf(&p, &sk_seed, &pub_seed, &a1, leaf),
-                "FORS trees 0 and 1 produced the same leaf at index {leaf}"
+            });
+            let calls = recorded.expect("recording was on");
+            assert!(calls.by_adrs.len() > 1000, "{v:?}: the calls were recorded");
+            assert!(
+                calls.reused.is_empty(),
+                "{v:?}: {} addresses were hashed with two different inputs or roles, first {:02x?}",
+                calls.reused.len(),
+                calls.reused.first()
             );
         }
     }
 
-    /// THE ADDRESS FIELDS THAT COEXIST MUST NOT ALIAS.
-    ///
-    /// Stated as a property of the encoding rather than of one call site: for a
-    /// FORS TREE address, setting the tree number and then the leaf index must
-    /// leave BOTH readable. The collision this pins was invisible because the
-    /// verifier repeated it, so signatures still verified.
+    /// A FORS key belongs to the hypertree leaf that signs it: every FORS
+    /// address a signature uses sits at layer 0, in the signing tree, with
+    /// the signing leaf as its key pair. Version 1 left the key pair to the
+    /// FORS tree number, so all leaves of a bottom tree shared one FORS key.
     #[test]
-    fn setting_a_fors_leaf_index_must_not_erase_the_tree_number() {
-        let mut a = SpxAddress::new();
-        a.set_type(4);
-        a.set_keypair(9);
-        let after_keypair = a.as_bytes();
-
-        a.set_tree_index(3);
-        let after_index = a.as_bytes();
-
-        // Setting the index must change the address...
-        assert_ne!(after_keypair, after_index);
-
-        // ...but a DIFFERENT tree number with the SAME index must still differ.
-        let mut b = SpxAddress::new();
-        b.set_type(4);
-        b.set_keypair(10);
-        b.set_tree_index(3);
-        assert_ne!(
-            a.as_bytes(),
-            b.as_bytes(),
-            "tree numbers 9 and 10 encode identically once a leaf index is set — \
-             set_tree_index has overwritten set_keypair"
-        );
-    }
-
-    /// THE LAYOUT PROOF, not one call site.
-    ///
-    /// Eight words carry more than eight logical fields, so some pairs must
-    /// share a word. This enumerates every address type this implementation
-    /// builds, together with every field that type writes, and asserts each of
-    /// those fields is independently observable in the encoding. Two fields of
-    /// the same type sharing a word makes the earlier writer invisible and fails
-    /// here.
-    ///
-    /// Aliases that are legal because the two fields belong to disjoint types:
-    ///   word 6 — `chain` (WOTS types 0/1) and `tree_index` (types 2/4)
-    /// Every other field owns a word outright.
-    #[test]
-    fn no_two_fields_of_the_same_address_type_alias() {
-        type Setter = fn(&mut SpxAddress, u32);
-        /// (type name, type tag, fields written by that type, in write order)
-        type AddressType<'a> = (&'a str, u32, &'a [(&'a str, Setter)]);
-
-        let layer: Setter = |a, v| a.set_layer(v);
-        let tree: Setter = |a, v| a.set_tree(v as u64);
-        let keypair: Setter = |a, v| a.set_keypair(v);
-        let chain: Setter = |a, v| a.set_chain(v);
-        let hash: Setter = |a, v| a.set_hash(v);
-        let tree_height: Setter = |a, v| a.set_tree_height(v);
-        let tree_index: Setter = |a, v| a.set_tree_index(v);
-
-        // Written in the order the implementation writes them, because an alias
-        // only hides the EARLIER writer.
-        let types: &[AddressType] = &[
-            (
-                "WOTS_HASH",
-                0,
-                &[
-                    ("layer", layer),
-                    ("tree", tree),
-                    ("keypair", keypair),
-                    ("chain", chain),
-                    ("hash", hash),
-                ],
-            ),
-            (
-                "WOTS_PK",
-                1,
-                &[("layer", layer), ("tree", tree), ("keypair", keypair)],
-            ),
-            (
-                "HASHTREE",
-                2,
-                &[
-                    ("layer", layer),
-                    ("tree", tree),
-                    ("keypair", keypair),
-                    ("tree_height", tree_height),
-                    ("tree_index", tree_index),
-                ],
-            ),
-            (
-                "FORS_TREE",
-                4,
-                &[
-                    ("layer", layer),
-                    ("tree", tree),
-                    ("keypair", keypair),
-                    ("tree_height", tree_height),
-                    ("tree_index", tree_index),
-                ],
-            ),
-            (
-                "FORS_PK",
-                5,
-                &[("layer", layer), ("tree", tree), ("keypair", keypair)],
-            ),
-        ];
-
-        for (type_name, type_tag, fields) in types {
-            let build = |bumped: Option<usize>| {
-                let mut a = SpxAddress::new();
-                a.set_type(*type_tag);
-                for (i, (_, set)) in fields.iter().enumerate() {
-                    // Distinct per-field base values so a swap is caught too.
-                    let v = 1 + i as u32;
-                    set(&mut a, if bumped == Some(i) { v + 100 } else { v });
-                }
-                a.as_bytes()
-            };
-
-            let base = build(None);
-            for (i, (field_name, _)) in fields.iter().enumerate() {
-                assert_ne!(
-                    base,
-                    build(Some(i)),
-                    "{type_name}: changing `{field_name}` does not change the address — \
-                     a later field of the same type shares its word, so `{field_name}` \
-                     is not part of the hash input the way the design assumes"
-                );
-            }
-        }
-    }
-
-    /// Cross-tree independence over the FULL index space, not one leaf.
-    ///
-    /// `two_fors_trees_must_not_share_a_secret_at_the_same_leaf_index` fixes the
-    /// index and varies the tree. This varies both, so a layout that merely
-    /// permuted the collision rather than removing it still fails.
-    #[test]
-    fn fors_secrets_are_distinct_across_every_tree_and_index_pair() {
-        for variant in [
-            SphincsVariant::SPX128f,
-            SphincsVariant::SPX192f,
-            SphincsVariant::SPX256f,
-        ] {
-            let p = param_set(variant);
-            let sk_seed = [0x5au8; 32];
-            let leaf_count = 1usize << p.a;
-
-            let mut secrets = std::collections::HashSet::new();
-            for tree_number in 0..(p.k as u32) {
-                for leaf in 0..(leaf_count as u32) {
-                    let mut a = SpxAddress::new();
-                    a.set_type(4);
-                    a.set_layer(0);
-                    a.set_tree(0);
-                    a.set_keypair(tree_number);
-                    a.set_tree_height(0);
-                    a.set_tree_index(leaf);
-                    secrets.insert(prf_addr(p.n, &sk_seed, &a));
-                }
-            }
-
+    fn a_fors_key_belongs_to_the_leaf_that_signs_it() {
+        for v in DEPLOYED {
+            let kp = key(v, 0x3C);
+            let m = b"a message for the FORS binding";
+            let (sig, recorded) = trace::capture(|| sign(v, &kp.secret_key, m).unwrap());
+            let calls = recorded.expect("recording was on");
+            let at = indices_of(v, &kp, m, &sig);
+            let fors: Vec<&[u8; 32]> = calls
+                .by_adrs
+                .keys()
+                .filter(|a| matches!(word(a, 4), FORS_TREE | FORS_PRF | FORS_ROOTS))
+                .collect();
+            let p = param_set(v);
             assert_eq!(
-                secrets.len(),
-                p.k * leaf_count,
-                "{variant:?}: {} distinct secrets across {} trees x {leaf_count} leaves, \
-                 expected {} — the (tree, index) pair is not injective in the address",
-                secrets.len(),
-                p.k,
-                p.k * leaf_count,
+                fors.len(),
+                // k·2^a secrets, k·(2^(a+1) − 1) tree nodes, one roots call.
+                p.k * (1 << p.a) + p.k * ((1 << (p.a + 1)) - 1) + 1,
+                "{v:?}: every FORS call of one signature"
+            );
+            for adrs in fors {
+                assert_eq!(word(adrs, 0), 0, "{v:?}: FORS is at layer 0");
+                assert_eq!(
+                    (u64::from(word(adrs, 2)) << 32) | u64::from(word(adrs, 3)),
+                    at.idx_tree,
+                    "{v:?}: FORS is in the signing tree"
+                );
+                assert_eq!(
+                    word(adrs, 5),
+                    at.idx_leaf,
+                    "{v:?}: FORS is the signing leaf's"
+                );
+            }
+        }
+    }
+
+    /// Two leaves of one tree hold two FORS keys.
+    #[test]
+    fn two_leaves_of_one_tree_hold_different_fors_keys() {
+        let v = SphincsVariant::SPX128f;
+        let p = param_set(v);
+        let kp = key(v, 0x11);
+        let pc = PublicCtx::new(p.n, &kp.public_key[..p.n]);
+        let sc = SecretCtx::new(&kp.secret_key[..p.n]);
+        let md = vec![0x77u8; p.md_bytes];
+        let fors_pk = |leaf: u32| {
+            let at = Indices {
+                md: md.clone(),
+                idx_tree: 4,
+                idx_leaf: leaf,
+            };
+            let mut adrs = fors_adrs(&at);
+            let sig = fors_sign(&p, &pc, &sc, &md, &mut adrs);
+            fors_pk_from_sig(&p, &pc, &sig, &md, &mut adrs)
+        };
+        assert_ne!(fors_pk(1), fors_pk(2));
+    }
+
+    /// `PRF` takes `PK.seed`: one `SK.seed` under two public seeds draws
+    /// two secrets at one address, so a multi-key search cannot pool the
+    /// top-layer addresses every key shares.
+    #[test]
+    fn the_prf_binds_the_public_seed() {
+        let sc = SecretCtx::new(&[0x42; 32]);
+        let mut adrs = Adrs::new();
+        adrs.set_type_and_clear(WOTS_PRF);
+        let one = prf(&PublicCtx::new(32, &[1; 32]), &sc, &adrs);
+        let other = prf(&PublicCtx::new(32, &[2; 32]), &sc, &adrs);
+        assert_ne!(*one, *other);
+    }
+
+    #[test]
+    fn each_variant_signs_and_verifies() {
+        for v in ALL {
+            let kp = key(v, 0x07);
+            let sig = sign(v, &kp.secret_key, b"each variant").unwrap();
+            assert_eq!(sig.len(), signature_bytes(v));
+            assert!(
+                verify(v, &kp.public_key, b"each variant", &sig).unwrap(),
+                "{v:?}"
+            );
+            assert!(
+                !verify(v, &kp.public_key, b"another message", &sig).unwrap(),
+                "{v:?}"
             );
         }
     }
 
-    /// The hypertree must not regain independence at the cost of soundness:
-    /// signatures still verify, at several leaf indices, and tampering with the
-    /// FORS region of the signature is still refused.
     #[test]
-    fn signatures_verify_and_fors_region_tampering_is_refused() -> Result<(), Error> {
-        for variant in [SphincsVariant::SPX128f, SphincsVariant::SPX256f] {
-            let p = param_set(variant);
-            let kp = generate_keypair_from_seed(variant, &[0x7cu8; 32])?;
+    fn signing_is_deterministic_and_keys_follow_their_seed() {
+        let v = SphincsVariant::SPX128f;
+        assert_eq!(key(v, 0x01).secret_key, key(v, 0x01).secret_key);
+        assert_ne!(key(v, 0x01).public_key, key(v, 0x02).public_key);
+        let kp = key(v, 0x01);
+        assert_eq!(
+            sign(v, &kp.secret_key, b"same").unwrap(),
+            sign(v, &kp.secret_key, b"same").unwrap()
+        );
+    }
 
-            // Different messages land on different hypertree leaves and different
-            // FORS index sets, so this sweeps the tree/index space the signer
-            // actually reaches rather than a single fixed path.
-            for m in 0u8..8 {
-                let msg = [m; 48];
-                let sig = sign(variant, &kp.secret_key, &msg)?;
+    #[test]
+    fn an_empty_message_or_a_short_key_is_refused() {
+        let v = SphincsVariant::SPX128f;
+        let kp = key(v, 0x09);
+        assert_eq!(
+            sign(v, &kp.secret_key, b"").unwrap_err(),
+            Error::Crypto("Cannot sign empty message")
+        );
+        assert_eq!(
+            sign(v, &kp.secret_key[1..], b"m").unwrap_err(),
+            Error::Crypto("Bad secret key size")
+        );
+        let sig = sign(v, &kp.secret_key, b"m").unwrap();
+        assert_eq!(
+            verify(v, &kp.public_key, b"", &sig).unwrap_err(),
+            Error::Crypto("Cannot verify empty message")
+        );
+    }
+
+    /// A signature is verified before it leaves `sign`: under a secret key
+    /// whose `PK.root` is not the root its seeds build, nothing is signed.
+    #[test]
+    fn a_secret_key_whose_root_is_not_its_own_signs_nothing() {
+        let v = SphincsVariant::SPX128f;
+        let p = param_set(v);
+        let mut sk = key(v, 0x44).secret_key.clone();
+        sk[3 * p.n] ^= 1;
+        assert!(
+            matches!(sign(v, &sk, b"m"), Err(Error::Crypto(why)) if why.contains("does not verify"))
+        );
+    }
+
+    /// A signature or key of any other length does not verify, and neither
+    /// does a signature checked under another variant.
+    #[test]
+    fn a_malformed_signature_or_key_does_not_verify() {
+        for v in DEPLOYED {
+            let kp = key(v, 0x21);
+            let m = b"malformed";
+            let sig = sign(v, &kp.secret_key, m).unwrap();
+            let mut longer = sig.clone();
+            longer.push(0);
+            for bad in [&[][..], &sig[..1], &sig[..sig.len() - 1], &longer[..]] {
                 assert!(
-                    verify(variant, &kp.public_key, &msg, &sig)?,
-                    "{variant:?}: honest signature failed to verify for message {m}"
+                    !verify(v, &kp.public_key, m, bad).unwrap(),
+                    "{v:?} sig len {}",
+                    bad.len()
                 );
-
-                // The FORS region is R (n bytes) followed by k * (a + 1) * n bytes.
-                let fors_start = p.n;
-                let fors_end = fors_start + p.k * (p.a + 1) * p.n;
-                for offset in [
-                    fors_start,
-                    fors_start + p.n,     // second tree's material
-                    fors_start + p.n / 2, // mid-element
-                    fors_end - 1,         // last FORS byte
-                ] {
-                    let mut tampered = sig.clone();
-                    tampered[offset] ^= 0x01;
-                    assert!(
-                        !verify(variant, &kp.public_key, &msg, &tampered)?,
-                        "{variant:?}: a single-bit change at FORS offset {offset} \
-                         still verified for message {m}"
-                    );
-                }
+            }
+            let mut long_pk = kp.public_key.clone();
+            long_pk.push(0);
+            for bad in [&kp.public_key[1..], &long_pk[..]] {
+                assert!(
+                    !verify(v, bad, m, &sig).unwrap(),
+                    "{v:?} pk len {}",
+                    bad.len()
+                );
+            }
+            for other in ALL.into_iter().filter(|o| *o != v) {
+                assert!(
+                    !verify(other, &kp.public_key, m, &sig).unwrap(),
+                    "{v:?} under {other:?}"
+                );
             }
         }
-        Ok(())
     }
 
-    /// An encoder written from the layout table rather than by calling the
-    /// production setters, so it cannot inherit their bugs.
-    ///
-    /// Round-tripping sign against verify cannot see an address defect, because
-    /// both sides call the same setters. This compares the setters against a
-    /// separately written statement of where each field lives. Note that the
-    /// signature has ONE parameter for word 6: that word is shared by `chain`
-    /// (WOTS) and `tree_index` (hashtree/FORS), and the alias is legal only
-    /// because no address type writes both. Every other field has its own
-    /// parameter, so a layout that puts two of them in one word cannot be
-    /// expressed here and fails the comparison below.
-    fn reference_adrs(
-        layer: u32,
-        tree: u64,
-        type_tag: u32,
-        tree_height: u32,
-        keypair: u32,
-        chain_or_tree_index: u32,
-        hash: u32,
-    ) -> [u8; 32] {
-        let words = [
-            layer,
-            (tree >> 32) as u32,
-            tree as u32,
-            type_tag,
-            tree_height,
-            keypair,
-            chain_or_tree_index,
-            hash,
-        ];
-        let mut out = [0u8; 32];
-        for (i, w) in words.iter().enumerate() {
-            out[i * 4..(i + 1) * 4].copy_from_slice(&w.to_be_bytes());
-        }
-        out
-    }
-
+    /// One flipped bit in any n-byte block of a signature, in the public key
+    /// or in the message, and the signature does not verify. The flipped bit
+    /// moves through all eight positions as the block advances.
     #[test]
-    fn the_production_setters_agree_with_an_independently_written_encoder() {
-        // A FORS TREE address carrying a tree number AND a leaf index — the
-        // exact combination that was collapsing.
-        let mut fors = SpxAddress::new();
-        fors.set_layer(0);
-        fors.set_tree(0);
-        fors.set_type(4);
-        fors.set_keypair(29);
-        fors.set_tree_height(0);
-        fors.set_tree_index(41);
-        assert_eq!(
-            fors.as_bytes(),
-            reference_adrs(0, 0, 4, 0, 29, 41, 0),
-            "FORS TREE address does not match the documented layout"
-        );
-
-        // A WOTS chain address, which is what makes word 6 shared.
-        let mut wots = SpxAddress::new();
-        wots.set_layer(3);
-        wots.set_tree(0x0123_4567_89ab_cdef);
-        wots.set_type(0);
-        wots.set_keypair(7);
-        wots.set_chain(11);
-        wots.set_hash(13);
-        assert_eq!(
-            wots.as_bytes(),
-            reference_adrs(3, 0x0123_4567_89ab_cdef, 0, 0, 7, 11, 13),
-            "WOTS address does not match the documented layout"
-        );
-
-        // A hashtree address at a nonzero height and index.
-        let mut tree = SpxAddress::new();
-        tree.set_layer(2);
-        tree.set_tree(9);
-        tree.set_type(2);
-        tree.set_keypair(5);
-        tree.set_tree_height(4);
-        tree.set_tree_index(6);
-        assert_eq!(
-            tree.as_bytes(),
-            reference_adrs(2, 9, 2, 4, 5, 6, 0),
-            "hashtree address does not match the documented layout"
-        );
+    fn a_flipped_bit_anywhere_in_a_signature_does_not_verify() {
+        for v in DEPLOYED {
+            let p = param_set(v);
+            let kp = key(v, 0x33);
+            let m = b"every block";
+            let sig = sign(v, &kp.secret_key, m).unwrap();
+            for block in 0..sig.len() / p.n {
+                let mut bent = sig.clone();
+                bent[block * p.n + block % p.n] ^= 1 << (block % 8);
+                assert!(
+                    !verify(v, &kp.public_key, m, &bent).unwrap(),
+                    "{v:?} block {block}"
+                );
+            }
+            for byte in 0..kp.public_key.len() {
+                let mut pk = kp.public_key.clone();
+                pk[byte] ^= 0x80;
+                assert!(!verify(v, &pk, m, &sig).unwrap(), "{v:?} pk byte {byte}");
+            }
+            let mut other = m.to_vec();
+            other[0] ^= 1;
+            assert!(
+                !verify(v, &kp.public_key, &other, &sig).unwrap(),
+                "{v:?} message"
+            );
+        }
     }
+
+    /// Frozen digests of a key and a signature for each deployed variant.
+    /// They are regression tripwires, not known-answer tests: no external
+    /// implementation shares this instantiation. A change here is a change
+    /// to every DSM key and signature.
+    #[test]
+    fn frozen_construction_vectors() {
+        let expected: [(SphincsVariant, [u8; 32], [u8; 32]); 2] = [
+            (SphincsVariant::SPX128f, FROZEN_128F_PK, FROZEN_128F_SIG),
+            (SphincsVariant::SPX256f, FROZEN_256F_PK, FROZEN_256F_SIG),
+        ];
+        for (v, pk_digest, sig_digest) in expected {
+            let kp = key(v, 0xD5);
+            let sig = sign(v, &kp.secret_key, b"DSM SPHINCS+ construction vector").unwrap();
+            assert_eq!(
+                *blake3::hash(&kp.public_key).as_bytes(),
+                pk_digest,
+                "{v:?} pk"
+            );
+            assert_eq!(*blake3::hash(&sig).as_bytes(), sig_digest, "{v:?} sig");
+        }
+    }
+
+    const FROZEN_128F_PK: [u8; 32] = [
+        178, 204, 107, 84, 3, 23, 150, 109, 223, 12, 114, 75, 196, 67, 239, 116, 140, 90, 42, 184,
+        38, 132, 253, 57, 231, 50, 31, 224, 143, 162, 51, 212,
+    ];
+    const FROZEN_128F_SIG: [u8; 32] = [
+        34, 204, 64, 137, 94, 146, 143, 83, 88, 183, 115, 21, 128, 234, 188, 89, 40, 10, 77, 119,
+        172, 120, 198, 189, 137, 32, 208, 131, 150, 51, 161, 63,
+    ];
+    const FROZEN_256F_PK: [u8; 32] = [
+        74, 142, 127, 239, 61, 238, 172, 248, 45, 166, 115, 205, 57, 112, 72, 181, 229, 112, 134,
+        70, 131, 204, 29, 58, 193, 37, 220, 238, 40, 189, 62, 95,
+    ];
+    const FROZEN_256F_SIG: [u8; 32] = [
+        185, 69, 62, 11, 156, 73, 32, 209, 209, 30, 112, 216, 134, 235, 124, 33, 173, 186, 110,
+        120, 78, 143, 179, 74, 190, 63, 115, 182, 191, 213, 14, 239,
+    ];
 }
