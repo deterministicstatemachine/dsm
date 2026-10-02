@@ -1333,10 +1333,13 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     // never writes its pair.
     p.b.enter();
     let head = p.b.router().core_sdk.device_head().expect("B's head");
-    let fulfillment_id = match head.pending_economic_admission().map(|pending| pending.kind) {
-        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment { fulfillment_id }) => {
-            fulfillment_id
-        }
+    let fulfillment_id = match head
+        .pending_economic_admission()
+        .map(|pending| pending.kind)
+    {
+        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment {
+            fulfillment_id,
+        }) => fulfillment_id,
         other => panic!("B's pending admission is its fulfillment: {other:?}"),
     };
     let fulfillment = match crate::sdk::sofi_publish::fetch_fulfillment(&set, &fulfillment_id)
@@ -1422,7 +1425,11 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
         let walked = verifier
             .walk_parent(&chains, &m.vault_id, &r0, 0, WALK_BUDGET)
             .expect("the walk");
-        eprintln!("[{label}] {:?} / {:?}", registration.registration(), walked.outcome);
+        eprintln!(
+            "[{label}] {:?} / {:?}",
+            registration.registration(),
+            walked.outcome
+        );
         (registration.into_registration(), walked.outcome)
     };
     let (before, walked) = read_vault("withheld");
