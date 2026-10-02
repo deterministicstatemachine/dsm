@@ -3,7 +3,7 @@ name = "dsm-sphincs"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "no_std BLAKE3-keyed SPHINCS+ signatures for DSM — byte-compatible with the DSM crypto SPHINCS+ (TAG_DSM_SPHINCS_KDF = \"DSM/sphincs-kdf\"), shared by the host and the RP2350 anchor firmware. Deterministic keygen from a 32-byte seed; sign/verify only (no OS RNG)."
+description = "no_std SPHINCS+ for DSM: the FIPS 205 (SLH-DSA) structure instantiated with BLAKE3, construction version 2. The one implementation, linked by the host (dsm::crypto::sphincs) and the RP2350 anchor firmware. Deterministic keygen from a 32-byte seed; sign/verify only (no OS RNG)."
 
 [lib]
 name = "dsm_sphincs"
