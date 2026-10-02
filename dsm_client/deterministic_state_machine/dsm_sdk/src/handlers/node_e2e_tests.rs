@@ -1282,15 +1282,17 @@ async fn an_exercise_carrying_other_bytes_than_its_closure_holds_no_key() {
 /// the key. Only the trader can sign `C_q`, so before the exercise carried it
 /// no relayer could register the trader's `F`: the key was held by an
 /// exercise neither registered nor lost, rung 0 waited on it, and every later
-/// trade at the vault waited behind it.
+/// operation at the vault waited behind it.
 ///
 /// B trades with its pair's leader refusing the pair, so nothing of the pair
 /// is written; then B, as a hostile trader would, writes its exercise at the
-/// vault's first key anyway. The key is held and the pair is empty. A, with
-/// nothing from B, relays from the key: the exercise's own bytes register
-/// B's `F`, the vault's parent is consumed at that key, and B's position
-/// realizes. Mutation: the relay ignores the exercise's `C_q` and only
-/// carries one `K_root(q)` already holds.
+/// vault's first key anyway. The key is held and the pair is empty. A writes
+/// a claim of its own for B's pair at `K_root(q)`: signed by A, it occupies
+/// nothing. Then A closes the vault. Before its walk goes past the held key,
+/// A registers B's pair from the `C_q` B's exercise carries (owner ruling,
+/// 2026-10-01), walks the chain again, and closes at the head B's trade left;
+/// B's position realizes on what A wrote. Mutation: the relay ignores the
+/// exercise's `C_q` and only carries one `K_root(q)` already holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_bytes() {
@@ -1333,10 +1335,13 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     // never writes its pair.
     p.b.enter();
     let head = p.b.router().core_sdk.device_head().expect("B's head");
-    let fulfillment_id = match head.pending_economic_admission().map(|pending| pending.kind) {
-        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment { fulfillment_id }) => {
-            fulfillment_id
-        }
+    let fulfillment_id = match head
+        .pending_economic_admission()
+        .map(|pending| pending.kind)
+    {
+        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment {
+            fulfillment_id,
+        }) => fulfillment_id,
         other => panic!("B's pending admission is its fulfillment: {other:?}"),
     };
     let fulfillment = match crate::sdk::sofi_publish::fetch_fulfillment(&set, &fulfillment_id)
@@ -1408,7 +1413,7 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     // at the key: the fulfillment is neither registered nor lost.
     p.a.enter();
     let (own_a, parents_a) = standing_of(&p.a);
-    let read_vault = |label: &str| {
+    let read_vault = || {
         let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
         let verifier = ctx.verifier();
         let registration = verifier
@@ -1422,40 +1427,166 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
         let walked = verifier
             .walk_parent(&chains, &m.vault_id, &r0, 0, WALK_BUDGET)
             .expect("the walk");
-        eprintln!("[{label}] {:?} / {:?}", registration.registration(), walked.outcome);
         (registration.into_registration(), walked.outcome)
     };
-    let (before, walked) = read_vault("withheld");
+    let (before, walked) = read_vault();
     assert!(
         matches!(before, Registration::Unresolved),
         "B wrote no pair: {before:?}"
     );
     assert_eq!(walked, WalkOutcome::Unresolved { attempt: 0 });
 
-    // A relays from the key, with nothing from B.
-    let relayed = crate::sdk::sofi_relay::relay_exercise(&set, &m.vault_id, &r0, 0)
+    // A signs a claim of its own for B's pair: it is not the trader's, so
+    // at K_root(q) it occupies nothing.
+    let substitute = {
+        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("A's AK");
+        let att_a = crate::sdk::signing_authority::current_att_a().expect("A's AttA");
+        let claim = derive::resolution_claim(&precommit.body, &fulfillment.body);
+        let alg = fulfillment.body.signature_alg();
+        let signature = dsm::crypto::sphincs::sphincs_sign(
+            &sk,
+            &derive::resolution_claim_signing_digest(&claim, alg, &pk, &att_a),
+        )
+        .expect("A signs");
+        SignedSofiResolutionClaim::new(claim, alg, &pk, att_a, &signature)
+            .expect("a claim's shape")
+            .encode()
+    };
+    let written = crate::sdk::route_seats::write_recorded(&set, pair.root().routed(), &substitute)
         .await
-        .expect("the exercise carries everything its pair needs");
-    assert_eq!(relayed.fulfillment_id, fulfillment_id);
-    assert_eq!(relayed.position, q);
-    assert!(relayed.pair.iter().all(|report| report.reached_leader()));
-    let (after, walked) = read_vault("relayed");
+        .expect("the nodes keep whatever they are given");
+    assert!(written.reached_leader());
+    let (still, ..) = read_vault();
+    assert!(
+        matches!(still, Registration::Unresolved),
+        "a relayer's own claim registers nothing: {still:?}"
+    );
+
+    // A closes the vault: its walk registers B's pair from B's exercise
+    // before going past the key, walks the chain again, and closes at the
+    // head B's trade left.
+    let era_before = balance(&p.a, &m.era);
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
+        .expect("the vault prices the trade");
+    assert_eq!(
+        balance(&p.a, &m.era),
+        era_before + 110,
+        "A closed at the head B's trade left: its reserve and all of B's input"
+    );
+    let (after, walked) = read_vault();
     assert!(
         matches!(&after, Registration::Registered(signed) if signed.body == fulfillment.body),
         "B's F registers from its exercise: {after:?}"
     );
     assert_eq!(walked, WalkOutcome::Consumed { attempt: 0 });
 
-    // B's position realizes on what the relayer wrote.
+    // B's position realizes on what A wrote.
     assert_eq!(resolve(&p).await, (q, realized));
-    let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
-        .expect("the vault prices the trade");
     assert_eq!(
         balance(&p.b, &m.era),
         crate::economic_fixtures::whole_era(200) - 10
     );
     assert_eq!(balance(&p.b, &m.tkn), out);
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
+}
+
+/// Pre-audit 12e, the owner's ruling (2026-10-01): a pair that is already
+/// registered is not written again. B's trade registers its pair, and its
+/// exercise reaches only the leader of the vault's first key, so the key is
+/// held and not yet final. A then closes the vault: its walk meets the held
+/// key, finds B's pair registered, and goes past it without writing the
+/// pair. Every member holds exactly the values it held at B's two cells
+/// before A's close. Mutation: a registered pair counts as withheld.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let r0 = ctx
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain")
+        .roots()[0];
+    let attempt = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the first attempt key");
+    // Every seat after the leader refuses B's exercise.
+    for seat in &attempt.routed().route().seats()[1..] {
+        p.nodes
+            .refuse_cell_writes(&member_name(seat), &[*attempt.routed().key()])
+            .await;
+    }
+
+    // B's pair registers; its exercise reaches only the key's leader.
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    let client = SetClient::new(&set).expect("a client of the set");
+    let held_at = |cell: &dsm::route_chain::RoutedCell| {
+        let (namespace, key) = (cell.namespace().to_vec(), *cell.key());
+        let client = &client;
+        async move { client.get_cell(&namespace, &key).await }
+    };
+    let ful_before = held_at(pair.fulfillment()).await;
+    let root_before = held_at(pair.root().routed()).await;
+    {
+        p.a.enter();
+        let (own_a, parents_a) = standing_of(&p.a);
+        let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
+        let registration = ctx
+            .verifier()
+            .read_registration(&p.b.genesis, &p.b.device_id, q, &root)
+            .expect("read")
+            .expect("decided");
+        assert!(
+            matches!(registration.registration(), Registration::Registered(..)),
+            "B's pair is registered: {:?}",
+            registration.registration()
+        );
+        let held = ctx
+            .verifier()
+            .read_attempt_cell(&m.vault_id, &r0, 0)
+            .expect("read")
+            .expect("decided");
+        assert!(
+            held.exercise().is_some(),
+            "B's exercise holds the first key"
+        );
+        assert_ne!(held.fact(), CellFact::Open);
+    }
+
+    // A closes: the walk goes past the held key and writes nothing at B's pair.
+    let r = invoke(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert!(r.success, "A's close is taken: {:?}", r.error_message);
+    assert_eq!(held_at(pair.fulfillment()).await, ful_before);
+    assert_eq!(held_at(pair.root().routed()).await, root_before);
 }
 
 /// A fulfillment B signs for position `q`, naming `precommit_id`, as the
