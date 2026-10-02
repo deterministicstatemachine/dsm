@@ -1729,11 +1729,18 @@ mod tests {
     use dsm::types::operations::{Operation, TransactionMode};
     use dsm::types::token_types::Balance;
 
+    /// A transfer of `amount` of the builtin `token_id`. A transfer names its
+    /// asset by policy commit (pre-audit item 4); the gate names the lock it
+    /// falls under from that commit.
     fn transfer_of(token_id: &[u8], amount: u64) -> Operation {
+        let ticker = std::str::from_utf8(token_id).expect("a builtin ticker");
         Operation::Transfer {
             to_device_id: vec![0xCC; 32],
             amount: Balance::amount(amount),
-            policy_commit: [0u8; 32],
+            policy_commit: dsm::core::token::token_state_manager::builtin_policy_commit_for_token(
+                ticker,
+            )
+            .expect("a builtin token"),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: token_id.to_vec(),
                 nonce: vec![],
@@ -1758,7 +1765,29 @@ mod tests {
         // Egress of a LockedRecovery asset is refused.
         assert!(asset_egress_block_reason(&transfer_of(tok, 5)).is_some());
         // An UNTOUCHED asset (no lock entry) is not gated.
-        assert!(asset_egress_block_reason(&transfer_of(b"OTHER", 5)).is_none());
+        assert!(asset_egress_block_reason(&transfer_of(b"dBTC", 5)).is_none());
+        // An asset this device cannot name from its commit is blocked while
+        // any lock is held: the gate cannot prove it is not the locked one.
+        let unnamed = match transfer_of(b"dBTC", 5) {
+            Operation::Transfer {
+                to_device_id,
+                amount,
+                terms_commitment,
+                signature,
+                authority_policy,
+                ..
+            } => Operation::Transfer {
+                to_device_id,
+                amount,
+                policy_commit: [0x77; 32],
+                terms_commitment,
+                signature,
+                authority_policy,
+            },
+            other => other,
+        };
+        let blocked = asset_egress_block_reason(&unnamed).expect("an unnamed asset is blocked");
+        assert!(blocked.contains("cannot be identified"), "{blocked}");
     }
 
     #[test]
