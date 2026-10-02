@@ -43,7 +43,7 @@ pub const MAX_MEMBER_ID_LEN: usize = 128;
 
 /// Largest value a route entry may carry (the proto bound): the largest
 /// object a cell holds, such as a SoFi exercise (`MAX_EXERCISE_BYTES`).
-pub const MAX_VALUE_LEN: usize = 262_144;
+pub const MAX_VALUE_LEN: usize = 327_680;
 
 /// A bound on everything an entry adds around its value: the cell, the seat,
 /// the position, and up to four chain slots, each an arrival record with
