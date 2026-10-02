@@ -264,7 +264,7 @@ export default function SofiScreen(): React.JSX.Element {
       {tab === 'swap' && (
         <div className="swap-tab">
           <section className="sb-card">
-            <div className="sb-field">
+            <div className="sb-field" data-tour="swap-pay">
               <label htmlFor="sofi-amount-in">You pay</label>
               <div className="sb-input-row">
                 <input
@@ -294,7 +294,7 @@ export default function SofiScreen(): React.JSX.Element {
               </div>
             </div>
 
-            <div className="sb-field">
+            <div className="sb-field" data-tour="swap-get">
               <label htmlFor="sofi-token-out-anchor">You get</label>
               <TokenSelect
                 label="Token out"
@@ -391,7 +391,7 @@ export default function SofiScreen(): React.JSX.Element {
             </section>
           )}
 
-          <section className="sb-card">
+          <section className="sb-card" data-tour="liquidity-create">
             <div className="sb-card__title">Create a liquidity vault</div>
             <div className="sb-field">
               <label htmlFor="sofi-reserve-a">Token A and its reserve</label>
@@ -445,7 +445,7 @@ export default function SofiScreen(): React.JSX.Element {
             </button>
           </section>
 
-          <section className="sb-card">
+          <section className="sb-card" data-tour="liquidity-close">
             <div className="sb-card__title">A liquidity vault by id</div>
             <div className="sb-field">
               <label htmlFor="sofi-vault">Vault id</label>
@@ -463,7 +463,7 @@ export default function SofiScreen(): React.JSX.Element {
             <p className="sb-hint sb-hint--tight">Close is for a vault of your own: both reserves come back to you. Storage → DLVs lists your vaults with their live reserves.</p>
           </section>
 
-          <Disclosure summary="Advanced: relay a fulfillment">
+          <Disclosure summary="Advanced: relay a fulfillment" className="sofi-relay">
             <p className="sb-hint">Complete someone else&apos;s registered fulfillment: their genesis, their device id, and the position.</p>
             <div className="sb-field">
               <label htmlFor="sofi-relay-genesis">Trader genesis</label>

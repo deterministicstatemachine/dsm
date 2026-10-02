@@ -150,7 +150,7 @@ pub fn start_poller() {
                 break;
             }
 
-            let (processed, _pulled) = run_inbox_sync_cycle_counted("poll").await;
+            let (processed, pulled, more_pending) = run_inbox_sync_cycle_counted("poll").await;
             #[cfg(test)]
             POLLER_CYCLE_DONE.notify_waiters();
             // Settlement-urgent covers BOTH directions: the sender awaiting an
@@ -168,9 +168,7 @@ pub fn start_poller() {
                 }
             };
 
-            // Enter eager mode when items are processed, so follow-up
-            // messages (ACKs, rapid exchanges) are discovered faster.
-            if processed > 0 {
+            if enters_eager_mode(processed, pulled, more_pending) {
                 eager_remaining = EAGER_POLL_CYCLES;
                 log::info!(
                     "[inbox_poller] Entering eager mode ({} cycles at {}ms)",
@@ -273,8 +271,19 @@ pub fn resume_poller() {
     }
 }
 
+/// Whether a cycle sends the poller into eager mode. It processed something,
+/// so follow-up messages (ACKs, rapid exchanges) are found faster; or a route
+/// holds more than the sync took and the sync took entries, so a backlog
+/// drains soon (pre-audit item 11). A route still pending when nothing was
+/// taken (a read that went over copies already passed over, behind one that
+/// waits) is left to the normal cadence: junk cannot hold the poller at the
+/// eager rate.
+pub(crate) fn enters_eager_mode(processed: u32, pulled: u32, routes_pending: usize) -> bool {
+    processed > 0 || (routes_pending > 0 && pulled > 0)
+}
+
 /// The `storage.sync` request every poll makes: pull the inbox, push what is
-/// owed, 50 items.
+/// owed, at most 50 entries from each route.
 pub(crate) fn poll_sync_request() -> generated::StorageSyncRequest {
     generated::StorageSyncRequest {
         pull_inbox: true,
@@ -285,13 +294,14 @@ pub(crate) fn poll_sync_request() -> generated::StorageSyncRequest {
 
 /// Run one sync cycle: call `storage.sync` through the app router,
 /// then push `inbox.updated` to the WebView if items were processed.
-/// Returns (processed, pulled) counts for adaptive polling.
-async fn run_inbox_sync_cycle_counted(source: &str) -> (u32, u32) {
+/// Returns the processed and pulled counts and how many routes are
+/// `more_pending`, for adaptive polling.
+async fn run_inbox_sync_cycle_counted(source: &str) -> (u32, u32, usize) {
     let router = match crate::bridge::app_router() {
         Some(r) => r,
         None => {
             log::debug!("[inbox_poller] AppRouter not installed yet, skipping cycle");
-            return (0, 0);
+            return (0, 0, 0);
         }
     };
 
@@ -311,37 +321,41 @@ async fn run_inbox_sync_cycle_counted(source: &str) -> (u32, u32) {
     if !result.success {
         let msg = result.error_message.as_deref().unwrap_or("unknown");
         log::warn!("[inbox_poller] storage.sync failed: {msg}");
-        return (0, 0);
+        return (0, 0, 0);
     }
 
     // Decode the Envelope response to get StorageSyncResponse.
-    let (processed, pulled) = match decode_sync_response(&result.data) {
+    let (processed, pulled, more_pending) = match decode_sync_response(&result.data) {
         Ok(counts) => counts,
         Err(e) => {
             log::error!("[inbox_poller] storage.sync answer is not readable: {e}");
-            return (0, 0);
+            return (0, 0, 0);
         }
     };
 
     log::info!(
-        "[inbox_poller] sync cycle complete: pulled={pulled}, processed={processed}, source={source}"
+        "[inbox_poller] sync cycle complete: pulled={pulled}, processed={processed}, \
+         more_pending={}, source={source}",
+        more_pending.len()
     );
 
+    let routes_pending = more_pending.len();
     // Push `inbox.updated` event to WebView via the canonical reverse-spine.
-    push_inbox_event_to_webview(pulled, processed);
+    push_inbox_event_to_webview(pulled, processed, more_pending);
 
-    (processed, pulled)
+    (processed, pulled, routes_pending)
 }
 
 /// Push inbox.updated + optional wallet refresh to WebView.
 #[cfg(all(target_os = "android", feature = "jni"))]
-fn push_inbox_event_to_webview(pulled: u32, processed: u32) {
+fn push_inbox_event_to_webview(pulled: u32, processed: u32, more_pending: Vec<String>) {
     let event_payload = generated::StorageSyncResponse {
         success: true,
         pulled,
         processed,
         pushed: 0,
         errors: vec![],
+        more_pending,
     };
     let payload_bytes = event_payload.encode_to_vec();
 
@@ -357,14 +371,14 @@ fn push_inbox_event_to_webview(pulled: u32, processed: u32) {
 }
 
 #[cfg(not(all(target_os = "android", feature = "jni")))]
-fn push_inbox_event_to_webview(_pulled: u32, _processed: u32) {
+fn push_inbox_event_to_webview(_pulled: u32, _processed: u32, _more_pending: Vec<String>) {
     // No-op on non-Android / non-JNI builds.
 }
 
 /// The `(processed, pulled)` counts of `storage.sync`'s answer. The router
 /// answers its own caller with a local answer (`pack_envelope_ok`: `[0x03]`
 /// framing, no sender headers, no message id), so it is read as one.
-fn decode_sync_response(data: &[u8]) -> Result<(u32, u32), String> {
+fn decode_sync_response(data: &[u8]) -> Result<(u32, u32, Vec<String>), String> {
     let envelope = crate::handlers::response_helpers::decode_local_envelope(data)?;
     match envelope.payload {
         Some(generated::envelope::Payload::StorageSyncResponse(resp)) => {
@@ -375,7 +389,7 @@ fn decode_sync_response(data: &[u8]) -> Result<(u32, u32), String> {
                     resp.errors
                 );
             }
-            Ok((resp.processed, resp.pulled))
+            Ok((resp.processed, resp.pulled, resp.more_pending))
         }
         _ => Err("storage.sync answered with a payload that is not a StorageSyncResponse".into()),
     }
@@ -481,6 +495,7 @@ mod tests {
                 processed,
                 pushed: 0,
                 errors,
+                more_pending: Vec::new(),
             },
         ))
     }
@@ -491,10 +506,13 @@ mod tests {
     /// and never announced a sync.
     #[test]
     fn a_storage_sync_answer_as_the_router_frames_it_is_read() {
-        assert_eq!(decode_sync_response(&sync_answer(7, 3, vec![])), Ok((3, 7)));
+        assert_eq!(
+            decode_sync_response(&sync_answer(7, 3, vec![])),
+            Ok((3, 7, Vec::new()))
+        );
         assert_eq!(
             decode_sync_response(&sync_answer(u32::MAX, u32::MAX - 1, vec!["e".into()])),
-            Ok((u32::MAX - 1, u32::MAX))
+            Ok((u32::MAX - 1, u32::MAX, Vec::new()))
         );
     }
 
@@ -634,8 +652,19 @@ mod tests {
     // ── push_inbox_event_to_webview is no-op on non-android ──
 
     #[test]
+    fn a_pending_route_hurries_the_poller_only_while_entries_are_taken() {
+        assert!(enters_eager_mode(1, 0, 0), "something processed");
+        assert!(enters_eager_mode(0, 3, 1), "a backlog being taken");
+        assert!(
+            !enters_eager_mode(0, 0, 1),
+            "a pending route from which nothing was taken"
+        );
+        assert!(!enters_eager_mode(0, 3, 0), "junk taken, nothing left");
+    }
+
+    #[test]
     fn push_inbox_event_noop_on_test_platform() {
         // Should not panic on non-Android
-        push_inbox_event_to_webview(5, 3);
+        push_inbox_event_to_webview(5, 3, Vec::new());
     }
 }

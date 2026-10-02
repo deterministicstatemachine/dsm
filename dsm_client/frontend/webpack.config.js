@@ -4,6 +4,45 @@ const webpack = require('webpack');
 const HtmlWebpackPlugin  = require('html-webpack-plugin');
 const MiniCssExtract     = require('mini-css-extract-plugin');
 const CopyWebpackPlugin  = require('copy-webpack-plugin');
+const crypto             = require('crypto');
+
+// The WebView's Content-Security-Policy admits no inline script by kind
+// ('unsafe-inline') and no eval ('unsafe-eval'): only the app's own files and
+// the inline scripts index.html itself carries, each by the SHA-256 of its
+// exact text in the page as emitted (pre-audit item 13). The page names where
+// the hashes go with this token; a page without it, or an inline script with
+// attributes the hash cannot vouch for, fails the build rather than ship a
+// policy that admits more, or a page whose own scripts it blocks.
+const INLINE_SCRIPT_HASHES_TOKEN = '__DSM_INLINE_SCRIPT_HASHES__';
+
+class InlineScriptHashes {
+  apply(compiler) {
+    compiler.hooks.compilation.tap('InlineScriptHashes', (compilation) => {
+      HtmlWebpackPlugin.getCompilationHooks(compilation).beforeEmit.tapAsync(
+        'InlineScriptHashes',
+        (data, done) => {
+          // Tag names are case-insensitive, and a closing tag may carry whitespace:
+          // every spelling a browser reads as a script is a script here.
+          const scripts = [...data.html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+          const inline = scripts.filter(([, attributes]) => !/\bsrc\s*=/i.test(attributes));
+          const unhashable = inline.filter(([, attributes]) => attributes.trim().length > 0);
+          if (unhashable.length > 0) {
+            done(new Error(`an inline script carries attributes: ${unhashable[0][1].trim()}`));
+            return;
+          }
+          if (data.html.split(INLINE_SCRIPT_HASHES_TOKEN).length !== 2) {
+            done(new Error(`the page must name ${INLINE_SCRIPT_HASHES_TOKEN} exactly once in its policy`));
+            return;
+          }
+          const hashes = inline.map(([, , text]) =>
+            `'sha256-${crypto.createHash('sha256').update(text, 'utf8').digest('base64')}'`);
+          data.html = data.html.replace(INLINE_SCRIPT_HASHES_TOKEN, hashes.join(' '));
+          done(null, data);
+        },
+      );
+    });
+  }
+}
 
 module.exports = (env, argv) => {
   const isProd        = argv.mode === 'production';
@@ -90,6 +129,7 @@ module.exports = (env, argv) => {
           minifyCSS: true
         }
       }),
+      new InlineScriptHashes(),
       isProd && new MiniCssExtract({
         filename: 'css/[name].[contenthash:8].css'
       }),
@@ -209,7 +249,7 @@ module.exports = (env, argv) => {
       ? false
       : inMobile
          ? 'source-map'               // WebView-safe, no eval()
-         : 'eval-cheap-module-source-map',
+         : 'cheap-module-source-map', // the policy admits no eval
 
     devServer: inMobile ? undefined : {
       static: { directory: path.join(__dirname, 'public') },

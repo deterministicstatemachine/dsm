@@ -388,9 +388,7 @@ fn derive_resolved<'e>(
         Established::RefutedInHand(refuted) => {
             // Registration is the one fact the ladder asks of a refuted
             // exercise; registered, it is Invalid whatever the cells say.
-            match resolve_refuted_in_hand(refuted.registered)
-                .map_err(AdvanceError::FactsIncomplete)?
-            {
+            match resolve_refuted_in_hand(refuted.pair).map_err(AdvanceError::FactsIncomplete)? {
                 Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
                 Resolution::Realized | Resolution::Void => {
                     return Err(AdvanceError::RefutedYetNotTerminal)
@@ -824,6 +822,7 @@ mod tests {
     use crate::route_chain::{CellFact, ChainState};
     use crate::sofi::conformance::Validation;
     use crate::sofi::facts::{EstablishedFacts, RefutedPosition};
+    use crate::sofi::registration::PairStanding;
     use crate::sofi::resolution::{LegFacts, ParentPosition, ParentStatus, RefutedInHand};
     use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
     use crate::sofi::wire::{PrecommitLeg, TraderRelationshipLeaf};
@@ -943,9 +942,8 @@ mod tests {
         Established::Facts(Box::new(EstablishedFacts {
             fulfillment_id: derive::fulfillment_id(f),
             external_commitment: e,
-            registered: true,
+            pair: PairStanding::Registered,
             conformance: Validation::Valid,
-            position_lost: false,
             parent: ParentPosition::SingleRoot {
                 named: *p.parent_claim_ref(),
                 held: *p.parent_claim_ref(),
@@ -1092,7 +1090,7 @@ mod tests {
             unreachable!("stated facts")
         };
         let unregistered = EstablishedFacts {
-            registered: false,
+            pair: PairStanding::Pending,
             ..(*complete).clone()
         };
         assert_eq!(
@@ -1135,12 +1133,12 @@ mod tests {
         let pre = d(0xA0);
         let p = precommit(pre, d(0xA1));
         let f = fulfillment(&p);
-        let refuted = |registered| {
+        let refuted = |pair| {
             Established::RefutedInHand(RefutedPosition {
                 fulfillment_id: derive::fulfillment_id(&f),
                 external_commitment: *p.external_commitment(),
                 refuted: RefutedInHand::Conformance,
-                registered,
+                pair,
             })
         };
         assert_eq!(
@@ -1149,7 +1147,7 @@ mod tests {
                 &p,
                 &f,
                 p.parent_claim_ref(),
-                &refuted(true),
+                &refuted(PairStanding::Registered),
                 &bare_receiver(),
             ),
             Err(AdvanceError::LineageIsTerminal)
@@ -1160,7 +1158,7 @@ mod tests {
                 &p,
                 &f,
                 p.parent_claim_ref(),
-                &refuted(false),
+                &refuted(PairStanding::Pending),
                 &bare_receiver(),
             ),
             Err(AdvanceError::FactsIncomplete(Incomplete::NotRegistered))
