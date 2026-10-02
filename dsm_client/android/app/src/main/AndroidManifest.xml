@@ -114,21 +114,9 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice|dataSync" />
 
-        <!-- H2 bench self-test: launched when the Pico anchor attaches over USB-OTG (that launch
-             also grants USB permission for the device). Replays one OP_SPI_PASSTHROUGH round-trip
-             and logs whether the phone reached the real TROPIC01. Debug bring-up only. -->
-        <activity
-            android:name="com.dsm.wallet.debug.PicoSelfTestActivity"
-            android:exported="true"
-            android:label="Pico USB self-test"
-            android:launchMode="singleTop">
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-            </intent-filter>
-            <meta-data
-                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                android:resource="@xml/pico_device_filter" />
-        </activity>
+        <!-- The H2 bench self-test (PicoSelfTestActivity) is declared in src/debug/AndroidManifest.xml
+             only: it is exported, and a launch with its confirmation extras runs irreversible chip
+             operations, so a release build must not declare it (pre-audit item 16). -->
 
         <!-- Hardware Incompatibility Screen (shown when JNI library fails to load) -->
         <activity

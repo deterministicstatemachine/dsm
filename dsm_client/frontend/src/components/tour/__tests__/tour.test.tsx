@@ -289,13 +289,20 @@ describe('tour anchors', () => {
     ),
   );
 
-  it('the steps name at least the seven tour anchors', () => {
+  it('the steps name exactly the tour anchors', () => {
     expect(anchors.sort()).toEqual([
-      'appliance-setup',
+      'add-token',
+      'contact-code',
+      'contact-list',
       'contacts-tabs',
       'create-token',
       'faucet-claim',
-      'offline-funding',
+      'liquidity-close',
+      'liquidity-create',
+      'liquidity-vaults',
+      'recent-activity',
+      'swap-get',
+      'swap-pay',
       'tokens-tabs',
       'tutorial-button',
     ]);
@@ -303,5 +310,34 @@ describe('tour anchors', () => {
 
   it.each(anchors)('data-tour="%s" exists in the app', (anchor) => {
     expect(appSource).toContain(`data-tour="${anchor}"`);
+  });
+
+  // Every selector a step points at, waits for or backs out on names things
+  // the app renders: each attribute value, class and id in it is written in the
+  // app's screens or in the shell (public/index.html). A selector naming
+  // something no screen renders is a step that can never find its element.
+  const shell = fs.readFileSync(path.resolve(src, '../public/index.html'), 'utf8');
+  const rendered = `${appSource}\n${shell}`;
+  const selectors = TOUR_STEPS.flatMap((step) =>
+    [step.target, step.backOn, step.wait && 'selector' in step.wait ? step.wait.selector : undefined]
+      .filter((selector): selector is string => typeof selector === 'string')
+      .map((selector) => [step.id, selector] as const),
+  );
+  const written = (name: string): RegExp => new RegExp(`(?<![\\w-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`);
+
+  it.each(selectors)('step %s: %s names only what the app renders', (_id, selector) => {
+    const attributes = Array.from(selector.matchAll(/\[[a-z-]+\^?="([^"]+)"\]/g), (m) => m[1]);
+    const classes = Array.from(selector.matchAll(/\.([A-Za-z][\w-]*)/g), (m) => m[1]);
+    const ids = Array.from(selector.matchAll(/#([A-Za-z][\w-]*)/g), (m) => m[1]);
+    for (const value of attributes) expect(rendered).toContain(value);
+    for (const name of [...classes, ...ids]) expect(rendered).toMatch(written(name));
+  });
+
+  // Offline sending and Bitcoin stay out of the tour (owner, 2026-10-01).
+  it('no step teaches offline sending or Bitcoin', () => {
+    for (const step of TOUR_STEPS) {
+      expect(`${step.title} ${step.body}`).not.toMatch(/bluetooth|appliance|bitcoin|dbtc|offline (send|allocation|funding|mode)/i);
+      expect(JSON.stringify(step)).not.toMatch(/offline-funding|appliance-setup|Transaction mode/);
+    }
   });
 });

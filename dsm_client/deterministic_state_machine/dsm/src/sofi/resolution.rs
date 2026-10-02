@@ -38,6 +38,7 @@
 
 use crate::route_chain::{CellFact, ChainState};
 use super::conformance::Validation;
+use super::registration::PairStanding;
 use super::wire::{next_attempt, ParentClaimRef};
 
 /// What a verifier has established about the predecessor position `p` that `P`
@@ -70,6 +71,13 @@ pub enum ParentPosition {
     /// The `C_p` that `P` names selects no root, ever: another claim holds
     /// `p`, so it never registered there, or it resolved Invalid. Terminal.
     ConditionalNoRoot,
+    /// Lineage validation established the trader's lineage Invalid at or
+    /// before `p` (an Invalid step, or a divergent write-once register cell
+    /// it quarantines): that lineage holds no claim at `p`, ever, whatever
+    /// `P` names. Terminal (SoFi §23.3; Amendment S13: "No trade whose
+    /// trader's lineage is known invalid can occupy a vault key
+    /// indefinitely").
+    LineageInvalid,
 }
 
 /// A trader-position result. Every one is permanent (Amendment S7). Core
@@ -421,19 +429,19 @@ pub struct RouteFacts<'legs> {
     /// `E` — the ONE external commitment this operation is bound to. Every
     /// required leg must be final on exactly this value.
     pub(crate) external_commitment: [u8; 32],
-    /// `FulfillmentRegistered(q, F)` — the exercise boundary.
-    pub(crate) registered: bool,
+    /// Where `F` stands at its position pair (R10, SoFi Amendments S14 and
+    /// S20): `Registered` is `FulfillmentRegistered(q, F)`, the exercise
+    /// boundary. `Lost` is the fact behind the skip
+    /// `RejectedFinalInadmissible`: position `q` already holds a different
+    /// claim, so this `F` can never register (Section 21.1), a fact about `F`
+    /// and never an arm of `RouteImpossible(P, E)`. `Misbodied` is the pair
+    /// final on `F` under a claim that is not `derive(P, F)`: lost the same
+    /// way, and the position Invalid for the trader's lineage.
+    pub(crate) pair: PairStanding,
     /// `FulfillmentConformance(F)` (Section 20.2), as the ladder reads it.
     /// Registration supplies no truth value for it: a registered `F` may be
     /// `Invalid`, and a producer's pre-sign check is not this verifier's.
     pub(crate) conformance: Validation,
-    /// The fact behind the skip `RejectedFinalInadmissible` (SoFi Amendment
-    /// S14): position `q` already holds a different claim — an ordinary
-    /// transition, or another fulfillment of the same trader naming other
-    /// attempt keys — so this `F` can never register (Section 21.1). A fact
-    /// about `F`, never an arm of `RouteImpossible(P, E)`. Read from the
-    /// position pair (R10); it never holds together with `registered`.
-    pub(crate) position_lost: bool,
     /// What is known about the claim at `p`.
     pub(crate) parent: ParentPosition,
     /// `P.void_root == T°.pre_root`.
@@ -454,7 +462,7 @@ pub struct RouteFacts<'legs> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroundRouteFacts<'legs> {
     pub(crate) external_commitment: [u8; 32],
-    pub(crate) position_lost: bool,
+    pub(crate) pair: PairStanding,
     pub(crate) parent: ParentPosition,
     pub(crate) parent_pre_root: [u8; 32],
     pub(crate) legs: &'legs [LegFacts],
@@ -480,38 +488,44 @@ impl RouteFacts<'_> {
     }
 }
 
-/// `TraderParentCompatible(P)`: the parent is an ordinary claim the trader
-/// holds at `p`, at exactly the root this operation was built on, or a
-/// conditional claim that selected exactly that root. The parent is always resolved here: Core resolves only over complete
-/// facts, the predecessor's resolution among them (Amendment S7).
-pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
+/// The root a terminal parent leaves `P` standing on: the root the ordinary
+/// claim `P` names installed, when the trader's lineage holds that very claim
+/// at `p`; the root a conditional `C_p` selected. `None` when the parent
+/// leaves `P` on no root, ever: an ordinary claim the lineage does not hold
+/// at `p`, a `C_p` that selects no root, or a lineage known Invalid at or
+/// before `p`.
+fn root_left_by(parent: &ParentPosition) -> Option<&[u8; 32]> {
     match parent {
         ParentPosition::SingleRoot {
             named,
             held,
             held_root,
-        } => named == held && held_root == parent_pre_root,
-        ParentPosition::ConditionalSelected { selected_root } => selected_root == parent_pre_root,
-        ParentPosition::ConditionalNoRoot => false,
+        } => (named == held).then_some(held_root),
+        ParentPosition::ConditionalSelected { selected_root } => Some(selected_root),
+        ParentPosition::ConditionalNoRoot | ParentPosition::LineageInvalid => None,
     }
+}
+
+/// `TraderParentCompatible(P)`: the parent is an ordinary claim the trader
+/// holds at `p`, at exactly the root this operation was built on, or a
+/// conditional claim that selected exactly that root. The parent is always
+/// resolved here: Core resolves only over complete facts, the predecessor's
+/// resolution among them (Amendment S7).
+pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
+    root_left_by(parent) == Some(parent_pre_root)
 }
 
 /// `TraderParentImpossible(P)`: the parent is terminal and did not select the
 /// root this operation was built on — either it selected nothing (Invalid), or
 /// it selected the other branch — or it is an ordinary claim the trader does
-/// not hold at `p`, or holds at another root.
+/// not hold at `p`, or holds at another root, or the trader's lineage is
+/// known Invalid at or before `p`, so it holds nothing there.
 ///
-/// Objective and monotone.
+/// A [`ParentPosition`] is always terminal: a parent not established yet is
+/// no fact at all (`NotEstablished::ParentUnresolved`). So the parent is
+/// impossible exactly when it is not compatible. Objective and monotone.
 pub fn trader_parent_impossible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
-    match parent {
-        ParentPosition::ConditionalNoRoot => true,
-        ParentPosition::ConditionalSelected { selected_root } => selected_root != parent_pre_root,
-        ParentPosition::SingleRoot {
-            named,
-            held,
-            held_root,
-        } => named != held || held_root != parent_pre_root,
-    }
+    !trader_parent_compatible(parent, parent_pre_root)
 }
 
 /// `ConsumedRoute(F, E)` (Section 23.2): registered, conforming, statically
@@ -524,7 +538,7 @@ pub fn trader_parent_impossible(parent: &ParentPosition, parent_pre_root: &[u8; 
 /// `FulfillmentConformance` is a conjunct of its own: registration is a race
 /// at a leader, not a verdict on the bytes that won it.
 pub fn consumed_route(facts: &RouteFacts<'_>) -> bool {
-    facts.registered
+    facts.pair == PairStanding::Registered
         && facts.conformance == Validation::Valid
         && facts.validation == Validation::Valid
         && trader_parent_compatible(&facts.parent, &facts.parent_pre_root)
@@ -617,9 +631,13 @@ pub enum Incomplete {
 /// Crate-private: the one production caller is `advance_resolved`, which
 /// installs a root on this answer and on nothing a caller says.
 pub(crate) fn resolve_position(facts: &RouteFacts<'_>) -> Result<Resolution, Incomplete> {
-    // 0 — nothing is exercised before registration.
-    if !facts.registered {
-        return Err(Incomplete::NotRegistered);
+    // 0 — nothing is exercised before registration; a pair final on `F`
+    // under another body than `derive(P, F)` is Invalid for the lineage
+    // (SoFi Amendment S20), the same verdict a peer reads.
+    match facts.pair {
+        PairStanding::Registered => {}
+        PairStanding::Misbodied => return Ok(Resolution::Invalid),
+        PairStanding::Pending | PairStanding::Lost => return Err(Incomplete::NotRegistered),
     }
     // 1 — the parent took another branch, or none.
     if trader_parent_impossible(&facts.parent, &facts.parent_pre_root) {
@@ -729,7 +747,7 @@ pub fn classify_attempt(
         // another claim holds its position, so no registered fulfillment will
         // ever name this cell. Without the skip the parent's attempt chain
         // stops here forever (TLA `DSM_SofiFulfillment`, `LostPosition`).
-        if facts.position_lost {
+        if facts.pair.is_lost() {
             return (
                 AttemptClass::Skipped,
                 Some(SkipReason::RejectedFinalInadmissible),
@@ -823,7 +841,7 @@ pub fn skip_without_evidence(
         SkipReason::RejectedFinalRoute(ImpossibleArm::ParentConsumedElsewhere)
     } else if trader_parent_impossible(&ground.parent, &ground.parent_pre_root) {
         SkipReason::RejectedFinalRoute(ImpossibleArm::TraderParentImpossible)
-    } else if ground.position_lost {
+    } else if ground.pair.is_lost() {
         SkipReason::RejectedFinalInadmissible
     } else {
         return (AttemptClass::Unresolved, None);
@@ -831,16 +849,16 @@ pub fn skip_without_evidence(
     (AttemptClass::Skipped, Some(reason))
 }
 
-/// The ladder over a position whose exercise is refuted in hand: registration
-/// is the one fact it reads. Unregistered, rung 0 holds. Registered, the
+/// The ladder over a position whose exercise is refuted in hand: the pair is
+/// the one fact it reads. Unregistered, rung 0 holds. Registered, the
 /// position is Invalid whatever the other facts are — rung 1 when the parent
 /// took another branch, else rung 2 for a non-conforming `F`, else rung 4
-/// for an invalid route, which nothing before it can consume.
-pub(crate) fn resolve_refuted_in_hand(registered: bool) -> Result<Resolution, Incomplete> {
-    if registered {
-        Ok(Resolution::Invalid)
-    } else {
-        Err(Incomplete::NotRegistered)
+/// for an invalid route, which nothing before it can consume. Misbodied, it
+/// is Invalid at rung 0.
+pub(crate) fn resolve_refuted_in_hand(pair: PairStanding) -> Result<Resolution, Incomplete> {
+    match pair {
+        PairStanding::Registered | PairStanding::Misbodied => Ok(Resolution::Invalid),
+        PairStanding::Pending | PairStanding::Lost => Err(Incomplete::NotRegistered),
     }
 }
 
@@ -1339,9 +1357,8 @@ mod tests {
     fn realized<'l>(legs: &'l [LegFacts]) -> RouteFacts<'l> {
         RouteFacts {
             external_commitment: E,
-            registered: true,
+            pair: PairStanding::Registered,
             conformance: Valid,
-            position_lost: false,
             parent: HELD,
             parent_pre_root: PRE,
             validation: Valid,
@@ -1359,7 +1376,7 @@ mod tests {
     fn an_unregistered_fulfillment_is_not_resolved_even_with_every_leg_final() {
         let legs = [good_leg()];
         let facts = RouteFacts {
-            registered: false,
+            pair: PairStanding::Pending,
             ..realized(&legs)
         };
         assert_eq!(resolve_position(&facts), Err(Incomplete::NotRegistered));
@@ -1767,7 +1784,7 @@ mod tests {
             conformance: Invalid,
             ..realized(&legs)
         };
-        assert!(facts.registered);
+        assert_eq!(facts.pair, PairStanding::Registered);
         assert_ne!(resolve_position(&facts), Ok(Resolution::Realized));
     }
 
@@ -1814,8 +1831,7 @@ mod tests {
     fn a_final_cell_whose_fulfillment_lost_its_position_is_skipped() {
         let legs = [good_leg()];
         let facts = RouteFacts {
-            registered: false,
-            position_lost: true,
+            pair: PairStanding::Lost,
             ..realized(&legs)
         };
         assert_eq!(route_impossible(&facts), None);
@@ -1831,7 +1847,7 @@ mod tests {
         assert!(!consumed_route(&facts));
         // Without the skip the same cell is that F's open question forever.
         let held = RouteFacts {
-            position_lost: false,
+            pair: PairStanding::Pending,
             ..facts
         };
         assert_eq!(route_impossible(&held), None);
@@ -1874,7 +1890,7 @@ mod tests {
     fn ground_of<'l>(facts: &RouteFacts<'l>) -> GroundRouteFacts<'l> {
         GroundRouteFacts {
             external_commitment: facts.external_commitment,
-            position_lost: facts.position_lost,
+            pair: facts.pair,
             parent: facts.parent,
             parent_pre_root: facts.parent_pre_root,
             legs: facts.legs,
@@ -1953,7 +1969,7 @@ mod tests {
 
         let lost = around(&legs, Valid, Valid)
             .into_iter()
-            .find(|f| f.position_lost && f.parent == HELD)
+            .find(|f| f.pair == PairStanding::Lost && f.parent == HELD)
             .expect("a lost position among the facts");
         assert_eq!(
             skip_without_evidence(&ground_of(&lost), &legs[0]),
@@ -2107,9 +2123,8 @@ mod tests {
                             let legs = [LegFacts { cell, ..good_leg() }];
                             let facts = RouteFacts {
                                 external_commitment: E,
-                                registered: true,
+                                pair: PairStanding::Registered,
                                 conformance,
-                                position_lost: false,
                                 parent,
                                 parent_pre_root: PRE,
                                 validation,
@@ -2273,9 +2288,8 @@ mod tests {
                 attempt,
                 RouteFacts {
                     external_commitment: e,
-                    registered: true,
+                    pair: PairStanding::Registered,
                     conformance: Valid,
-                    position_lost: false,
                     parent: HELD,
                     parent_pre_root: PRE,
                     validation,
@@ -2326,9 +2340,8 @@ mod tests {
                 attempt,
                 RouteFacts {
                     external_commitment: OTHER_E,
-                    registered: true,
+                    pair: PairStanding::Registered,
                     conformance: Valid,
-                    position_lost: false,
                     parent: HELD,
                     parent_pre_root: PRE,
                     validation: Invalid,
@@ -2381,9 +2394,8 @@ mod tests {
                 attempt,
                 RouteFacts {
                     external_commitment: OTHER_E,
-                    registered: true,
+                    pair: PairStanding::Registered,
                     conformance: Valid,
-                    position_lost: false,
                     parent: HELD,
                     parent_pre_root: PRE,
                     validation: Invalid,
@@ -2433,8 +2445,13 @@ mod tests {
         validation: Validation,
     ) -> Vec<RouteFacts<'l>> {
         let mut out = Vec::new();
-        for registered in [true, false] {
-            for position_lost in [true, false] {
+        for pair in [
+            PairStanding::Registered,
+            PairStanding::Pending,
+            PairStanding::Lost,
+            PairStanding::Misbodied,
+        ] {
+            {
                 for storage_resolved in [true, false] {
                     for parent in [
                         HELD,
@@ -2448,9 +2465,8 @@ mod tests {
                     ] {
                         out.push(RouteFacts {
                             external_commitment: E,
-                            registered,
+                            pair,
                             conformance,
-                            position_lost: position_lost && !registered,
                             parent,
                             parent_pre_root: PRE,
                             validation,
@@ -2508,7 +2524,7 @@ mod tests {
                         );
                         assert_eq!(
                             resolve_position(&facts),
-                            resolve_refuted_in_hand(facts.registered),
+                            resolve_refuted_in_hand(facts.pair),
                             "{refuted:?} over {facts:?}"
                         );
                     }
@@ -2634,9 +2650,8 @@ mod tests {
                 attempt,
                 RouteFacts {
                     external_commitment: OTHER_E,
-                    registered: true,
+                    pair: PairStanding::Registered,
                     conformance: Valid,
-                    position_lost: false,
                     parent: HELD,
                     parent_pre_root: PRE,
                     validation: Invalid,

@@ -43,7 +43,7 @@ describe('wallet.ts', () => {
           case: 'balancesListResponse',
           value: new pb.BalancesListResponse({
             balances: [
-              new pb.BalanceGetResponse({ tokenId: 'ERA', available: 100000n, symbol: 'ERA', decimals: 2, tokenName: 'ERA', displayAmount: '1000.00', protocolDefined: true }),
+              new pb.BalanceGetResponse({ tokenId: 'ERA', available: 1000n, symbol: 'ERA', decimals: 0, tokenName: 'ERA', displayAmount: '1000', protocolDefined: true }),
               new pb.BalanceGetResponse({
                 tokenId: 'RIGB',
                 available: 100000n,
@@ -72,9 +72,9 @@ describe('wallet.ts', () => {
           tokenId: 'ERA',
           symbol: 'ERA',
           tokenName: 'ERA',
-          baseUnits: 100000n,
-          decimals: 2,
-          displayAmount: '1000.00',
+          baseUnits: 1000n,
+          decimals: 0,
+          displayAmount: '1000',
           canonicalTokenId: undefined,
           policyAnchorB32: undefined,
           anchorFingerprint: undefined,
@@ -146,7 +146,7 @@ describe('wallet.ts', () => {
           version: 3,
           payload: { case: 'balancesListResponse', value: new pb.BalancesListResponse({ balances: [row] }) },
         }));
-      const era = { tokenId: 'ERA', available: 9000n, symbol: 'ERA', decimals: 2, tokenName: 'ERA', displayAmount: '90.00', protocolDefined: true };
+      const era = { tokenId: 'ERA', available: 90n, symbol: 'ERA', decimals: 0, tokenName: 'ERA', displayAmount: '90', protocolDefined: true };
 
       // No appliance has stated a bundle: the row carries no allocation, and
       // the view says unknown rather than zero.
@@ -154,13 +154,13 @@ describe('wallet.ts', () => {
       expect((await getAllBalances())[0].offline).toBeUndefined();
 
       (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(
-        answer(new pb.BalanceGetResponse({ ...era, offlineAllocation: { baseUnits: 1000n, displayAmount: '10.00' } })),
+        answer(new pb.BalanceGetResponse({ ...era, offlineAllocation: { baseUnits: 10n, displayAmount: '10' } })),
       );
-      expect((await getAllBalances())[0].offline).toEqual({ baseUnits: 1000n, displayAmount: '10.00' });
+      expect((await getAllBalances())[0].offline).toEqual({ baseUnits: 10n, displayAmount: '10' });
 
       // Present without its rendered form is a row Rust did not finish.
       (getAllBalancesStrictBridge as jest.Mock).mockResolvedValue(
-        answer(new pb.BalanceGetResponse({ ...era, offlineAllocation: { baseUnits: 1000n } })),
+        answer(new pb.BalanceGetResponse({ ...era, offlineAllocation: { baseUnits: 10n } })),
       );
       await expect(getAllBalances()).rejects.toThrow(/STRICT.*ERA's offline allocation without its display form/);
     });
