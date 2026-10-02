@@ -19,7 +19,7 @@ import { walletAmount } from '../../dsm/amount';
 import { callBin, setPreference } from '../../dsm/WebViewBridge';
 import { startNativeQrScan, writeNfcTagPayloadHost } from '../../dsm/NativeHostBridge';
 import { dsmClient } from '../../services/dsmClient';
-import { practiceMode } from '../../components/tour/practiceMode';
+import { practiceMode, PRACTICE_CONTACT_DEVICE_ID } from '../../components/tour/practiceMode';
 
 const RECORD = join(__dirname, '../../components/tour/__tests__/fixtures/wallet_amount.ingress.bin');
 const carried = (arrivals: Arrival[]): string[] => arrivals.map((a) => a.carried);
@@ -104,7 +104,7 @@ describe('practice mode puts the bridge in its sandbox', () => {
   });
 
   it('answers a write it simulates with only Rust reads crossing the bridge', async () => {
-    const sent = await client.sendOnlineTransferSmart('alice', '25', undefined, 'ERA');
+    const sent = await client.sendOnlineTransferSmart(PRACTICE_CONTACT_DEVICE_ID, '25', undefined, 'ERA');
     expect(sent).toEqual(expect.objectContaining({ newBalance: 97500n }));
     expect(new Set(carried(arrivals))).toEqual(new Set(['wallet.amount']));
   });
