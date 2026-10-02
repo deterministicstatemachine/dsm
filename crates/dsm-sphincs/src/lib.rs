@@ -1014,6 +1014,15 @@ mod tests {
             });
             let calls = recorded.expect("recording was on");
             assert!(calls.by_adrs.len() > 1000, "{v:?}: the calls were recorded");
+            let types: std::collections::BTreeSet<u32> =
+                calls.by_adrs.keys().map(|a| word(a, 4)).collect();
+            assert_eq!(
+                types,
+                [WOTS_HASH, WOTS_PK, TREE, FORS_TREE, FORS_ROOTS, WOTS_PRF, FORS_PRF]
+                    .into_iter()
+                    .collect(),
+                "{v:?}: each role hashes under its own address type"
+            );
             assert!(
                 calls.reused.is_empty(),
                 "{v:?}: {} addresses were hashed with two different inputs or roles, first {:02x?}",
