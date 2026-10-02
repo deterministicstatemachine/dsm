@@ -1053,6 +1053,11 @@ inductive ParentState where
   so it never registered there (CONFORMANCE §6.66 12d), or it resolved
   Invalid. -/
   | noRoot
+  /-- The trader's lineage is known Invalid at or before `p` (an Invalid step,
+  or a divergent write-once register cell the walk quarantines): it holds no
+  claim at `p`, ever, whatever P names (CONFORMANCE §6.66 12f; SoFi Amendment
+  S13). Terminal. -/
+  | lineageInvalid
   deriving DecidableEq, Repr
 
 def parentCompatible : ParentState → Bool
@@ -1064,6 +1069,7 @@ def parentImpossible : ParentState → Bool
   | .otherBranch => true
   | .noRoot => true
   | .singleNotHeld => true
+  | .lineageInvalid => true
   | _ => false
 
 def parentPending : ParentState → Bool
@@ -1612,6 +1618,17 @@ theorem single_root_parent_not_held_is_invalid {x : Facts} {legs : List Nat} {e 
     resolve x legs e = .invalid ∧ ConsumedRoute x legs e = false :=
   conditional_parent_on_another_branch_is_invalid hreg (by rw [hp]; rfl)
 
+/-- CONFORMANCE §6.66 12f: a parent on a lineage known Invalid at or before
+`p` makes the position Invalid and its route never consumed, whatever its legs
+and evidence say. That lineage can never yield a claim at `p`, so the key its
+exercise holds is skipped rather than held for good (SoFi Amendment S13: "No
+trade whose trader's lineage is known invalid can occupy a vault key
+indefinitely"). -/
+theorem parent_on_an_invalid_lineage_is_invalid {x : Facts} {legs : List Nat} {e : Nat}
+    (hreg : x.registered = true) (hp : x.parent = .lineageInvalid) :
+    resolve x legs e = .invalid ∧ ConsumedRoute x legs e = false :=
+  conditional_parent_on_another_branch_is_invalid hreg (by rw [hp]; rfl)
+
 /-- A concrete position on a branch its parent never took: registered, valid,
 every leg final on this E, Complete — and still Invalid, because `p` selected
 the other root. Its two siblings differ only in the parent's state. Without
@@ -1630,12 +1647,15 @@ def builtOnTheOtherBranch : Facts where
 def awaitingItsParent : Facts := { builtOnTheOtherBranch with parent := .openBranch }
 def onTheTakenBranch : Facts := { builtOnTheOtherBranch with parent := .taken }
 def terminalParentNoRoot : Facts := { builtOnTheOtherBranch with parent := .noRoot }
+def onAnInvalidLineage : Facts := { builtOnTheOtherBranch with parent := .lineageInvalid }
 
 /-- THE RUNGS ARE NOT VACUOUS, and they separate three outcomes on facts that
 differ ONLY in what the trader parent did. -/
 theorem the_trader_parent_rungs_are_not_vacuous :
     resolve builtOnTheOtherBranch [10] 50 = .invalid
       ∧ resolve terminalParentNoRoot [10] 50 = .invalid
+      ∧ resolve onAnInvalidLineage [10] 50 = .invalid
+      ∧ ConsumedRoute onAnInvalidLineage [10] 50 = false
       ∧ resolve awaitingItsParent [10] 50 = .pending
       ∧ resolve onTheTakenBranch [10] 50 = .realized
       ∧ ConsumedRoute builtOnTheOtherBranch [10] 50 = false
@@ -2654,6 +2674,7 @@ theorem later_setups_confer_no_authority (p k q k0 : Nat) (rest : List (Nat × N
 #print axioms conditional_parent_on_another_branch_is_invalid
 #print axioms terminal_parent_with_no_root_is_invalid_without_evidence
 #print axioms single_root_parent_not_held_is_invalid
+#print axioms parent_on_an_invalid_lineage_is_invalid
 #print axioms the_trader_parent_rungs_are_not_vacuous
 #print axioms trader_parent_arm_is_monotone
 #print axioms fulfillment_atomic_all_or_none

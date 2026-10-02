@@ -44,6 +44,7 @@ use super::exercise::{
 use super::facts::{
     establish, establish_ground, refuted_in_hand, Established, EstablishedFacts, ExerciseReads,
     GroundFacts, GroundReads, InHandRefutation, LegReads, NotEstablished, ResolvedParent,
+    TraderAtParent,
 };
 use super::lineage::{
     advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted, genesis_root,
@@ -1825,30 +1826,52 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// admitted position when that is the claim `P` names, and otherwise the
     /// frontier-relative walk of the trader's lineage (DSM Amendment A8; SoFi
     /// Amendment S15). Whether what is held is what `P` names is the facts'
-    /// to decide (§6.62). `None` while the reads do not establish the lineage
-    /// at that position: the facts then report the parent unresolved, and
-    /// nothing is refuted.
-    fn parent_for(&self, exercise: &RecognizedExercise) -> Option<ResolvedParent> {
+    /// to decide (§6.62). A lineage the walk establishes Invalid at or before
+    /// that position, or quarantines for a divergent write-once register
+    /// cell, holds nothing there, ever: the verdict reaches the facts as such
+    /// (SoFi Amendment S13, the same classes `validation::setup_lineage`
+    /// reads). `None` while the reads do not establish the lineage at that
+    /// position: the facts then report the parent unresolved, and nothing is
+    /// refuted.
+    fn parent_for(&self, exercise: &RecognizedExercise) -> Option<TraderAtParent> {
         let precommit = &exercise.precommit().body;
         let position = precommit.position();
         if let Some(own) = self.parent {
             if own.named == *precommit.parent_claim_ref() && own.economic_position == position {
-                return Some(own);
+                return Some(TraderAtParent::Held(own));
             }
         }
-        match self
-            .reads
-            .trader_root_at(precommit.genesis(), precommit.device_id(), position)
-        {
-            Ok((root, named)) => held_at(
-                position,
-                root.economic_position(),
-                root.economic_root(),
-                named,
-            ),
-            // The reads do not establish the lineage at that position yet.
-            Err(..) => None,
+        trader_at_parent(
+            position,
+            self.reads
+                .trader_root_at(precommit.genesis(), precommit.device_id(), position),
+        )
+    }
+}
+
+/// What the walk of a trader's lineage to `position` establishes there
+/// (DSM Amendment A8; SoFi Amendment S15): the claim it holds and its root;
+/// or, when the walk establishes the lineage Invalid at or before `position`
+/// — an Invalid step, or a divergent write-once register cell it
+/// quarantines — that it holds nothing there, ever (SoFi Amendment S13, the
+/// classes `validation::setup_lineage` reads). Evidence not in hand and a
+/// position the walk cannot pass yet establish nothing.
+fn trader_at_parent(
+    position: u64,
+    walked: Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure>,
+) -> Option<TraderAtParent> {
+    match walked {
+        Ok((root, named)) => held_at(
+            position,
+            root.economic_position(),
+            root.economic_root(),
+            named,
+        )
+        .map(TraderAtParent::Held),
+        Err(PeerLineageFailure::Invalid(..) | PeerLineageFailure::Quarantined(..)) => {
+            Some(TraderAtParent::LineageInvalid)
         }
+        Err(PeerLineageFailure::Incomplete(..) | PeerLineageFailure::Unresolved(..)) => None,
     }
 }
 
@@ -2105,6 +2128,55 @@ mod tests {
         );
         assert_eq!(remembered(&memo, &vault, [changed.as_slice()]), None);
         assert_eq!(remembered(&memo, &other, [accepted.as_slice()]), None);
+    }
+
+    /// Pre-audit 12f, SoFi Amendment S13: the walk's verdict reaches the
+    /// facts as what it is. A lineage the walk establishes Invalid at or
+    /// before `p`, or quarantines for a divergent register cell, holds
+    /// nothing at `p`, ever; evidence not in hand and a position the walk
+    /// cannot pass yet establish nothing; a walk that holds a claim at `p`
+    /// holds it there and nowhere else. On the old code every failure read as
+    /// no parent, so a key held on an invalid lineage waited forever.
+    #[test]
+    fn the_walks_verdict_on_a_traders_lineage_reaches_the_facts() {
+        use crate::economic::provenance::PeerLineageFailure as F;
+        for verdict in [
+            F::Invalid("a step's witness does not fold".to_string()),
+            F::Quarantined("two claims hold the register cell".to_string()),
+        ] {
+            assert_eq!(
+                trader_at_parent(7, Err(verdict)),
+                Some(TraderAtParent::LineageInvalid)
+            );
+        }
+        for pending in [
+            F::Incomplete("the register cell is not decided yet".to_string()),
+            F::Unresolved("a conditional position has not resolved".to_string()),
+        ] {
+            assert_eq!(trader_at_parent(7, Err(pending)), None);
+        }
+        let named = ParentClaimRef::SingleRoot {
+            claim_ref: [0xC7; 32],
+        };
+        let at = |position| {
+            ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                    economic_position: position,
+                    economic_root: [0x77; 32],
+                    claim_ref: [0xC7; 32],
+                },
+            )
+            .expect("an ordinary admitted position")
+        };
+        assert_eq!(
+            trader_at_parent(7, Ok((at(7), named))),
+            Some(TraderAtParent::Held(ResolvedParent {
+                economic_position: 7,
+                selected_root: [0x77; 32],
+                named,
+            }))
+        );
+        assert_eq!(trader_at_parent(7, Ok((at(6), named))), None);
     }
 
     /// What a walk holds counts only at the position it reached: there it is
