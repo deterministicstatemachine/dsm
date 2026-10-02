@@ -16,6 +16,7 @@ BUILD_ONLY=0
 SKIP_UNINSTALL=1
 START_APP=1
 LOCAL_DEV=0
+NEW_KEYSTORE=0
 
 usage() {
   cat <<'USAGE'
@@ -25,6 +26,7 @@ Options:
   --no-build         Skip gradle build step (assumes APK exists)
   --build-only       Build the signed release APK, then exit without adb install
   --uninstall        Uninstall app before install (clears data)
+  --new-keystore     Make a new signing keystore first (the old one is kept as <path>.<time>.bak)
   --no-start         Don't launch MainActivity
   --local            Local dev mode: push localhost env config override + adb reverse ports
 
@@ -40,10 +42,73 @@ USAGE
 
 resolve_keystore_path() {
   export DSM_KEYSTORE_PATH="${DSM_KEYSTORE_PATH:-$HOME/dsm-release.p12}"
-  if [[ ! -f "$DSM_KEYSTORE_PATH" ]]; then
-    echo "[fast_deploy_release] ERROR: keystore not found at $DSM_KEYSTORE_PATH (set DSM_KEYSTORE_PATH)." >&2
+  if [[ $NEW_KEYSTORE -eq 1 ]]; then
+    create_keystore
+  elif [[ ! -f "$DSM_KEYSTORE_PATH" ]]; then
+    echo "[fast_deploy_release] ERROR: keystore not found at $DSM_KEYSTORE_PATH (set DSM_KEYSTORE_PATH, or pass --new-keystore)." >&2
     exit 1
   fi
+}
+
+# Java's PKCS12 keystores take only ASCII passwords. keytool's own prompt
+# decodes the terminal by its locale, so a character such as € or § can
+# arrive there as '?' and be accepted; the same password read here reaches
+# keytool and Gradle intact, and the keystore refuses it.
+non_ascii() {
+  LC_ALL=C grep -q '[^ -~]' <<<"$1"
+}
+
+# A keystore made here takes its password through the channel every later
+# use reads it from: this prompt, then an environment variable to keytool
+# and Gradle.
+create_keystore() {
+  if [[ ! -t 0 ]]; then
+    echo "[fast_deploy_release] ERROR: --new-keystore needs a terminal for the password." >&2
+    exit 1
+  fi
+  if ! command -v keytool >/dev/null 2>&1; then
+    echo "[fast_deploy_release] ERROR: --new-keystore needs keytool (a JDK) on PATH." >&2
+    exit 1
+  fi
+  local again
+  while true; do
+    IFS= read -r -s -p "New keystore password (ASCII; symbols such as !@#\$%^&* are fine): " DSM_KEYSTORE_PASSWORD
+    echo
+    if [[ -z "$DSM_KEYSTORE_PASSWORD" ]]; then
+      echo "[fast_deploy_release] Empty. Again." >&2
+      continue
+    fi
+    if non_ascii "$DSM_KEYSTORE_PASSWORD"; then
+      echo "[fast_deploy_release] That password has a non-ASCII character (such as € § • £ é); Java keystores refuse those. Again." >&2
+      continue
+    fi
+    IFS= read -r -s -p "The same password again: " again
+    echo
+    if [[ "$DSM_KEYSTORE_PASSWORD" == "$again" ]]; then
+      break
+    fi
+    echo "[fast_deploy_release] The two did not match. Again." >&2
+  done
+  export DSM_KEYSTORE_PASSWORD
+  local kept=""
+  if [[ -f "$DSM_KEYSTORE_PATH" ]]; then
+    kept="$DSM_KEYSTORE_PATH.$(date +%Y%m%d-%H%M%S).bak"
+    mv "$DSM_KEYSTORE_PATH" "$kept"
+  fi
+  if ! keytool -genkeypair -keystore "$DSM_KEYSTORE_PATH" -storetype PKCS12 \
+      -alias "${DSM_KEY_ALIAS:-dsm-release}" -keyalg RSA -keysize 4096 -validity 10000 \
+      -dname "CN=DSM Release" -storepass:env DSM_KEYSTORE_PASSWORD; then
+    rm -f "$DSM_KEYSTORE_PATH"
+    if [[ -n "$kept" ]]; then
+      mv "$kept" "$DSM_KEYSTORE_PATH"
+    fi
+    echo "[fast_deploy_release] ERROR: keytool could not make the keystore; nothing changed." >&2
+    exit 1
+  fi
+  if [[ -n "$kept" ]]; then
+    echo "[fast_deploy_release] Kept the old keystore as $kept"
+  fi
+  echo "[fast_deploy_release] Made a new keystore at $DSM_KEYSTORE_PATH"
 }
 
 prompt_keystore_password() {
@@ -74,6 +139,12 @@ check_keystore() {
   local listing
   if ! listing="$(keytool -list -keystore "$DSM_KEYSTORE_PATH" -storepass:env DSM_KEYSTORE_PASSWORD 2>&1)"; then
     echo "[fast_deploy_release] $DSM_KEYSTORE_PATH refused that password." >&2
+    if non_ascii "$DSM_KEYSTORE_PASSWORD"; then
+      echo "[fast_deploy_release] It has a non-ASCII character (such as € § • £ é). Java keystores take ASCII only, and" >&2
+      echo "[fast_deploy_release] keytool's own prompt may have stored each such character as '?'. Rerun with --new-keystore" >&2
+      echo "[fast_deploy_release] and an ASCII password (symbols such as !@#\$%^&* are fine)." >&2
+      exit 1
+    fi
     return 1
   fi
   local keys wanted
@@ -97,6 +168,7 @@ while [[ $# -gt 0 ]]; do
     --no-build) SKIP_BUILD=1; shift ;;
     --build-only) BUILD_ONLY=1; shift ;;
     --uninstall) SKIP_UNINSTALL=0; shift ;;
+    --new-keystore) NEW_KEYSTORE=1; shift ;;
     --no-start) START_APP=0; shift ;;
     --local) LOCAL_DEV=1; shift ;;
     -h|--help) usage; exit 0 ;;
