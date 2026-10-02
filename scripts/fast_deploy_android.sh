@@ -55,11 +55,25 @@ if [[ ! -f "$APK" ]]; then
   exit 1
 fi
 
+# The Android SDK's adb, ahead of any other on PATH: two adb versions share one
+# server port and reset each other's connections.
+SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+if [[ -x "$SDK_DIR/platform-tools/adb" ]]; then
+  export PATH="$SDK_DIR/platform-tools:$PATH"
+fi
+
+# Each device is an adb selector, "-s SERIAL" or "-t TRANSPORT_ID". A device
+# found by itself is addressed by its transport id: a wireless-debugging serial
+# can hold a space ("adb-XXXX (2)._adb-tls-connect._tcp").
+DEVICES=()
 if [[ -n "${SERIALS:-}" ]]; then
-  # shellcheck disable=SC2206
-  DEVICES=($SERIALS)
+  for s in $SERIALS; do
+    DEVICES+=("-s $s")
+  done
 else
-  mapfile -t DEVICES < <(adb devices | awk '/\tdevice$/{print $1}')
+  while read -r t; do
+    DEVICES+=("-t $t")
+  done < <(adb devices -l | grep -E '[[:space:]]device[[:space:]]' | grep -oE 'transport_id:[0-9]+' | cut -d: -f2)
 fi
 
 if [[ ${#DEVICES[@]} -eq 0 ]]; then
@@ -90,22 +104,24 @@ else
 fi
 
 for d in "${DEVICES[@]}"; do
-  echo "=== $d ==="
+  read -r -a sel <<<"$d"
+  label="$(adb "${sel[@]}" shell getprop ro.serialno 2>/dev/null | tr -d '\r\n' || true)"
+  echo "=== ${label:-$d} ($d) ==="
   if [[ $SKIP_UNINSTALL -eq 0 ]]; then
-    adb -s "$d" uninstall com.dsm.wallet || true
+    adb "${sel[@]}" uninstall com.dsm.wallet || true
   fi
 
-  adb -s "$d" install -r "$APK"
+  adb "${sel[@]}" install -r "$APK"
 
   if [[ $SKIP_REVERSE -eq 0 ]]; then
     for p in 8080 8081 8082 8083 8084 18443; do
-      adb -s "$d" reverse tcp:$p tcp:$p || echo "reverse failed for $d:$p"
+      adb "${sel[@]}" reverse tcp:$p tcp:$p || echo "reverse failed for ${label:-$d}:$p"
     done
   fi
 
   if [[ $LOCAL_DEV -eq 1 ]]; then
     # Local dev: push a localhost override so the app reaches nodes via adb reverse.
-    is_emu=$(adb -s "$d" shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r\n')
+    is_emu=$(adb "${sel[@]}" shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r\n')
     if [[ "$is_emu" == "1" ]]; then
       ENV_HOST="10.0.2.2"
     else
@@ -138,20 +154,20 @@ endpoint = "http://$ENV_HOST:8083"
 name = "storage-node-5"
 endpoint = "http://$ENV_HOST:8084"
 EOF
-    adb -s "$d" push "$ENV_TOML" /data/local/tmp/dsm_env_config.toml
-    adb -s "$d" shell run-as com.dsm.wallet mkdir -p files 2>/dev/null || true
-    adb -s "$d" shell run-as com.dsm.wallet cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
+    adb "${sel[@]}" push "$ENV_TOML" /data/local/tmp/dsm_env_config.toml
+    adb "${sel[@]}" shell run-as com.dsm.wallet mkdir -p files 2>/dev/null || true
+    adb "${sel[@]}" shell run-as com.dsm.wallet cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
     rm -f "$ENV_TOML"
-    echo "[fast_deploy] Env config pushed to $d (host=$ENV_HOST)"
+    echo "[fast_deploy] Env config pushed to ${label:-$d} (host=$ENV_HOST)"
   else
     # GCP mode: remove any stale local overrides so the app uses the bundled GCP config.
-    adb -s "$d" shell run-as com.dsm.wallet rm -f files/dsm_env_config.override.toml 2>/dev/null || true
-    adb -s "$d" shell run-as com.dsm.wallet rm -f files/dsm_env_config.local.toml 2>/dev/null || true
-    echo "[fast_deploy] Cleared stale overrides on $d (app will use bundled GCP config)"
+    adb "${sel[@]}" shell run-as com.dsm.wallet rm -f files/dsm_env_config.override.toml 2>/dev/null || true
+    adb "${sel[@]}" shell run-as com.dsm.wallet rm -f files/dsm_env_config.local.toml 2>/dev/null || true
+    echo "[fast_deploy] Cleared stale overrides on ${label:-$d} (app will use bundled GCP config)"
   fi
 
   if [[ $START_APP -eq 1 ]]; then
-    adb -s "$d" shell am start -n com.dsm.wallet/.ui.MainActivity || echo "Failed to start on $d"
+    adb "${sel[@]}" shell am start -n com.dsm.wallet/.ui.MainActivity || echo "Failed to start on ${label:-$d}"
   fi
 
 done
