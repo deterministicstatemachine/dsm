@@ -260,7 +260,10 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
         sendCheckState: 'ready',
       });
       emit('contactAdded');
-      return { accepted: true, contactId, alias };
+      // Accepted when the practice wallet now holds the contact, as the real
+      // answer reports the contact stored.
+      const accepted = state.contacts.some((held) => held.deviceId === contactId);
+      return { accepted, contactId, alias };
     },
   };
 }
