@@ -1599,9 +1599,13 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
 /// itself: `F` at `K_ful(q)` and, at `K_root(q)`, a claim B signs naming `F`
 /// with another `R_realize`. The pair registers, being matched by `F`'s id;
 /// only the body tells it apart. A, walking B's lineage to `q` (DSM
-/// Amendment A8), gets Invalid, with the body check's own reason. B's
+/// Amendment A8), gets Invalid, with the body check's own reason. B's own
+/// device resolves `q` Invalid too (pre-audit 12k, the owner's 2026-10-01
+/// ruling: "same bytes => same terminal verdict for local and peer
+/// resolution"); before 12k it answered `RetriesExhausted` for good. B's
 /// exercise then holds the vault's first key, and A's walk of the vault
-/// passes over it. Mutation: the body check removed from `peer_position`.
+/// passes over it. Mutations: the body check removed from `peer_position`;
+/// the misbodied pair read as merely lost by the trader's own ladder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the_lineage() {
@@ -1609,6 +1613,7 @@ async fn a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the
     let m = open_market(&p).await;
     let set = canonical_set(NETWORK).expect("the pinned set");
     let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+    let invalid = generated::SofiPositionState::Invalid as i32;
 
     let q = admitted_position(&p.b) + 1;
     let (.., root) = {
@@ -1715,9 +1720,16 @@ async fn a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the
         "{walked:?}"
     );
 
+    // B's own resolution agrees with every peer's: Invalid.
+    assert!(matches!(complete(&p).await, Completion::Written(..)));
+    assert_eq!(
+        resolve(&p).await,
+        (q, invalid),
+        "B's own device reads the same verdict its peers do"
+    );
+
     // B's exercise holds the vault's first key, and the vault passes over it:
     // its F is lost at q (Amendment S14), so it consumes nothing.
-    assert!(matches!(complete(&p).await, Completion::Written(..)));
     p.a.enter();
     let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();

@@ -1107,6 +1107,11 @@ the one fulfillment that does register (R15-2). Keys are DLV parents `R_j`;
 per-parent facts are at the fulfillment's own attempt. -/
 structure Facts where
   registered : Bool
+  /-- The pair is final on `F` under a root claim that names `F` with another
+  body than `derive(P, F)` (SoFi Amendment S20; CONFORMANCE §6.66 12k): `F` is
+  lost there, and the position is Invalid for the trader's lineage, the same
+  verdict a peer's walk reads. Never together with `registered`. -/
+  misbodied : Bool := false
   /-- The leg half of `RouteValidation(P, G, E)`: policy fulfillment,
   arithmetic, shadows, signatures, canonical witnesses. -/
   validation : Validation
@@ -1190,7 +1195,7 @@ never took is Invalid whatever its own legs did. Void requires
 Unavailable" and "permanent once non-Pending" jointly require (see
 `literal_ladder_is_not_permanent`). -/
 def resolve (x : Facts) (legs : List Nat) (e : Nat) : Resolution :=
-  if x.registered = false then .pending
+  if x.registered = false then (if x.misbodied = true then .invalid else .pending)
   else if parentPending x.parent = true then .pending
   else if parentImpossible x.parent = true then .invalid
   else if x.conformance = .invalid then .invalid
@@ -1239,6 +1244,8 @@ structure Evolves (x x' : Facts) : Prop where
   consumedElsewhere : ∀ R, x.consumedElsewhere R = true → x'.consumedElsewhere R = true
   /-- An open branch may be selected; a terminal one never changes. -/
   parent : x.parent ≠ .openBranch → x'.parent = x.parent := by intro _; rfl
+  /-- A misbodied pair is final: it stays misbodied and never registers. -/
+  misbodied : x.misbodied = true → x'.misbodied = true ∧ x'.registered = false
 
 theorem consumedRoute_iff (x : Facts) (legs : List Nat) (e : Nat) :
     ConsumedRoute x legs e = true ↔
@@ -1469,7 +1476,7 @@ theorem resolve_realized_iff (x : Facts) (legs : List Nat) (e : Nat) :
   · intro h
     unfold resolve at h
     by_cases h1 : x.registered = false
-    · rw [if_pos h1] at h; cases h
+    · rw [if_pos h1] at h; split at h <;> cases h
     · rw [if_neg h1] at h
       by_cases hp : parentPending x.parent = true
       · rw [if_pos hp] at h; cases h
@@ -1539,11 +1546,11 @@ admissibility. Whatever the cells hold, an unregistered fulfillment consumes
 nothing and its position is Pending. Mutation: make `ConsumedRoute` the leg
 predicate alone -- red. -/
 theorem early_cell_cannot_cause_consumption {x : Facts} {legs : List Nat} {e : Nat}
-    (hnr : x.registered = false) :
+    (hnr : x.registered = false) (hnm : x.misbodied = false) :
     ConsumedRoute x legs e = false ∧ resolve x legs e = .pending := by
   constructor
   · simp [ConsumedRoute, hnr]
-  · unfold resolve; rw [if_pos hnr]
+  · unfold resolve; rw [if_pos hnr, if_neg (by simp [hnm])]
 
 /-- Witnesses: every cell final on E, every parent canonical -- and no
 registration, or a registered F that does not conform. -/
@@ -1572,13 +1579,13 @@ theorem stored_is_not_valid_and_registered_is_not_valid :
 resolved keeps the position Pending. The parent alone consumes nothing and
 makes nothing impossible — an undecided branch is not a verdict. -/
 theorem conditional_parent_pending_keeps_the_position_pending {x : Facts} {legs : List Nat}
-    {e : Nat} (hopen : x.parent = .openBranch) :
+    {e : Nat} (hopen : x.parent = .openBranch) (hnm : x.misbodied = false) :
     resolve x legs e = .pending ∧ ConsumedRoute x legs e = false
       ∧ parentCompatible x.parent = false ∧ parentImpossible x.parent = false := by
   refine ⟨?_, ?_, by rw [hopen]; rfl, by rw [hopen]; rfl⟩
   · unfold resolve
     by_cases hreg : x.registered = false
-    · rw [if_pos hreg]
+    · rw [if_pos hreg, if_neg (by simp [hnm])]
     · rw [if_neg hreg, if_pos (by rw [hopen]; rfl : parentPending x.parent = true)]
   · simp [ConsumedRoute, hopen, parentCompatible]
 
@@ -1826,10 +1833,16 @@ theorem voidEvidence_mono {x x' : Facts} (hev : Evolves x x') {legs : List Nat} 
 theorem resolution_is_permanent {x x' : Facts} {legs : List Nat} {e : Nat}
     (hev : Evolves x x') (hc' : Coherent x' legs e) (hnp : resolve x legs e ≠ .pending) :
     resolve x' legs e = resolve x legs e := by
-  have hreg : x.registered = true := by
-    cases h : x.registered
-    · exact absurd (by unfold resolve; rw [if_pos h]) hnp
-    · rfl
+  -- Unregistered and non-Pending is a misbodied pair: Invalid, and it stays
+  -- misbodied and unregistered (CONFORMANCE §6.66 12k).
+  by_cases hr : x.registered = false
+  · have hm : x.misbodied = true := by
+      cases hm : x.misbodied
+      · exact absurd (by unfold resolve; rw [if_pos hr, if_neg (by simp [hm])]) hnp
+      · rfl
+    obtain ⟨hm', hr'⟩ := hev.misbodied hm
+    unfold resolve; rw [if_pos hr, if_pos hm, if_pos hr', if_pos hm']
+  have hreg : x.registered = true := by simpa using hr
   have hreg' := hev.registered hreg
   have h1 : ¬ x.registered = false := by simp [hreg]
   have h1' : ¬ x'.registered = false := by simp [hreg']
@@ -1925,7 +1938,7 @@ theorem literal_ladder_is_not_permanent :
       ∧ resolveLiteral laterInvalid [10] 50 = .invalid
       ∧ resolve unavailableThenVoid [10] 50 = .pending := by
   refine ⟨⟨fun h => h, trivial, rfl, rfl, fun _ => rfl, fun _ h => h, fun _ _ h => h,
-    fun _ h => h, fun _ h => h, fun _ => rfl⟩, ⟨(fun _ _ h => nomatch h),
+    fun _ h => h, fun _ h => h, fun _ => rfl, fun h => nomatch h⟩, ⟨(fun _ _ h => nomatch h),
     (fun h => by simp [ConsumedRoute, laterInvalid, unavailableThenVoid, Facts.routeValidation, Validation.and] at h)⟩,
     (by decide), (by decide), (by decide)⟩
 
@@ -1973,12 +1986,30 @@ theorem at_most_one_candidate_registers_per_position {hm : HashModel}
   · cases h
   · exact (Option.some.inj h).symm
 
-/-- A candidate that never registers never resolves the position: the ladder
-answers Pending for it forever, and the position's terminal answer comes from
-the one fulfillment that did register. -/
+/-- A candidate that never registers, and whose pair is not misbodied, never
+resolves the position: the ladder answers Pending for it forever, and the
+position's terminal answer comes from the one fulfillment that did register. -/
 theorem a_candidate_that_never_registers_stays_pending (x : Facts) (legs : List Nat) (e : Nat)
-    (h : x.registered = false) : resolve x legs e = .pending := by
-  unfold resolve; rw [if_pos h]
+    (h : x.registered = false) (hnm : x.misbodied = false) : resolve x legs e = .pending := by
+  unfold resolve; rw [if_pos h, if_neg (by simp [hnm])]
+
+/-- CONFORMANCE §6.66 12k (owner ruling, 2026-10-01: "same bytes => same
+terminal verdict for local and peer resolution"): a pair final on `F` under a
+root claim naming `F` with another body is Invalid for the trader's lineage,
+whatever else the facts say, and its route consumes nothing. A peer's walk
+reads the same Invalid (SoFi Amendment S20). -/
+theorem a_misbodied_pair_is_invalid {x : Facts} {legs : List Nat} {e : Nat}
+    (hm : x.misbodied = true) (hnr : x.registered = false) :
+    resolve x legs e = .invalid ∧ ConsumedRoute x legs e = false := by
+  refine ⟨?_, by simp [ConsumedRoute, hnr]⟩
+  unfold resolve; rw [if_pos hnr, if_pos hm]
+
+/-- The 12k rung is not vacuous: facts that differ only in `misbodied` resolve
+Pending and Invalid. -/
+theorem the_misbodied_rung_is_not_vacuous :
+    resolve cellsFinalUnregistered [10, 11] 50 = .pending
+      ∧ resolve { cellsFinalUnregistered with misbodied := true } [10, 11] 50 = .invalid := by
+  decide
 
 /-- NO GUARANTEE WITHOUT A PREPARE LOCK. Witnesses do not lock (§6), so a
 registered, fully valid fulfillment is not guaranteed to realize; the only way to
@@ -2145,6 +2176,7 @@ theorem without_evidence_a_registered_fulfillment_stays_pending :
     ∀ x', Evolves unavailableThenVoid x' → x'.validation = .unavailable →
       resolve x' [10] 50 ≠ .realized ∧ resolve x' [10] 50 ≠ .void := by
   intro x' hevx hu
+  have hreg' : x'.registered = true := hevx.registered rfl
   have hpar : x'.parent = .single := by
     have := hevx.parent (by decide); simpa [unavailableThenVoid] using this
   have hrv : x'.routeValidation ≠ .valid := by
@@ -2160,6 +2192,7 @@ theorem without_evidence_a_registered_fulfillment_stays_pending :
   · intro h; rw [(resolve_realized_iff _ _ _).mp h] at hcr; cases hcr
   · intro h
     unfold resolve at h
+    rw [if_neg (by simp [hreg'])] at h
     cases hc : x'.conformance <;> cases hh : x'.routeValidation <;>
       simp_all [parentPending, parentImpossible] <;> split at h <;> simp_all
 
@@ -2693,6 +2726,8 @@ theorem later_setups_confer_no_authority (p k q k0 : Nat) (rest : List (Nat × N
 #print axioms fulfillment_registrable_after_parent_loss_resolves_void
 #print axioms at_most_one_candidate_registers_per_position
 #print axioms a_candidate_that_never_registers_stays_pending
+#print axioms a_misbodied_pair_is_invalid
+#print axioms the_misbodied_rung_is_not_vacuous
 #print axioms no_guarantee_without_prepare_lock
 -- ── §10 FulfillmentConformance over fetched evidence (rebuild step R7) ─────
 
