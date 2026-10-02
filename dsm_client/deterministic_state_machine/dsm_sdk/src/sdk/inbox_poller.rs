@@ -22,11 +22,21 @@ const DEFAULT_POLL_INTERVAL_MS: u64 = 60_000;
 /// so follow-up messages (e.g. ACKs or rapid exchanges) are picked up faster.
 const EAGER_POLL_INTERVAL_MS: u64 = 8_000;
 
-/// Poll interval while sender-side pending online catch-up gates exist.
+/// Poll interval while settlement work is outstanding (see
+/// [`has_pending_settlement_work`]): a sender awaiting the acceptance, a
+/// recipient owing its reply or awaiting the sender's certificate, a
+/// certificate not yet at quorum.
 ///
-/// This keeps ACK/finalization hot until the relationship actually converges,
-/// instead of falling back to the idle 60s cadence after one early wake-up.
-const PENDING_GATE_POLL_INTERVAL_MS: u64 = 5_000;
+/// A transfer settles in three syncs — the recipient takes it and replies,
+/// the sender finalizes and posts its certificate, the recipient takes the
+/// certificate — and each side waits this long at most for the other's step.
+/// At 5 s a two-phone round trip took up to half a minute after the money had
+/// already moved, with both phones open.
+const PENDING_GATE_POLL_INTERVAL_MS: u64 = 2_000;
+
+/// Poll interval while the app is on screen and nothing is settling: an
+/// incoming transfer shows within this, instead of within the idle minute.
+const FOREGROUND_POLL_INTERVAL_MS: u64 = 5_000;
 
 /// Number of consecutive eager-interval polls before reverting to default.
 const EAGER_POLL_CYCLES: u32 = 5;
@@ -181,6 +191,8 @@ pub fn start_poller() {
 
             let interval_ms = if pending_gate_active {
                 PENDING_GATE_POLL_INTERVAL_MS
+            } else if crate::sdk::session_manager::app_in_foreground() {
+                FOREGROUND_POLL_INTERVAL_MS
             } else if eager_remaining > 0 {
                 EAGER_POLL_INTERVAL_MS
             } else {

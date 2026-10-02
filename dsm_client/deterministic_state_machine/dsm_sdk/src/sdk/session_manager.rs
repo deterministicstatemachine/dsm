@@ -428,6 +428,16 @@ fn envelope_wrap_snapshot(snapshot: generated::AppSessionStateProto) -> Vec<u8> 
 
 /// Acquire the global session manager lock and return envelope-wrapped snapshot bytes.
 /// Returns `[0x03][Envelope(SessionStateResponse)]` — Kotlin relays untouched to WebView.
+/// Whether the app is on screen, as the last session facts from the host said.
+/// The inbox poller polls faster while it is.
+pub fn app_in_foreground() -> bool {
+    let mgr = match SESSION_MANAGER.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    mgr.hardware.app_foreground
+}
+
 pub fn get_session_snapshot_bytes() -> Result<Vec<u8>, String> {
     let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
     mgr.sync_lock_config_from_app_state()
