@@ -147,12 +147,25 @@ pub struct ExerciseReads<'a> {
     pub conformance: &'a ConformanceEvidence,
     /// What `RouteValidation(P, G, E)` reads.
     pub evidence: &'a Evidence,
-    /// This verifier's own admitted position at `P.p`, when `P` names a
-    /// conditional parent: what that position selected is what this
-    /// verifier itself resolved. Nothing else resolves a parent.
-    pub parent: Option<ResolvedParent>,
+    /// What this verifier established about the trader's lineage at `P.p`
+    /// ([`TraderAtParent`]); `None` while it has not. Nothing else resolves
+    /// a parent.
+    pub parent: Option<TraderAtParent>,
     /// One entry per leg of `P`, in P's leg order.
     pub legs: &'a [LegReads<'a>],
+}
+
+/// What this verifier established about the trader's lineage at `p`: the
+/// claim it holds there, or that it holds none, ever, because lineage
+/// validation established it Invalid at or before `p` (SoFi Amendment S13,
+/// the verdict `validation::setup_lineage` reads for setups). A lineage not
+/// established yet is neither: no fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraderAtParent {
+    /// The claim final at the trader's `K_root(p)` and the root it installed.
+    Held(ResolvedParent),
+    /// The trader's lineage is Invalid at or before `p`.
+    LineageInvalid,
 }
 
 /// What this verifier itself established at `p`: the claim that holds the
@@ -209,7 +222,7 @@ impl ResolvedParent {
 pub struct GroundReads<'a> {
     pub exercise: &'a RecognizedExercise,
     pub registration: &'a RegistrationRead,
-    pub parent: Option<ResolvedParent>,
+    pub parent: Option<TraderAtParent>,
     pub legs: &'a [LegReads<'a>],
 }
 
@@ -507,14 +520,19 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
 /// names it selected the root it holds. One that another claim holds never
 /// registered at `position` and never will (pair mutual exclusion), so it
 /// selects no root, ever: terminal, the position Invalid and the key it holds
-/// skipped, never left waiting. `None` while `held` is not established at
-/// `position`: no fact.
+/// skipped, never left waiting. A lineage known Invalid at or before
+/// `position` holds no claim there, ever, whatever `P` names: terminal the
+/// same way. `None` while `held` is not established at `position`: no fact.
 fn parent_position(
     named: ParentClaimRef,
     position: u64,
-    held: Option<ResolvedParent>,
+    held: Option<TraderAtParent>,
 ) -> Option<ParentPosition> {
-    let held = held.filter(|held| held.economic_position == position)?;
+    let held = match held? {
+        TraderAtParent::LineageInvalid => return Some(ParentPosition::LineageInvalid),
+        TraderAtParent::Held(held) => held,
+    };
+    let held = (held.economic_position == position).then_some(held)?;
     Some(match named {
         ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot {
             named,
@@ -673,7 +691,7 @@ mod tests {
         chains: BTreeMap<D32, VaultChain>,
         /// What holds the trader's `K_root(p)`, as this verifier established
         /// it: by default the claim `P` names, at the root `P` was built on.
-        parent: Option<ResolvedParent>,
+        parent: Option<TraderAtParent>,
     }
 
     impl Reads {
@@ -814,7 +832,7 @@ mod tests {
             .collect();
         let conformance = conformance_evidence(&fx, &exercise, BTreeMap::new());
         let evidence = fx.evidence.clone();
-        let parent = Some(held_parent(&built.precommit));
+        let parent = Some(TraderAtParent::Held(held_parent(&built.precommit)));
         (
             fx,
             Reads {
@@ -1014,12 +1032,12 @@ mod tests {
     fn a_parent_claim_the_trader_does_not_hold_at_p_never_realizes() {
         let (_, mut r) = reads(1, &[0]);
         let held = held_parent(&r.exercise.precommit().body);
-        r.parent = Some(ResolvedParent {
+        r.parent = Some(TraderAtParent::Held(ResolvedParent {
             named: ParentClaimRef::SingleRoot {
                 claim_ref: OTHER_CLAIM,
             },
             ..held
-        });
+        }));
         let facts = r.establish(&r.legs()).expect("every read decides");
         assert_eq!(
             resolve_position(&facts.route_facts()),
@@ -1040,10 +1058,10 @@ mod tests {
     fn a_parent_at_another_root_than_the_trader_holds_never_realizes() {
         let (_, mut r) = reads(1, &[0]);
         let held = held_parent(&r.exercise.precommit().body);
-        r.parent = Some(ResolvedParent {
+        r.parent = Some(TraderAtParent::Held(ResolvedParent {
             selected_root: OTHER_ROOT,
             ..held
-        });
+        }));
         let facts = r.establish(&r.legs()).expect("every read decides");
         assert_eq!(
             resolve_position(&facts.route_facts()),
@@ -1088,11 +1106,11 @@ mod tests {
             fulfillment_id: [0xF7; 32],
         };
         let held = |claim| {
-            Some(ResolvedParent {
+            Some(TraderAtParent::Held(ResolvedParent {
                 economic_position: position,
                 selected_root: root,
                 named: claim,
-            })
+            }))
         };
         assert_eq!(
             parent_position(named, position, held(named)),
@@ -1125,6 +1143,50 @@ mod tests {
             "the claim held at another position"
         );
         assert_eq!(parent_position(named, position, None), None);
+    }
+
+    /// Pre-audit 12f, SoFi §23.3 and Amendment S13: a trader's lineage that
+    /// lineage validation established Invalid at or before `p` holds no claim
+    /// there, ever. Whatever `P` names, single-root or conditional, its
+    /// parent is terminal: the position is Invalid and the key its exercise
+    /// holds is skipped, never left waiting for a lineage that cannot yield
+    /// a claim. On the old code the walk's verdict reached the facts as no
+    /// parent at all, and the key waited forever.
+    #[test]
+    fn a_parent_on_a_lineage_known_invalid_is_terminal() {
+        for named in [
+            ParentClaimRef::SingleRoot {
+                claim_ref: [0xC7; 32],
+            },
+            ParentClaimRef::Conditional {
+                fulfillment_id: [0xF7; 32],
+            },
+        ] {
+            assert_eq!(
+                parent_position(named, 7, Some(TraderAtParent::LineageInvalid)),
+                Some(ParentPosition::LineageInvalid),
+                "{named:?}"
+            );
+            assert!(trader_parent_impossible(
+                &ParentPosition::LineageInvalid,
+                &[0x77; 32]
+            ));
+        }
+
+        let (_, mut r) = reads(1, &[0]);
+        r.parent = Some(TraderAtParent::LineageInvalid);
+        let facts = r.establish(&r.legs()).expect("every read decides");
+        assert_eq!(
+            resolve_position(&facts.route_facts()),
+            Ok(Resolution::Invalid),
+            "built on a lineage that holds nothing at p"
+        );
+        let (class, ..) = classify_attempt(&facts.route_facts(), &facts.legs[0]);
+        assert_eq!(
+            class,
+            AttemptClass::Skipped,
+            "the vault's key is passed over"
+        );
     }
 
     /// Registration is read from the pair, never assumed: with `C_q` not
@@ -1230,7 +1292,7 @@ mod tests {
             evidence: fx.evidence.clone(),
             cells: vec![cell_read(&v, &root, 1, Some(&bytes))],
             chains: BTreeMap::from([(v, chain_naming(&fx, &v, root))]),
-            parent: Some(held_parent(&built.precommit)),
+            parent: Some(TraderAtParent::Held(held_parent(&built.precommit))),
             exercise,
         };
 
