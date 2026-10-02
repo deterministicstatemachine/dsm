@@ -83,6 +83,16 @@ mod tests {
 
     const REL_A: [u8; 32] = [0xA1; 32];
     const REL_B: [u8; 32] = [0xB2; 32];
+    /// Each relationship's chain tip, one of the public inputs its next
+    /// transfer's nonce derives from.
+    const TIP_A: [u8; 32] = [0xA7; 32];
+    const TIP_B: [u8; 32] = [0xB7; 32];
+
+    /// The nonce the next transfer of `amount` ERA carries in a relationship
+    /// whose chain tip is `tip`, as the SDK derives it (§4.1).
+    fn next_nonce(tip: &[u8; 32], amount: u64) -> Vec<u8> {
+        crate::handlers::app_router_impl::transfer_nonce(tip, amount, "ERA", &[0xD1; 32])
+    }
 
     fn init_test_db() {
         crate::economic_fixtures::use_test_storage_dir();
@@ -109,12 +119,12 @@ mod tests {
         init_test_db();
         let binding = crate::storage::client_db::get_connection().expect("db");
         let conn = binding.lock().expect("db lock");
-        let nonce = b"unique-nonce-42";
-        assert!(!is_nonce_spent_with_conn(&conn, &REL_A, nonce).expect("read"));
-        mark_nonce_spent_with_conn(&conn, &REL_A, nonce, "tx-42", b"sender-a", 500)
+        let nonce = next_nonce(&TIP_A, 500);
+        assert!(!is_nonce_spent_with_conn(&conn, &REL_A, &nonce).expect("read"));
+        mark_nonce_spent_with_conn(&conn, &REL_A, &nonce, "tx-42", b"sender-a", 500)
             .expect("mark spent");
-        assert!(is_nonce_spent_with_conn(&conn, &REL_A, nonce).expect("read"));
-        let err = mark_nonce_spent_with_conn(&conn, &REL_A, nonce, "tx-again", b"sender-a", 500)
+        assert!(is_nonce_spent_with_conn(&conn, &REL_A, &nonce).expect("read"));
+        let err = mark_nonce_spent_with_conn(&conn, &REL_A, &nonce, "tx-again", b"sender-a", 500)
             .expect_err("a second spend in the relationship is a replay");
         assert!(err.to_string().contains("Replay attack"));
     }
@@ -122,21 +132,23 @@ mod tests {
     /// Security pre-audit item 5: the same nonce bytes spent in one
     /// relationship are not spent in another, so a contact cannot spend
     /// another contact's predicted nonce first and have its transfer dropped.
+    /// The nonce is the one relationship B's next transfer carries, derived
+    /// from B's public inputs; contact Y spends those bytes in A first.
     #[test]
     #[serial]
     fn a_nonce_spent_in_one_relationship_is_not_spent_in_another() {
         init_test_db();
         let binding = crate::storage::client_db::get_connection().expect("db");
         let conn = binding.lock().expect("db lock");
-        let nonce = b"predicted-nonce";
-        mark_nonce_spent_with_conn(&conn, &REL_A, nonce, "tx-a", b"contact-y", 1)
+        let predicted = next_nonce(&TIP_B, 100);
+        mark_nonce_spent_with_conn(&conn, &REL_A, &predicted, "tx-a", b"contact-y", 1)
             .expect("spent in A");
-        assert!(!is_nonce_spent_with_conn(&conn, &REL_B, nonce).expect("read"));
-        mark_nonce_spent_with_conn(&conn, &REL_B, nonce, "tx-b", b"contact-x", 100)
+        assert!(!is_nonce_spent_with_conn(&conn, &REL_B, &predicted).expect("read"));
+        mark_nonce_spent_with_conn(&conn, &REL_B, &predicted, "tx-b", b"contact-x", 100)
             .expect("still spendable in B");
         assert_ne!(
-            relationship_nonce_hash(&REL_A, nonce),
-            relationship_nonce_hash(&REL_B, nonce)
+            relationship_nonce_hash(&REL_A, &predicted),
+            relationship_nonce_hash(&REL_B, &predicted)
         );
     }
 }
