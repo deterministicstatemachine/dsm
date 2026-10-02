@@ -25,8 +25,10 @@ function directives(html) {
 }
 
 function inlineScriptHashes(html) {
-  return [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)]
-    .filter(([, attributes]) => !/\bsrc\s*=/.test(attributes))
+  // Tag names are case-insensitive, and a closing tag may carry whitespace:
+  // every spelling a browser reads as a script is counted.
+  return [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)]
+    .filter(([, attributes]) => !/\bsrc\s*=/i.test(attributes))
     .map(([, , text]) => `'sha256-${crypto.createHash('sha256').update(text, 'utf8').digest('base64')}'`);
 }
 
