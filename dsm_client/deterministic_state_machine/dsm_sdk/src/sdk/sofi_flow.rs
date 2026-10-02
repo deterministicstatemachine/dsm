@@ -22,7 +22,7 @@ use dsm::economic::tree::{EconomicSmt, ABSENT_LEAF};
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::sofi::derive;
 use dsm::sofi::publication::{Publication, VaultPolicyClass};
-use dsm::sofi::registration::Registration;
+use dsm::sofi::registration::{PairStanding, Registration};
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::resolve::{AcceptedGeneses, Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
 use dsm::sofi::storage::Discovered;
@@ -1159,14 +1159,35 @@ async fn own_setup_ref(
     }
 }
 
-/// The live attempt of a leg at `parent_root`: the walk's first unresolved
-/// key, advanced past keys an exercise still in flight holds (§31 stage 6).
-fn live_attempt(
+/// What the walk at a parent found for a new attempt.
+enum Walked {
+    /// The live attempt: the walk's first unresolved key, advanced past keys
+    /// an exercise still in flight holds.
+    Live(u64),
+    /// A key the walk would have passed was held by an exercise whose pair
+    /// its trader withheld, and that pair is now registered from the
+    /// exercise. The walk is run again.
+    Registered,
+}
+
+/// The walk at `parent_root` of `vault_id` (§31 stage 6): its first
+/// unresolved key, advanced past keys an exercise still in flight holds.
+///
+/// Before it goes past a key held by an exercise whose position pair is not
+/// registered, it registers that pair from the trader's signed `C_q` the
+/// exercise carries (owner ruling, 2026-10-01, pre-audit 12e: "If a vault key
+/// is held by an exercise whose pair is not yet registered, the relayer MUST
+/// use the signed C_q carried by that exercise to register the trader's
+/// missing pair before advancing past that held key"). The relayer authors
+/// nothing: it carries the trader's bytes exactly. A pair already
+/// registered, lost, or not decided by the reads is not written.
+async fn walk_for_attempt(
+    set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     chains: &BTreeMap<D32, VaultChain>,
     vault_id: &D32,
     parent_root: &D32,
-) -> Result<u64, DsmError> {
+) -> Result<Walked, DsmError> {
     let mut walked = verifier
         .walk_parent(chains, vault_id, parent_root, 0, WALK_BUDGET)
         .map_err(verifier_error)?;
@@ -1193,25 +1214,133 @@ fn live_attempt(
     let mut attempt = first;
     let mut advanced = 0;
     while advanced <= ATTEMPT_ADVANCE {
-        match verifier
+        let read = match verifier
             .read_attempt_cell(vault_id, parent_root, attempt)
             .map_err(verifier_error)?
         {
-            Ok(read) if read.exercise().is_none() => return Ok(attempt),
-            Ok(..) => {
-                attempt = next_attempt(attempt).map_err(refuse)?;
-                advanced += 1;
-            }
+            Ok(read) => read,
             Err(missing) => {
                 return Err(storage(
                     "attempt cell",
                     format!("the reads do not decide attempt {attempt}: {missing:?}"),
                 ))
             }
+        };
+        let Some(exercise) = read.exercise() else {
+            return Ok(Walked::Live(attempt));
+        };
+        if pair_withheld(verifier, exercise, attempt)? {
+            let relayed =
+                crate::sdk::sofi_relay::relay_exercise(set, vault_id, parent_root, attempt).await?;
+            if !relayed.pair.iter().all(|report| report.reached_leader()) {
+                return Err(storage(
+                    "withheld pair",
+                    format!(
+                        "the leader of the pair the exercise at attempt {attempt} carries did not \
+                         take it"
+                    ),
+                ));
+            }
+            log::info!(
+                "[sofi] registered the withheld pair of the exercise at attempt {attempt} from \
+                 its own signed C_q"
+            );
+            return Ok(Walked::Registered);
         }
+        attempt = next_attempt(attempt).map_err(refuse)?;
+        advanced += 1;
     }
     Err(refuse(
         "every nearby attempt key is held by an exercise in flight",
+    ))
+}
+
+/// Whether the position pair of the exercise holding `attempt` is still to
+/// be registered: neither registered nor lost, as its cells read now. Reads
+/// that do not decide the pair establish nothing, so the pair is not
+/// written on them.
+fn pair_withheld(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    exercise: &dsm::sofi::exercise::RecognizedExercise,
+    attempt: u64,
+) -> Result<bool, DsmError> {
+    let (precommit, fulfillment) = (&exercise.precommit().body, &exercise.fulfillment().body);
+    let standing = match verifier
+        .read_registration(
+            precommit.genesis(),
+            precommit.device_id(),
+            fulfillment.position(),
+            precommit.void_root(),
+        )
+        .map_err(verifier_error)?
+    {
+        Ok(read) => Some(read.standing_of(precommit, fulfillment)),
+        Err(missing) => {
+            log::info!(
+                "[sofi] the pair of the exercise at attempt {attempt} is not decided yet: \
+                 {missing:?}"
+            );
+            None
+        }
+    };
+    Ok(standing == Some(PairStanding::Pending))
+}
+
+/// The live attempt of a leg at `parent_root` (§31 stage 6), every withheld
+/// pair the walk meets registered first. A registration can consume the
+/// parent: the walk run again then says the head moved.
+async fn live_attempt(
+    set: &StorageSet,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    chains: &mut BTreeMap<D32, VaultChain>,
+    vault_id: &D32,
+    parent_root: &D32,
+) -> Result<u64, DsmError> {
+    // Each round registers a pair the walk met at one of the keys it
+    // examines, at most ATTEMPT_ADVANCE + 1 of them.
+    for _ in 0..=ATTEMPT_ADVANCE {
+        match walk_for_attempt(set, verifier, chains, vault_id, parent_root).await? {
+            Walked::Live(attempt) => return Ok(attempt),
+            Walked::Registered => {
+                chains.insert(*vault_id, verifier.chain(vault_id).map_err(verifier_error)?);
+            }
+        }
+    }
+    Err(refuse(
+        "every nearby attempt key is held by an exercise whose withheld pair was registered",
+    ))
+}
+
+/// `vault_id`'s chain, walked again past every withheld pair the walk at its
+/// head meets: each is registered from its exercise and the chain is walked
+/// again, so a trade or a close is drafted at the head those registrations
+/// leave (owner ruling, 2026-10-01: "After successful pair registration, the
+/// relayer retries progression").
+async fn chain_past_withheld_pairs(
+    set: &StorageSet,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_id: &D32,
+    chain: VaultChain,
+) -> Result<VaultChain, DsmError> {
+    let mut chains = BTreeMap::from([(*vault_id, chain)]);
+    for _ in 0..=ATTEMPT_ADVANCE {
+        let (.., head) = chains
+            .get(vault_id)
+            .and_then(VaultChain::head)
+            .ok_or_else(|| refuse("no head of this vault is established"))?;
+        match walk_for_attempt(set, verifier, &chains, vault_id, &head).await? {
+            Walked::Live(..) => {
+                return chains
+                    .remove(vault_id)
+                    .ok_or_else(|| refuse("the vault's chain is not in hand"))
+            }
+            Walked::Registered => {
+                chains.insert(*vault_id, verifier.chain(vault_id).map_err(verifier_error)?);
+            }
+        }
+    }
+    Err(refuse(
+        "every nearby attempt key is held by an exercise whose withheld pair was registered",
     ))
 }
 
@@ -1428,7 +1557,7 @@ async fn exercise_draft(
     for leg in checked.precommit().legs() {
         attempts.push((
             leg.vault_id,
-            live_attempt(&verifier, &chains, &leg.vault_id, &leg.parent_root)?,
+            live_attempt(set, &verifier, &mut chains, &leg.vault_id, &leg.parent_root).await?,
         ));
     }
     let att_a = crate::sdk::signing_authority::current_att_a()?;
@@ -1613,7 +1742,8 @@ pub async fn trade(
         .iter()
         .zip(chains_at_once(&verifier, &intent.vault_ids))
     {
-        heads.push(head_of(set, &verifier, vault_id, chain?).await?.0);
+        let chain = chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?;
+        heads.push(head_of(set, &verifier, vault_id, chain).await?.0);
     }
     log::info!("[sofi] trade: walked {} vault heads", heads.len());
     // A chain, or a split across two vaults of the pair (Amendment S19),
@@ -1680,7 +1810,14 @@ pub async fn close(
     let standing = standing(core)?;
     let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
-    let (vault, ..) = vault_at_head(set, &verifier, &intent.vault_id).await?;
+    let chain = chain_past_withheld_pairs(
+        set,
+        &verifier,
+        &intent.vault_id,
+        verifier.chain(&intent.vault_id).map_err(verifier_error)?,
+    )
+    .await?;
+    let (vault, ..) = head_of(set, &verifier, &intent.vault_id, chain).await?;
     only_the_owner(&standing, &vault)?;
     let setup_ref = own_setup_ref(
         set,

@@ -276,7 +276,9 @@ pub async fn relay_exercise(
     let read = attempt_resolution(&cell, &evidence)
         .map_err(|undecided| refuse(format!("the key is not decided yet: {undecided:?}")))?;
     let (Some(exercise), Some(bytes)) = (read.exercise(), read.value()) else {
-        return Err(refuse("no exercise holds the key; there is nothing to relay"));
+        return Err(refuse(
+            "no exercise holds the key; there is nothing to relay",
+        ));
     };
     let (fulfillment, precommit) = (exercise.fulfillment(), exercise.precommit());
     let cells = leg_cells(set, fulfillment, precommit)?;
