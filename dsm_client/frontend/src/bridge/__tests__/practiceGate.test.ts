@@ -106,7 +106,10 @@ describe('practice mode puts the bridge in its sandbox', () => {
   it('answers a write it simulates with only Rust reads crossing the bridge', async () => {
     const sent = await client.sendOnlineTransferSmart(PRACTICE_CONTACT_DEVICE_ID, '25', undefined, 'ERA');
     expect(sent).toEqual(expect.objectContaining({ newBalance: 97500n }));
-    expect(new Set(carried(arrivals))).toEqual(new Set(['wallet.amount']));
+    // Rust renders the amounts (wallet.amount) and says whether practice ERA
+    // is protocol-defined (balance.list, as main reads it since #1098): both
+    // reads, and nothing else crosses.
+    expect(new Set(carried(arrivals))).toEqual(new Set(['wallet.amount', 'balance.list']));
   });
 
   it('takes the bridge out of its sandbox when it leaves', () => {
