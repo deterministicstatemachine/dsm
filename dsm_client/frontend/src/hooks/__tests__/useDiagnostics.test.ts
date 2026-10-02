@@ -349,42 +349,6 @@ describe('useDiagnostics', () => {
     expect(writeText).not.toHaveBeenCalled();
   });
 
-  it('downloadDiagnostics creates and clicks a link', async () => {
-    const notifyToast = jest.fn();
-    const { result } = renderHook(() => useDiagnostics(notifyToast));
-
-    await act(async () => {});
-
-    await act(async () => {
-      await result.current.gatherDiagnostics();
-    });
-
-    const mockClick = jest.fn();
-    const mockRemove = jest.fn();
-    const mockCreateElement = jest.spyOn(document, 'createElement').mockReturnValue({
-      href: '',
-      download: '',
-      click: mockClick,
-      remove: mockRemove,
-    } as any);
-    jest.spyOn(document.body, 'appendChild').mockImplementation((n) => n);
-    const mockCreateObjectURL = jest.fn(() => 'blob:test');
-    const mockRevokeObjectURL = jest.fn();
-    global.URL.createObjectURL = mockCreateObjectURL;
-    global.URL.revokeObjectURL = mockRevokeObjectURL;
-
-    await act(async () => {
-      result.current.downloadDiagnostics();
-      await new Promise(r => setTimeout(r, 10));
-    });
-
-    expect(mockClick).toHaveBeenCalled();
-    expect(mockRemove).toHaveBeenCalled();
-    expect(mockRevokeObjectURL).toHaveBeenCalled();
-
-    mockCreateElement.mockRestore();
-  });
-
   it('responds to dsm-open-diagnostics custom event', async () => {
     const notifyToast = jest.fn();
     mockGetPreference.mockResolvedValue('');

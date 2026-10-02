@@ -13,6 +13,8 @@ import {
   buildGitHubIssueUrl,
 } from '../utils/githubIssue';
 import { nativeSessionStore } from '../runtime/nativeSessionStore';
+import { getContacts } from '../dsm/contacts';
+import { mapContactList } from '../domain/mappers';
 
 type NotifyToast = (type: string, message?: string) => void;
 
@@ -47,6 +49,8 @@ export function useDiagnostics(notifyToast: NotifyToast) {
   const [diagLoading, setDiagLoading] = useState(false);
   const [diagnostics, setDiagnostics] = useState<string | null>(null);
   const [telemetryConsent, setTelemetryConsent] = useState(false);
+  // Shares still being prepared: the button waits while one is.
+  const [sharesInFlight, setSharesInFlight] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -95,43 +99,64 @@ export function useDiagnostics(notifyToast: NotifyToast) {
   }, [notifyToast]);
 
   // Every line states a measurement or names the failure of measuring it.
+  const measureDiagnostics = useCallback(async (): Promise<string> => {
+    const wb = await import('../dsm/WebViewBridge');
+
+    const session = nativeSessionStore.getSnapshot();
+    const sessionLine = `session=${session.received ? session.phase : 'pending'}`;
+
+    let identityLine: string;
+    try {
+      const id = await dsmClient.getIdentity();
+      identityLine = `identity=device ${id.deviceId} genesis ${id.genesisHash}`;
+    } catch (e) {
+      // Missing, runtime not ready, or not read: each as Rust and the bridge report it.
+      identityLine = isIdentityUnavailable(e)
+        ? `identity=${e.state}: ${e.message}`
+        : `identity=not read: ${messageOf(e)}`;
+    }
+
+    let archLine: string;
+    try {
+      const arch = await wb.getArchitectureInfo();
+      archLine = `arch=${arch.status} device=${arch.deviceArch} abis=${arch.supportedAbis} message=${arch.message} recommendation=${arch.recommendation}`;
+    } catch (e) {
+      archLine = `arch=not measured: ${messageOf(e)}`;
+    }
+
+    // Each relationship's send state as Rust derives it: a blocked send says why.
+    let contactLines: string[];
+    try {
+      const contacts = mapContactList((await getContacts()).contacts);
+      contactLines = contacts.length === 0
+        ? ['contacts=none']
+        : contacts.map((c) => {
+          const send = c.sendReady
+            ? 'ready'
+            : `blocked (${c.sendBlockReason ?? 'no reason given'}): ${c.sendBlockMessage ?? 'no message given'}`;
+          return `contact ${c.alias} device=${c.deviceId} tip=${c.chainTip ?? 'none'} pairing=${c.pairing} send=${send}`;
+        });
+    } catch (e) {
+      contactLines = [`contacts=not read: ${messageOf(e)}`];
+    }
+
+    return [
+      'DSM diagnostics',
+      sessionLine,
+      identityLine,
+      archLine,
+      ...contactLines,
+      `envConfigError=${envConfigError ?? 'none'}`,
+      `lastBridgeError=${lastBridgeError ? `${lastBridgeError.code}:${lastBridgeError.message}` : 'none'}`,
+      `bridgeErrorDebugB32=${lastBridgeError?.debugB32 ?? 'none'}`,
+    ].join('\n');
+  }, [envConfigError, lastBridgeError]);
+
   const gatherDiagnostics = useCallback(async () => {
     setDiagLoading(true);
     setDiagnostics(null);
     try {
-      const wb = await import('../dsm/WebViewBridge');
-
-      const session = nativeSessionStore.getSnapshot();
-      const sessionLine = `session=${session.received ? session.phase : 'pending'}`;
-
-      let identityLine: string;
-      try {
-        const id = await dsmClient.getIdentity();
-        identityLine = `identity=device ${id.deviceId} genesis ${id.genesisHash}`;
-      } catch (e) {
-        // Missing, runtime not ready, or not read: each as Rust and the bridge report it.
-        identityLine = isIdentityUnavailable(e)
-          ? `identity=${e.state}: ${e.message}`
-          : `identity=not read: ${messageOf(e)}`;
-      }
-
-      let archLine: string;
-      try {
-        const arch = await wb.getArchitectureInfo();
-        archLine = `arch=${arch.status} device=${arch.deviceArch} abis=${arch.supportedAbis} message=${arch.message} recommendation=${arch.recommendation}`;
-      } catch (e) {
-        archLine = `arch=not measured: ${messageOf(e)}`;
-      }
-
-      setDiagnostics([
-        'DSM diagnostics',
-        sessionLine,
-        identityLine,
-        archLine,
-        `envConfigError=${envConfigError ?? ''}`,
-        `lastBridgeError=${lastBridgeError ? `${lastBridgeError.code}:${lastBridgeError.message}` : ''}`,
-        `bridgeErrorDebugB32=${lastBridgeError?.debugB32 ?? ''}`,
-      ].join('\n'));
+      setDiagnostics(await measureDiagnostics());
       setShowDiagnostics(true);
     } catch (e) {
       setDiagnostics(`Failed to gather diagnostics: ${messageOf(e)}`);
@@ -139,7 +164,7 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     } finally {
       setDiagLoading(false);
     }
-  }, [envConfigError, lastBridgeError]);
+  }, [measureDiagnostics]);
 
   // The report plus the native bridge log, or the reason the log was not read.
   const buildDiagnosticsBundle = useCallback(async (): Promise<string> => {
@@ -193,7 +218,7 @@ export function useDiagnostics(notifyToast: NotifyToast) {
           : '';
         const diagnosticsSection = telemetryConsent
           ? `**Diagnostics excerpt**\n\n----BEGIN EXCERPT----\n${excerpt}\n----END EXCERPT----\n\n`
-          : `**Diagnostics**\n\nAttach the downloaded \`dsm-diagnostics.txt\` file if you are comfortable sharing it.\n\n`;
+          : `**Diagnostics**\n\nAttach \`dsm-diagnostics.txt\` from **Share report** in the app's diagnostics if you are comfortable sharing it.\n\n`;
         const body = `**Describe the problem**\n\nPlease describe the beta issue.\n\n${diagnosticsSection}**Steps to reproduce**\n1. Launch the app\n2. Reproduce the issue\n3. Note the exact screen, flow, and expected result\n\n**Additional info**\n- Attach adb logcat output if available\n`;
         const url = buildGitHubIssueUrl({ title, body, template: BETA_BUG_TEMPLATE });
         await openUrlOrCopy(url, 'Beta bug report opened', 'Bug report link copied to clipboard');
@@ -248,22 +273,22 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     }
   }, [buildDiagnosticsBundle, diagnostics, notifyToast]);
 
-  const downloadDiagnostics = useCallback(() => {
-    if (!diagnostics) return;
-    void (async () => {
-      const bundle = await buildDiagnosticsBundle();
-      const blob = new Blob([bundle], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'dsm-diagnostics.txt';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      notifyToast('success', 'Diagnostics downloaded');
-    })();
-  }, [buildDiagnosticsBundle, diagnostics, notifyToast]);
+  // The full report (this summary, the app's log, the bridge log) goes out
+  // through the Android share sheet: a WebView saves no file of its own.
+  const shareDiagnostics = useCallback(async () => {
+    setSharesInFlight((n) => n + 1);
+    try {
+      const summary = await measureDiagnostics();
+      setDiagnostics(summary);
+      const wb = await import('../dsm/WebViewBridge');
+      const size = await wb.shareDiagnosticsReport(summary);
+      notifyToast('success', `Report ready (${Math.ceil(size / 1024)} KB): pick where to send it`);
+    } catch (e) {
+      notifyToast('error', `Report not shared: ${messageOf(e)}`);
+    } finally {
+      setSharesInFlight((n) => n - 1);
+    }
+  }, [measureDiagnostics, notifyToast]);
 
   const state: DiagnosticsState = {
     envConfigError,
@@ -276,6 +301,7 @@ export function useDiagnostics(notifyToast: NotifyToast) {
   };
 
   return {
+    sharesInFlight,
     ...state,
     setEnvConfigError,
     setShowDiagnostics,
@@ -286,6 +312,6 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     openGitHubFeedback,
     sendDiagnosticsTelemetry,
     copyDiagnostics,
-    downloadDiagnostics,
+    shareDiagnostics,
   };
 }

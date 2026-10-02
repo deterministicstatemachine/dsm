@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
+<!-- The one directory the diagnostics FileProvider shares: the debug report. -->
+<paths>
+    <cache-path name="diagnostics" path="diagnostics/" />
+</paths>

@@ -49,6 +49,7 @@ export const {
   getArchitectureInfo,
   getDeviceIdBinBridgeAsync,
   getDiagnosticsLog,
+  shareDiagnosticsReport,
 } = diagnostics;
 
 export const { addDsmEventListener } = events;
