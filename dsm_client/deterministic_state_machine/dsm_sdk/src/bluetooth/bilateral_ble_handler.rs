@@ -674,11 +674,6 @@ impl BilateralBleHandler {
         terms: Option<dsm::types::operations::TransferTerms>,
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         info!("Preparing BLE bilateral transaction");
-        let terms_bytes = terms.as_ref().map(|t| t.to_bytes());
-        let terms = crate::bluetooth::bilateral_session::step_terms(
-            &operation,
-            terms_bytes.as_deref(),
-        )?;
 
         // BLE/USB is the OFFLINE transport: value over it is bearer-tier only,
         // drawn from the offline-cash allocation. An online-tier Transfer uses
@@ -771,6 +766,14 @@ impl BilateralBleHandler {
         // no prepare to send, and nothing is staged.
         let (sender_kyber_public_key, sender_kyber_binding_sig) =
             crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
+
+        // A transfer carries the terms it commits to, and they open it: one
+        // without them is refused before any precommitment exists.
+        let terms_bytes = terms.as_ref().map(|t| t.to_bytes());
+        let terms = crate::bluetooth::bilateral_session::step_terms(
+            &operation,
+            terms_bytes.as_deref(),
+        )?;
 
         // Prepare offline transfer in core
         let (pre_commitment, local_genesis_hash) = {

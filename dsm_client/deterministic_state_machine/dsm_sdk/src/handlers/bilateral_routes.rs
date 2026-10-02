@@ -227,18 +227,18 @@ mod pending_list_tests {
     /// the step's phase, direction, amount and token and verifies nothing,
     /// so the operation here is unsigned.
     fn outgoing(peer: [u8; 32], commitment: [u8; 32], phase: &str) -> BilateralSessionRecord {
+        let terms = dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: commitment[..16].to_vec(),
+            mode: TransactionMode::Bilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
+        };
         let operation = Operation::Transfer {
             to_device_id: peer.to_vec(),
             amount: dsm::types::token_types::Balance::amount(3),
             policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
-            terms_commitment: dsm::types::operations::TransferTerms {
-                token_id: b"ERA".to_vec(),
-                nonce: commitment[..16].to_vec(),
-                mode: TransactionMode::Bilateral,
-                memo: String::new(),
-                salt: vec![0x5A; 32],
-            }
-            .commitment(),
+            terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,
         };
@@ -262,7 +262,7 @@ mod pending_list_tests {
             spend_asset: None,
             spend_amount: None,
             owed_frame: None,
-            terms_bytes: None,
+            terms_bytes: Some(terms.to_bytes()),
         }
     }
 
