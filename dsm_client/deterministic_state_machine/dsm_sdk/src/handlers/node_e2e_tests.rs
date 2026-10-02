@@ -1589,6 +1589,156 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
     assert_eq!(held_at(pair.root().routed()).await, root_before);
 }
 
+/// SoFi Amendment S20 (12j), Amendment S15: a position whose root cell
+/// holds a claim naming its fulfillment but with another body than the one
+/// its `P` and `F` derive resolves Invalid for the trader's lineage, read by
+/// any peer walking that lineage, and the vault agrees: the key the
+/// exercise holds is skipped, never consumed.
+///
+/// B trades with its pair's leader refusing the pair, then writes its pair
+/// itself: `F` at `K_ful(q)` and, at `K_root(q)`, a claim B signs naming `F`
+/// with another `R_realize`. The pair registers, being matched by `F`'s id;
+/// only the body tells it apart. A, walking B's lineage to `q` (DSM
+/// Amendment A8), gets Invalid, with the body check's own reason. B's
+/// exercise then holds the vault's first key, and A's walk of the vault
+/// passes over it. Mutation: the body check removed from `peer_position`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the_lineage() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let pair_leader = member_name(pair.fulfillment().route().leader());
+    p.nodes
+        .refuse_cell_writes(
+            &pair_leader,
+            &[*pair.fulfillment().key(), *pair.root().routed().key()],
+        )
+        .await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    p.nodes.accept_cell_writes(&pair_leader).await;
+
+    // B writes its pair with a claim naming its F under another body.
+    p.b.enter();
+    let head = p.b.router().core_sdk.device_head().expect("B's head");
+    let fulfillment_id = match head
+        .pending_economic_admission()
+        .map(|pending| pending.kind)
+    {
+        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment {
+            fulfillment_id,
+        }) => fulfillment_id,
+        other => panic!("B's pending admission is its fulfillment: {other:?}"),
+    };
+    let fulfillment = match crate::sdk::sofi_publish::fetch_fulfillment(&set, &fulfillment_id)
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("F is stored under its id: {other:?}"),
+    };
+    let precommit = match fetch_precommit(&set, fulfillment.body.precommit_id())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("P is stored under its id: {other:?}"),
+    };
+    let derived = derive::resolution_claim(&precommit.body, &fulfillment.body);
+    let other_body = dsm::sofi::wire::SofiResolutionClaim {
+        realize_root: [0x5E; 32],
+        ..derived
+    };
+    assert_eq!(other_body.fulfillment_id, fulfillment_id);
+    assert_ne!(other_body, derived);
+    let claim = {
+        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
+        let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+        dsm::sofi::signature::sign_resolution_claim(
+            other_body,
+            fulfillment.body.signature_alg(),
+            &pk,
+            att_a,
+            &sk,
+        )
+        .expect("B signs its own claim")
+        .encode()
+    };
+    let f_bytes = Publication::Fulfillment {
+        body: &fulfillment.body,
+        signature: &fulfillment.signature,
+    }
+    .object_bytes()
+    .expect("F's envelope");
+    let written = crate::sdk::route_seats::write_recorded_position(&set, &pair, &f_bytes, &claim)
+        .await
+        .expect("the pair is written along its route");
+    assert!(written.iter().all(|report| report.reached_leader()));
+
+    // The pair registers: it is matched by F's id.
+    p.a.enter();
+    let (own_a, parents_a) = standing_of(&p.a);
+    let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
+    let registration = ctx
+        .verifier()
+        .read_registration(&p.b.genesis, &p.b.device_id, q, &root)
+        .expect("read")
+        .expect("decided");
+    assert!(
+        matches!(registration.registration(), Registration::Registered(signed) if signed.body == fulfillment.body),
+        "{:?}",
+        registration.registration()
+    );
+
+    // A peer walking B's lineage to q: Invalid, by the body check.
+    let live = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("live reads");
+    let walked =
+        dsm::sofi::resolve::SofiReads::trader_root_at(&live, &p.b.genesis, &p.b.device_id, q);
+    assert!(
+        matches!(
+            &walked,
+            Err(dsm::economic::provenance::PeerLineageFailure::Invalid(why))
+                if why.contains("not the claim its P and F derive")
+        ),
+        "{walked:?}"
+    );
+
+    // B's exercise holds the vault's first key, and the vault passes over it:
+    // its F is lost at q (Amendment S14), so it consumes nothing.
+    assert!(matches!(complete(&p).await, Completion::Written(..)));
+    p.a.enter();
+    let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
+    let r0 = chain.roots()[0];
+    assert!(
+        verifier
+            .read_attempt_cell(&m.vault_id, &r0, 0)
+            .expect("read")
+            .expect("decided")
+            .exercise()
+            .is_some(),
+        "B's exercise holds the vault's first key"
+    );
+    let chains = BTreeMap::from([(m.vault_id, chain)]);
+    let walked = verifier
+        .walk_parent(&chains, &m.vault_id, &r0, 0, WALK_BUDGET)
+        .expect("the walk");
+    assert_eq!(walked.outcome, WalkOutcome::Unresolved { attempt: 1 });
+}
+
 /// A fulfillment B signs for position `q`, naming `precommit_id`, as the
 /// signed envelope a seat would hold at `K_ful(q)`. B's own key, so it passes
 /// any check of who may sign at B's cells; what it names is up to whoever
