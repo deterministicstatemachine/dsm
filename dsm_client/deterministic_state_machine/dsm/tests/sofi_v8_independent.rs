@@ -156,6 +156,7 @@ mod indep {
         q: u64,
         alg: u16,
         k: &[u8],
+        att_a: &[u8; 32],
     ) -> Vec<u8> {
         let mut out = [env(0x0039), pid.to_vec(), u32be(set.len() as u32)].concat();
         for id in set {
@@ -166,7 +167,7 @@ mod indep {
             out.extend_from_slice(v);
             out.extend(u64be(*a));
         }
-        [out, u64be(q), key(alg, k)].concat()
+        [out, u64be(q), key(alg, k), att_a.to_vec()].concat()
     }
 
     pub fn resolution_claim(
@@ -302,6 +303,7 @@ fn conforming_fulfillment(p: &TraderPrecommitBody) -> TraderFulfillmentBody {
         42,
         ALG,
         &KEY,
+        [0xA7; 32],
     )
     .expect("fulfillment")
 }
@@ -360,6 +362,7 @@ fn every_object_matches_the_independent_encoder_and_round_trips() {
         42,
         ALG,
         &KEY,
+        &[0xA7; 32],
     );
     assert_eq!(f.encode(), f_bytes);
     assert_eq!(TraderFulfillmentBody::decode(&f_bytes).expect("decode"), f);
@@ -696,6 +699,7 @@ fn fulfillment_conformance_refuses_every_malformed_exercise() {
         42,
         ALG,
         &KEY,
+        [0xA7; 32],
     )
     .expect("structurally valid");
     assert_eq!(
@@ -715,6 +719,7 @@ fn fulfillment_conformance_refuses_every_malformed_exercise() {
         42,
         ALG,
         &KEY,
+        [0xA7; 32],
     )
     .expect("a third witness encodes; cardinality is not the codec's business");
     assert_eq!(
@@ -747,6 +752,7 @@ fn fulfillment_conformance_refuses_every_malformed_exercise() {
         43,
         ALG,
         &KEY,
+        [0xA7; 32],
     )
     .expect("structurally valid");
     assert_eq!(
@@ -765,6 +771,7 @@ fn fulfillment_conformance_refuses_every_malformed_exercise() {
         42,
         ALG,
         &[0x56; 64],
+        [0xA7; 32],
     )
     .expect("structurally valid");
     assert_eq!(
@@ -789,6 +796,7 @@ fn fulfillment_conformance_refuses_every_malformed_exercise() {
         42,
         ALG,
         &KEY,
+        [0xA7; 32],
     )
     .expect("structurally valid");
     assert_eq!(

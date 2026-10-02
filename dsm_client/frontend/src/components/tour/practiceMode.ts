@@ -41,6 +41,8 @@ const PAD = '0'.repeat(52);
 const practiceId = (stem: string): string => (stem + PAD).slice(0, 52);
 
 export const PRACTICE_CONTACT_ALIAS = 'alice';
+/** The practice contact's device id: what the send screen names a recipient by. */
+export const PRACTICE_CONTACT_DEVICE_ID = practiceId('PRACT1CEA11CE');
 /** The practice ERA the tour starts with, and what its faucet pays, as people count ERA. */
 export const PRACTICE_ERA_HELD = '1000';
 export const PRACTICE_FAUCET_AMOUNT = '100';
@@ -67,7 +69,7 @@ function freshState(): PracticeState {
     contacts: [
       {
         alias: PRACTICE_CONTACT_ALIAS,
-        deviceId: practiceId('PRACT1CEA11CE'),
+        deviceId: PRACTICE_CONTACT_DEVICE_ID,
         genesisHash: practiceId('PRACT1CEA11CEGENES1S'),
         signingPublicKey: practiceId('PRACT1CEA11CEKEY'),
         // Practice contacts are never paired over BLE.
@@ -157,7 +159,7 @@ async function credit(state: PracticeState, tokenId: string, amount: string): Pr
 function recordSend(state: PracticeState, to: string, tokenId: string, taken: AmountForms, memo: string | undefined, mode: 'online' | 'offline'): string {
   state.sequence += 1;
   const txId = `practice-${state.sequence}`;
-  const contact = state.contacts.find((c) => c.alias === to || c.deviceId === to);
+  const contact = state.contacts.find((c) => c.deviceId === to);
   state.history = [
     {
       txId,
@@ -209,7 +211,7 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
       await ready();
       return { transactions: [...state.history] };
     },
-    sendOnlineTransferSmart: async (recipientAlias: string, enteredAmount: string | number | bigint, memo?: string, tokenId?: string) => {
+    sendOnlineTransferSmart: async (recipientDeviceId: string, enteredAmount: string | number | bigint, memo?: string, tokenId?: string) => {
       await pause(700);
       // As Rust answers: a send that names no token is refused, never sent as ERA.
       if (!tokenId) return { success: false, message: 'wallet.sendSmart: the request names no token' };
@@ -218,7 +220,7 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
       const result = await inTurn(() => debit(state, token, enteredAmount));
       // The real call answers a refusal as { success, message }.
       if ('refused' in result) return { success: false, message: result.refused };
-      recordSend(state, recipientAlias, token, result.taken, memo, 'online');
+      recordSend(state, recipientDeviceId, token, result.taken, memo, 'online');
       emit('sent');
       return { success: true, newBalance: result.balance };
     },

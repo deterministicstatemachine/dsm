@@ -1380,7 +1380,10 @@ impl Operation {
         }
         fn dec_vec_bytes(inp: &mut &[u8]) -> Result<Vec<Vec<u8>>, DsmError> {
             let n = get_u32(inp)? as usize;
-            let mut v = Vec::with_capacity(n);
+            // Not preallocated from `n`: the count is the sender's, and every
+            // element must still decode from bytes in hand, so the vector
+            // grows only as far as the input carries it.
+            let mut v = Vec::new();
             for _ in 0..n {
                 v.push(get_bytes(inp)?);
             }
@@ -2149,6 +2152,32 @@ impl Operation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A count the bytes that follow cannot carry is refused, and decoding it
+    /// allocates nothing from the count: a recovery operation claiming
+    /// `u32::MAX` authority signatures and carrying none.
+    #[test]
+    fn a_count_the_remaining_bytes_cannot_carry_is_refused() {
+        let op = Operation::Recovery {
+            message: String::new(),
+            state_number: 0,
+            state_hash: Vec::new(),
+            state_entropy: Vec::new(),
+            invalidation_data: Vec::new(),
+            new_state_data: Vec::new(),
+            new_state_number: 0,
+            new_state_hash: Vec::new(),
+            new_state_entropy: Vec::new(),
+            compromise_proof: Vec::new(),
+            authority_sigs: Vec::new(),
+        };
+        let mut bytes = op.to_bytes();
+        let n = bytes.len();
+        bytes[n - 4..].copy_from_slice(&u32::MAX.to_be_bytes());
+        let refused = Operation::from_bytes(&bytes)
+            .expect_err("no signature follows the count, so nothing decodes");
+        assert!(refused.to_string().contains("short input"), "{refused}");
+    }
 
     fn test_balance(value: u64) -> Balance {
         Balance::amount(value)

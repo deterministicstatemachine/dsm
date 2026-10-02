@@ -19,10 +19,14 @@
 //! What protects a trader's cell is recognition, not a member. The cell's
 //! coordinate is identity-scoped but derivable by anyone holding a trader's
 //! public `(G, DevID, position)`; bytes anyone sends there are kept, but only
-//! a claim that verifies under the trader's own key is an object naming the
-//! cell, and Core's leader-first read counts nothing else. A claim in the
-//! trader's name that the trader never signed is not a rival and not a
-//! winner, however early it arrived.
+//! an object that proves its own authority for the cell names it, and Core's
+//! leader-first read counts nothing else (DSM Amendment A10). A single-root
+//! claim carries the trader device's `AttA`: its signature verifies under the
+//! key it carries, and `derive_devid(key, AttA)` is the device it names. A
+//! conditional claim is the signed `C_q` (SoFi Amendment S20), bound the same
+//! way. A claim in the trader's name that the trader never signed, or signed
+//! under a key that does not derive the trader's device, is not a rival and
+//! not a winner, however early it arrived.
 
 use prost::Message;
 
@@ -83,6 +87,14 @@ pub enum ClaimEnvelopeError {
     Body(DecodeError),
     /// The signature does not verify over the body under the body's own key.
     SignatureInvalid,
+    /// The key and `AttA` the claim carries do not derive the device it
+    /// names: `derive_devid(key, AttA) != trader_devid` (DSM Amendment A10).
+    KeyIsNotTheNamedDevices,
+    /// A conditional claim with no signature. `C_q` occupies `K_root(q)` only
+    /// as the trader-signed `0x0062` object (SoFi Amendment S20).
+    UnsignedConditionalClaim,
+    /// The signed `C_q` does not prove authority for the cell it names.
+    ConditionalClaim(crate::sofi::signature::SignatureError),
     /// SPHINCS+ signing failed.
     SignFailed(String),
     /// The body could not be re-encoded to check the signing digest.
@@ -95,6 +107,16 @@ impl core::fmt::Display for ClaimEnvelopeError {
             Self::Malformed(why) => write!(f, "economic root claim malformed: {why}"),
             Self::Body(e) => write!(f, "economic root claim body: {e}"),
             Self::SignatureInvalid => write!(f, "economic root claim signature invalid"),
+            Self::KeyIsNotTheNamedDevices => write!(
+                f,
+                "economic root claim is signed by a key that, with the AttA it carries, does \
+                 not derive the device it names"
+            ),
+            Self::UnsignedConditionalClaim => write!(
+                f,
+                "an unsigned conditional claim proves no authority for the cell it names"
+            ),
+            Self::ConditionalClaim(e) => write!(f, "conditional claim: {e}"),
             Self::SignFailed(e) => write!(f, "economic root claim sign failed: {e}"),
             Self::Encode(e) => write!(f, "economic root claim body not encodable: {e}"),
         }
@@ -103,7 +125,7 @@ impl core::fmt::Display for ClaimEnvelopeError {
 
 impl std::error::Error for ClaimEnvelopeError {}
 
-/// Decode an `EconomicRootClaimBody` — class `0x001B`, schema 1, strict.
+/// Decode an `EconomicRootClaimBody` — class `0x001B`, schema 2, strict.
 pub fn decode_economic_root_claim_body(bytes: &[u8]) -> Result<EconomicRootClaimBody, DecodeError> {
     use crate::ccb::decode::{invalid, Cursor};
     let mut c = Cursor { b: bytes, i: 0 };
@@ -117,6 +139,7 @@ pub fn decode_economic_root_claim_body(bytes: &[u8]) -> Result<EconomicRootClaim
     let signature_alg = c.u16()?;
     let key_len = c.u32()? as usize;
     let claimant_public_key = c.take(key_len)?.to_vec();
+    let claimant_att_a = c.digest32()?;
     if c.i != bytes.len() {
         return Err(DecodeError::TrailingBytes {
             extra: bytes.len() - c.i,
@@ -133,6 +156,7 @@ pub fn decode_economic_root_claim_body(bytes: &[u8]) -> Result<EconomicRootClaim
         root_register_storage_set_id,
         signature_alg,
         &claimant_public_key,
+        claimant_att_a,
     )
     .map_err(invalid)
 }
@@ -154,8 +178,9 @@ pub fn sign_economic_root_claim(
     .encode_to_vec())
 }
 
-/// Strictly decode an envelope and verify its signature under the body's own
-/// `claimant_public_key`.
+/// Strictly decode an envelope, verify its signature under the body's own
+/// `claimant_public_key`, and require that key with the body's `AttA` to
+/// derive the device the claim names (DSM Amendment A10).
 ///
 /// Refuses anything that does not re-encode to exactly the input bytes:
 /// unknown fields, duplicates and non-canonical encodings all fail that
@@ -202,6 +227,16 @@ pub fn decode_and_verify_economic_root_claim(
     .map_err(|_| ClaimEnvelopeError::SignatureInvalid)?;
     if !ok {
         return Err(ClaimEnvelopeError::SignatureInvalid);
+    }
+    // The claim proves its own authority for the cell it names: a key that
+    // does not derive the named device signs nothing that names that device's
+    // cell, however valid the signature.
+    if crate::core::identity::genesis_v2::derive_devid(
+        &body.claimant_public_key,
+        &body.claimant_att_a,
+    ) != body.trader_devid
+    {
+        return Err(ClaimEnvelopeError::KeyIsNotTheNamedDevices);
     }
     Ok(VerifiedEconomicRootClaim {
         body,
@@ -319,41 +354,108 @@ impl RegisteredEconomicClaim {
 /// Decode a register cell into whichever claim it holds, **by class**.
 ///
 /// The two kinds are distinguishable at the first two bytes: a conditional
-/// claim is a bare CCB object and leads with its class envelope, while a
+/// claim is a CCB object and leads with its class envelope, while a
 /// single-root claim is a `EconomicRootClaimV1` protobuf and never does. So
 /// this peeks the class and dispatches, exactly as `ParentClaimRef::at` does
 /// for the wire union — it does not try one decoder and fall back to the
 /// other, because "whichever parses" is not a canonical rule.
 ///
-/// The conditional arm has no signature to check and none to fake: `C_q` is
-/// a derived object, recomputed from `(P, F)` by whoever reads it, and `F`'s
-/// own signature is the attribution.
+/// Both arms prove authority from the bytes in hand (DSM Amendment A10). The
+/// conditional arm is the trader-signed `C_q` (SoFi Amendment S20): its
+/// signature and its key's derivation of the named device are checked, and
+/// the body it yields is the derived claim every reader compares. A bare,
+/// unsigned `C_q` is refused by name.
 pub fn decode_registered_economic_claim(
     cell_bytes: &[u8],
 ) -> Result<RegisteredEconomicClaim, ClaimEnvelopeError> {
     if cell_bytes.is_empty() {
         return Err(ClaimEnvelopeError::Malformed("empty envelope"));
     }
-    if cell_bytes.len() >= 2
-        && u16::from_be_bytes([cell_bytes[0], cell_bytes[1]]) == class::SOFI_RESOLUTION_CLAIM
-    {
-        let claim = crate::sofi::wire::SofiResolutionClaim::decode(cell_bytes)
+    let leading_class =
+        (cell_bytes.len() >= 2).then(|| u16::from_be_bytes([cell_bytes[0], cell_bytes[1]]));
+    if leading_class == Some(class::SOFI_RESOLUTION_CLAIM) {
+        return Err(ClaimEnvelopeError::UnsignedConditionalClaim);
+    }
+    if leading_class == Some(class::SOFI_SIGNED_RESOLUTION_CLAIM) {
+        let signed = crate::sofi::wire::SignedSofiResolutionClaim::decode(cell_bytes)
             .map_err(ClaimEnvelopeError::Body)?;
-        return Ok(RegisteredEconomicClaim::ConditionalSofi(claim));
+        crate::sofi::signature::verify_resolution_claim(&signed)
+            .map_err(ClaimEnvelopeError::ConditionalClaim)?;
+        return Ok(RegisteredEconomicClaim::ConditionalSofi(*signed.claim()));
     }
     decode_and_verify_economic_root_claim(cell_bytes).map(RegisteredEconomicClaim::SingleRoot)
+}
+
+/// A device as a genesis makes one, for tests that build register claims:
+/// its id is `derive_devid(AK, AttA)` (DSM Amendment A10), so the claims it
+/// signs name its own cells and nothing else.
+#[cfg(test)]
+pub(crate) mod device_fixture {
+    use crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F as ALG;
+    use crate::sofi::wire::{SignedSofiResolutionClaim, SofiResolutionClaim};
+    use crate::types::error::DsmError;
+
+    pub(crate) struct Device {
+        pub(crate) pk: Vec<u8>,
+        pub(crate) sk: Vec<u8>,
+        pub(crate) att_a: [u8; 32],
+        pub(crate) devid: [u8; 32],
+    }
+
+    pub(crate) fn device(att_a: [u8; 32]) -> Result<Device, DsmError> {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair()?;
+        let devid = crate::core::identity::genesis_v2::derive_devid(&pk, &att_a);
+        Ok(Device {
+            pk,
+            sk,
+            att_a,
+            devid,
+        })
+    }
+
+    /// `C_q` as `K_root(q)` holds it, signed by the device it names.
+    pub(crate) fn signed_conditional(
+        claim: SofiResolutionClaim,
+        d: &Device,
+    ) -> Result<Vec<u8>, DsmError> {
+        Ok(
+            crate::sofi::signature::sign_resolution_claim(claim, ALG, &d.pk, d.att_a, &d.sk)?
+                .encode(),
+        )
+    }
+
+    /// `claim` signed under `signer`'s key and the given `AttA`, whatever
+    /// device it names: the object a squatter would try to place.
+    pub(crate) fn signed_by(
+        claim: SofiResolutionClaim,
+        signer: &Device,
+        att_a: [u8; 32],
+    ) -> Result<Vec<u8>, DsmError> {
+        let digest =
+            crate::sofi::derive::resolution_claim_signing_digest(&claim, ALG, &signer.pk, &att_a);
+        let signature = crate::crypto::sphincs::sphincs_sign(&signer.sk, &digest)?;
+        Ok(
+            SignedSofiResolutionClaim::new(claim, ALG, &signer.pk, att_a, &signature)
+                .map_err(|e| DsmError::invalid_operation(e.to_string()))?
+                .encode(),
+        )
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
     use super::*;
+    use crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F as ALG;
+    use crate::economic::claim::EconomicRootClaimBody;
     use crate::sofi::wire::SofiResolutionClaim;
 
-    fn conditional() -> SofiResolutionClaim {
+    use super::device_fixture::{device, Device};
+
+    fn conditional(device_id: [u8; 32]) -> SofiResolutionClaim {
         SofiResolutionClaim {
             genesis: [0x11; 32],
-            device_id: [0x22; 32],
+            device_id,
             position: 7,
             fulfillment_id: [0xF1; 32],
             realize_root: [0xA1; 32],
@@ -361,20 +463,145 @@ mod tests {
         }
     }
 
+    /// `C_q` signed by the device it names, as `K_root(q)` holds it.
+    fn signed_conditional(d: &Device) -> Vec<u8> {
+        super::device_fixture::signed_conditional(conditional(d.devid), d).unwrap()
+    }
+
+    fn conditional_signed_by(
+        claim: SofiResolutionClaim,
+        signer: &Device,
+        att_a: [u8; 32],
+    ) -> Vec<u8> {
+        super::device_fixture::signed_by(claim, signer, att_a).unwrap()
+    }
+
+    fn root_body(
+        trader_devid: [u8; 32],
+        signer: &Device,
+        att_a: [u8; 32],
+        position: u64,
+    ) -> EconomicRootClaimBody {
+        EconomicRootClaimBody::new(
+            [0x11; 32],
+            trader_devid,
+            position,
+            [0xC0; 32],
+            [0xD0; 32],
+            [0x77; 32],
+            ALG,
+            &signer.pk,
+            att_a,
+        )
+        .unwrap()
+    }
+
     /// A conditional cell decodes AS a conditional claim — by class, not by
-    /// "whichever decoder happens to parse". It is not an error and it is not
-    /// a single-root claim with a missing field.
+    /// "whichever decoder happens to parse" — and yields the derived `C_q`
+    /// its trader signed.
     #[test]
     fn a_conditional_cell_decodes_by_class() {
-        let claim = conditional();
-        let decoded = decode_registered_economic_claim(&claim.encode()).unwrap();
+        let d = device([0xA7; 32]).unwrap();
+        let decoded = decode_registered_economic_claim(&signed_conditional(&d)).unwrap();
         assert_eq!(
             decoded,
-            RegisteredEconomicClaim::ConditionalSofi(claim),
+            RegisteredEconomicClaim::ConditionalSofi(conditional(d.devid)),
             "the cell holds C_q and says so"
         );
         assert_eq!(decoded.economic_position(), 7);
-        assert_eq!(decoded.trader(), ([0x11; 32], [0x22; 32]));
+        assert_eq!(decoded.trader(), ([0x11; 32], d.devid));
+    }
+
+    /// DSM Amendment A10 / SoFi Amendment S20: an object that can occupy a
+    /// root position proves its own authority for it. A bare `C_q` carries
+    /// none, so it names no cell, whoever wrote it first.
+    #[test]
+    fn an_unsigned_conditional_claim_names_no_cell() {
+        let d = device([0xA7; 32]).unwrap();
+        assert_eq!(
+            decode_registered_economic_claim(&conditional(d.devid).encode()),
+            Err(ClaimEnvelopeError::UnsignedConditionalClaim)
+        );
+        let k_root =
+            crate::economic::register::economic_root_register_key(&[0x11; 32], &d.devid, 7);
+        assert!(crate::economic::register::root_claim_naming(
+            &conditional(d.devid).encode(),
+            &k_root
+        )
+        .is_none());
+    }
+
+    /// A `C_q` naming the victim's device, signed under another device's key
+    /// — with that device's own `AttA`, or with the victim's — does not derive
+    /// the victim's device id, so it names no cell.
+    #[test]
+    fn a_conditional_claim_signed_by_another_device_names_no_cell() {
+        let victim = device([0xA7; 32]).unwrap();
+        let squatter = device([0x5A; 32]).unwrap();
+        let k_root =
+            crate::economic::register::economic_root_register_key(&[0x11; 32], &victim.devid, 7);
+        for att_a in [squatter.att_a, victim.att_a] {
+            let squat = conditional_signed_by(conditional(victim.devid), &squatter, att_a);
+            assert_eq!(
+                decode_registered_economic_claim(&squat),
+                Err(ClaimEnvelopeError::ConditionalClaim(
+                    crate::sofi::signature::SignatureError::NotTheNamedDevice {
+                        what: "SofiResolutionClaim"
+                    }
+                ))
+            );
+            assert!(crate::economic::register::root_claim_naming(&squat, &k_root).is_none());
+        }
+        // The producer refuses to sign it at all.
+        let refused = crate::sofi::signature::sign_resolution_claim(
+            conditional(victim.devid),
+            ALG,
+            &squatter.pk,
+            squatter.att_a,
+            &squatter.sk,
+        )
+        .expect_err("the producer refuses a key that does not derive the named device");
+        assert!(
+            refused
+                .to_string()
+                .contains("does not derive the device it names"),
+            "{refused}"
+        );
+        // And the victim's own C_q names the cell.
+        assert!(crate::economic::register::root_claim_naming(
+            &signed_conditional(&victim),
+            &k_root
+        )
+        .is_some());
+    }
+
+    /// A single-root claim naming the victim's device, signed under another
+    /// device's key with a valid signature, does not derive the victim's
+    /// device id, so it is refused and names no cell.
+    #[test]
+    fn a_root_claim_under_a_key_that_does_not_derive_the_named_device_names_no_cell() {
+        let victim = device([0xA7; 32]).unwrap();
+        let squatter = device([0x5A; 32]).unwrap();
+        let k_root =
+            crate::economic::register::economic_root_register_key(&[0x11; 32], &victim.devid, 4);
+        for att_a in [squatter.att_a, victim.att_a] {
+            let squat = sign_economic_root_claim(
+                &root_body(victim.devid, &squatter, att_a, 4),
+                &squatter.sk,
+            )
+            .unwrap();
+            assert_eq!(
+                decode_and_verify_economic_root_claim(&squat),
+                Err(ClaimEnvelopeError::KeyIsNotTheNamedDevices)
+            );
+            assert!(crate::economic::register::root_claim_naming(&squat, &k_root).is_none());
+        }
+        let honest = sign_economic_root_claim(
+            &root_body(victim.devid, &victim, victim.att_a, 4),
+            &victim.sk,
+        )
+        .unwrap();
+        assert!(crate::economic::register::root_claim_naming(&honest, &k_root).is_some());
     }
 
     /// THE ROOT IS NOT AVAILABLE, AND NOT GUESSED. Asking a conditional claim
@@ -383,8 +610,9 @@ mod tests {
     /// every downstream inclusion proof succeed against an unchosen branch.
     #[test]
     fn a_conditional_claim_refuses_to_supply_a_root() {
-        let claim = conditional();
-        let decoded = decode_registered_economic_claim(&claim.encode()).unwrap();
+        let d = device([0xA7; 32]).unwrap();
+        let claim = conditional(d.devid);
+        let decoded = decode_registered_economic_claim(&signed_conditional(&d)).unwrap();
         let refusal = decoded.single_root().expect_err("no root is selected");
         assert_eq!(
             refusal,
@@ -421,19 +649,9 @@ mod tests {
     /// no runtime test can observe a field becoming public.
     #[test]
     fn the_only_verified_claim_is_one_whose_signature_verified() {
-        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
-        let body = crate::economic::claim::EconomicRootClaimBody::new(
-            [0x11; 32],
-            [0x22; 32],
-            4,
-            [0xC0; 32],
-            [0xD0; 32],
-            [0x77; 32],
-            crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-            &pk,
-        )
-        .unwrap();
-        let envelope = sign_economic_root_claim(&body, &sk).unwrap();
+        let d = device([0xA7; 32]).unwrap();
+        let body = root_body(d.devid, &d, d.att_a, 4);
+        let envelope = sign_economic_root_claim(&body, &d.sk).unwrap();
 
         // The capability, and it carries exactly what it verified.
         let verified = decode_and_verify_economic_root_claim(&envelope).unwrap();
@@ -464,7 +682,7 @@ mod tests {
 
     /// THE OTHER ARM STILL WORKS, and the two framings cannot be confused.
     ///
-    /// A single-root claim is a protobuf envelope; `C_q` is a bare CCB object
+    /// A single-root claim is a protobuf envelope; `C_q` is a CCB object
     /// leading with its class. The dispatch is unambiguous for a structural
     /// reason worth stating: the class tag's high byte is `0x00`, and no
     /// canonical protobuf can begin with `0x00` because field number 0 is
@@ -472,26 +690,21 @@ mod tests {
     /// conditional claim, and the test asserts that rather than assuming it.
     #[test]
     fn a_single_root_envelope_still_decodes_as_a_single_root() {
-        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
-        let body = crate::economic::claim::EconomicRootClaimBody::new(
-            [0x11; 32],
-            [0x22; 32],
-            9,
-            [0xC0; 32],
-            [0xD0; 32],
-            [0x77; 32],
-            crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-            &pk,
-        )
-        .unwrap();
-        let envelope = sign_economic_root_claim(&body, &sk).unwrap();
+        let d = device([0xA7; 32]).unwrap();
+        let body = root_body(d.devid, &d, d.att_a, 9);
+        let envelope = sign_economic_root_claim(&body, &d.sk).unwrap();
 
-        // It cannot be read as the conditional arm, structurally.
-        assert_ne!(
-            u16::from_be_bytes([envelope[0], envelope[1]]),
+        // It cannot be read as either conditional class, structurally.
+        for conditional_class in [
             class::SOFI_RESOLUTION_CLAIM,
-            "a protobuf envelope cannot lead with a CCB class tag"
-        );
+            class::SOFI_SIGNED_RESOLUTION_CLAIM,
+        ] {
+            assert_ne!(
+                u16::from_be_bytes([envelope[0], envelope[1]]),
+                conditional_class,
+                "a protobuf envelope cannot lead with a CCB class tag"
+            );
+        }
         assert_ne!(envelope[0], 0x00, "protobuf field number 0 is illegal");
 
         match decode_registered_economic_claim(&envelope).unwrap() {
@@ -520,13 +733,15 @@ mod tests {
         assert!(decode_registered_economic_claim(&tampered).is_err());
     }
 
-    /// Bytes that are neither a canonical `C_q` nor a canonical single-root
-    /// envelope are refused, and a truncated conditional claim does not fall
-    /// through to the proto decoder: class dispatch commits to one reading.
+    /// Bytes that are neither a canonical signed `C_q` nor a canonical
+    /// single-root envelope are refused, and a truncated conditional claim
+    /// does not fall through to the proto decoder: class dispatch commits to
+    /// one reading.
     #[test]
     fn a_malformed_cell_does_not_fall_through_to_the_other_decoder() {
         assert!(decode_registered_economic_claim(&[]).is_err());
-        let mut truncated = conditional().encode();
+        let d = device([0xA7; 32]).unwrap();
+        let mut truncated = signed_conditional(&d);
         truncated.pop();
         match decode_registered_economic_claim(&truncated) {
             Err(ClaimEnvelopeError::Body(_)) => {}
@@ -534,7 +749,7 @@ mod tests {
         }
         // Trailing bytes are not tolerated either — a write-once cell holds
         // exactly one canonical value.
-        let mut trailing = conditional().encode();
+        let mut trailing = signed_conditional(&d);
         trailing.push(0x00);
         assert!(decode_registered_economic_claim(&trailing).is_err());
     }

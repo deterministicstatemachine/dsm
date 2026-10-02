@@ -21,7 +21,7 @@
 use dsm::economic::claim_envelope::RegisteredEconomicClaim;
 use dsm::economic::peer_lineage::{
     validate_peer_lineage, ConditionalPositionResolver, PeerEvidenceFetcher, PeerFrontier,
-    PeerFrontiers,
+    ValidatedPeerLineage, PeerFrontiers,
 };
 use dsm::economic::provenance::{
     PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
@@ -83,7 +83,9 @@ pub enum RootClaimSettlement {
     Final,
     /// Another claim holds the cell's leader link. No other value will ever
     /// be final there (storage spec §9 finality 2), so this claim never will.
-    Lost { holder: RegisteredEconomicClaim },
+    Lost {
+        holder: Box<RegisteredEconomicClaim>,
+    },
     /// The cell is not decided for this claim yet: open, held by this claim
     /// but not final, or the evidence in hand does not decide it. A network
     /// status, retried with the same bytes.
@@ -105,9 +107,9 @@ pub async fn root_claim_settlement(
             state: ChainState::Final,
             ..
         }) if id == ours => RootClaimSettlement::Final,
-        Ok(CellReading::Held { id, object, .. }) if id != ours => {
-            RootClaimSettlement::Lost { holder: object }
-        }
+        Ok(CellReading::Held { id, object, .. }) if id != ours => RootClaimSettlement::Lost {
+            holder: Box::new(object),
+        },
         Ok(CellReading::Held { state, .. }) => {
             RootClaimSettlement::Pending(format!("the claim holds the cell, {state:?}"))
         }
@@ -258,10 +260,9 @@ impl PeerFrontiers for StoredFrontiers {
 }
 
 /// A peer's lineage verified to `peer_economic_position` from this
-/// receiver's frontier (DSM Amendment A8), over WHATEVER fetcher the caller
-/// supplies, so a recording fetcher observes exactly the closure the
-/// verification consumed. Nothing is recorded here: a frontier is recorded
-/// only in the transaction that accepts a step from the peer.
+/// receiver's frontier (DSM Amendment A8): the target step's validated
+/// transition, for a caller that accepts nothing from the peer and so records
+/// none of the frontiers the walk reached.
 pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -270,6 +271,31 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     peer_economic_position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+    resolve_peer_lineage(
+        fetcher,
+        expected_network_id,
+        peer_genesis,
+        peer_devid,
+        peer_economic_position,
+        conditional,
+    )
+    .map(|lineage| lineage.into_parts().0)
+}
+
+/// A peer's lineage verified to `peer_economic_position` from this
+/// receiver's frontier (DSM Amendment A8), over WHATEVER fetcher the caller
+/// supplies, so a recording fetcher observes exactly the closure the
+/// verification consumed, with the frontiers its credits' sources reached.
+/// Nothing is recorded here: a frontier, the peer's or a source's, is
+/// recorded only in the transaction that accepts a step from the peer.
+pub(crate) fn resolve_peer_lineage<F: PeerEvidenceFetcher>(
+    fetcher: &F,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    peer_economic_position: u64,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<ValidatedPeerLineage, PeerLineageFailure> {
     let validated = validate_peer_lineage(
         fetcher,
         expected_network_id,
@@ -313,15 +339,15 @@ impl<'a> RecordingResolver<'a> {
     }
 
     /// The peer's lineage verified from this receiver's frontier, recorded at
-    /// the fetch boundary.
-    pub fn validated_peer_transition(
+    /// the fetch boundary, with the frontiers its credits' sources reached.
+    pub fn validated_peer_lineage(
         &self,
         peer_genesis: &[u8; 32],
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
         conditional: &dyn ConditionalPositionResolver,
-    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        resolve_peer(
+    ) -> Result<ValidatedPeerLineage, PeerLineageFailure> {
+        resolve_peer_lineage(
             self,
             &self.inner.expected_network_id,
             peer_genesis,

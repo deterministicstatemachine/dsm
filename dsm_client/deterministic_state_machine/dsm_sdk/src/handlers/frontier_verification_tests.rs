@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Frontier-relative verification (DSM Amendment A8, owner ruling
-//! 2026-09-30) on the storage nodes. A verifier starts at its own frontier
-//! for a peer, validates every step from there from that step's own
-//! evidence, checks a credit's source one hop back and no further, and reads
-//! nothing behind its frontier.
+//! Frontier-relative verification (DSM Amendment A8, owner rulings
+//! 2026-09-30 and 2026-10-01) on the storage nodes. A verifier starts at its
+//! own frontier for a peer, validates every step from there from that step's
+//! own evidence, validates a credit's source through the source's own
+//! segment back to a frontier it holds for the source, records the
+//! frontiers it reached with the acceptance, and reads nothing behind a
+//! frontier.
 
 use serial_test::serial;
 
@@ -139,6 +141,7 @@ async fn a_root_no_transition_explains_is_refused_where_it_sits() {
         profile.storage_set_id,
         dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
         &crate::sdk::signing_authority::current_public_key().expect("the device's AK"),
+        crate::sdk::signing_authority::current_att_a().expect("the device's AttA"),
     )
     .expect("a claim body");
     let claim = dsm::economic::claim_envelope::sign_economic_root_claim(
@@ -227,15 +230,16 @@ async fn a_receiver_reads_nothing_behind_its_frontier() {
     assert!(asked.contains(&past), "B read A's cell past its frontier");
 }
 
-/// A credit's source is validated one hop back and no further. C pays A,
-/// and A pays B; B meets both first. B validates A's credit step, and for
-/// its source validates C's paying step from its own evidence, over C's
-/// root chain from C's activation root: C's claim at 1 is read and
-/// authenticated by its manifest, and none of the evidence behind C's step
-/// at 1 is read.
+/// A credit's source is held to account through its own segment (DSM
+/// Amendment A8 as corrected for sources, owner 2026-10-01). C pays A, and A
+/// pays B; B meets both first. B validates A's credit step and, for its
+/// source, C's whole segment from C's activation root: C's step at 1 is
+/// validated from its own evidence, its witness and successor evidence read,
+/// before C's paying step at 2. A root C only registered would prove nothing
+/// about where its value came from.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_credits_source_is_validated_one_hop_back_and_no_further() {
+async fn a_credits_source_is_validated_through_its_own_segment() {
     use dsm::common::domain_tags::{
         TAG_DSM_ECONOMIC_ADMISSION_MANIFEST, TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE,
         TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
@@ -276,7 +280,7 @@ async fn a_credits_source_is_validated_one_hop_back_and_no_further() {
     else {
         panic!("C's faucet claim rides a DSM successor");
     };
-    let behind_the_hop = [
+    let the_sources_first_step = [
         object_read(
             TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
             &manifest.transition_witness_addr,
@@ -303,10 +307,219 @@ async fn a_credits_source_is_validated_one_hop_back_and_no_further() {
         asked.contains(&authenticated),
         "B authenticated C's claim at 1 by its manifest"
     );
-    for read in &behind_the_hop {
+    for read in &the_sources_first_step {
+        assert!(
+            asked.contains(read),
+            "B did not validate the source's step at 1 from its evidence: {read}"
+        );
+    }
+}
+
+/// A source's segment stops at the frontier the receiver already holds for
+/// it (owner 2026-10-01: "validate that source identity's economic segment
+/// backward until reaching a frontier that this verifier has already fully
+/// validated"). C pays B first, so B holds a frontier for C at C's paying
+/// step. Then C pays A, and A pays B. Validating A's credit, B walks C from
+/// that frontier: it reads C's cell past it, and none of C's cells at or
+/// behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_sources_segment_stops_at_the_frontier_the_receiver_holds() {
+    let p = Pair::boot(100, 0).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    for peer in [&p.a, &p.b] {
+        c.add_contact(peer).await;
+        peer.add_contact(&c).await;
+    }
+    c.fund_admitted(100).await;
+    let to_b = c.send(&p.b, 7).await;
+    assert!(to_b.success, "{:?}", to_b.error_message);
+    let first = p.b.sync().await;
+    assert!(first.success, "{:?}", first.errors);
+    assert_eq!(p.b.era_balance(), 7);
+
+    c.enter();
+    let (paid_b_at, _) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("C admitted its debit to B");
+    p.b.enter();
+    let frontier =
+        client_db::economic_lineage::frontier_below(&c.genesis, &c.device_id, paid_b_at + 1)
+            .expect("the frontier store")
+            .expect("B's frontier for C");
+    assert_eq!(frontier.economic_position(), paid_b_at);
+
+    let to_a = c.send(&p.a, 30).await;
+    assert!(to_a.success, "{:?}", to_a.error_message);
+    let credited = p.a.sync().await;
+    assert!(credited.success, "{:?}", credited.errors);
+    let sent = p.a.send(&p.b, 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+
+    c.enter();
+    let mut parent = dsm::economic::tree::empty_economic_root();
+    let mut behind = Vec::new();
+    for position in 1..=paid_b_at {
+        behind.push(cell_read(&c.genesis, &c.device_id, position, &parent));
+        parent = admitted(position).0;
+    }
+    let past = cell_read(&c.genesis, &c.device_id, paid_b_at + 1, &parent);
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let received = p.b.sync().await;
+    assert!(received.success, "{:?}", received.errors);
+    assert_eq!(p.b.era_balance(), 27);
+    let asked = requests(&p.nodes);
+    assert!(
+        asked.contains(&past),
+        "B read C's paying step to A, past its frontier"
+    );
+    for read in &behind {
         assert!(
             !asked.contains(read),
-            "B read the evidence behind the one-hop source: {read}"
+            "B read C's cell behind the frontier it holds for C: {read}"
+        );
+    }
+}
+
+/// C's three-device setup: A and B as a pair, C booted on the same fleet,
+/// all three contacts of each other, and C funded.
+async fn three_devices() -> (Pair, TestDevice) {
+    let p = Pair::boot(100, 0).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    for peer in [&p.a, &p.b] {
+        c.add_contact(peer).await;
+        peer.add_contact(&c).await;
+    }
+    c.fund_admitted(100).await;
+    (p, c)
+}
+
+/// C pays A `amount`, A takes it in, and the position C admitted the debit
+/// at.
+async fn c_pays_a(p: &Pair, c: &TestDevice, amount: u64) -> u64 {
+    let sent = c.send(&p.a, amount).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let credited = p.a.sync().await;
+    assert!(credited.success, "{:?}", credited.errors);
+    c.enter();
+    client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("C admitted its debit to A")
+        .0
+}
+
+/// The reads of C's root cells at positions `1..=through`, in C's own
+/// order, as the members log them.
+fn cs_cells_through(c: &TestDevice, through: u64) -> Vec<String> {
+    c.enter();
+    let mut parent = dsm::economic::tree::empty_economic_root();
+    let mut reads = Vec::new();
+    for position in 1..=through {
+        reads.push(cell_read(&c.genesis, &c.device_id, position, &parent));
+        parent = admitted(position).0;
+    }
+    reads
+}
+
+/// A source's frontier is cached with the acceptance (owner 2026-10-01:
+/// "Cache/update validated frontiers so subsequent interactions validate
+/// only the new suffix"). C has never paid B. C pays A and A pays B: B
+/// validates C's segment to the paying step and records its frontier for C
+/// there with the acceptance. C pays A again and A pays B again: B walks C
+/// from that frontier, reading C's cells past it and none at or behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_sources_frontier_is_recorded_and_the_next_credit_walks_only_its_suffix() {
+    let (p, c) = three_devices().await;
+    let first_source = c_pays_a(&p, &c, 30).await;
+    let sent = p.a.send(&p.b, 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let received = p.b.sync().await;
+    assert!(received.success, "{:?}", received.errors);
+    assert_eq!(p.b.era_balance(), 20);
+    p.b.enter();
+    let frontier =
+        client_db::economic_lineage::frontier_below(&c.genesis, &c.device_id, first_source + 1)
+            .expect("the frontier store")
+            .expect("B's frontier for C, recorded from the source's segment alone");
+    assert_eq!(
+        frontier.economic_position(),
+        first_source,
+        "B's frontier for C is the source step its acceptance validated"
+    );
+
+    let second_source = c_pays_a(&p, &c, 10).await;
+    let again = p.a.send(&p.b, 5).await;
+    assert!(again.success, "{:?}", again.error_message);
+    let behind = cs_cells_through(&c, first_source);
+    let past = cs_cells_through(&c, second_source)
+        .pop()
+        .expect("C's cell at its second paying step");
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let received = p.b.sync().await;
+    assert!(received.success, "{:?}", received.errors);
+    assert_eq!(p.b.era_balance(), 25);
+    let asked = requests(&p.nodes);
+    assert!(
+        asked.contains(&past),
+        "B read C's second paying step, past its frontier"
+    );
+    for read in &behind {
+        assert!(
+            !asked.contains(read),
+            "B read C's cell at or behind the frontier its first acceptance recorded: {read}"
+        );
+    }
+}
+
+/// One walk validates a source's segment once. C pays A twice, and A pays
+/// B out of both: validating A's segment, B walks C to the first paying
+/// step, and the walk to the second starts there. Every member is asked for
+/// each of C's cells at or behind the first paying step exactly as often as
+/// for C's second paying step, which any walk reads once: never once more
+/// for the second source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn one_walk_validates_a_sources_segment_once() {
+    let (p, c) = three_devices().await;
+    let first_source = c_pays_a(&p, &c, 30).await;
+    let second_source = c_pays_a(&p, &c, 10).await;
+    assert!(second_source > first_source);
+    let sent = p.a.send(&p.b, 35).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let behind = cs_cells_through(&c, first_source);
+    let second = cs_cells_through(&c, second_source)
+        .pop()
+        .expect("C's cell at its second paying step");
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let received = p.b.sync().await;
+    assert!(received.success, "{:?}", received.errors);
+    assert_eq!(p.b.era_balance(), 35);
+    let per_member = |read: &String| -> Vec<usize> {
+        p.nodes
+            .nodes
+            .iter()
+            .map(|n| n.requests().iter().filter(|r| *r == read).count())
+            .collect()
+    };
+    let once = per_member(&second);
+    assert!(
+        once.iter().any(|n| *n > 0),
+        "B validated C's second paying step"
+    );
+    for read in &behind {
+        assert_eq!(
+            per_member(read),
+            once,
+            "B walked C's segment through {read} more often than C's second paying step"
         );
     }
 }

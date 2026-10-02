@@ -312,3 +312,46 @@ async fn different_bytes_at_an_address_are_reported_as_corruption() {
         "the held row is left as it was"
     );
 }
+
+/// Puts made at one member at once never refuse each other. Three rounds of
+/// sixty-four different objects, each round put all at once, are each taken;
+/// and sixteen puts of one object at once are each acknowledged, under the
+/// one address. A serializable put refused some of a concurrent burst with a
+/// 500 (a serialization failure) though no two of them touched the same
+/// address, so a device's write could fail for having run beside another's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn puts_made_at_once_are_each_taken() {
+    let app = member("immutable_concurrent").await;
+    for round in 0..3u8 {
+        let objects: Vec<[u8; 3]> = (0..64u8).map(|i| [round, i, 0x5A]).collect();
+        let answers = futures::future::join_all(
+            objects
+                .iter()
+                .map(|object| put(&app, "DSM/test/concurrent", object)),
+        )
+        .await;
+        let refused: Vec<StatusCode> = answers
+            .iter()
+            .map(|(status, _)| *status)
+            .filter(|status| !status.is_success())
+            .collect();
+        assert_eq!(
+            refused,
+            Vec::<StatusCode>::new(),
+            "round {round}: distinct puts refused while others ran"
+        );
+    }
+
+    let answers = futures::future::join_all(
+        (0..16).map(|_| put(&app, "DSM/test/concurrent", b"one object put at once")),
+    )
+    .await;
+    let first = answers[0].1.clone();
+    for (status, addr) in &answers {
+        assert!(
+            status.is_success(),
+            "an identical put was refused: {status}"
+        );
+        assert_eq!(addr, &first, "every identical put names the one address");
+    }
+}
