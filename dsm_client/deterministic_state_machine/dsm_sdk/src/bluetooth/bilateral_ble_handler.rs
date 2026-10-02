@@ -1391,8 +1391,7 @@ impl BilateralBleHandler {
                         origin_commitment_hash,
                         counterparty_device_id,
                         sender_genesis,
-                        operation,
-                        terms,
+                        (operation, terms),
                         sender_ble_address,
                         in_flight,
                     )
@@ -1845,8 +1844,7 @@ impl BilateralBleHandler {
         commitment_hash: [u8; 32],
         counterparty_device_id: [u8; 32],
         counterparty_genesis_hash: [u8; 32],
-        operation: Operation,
-        terms: Option<dsm::types::operations::TransferTerms>,
+        (operation, terms): (Operation, Option<dsm::types::operations::TransferTerms>),
         sender_ble_address: Option<String>,
         in_flight: [u8; 32],
     ) -> Result<Vec<u8>, DsmError> {

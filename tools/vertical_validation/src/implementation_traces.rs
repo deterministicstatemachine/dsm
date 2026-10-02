@@ -1726,14 +1726,16 @@ fn build_signed_bilateral_transfer(
 ) -> Operation {
     let op = Operation::Transfer {
         policy_commit: era_policy_commit(),
-        token_id: b"ERA".to_vec(),
+        terms_commitment: dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![nonce; 8],
+            mode: TransactionMode::Bilateral,
+            memo: message.into(),
+            salt: vec![0x5A; 32],
+        }
+        .commitment(),
         to_device_id: remote_device_id.to_vec(),
         amount: Balance::amount(TRACE_BILATERAL_AMOUNT),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![nonce; 8],
-        recipient: remote_device_id.to_vec(),
-        to: b"trace-bilateral-recipient".to_vec(),
-        message: message.into(),
         signature: Vec::new(),
         authority_policy: None,
     };

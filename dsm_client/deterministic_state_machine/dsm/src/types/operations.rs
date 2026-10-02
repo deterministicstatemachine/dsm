@@ -2259,9 +2259,10 @@ impl Operation {
     /// §4.2.1 Authoritative binding: decode the sender's signed canonical
     /// preimage and bind it to the verified signature. This is the SINGLE
     /// trusted source for an inbound signed operation — callers MUST route
-    /// every value read (amount/token_id/recipient/nonce/message) off the
-    /// returned [`Operation`], never off any parallel structured field that
-    /// traveled alongside the signed bytes.
+    /// every value read (recipient/amount/policy commit) off the returned
+    /// [`Operation`], and a transfer's token, nonce and memo off
+    /// [`TransferTerms`] that open its commitment, never off any parallel
+    /// structured field that traveled alongside the signed bytes.
     ///
     /// Steps:
     /// 1. SPHINCS+ verify `signature` over `canonical_operation_bytes` under

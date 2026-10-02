@@ -2685,6 +2685,46 @@ Mutation control (item 16): the gate run on the previous manifest fails, "activi
 
 Outside this round: the anchor firmware's signing call sites turn an error into an empty signature (`unwrap_or_default`). Separately, `crates/dsm-anchor-hw-verifier/Cargo.lock` was already stale against `dsm_sdk` before this change. Only this change's own lines were added to it.
 
+### 6.71 A transfer's memo, ticker and nonce are in no public object (`security/minimum-disclosure`, pre-audit item 4, 2026-10-02)
+
+**The finding.** A transfer's signed operation (`Operation::Transfer`, tag 3) carried its memo, its token ticker, its nonce, its mode, the recipient's public key (`recipient`) and the recipient's id again as text (`to`), all in the clear. Those bytes are the step's public evidence: they hash into the relationship tip, ride the economic admission into the register, and a later counterparty of the recipient reads the operation when it walks the credit's source (peer lineage, §6.68). So the memo a payer wrote, and the nonce §6.67 shows is predictable from public identifiers, outlived the sealed spool (DSM Amendment A7) in every object that carries the operation.
+
+**The ruling.** Owner, 2026-10-02, the option "one shape, BLE carries terms": the signed transfer keeps only what admission needs (recipient, amount, policy commit, authority policy) and a salted commitment to the rest; the rest travels inside the sealed spool payload online and beside the operation on BLE; the recipient takes nothing it cannot open.
+
+**The fix.**
+- **One shape.** `Operation::Transfer` is `{to_device_id, amount, policy_commit, terms_commitment, signature, authority_policy}`, canonical tag 37. Tag 3 is retired: its bytes do not decode, and the value is never reused. `recipient` and `to` are deleted.
+- **The terms.** `TransferTerms {token_id, nonce, mode, memo, salt}` (`dsm::types::operations`), canonical bytes with a version tag; `terms_commitment = H(DSM/transfer-terms/v1; terms)`, the salt inside. The salt is 32 bytes drawn fresh from the OS RNG for each transfer, and a decode refuses one shorter than 128 bits. It is not derived from the step's Kyber secret: the operation is signed and advanced before the per-step encapsulation exists. It travels only with the terms, so it is as secret as they are.
+- **Opening.** `TransferTerms::open(op)` accepts terms only when their commitment is the operation's. Every reader of a term opens it first:
+  - online, `recipient_dispatch::recognize_transfer` reads `OnlineTransferRequest.transfer_terms` (field 15, inside the sealed payload); missing, undecodable or non-opening terms are `NotRecognized`, nothing is staged, and the copy is passed over (§6.64);
+  - the canonical apply (`apply_incoming_transfer_staged`) opens them again and takes the nonce it spends, in its relationship (§6.67), and the token from them;
+  - BLE, `BilateralPrepareRequest.transfer_terms` (field 19) rides beside `operation_data`; `bilateral_session::step_terms` refuses the prepare before any session exists, and a stored session's terms are opened again when it is restored;
+  - the inbox preview, the history row (`HISTORY_TERMS_KEY` beside `HISTORY_OPERATION_KEY`) and the BLE events show the token and memo only from opened terms.
+- **Asset names.** The ticker no longer names the asset anywhere value moves: the sender's debit, the BLE allocation spend and the BLE credit take the operation's signed `policy_commit`, and each requires the ticker its terms name to resolve to that commit. The recovery egress gate (`EgressAsset::Committed`) names a transfer's lock from its commit — the builtin's ticker, or the registry's id and ticker for it — and blocks an asset it cannot name while any lock is held.
+- **Storage.** `recipient_staged_transfer.terms_bytes` and `bilateral_sessions.terms_bytes`; client schema 28 (the beta does not migrate).
+- **What stays public**, by design: the recipient's device id, the amount, the asset's policy commit and the authority policy. These are what a third party verifies a credit's source against (`provenance`, `peer_lineage`, the write set), and none of those read anything else.
+
+**Tests.**
+- `dsm::types::operations::tests::transfer_terms`: the terms round-trip and open their transfer; terms differing in any field (the salt included) do not open it, and terms open no other operation; `a_salt_is_fresh_for_every_transfer`; a short salt, trailing bytes and an unknown version do not decode; the operation's bytes hold the commitment and no memo, nonce or salt; tag 3 does not decode.
+- `dsm_sdk::handlers::recipient_dispatch::tests::a_transfer_without_terms_that_open_it_is_not_recognized`: a transfer A signed whose request carries no terms, terms naming a memo A never signed, or bytes that are not terms, is not recognized and nothing is staged; with its own terms it is, and B reads the memo and nonce from them.
+- `dsm_sdk::bluetooth::offline_step_tests::a_bearer_prepare_without_terms_that_open_it_is_refused`: the same three over BLE are refused before any session exists; the honest prepare is taken and its session keeps the terms.
+- `dsm_sdk::handlers::node_e2e_tests::no_node_holds_a_transfers_memo_ticker_or_nonce`: after a transfer arrives and settles, no row of any table on any node — spool, register cells, admissions — holds the memo (as text or bytes), the nonce, the salt, or the ticker in the length-prefixed form the operation carried it in; the terms searched for are the ones the sender kept, and the recipient shows the memo it opened.
+- `dsm_sdk::handlers::bilateral_settlement::tests::a_transfer_settles_only_with_terms_that_open_it`.
+
+**Mutation controls.** Each was run on the committed code and restored afterwards.
+
+| Mutation | Red test |
+|---|---|
+| The commitment check removed: any terms open any transfer | `terms_that_differ_in_anything_do_not_open_the_transfer`, `a_transfer_without_terms_that_open_it_is_not_recognized`, `a_bearer_prepare_without_terms_that_open_it_is_refused` |
+| Online: terms decoded and taken without opening the commitment | `a_transfer_without_terms_that_open_it_is_not_recognized` |
+| BLE: terms decoded and taken without opening the commitment | `a_bearer_prepare_without_terms_that_open_it_is_refused` |
+| The salt taken from public data (a constant), not drawn fresh | `a_salt_is_fresh_for_every_transfer` |
+
+**Requirements.** MR-SOFI-0283 ("a transfer nonce stays in the operation bytes") now holds by commitment: the nonce is bound into the operation bytes, and through them the tip, by `terms_commitment`, not carried in the clear. The specification's wording predates the ruling. MR-DSM-0272 (sealed spool payloads) now covers the terms too: they ride only inside the sealed request.
+
+**A clean cut.** Every transfer's operation bytes change shape, so its digest, op id and tip do too. Nothing signed under tag 3 decodes. This ships with SPHINCS+ version 2 (§6.70), which already re-provisions every device.
+
+**Open.** On BLE the terms ride beside the operation in the clear, as the prepare always has: BLE is a direct link between the two parties, and the ruling chose it. `TokenSDK`'s generic transfer and its token-creation fee transfer commit to terms that nothing carries, so a recipient could not open them. Neither is reached today: `TokenOperation::Transfer` is built nowhere outside `TokenSDK`, and the one `TokenOperation::Create` the SDK builds (dBTC registration) charges no fee.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -3266,7 +3306,7 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 | MR-SOFI-0280 | Met | `dsm::types::device_state::DeviceState::derive_transition_entropy` | `dsm::types::device_state::tests::advance_derives_the_one_entropy_and_nothing_else_supplies_it`; `dsm::types::device_state::tests::changing_a_carried_byte_changes_the_derived_value_and_the_tip` | The cited line numbers are stale; the test recomputes H(DSM/state-entropy; e_n, op, h_n) explicitly and compares it byte for byte with what advance installs. |
 | MR-SOFI-0281 | Partial | `dsm::core::state_machine::StateMachine::prepare_advance_relationship`; `dsm_sdk::sdk::core_sdk::CoreSDK::admitted_advance` | — | SoFi producers reach DeviceState::advance only through CoreSDK::admitted_advance and then prepare_advance_relationship, but no test enforces this, and the canonical_rebuild path calls DeviceState::advance directly. |
 | MR-SOFI-0282 | Met | `dsm::types::device_state::DeviceState::derive_transition_entropy`; `dsm::types::device_state::DeviceState::advance` | `dsm::types::device_state::tests::advance_derives_the_one_entropy_and_nothing_else_supplies_it`; `dsm::types::device_state::tests::tip_and_both_receipt_hashes_contain_the_one_derived_value` | advance takes no entropy parameter, and the tip, C_pre and the symmetric tip are each checked against the one derived value. |
-| MR-SOFI-0283 | Partial | dsm · types/device_state.rs:977 (`operation.to_bytes()` hashed) | no test found | — |
+| MR-SOFI-0283 | Partial | dsm · types/operations.rs · `Operation::Transfer.terms_commitment`, `TransferTerms::commitment` | `dsm::types::operations::tests::transfer_terms::terms_that_differ_in_anything_do_not_open_the_transfer` | By commitment since §6.71 (pre-audit item 4): the nonce is bound into the operation bytes, and through them the tip, by the salted terms commitment, never in the clear. The specification's wording predates the ruling. |
 | MR-SOFI-0284 | Partial | dsm · types/device_state.rs (entropy-equality test exists) | device_state.rs:3724 test is generic, not a consolidated per-SoFi-op determinism/gate test | — |
 | MR-SOFI-0285 | Not code | — | — | Process rule |
 | MR-SOFI-0286 | Partial | — | — | ci/storage_is_dumb.sh exists and is wired in production_safety_checks.sh, but nothing injects a banned token to show the gate fails, and the requirement is exactly that mutation proof. |
