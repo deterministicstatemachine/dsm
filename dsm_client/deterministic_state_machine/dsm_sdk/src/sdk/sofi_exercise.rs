@@ -115,31 +115,34 @@ pub(crate) fn attempt_cell(
 /// Write `exercise` to every successor key its `F` names — `K^(a_j)` of
 /// `v_j` at the parent `R_j` its `P` names — along each cell's route,
 /// continuing an earlier write of the same bytes. The bytes are the same at
-/// every seat.
+/// every seat. Each leg's key is its own vault's cell on its own route, so
+/// the legs are written at once, and reported in the order `F` names them.
 pub async fn write_exercise(
     set: &StorageSet,
     exercise: &SofiExercise,
     recognized: &RecognizedExercise,
 ) -> Result<Vec<LegWrite>, DsmError> {
     let bytes = exercise.encode();
-    let mut writes = Vec::new();
-    for attempt in recognized.fulfillment().body.attempts() {
-        let leg = recognized
-            .precommit()
-            .body
-            .legs()
-            .iter()
-            .find(|l| l.vault_id == attempt.vault_id)
-            .ok_or_else(|| err("exercise", "an attempt names a vault P has no leg for"))?;
-        let cell = attempt_cell(set, &leg.vault_id, &leg.parent_root, attempt.attempt)?;
-        let write = write_recorded(set, cell.routed(), &bytes).await?;
-        writes.push(LegWrite {
-            vault_id: leg.vault_id,
-            parent_root: leg.parent_root,
-            attempt: attempt.attempt,
-            key: *cell.routed().key(),
-            reached_leader: write.reached_leader(),
-        });
-    }
-    Ok(writes)
+    let bytes = &bytes;
+    futures::future::try_join_all(recognized.fulfillment().body.attempts().iter().map(
+        |attempt| async move {
+            let leg = recognized
+                .precommit()
+                .body
+                .legs()
+                .iter()
+                .find(|l| l.vault_id == attempt.vault_id)
+                .ok_or_else(|| err("exercise", "an attempt names a vault P has no leg for"))?;
+            let cell = attempt_cell(set, &leg.vault_id, &leg.parent_root, attempt.attempt)?;
+            let write = write_recorded(set, cell.routed(), bytes).await?;
+            Ok::<_, DsmError>(LegWrite {
+                vault_id: leg.vault_id,
+                parent_root: leg.parent_root,
+                attempt: attempt.attempt,
+                key: *cell.routed().key(),
+                reached_leader: write.reached_leader(),
+            })
+        },
+    ))
+    .await
 }

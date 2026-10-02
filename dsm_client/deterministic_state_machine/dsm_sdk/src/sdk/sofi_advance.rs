@@ -38,7 +38,7 @@ use dsm::sofi::lineage::{advance_resolved, descendant_fence, AdvanceError};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
-use dsm::sofi::resolve::{AcceptedGeneses, Acquired};
+use dsm::sofi::resolve::{AcceptedGeneses, Acquired, SofiReads as _};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::validation::{trader_balance_changes, trader_post_states, vault_post_states};
 use dsm::sofi::wire::{
@@ -751,7 +751,13 @@ pub async fn resolve_pending_position(
     };
     // Each stage logs where it ends; the log's own timestamps time it.
     log::info!("[sofi settle] position {q}: its registration read");
-    let precommit = match fetch_precommit(set, fulfillment.body.precommit_id()).await? {
+    // Through the verifier's reads: the walks below read the same precommit,
+    // and this resolution fetches it once.
+    let precommit = match verifier
+        .reads
+        .precommit(fulfillment.body.precommit_id())
+        .map_err(|e| storage("precommit", e))?
+    {
         Resolved::Kept(precommit) => precommit.body,
         Resolved::None | Resolved::Unavailable => return not_yet(NotResolved::PrecommitNotStored),
     };

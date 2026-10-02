@@ -14,9 +14,11 @@ use std::future::Future;
 use dsm::ccb::StorageSetMembers;
 use dsm::common::domain_tags::{TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR};
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
-use dsm::economic::peer_lineage::peer_root_at;
-use dsm::economic::provenance::{PeerLineageFailure, ValidatedPeerTransition};
-use dsm::route_chain::{CellEvidence, CompletionProof, RoutedCell};
+use dsm::crypto::domain::TaggedHashDomain;
+use dsm::economic::peer_lineage::{peer_root_at, PeerEvidenceFetcher};
+use dsm::economic::provenance::{PeerLineageFailure, ReserveReleaseWin, ValidatedPeerTransition};
+use dsm::economic::register::{read_root_cell, RootCell};
+use dsm::route_chain::{CellEvidence, CellReading, ChainState, CompletionProof, RoutedCell};
 use dsm::sofi::derive;
 use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
@@ -97,6 +99,143 @@ pub struct LiveSofiReads<'a> {
     /// context's life: they are verified, so a walk that meets one trader's
     /// exercises again does not walk that lineage again.
     roots: std::sync::Mutex<BTreeMap<(D32, D32, u64), (ValidatedEconomicRoot, ParentClaimRef)>>,
+    /// What this context read and keeps for its life — one resolution, one
+    /// quote, one walk — so the verifier's passes over the same cells and
+    /// objects read each once ([`ReadOnce`]).
+    once: ReadOnce,
+}
+
+/// The readings one context keeps: only those nothing later can change. A
+/// cell's reads are kept once Core evaluated them as showing a final value
+/// at the cell — a final value holds the cell for good; an object once Core
+/// read it `Stored`, kept under its id, or re-hashed to its address; a
+/// locator's candidates once every one was examined. An open or undecided
+/// cell, and an unavailable or partial reading, is read again each time it
+/// is asked for: it may have been written since.
+#[derive(Default)]
+struct ReadOnce {
+    cells: std::sync::Mutex<BTreeMap<CellId, CellEvidence>>,
+    objects: std::sync::Mutex<BTreeMap<D32, Option<Vec<u8>>>>,
+    /// The peer walks' immutable objects, by namespace and identity: bytes a
+    /// member served that re-hashed to their address.
+    fetched: std::sync::Mutex<BTreeMap<(Vec<u8>, D32), Vec<u8>>>,
+    precommits: std::sync::Mutex<BTreeMap<D32, Resolved<Signed<TraderPrecommitBody>>>>,
+    fulfillments: std::sync::Mutex<BTreeMap<D32, Resolved<Signed<TraderFulfillmentBody>>>>,
+    setups: std::sync::Mutex<BTreeMap<D32, Resolved<Vec<u8>>>>,
+    geneses: std::sync::Mutex<BTreeMap<D32, Discovered<(VaultGenesisPreimage, Vec<u8>)>>>,
+}
+
+/// A cell as its reading depends on it: the namespace and key it is read
+/// at, and the seed and committed set its route is derived from.
+type CellId = (Vec<u8>, D32, D32, D32);
+
+fn cell_id(cell: &RoutedCell) -> CellId {
+    (
+        cell.namespace().to_vec(),
+        *cell.key(),
+        *cell.seed(),
+        *cell.committed_set_id(),
+    )
+}
+
+/// The kept readings could not be consulted.
+struct Unkept(String);
+
+impl From<Unkept> for ReadFailure {
+    fn from(unkept: Unkept) -> Self {
+        ReadFailure(format!("the readings kept: {}", unkept.0))
+    }
+}
+
+impl From<Unkept> for PeerLineageFailure {
+    fn from(unkept: Unkept) -> Self {
+        PeerLineageFailure::Incomplete(format!("the readings kept: {}", unkept.0))
+    }
+}
+
+/// `memo`'s reading under `key`, or `read` it and keep it when `complete`.
+fn read_once<K: Ord, V: Clone, E: From<Unkept>>(
+    memo: &std::sync::Mutex<BTreeMap<K, V>>,
+    key: K,
+    read: impl FnOnce() -> Result<V, E>,
+    complete: impl FnOnce(&V) -> bool,
+) -> Result<V, E> {
+    let lock = || memo.lock().map_err(|e| Unkept(e.to_string()));
+    if let Some(kept) = lock()?.get(&key) {
+        return Ok(kept.clone());
+    }
+    let reading = read()?;
+    if complete(&reading) {
+        lock()?.insert(key, reading.clone());
+    }
+    Ok(reading)
+}
+
+/// Every candidate under the locator was examined.
+fn discovered_all<T>(discovered: &Discovered<T>) -> bool {
+    matches!(discovered, Discovered::Complete(..))
+}
+
+/// The peer walks' reads, through the context's: every step of a lineage
+/// fetches the objects its steps share again, and a resolution that walks a
+/// lineage twice reads its register cells twice. Each is read once.
+struct OnceFetcher<'r, 'a> {
+    live: LiveRegisterResolver<'a>,
+    once: &'r ReadOnce,
+}
+
+impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
+    fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
+        // Kept once Core reads a final claim at the cell from them.
+        read_once(
+            &self.once.cells,
+            cell_id(cell.routed()),
+            || self.live.register_cell(cell),
+            |evidence| {
+                matches!(
+                    read_root_cell(cell, evidence),
+                    Ok(CellReading::Held {
+                        state: ChainState::Final,
+                        ..
+                    })
+                )
+            },
+        )
+    }
+
+    fn native_reserve_release(
+        &self,
+        reserve_id: &D32,
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        self.live.native_reserve_release(reserve_id, generation)
+    }
+
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<StorageSetMembers, PeerLineageFailure> {
+        self.live.root_register_candidate_set(network_id)
+    }
+
+    fn immutable(
+        &self,
+        namespace: TaggedHashDomain<'static>,
+        addr: &D32,
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        // Kept only as the object it is: bytes whose identity under
+        // `namespace`, recomputed here, is `addr`.
+        read_once(
+            &self.once.fetched,
+            (namespace.source_bytes().to_vec(), *addr),
+            || self.live.immutable(namespace, addr),
+            |bytes| dsm::storage_object::immutable_inner(namespace, bytes) == *addr,
+        )
+    }
+
+    fn anchored_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.live.anchored_policy_bytes(policy_commit)
+    }
 }
 
 impl<'a> LiveSofiReads<'a> {
@@ -107,14 +246,20 @@ impl<'a> LiveSofiReads<'a> {
             network: committed_network_id()?,
             own,
             roots: std::sync::Mutex::new(BTreeMap::new()),
+            once: ReadOnce::default(),
         })
     }
 
-    fn peer_resolver(&self) -> LiveRegisterResolver<'_> {
-        LiveRegisterResolver {
-            set: self.set,
-            runtime: self.runtime.clone(),
-            expected_network_id: self.network.clone(),
+    /// The peer walks' fetcher: the live one, through this context's
+    /// readings.
+    fn peer_resolver(&self) -> OnceFetcher<'_, '_> {
+        OnceFetcher {
+            live: LiveRegisterResolver {
+                set: self.set,
+                runtime: self.runtime.clone(),
+                expected_network_id: self.network.clone(),
+            },
+            once: &self.once,
         }
     }
 
@@ -170,27 +315,60 @@ fn recognize_genesis(bytes: &[u8]) -> Option<(VaultGenesisPreimage, Vec<u8>)> {
 
 impl SofiReads for LiveSofiReads<'_> {
     fn cell(&self, cell: &RoutedCell) -> Result<CellEvidence, ReadFailure> {
+        // The reads Core evaluated as final here are kept with the
+        // completion proof ([`Self::keep_completion`]); anything else is
+        // read again.
+        let kept = self
+            .once
+            .cells
+            .lock()
+            .map_err(|e| ReadFailure::from(Unkept(e.to_string())))?
+            .get(&cell_id(cell))
+            .cloned();
+        if let Some(kept) = kept {
+            return Ok(kept);
+        }
         let seats = NodeSeats::new(self.set).map_err(|e| ReadFailure(format!("seats: {e}")))?;
         Ok(self.block(read_cell(&seats, cell)))
     }
 
     fn precommit(&self, id: &D32) -> Result<Resolved<Signed<TraderPrecommitBody>>, ReadFailure> {
-        self.read("precommit", fetch_precommit(self.set, id))
+        read_once(
+            &self.once.precommits,
+            *id,
+            || self.read("precommit", fetch_precommit(self.set, id)),
+            |read| matches!(read, Resolved::Kept(..)),
+        )
     }
 
     fn fulfillment(
         &self,
         id: &D32,
     ) -> Result<Resolved<Signed<TraderFulfillmentBody>>, ReadFailure> {
-        self.read("fulfillment", fetch_fulfillment(self.set, id))
+        read_once(
+            &self.once.fulfillments,
+            *id,
+            || self.read("fulfillment", fetch_fulfillment(self.set, id)),
+            |read| matches!(read, Resolved::Kept(..)),
+        )
     }
 
     fn setup_bytes(&self, setup_ref: &D32) -> Result<Resolved<Vec<u8>>, ReadFailure> {
-        self.read("setup", fetch_setup_bytes(self.set, setup_ref))
+        read_once(
+            &self.once.setups,
+            *setup_ref,
+            || self.read("setup", fetch_setup_bytes(self.set, setup_ref)),
+            |read| matches!(read, Resolved::Kept(..)),
+        )
     }
 
     fn stored_bytes(&self, addr: &D32) -> Result<Option<Vec<u8>>, ReadFailure> {
-        self.read("stored bytes", read_stored_bytes(self.set, addr))
+        read_once(
+            &self.once.objects,
+            *addr,
+            || self.read("stored bytes", read_stored_bytes(self.set, addr)),
+            Option::is_some,
+        )
     }
 
     fn token_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, ReadFailure> {
@@ -203,22 +381,29 @@ impl SofiReads for LiveSofiReads<'_> {
         vault_id: &D32,
     ) -> Result<Discovered<(VaultGenesisPreimage, Vec<u8>)>, ReadFailure> {
         let locator = derive::vault_genesis_locator(vault_id);
-        self.read(
-            "vault genesis candidates",
-            resolve_locator_all(
-                self.set,
-                TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
-                &locator,
-                LOCATOR_BUDGET,
-                |bytes| {
-                    recognize_genesis(bytes).map(|(preimage, bytes)| {
-                        (
-                            derive::vault_genesis_locator(&preimage.vault_id()),
-                            (preimage, bytes),
-                        )
-                    })
-                },
-            ),
+        read_once(
+            &self.once.geneses,
+            *vault_id,
+            || {
+                self.read(
+                    "vault genesis candidates",
+                    resolve_locator_all(
+                        self.set,
+                        TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                        &locator,
+                        LOCATOR_BUDGET,
+                        |bytes| {
+                            recognize_genesis(bytes).map(|(preimage, bytes)| {
+                                (
+                                    derive::vault_genesis_locator(&preimage.vault_id()),
+                                    (preimage, bytes),
+                                )
+                            })
+                        },
+                    ),
+                )
+            },
+            discovered_all,
         )
     }
 
@@ -336,9 +521,16 @@ impl SofiReads for LiveSofiReads<'_> {
     fn keep_completion(
         &self,
         cell: &RoutedCell,
+        evidence: &CellEvidence,
         proof: &CompletionProof,
     ) -> Result<(), ReadFailure> {
-        keep_completion(cell, proof).map_err(|e| ReadFailure(format!("keep completion: {e}")))
+        keep_completion(cell, proof).map_err(|e| ReadFailure(format!("keep completion: {e}")))?;
+        self.once
+            .cells
+            .lock()
+            .map_err(|e| ReadFailure::from(Unkept(e.to_string())))?
+            .insert(cell_id(cell), evidence.clone());
+        Ok(())
     }
 }
 

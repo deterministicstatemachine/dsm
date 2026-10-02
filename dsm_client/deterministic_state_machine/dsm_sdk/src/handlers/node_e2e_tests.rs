@@ -867,12 +867,16 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         "the re-aimed exercise holds the next generation's first key, final"
     );
 
-    // The walk at the next generation, with every node's request log cleared.
+    // The walk at the next generation, by a verifier that has read nothing
+    // yet — this one keeps the held key's final reads — with every node's
+    // request log cleared: what the walk reads, the nodes are asked.
+    let walking = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     for node in &p.nodes.nodes {
         node.forget_requests();
     }
     let chains = BTreeMap::from([(m.vault_id, chain)]);
-    let walked = verifier
+    let walked = walking
+        .verifier()
         .walk_parent(&chains, &m.vault_id, &r1, 0, WALK_BUDGET)
         .expect("the walk");
     assert_eq!(walked.outcome, WalkOutcome::Unresolved { attempt: 1 });
@@ -1941,9 +1945,10 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
     fn keep_completion(
         &self,
         cell: &dsm::route_chain::RoutedCell,
+        evidence: &dsm::route_chain::CellEvidence,
         proof: &dsm::route_chain::CompletionProof,
     ) -> Result<(), dsm::sofi::resolve::ReadFailure> {
-        self.live.keep_completion(cell, proof)
+        self.live.keep_completion(cell, evidence, proof)
     }
 }
 
@@ -2052,4 +2057,167 @@ async fn an_operations_verifiers_share_the_geneses_it_accepted() {
         (2, 3),
         "a new operation walks the owner's lineage again"
     );
+}
+
+/// One resolution asks each node once for a cell holding a final value, an
+/// index or an object. On the rig one settle read 33 cells, 6 of them
+/// distinct: the walk of each leg's vault and the facts it established
+/// re-read what the resolution had read already, the precommit was fetched
+/// twice, each step of the vault owner's lineage fetched again an object the
+/// steps share, and each vault's genesis locator was scanned four times. A
+/// cell still open is read again each time it is asked for — anyone may
+/// write it meanwhile — and here those are each vault's next key.
+///
+/// B's order is split across two vaults A opened one after the other, so
+/// its resolution walks A's lineage twice — to the position each vault was
+/// opened at — over the same cells and objects below the first. B's first
+/// order realizes and sets it up with both; its second is left pending —
+/// its position pair's leader refuses the pair — then the pair lands and
+/// the fulfillment completes. One resolution of it realizes the position and
+/// asks no node twice for anything but an open key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let one = create_vault(&p.a, (era, 100), (tkn, 1_000)).await;
+    let two = create_vault(&p.a, (era, 100), (tkn, 1_000)).await;
+    adopt(&p.b, &tkn).await;
+    let split = |amount: u64| {
+        let b = &p.b;
+        async move {
+            let hops = match payload(
+                &invoke(
+                    b,
+                    "sofi.findRoute",
+                    args(&generated::SofiFindRouteRequest {
+                        token_in_policy_commit: era.to_vec(),
+                        token_out_policy_commit: tkn.to_vec(),
+                        amount_in_entered: entered(b, &era, amount),
+                    }),
+                )
+                .await,
+            ) {
+                Payload::SofiFindRouteResponse(r) => r.hops,
+                other => panic!("sofi.findRoute answered {other:?}"),
+            };
+            let mut vaults: Vec<Vec<u8>> = hops.iter().map(|h| h.vault_id.clone()).collect();
+            vaults.sort();
+            let mut both = vec![one.to_vec(), two.to_vec()];
+            both.sort();
+            assert_eq!(vaults, both, "the order splits across A's two vaults");
+            args(&generated::SofiRouteRequest {
+                vault_ids: hops.iter().map(|h| h.vault_id.clone()).collect(),
+                token_in_policy_commit: era.to_vec(),
+                amount_in_entered: entered(b, &era, amount),
+                min_amount_out_entered: entered(b, &tkn, 1),
+                token_out_policy_commit: tkn.to_vec(),
+            })
+        }
+    };
+    realized_through(&p.b, "sofi.route", split(60).await).await;
+    assert_eq!(setups(&p.b).await, 2, "B set up with both vaults");
+
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let pair_leader = member_name(pair.fulfillment().route().leader());
+    p.nodes
+        .refuse_cell_writes(
+            &pair_leader,
+            &[*pair.fulfillment().key(), *pair.root().routed().key()],
+        )
+        .await;
+    let r = invoke(&p.b, "sofi.route", split(60).await).await;
+    assert_eq!(position_of(&r, "sofi.route"), (q, exhausted));
+    p.nodes.accept_cell_writes(&pair_leader).await;
+    assert!(matches!(complete(&p).await, Completion::Written(..)));
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    p.b.enter();
+    let advanced = crate::sdk::sofi_advance::resolve_pending_position(
+        &p.b.router().core_sdk,
+        &set,
+        &dsm::sofi::resolve::AcceptedGeneses::default(),
+    )
+    .await
+    .expect("the resolution");
+    assert!(
+        matches!(
+            advanced,
+            crate::sdk::sofi_advance::Advanced::Installed {
+                resolution: dsm::sofi::resolution::Resolution::Realized,
+                ..
+            }
+        ),
+        "one resolution realizes the position: {advanced:?}"
+    );
+    let asked: Vec<(String, BTreeMap<String, usize>)> = p
+        .nodes
+        .nodes
+        .iter()
+        .map(|node| {
+            let mut asked: BTreeMap<String, usize> = BTreeMap::new();
+            for request in node.requests() {
+                if [
+                    "GET /api/v2/cell/",
+                    "GET /api/v2/immutable/",
+                    "GET /api/v2/index/",
+                ]
+                .iter()
+                .any(|read| request.starts_with(read))
+                {
+                    *asked.entry(request).or_insert(0) += 1;
+                }
+            }
+            (node.member_id.clone(), asked)
+        })
+        .collect();
+
+    // Each vault's next key: the first attempt key at the generation this
+    // position's exercise produced, open, as a verifier that has read
+    // nothing yet finds it.
+    let (own, parents) = standing_of(&p.b);
+    let reading = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let verifier = reading.verifier();
+    let mut open = Vec::new();
+    for vault_id in [one, two] {
+        let chain = verifier.chain(&vault_id).expect("the vault's chain");
+        let head = *chain.roots().last().expect("the vault's head");
+        assert_eq!(
+            verifier
+                .read_attempt_cell(&vault_id, &head, 0)
+                .expect("read")
+                .expect("decided")
+                .fact(),
+            CellFact::Open,
+            "the vault's next key is open"
+        );
+        let next = attempt_cell(&set, &vault_id, &head, 0).expect("the next key");
+        open.push(format!(
+            "GET /api/v2/cell/{}",
+            crate::util::text_id::encode_base32_crockford(next.routed().key())
+        ));
+    }
+    for (member, asked) in &asked {
+        let again: Vec<_> = asked
+            .iter()
+            .filter(|(request, times)| **times > 1 && !open.contains(request))
+            .collect();
+        assert!(
+            again.is_empty(),
+            "{member} was asked again for what the resolution had read: {again:?}"
+        );
+    }
 }

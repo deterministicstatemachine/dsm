@@ -573,6 +573,45 @@ async fn vault_at_head(
     vault_id: &D32,
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
     let chain = verifier.chain(vault_id).map_err(verifier_error)?;
+    head_of(set, verifier, vault_id, chain).await
+}
+
+/// Each of `vault_ids`' chains, walked at once, in the order given. A vault's
+/// walk reads its owner's lineage and its own cells, and needs nothing
+/// another vault's walk finds first, so each runs on a thread of its own over
+/// the one verifier: the reads it keeps are shared, and each read blocks only
+/// its own walk.
+fn chains_at_once(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_ids: &[D32],
+) -> Vec<Result<VaultChain, DsmError>> {
+    tokio::task::block_in_place(|| {
+        std::thread::scope(|scope| {
+            let walks: Vec<_> = vault_ids
+                .iter()
+                .map(|vault_id| {
+                    scope.spawn(move || verifier.chain(vault_id).map_err(verifier_error))
+                })
+                .collect();
+            // A walk that panicked panics here, as it would have in line.
+            walks
+                .into_iter()
+                .map(|walk| match walk.join() {
+                    Ok(chain) => chain,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                })
+                .collect()
+        })
+    })
+}
+
+/// `vault_id` at the head of its walked `chain`.
+async fn head_of(
+    set: &StorageSet,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_id: &D32,
+    chain: VaultChain,
+) -> Result<(VaultAtHead, VaultChain), DsmError> {
     let (generation, root) = chain
         .head()
         .ok_or_else(|| refuse("no head of this vault is established"))?;
@@ -1568,8 +1607,12 @@ pub async fn trade(
     let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let mut heads = Vec::with_capacity(intent.vault_ids.len());
-    for vault_id in &intent.vault_ids {
-        heads.push(vault_at_head(set, &verifier, vault_id).await?.0);
+    for (vault_id, chain) in intent
+        .vault_ids
+        .iter()
+        .zip(chains_at_once(&verifier, &intent.vault_ids))
+    {
+        heads.push(head_of(set, &verifier, vault_id, chain?).await?.0);
     }
     log::info!("[sofi] trade: walked {} vault heads", heads.len());
     // A chain, or a split across two vaults of the pair (Amendment S19),
