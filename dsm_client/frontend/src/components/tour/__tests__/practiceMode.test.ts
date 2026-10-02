@@ -12,61 +12,22 @@
 //! writes and holds equal to the live ingress. A request Rust has no recorded
 //! answer for is the bridge's error, so these tests pass only on Rust's answers.
 
-import { readFileSync } from 'fs';
 import { join } from 'path';
-import * as pb from '../../../proto/dsm_app_pb';
+import { answerFromRustRecord } from '../../../tests/helpers/rustIngressRecord';
 import { dsmClient } from '../../../services/dsmClient';
 import { routerQueryBin } from '../../../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../../../dsm/decoding';
 import { practiceMode, PRACTICE_CONTACT_ALIAS, PRACTICE_CONTACT_DEVICE_ID } from '../practiceMode';
+import { encodeBase32Crockford } from '../../../utils/textId';
 
 const client = dsmClient as unknown as Record<string, (...args: any[]) => Promise<any>>;
 
-type RecordedAnswer = { request: Uint8Array; response: Uint8Array };
-
-/** Rust's record: length-prefixed pairs of an IngressRequest and the IngressResponse the JNI handed back. */
-function rustRecord(): RecordedAnswer[] {
-  const bytes = new Uint8Array(readFileSync(join(__dirname, 'fixtures/wallet_amount.ingress.bin')));
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let at = 0;
-  const part = (): Uint8Array => {
-    const length = view.getUint32(at);
-    const out = bytes.slice(at + 4, at + 4 + length);
-    at += 4 + length;
-    return out;
-  };
-  const answers: RecordedAnswer[] = [];
-  while (at < bytes.length) answers.push({ request: part(), response: part() });
-  return answers;
-}
-
-const sameBytes = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.every((v, i) => v === b[i]);
-
-/** The app's bridge, answering the native ingress from Rust's record and nothing else. */
-function answerFromRustRecord(): void {
-  const record = rustRecord();
-  window.DsmBridge = {
-    sendMessageBin: async (bytes: Uint8Array): Promise<Uint8Array> => {
-      const call = pb.BridgeRpcRequest.fromBinary(bytes);
-      const payload = call.payload.case === 'bytes' ? call.payload.value.data : new Uint8Array(0);
-      const answer = call.method === 'nativeBoundaryIngress'
-        ? record.find((recorded) => sameBytes(recorded.request, payload))
-        : undefined;
-      if (!answer) {
-        const message = `Rust has no recorded answer to this ${call.method} request`;
-        return new pb.BridgeRpcResponse({ result: { case: 'error', value: { errorCode: 1, message } } }).toBinary();
-      }
-      return new pb.BridgeRpcResponse({
-        result: { case: 'success', value: { data: new Uint8Array(answer.response) } },
-      }).toBinary();
-    },
-  };
-}
+const RECORD = join(__dirname, 'fixtures/wallet_amount.ingress.bin');
 
 const eraRow = async () => (await client.getAllBalances()).find((r: any) => r.tokenId === 'ERA');
 
 describe('practice mode answers as the real calls do', () => {
-  beforeAll(() => answerFromRustRecord());
+  beforeAll(() => answerFromRustRecord(RECORD));
   beforeEach(() => practiceMode.enter());
   afterEach(() => practiceMode.leave());
 
@@ -94,6 +55,38 @@ describe('practice mode answers as the real calls do', () => {
     expect(online).toEqual({ success: false, message: expect.stringContaining('names no token') });
   });
 
+  // It answered `ok` where the real call answers `accepted`, which the contacts
+  // store read as a refusal, and stored one fixed practice id for every device.
+  it('adds a contact in the shape the real addContact answers, under the ids of the card Rust read', async () => {
+    const card = {
+      deviceId: new Uint8Array(32).fill(0xb0),
+      genesisHash: new Uint8Array(32).fill(0xb1),
+      signingPublicKey: new Uint8Array(64).fill(0xb2),
+    };
+    const contactId = encodeBase32Crockford(card.deviceId);
+    const added = await client.addContact({ alias: ' bob ', ...card });
+    expect(added.accepted).toBeTruthy();
+    expect(added).toEqual(expect.objectContaining({ contactId, alias: 'bob' }));
+    const { contacts } = await client.getContacts();
+    expect(contacts.map((c: any) => c.alias)).toEqual([PRACTICE_CONTACT_ALIAS, 'bob']);
+    expect(contacts[1]).toEqual(expect.objectContaining({
+      deviceId: contactId,
+      genesisHash: encodeBase32Crockford(card.genesisHash),
+      signingPublicKey: encodeBase32Crockford(card.signingPublicKey),
+    }));
+  });
+
+  it('names a contact added with no alias as Rust does: by its device id', async () => {
+    const deviceId = new Uint8Array(32).fill(0xc0);
+    const added = await client.addContact({
+      alias: '',
+      deviceId,
+      genesisHash: new Uint8Array(32).fill(0xc1),
+      signingPublicKey: new Uint8Array(64).fill(0xc2),
+    });
+    expect(added).toEqual(expect.objectContaining({ alias: encodeBase32Crockford(deviceId).slice(0, 8) }));
+  });
+
   it('refuses moving offline cash: practice never touches the real allocation', async () => {
     await expect(client.loadOfflineCash('PLAY', '5')).rejects.toThrow(/Practice mode/);
     await expect(client.unloadOfflineCash('PLAY', '5')).rejects.toThrow(/Practice mode/);
@@ -101,7 +94,7 @@ describe('practice mode answers as the real calls do', () => {
 });
 
 describe('practice ERA counts as Rust counts ERA', () => {
-  beforeAll(() => answerFromRustRecord());
+  beforeAll(() => answerFromRustRecord(RECORD));
   beforeEach(() => practiceMode.enter());
   afterEach(() => practiceMode.leave());
 

@@ -211,7 +211,7 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
             : 'Enter the contact code shown with the QR, or use the camera.'}
       </p>
 
-      <section className="sb-card">
+      <section className="sb-card" data-tour="contact-code">
         <div className="sb-card__title">Enter Contact Code</div>
         <div className="sb-field">
           <textarea
