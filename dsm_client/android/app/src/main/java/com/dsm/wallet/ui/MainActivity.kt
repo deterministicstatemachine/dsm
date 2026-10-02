@@ -4,6 +4,7 @@ package com.dsm.wallet.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -1727,6 +1728,23 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
+    /**
+     * A page asked to leave the app. Only the beta issue form goes, to the
+     * system browser; every other address is refused (pre-audit item 13).
+     */
+    private fun openOutside(uri: Uri) {
+        when (WebNavigationPolicy.decide(uri.scheme, uri.host, uri.path)) {
+            WebNavigation.IssueForm ->
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                } catch (e: ActivityNotFoundException) {
+                    Log.w(tag, "No browser to open the issue form in", e)
+                }
+            WebNavigation.App, WebNavigation.NativeQr, WebNavigation.Refused ->
+                Log.w(tag, "Refused to open ${uri.scheme}://${uri.host} outside the app")
+        }
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView(wv: WebView) {
         assetLoader = WebViewAssetLoader.Builder()
@@ -1776,21 +1794,14 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     val hitResult = view?.hitTestResult
                     val url = hitResult?.extra
                     if (!url.isNullOrEmpty()) {
-                        Log.i(tag, "window.open intercepted — opening in system browser: $url")
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                        startActivity(intent)
+                        openOutside(Uri.parse(url))
                         return false
                     }
                     // Secondary path: create a temporary WebView to capture the URL
                     val tempWebView = WebView(view?.context ?: this@MainActivity)
                     tempWebView.webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
-                            val uri = request?.url
-                            if (uri != null) {
-                                Log.i(tag, "window.open secondary path: opening in system browser: ${uri.host}")
-                                val intent = Intent(Intent.ACTION_VIEW, uri)
-                                startActivity(intent)
-                            }
+                            request?.url?.let { openOutside(it) }
                             tempWebView.destroy()
                             return true
                         }
@@ -1874,7 +1885,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                             try {
                                 if (WebViewFeature.isFeatureSupported(WebViewFeature.POST_WEB_MESSAGE)) {
                                     val msg = WebMessageCompat("", arrayOf(port))
-                                    WebViewCompat.postWebMessage(target, msg, "https://appassets.androidplatform.net".toUri())
+                                    WebViewCompat.postWebMessage(target, msg, WebNavigationPolicy.APP_ORIGIN.toUri())
                                     pendingJsPort = null
                                     Log.i(tag, "Delivered DSM MessagePort to page")
                                 }
@@ -1908,31 +1919,25 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return assetLoader.shouldInterceptRequest(uri)
             }
 
+            // Every navigation goes through WebNavigationPolicy (pre-audit item 13):
+            // only the app's own page loads here; the QR link and the issue form
+            // are handled natively; everything else is refused.
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                try {
-                    val uri = request?.url ?: return false
-                    // Handle native DSM deep links
-                    if (uri.scheme == "dsm" && uri.host == "native") {
-                        val path = uri.path ?: ""
-                        if (path == "/qr/start") {
-                            Log.i(tag, "WebView requested native QR scan")
-                            launchNativeQrScanner { qrText: String? ->
-                                dispatchQrScanResult(qrText)
-                            }
-                            return true
+                val uri = request?.url ?: return super.shouldOverrideUrlLoading(view, request)
+                val navigation = WebNavigationPolicy.decide(uri.scheme, uri.host, uri.path)
+                when (navigation) {
+                    WebNavigation.App -> Unit
+                    WebNavigation.NativeQr -> {
+                        Log.i(tag, "WebView requested native QR scan")
+                        launchNativeQrScanner { qrText: String? ->
+                            dispatchQrScanResult(qrText)
                         }
                     }
-                    // External URLs (http/https): open in system browser, keep WebView intact
-                    if (uri.scheme == "http" || uri.scheme == "https") {
-                        Log.i(tag, "Opening external URL in system browser: ${uri.host}")
-                        val intent = Intent(Intent.ACTION_VIEW, uri)
-                        startActivity(intent)
-                        return true
-                    }
-                } catch (t: Throwable) {
-                    Log.w(tag, "shouldOverrideUrlLoading: error", t)
+                    WebNavigation.IssueForm -> openOutside(uri)
+                    WebNavigation.Refused ->
+                        Log.w(tag, "Refused navigation to ${uri.scheme}://${uri.host}")
                 }
-                return false
+                return navigation != WebNavigation.App
             }
         }
 

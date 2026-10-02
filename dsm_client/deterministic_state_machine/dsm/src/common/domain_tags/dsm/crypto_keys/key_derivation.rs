@@ -41,8 +41,6 @@ pub const TAG_DSM_ML_KEM_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/ml-kem-seed");
 pub const TAG_DSM_NEXT_ENTROPY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/next-entropy");
-pub const TAG_DSM_SPHINCS_KDF: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sphincs-kdf");
 pub const TAG_DSM_SPHINCS_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sphincs-seed");
 pub const TAG_DSM_STEP_SALT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/step-salt");

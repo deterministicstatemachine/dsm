@@ -493,6 +493,12 @@ pub struct AttemptEntry {
 }
 
 /// `F` — the trader's exercise. Never restates a field of `P`.
+///
+/// `claimant_att_a` is the trader device's `AttA`. `F` occupies `K_ful(q)`,
+/// so it proves its own authority for that position (DSM Amendment A10, SoFi
+/// Amendment S20): `derive_devid(claimant_public_key, claimant_att_a)` must
+/// be the device whose cell it is, decided from these bytes before `P` is
+/// fetched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraderFulfillmentBody {
     precommit_id: D32,
@@ -501,6 +507,7 @@ pub struct TraderFulfillmentBody {
     position: u64,
     signature_alg: u16,
     claimant_public_key: Vec<u8>,
+    claimant_att_a: D32,
 }
 
 impl TraderFulfillmentBody {
@@ -511,6 +518,7 @@ impl TraderFulfillmentBody {
         position: u64,
         signature_alg: u16,
         claimant_public_key: &[u8],
+        claimant_att_a: D32,
     ) -> Result<Self, SofiWireError> {
         check_count(
             "policy fulfillment set",
@@ -530,6 +538,7 @@ impl TraderFulfillmentBody {
             position,
             signature_alg,
             claimant_public_key: claimant_public_key.to_vec(),
+            claimant_att_a,
         })
     }
 
@@ -551,6 +560,9 @@ impl TraderFulfillmentBody {
     pub fn claimant_public_key(&self) -> &[u8] {
         &self.claimant_public_key
     }
+    pub fn claimant_att_a(&self) -> &D32 {
+        &self.claimant_att_a
+    }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -567,6 +579,7 @@ impl TraderFulfillmentBody {
         }
         push_u64(&mut out, self.position);
         push_key(&mut out, self.signature_alg, &self.claimant_public_key);
+        push_digest32(&mut out, &self.claimant_att_a);
         out
     }
 
@@ -589,8 +602,9 @@ impl TraderFulfillmentBody {
         }
         let position = c.u64()?;
         let (alg, key) = read_key(&mut c)?;
-        let v =
-            Self::new(precommit_id, set, attempts, position, alg, &key).map_err(wire_invalid)?;
+        let att_a = c.digest32()?;
+        let v = Self::new(precommit_id, set, attempts, position, alg, &key, att_a)
+            .map_err(wire_invalid)?;
         finish(&c, v)
     }
 }
@@ -633,6 +647,119 @@ impl SofiResolutionClaim {
             fulfillment_id: c.digest32()?,
             realize_root: c.digest32()?,
             void_root: c.digest32()?,
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x0062 SignedSofiResolutionClaim ───────────────────────────────────────
+
+/// `C_q` as it occupies `K_root(q)` (DSM Amendment A10, SoFi Amendment S20):
+/// the derived claim, the key and `AttA` it is signed under, and the
+/// signature.
+///
+/// The claim is still derived: `C_q` is `derive::resolution_claim(P, F)`, and
+/// every comparison is of that body. The signature is how the claim proves
+/// its own authority for the cell, because an object that can occupy a root
+/// position must prove authority for that position. Recognition
+/// (`sofi::signature::verify_resolution_claim`) requires the signature to
+/// verify and `derive_devid(key, AttA)` to be the device the claim names. This
+/// type is the wire form only; holding one proves nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedSofiResolutionClaim {
+    claim: SofiResolutionClaim,
+    signature_alg: u16,
+    claimant_public_key: Vec<u8>,
+    claimant_att_a: D32,
+    signature: Vec<u8>,
+}
+
+impl SignedSofiResolutionClaim {
+    /// Refuses an undeclared algorithm, a key of the wrong width and an empty
+    /// or oversized signature. It does not verify anything.
+    pub fn new(
+        claim: SofiResolutionClaim,
+        signature_alg: u16,
+        claimant_public_key: &[u8],
+        claimant_att_a: D32,
+        signature: &[u8],
+    ) -> Result<Self, SofiWireError> {
+        check_key(signature_alg, claimant_public_key)?;
+        if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "signature",
+                bytes: signature.len(),
+                max: MAX_SIGNATURE_BYTES,
+            });
+        }
+        Ok(Self {
+            claim,
+            signature_alg,
+            claimant_public_key: claimant_public_key.to_vec(),
+            claimant_att_a,
+            signature: signature.to_vec(),
+        })
+    }
+
+    /// The derived claim this signs.
+    pub fn claim(&self) -> &SofiResolutionClaim {
+        &self.claim
+    }
+
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+
+    pub fn claimant_public_key(&self) -> &[u8] {
+        &self.claimant_public_key
+    }
+
+    pub fn claimant_att_a(&self) -> &D32 {
+        &self.claimant_att_a
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_SIGNED_RESOLUTION_CLAIM);
+        push_digest32(&mut out, &self.claim.genesis);
+        push_digest32(&mut out, &self.claim.device_id);
+        push_u64(&mut out, self.claim.position);
+        push_digest32(&mut out, &self.claim.fulfillment_id);
+        push_digest32(&mut out, &self.claim.realize_root);
+        push_digest32(&mut out, &self.claim.void_root);
+        push_key(&mut out, self.signature_alg, &self.claimant_public_key);
+        push_digest32(&mut out, &self.claimant_att_a);
+        // `new` and `decode` bound the signature to MAX_SIGNATURE_BYTES, so
+        // its length fits the u32 prefix.
+        push_u32(&mut out, self.signature.len() as u32);
+        out.extend_from_slice(&self.signature);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_SIGNED_RESOLUTION_CLAIM, SCHEMA_V1)?;
+        let claim = SofiResolutionClaim {
+            genesis: c.digest32()?,
+            device_id: c.digest32()?,
+            position: c.u64()?,
+            fulfillment_id: c.digest32()?,
+            realize_root: c.digest32()?,
+            void_root: c.digest32()?,
+        };
+        let (signature_alg, claimant_public_key) = read_key(&mut c)?;
+        let claimant_att_a = c.digest32()?;
+        let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+        let v = Self {
+            claim,
+            signature_alg,
+            claimant_public_key,
+            claimant_att_a,
+            signature,
         };
         finish(&c, v)
     }
@@ -776,6 +903,14 @@ fn read_var_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError
     Ok(c.take(n)?.to_vec())
 }
 
+/// The encoding twin of [`read_var_bytes`], for a part its type already
+/// bounds: `new` and `decode` both refuse a part over its maximum, which is
+/// far below `u32::MAX`, so the length always fits its prefix.
+fn push_part(out: &mut Vec<u8>, part: &[u8]) {
+    push_u32(out, part.len() as u32);
+    out.extend_from_slice(part);
+}
+
 // ── ValidationRef: 0x003D..=0x0040 ─────────────────────────────────────────
 
 // ── 0x005E SofiExercise ─────────────────────────────────────────────────────
@@ -785,10 +920,14 @@ fn read_var_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError
 /// and `P` in the envelopes their signatures travel in, `P(E)`, the witnesses
 /// and the closure objects — and everything is bound to `F` by hashed
 /// preimages. It names its own attempt through `F` and its own parents
-/// through `P`, so it cannot count at another key.
+/// through `P`, so it cannot count at another key. It also carries the
+/// trader's signed `C_q` (SoFi Amendment S20), so whatever holds a vault key
+/// carries everything needed to register its own `F`: no relayer can sign
+/// `C_q`, and a trader that withholds its pair cannot hold the key forever.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SofiExercise {
     fulfillment: Vec<u8>,
+    resolution_claim: Vec<u8>,
     precommit: Vec<u8>,
     preimage: Vec<u8>,
     witnesses: Vec<Vec<u8>>,
@@ -805,6 +944,7 @@ impl SofiExercise {
     /// not construction.
     pub fn new(
         fulfillment: Vec<u8>,
+        resolution_claim: Vec<u8>,
         precommit: Vec<u8>,
         preimage: Vec<u8>,
         witnesses: Vec<Vec<u8>>,
@@ -812,6 +952,7 @@ impl SofiExercise {
     ) -> Result<Self, SofiWireError> {
         for (field, bytes) in [
             ("fulfillment", &fulfillment),
+            ("resolution claim", &resolution_claim),
             ("precommit", &precommit),
             ("preimage", &preimage),
         ] {
@@ -838,6 +979,7 @@ impl SofiExercise {
         }
         let v = Self {
             fulfillment,
+            resolution_claim,
             precommit,
             preimage,
             witnesses,
@@ -856,6 +998,11 @@ impl SofiExercise {
 
     pub fn fulfillment(&self) -> &[u8] {
         &self.fulfillment
+    }
+
+    /// The trader's signed `C_q`, as `K_root(q)` takes it (class `0x0062`).
+    pub fn resolution_claim(&self) -> &[u8] {
+        &self.resolution_claim
     }
 
     pub fn precommit(&self) -> &[u8] {
@@ -877,16 +1024,17 @@ impl SofiExercise {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         push_env(&mut out, class::SOFI_EXERCISE);
-        let _ = push_bytes(&mut out, &self.fulfillment);
-        let _ = push_bytes(&mut out, &self.precommit);
-        let _ = push_bytes(&mut out, &self.preimage);
+        push_part(&mut out, &self.fulfillment);
+        push_part(&mut out, &self.resolution_claim);
+        push_part(&mut out, &self.precommit);
+        push_part(&mut out, &self.preimage);
         push_u32(&mut out, self.witnesses.len() as u32);
         for w in &self.witnesses {
-            let _ = push_bytes(&mut out, w);
+            push_part(&mut out, w);
         }
         push_u32(&mut out, self.closure.len() as u32);
         for o in &self.closure {
-            let _ = push_bytes(&mut out, o);
+            push_part(&mut out, o);
         }
         out
     }
@@ -901,6 +1049,7 @@ impl SofiExercise {
         let mut c = Cursor { b: bytes, i: 0 };
         c.envelope(class::SOFI_EXERCISE, SCHEMA_V1)?;
         let fulfillment = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let resolution_claim = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
         let precommit = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
         let preimage = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
         let n = read_count(&mut c, "witnesses", 1, CANONICAL_MAX_LEGS)?;
@@ -915,6 +1064,7 @@ impl SofiExercise {
         }
         let v = Self {
             fulfillment,
+            resolution_claim,
             precommit,
             preimage,
             witnesses,

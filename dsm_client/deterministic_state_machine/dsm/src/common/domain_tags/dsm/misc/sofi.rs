@@ -66,6 +66,11 @@ pub const TAG_DSM_SOFI_FULFILLMENT_ID: TaggedHashDomain<'static> =
 /// `m_F = H(tag ‖ CCB(TraderFulfillmentBody))`.
 pub const TAG_DSM_SOFI_FULFILLMENT_SIGN: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/fulfillment-sign/v1");
+/// `m_C = H(tag ‖ CCB(C_q) ‖ u16be(alg) ‖ u32be(|key|) ‖ key ‖ AttA)` — what
+/// the trader signs to make `C_q` an occupant of `K_root(q)` (SoFi Amendment
+/// S20).
+pub const TAG_DSM_SOFI_RESOLUTION_CLAIM_SIGN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/resolution-claim-sign/v1");
 
 // ── Successor attempts and route outcome (F6, F7) ──────────────────────────
 
@@ -196,6 +201,7 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_FULFILLMENT,
     TAG_DSM_SOFI_FULFILLMENT_ID,
     TAG_DSM_SOFI_FULFILLMENT_SIGN,
+    TAG_DSM_SOFI_RESOLUTION_CLAIM_SIGN,
     TAG_DSM_SOFI_SUCC_CELL_V2,
     TAG_DSM_SOFI_SUCC_ATTEMPT,
     TAG_DSM_SOFI_STORAGE_SEED_V4,

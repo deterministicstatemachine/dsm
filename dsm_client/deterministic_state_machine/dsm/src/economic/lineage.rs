@@ -153,8 +153,8 @@ impl ValidatedEconomicRoot {
     }
 
     /// A peer coordinate THIS verifier authenticated (DSM Amendment A8): its
-    /// recorded frontier for the peer (`peer_lineage::PeerFrontier`), or a
-    /// root its root chain authenticated on the way to a one-hop source.
+    /// recorded frontier for the peer (`peer_lineage::PeerFrontier`), whose
+    /// whole segment it validated before recording it.
     /// **Only the peer lineage verifier may call this**, from one place
     /// (`peer_lineage::authenticated_root`). Nothing behind a frontier is
     /// read again: a verification that fails from one fails.

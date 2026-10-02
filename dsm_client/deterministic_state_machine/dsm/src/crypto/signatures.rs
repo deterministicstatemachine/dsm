@@ -341,13 +341,15 @@ mod tests {
         }
     }
 
-    /// These digests were REGENERATED when the FORS address collision was fixed
-    /// (`set_tree_index` no longer overwrites `set_keypair`). That fix changes
-    /// the hypertree root, so every SPHINCS+ public key, secret key and
-    /// signature this repository produces changed with it. Keys and signatures
-    /// minted before the fix are not valid after it and must not be carried
-    /// across: the same mnemonic now yields a different identity. If this test
-    /// fails again, the key derivation moved — find out why before updating it.
+    /// These digests were REGENERATED for SPHINCS+ construction version 2
+    /// (2026-10-01, security pre-audit item 17: the FIPS 205 structure, BLAKE3
+    /// kept). The root moved, and with it both digests: the secret key carries
+    /// the root after its seeds, which key generation still draws from the
+    /// same seed as before. Every
+    /// SPHINCS+ public key and signature this repository produces changed with
+    /// it, and keys minted before must not be carried across: the same
+    /// mnemonic now yields a different identity. If this test fails again,
+    /// the key derivation moved — find out why before updating it.
     #[test]
     fn default_entropy_keypair_digest_is_stable() {
         let kp = SignatureKeyPair::generate_from_entropy(b"DSM/default-entropy-kat")
@@ -358,15 +360,15 @@ mod tests {
         assert_eq!(
             pk_digest,
             [
-                126, 34, 13, 25, 67, 57, 208, 5, 209, 8, 15, 15, 95, 9, 168, 132, 27, 53, 201, 124,
-                103, 177, 116, 31, 248, 109, 22, 175, 136, 131, 15, 158,
+                110, 139, 46, 55, 41, 137, 15, 190, 249, 131, 233, 5, 224, 45, 16, 57, 237, 225,
+                87, 185, 30, 123, 170, 25, 94, 221, 40, 188, 138, 197, 122, 154,
             ]
         );
         assert_eq!(
             sk_digest,
             [
-                20, 1, 60, 183, 29, 157, 21, 84, 240, 0, 12, 60, 183, 216, 211, 94, 94, 32, 225,
-                189, 80, 227, 9, 213, 190, 110, 155, 221, 210, 94, 95, 102,
+                193, 136, 178, 70, 212, 51, 207, 45, 0, 236, 249, 99, 98, 230, 190, 83, 90, 7, 20,
+                229, 6, 200, 254, 8, 64, 13, 251, 115, 13, 50, 14, 235,
             ]
         );
     }

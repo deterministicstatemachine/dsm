@@ -326,12 +326,14 @@ async fn install_pair(
 }
 
 /// Stage 8: the exercise, built over the evidence its conformance was
-/// decided on, at every leg's key (R11). Written when the leader of every
-/// leg's key answered with its link.
+/// decided on and carrying the signed `C_q` the install wrote, at every
+/// leg's key (R11). Written when the leader of every leg's key answered with
+/// its link.
 async fn exercise_legs(
     ctx: &VerifierContext<'_>,
     set: &StorageSet,
     request: &FulfillRequest<'_>,
+    resolution_claim: &[u8],
 ) -> Result<Result<Vec<LegWrite>, NotTaken>, DsmError> {
     let install = install_request(request);
     let evidence = match ctx
@@ -342,7 +344,7 @@ async fn exercise_legs(
         Acquired::Complete(evidence) => evidence,
         Acquired::Exhausted(missing) => return Ok(Err(NotTaken::Evidence(missing))),
     };
-    let exercise = build_exercise(&install, &evidence)?;
+    let exercise = build_exercise(&install, resolution_claim, &evidence)?;
     let recognized = dsm::sofi::exercise::recognize_exercise(&exercise.encode())
         .ok_or_else(|| refuse("the exercise built here does not recognize"))?;
     let writes = write_exercise(set, &exercise, &recognized).await?;
@@ -528,7 +530,7 @@ async fn pending_objects(
 /// want — only the owning device may touch its own admission, fence, lineage
 /// and leaf cache (owner ruling, §44.4). What any device may do is carry
 /// already-signed material to storage: `sofi_relay::{relay_fulfillment,
-/// relay_position_pair}`, which hold no `CoreSDK` and write nothing local.
+/// relay_exercise}`, which hold no `CoreSDK` and write nothing local.
 pub async fn complete_pending_fulfillment(
     core: &CoreSDK,
     set: &StorageSet,
@@ -564,7 +566,7 @@ pub async fn complete_pending_fulfillment(
         Ok(installed) => installed,
         Err(why) => return not_taken(why),
     };
-    let exercise = match exercise_legs(&ctx, set, &request).await? {
+    let exercise = match exercise_legs(&ctx, set, &request, &installed.resolution_claim).await? {
         Ok(exercise) => exercise,
         Err(why) => return not_taken(why),
     };
@@ -738,12 +740,19 @@ pub async fn resolve_pending_position(
         {
             signed.clone()
         }
-        Registration::Registered(..) | Registration::NeverRegistered { .. } => {
+        // This device's own fulfillment holds K_ful(q), and the pair is not
+        // final on it yet.
+        Registration::Held(signed) if derive::fulfillment_id(&signed.body) == fulfillment_id => {
+            return not_yet(NotResolved::NotRegistered)
+        }
+        Registration::Registered(..)
+        | Registration::Held(..)
+        | Registration::NeverRegistered { .. } => {
             return Err(refuse(format!(
                 "position {q} is held by a claim other than the pending fulfillment"
             )))
         }
-        // No fulfillment is final at q yet; the root cell's claim is weighed
+        // No fulfillment holds K_ful(q) yet; the root cell's claim is weighed
         // once this device's own fulfillment is read back there.
         Registration::RootTaken { .. } | Registration::Unresolved => {
             return not_yet(NotResolved::NotRegistered)

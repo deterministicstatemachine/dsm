@@ -350,7 +350,7 @@ mod tests {
     use super::*;
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
     use crate::sofi::signature::verify_signed_object;
-    use crate::sofi::validation::fixtures::{swap_fixture_n, trader_keys, DEV, G};
+    use crate::sofi::validation::fixtures::{swap_fixture_n, trader_keys, dev, G};
     use crate::sofi::wire::{AttemptEntry, PrecommitLeg};
 
     fn d(byte: u8) -> D32 {
@@ -368,7 +368,7 @@ mod tests {
     }
 
     fn setup() -> SofiSetupBody {
-        SofiSetupBody::new(G, DEV, 4, d(0x0A), d(0x0B), d(0x0C), ALG, key()).unwrap()
+        SofiSetupBody::new(G, dev(), 4, d(0x0A), d(0x0B), d(0x0C), ALG, key()).unwrap()
     }
 
     fn fulfillment(p: &TraderPrecommitBody) -> TraderFulfillmentBody {
@@ -385,6 +385,7 @@ mod tests {
             p.position() + 1,
             ALG,
             key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -422,7 +423,7 @@ mod tests {
         assert_eq!(rho, derive::setup_ref(&s));
         let (rel, _) = recognize_setup_by_relationship(&setup_pub.object_bytes().unwrap()).unwrap();
         assert_eq!(locs[1].locator, rel);
-        assert_eq!(rel, derive::relationship_index_key(&G, &DEV, &d(0x0A)));
+        assert_eq!(rel, derive::relationship_index_key(&G, &dev(), &d(0x0A)));
 
         let p_pub = Publication::Precommit {
             body: &p,
@@ -571,7 +572,9 @@ mod tests {
         let mut hostile = bytes.clone();
         let alg_at = 4 + 2 + 4 + s.encode().len();
         assert_eq!(&hostile[alg_at..alg_at + 2], &ALG.to_be_bytes());
-        hostile[alg_at..alg_at + 2].copy_from_slice(&0x0002u16.to_be_bytes());
+        hostile[alg_at..alg_at + 2].copy_from_slice(
+            &crate::ccb::genesis::sigalg::RETIRED_SPHINCS_PLUS_SPX256F_V1.to_be_bytes(),
+        );
         assert!(
             SignedSofiObject::decode(&hostile).is_ok(),
             "the envelope itself parses"
@@ -609,7 +612,7 @@ mod tests {
         }
         let state = crate::sofi::wire::VaultStateLeaf {
             owner_genesis: G,
-            owner_device_id: DEV,
+            owner_device_id: dev(),
             create_position: 7,
             market_policy: crate::ccb::decode::policy_object_address(class::MARKET_POLICY, &market)
                 .unwrap(),
@@ -627,7 +630,7 @@ mod tests {
         };
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
-            owner_device_id: DEV,
+            owner_device_id: dev(),
             create_position: 7,
             state,
         };

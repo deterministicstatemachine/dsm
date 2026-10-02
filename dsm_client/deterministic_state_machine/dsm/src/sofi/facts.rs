@@ -35,7 +35,7 @@ use super::conformance::{
 };
 use super::derive;
 use super::exercise::{AttemptCellRead, RecognizedExercise};
-use super::registration::{Registration, RegistrationRead};
+use super::registration::{PairStanding, RegistrationRead};
 use super::resolution::{
     AttemptWalk, GroundRouteFacts, LegFacts, ParentPosition, ParentStatus, RefutedInHand,
     RouteFacts, VaultChain,
@@ -104,8 +104,8 @@ pub enum NotEstablished {
     ConformanceEvidence(Vec<ConformanceMissing>),
     /// Route evidence not in hand after the retry budget.
     RouteEvidence(Vec<Missing>),
-    /// `P` names a conditional parent this verifier has not resolved.
-    ParentUnresolved { fulfillment_id: D32 },
+    /// `P` names a parent this verifier has not established at `p`.
+    ParentUnresolved { parent: ParentClaimRef },
     /// A leg's attempt cell is not decided by its reads yet.
     AttemptCell {
         vault_id: D32,
@@ -147,28 +147,44 @@ pub struct ExerciseReads<'a> {
     pub conformance: &'a ConformanceEvidence,
     /// What `RouteValidation(P, G, E)` reads.
     pub evidence: &'a Evidence,
-    /// This verifier's own admitted position at `P.p`, when `P` names a
-    /// conditional parent: what that position selected is what this
-    /// verifier itself resolved. Nothing else resolves a parent.
-    pub parent: Option<ResolvedParent>,
+    /// What this verifier established about the trader's lineage at `P.p`
+    /// ([`TraderAtParent`]); `None` while it has not. Nothing else resolves
+    /// a parent.
+    pub parent: Option<TraderAtParent>,
     /// One entry per leg of `P`, in P's leg order.
     pub legs: &'a [LegReads<'a>],
 }
 
-/// What this verifier itself resolved at `p`, when `p` was a conditional
-/// SoFi position: the fulfillment it resolved and the root that resolution
-/// selected. The one fact about a conditional parent the facts read; nothing
-/// else resolves a parent.
+/// What this verifier established about the trader's lineage at `p`: the
+/// claim it holds there, or that it holds none, ever, because lineage
+/// validation established it Invalid at or before `p` (SoFi Amendment S13,
+/// the verdict `validation::setup_lineage` reads for setups). A lineage not
+/// established yet is neither: no fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraderAtParent {
+    /// The claim final at the trader's `K_root(p)` and the root it installed.
+    Held(ResolvedParent),
+    /// The trader's lineage is Invalid at or before `p`.
+    LineageInvalid,
+}
+
+/// What this verifier itself established at `p`: the claim that holds the
+/// trader's `K_root(p)`, as a `P` names it, and the root the lineage holds
+/// there — for a conditional position, the root its resolution selected.
+/// Established from this verifier's own admitted position, or by the
+/// frontier-relative walk of the trader's lineage (DSM Amendment A8; SoFi
+/// Amendment S15). The one fact about a parent the facts read: a claim `P`
+/// carries is never its own authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedParent {
     pub economic_position: u64,
     pub selected_root: D32,
-    pub fulfillment_id: D32,
+    pub named: ParentClaimRef,
 }
 
 impl ResolvedParent {
-    /// What an admitted position records of its resolution, when it is a
-    /// resolved SoFi position.
+    /// What an admitted position records: the claim it accepted and the root
+    /// it holds. Nothing for a conditional position not resolved yet.
     pub fn of(admitted: &AdmittedEconomicPosition) -> Option<Self> {
         match admitted {
             AdmittedEconomicPosition::ResolvedSofi {
@@ -179,10 +195,22 @@ impl ResolvedParent {
             } => Some(Self {
                 economic_position: *economic_position,
                 selected_root: *selected_root,
-                fulfillment_id: *fulfillment_id,
+                named: ParentClaimRef::Conditional {
+                    fulfillment_id: *fulfillment_id,
+                },
             }),
-            AdmittedEconomicPosition::SingleRoot { .. }
-            | AdmittedEconomicPosition::UnresolvedSofi { .. } => None,
+            AdmittedEconomicPosition::SingleRoot {
+                economic_position,
+                economic_root,
+                claim_ref,
+            } => Some(Self {
+                economic_position: *economic_position,
+                selected_root: *economic_root,
+                named: ParentClaimRef::SingleRoot {
+                    claim_ref: *claim_ref,
+                },
+            }),
+            AdmittedEconomicPosition::UnresolvedSofi { .. } => None,
         }
     }
 }
@@ -194,7 +222,7 @@ impl ResolvedParent {
 pub struct GroundReads<'a> {
     pub exercise: &'a RecognizedExercise,
     pub registration: &'a RegistrationRead,
-    pub parent: Option<ResolvedParent>,
+    pub parent: Option<TraderAtParent>,
     pub legs: &'a [LegReads<'a>],
 }
 
@@ -209,8 +237,7 @@ pub struct GroundReads<'a> {
 #[derive(Debug, Clone)]
 pub struct GroundFacts {
     pub(crate) external_commitment: D32,
-    pub(crate) registered: bool,
-    pub(crate) position_lost: bool,
+    pub(crate) pair: PairStanding,
     pub(crate) parent: ParentPosition,
     pub(crate) parent_pre_root: D32,
     /// One per leg of `P`, in P's leg order.
@@ -227,7 +254,7 @@ impl GroundFacts {
     pub(crate) fn route_ground(&self) -> GroundRouteFacts<'_> {
         GroundRouteFacts {
             external_commitment: self.external_commitment,
-            position_lost: self.position_lost,
+            pair: self.pair,
             parent: self.parent,
             parent_pre_root: self.parent_pre_root,
             legs: &self.legs,
@@ -257,9 +284,8 @@ impl GroundFacts {
 pub struct EstablishedFacts {
     pub(crate) fulfillment_id: D32,
     pub(crate) external_commitment: D32,
-    pub(crate) registered: bool,
+    pub(crate) pair: PairStanding,
     pub(crate) conformance: Validation,
-    pub(crate) position_lost: bool,
     pub(crate) parent: ParentPosition,
     pub(crate) parent_pre_root: D32,
     pub(crate) validation: Validation,
@@ -295,9 +321,8 @@ impl EstablishedFacts {
     pub(crate) fn route_facts(&self) -> RouteFacts<'_> {
         RouteFacts {
             external_commitment: self.external_commitment,
-            registered: self.registered,
+            pair: self.pair,
             conformance: self.conformance,
-            position_lost: self.position_lost,
             parent: self.parent,
             parent_pre_root: self.parent_pre_root,
             validation: self.validation,
@@ -331,13 +356,13 @@ pub enum Established {
 }
 
 /// A position whose exercise is refuted in hand, with the one fact the
-/// ladder asks of it: whether that exercise registered.
+/// ladder asks of it: where that exercise stands at its pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefutedPosition {
     pub(crate) fulfillment_id: D32,
     pub(crate) external_commitment: D32,
     pub(crate) refuted: RefutedInHand,
-    pub(crate) registered: bool,
+    pub(crate) pair: PairStanding,
 }
 
 impl Established {
@@ -362,7 +387,8 @@ impl Established {
             fulfillment_id: refutation.fulfillment_id,
             external_commitment: refutation.external_commitment,
             refuted: refutation.refuted,
-            registered: registration.is_registered_as(&exercise.fulfillment().body),
+            pair: registration
+                .standing_of(&exercise.precommit().body, &exercise.fulfillment().body),
         }))
     }
 
@@ -463,14 +489,13 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
             facts.parent = chain.status_of(*generation, &leg.parent_root);
         }
     }
-    let storage_resolved =
-        ground.registered && legs.iter().all(|l| permanently_resolved(&l.cell, &e));
+    let storage_resolved = ground.pair == PairStanding::Registered
+        && legs.iter().all(|l| permanently_resolved(&l.cell, &e));
     Ok(EstablishedFacts {
         fulfillment_id: derive::fulfillment_id(fulfillment),
         external_commitment: e,
-        registered: ground.registered,
+        pair: ground.pair,
         conformance,
-        position_lost: ground.position_lost,
         parent: ground.parent,
         parent_pre_root: ground.parent_pre_root,
         validation,
@@ -479,6 +504,41 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
         keys: ground.keys,
         preimage: exercise.preimage().clone(),
         evidence: reads.evidence.clone(),
+    })
+}
+
+/// The trader parent the ladder reads (§23.3, §6.62): `named` is the claim
+/// `P` names at `position`, `held` what this verifier established the
+/// trader's lineage holds there. A single-root parent carries both claims and
+/// the root, for the ladder to compare. A conditional parent held as `P`
+/// names it selected the root it holds. One that another claim holds never
+/// registered at `position` and never will (pair mutual exclusion), so it
+/// selects no root, ever: terminal, the position Invalid and the key it holds
+/// skipped, never left waiting. A lineage known Invalid at or before
+/// `position` holds no claim there, ever, whatever `P` names: terminal the
+/// same way. `None` while `held` is not established at `position`: no fact.
+fn parent_position(
+    named: ParentClaimRef,
+    position: u64,
+    held: Option<TraderAtParent>,
+) -> Option<ParentPosition> {
+    let held = match held? {
+        TraderAtParent::LineageInvalid => return Some(ParentPosition::LineageInvalid),
+        TraderAtParent::Held(held) => held,
+    };
+    let held = (held.economic_position == position).then_some(held)?;
+    Some(match named {
+        ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot {
+            named,
+            held: held.named,
+            held_root: held.selected_root,
+        },
+        ParentClaimRef::Conditional { .. } if held.named == named => {
+            ParentPosition::ConditionalSelected {
+                selected_root: held.selected_root,
+            }
+        }
+        ParentClaimRef::Conditional { .. } => ParentPosition::ConditionalNoRoot,
     })
 }
 
@@ -498,44 +558,21 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
             "the registration read is of another position",
         ));
     }
-    let (registered, position_lost) = match reads.registration.registration() {
-        Registration::Registered(signed) => {
-            let ours = signed.body == *fulfillment;
-            (ours, !ours)
-        }
-        Registration::NeverRegistered { .. } => (false, true),
-        // SoFi Amendment S14: the position went to the claim holding K_root(q)
-        // unless that claim is this F's own C_q, whose fulfillment may still be
-        // relayed.
-        Registration::RootTaken { claim } => (
-            false,
-            *claim
-                != crate::storage_cell::entry_digest(
-                    &derive::resolution_claim(precommit, fulfillment).encode(),
-                ),
-        ),
-        Registration::Unresolved => (false, false),
-    };
+    // Where this F stands at its pair, with P in hand (SoFi Amendments S14,
+    // S20): lost to any other fulfillment holding K_ful(q)'s leader link, or
+    // to any claim at K_root(q) other than derive(P, F); misbodied when that
+    // claim names F under another body.
+    let pair = reads.registration.standing_of(precommit, fulfillment);
 
-    // The trader parent: P names it; what it selected is this verifier's
-    // own resolution of p, and nothing else resolves it.
-    let parent = match precommit.parent_claim_ref() {
-        ParentClaimRef::SingleRoot { .. } => ParentPosition::SingleRoot,
-        ParentClaimRef::Conditional { fulfillment_id } => match reads.parent {
-            Some(ResolvedParent {
-                economic_position,
-                selected_root,
-                fulfillment_id: resolved,
-            }) if resolved == *fulfillment_id && economic_position == precommit.position() => {
-                ParentPosition::ConditionalSelected { selected_root }
-            }
-            Some(..) | None => {
-                return Err(NotEstablished::ParentUnresolved {
-                    fulfillment_id: *fulfillment_id,
-                })
-            }
-        },
-    };
+    // The trader parent: what `P` names must be what the trader's lineage
+    // holds at `p` — the claim final at its `K_root(p)` and the root that
+    // claim installed — as this verifier itself established it, from its own
+    // admitted position or the frontier-relative walk of the trader's lineage
+    // (DSM Amendment A8; SoFi Amendment S15). A claim `P` carries is never
+    // its own authority (§6.62).
+    let named = *precommit.parent_claim_ref();
+    let parent = parent_position(named, precommit.position(), reads.parent)
+        .ok_or(NotEstablished::ParentUnresolved { parent: named })?;
 
     // Every leg of P at the attempt F fixed for it. The attempts cover the
     // legs exactly: that is conformance item 4, decided in hand.
@@ -600,8 +637,7 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
     }
     Ok(GroundFacts {
         external_commitment: e,
-        registered,
-        position_lost,
+        pair,
         parent,
         parent_pre_root: *precommit.void_root(),
         legs,
@@ -621,13 +657,17 @@ mod tests {
     use crate::sofi::lineage::advance_resolved;
     use crate::sofi::publication::Publication;
     use crate::sofi::registration::{fulfillment_registered, PositionCells};
-    use crate::sofi::resolution::{resolve_position, walk, Incomplete, KeyFacts, Resolution};
+    use crate::sofi::resolution::{
+        classify_attempt, consumed_route, resolve_position, trader_parent_impossible, walk,
+        AttemptClass, Incomplete, KeyFacts, Resolution,
+    };
     use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
     use crate::sofi::validation::trader_credits;
     use crate::sofi::wire::{SofiResolutionClaim, TraderFulfillmentBody, TraderPrecommitBody};
     use crate::types::device_state::DeviceState;
 
     const OTHER_ROOT: D32 = [0x77; 32];
+    const OTHER_CLAIM: D32 = [0x7C; 32];
     const OTHER_E: D32 = [0x11; 32];
 
     /// One operation's reads, as the SDK fetches them: the position pair
@@ -641,6 +681,9 @@ mod tests {
         evidence: Evidence,
         cells: Vec<AttemptCellRead>,
         chains: BTreeMap<D32, VaultChain>,
+        /// What holds the trader's `K_root(p)`, as this verifier established
+        /// it: by default the claim `P` names, at the root `P` was built on.
+        parent: Option<TraderAtParent>,
     }
 
     impl Reads {
@@ -662,7 +705,7 @@ mod tests {
                 registration: &self.registration,
                 conformance: &self.conformance,
                 evidence: &self.evidence,
-                parent: None,
+                parent: self.parent,
                 legs,
             })
         }
@@ -694,10 +737,13 @@ mod tests {
         ful.write(&envelope, ROUTE_LEN - 1, &[]);
         let mut root = Cell::at(cells.root().routed());
         if let Some(claim) = root_holds {
-            root.write(&claim.encode(), ROUTE_LEN - 1, &[]);
+            root.write(
+                &crate::sofi::validation::fixtures::signed_c_q(claim),
+                ROUTE_LEN - 1,
+                &[],
+            );
         }
-        let lookup = BTreeMap::from([(derive::precommit_id(p), p.clone())]);
-        fulfillment_registered(&cells, &ful.evidence(), &root.evidence(), &lookup).unwrap()
+        fulfillment_registered(&cells, &ful.evidence(), &root.evidence()).unwrap()
     }
 
     /// `K^(attempt)` of `vault_id` at `parent_root`, holding `bytes` final
@@ -778,6 +824,7 @@ mod tests {
             .collect();
         let conformance = conformance_evidence(&fx, &exercise, BTreeMap::new());
         let evidence = fx.evidence.clone();
+        let parent = Some(TraderAtParent::Held(held_parent(&built.precommit)));
         (
             fx,
             Reads {
@@ -787,6 +834,7 @@ mod tests {
                 evidence,
                 cells,
                 chains,
+                parent,
             },
         )
     }
@@ -832,8 +880,7 @@ mod tests {
         let f = &r.exercise.fulfillment().body;
         assert_eq!(facts.fulfillment_id(), &derive::fulfillment_id(f));
         assert_eq!(facts.external_commitment(), p.external_commitment());
-        assert!(facts.registered);
-        assert!(!facts.position_lost);
+        assert_eq!(facts.pair, PairStanding::Registered);
         assert_eq!(
             facts.conformance,
             Validation::Valid,
@@ -844,7 +891,15 @@ mod tests {
             Validation::Valid,
             "validation recomputed over the evidence"
         );
-        assert_eq!(facts.parent, ParentPosition::SingleRoot);
+        assert_eq!(
+            facts.parent,
+            ParentPosition::SingleRoot {
+                named: *p.parent_claim_ref(),
+                held: *p.parent_claim_ref(),
+                held_root: *p.void_root(),
+            },
+            "the trader holds the very claim P names, at P's root"
+        );
         assert_eq!(facts.parent_pre_root, *p.void_root());
         assert!(facts.storage_resolved);
         assert_eq!(facts.legs.len(), 1);
@@ -940,7 +995,228 @@ mod tests {
             evidence: r.evidence.clone(),
             cells: r.cells.clone(),
             chains: r.chains.clone(),
+            parent: r.parent,
         }
+    }
+
+    /// What an honest trader's lineage holds at `P.p`: the claim `P` names,
+    /// at the root `P` was built on.
+    fn held_parent(p: &TraderPrecommitBody) -> ResolvedParent {
+        ResolvedParent {
+            economic_position: p.position(),
+            selected_root: *p.void_root(),
+            named: *p.parent_claim_ref(),
+        }
+    }
+
+    /// The single-root parent `P` names is what the trader's lineage holds at
+    /// `p` — the claim final at its `K_root(p)` and the root it installed —
+    /// as this verifier established it, never a claim `P` carries for itself
+    /// (§6.62; SoFi §17.1 rules 2–3, DSM Amendment A8, SoFi Amendment S15).
+    /// Here the fixture's parent claim verifies, names the trader, `p` and
+    /// `P`'s root, and is signed under `P`'s key, but the trader's lineage
+    /// holds another claim at `p`: `P` was built on a position the trader
+    /// never held. The position is Invalid, and the vault's key is passed
+    /// over, never consumed: a vault cannot be drained against a balance the
+    /// trader's lineage never held.
+    #[test]
+    fn a_parent_claim_the_trader_does_not_hold_at_p_never_realizes() {
+        let (_, mut r) = reads(1, &[0]);
+        let held = held_parent(&r.exercise.precommit().body);
+        r.parent = Some(TraderAtParent::Held(ResolvedParent {
+            named: ParentClaimRef::SingleRoot {
+                claim_ref: OTHER_CLAIM,
+            },
+            ..held
+        }));
+        let facts = r.establish(&r.legs()).expect("every read decides");
+        assert_eq!(
+            resolve_position(&facts.route_facts()),
+            Ok(Resolution::Invalid),
+            "built on a claim the trader's lineage never held at p"
+        );
+        let (class, ..) = classify_attempt(&facts.route_facts(), &facts.legs[0]);
+        assert_eq!(
+            class,
+            AttemptClass::Skipped,
+            "the vault's key is passed over"
+        );
+    }
+
+    /// The same, where the lineage holds the very claim `P` names but at
+    /// another root than the one `P` was built on.
+    #[test]
+    fn a_parent_at_another_root_than_the_trader_holds_never_realizes() {
+        let (_, mut r) = reads(1, &[0]);
+        let held = held_parent(&r.exercise.precommit().body);
+        r.parent = Some(TraderAtParent::Held(ResolvedParent {
+            selected_root: OTHER_ROOT,
+            ..held
+        }));
+        let facts = r.establish(&r.legs()).expect("every read decides");
+        assert_eq!(
+            resolve_position(&facts.route_facts()),
+            Ok(Resolution::Invalid),
+            "built on a root the trader's lineage never held at p"
+        );
+        let (class, ..) = classify_attempt(&facts.route_facts(), &facts.legs[0]);
+        assert_eq!(
+            class,
+            AttemptClass::Skipped,
+            "the vault's key is passed over"
+        );
+    }
+
+    /// A single-root parent this verifier has not established at `p` — the
+    /// trader's lineage not walked there, or not established yet — is not a
+    /// fact the ladder reads: nothing resolves, and nothing is refuted.
+    #[test]
+    fn a_single_root_parent_not_established_at_p_is_no_fact() {
+        let (_, mut r) = reads(1, &[0]);
+        r.parent = None;
+        assert_eq!(
+            r.establish(&r.legs()).err(),
+            Some(NotEstablished::ParentUnresolved {
+                parent: *r.exercise.precommit().body.parent_claim_ref()
+            })
+        );
+    }
+
+    /// Pre-audit item 12, §23.3: a conditional parent counts only as the
+    /// claim the trader's lineage holds at `p`. Held as `P` names it, it
+    /// selected the root it holds. Held by another fulfillment's claim, or by
+    /// an ordinary claim, the claim `P` names never registered at `p` and
+    /// never will: it selects no root, the parent is impossible, and the key
+    /// its exercise holds is skipped rather than left waiting for a parent
+    /// that cannot come. What a walk holds at another position is no fact
+    /// about `p`, and neither is a lineage not walked there.
+    #[test]
+    fn a_conditional_parent_another_claim_holds_selects_no_root() {
+        let (position, root) = (7, [0x77; 32]);
+        let named = ParentClaimRef::Conditional {
+            fulfillment_id: [0xF7; 32],
+        };
+        let held = |claim| {
+            Some(TraderAtParent::Held(ResolvedParent {
+                economic_position: position,
+                selected_root: root,
+                named: claim,
+            }))
+        };
+        assert_eq!(
+            parent_position(named, position, held(named)),
+            Some(ParentPosition::ConditionalSelected {
+                selected_root: root
+            })
+        );
+        for other in [
+            ParentClaimRef::Conditional {
+                fulfillment_id: [0xF8; 32],
+            },
+            ParentClaimRef::SingleRoot {
+                claim_ref: [0xC7; 32],
+            },
+        ] {
+            let parent = parent_position(named, position, held(other));
+            assert_eq!(
+                parent,
+                Some(ParentPosition::ConditionalNoRoot),
+                "{other:?} holds p"
+            );
+            assert!(
+                parent.is_some_and(|parent| trader_parent_impossible(&parent, &root)),
+                "terminal: the position is Invalid and its keys are skipped"
+            );
+        }
+        assert_eq!(
+            parent_position(named, position + 1, held(named)),
+            None,
+            "the claim held at another position"
+        );
+        assert_eq!(parent_position(named, position, None), None);
+    }
+
+    /// Pre-audit 12f, SoFi §23.3 and Amendment S13: a trader's lineage that
+    /// lineage validation established Invalid at or before `p` holds no claim
+    /// there, ever. Whatever `P` names, single-root or conditional, its
+    /// parent is terminal: the position is Invalid and the key its exercise
+    /// holds is skipped, never left waiting for a lineage that cannot yield
+    /// a claim. On the old code the walk's verdict reached the facts as no
+    /// parent at all, and the key waited forever.
+    #[test]
+    fn a_parent_on_a_lineage_known_invalid_is_terminal() {
+        for named in [
+            ParentClaimRef::SingleRoot {
+                claim_ref: [0xC7; 32],
+            },
+            ParentClaimRef::Conditional {
+                fulfillment_id: [0xF7; 32],
+            },
+        ] {
+            assert_eq!(
+                parent_position(named, 7, Some(TraderAtParent::LineageInvalid)),
+                Some(ParentPosition::LineageInvalid),
+                "{named:?}"
+            );
+            assert!(trader_parent_impossible(
+                &ParentPosition::LineageInvalid,
+                &[0x77; 32]
+            ));
+        }
+
+        let (_, mut r) = reads(1, &[0]);
+        r.parent = Some(TraderAtParent::LineageInvalid);
+        let facts = r.establish(&r.legs()).expect("every read decides");
+        assert_eq!(
+            resolve_position(&facts.route_facts()),
+            Ok(Resolution::Invalid),
+            "built on a lineage that holds nothing at p"
+        );
+        let (class, ..) = classify_attempt(&facts.route_facts(), &facts.legs[0]);
+        assert_eq!(
+            class,
+            AttemptClass::Skipped,
+            "the vault's key is passed over"
+        );
+    }
+
+    /// Pre-audit 12k, SoFi Amendment S20 (owner ruling, 2026-10-01: "same
+    /// bytes => same terminal verdict for local and peer resolution"): a pair
+    /// final on `F` whose root cell names `F` under another body than
+    /// `derive(P, F)` is misbodied. The trader's own ladder resolves the
+    /// position Invalid, as a peer's walk does, and the vault's key is
+    /// skipped, never consumed. On the old code the ladder read the pair as
+    /// not registered and waited for good.
+    #[test]
+    fn a_pair_final_on_its_fulfillment_under_another_body_resolves_invalid() {
+        let (_, mut r) = reads(1, &[0]);
+        let p = r.exercise.precommit().body.clone();
+        let f = r.exercise.fulfillment().body.clone();
+        let forged = SofiResolutionClaim {
+            realize_root: [0xBD; 32],
+            ..derive::resolution_claim(&p, &f)
+        };
+        r.registration = registration_read(
+            &p,
+            &f,
+            &r.exercise.fulfillment().signature,
+            p.void_root(),
+            Some(forged),
+        );
+        let facts = r.establish(&r.legs()).expect("every read decides");
+        assert_eq!(facts.pair, PairStanding::Misbodied);
+        assert_eq!(
+            resolve_position(&facts.route_facts()),
+            Ok(Resolution::Invalid),
+            "the lineage's verdict is the peers'"
+        );
+        assert!(!consumed_route(&facts.route_facts()));
+        let (class, ..) = classify_attempt(&facts.route_facts(), &facts.legs[0]);
+        assert_eq!(
+            class,
+            AttemptClass::Skipped,
+            "the vault's key is passed over"
+        );
     }
 
     /// Registration is read from the pair, never assumed: with `C_q` not
@@ -959,8 +1235,7 @@ mod tests {
             None,
         );
         let facts = r.establish(&r.legs()).expect("every read decides");
-        assert!(!facts.registered);
-        assert!(!facts.position_lost);
+        assert_eq!(facts.pair, PairStanding::Pending);
         assert!(!facts.storage_resolved);
         assert_eq!(
             resolve_position(&facts.route_facts()),
@@ -1046,6 +1321,7 @@ mod tests {
             evidence: fx.evidence.clone(),
             cells: vec![cell_read(&v, &root, 1, Some(&bytes))],
             chains: BTreeMap::from([(v, chain_naming(&fx, &v, root))]),
+            parent: Some(TraderAtParent::Held(held_parent(&built.precommit))),
             exercise,
         };
 
@@ -1087,10 +1363,13 @@ mod tests {
                     0,
                     RouteFacts {
                         external_commitment: OTHER_E,
-                        registered: true,
+                        pair: PairStanding::Registered,
                         conformance: Validation::Valid,
-                        position_lost: false,
-                        parent: ParentPosition::SingleRoot,
+                        parent: ParentPosition::SingleRoot {
+                            named: *built.precommit.parent_claim_ref(),
+                            held: *built.precommit.parent_claim_ref(),
+                            held_root: root,
+                        },
                         parent_pre_root: root,
                         validation: Validation::Invalid,
                         storage_resolved: true,
@@ -1130,7 +1409,7 @@ mod tests {
         else {
             panic!("a refutation")
         };
-        assert!(position.registered);
+        assert_eq!(position.pair, PairStanding::Registered);
         assert_eq!(position.refuted, RefutedInHand::Conformance);
 
         let other = InHandRefutation {
@@ -1164,6 +1443,6 @@ mod tests {
         else {
             panic!("a refutation")
         };
-        assert!(!position.registered);
+        assert_eq!(position.pair, PairStanding::Pending);
     }
 }

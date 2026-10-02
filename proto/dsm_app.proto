@@ -3384,10 +3384,17 @@ message RelationshipFinalizedV1 {
 }
 
 message OnlineTransferSmartRequest {
-  string recipient = 1; // Alias or Base32 ID
+  // The recipient was once named by alias or Base32 text. An alias is a label
+  // two contacts can share, so a send named by one could pay the wrong contact
+  // (pre-audit item 6, CONFORMANCE §6.63).
+  reserved 1;
+  reserved "recipient";
   string amount = 2; // Decimal string
   string token_id = 3;
   string memo = 4;
+  // The contact the user chose, by its device id: the one identity a contact
+  // is keyed by.
+  bytes recipient_device_id = 5 [(dsm_fixed_len)=32];
 }
 
 // wallet.sendOffline: what the user asked for, and nothing the SDK works out
@@ -3602,7 +3609,7 @@ message InboxResponse { repeated InboxItem items = 1; }
 message StorageSyncRequest {
   bool pull_inbox        = 1; // retrieve pending items from b0x
   bool push_pending      = 2; // submit local pending transactions
-  uint32 limit           = 3; // max inbox items to pull (0 = default 100)
+  uint32 limit           = 3; // max inbox items to read from each route (0 = default 100)
 }
 message StorageSyncResponse {
   bool   success         = 1;
@@ -3610,6 +3617,10 @@ message StorageSyncResponse {
   uint32 processed       = 3; // items successfully processed
   uint32 pushed          = 4; // transactions pushed to storage
   repeated string errors = 5; // any errors encountered
+  // Inbox routes holding more than this sync took (a read stopped at its
+  // page cap, or more entries than the route's budget): a status, not an
+  // error. The next sync resumes each where it stopped.
+  repeated string more_pending = 6;
 }
 
 // ========================= Canonical Proofs =========================
@@ -4266,7 +4277,7 @@ message BleConnectionFailed {
 // Everything a member holds at a key, in arrival order. An empty list is an
 // asserted absence. The member decodes none of the values.
 message CellValuesV1 {
-  repeated bytes values = 1 [(dsm_max_len)=262144];
+  repeated bytes values = 1 [(dsm_max_len)=327680];
   // One arrival record per value, in the same order (storage spec §14).
   repeated ArrivalRecordV1 records = 2;
 }
@@ -4294,7 +4305,7 @@ message ArrivalRecordsV1 {
 message RouteEntryV1 {
   bytes  namespace      = 1 [(dsm_max_len)=128];
   bytes  key            = 2 [(dsm_fixed_len)=32];
-  bytes  value          = 3 [(dsm_max_len)=262144];
+  bytes  value          = 3 [(dsm_max_len)=327680];
   bytes  seat_member_id = 4 [(dsm_max_len)=128]; // the seat at `position`, as the set commits it
   uint32 position       = 5;                     // 0 = the leader, up to 4
   repeated ChainSlotV1 chain = 6;                // one slot per earlier position, in route order
@@ -4342,7 +4353,7 @@ message CellCommitProofV1 {
 message CellPutV1 {
   bytes namespace = 1 [(dsm_max_len)=128];
   bytes key       = 2 [(dsm_fixed_len)=32];
-  bytes value     = 3 [(dsm_max_len)=262144];
+  bytes value     = 3 [(dsm_max_len)=327680];
 }
 
 // Several keys taken in ONE local transaction at the member: all of them or

@@ -10,16 +10,22 @@
 //! half — `complete_pending_fulfillment` and `resolve_pending_position` —
 //! stays in `sofi_advance`.
 //!
-//! A relay creates nothing and decides nothing. `F` is signed by the trader
-//! and `C_q` is a function of the two verified objects, so a relayer carrying
-//! them adds no authority of its own; the exercise it carries is the value
-//! Core reads as holding one of the fulfillment's leg cells, relayed verbatim
-//! rather than rebuilt, because the trader's own closure objects are not a
-//! relayer's to hold. Every write goes along its cell's route from the
+//! A relay creates nothing and decides nothing. `F` and `C_q` are signed by
+//! the trader (SoFi Amendment S20), so a relayer carrying them adds no
+//! authority of its own and can author neither; the exercise it carries is
+//! the value Core reads as holding one of the fulfillment's leg cells,
+//! relayed verbatim rather than rebuilt, because the trader's own closure
+//! objects are not a relayer's to hold. The exercise carries the trader's
+//! signed `C_q` too, so a fulfillment whose exercise holds a vault key can
+//! always be registered from that exercise's bytes, whatever its trader
+//! withholds. Every write goes along its cell's route from the
 //! leader (storage spec §9). Nothing here re-gates on conformance: that gate
 //! is the PRODUCER's discipline before it publishes, not a second opinion at
 //! every carrier.
-use dsm::sofi::exercise::attempt_resolution;
+use dsm::economic::claim_envelope::RegisteredEconomicClaim;
+use dsm::economic::register::read_root_cell;
+use dsm::route_chain::CellReading;
+use dsm::sofi::exercise::{attempt_resolution, AttemptCell, RecognizedExercise};
 use dsm::sofi::publication::{Publication, Signed};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::wire::{TraderFulfillmentBody, TraderPrecommitBody};
@@ -72,28 +78,16 @@ async fn objects(
     Ok((fulfillment, precommit))
 }
 
-/// Carry the position pair of a registered-or-not fulfillment along the
-/// route of `s(q)`: `F` in the envelope it was published in, and `C_q`
-/// derived from the two verified objects. It establishes no registration —
-/// Core derives that from the cells (R10).
-pub async fn relay_position_pair(
-    set: &StorageSet,
-    fulfillment_id: &D32,
-) -> Result<Relayed, DsmError> {
-    let (fulfillment, precommit) = objects(set, fulfillment_id).await?;
-    let pair = carry_pair(set, &fulfillment, &precommit).await?;
-    Ok(Relayed {
-        fulfillment_id: *fulfillment_id,
-        position: fulfillment.body.position(),
-        pair,
-        legs: Vec::new(),
-    })
-}
-
+/// The trader's signed `C_q` of a position pair, exactly as signed (SoFi
+/// Amendment S20): the bytes `K_root(q)` holds when its claim is this
+/// fulfillment's, and otherwise the bytes the fulfillment's exercise carries.
+/// A relayer never authors it. `K_root(q)` held by another claim loses `F`
+/// there, so there is no pair to carry.
 async fn carry_pair(
     set: &StorageSet,
     fulfillment: &Signed<TraderFulfillmentBody>,
     precommit: &Signed<TraderPrecommitBody>,
+    carried: Option<&[u8]>,
 ) -> Result<[WriteReport; 2], DsmError> {
     let cells = cells_of(set, &precommit.body, &fulfillment.body)?;
     let f_bytes = Publication::Fulfillment {
@@ -102,26 +96,47 @@ async fn carry_pair(
     }
     .object_bytes()
     .map_err(refuse)?;
-    let claim = dsm::sofi::derive::resolution_claim(&precommit.body, &fulfillment.body).encode();
+    let derived = dsm::sofi::derive::resolution_claim(&precommit.body, &fulfillment.body);
+    let seats = NodeSeats::new(set)?;
+    let evidence = read_cell(&seats, cells.root().routed()).await;
+    let claim = match read_root_cell(cells.root(), &evidence) {
+        Ok(CellReading::Held {
+            object: RegisteredEconomicClaim::ConditionalSofi(held),
+            value,
+            ..
+        }) if held == derived => value,
+        Ok(CellReading::Held { .. }) => {
+            return Err(refuse(
+                "K_root(q) holds another claim: the fulfillment is lost at its position, and \
+                 there is no pair to carry",
+            ))
+        }
+        Ok(CellReading::Open) => carried_claim(carried, "K_root(q) holds no claim yet")?,
+        Err(missing) => carried_claim(
+            carried,
+            &format!("K_root(q) is not decided yet ({missing:?})"),
+        )?,
+    };
     write_recorded_position(set, &cells, &f_bytes, &claim).await
 }
 
-/// §33: complete a fulfillment whose hops are not all final.
-///
-/// The exercise is the value Core reads as holding one of the fulfillment's
-/// leg cells, taken from that cell's reads and carried VERBATIM to every leg
-/// key the fulfillment names — never rebuilt, because building one needs the
-/// trader's own closure objects and those are not a relayer's to hold. If no
-/// leg cell is held by this fulfillment's exercise there is nothing to relay,
-/// and that is reported rather than papered over: the trader must write it
-/// once before any relayer can carry it.
-pub async fn relay_fulfillment(
-    set: &StorageSet,
-    fulfillment_id: &D32,
-) -> Result<Relayed, DsmError> {
-    let (fulfillment, precommit) = objects(set, fulfillment_id).await?;
-    let pair = carry_pair(set, &fulfillment, &precommit).await?;
+/// The signed `C_q` an exercise carries, or why there is none to carry.
+fn carried_claim(carried: Option<&[u8]>, why: &str) -> Result<Vec<u8>, DsmError> {
+    carried.map(<[u8]>::to_vec).ok_or_else(|| {
+        refuse(format!(
+            "{why}, and no exercise of this fulfillment is in hand to carry the trader's \
+             signed C_q: only the trader can sign it"
+        ))
+    })
+}
 
+/// Every leg key a fulfillment names: `K^(a_j)` of `v_j` at the parent `R_j`
+/// its `P` names.
+fn leg_cells(
+    set: &StorageSet,
+    fulfillment: &Signed<TraderFulfillmentBody>,
+    precommit: &Signed<TraderPrecommitBody>,
+) -> Result<Vec<(D32, D32, u64, AttemptCell)>, DsmError> {
     let mut cells = Vec::new();
     for attempt in fulfillment.body.attempts() {
         let Some(leg) = precommit
@@ -139,10 +154,19 @@ pub async fn relay_fulfillment(
             attempt_cell(set, &leg.vault_id, &leg.parent_root, attempt.attempt)?,
         ));
     }
+    Ok(cells)
+}
 
+/// The exercise of `fulfillment` holding one of its leg keys, with the exact
+/// bytes Core read as holding it. `None` when no leg key is held by this
+/// fulfillment's exercise.
+async fn held_exercise(
+    set: &StorageSet,
+    cells: &[(D32, D32, u64, AttemptCell)],
+    fulfillment: &Signed<TraderFulfillmentBody>,
+) -> Result<Option<(RecognizedExercise, Vec<u8>)>, DsmError> {
     let seats = NodeSeats::new(set)?;
-    let mut carried: Option<Vec<u8>> = None;
-    for (.., cell) in &cells {
+    for (.., cell) in cells {
         let evidence = read_cell(&seats, cell.routed()).await;
         let read = match attempt_resolution(cell, &evidence) {
             Ok(read) => read,
@@ -155,33 +179,32 @@ pub async fn relay_fulfillment(
         // they are is this fulfillment's.
         if let (Some(object), Some(value)) = (read.exercise(), read.value()) {
             if object.fulfillment().body == fulfillment.body {
-                carried = Some(value.to_vec());
-                break;
+                return Ok(Some((object.clone(), value.to_vec())));
             }
         }
     }
-    let Some(bytes) = carried else {
-        return Ok(Relayed {
-            fulfillment_id: *fulfillment_id,
-            position: fulfillment.body.position(),
-            pair,
-            legs: Vec::new(),
-        });
-    };
+    Ok(None)
+}
 
+/// Carry the exercise `bytes` to every leg key its `F` names.
+async fn carry_exercise(
+    set: &StorageSet,
+    cells: Vec<(D32, D32, u64, AttemptCell)>,
+    bytes: &[u8],
+) -> Result<Vec<LegWrite>, DsmError> {
     let mut legs = Vec::new();
     for (vault_id, parent_root, attempt, cell) in cells {
         // The one exercise names every leg's key, so the same bytes belong at
         // each of them; Core counts only an exercise naming the key it sits
         // at, so carrying it where it names nothing would carry nothing.
-        if dsm::sofi::exercise::exercise_names_key(&bytes, &vault_id, &parent_root, attempt)
+        if dsm::sofi::exercise::exercise_names_key(bytes, &vault_id, &parent_root, attempt)
             .is_none()
         {
             return Err(refuse(
                 "the exercise found does not name every key its F does",
             ));
         }
-        let write = write_recorded(set, cell.routed(), &bytes).await?;
+        let write = write_recorded(set, cell.routed(), bytes).await?;
         legs.push(LegWrite {
             vault_id,
             parent_root,
@@ -190,8 +213,85 @@ pub async fn relay_fulfillment(
             reached_leader: write.reached_leader(),
         });
     }
+    Ok(legs)
+}
+
+/// §33: complete a fulfillment whose hops are not all final.
+///
+/// The exercise is the value Core reads as holding one of the fulfillment's
+/// leg cells, taken from that cell's reads and carried VERBATIM to every leg
+/// key the fulfillment names — never rebuilt, because building one needs the
+/// trader's own closure objects and those are not a relayer's to hold. The
+/// position pair is carried with the trader's signed `C_q`: the one
+/// `K_root(q)` holds, or the one that exercise carries. If no leg cell is
+/// held by this fulfillment's exercise only the pair is carried, and only
+/// when `K_root(q)` already holds the trader's claim; that is reported
+/// rather than papered over.
+pub async fn relay_fulfillment(
+    set: &StorageSet,
+    fulfillment_id: &D32,
+) -> Result<Relayed, DsmError> {
+    let (fulfillment, precommit) = objects(set, fulfillment_id).await?;
+    let cells = leg_cells(set, &fulfillment, &precommit)?;
+    let held = held_exercise(set, &cells, &fulfillment).await?;
+    let pair = carry_pair(
+        set,
+        &fulfillment,
+        &precommit,
+        held.as_ref()
+            .map(|(exercise, _)| exercise.resolution_claim()),
+    )
+    .await?;
+    let legs = match held {
+        Some((_, bytes)) => carry_exercise(set, cells, &bytes).await?,
+        None => Vec::new(),
+    };
     Ok(Relayed {
         fulfillment_id: *fulfillment_id,
+        position: fulfillment.body.position(),
+        pair,
+        legs,
+    })
+}
+
+/// Register the fulfillment whose exercise holds `vault_id`'s key
+/// `K^(attempt)` at `parent_root`, from that exercise's bytes alone (SoFi
+/// Amendment S20), and carry the exercise to every key its `F` names.
+///
+/// Everything comes from the exercise: `F` in its envelope, the trader's
+/// signed `C_q`, and `P`, whose parent root routes the pair. Nothing is
+/// fetched from the trader or by content address, so a trader that wrote its
+/// exercise and withheld its pair — or never published `F` on its own —
+/// cannot keep the key held: any device that reads the key completes the
+/// pair.
+pub async fn relay_exercise(
+    set: &StorageSet,
+    vault_id: &D32,
+    parent_root: &D32,
+    attempt: u64,
+) -> Result<Relayed, DsmError> {
+    let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
+    let seats = NodeSeats::new(set)?;
+    let evidence = read_cell(&seats, cell.routed()).await;
+    let read = attempt_resolution(&cell, &evidence)
+        .map_err(|undecided| refuse(format!("the key is not decided yet: {undecided:?}")))?;
+    let (Some(exercise), Some(bytes)) = (read.exercise(), read.value()) else {
+        return Err(refuse(
+            "no exercise holds the key; there is nothing to relay",
+        ));
+    };
+    let (fulfillment, precommit) = (exercise.fulfillment(), exercise.precommit());
+    let cells = leg_cells(set, fulfillment, precommit)?;
+    let pair = carry_pair(
+        set,
+        fulfillment,
+        precommit,
+        Some(exercise.resolution_claim()),
+    )
+    .await?;
+    let legs = carry_exercise(set, cells, bytes).await?;
+    Ok(Relayed {
+        fulfillment_id: dsm::sofi::derive::fulfillment_id(&fulfillment.body),
         position: fulfillment.body.position(),
         pair,
         legs,

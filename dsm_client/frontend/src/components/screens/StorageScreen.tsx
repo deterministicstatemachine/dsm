@@ -99,10 +99,12 @@ const StorageScreen: React.FC = () => {
 
       {activeTab === "dlvs" && (
         <>
-          <SofiVaultsSection
-            view={storage.sofiVaults}
-            onRetry={storageStore.refreshSofiVaults}
-          />
+          <div data-tour="liquidity-vaults">
+            <SofiVaultsSection
+              view={storage.sofiVaults}
+              onRetry={storageStore.refreshSofiVaults}
+            />
+          </div>
           <DlvTab
             dlvLoading={storage.dlvLoading}
             dlvs={storage.dlvs}

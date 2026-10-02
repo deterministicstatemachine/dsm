@@ -829,6 +829,21 @@ fn create_schema(conn: &Connection) -> Result<()> {
             next_seq    INTEGER NOT NULL,
             PRIMARY KEY (address, endpoint)
         );
+        -- Copies this device classified as never anything it can take, by
+        -- content, never by message id alone (b0x_consumed.rs).
+        CREATE TABLE IF NOT EXISTS b0x_passed_over(
+            address     TEXT NOT NULL,
+            copy_key    TEXT NOT NULL,
+            PRIMARY KEY (address, copy_key)
+        );
+        -- Where storage.sync's read of each inbox on each node resumes
+        -- (b0x_consumed.rs).
+        CREATE TABLE IF NOT EXISTS b0x_scan_cursor(
+            address     TEXT NOT NULL,
+            endpoint    TEXT NOT NULL,
+            next_seq    INTEGER NOT NULL,
+            PRIMARY KEY (address, endpoint)
+        );
         -- The one sealed form of each outgoing spool payload, by message id
         -- (DSM Amendment A7; b0x_sealed.rs).
         CREATE TABLE IF NOT EXISTS b0x_sealed(

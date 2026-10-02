@@ -2236,14 +2236,40 @@ pub(crate) mod fixtures {
     use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg, SofiSetupBody, ValidationRef};
 
     pub(crate) const G: D32 = [0x11; 32];
-    pub(crate) const DEV: D32 = [0x22; 32];
+    /// The fixture trader's attestation digest. Its device id is derived from
+    /// this and [`trader_keys`], as a genesis derives one (DSM Amendment A10).
+    pub(crate) const TRADER_ATT_A: D32 = [0xA7; 32];
+
+    /// The fixture trader's device id, `derive_devid(AK, AttA)` over
+    /// [`trader_keys`] and [`TRADER_ATT_A`]: every claim the fixture trader
+    /// signs names its own cells.
+    /// `claim` as `K_root(q)` holds it: signed by the fixture trader under its
+    /// key and [`TRADER_ATT_A`] (SoFi Amendment S20).
+    pub(crate) fn signed_c_q(claim: crate::sofi::wire::SofiResolutionClaim) -> Vec<u8> {
+        crate::sofi::signature::sign_resolution_claim(
+            claim,
+            SIG_ALG,
+            &trader_keys().0,
+            TRADER_ATT_A,
+            &trader_keys().1,
+        )
+        .expect("the fixture trader signs its own C_q")
+        .encode()
+    }
+
+    pub(crate) fn dev() -> D32 {
+        static DEV: std::sync::OnceLock<D32> = std::sync::OnceLock::new();
+        *DEV.get_or_init(|| {
+            crate::core::identity::genesis_v2::derive_devid(&trader_keys().0, &TRADER_ATT_A)
+        })
+    }
     pub(crate) const P_POS: u64 = 5;
     pub(crate) const P_CREATE: u64 = 7;
     pub(crate) const FEE_BPS: u32 = 30;
     pub(crate) const RESERVE_A: u64 = 10_000;
     pub(crate) const RESERVE_B: u64 = 20_000;
     pub(crate) const AMOUNT_IN: u64 = 1_000;
-    pub(crate) const SIG_ALG: u16 = 0x0001;
+    pub(crate) const SIG_ALG: u16 = crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F;
 
     pub(crate) fn token(byte: u8) -> D32 {
         [byte; 32]
@@ -2261,7 +2287,7 @@ pub(crate) mod fixtures {
     pub(crate) fn accepted_setup_claim() -> AcceptedClaim {
         AcceptedClaim::rehydrate_from_admitted_store(
             G,
-            DEV,
+            dev(),
             crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
                 economic_position: SETUP_POS,
                 economic_root: token(0x9A),
@@ -2304,7 +2330,7 @@ pub(crate) mod fixtures {
             ReleaseRule::AllAtCreation.code(),
         ];
         blob.extend_from_slice(&G);
-        blob.extend_from_slice(&DEV);
+        blob.extend_from_slice(&dev());
         blob.push(1);
         blob.push(1);
         blob.extend_from_slice(&(signer.len() as u16).to_be_bytes());
@@ -2359,7 +2385,7 @@ pub(crate) mod fixtures {
     pub(crate) fn setup_body_for(vault_id: D32) -> SofiSetupBody {
         SofiSetupBody::new(
             G,
-            DEV,
+            dev(),
             SETUP_POS,
             vault_id,
             SETUP_CLAIM_REF,
@@ -2416,7 +2442,7 @@ pub(crate) mod fixtures {
     }
 
     pub(crate) fn vault_id_of(j: usize) -> D32 {
-        derive::vault_id(&G, &DEV, P_CREATE + j as u64)
+        derive::vault_id(&G, &dev(), P_CREATE + j as u64)
     }
 
     pub(crate) fn vault_state(
@@ -2439,7 +2465,7 @@ pub(crate) mod fixtures {
         let (market, fee, release) = policies_over(market_pair);
         VaultStateLeaf {
             owner_genesis: G,
-            owner_device_id: DEV,
+            owner_device_id: dev(),
             create_position: P_CREATE + j as u64,
             market_policy: policy_addr(crate::ccb::class::MARKET_POLICY, &market.encode()),
             fee_policy: policy_addr(crate::ccb::class::FEE_POLICY, &fee.encode()),
@@ -2490,7 +2516,7 @@ pub(crate) mod fixtures {
     }
 
     pub(crate) fn base_of(j: usize) -> D32 {
-        derive::relationship_leaf_genesis(&derive::setup_id(&G, &DEV, P_POS, &vault_id_of(j)))
+        derive::relationship_leaf_genesis(&derive::setup_id(&G, &dev(), P_POS, &vault_id_of(j)))
     }
 
     /// A whole operation, built the way a trader builds one: the trees first,
@@ -2542,13 +2568,14 @@ pub(crate) mod fixtures {
     pub(crate) fn parent_claim_envelope(root: D32) -> Vec<u8> {
         let body = crate::economic::claim::EconomicRootClaimBody::new(
             G,
-            DEV,
+            dev(),
             P_POS,
             root,
             token(0x78),
             token(0x77),
             SIG_ALG,
             &trader_keys().0,
+            TRADER_ATT_A,
         )
         .expect("a root claim body");
         crate::economic::claim_envelope::sign_economic_root_claim(&body, &trader_keys().1)
@@ -2603,14 +2630,14 @@ pub(crate) mod fixtures {
     ) -> VaultParts {
         let (token_in, token_out) = market_pair;
         let vault_id = vault_id_of(j);
-        let rel_key = derive::relationship_key(&G, &DEV, &vault_id);
+        let rel_key = derive::relationship_key(&G, &dev(), &vault_id);
         let base = base_of(j);
         let state = vault_state_over(j, market_pair, RESERVE_A, RESERVE_B, VAULT_STATUS_ACTIVE);
         let amount_out =
             constant_product_output_classified(amount_in, RESERVE_A, RESERVE_B, FEE_BPS).unwrap();
         let relationship = VaultRelationshipLeaf {
             trader_genesis: G,
-            trader_device_id: DEV,
+            trader_device_id: dev(),
             leaf: base,
         };
         let state_key = derive::vault_state_key(&vault_id);
@@ -2636,7 +2663,7 @@ pub(crate) mod fixtures {
             },
             CoreEntry::Relationship {
                 genesis: G,
-                device_id: DEV,
+                device_id: dev(),
                 vault_id,
                 base,
                 path: path_of(&tree, &rel_key),
@@ -2645,7 +2672,7 @@ pub(crate) mod fixtures {
         entries.sort_by_key(|e| e.key());
         VaultParts {
             vault_id,
-            core: DlvCore::new(vault_id, tree.root(), G, DEV, base, entries).unwrap(),
+            core: DlvCore::new(vault_id, tree.root(), G, dev(), base, entries).unwrap(),
             hop: SwapHop {
                 vault_id,
                 parent_root: tree.root(),
@@ -2706,8 +2733,8 @@ pub(crate) mod fixtures {
         let exact_out = parts[hops - 1].hop.amount_out;
 
         // The trader's tree: the token spent, and one relationship per vault.
-        let in_key = balance_key(&G, &DEV, &intent_in);
-        let out_key = balance_key(&G, &DEV, &intent_out);
+        let in_key = balance_key(&G, &dev(), &intent_in);
+        let out_key = balance_key(&G, &dev(), &intent_out);
         let mut trader_tree = EconomicSmt::new();
         trader_tree.insert(in_key, balance_leaf_value(intent_in, 50_000));
         for (j, part) in parts.iter().enumerate() {
@@ -2718,7 +2745,7 @@ pub(crate) mod fixtures {
             trader_tree.insert(part.rel_key, derive::trader_relationship_leaf_value(&leaf));
         }
         // The balance spent, as the exercise carries it (SoFi Amendment S12).
-        let pre_balance = TraderPreBalance::new(G, DEV, intent_in, 50_000).unwrap();
+        let pre_balance = TraderPreBalance::new(G, dev(), intent_in, 50_000).unwrap();
 
         let mut trader_entries = vec![
             CoreEntry::Mutation {
@@ -2737,7 +2764,7 @@ pub(crate) mod fixtures {
         for (j, part) in parts.iter().enumerate() {
             trader_entries.push(CoreEntry::Relationship {
                 genesis: G,
-                device_id: DEV,
+                device_id: dev(),
                 vault_id: part.vault_id,
                 base: base_of(j),
                 path: path_of(&trader_tree, &part.rel_key),
@@ -2745,7 +2772,7 @@ pub(crate) mod fixtures {
         }
         trader_entries.sort_by_key(|e| e.key());
         let trader_core =
-            TraderCore::new(G, DEV, P_POS + 1, trader_tree.root(), trader_entries).unwrap();
+            TraderCore::new(G, dev(), P_POS + 1, trader_tree.root(), trader_entries).unwrap();
         let parent_claim = parent_claim_envelope(trader_tree.root());
         let closure = with_pre_balance(with_parent(closure, &parent_claim), &pre_balance);
 
@@ -2824,7 +2851,7 @@ pub(crate) mod fixtures {
         };
         let precommit = TraderPrecommitBody::new(
             G,
-            DEV,
+            dev(),
             P_POS,
             crate::sofi::wire::ParentClaimRef::SingleRoot {
                 claim_ref: derive::claim_ref(&parent_claim),
@@ -3003,7 +3030,7 @@ mod tests {
     ) -> (TraderPrecommitBody, SettlementPreimage) {
         let core = TraderCore::new(
             G,
-            DEV,
+            dev(),
             P_POS + 1,
             *f.preimage.trader_core().pre_root(),
             entries,
@@ -3109,7 +3136,7 @@ mod tests {
         let forged = token(0x7C);
         let core = TraderCore::new(
             G,
-            DEV,
+            dev(),
             P_POS + 1,
             forged,
             f.preimage.trader_core().entries().to_vec(),
@@ -3145,7 +3172,7 @@ mod tests {
         .unwrap();
         let precommit = TraderPrecommitBody::new(
             G,
-            DEV,
+            dev(),
             P_POS,
             *f.precommit.parent_claim_ref(),
             derive::recompute_e(&preimage).unwrap(),
@@ -3456,7 +3483,7 @@ mod tests {
     fn a_missing_trader_movement_is_invalid() {
         let f = swap_fixture();
         let entries = {
-            let out_key = balance_key(&G, &DEV, &pair(0).1);
+            let out_key = balance_key(&G, &dev(), &pair(0).1);
             f.preimage
                 .trader_core()
                 .entries()
@@ -3571,10 +3598,10 @@ mod tests {
     /// A close, built the same way: the vault retires and the trader takes
     /// back exactly both reserves. No debit, and no curve anywhere.
     fn close_fixture(authority: OwnerAuthority) -> Fixture {
-        close_fixture_for(authority, DEV)
+        close_fixture_for(authority, dev())
     }
 
-    /// The same close, against a vault owned by `owner_device`. With `DEV` it
+    /// The same close, against a vault owned by `owner_device`. With `dev()` it
     /// is the trader's own vault; with anything else the operation is a close
     /// of someone else's, and every OTHER field stays self-consistent.
     fn close_fixture_for(authority: OwnerAuthority, owner_device: D32) -> Fixture {
@@ -3592,8 +3619,9 @@ mod tests {
     ) -> Fixture {
         let (token_a, token_b) = pair(0);
         let vault_id = derive::vault_id(&G, &owner_device, P_CREATE);
-        let rel_key = derive::relationship_key(&G, &DEV, &vault_id);
-        let base = derive::relationship_leaf_genesis(&derive::setup_id(&G, &DEV, P_POS, &vault_id));
+        let rel_key = derive::relationship_key(&G, &dev(), &vault_id);
+        let base =
+            derive::relationship_leaf_genesis(&derive::setup_id(&G, &dev(), P_POS, &vault_id));
         let state = VaultStateLeaf {
             owner_device_id: owner_device,
             release_policy: match release_override.as_ref() {
@@ -3605,7 +3633,7 @@ mod tests {
         let state_key = derive::vault_state_key(&vault_id);
         let relationship = VaultRelationshipLeaf {
             trader_genesis: G,
-            trader_device_id: DEV,
+            trader_device_id: dev(),
             leaf: base,
         };
         let mut vault_tree = EconomicSmt::new();
@@ -3631,7 +3659,7 @@ mod tests {
             },
             CoreEntry::Relationship {
                 genesis: G,
-                device_id: DEV,
+                device_id: dev(),
                 vault_id,
                 base,
                 path: path_of(&vault_tree, &rel_key),
@@ -3639,10 +3667,10 @@ mod tests {
         ];
         vault_entries.sort_by_key(|e| e.key());
         let dlv_core =
-            DlvCore::new(vault_id, vault_tree.root(), G, DEV, base, vault_entries).unwrap();
+            DlvCore::new(vault_id, vault_tree.root(), G, dev(), base, vault_entries).unwrap();
 
-        let a_key = balance_key(&G, &DEV, &token_a);
-        let b_key = balance_key(&G, &DEV, &token_b);
+        let a_key = balance_key(&G, &dev(), &token_a);
+        let b_key = balance_key(&G, &dev(), &token_b);
         let trader_rel = TraderRelationshipLeaf {
             vault_id,
             leaf: base,
@@ -3665,7 +3693,7 @@ mod tests {
             },
             CoreEntry::Relationship {
                 genesis: G,
-                device_id: DEV,
+                device_id: dev(),
                 vault_id,
                 base,
                 path: path_of(&trader_tree, &rel_key),
@@ -3673,7 +3701,7 @@ mod tests {
         ];
         trader_entries.sort_by_key(|e| e.key());
         let trader_core =
-            TraderCore::new(G, DEV, P_POS + 1, trader_tree.root(), trader_entries).unwrap();
+            TraderCore::new(G, dev(), P_POS + 1, trader_tree.root(), trader_entries).unwrap();
         let parent_claim = parent_claim_envelope(trader_tree.root());
 
         let settlement = SettlementBody::Close {
@@ -3720,7 +3748,7 @@ mod tests {
         };
         let precommit = TraderPrecommitBody::new(
             G,
-            DEV,
+            dev(),
             P_POS,
             crate::sofi::wire::ParentClaimRef::SingleRoot {
                 claim_ref: derive::claim_ref(&parent_claim),
@@ -3894,7 +3922,7 @@ mod tests {
             vault_id,
             *core.pre_root(),
             G,
-            DEV,
+            dev(),
             *core.relationship_base(),
             entries,
         )
@@ -4173,7 +4201,7 @@ mod tests {
             bytes[n - 4..n - 2].copy_from_slice(&[0x00, 0x09]);
             bytes
         };
-        let f = close_fixture_with(OwnerAuthority::Origin, DEV, Some(bogus));
+        let f = close_fixture_with(OwnerAuthority::Origin, dev(), Some(bogus));
         assert_eq!(
             validate(&f.precommit, &f.preimage, &f.evidence),
             Err(Refusal::Invalid(Invalid::PolicyDoesNotDecode {
@@ -4190,8 +4218,8 @@ mod tests {
         let f = close_fixture(OwnerAuthority::Origin);
         assert_eq!(validate(&f.precommit, &f.preimage, &f.evidence), Ok(()));
         let (token_a, token_b) = pair(0);
-        let a_key = balance_key(&G, &DEV, &token_a);
-        let b_key = balance_key(&G, &DEV, &token_b);
+        let a_key = balance_key(&G, &dev(), &token_a);
+        let b_key = balance_key(&G, &dev(), &token_b);
         for (key, token, amount) in [(a_key, token_a, RESERVE_A), (b_key, token_b, RESERVE_B)] {
             let entry = f
                 .preimage
@@ -4586,7 +4614,7 @@ mod tests {
         let f = swap_fixture();
         let core = &f.preimage.dlv_cores()[0];
         let other_trader = token(0x3B);
-        let entries: Vec<CoreEntry> = core
+        let mut entries: Vec<CoreEntry> = core
             .entries()
             .iter()
             .map(|e| match e {
@@ -4596,7 +4624,7 @@ mod tests {
                     path,
                     ..
                 } => CoreEntry::Relationship {
-                    // The core's marker still says (G, DEV); the entry says
+                    // The core's marker still says (G, dev()); the entry says
                     // another device, and so addresses another key.
                     genesis: G,
                     device_id: other_trader,
@@ -4607,11 +4635,15 @@ mod tests {
                 other => other.clone(),
             })
             .collect();
+        // The bent entry addresses another key, so the entries take that
+        // key's place in canonical order: the core is well formed, and only
+        // its relationship entry is wrong.
+        entries.sort_by_key(CoreEntry::key);
         let bent_core = DlvCore::new(
             *core.vault_id(),
             *core.pre_root(),
             G,
-            DEV,
+            dev(),
             *core.relationship_base(),
             entries,
         )
@@ -4658,7 +4690,7 @@ mod tests {
         let f = swap_fixture();
         let core = &f.preimage.dlv_cores()[0];
         let vault_id = *core.vault_id();
-        let rel_key = derive::relationship_key(&G, &DEV, &vault_id);
+        let rel_key = derive::relationship_key(&G, &dev(), &vault_id);
         let mut evidence = Evidence {
             objects: f.evidence.objects.clone(),
             vault_leaves: f.evidence.vault_leaves.clone(),
@@ -4747,12 +4779,17 @@ mod tests {
 
     #[test]
     fn a_setup_of_another_trader_or_vault_is_invalid() {
-        let f = with_setup(setup_at(token(0x33), DEV, vault_id_of(0), SETUP_CLAIM_REF));
+        let f = with_setup(setup_at(
+            token(0x33),
+            dev(),
+            vault_id_of(0),
+            SETUP_CLAIM_REF,
+        ));
         assert_eq!(
             validate(&f.precommit, &f.preimage, &f.evidence),
             Err(Refusal::Invalid(Invalid::SetupNotThisTrader))
         );
-        let f = with_setup(setup_at(G, DEV, vault_id_of(1), SETUP_CLAIM_REF));
+        let f = with_setup(setup_at(G, dev(), vault_id_of(1), SETUP_CLAIM_REF));
         assert_eq!(
             validate(&f.precommit, &f.preimage, &f.evidence),
             Err(Refusal::Invalid(Invalid::SetupNotThisVault))
@@ -4797,7 +4834,7 @@ mod tests {
 
         let theirs = crate::sofi::wire::SofiSetupBody::new(
             G,
-            DEV,
+            dev(),
             SETUP_POS,
             vault_id_of(0),
             SETUP_CLAIM_REF,
@@ -4832,7 +4869,7 @@ mod tests {
     /// at its position, and no other.
     #[test]
     fn a_setup_naming_another_claim_than_the_accepted_one_is_invalid() {
-        let f = with_setup(setup_at(G, DEV, vault_id_of(0), token(0xA1)));
+        let f = with_setup(setup_at(G, dev(), vault_id_of(0), token(0xA1)));
         assert_eq!(
             validate(&f.precommit, &f.preimage, &f.evidence),
             Err(Refusal::Invalid(
@@ -4859,7 +4896,7 @@ mod tests {
         assert_eq!(validate(&f.precommit, &f.preimage, &evidence), missing);
         let foreign = crate::economic::lineage::AcceptedClaim::rehydrate_from_admitted_store(
             token(0x33),
-            DEV,
+            dev(),
             crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
                 economic_position: SETUP_POS,
                 economic_root: token(0x9A),
@@ -4893,7 +4930,7 @@ mod tests {
         ] {
             let mut evidence = f.evidence.clone();
             evidence.setup_lineages.clear();
-            let lineage = setup_lineage(G, DEV, SETUP_POS, Err(verdict));
+            let lineage = setup_lineage(G, dev(), SETUP_POS, Err(verdict));
             evidence.setup_lineages.insert(SETUP_POS, lineage);
             // The refusal carries lineage validation's own reason.
             assert_eq!(
@@ -4922,7 +4959,7 @@ mod tests {
             F::Unresolved("a conditional position has not resolved".to_string()),
         ] {
             let reason = pending.to_string();
-            let lineage = setup_lineage(G, DEV, SETUP_POS, Err(pending));
+            let lineage = setup_lineage(G, dev(), SETUP_POS, Err(pending));
             assert_eq!(
                 lineage,
                 SetupLineage::NotEstablished {
@@ -4963,7 +5000,7 @@ mod tests {
             let mut evidence = f.evidence.clone();
             let lineage = setup_lineage(
                 genesis,
-                DEV,
+                dev(),
                 position,
                 Err(F::Invalid("another lineage".to_string())),
             );
@@ -5355,7 +5392,7 @@ mod tests {
     fn a_trade_that_does_not_debit_the_trader_is_invalid_from_the_exercise_alone() {
         let f = swap_fixture();
         let honest = carried_pre_balance(&f);
-        let spent_key = balance_key(&G, &DEV, honest.policy_commit());
+        let spent_key = balance_key(&G, &dev(), honest.policy_commit());
         let entries: Vec<CoreEntry> = f
             .preimage
             .trader_core()
