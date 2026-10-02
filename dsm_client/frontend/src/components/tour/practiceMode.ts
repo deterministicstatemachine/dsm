@@ -8,8 +8,14 @@
 // wallet. Every other call whose name says it changes state is refused. When
 // the tour ends, the real client is put back exactly as it was, so nothing the
 // user does in the tour ever reaches the device's real state.
+//
+// Every figure the practice wallet shows is Rust's. It asks `wallet.amount` to
+// parse what the user typed and to render each balance it keeps, as the real
+// wallet's figures are parsed and rendered, so practice ERA counts as ERA does.
 
 import { dsmClient } from '../../services/dsmClient';
+import { walletAmount } from '../../dsm/amount';
+import type { AmountForms } from '../../dsm/amount';
 import type {
   DomainContact,
   DomainIdentity,
@@ -37,7 +43,9 @@ const practiceId = (stem: string): string => (stem + PAD).slice(0, 52);
 export const PRACTICE_CONTACT_ALIAS = 'alice';
 /** The practice contact's device id: what the send screen names a recipient by. */
 export const PRACTICE_CONTACT_DEVICE_ID = practiceId('PRACT1CEA11CE');
-export const PRACTICE_FAUCET_AMOUNT = 100;
+/** The practice ERA the tour starts with, and what its faucet pays, as people count ERA. */
+export const PRACTICE_ERA_HELD = '1000';
+export const PRACTICE_FAUCET_AMOUNT = '100';
 
 type PracticeState = {
   identity: DomainIdentity;
@@ -53,8 +61,9 @@ function freshState(): PracticeState {
       genesisHash: practiceId('PRACT1CEY0VGENES1S'),
       deviceId: practiceId('PRACT1CEY0VDEV1CE'),
     },
+    // The practice coin is counted in whole units. Practice ERA joins it once
+    // Rust has counted it (seedEra).
     balances: [
-      { tokenId: 'ERA', tokenName: 'ERA', symbol: 'ERA', decimals: 0, baseUnits: BigInt(1000), displayAmount: '1000', protocolDefined: true },
       { tokenId: 'PLAY', tokenName: 'Practice Coin', symbol: 'PLAY', decimals: 0, baseUnits: BigInt(50), displayAmount: '50', protocolDefined: false },
     ],
     contacts: [
@@ -70,64 +79,86 @@ function freshState(): PracticeState {
         sendCheckState: 'ready',
       },
     ],
-    history: [
-      {
-        txId: 'practice-welcome',
-        txHash: practiceId('PRACT1CEWE1C0ME'),
-        txType: 'online',
-        type: 'online',
-        amount: BigInt(1000),
-        displayAmount: '1000',
-        tokenId: 'ERA',
-        recipient: 'practice',
-        status: 'confirmed',
-        fromDeviceId: practiceId('PRACT1CESENDER'),
-        toDeviceId: practiceId('PRACT1CEY0VDEV1CE'),
-        memo: 'Practice tokens for the tour',
-        receiptVerified: false,
-      },
-    ],
+    history: [],
     sequence: 0,
   };
 }
 
+/**
+ * Practice ERA as Rust counts ERA: the tour's starting amount parsed at the
+ * decimals of ERA's committed policy, and the welcome payment that brought it.
+ */
+async function seedEra(state: PracticeState): Promise<void> {
+  const held = await walletAmount({ tokenId: 'ERA' }, { entered: PRACTICE_ERA_HELD });
+  state.balances.unshift({
+    tokenId: 'ERA',
+    tokenName: 'ERA',
+    symbol: 'ERA',
+    decimals: held.decimals,
+    baseUnits: held.baseUnits,
+    displayAmount: held.displayAmount,
+    protocolDefined: true,
+  });
+  state.history.push({
+    txId: 'practice-welcome',
+    txHash: practiceId('PRACT1CEWE1C0ME'),
+    txType: 'online',
+    type: 'online',
+    amount: held.baseUnits,
+    displayAmount: held.displayAmount,
+    tokenId: 'ERA',
+    recipient: 'practice',
+    status: 'confirmed',
+    fromDeviceId: practiceId('PRACT1CESENDER'),
+    toDeviceId: practiceId('PRACT1CEY0VDEV1CE'),
+    memo: 'Practice tokens for the tour',
+    receiptVerified: false,
+  });
+}
+
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-function wholeAmount(value: string | number | bigint): bigint | null {
-  try {
-    const text = String(value).trim();
-    if (!/^\d+$/.test(text)) return null;
-    return BigInt(text);
-  } catch {
-    return null;
-  }
-}
+/** A practice debit: the balance left and the amount taken, or why it was refused. */
+type Debit = { balance: bigint; taken: AmountForms } | { refused: string };
 
-type Debit = { ok: true; balance: bigint } | { ok: false; message: string };
-
-function debit(state: PracticeState, tokenId: string, amount: string | number | bigint): Debit {
-  const units = wholeAmount(amount);
-  if (units === null || units <= BigInt(0)) return { ok: false, message: 'Enter a whole amount above zero.' };
+/**
+ * Takes `amount`, as the user typed it, from a practice holding. Rust parses it
+ * at the holding's decimals as a send parses it, and renders what is left; a
+ * refusal is Rust's, in its words.
+ */
+async function debit(state: PracticeState, tokenId: string, amount: string | number | bigint): Promise<Debit> {
   const holding = state.balances.find((b) => b.tokenId === tokenId);
-  if (!holding) return { ok: false, message: `You hold no ${tokenId} in practice.` };
-  if (units > holding.baseUnits) {
-    return { ok: false, message: `Not enough ${holding.symbol}: you have ${holding.displayAmount}.` };
+  if (!holding) return { refused: `You hold no ${tokenId} in practice.` };
+  let taken: AmountForms;
+  try {
+    taken = await walletAmount({ decimals: holding.decimals }, { entered: String(amount) });
+  } catch (e) {
+    return { refused: e instanceof Error ? e.message : String(e) };
   }
-  holding.baseUnits -= units;
-  holding.displayAmount = holding.baseUnits.toString();
-  return { ok: true, balance: holding.baseUnits };
+  if (taken.baseUnits <= BigInt(0)) return { refused: 'Enter an amount above zero.' };
+  if (taken.baseUnits > holding.baseUnits) {
+    return { refused: `Not enough ${holding.symbol}: you have ${holding.displayAmount}.` };
+  }
+  const left = await walletAmount({ decimals: holding.decimals }, { baseUnits: holding.baseUnits - taken.baseUnits });
+  holding.baseUnits = left.baseUnits;
+  holding.displayAmount = left.displayAmount;
+  return { balance: holding.baseUnits, taken };
 }
 
-function credit(state: PracticeState, tokenId: string, units: number): void {
-  const holding = state.balances.find((b) => b.tokenId === tokenId) ?? state.balances[0];
-  holding.baseUnits += BigInt(units);
-  holding.displayAmount = holding.baseUnits.toString();
+/** Adds `amount`, as people count the token, to a practice holding; Rust parses and renders it. */
+async function credit(state: PracticeState, tokenId: string, amount: string): Promise<AmountForms> {
+  const holding = state.balances.find((b) => b.tokenId === tokenId);
+  if (!holding) throw new Error(`You hold no ${tokenId} in practice.`);
+  const paid = await walletAmount({ decimals: holding.decimals }, { entered: amount });
+  const now = await walletAmount({ decimals: holding.decimals }, { baseUnits: holding.baseUnits + paid.baseUnits });
+  holding.baseUnits = now.baseUnits;
+  holding.displayAmount = now.displayAmount;
+  return paid;
 }
 
-function recordSend(state: PracticeState, to: string, tokenId: string, amount: string | number | bigint, memo: string | undefined, mode: 'online' | 'offline'): string {
+function recordSend(state: PracticeState, to: string, tokenId: string, taken: AmountForms, memo: string | undefined, mode: 'online' | 'offline'): string {
   state.sequence += 1;
   const txId = `practice-${state.sequence}`;
-  const units = wholeAmount(amount) ?? BigInt(0);
   const contact = state.contacts.find((c) => c.deviceId === to);
   state.history = [
     {
@@ -135,8 +166,9 @@ function recordSend(state: PracticeState, to: string, tokenId: string, amount: s
       txHash: practiceId(`PRACT1CETX${state.sequence}`),
       txType: mode === 'offline' ? 'bilateral_offline' : 'online',
       type: mode,
-      amount: -units,
-      displayAmount: `-${units.toString()}`,
+      amount: -taken.baseUnits,
+      // An outgoing amount, signed as Rust signs one: its rendered form after a minus.
+      displayAmount: `-${taken.displayAmount}`,
       tokenId,
       recipient: contact?.alias ?? to,
       status: 'confirmed',
@@ -153,19 +185,42 @@ function recordSend(state: PracticeState, to: string, tokenId: string, amount: s
 type AnyFn = (...args: never[]) => unknown;
 
 function simulations(state: PracticeState, emit: (event: PracticeEvent) => void): Record<string, AnyFn> {
+  // Practice ERA is counted by Rust the first time a call needs it, and every
+  // such call waits for that count; a refusal is the call's answer.
+  let seeded: Promise<void> | undefined;
+  const ready = (): Promise<void> => {
+    if (!seeded) seeded = seedEra(state);
+    return seeded;
+  };
+  // One change to the practice wallet at a time: a debit's check and the
+  // balance Rust renders after it belong together, so the next change waits.
+  let turn: Promise<unknown> = Promise.resolve();
+  const inTurn = <T>(change: () => Promise<T>): Promise<T> => {
+    const next = turn.then(change, change);
+    turn = next;
+    return next;
+  };
   return {
     getIdentity: async () => ({ ...state.identity }),
-    getAllBalances: async () => state.balances.map((b) => ({ ...b })),
+    getAllBalances: async () => {
+      await ready();
+      return state.balances.map((b) => ({ ...b }));
+    },
     getContacts: async () => ({ contacts: state.contacts.map((c) => ({ ...c })) }),
-    getWalletHistory: async () => ({ transactions: [...state.history] }),
-    sendOnlineTransferSmart: async (recipientDeviceId: string, scaledAmountStr: string | number | bigint, memo?: string, tokenId?: string) => {
+    getWalletHistory: async () => {
+      await ready();
+      return { transactions: [...state.history] };
+    },
+    sendOnlineTransferSmart: async (recipientDeviceId: string, enteredAmount: string | number | bigint, memo?: string, tokenId?: string) => {
       await pause(700);
       // As Rust answers: a send that names no token is refused, never sent as ERA.
       if (!tokenId) return { success: false, message: 'wallet.sendSmart: the request names no token' };
       const token = tokenId;
-      const result = debit(state, token, scaledAmountStr);
-      if (!result.ok) return { success: false, error: { message: result.message } };
-      recordSend(state, recipientDeviceId, token, scaledAmountStr, memo, 'online');
+      await ready();
+      const result = await inTurn(() => debit(state, token, enteredAmount));
+      // The real call answers a refusal as { success, message }.
+      if ('refused' in result) return { success: false, message: result.refused };
+      recordSend(state, recipientDeviceId, token, result.taken, memo, 'online');
       emit('sent');
       return { success: true, newBalance: result.balance };
     },
@@ -174,21 +229,24 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
       await pause(700);
       if (!params.tokenId) return { accepted: false, result: 'wallet.sendOffline: the request names no token' };
       const token = params.tokenId;
-      const result = debit(state, token, params.amount);
-      if (!result.ok) return { accepted: false, result: result.message };
-      recordSend(state, params.to, token, params.amount, params.memo, 'offline');
+      await ready();
+      const result = await inTurn(() => debit(state, token, params.amount));
+      if ('refused' in result) return { accepted: false, result: result.refused };
+      recordSend(state, params.to, token, result.taken, params.memo, 'offline');
       emit('sent');
       return { accepted: true, result: 'Practice transfer complete' };
     },
-    // Answers in the shape the real claimFaucet does; the faucet releases ERA.
+    // Answers in the shape the real claimFaucet does; the faucet releases ERA,
+    // and its message shows ERA as Rust renders it.
     claimFaucet: async () => {
       await pause(600);
-      credit(state, 'ERA', PRACTICE_FAUCET_AMOUNT);
+      await ready();
+      const paid = await inTurn(() => credit(state, 'ERA', PRACTICE_FAUCET_AMOUNT));
       emit('claimed');
       return {
         success: true,
-        tokensReceived: BigInt(PRACTICE_FAUCET_AMOUNT),
-        message: `Practice: claimed ${PRACTICE_FAUCET_AMOUNT} ERA`,
+        tokensReceived: paid.baseUnits,
+        message: `Practice: claimed ${paid.displayAmount} ERA`,
       };
     },
     addContact: async (input: { alias: string; genesisHash: string | Uint8Array; deviceId: string | Uint8Array }) => {

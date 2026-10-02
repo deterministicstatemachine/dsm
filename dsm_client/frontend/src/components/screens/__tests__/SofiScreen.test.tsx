@@ -46,14 +46,16 @@ const PLAY = encodeBase32Crockford(PLAY_BYTES);
 const VAULT_1 = new Uint8Array(32).fill(0xa1);
 const VAULT_2 = new Uint8Array(32).fill(0xa2);
 
-function balance(symbol: string, anchor: string | undefined): TokenBalanceView {
+/** 1000 of a whole-unit token, and 1000 ERA at ERA's two decimals, as Rust lists them. */
+const WHOLE_1000 = { baseUnits: 1000n, decimals: 0, displayAmount: '1000' };
+const ERA_1000 = { baseUnits: 100000n, decimals: 2, displayAmount: '1000.00' };
+
+function balance(symbol: string, anchor: string | undefined, held = WHOLE_1000): TokenBalanceView {
   return {
     tokenId: symbol,
     symbol,
     tokenName: symbol,
-    baseUnits: 1000n,
-    decimals: 0,
-    displayAmount: '1000',
+    ...held,
     policyAnchorB32: anchor,
     anchorFingerprint: anchor?.slice(0, 8),
     protocolDefined: symbol === 'ERA',
@@ -69,7 +71,7 @@ async function pickToken(control: string, ticker: string) {
 beforeEach(() => {
   jest.clearAllMocks();
   // A hostile row: a token with no anchor is held, and must not be offered.
-  balances = [balance('ERA', ERA), balance('PLAY', PLAY), balance('NOANCHOR', undefined)];
+  balances = [balance('ERA', ERA, ERA_1000), balance('PLAY', PLAY), balance('NOANCHOR', undefined)];
 });
 
 describe('SofiScreen', () => {

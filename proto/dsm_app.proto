@@ -2689,6 +2689,8 @@ message Envelope {
     SealedEnvelopeV1                  sealed                           = 125;
     // sofi.vaults: the owner's vaults at their walked heads.
     SofiVaultsResponse                sofi_vaults_response             = 126;
+    // wallet.amount: an amount in both its forms, local-only.
+    WalletAmountResponse              wallet_amount_response           = 127;
 
 
     // Reply to `token.forget`.
@@ -3508,6 +3510,34 @@ message TokenPolicyPermissions {
 }
 // Multi-token enumeration (ordered lexicographically by token_id on server side)
 message BalancesListResponse { repeated BalanceGetResponse balances = 1; }
+
+// wallet.amount: one amount in both its forms, converted by the one rule Rust
+// owns (see BalanceGetResponse.display_amount). A client holding an amount in
+// one form that must show or count it in the other asks here; it converts
+// nothing itself. The guided tour's practice wallet keeps its figures this way.
+message WalletAmountRequest {
+  // What the amount is counted in.
+  oneof unit {
+    // A token Rust knows: the decimals of its committed policy, by the same
+    // lookup a send of that token uses.
+    string token_id = 1;
+    // A stated count of decimals, for a token no policy on this device
+    // commits: the tour's practice coin. At most a policy's maximum.
+    uint32 decimals = 2;
+  }
+  oneof amount {
+    // As a person typed it, in token units, parsed as a send parses it.
+    string entered = 3;
+    // Canonical base units.
+    uint64 base_units = 4;
+  }
+}
+
+message WalletAmountResponse {
+  uint64 base_units     = 1; // canonical base units
+  string display_amount = 2; // the same amount, rendered by Rust
+  uint32 decimals       = 3; // the decimals both forms are at
+}
 message TransactionInfo {
   string id            = 1;
   bytes  from_device_id= 2 [(dsm_fixed_len)=32];

@@ -117,19 +117,20 @@ function frameEnvelope(env: pb.Envelope): Uint8Array {
 }
 
 /** Build FramedEnvelopeV3 containing a BalancesListResponse */
-function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available: bigint }>): Uint8Array {
+function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available: bigint; displayAmount: string }>): Uint8Array {
   // Complete rows, as balance.list enriches them: the boundary decoder refuses
   // a row missing its symbol, name or display amount, and a created token's
   // row without its policy facts. The fixture's tokens are ERA, a protocol
-  // asset on Rust's word, and whole-unit, so the display form is the base units.
+  // asset on Rust's word, at ERA's two decimals; each row carries the display
+  // form Rust renders for it.
   const balList = balances.map(b => new pb.BalanceGetResponse({
     tokenId: b.tokenId,
     available: b.available as any,
     locked: 0n as any,
     symbol: b.tokenId,
     tokenName: b.tokenId,
-    decimals: 0,
-    displayAmount: b.available.toString(),
+    decimals: 2,
+    displayAmount: b.displayAmount,
     protocolDefined: true,
   } as any));
   const resp = new pb.BalancesListResponse({ balances: balList } as any);
@@ -141,7 +142,7 @@ function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available
 }
 
 /** Build FramedEnvelopeV3 containing a WalletHistoryResponse */
-function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountSigned: bigint }>): Uint8Array {
+function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountSigned: bigint; displayAmount: string }>): Uint8Array {
   // Complete rows, as wallet.history writes them: the boundary mapper refuses
   // a row missing any field Rust always sets.
   const txList = transactions.map((t, i) => new pb.TransactionInfo({
@@ -155,7 +156,7 @@ function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountS
     txType: pb.TransactionType.TX_TYPE_BILATERAL_OFFLINE,
     status: 'completed',
     recipient: 'peer',
-    displayAmount: t.amountSigned.toString(),
+    displayAmount: t.displayAmount,
   }));
   const resp = new pb.WalletHistoryResponse({ transactions: txList } as any);
   const env = new pb.Envelope({
@@ -198,11 +199,11 @@ function makeRejectFramedEnvelope(): Uint8Array {
 // ─── sendMessageBin Mock State ────────────────────────────────────────────────────
 
 /** Mutable state that tests can modify to change what sendMessageBin returns */
-let balancesState: Array<{ tokenId: string; available: bigint }> = [
-  { tokenId: 'ERA', available: 10000n },
+let balancesState: Array<{ tokenId: string; available: bigint; displayAmount: string }> = [
+  { tokenId: 'ERA', available: 1000000n, displayAmount: '10000.00' },
 ];
-let historyState: Array<{ amount: bigint; amountSigned: bigint }> = [
-  { amount: 100n, amountSigned: 100n },
+let historyState: Array<{ amount: bigint; amountSigned: bigint; displayAmount: string }> = [
+  { amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' },
 ];
 let capturedMethods: string[] = [];
 
@@ -628,8 +629,8 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     capturedMethods = [];
 
     // Reset balance and history state
-    balancesState = [{ tokenId: 'ERA', available: 10000n }];
-    historyState = [{ amount: 100n, amountSigned: 100n }];
+    balancesState = [{ tokenId: 'ERA', available: 1000000n, displayAmount: '10000.00' }];
+    historyState = [{ amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' }];
 
     // Re-install bridge mock (in case previous test modified it)
     installCallBinMock();
@@ -654,7 +655,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     // → decodeFramedEnvelopeV3() → TokenBalanceView[]
     // PROVES the entire decode chain works.
     const balText = screen.getByTestId('i-balance-era').textContent;
-    expect(balText).toBe('10000');
+    expect(balText).toBe('10000.00');
 
     // Verify sendMessageBin was actually called with the expected methods
     expect(capturedMethods).toContain('getAllBalancesStrict');
@@ -745,7 +746,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
   test('TRANSFER_COMPLETE → Dialog clears + REAL refreshAll → sendMessageBin returns new balance → DOM updates', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
+    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000.00'));
 
     // Show dialog first
     act(() => {
@@ -762,10 +763,10 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
 
     // CHANGE what sendMessageBin returns for the NEXT getAllBalancesStrict call
     // This simulates the balance updating in the native layer after transfer
-    balancesState = [{ tokenId: 'ERA', available: 10300n }];
+    balancesState = [{ tokenId: 'ERA', available: 1030000n, displayAmount: '10300.00' }];
     historyState = [
-      { amount: 300n, amountSigned: 300n },
-      { amount: 100n, amountSigned: 100n },
+      { amount: 30000n, amountSigned: 30000n, displayAmount: '300.00' },
+      { amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' },
     ];
 
     capturedMethods = [];
@@ -799,7 +800,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     // → sendMessageBin → BridgeRpcResponse → unwrapProtobufResponse → FramedEnvelopeV3
     // → getAllBalances → TokenBalanceView[] → walletStore → DOM
     await waitFor(() => {
-      expect(screen.getByTestId('i-balance-era').textContent).toBe('10300');
+      expect(screen.getByTestId('i-balance-era').textContent).toBe('10300.00');
     });
 
     // Transaction count should reflect updated history
@@ -811,7 +812,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
   test('REJECTED clears dialog WITHOUT triggering balance refresh', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
+    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000.00'));
 
     act(() => {
       eventBridgeEmit('bilateral.event', encodeBilateralEventNotification({
@@ -919,10 +920,10 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
   test('an accepted transfer → WalletProvider refreshes on the accept path’s wallet.refresh (REAL sendMessageBin round trip)', async () => {
     render(<ProductionLayout />);
     await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
+    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000.00'));
 
     // Change what sendMessageBin will return on next balance fetch
-    balancesState = [{ tokenId: 'ERA', available: 10500n }];
+    balancesState = [{ tokenId: 'ERA', available: 1050000n, displayAmount: '10500.00' }];
     capturedMethods = [];
 
     // What the accept path emits: the accepted signal (the toast's trigger)
@@ -940,7 +941,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
 
     // Balance should update in UI from sendMessageBin's response
     await waitFor(() => {
-      expect(screen.getByTestId('i-balance-era').textContent).toBe('10500');
+      expect(screen.getByTestId('i-balance-era').textContent).toBe('10500.00');
     });
 
     await settleWalletEffects();
@@ -990,7 +991,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     capturedMethods = [];
-    balancesState = [{ tokenId: 'ERA', available: 5000n }];
+    balancesState = [{ tokenId: 'ERA', available: 500000n, displayAmount: '5000.00' }];
     historyState = [];
     installCallBinMock();
   });
@@ -1010,15 +1011,15 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
 
     const { container } = render(<FullApp />);
     await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('seq-bal').textContent).toBe('5000'));
+    await waitFor(() => expect(screen.getByTestId('seq-bal').textContent).toBe('5000.00'));
 
     // ──── Step 1: PREPARE_RECEIVED ────
     act(() => {
       eventBridgeEmit('bilateral.event', encodeBilateralEventNotification({
         eventType: BilateralEventType.PREPARE_RECEIVED,
         status: 'pending',
-        message: 'Incoming: 1000 ERA from Device-A',
-        amount: 1000n,
+        message: 'Incoming: 1000.00 ERA from Device-A',
+        amount: 100000n,
         tokenId: 'ERA',
         counterpartyDeviceId: makeDeviceId(0x11),
         commitmentHash: makeCommitmentHash(0x22),
@@ -1063,8 +1064,8 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
     });
 
     // ──── Step 6: TRANSFER_COMPLETE → refreshAll → sendMessageBin(getAllBalancesStrict with new balance) → DOM ────
-    balancesState = [{ tokenId: 'ERA', available: 6000n }];
-    historyState = [{ amount: 1000n, amountSigned: 1000n }];
+    balancesState = [{ tokenId: 'ERA', available: 600000n, displayAmount: '6000.00' }];
+    historyState = [{ amount: 100000n, amountSigned: 100000n, displayAmount: '1000.00' }];
     capturedMethods = [];
 
     act(() => {
@@ -1072,16 +1073,16 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
         eventType: BilateralEventType.TRANSFER_COMPLETE,
         status: 'completed',
         message: 'Transfer complete!',
-        amount: 1000n,
+        amount: 100000n,
         tokenId: 'ERA',
         commitmentHash: makeCommitmentHash(0x22),
         transactionHash: makeTxHash(0x33),
       }));
     });
 
-    // Balance should reflect the 1000 ERA received (5000 → 6000) via sendMessageBin
+    // Balance should reflect the 1000.00 ERA received (5000.00 → 6000.00) via sendMessageBin
     await waitFor(() => {
-      expect(screen.getByTestId('seq-bal').textContent).toBe('6000');
+      expect(screen.getByTestId('seq-bal').textContent).toBe('6000.00');
     });
 
     // Transaction history should show the transfer
