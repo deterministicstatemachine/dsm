@@ -1105,7 +1105,7 @@ Tests for the radio's word: `BleCoordinatorRadioTest` (7: a refused advertising 
 - Kotlin · UnifiedContactBridge.kt `removeContact`, `hasContactForDeviceId`, with their `Unified` functions, externals and JNI exports: nothing calls them. A contacts pass.
 - `dsm_sdk` · bluetooth/bilateral_ble_handler.rs `handle_prepare_request`: a prepare that is not for this relationship is not meaningless bytes to the receiver, though its parent can never match. The receiver never checks that the prepare is for it: it logs the target and carries on. When the sender is also its contact, the tip mismatch stores the sender's claimed tip as a live-peer claim, and that claim blocks the receiving appliance's sends to the sender, online as well as offline (`wallet.send` checks the same readiness); nothing outside recovery clears it. The receiver also answers with a signed rejection, which the sender drops, and emits a rejected event to its own app. A throwaway probe reproduced it: send-ready before, then blocked with "Live peer reported a different relationship tip". The target field is not under the sender's signature; the operation inside the signed commitment names the recipient. The Kotlin fallback below is one way such a prepare arrives.
 - Kotlin · bridge/ble/BleCoordinator.kt `resolveSession`: when the address a transfer names is not a live session and no identity matches it, the transfer goes to the one ready peer, whichever appliance that is. A prepare for one contact can reach another appliance; the fallback picks a destination the SDK did not choose. A transport pass.
-- Kotlin · AndroidManifest.xml `PicoSelfTestActivity`: a bench self-test its own comment calls debug bring-up only, exported and launched on USB attach in the production manifest. The hardware track's.
+- Kotlin · AndroidManifest.xml `PicoSelfTestActivity`: a bench self-test its own comment calls debug bring-up only, exported and launched on USB attach in the production manifest. The hardware track's. **Closed by pre-audit item 16 (§6.69):** declared in the debug manifest only.
 - `proto` · `BilateralReconciliationRequest`, `BilateralReconciliationResponse`, `BleFrameType` 10–11, with their arms in `dsm_sdk` bluetooth/frame_classify.rs and wire/mod.rs: reconciliation was deleted (a fork is a Tripwire violation, not reconcilable) and its frames outlived it; the request's `include_peer_status` and `ble_address` name the peer status read deleted above. A backend wire pass.
 - frontend · SofiScreen: orders a vault's token pair bytewise before sending it (§28) — a protocol rule applied above Rust. The SoFi track's screen.
 - frontend · dsm/transactions.ts `schedulePostAcceptRefreshes`: after Accept, four re-reads of the wallet on a frame cadence (0/0.5/1/2 s) beside Rust's TRANSFER_COMPLETE announcement, kept because whether the announcement alone reaches the screen on a device is undecided; a device run decides, and the cadence goes if it does.
@@ -2555,6 +2555,39 @@ Also: `a_credits_source_is_validated_through_its_own_segment` (B validates C's f
 - **Test 5 has none.** The only writer of a frontier is the accept transaction, so there is no gate to remove. The test stands against a future writer.
 
 **Still open.** `peer_root_at`, the SoFi walk, records nothing, so §6.53's liveness bound on vault owners stands. The ruling's "Cache/update validated frontiers" answers the owner question recorded there, and SOFI holds the change.
+
+### 6.69 The WebView runs only the app's own scripts and goes nowhere else; a release build exports the launcher only (`security/beta-pre-audit-remaining`, pre-audit items 13 and 16, 2026-10-01)
+
+The owner's beta security pre-audit, items 13 ("WebView hardening: Remove `unsafe-eval`, reduce/remove `unsafe-inline`, lock navigation/origins down and preserve the packaged-origin-only native bridge") and 16 ("Exported Android component hardening: Review and restrict exported activities/components capable of irreversible or security-sensitive actions"). Audited at main `e736dbca7` by a read-only pass over `public/index.html`, `MainActivity.kt` and the manifests; the tree was unchanged after it.
+
+**Item 13. The WebView admitted any script and any address (closed).**
+
+| Field | Record |
+|---|---|
+| Severity | Medium (P2) |
+| Files | `dsm_client/frontend/public/index.html` (the policy); `dsm_client/frontend/webpack.config.js` · `InlineScriptHashes` (new), the web-development devtool; `dsm_client/frontend/scripts/webview-policy.js` (new), `validate-android-assets.js`; `dsm_client/android/.../ui/WebNavigationPolicy.kt` (new), `MainActivity.kt` · `shouldOverrideUrlLoading`, `onCreateWindow`, `openOutside` (new); `tools/sanitize-android-index.js` (deleted) |
+| Exploit | Any script that reached the page ran: `script-src` admitted `'unsafe-inline'` and `'unsafe-eval'`, so an injection anywhere in what the page renders would run with the native bridge in reach. Any http(s) link the page followed was handed to another app with `ACTION_VIEW` (data in the URL leaves the device), every other scheme (`file:`, `content:`, `intent:`, `data:`) loaded in the WebView itself, and an exception while deciding loaded it too. `window.open` was forwarded to `ACTION_VIEW` unfiltered. |
+| Violates | The pre-audit's item 13; the packaged-origin-only bridge (the port is posted to the app's origin alone, and nothing else may become the page). |
+| Verification | The shipped page, served locally, runs its three inline scripts and mounts React with no violation; an injected inline script is blocked (`securitypolicyviolation`, `script-src-elem`). `validate-android-assets.js` (CI's `npm run build`) passes on the shipped page. `WebNavigationPolicyTest` (3 tests): the app's assets load; the QR link and the issue form are the only ways out; fourteen other addresses are refused. Android unit tests 262/0. |
+| Closure condition | `script-src 'self'` plus the SHA-256 of each inline script the emitted page carries, written by the build; no `'unsafe-eval'` anywhere; `base-uri`, `form-action`, `frame-src` and `object-src` `'none'`; the shipped page is checked by CI. Every navigation and new window goes through `WebNavigationPolicy`: the app's own assets load, `dsm://native/qr/start` opens the scanner, the beta issue form (`https://github.com/deterministicstatemachine/dsm/issues/new`) opens in the browser, everything else is refused. |
+| Residual | `style-src` keeps `'unsafe-inline'`: six `<style>` blocks, one `style` attribute in `index.html` and a JSX `<style>` element (`AppContent.tsx`). Styles execute no script, and `connect-src`/`img-src` limit what a style can reach. `allowContentAccess` stays at its default: setting it needs a boolean literal the real-code guard refuses, and `content:` loads are refused by both the policy (`img-src`, `connect-src`) and the navigation policy. |
+| Status | Closed (`35109e75b`). |
+
+Mutation controls (item 13, restored byte for byte): the policy re-admitting `'unsafe-inline' 'unsafe-eval'` → the validator fails on both; `InlineScriptHashes` removed → the validator names the token left in the policy and the three inline scripts it no longer admits; the navigation policy opening any http(s) address → `every_other_address_is_refused` red.
+
+**Item 16. An exported bench tool ran irreversible chip operations for any app (closed).**
+
+| Field | Record |
+|---|---|
+| Severity | Medium (P2) |
+| Files | `dsm_client/android/app/src/main/AndroidManifest.xml`; `src/debug/AndroidManifest.xml` (new), `src/debug/res/xml/pico_device_filter.xml` (moved); `ci/android_exported_components.sh` (new), `ci/production_safety_checks.sh` |
+| Exploit | `PicoSelfTestActivity`, a bench self-test its own comment calls "Debug bring-up only" (§6.29), was exported by the main manifest with no permission. Any installed app could start it with an explicit intent; with its confirmation extras it calls `Unified.counterInitMax()` and `Unified.birthCageSlot0()`, the second labelled irreversible. Their Rust side is compiled only with `on_device_installs`, but nothing in the manifest depended on that. |
+| Violates | The pre-audit's item 16. |
+| Verification | `ci/android_exported_components.sh`: every component states `android:exported`, only `MainActivity` is exported, and it answers `MAIN` alone with no data filter. The release merged manifest declares no `PicoSelfTestActivity`; the debug one does. The other components were reviewed: `MainActivity` reads nothing from its launching intent and registers its receivers `RECEIVER_NOT_EXPORTED`; `QrScannerActivity`, `BleBackgroundService`, `DsmInitProvider` and `IncompatibleDeviceScreen` are not exported; there is no deep link, NFC intent filter or boot receiver. |
+| Closure condition | A release build declares the debug tool nowhere; the gate fails on any other exported component. |
+| Status | Closed (`b629a75c3`). |
+
+Mutation control (item 16): the gate run on the previous manifest fails, "activity com.dsm.wallet.debug.PicoSelfTestActivity is exported".
 
 ## 7 Totals
 
