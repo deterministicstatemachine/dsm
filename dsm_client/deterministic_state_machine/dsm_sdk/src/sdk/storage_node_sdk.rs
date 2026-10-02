@@ -1035,8 +1035,10 @@ mod tests {
 
     /// A member that answers the first request it is sent at once, whatever
     /// was asked, with `payload` under `namespace`, and then opens `opened`.
+    /// It serves `tls`, a certificate naming the member it stands in for, so
+    /// a device reaches it as it reaches that member.
     async fn substituting(
-        scheme: &str,
+        tls: axum_server::tls_rustls::RustlsConfig,
         namespace: &'static [u8],
         payload: &'static [u8],
         opened: std::sync::Arc<tokio::sync::Semaphore>,
@@ -1046,8 +1048,10 @@ mod tests {
             .await
             .expect("a member port");
         let port = listener.local_addr().expect("its address").port();
+        let acceptor = tokio_rustls::TlsAcceptor::from(tls.get_inner());
         tokio::spawn(async move {
-            let (mut inbound, ..) = listener.accept().await.expect("the member accepts");
+            let (inbound, ..) = listener.accept().await.expect("the member accepts");
+            let mut inbound = acceptor.accept(inbound).await.expect("the TLS handshake");
             let mut request = Vec::new();
             let mut chunk = [0u8; 1024];
             while !request.windows(4).any(|end| end == b"\r\n\r\n") {
@@ -1068,7 +1072,7 @@ mod tests {
             inbound.flush().await.expect("the answer sent");
             opened.add_permits(1);
         });
-        format!("{scheme}://127.0.0.1:{port}")
+        format!("https://127.0.0.1:{port}")
     }
 
     /// A fetch keeps the first bytes that re-hash to the address, not the
@@ -1081,7 +1085,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn a_fetch_passes_over_a_member_that_answers_first_with_other_bytes() {
-        let _fleet = crate::test_support::one_device::Fleet::start();
+        let fleet = crate::test_support::one_device::Fleet::start();
         let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
             .expect("the pinned set");
         const NAMESPACE: &[u8] = b"DSM/test/first-bytes-that-verify";
@@ -1102,7 +1106,8 @@ mod tests {
                     .split_once("://")
                     .expect("an endpoint names its scheme");
                 let endpoint = if position == 0 {
-                    substituting(scheme, NAMESPACE, b"other bytes", opened.clone()).await
+                    let tls = fleet.tls_for(&member.member_id).await;
+                    substituting(tls, NAMESPACE, b"other bytes", opened.clone()).await
                 } else {
                     relay_after(scheme, target.to_string(), opened.clone()).await
                 };
