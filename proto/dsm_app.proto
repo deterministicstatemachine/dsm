@@ -3609,7 +3609,7 @@ message InboxResponse { repeated InboxItem items = 1; }
 message StorageSyncRequest {
   bool pull_inbox        = 1; // retrieve pending items from b0x
   bool push_pending      = 2; // submit local pending transactions
-  uint32 limit           = 3; // max inbox items to pull (0 = default 100)
+  uint32 limit           = 3; // max inbox items to read from each route (0 = default 100)
 }
 message StorageSyncResponse {
   bool   success         = 1;
@@ -3617,6 +3617,9 @@ message StorageSyncResponse {
   uint32 processed       = 3; // items successfully processed
   uint32 pushed          = 4; // transactions pushed to storage
   repeated string errors = 5; // any errors encountered
+  // Inbox routes whose budget this sync spent with entries still unread:
+  // a status, not an error. The next sync resumes each where it stopped.
+  repeated string more_pending = 6;
 }
 
 // ========================= Canonical Proofs =========================

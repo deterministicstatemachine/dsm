@@ -5178,6 +5178,7 @@ mod tests {
             processed: pulled,
             pushed: 0,
             errors: Vec::new(),
+            more_pending: Vec::new(),
         }
     }
 

@@ -300,6 +300,7 @@ mod tests {
             processed: pulled,
             pushed: 0,
             errors: errors.iter().map(|s| s.to_string()).collect(),
+            more_pending: Vec::new(),
         }
     }
 

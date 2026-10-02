@@ -1208,6 +1208,7 @@ mod tests {
             processed: 0,
             pushed: 0,
             errors: Vec::new(),
+            more_pending: Vec::new(),
         })]);
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::set_dbtc_storage_list_results(vec![Err(
             "catalog unavailable".to_string(),
@@ -1250,6 +1251,7 @@ mod tests {
             processed: 0,
             pushed: 0,
             errors: Vec::new(),
+            more_pending: Vec::new(),
         })]);
 
         let res = router
