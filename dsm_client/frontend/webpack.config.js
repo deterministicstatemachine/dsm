@@ -21,8 +21,10 @@ class InlineScriptHashes {
       HtmlWebpackPlugin.getCompilationHooks(compilation).beforeEmit.tapAsync(
         'InlineScriptHashes',
         (data, done) => {
-          const scripts = [...data.html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
-          const inline = scripts.filter(([, attributes]) => !/\bsrc\s*=/.test(attributes));
+          // Tag names are case-insensitive, and a closing tag may carry whitespace:
+          // every spelling a browser reads as a script is a script here.
+          const scripts = [...data.html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+          const inline = scripts.filter(([, attributes]) => !/\bsrc\s*=/i.test(attributes));
           const unhashable = inline.filter(([, attributes]) => attributes.trim().length > 0);
           if (unhashable.length > 0) {
             done(new Error(`an inline script carries attributes: ${unhashable[0][1].trim()}`));
