@@ -464,8 +464,8 @@ describe('Offline Transfer — Full Cycle', () => {
         recipientId: DEVICE_B,
         phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_FAILED,
         direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING,
-        amount: BigInt(7),
-        displayAmount: '7',
+        amount: BigInt(700),
+        displayAmount: '7.00',
         tokenId: 'ERA',
       } as any),
     ];
@@ -594,8 +594,9 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
         recipientId: DEVICE_B,
         phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_COMMITTED,
         direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING,
-        amount: BigInt(15000 + testIndex),
-        displayAmount: String(15000 + testIndex),
+        // The typed ERA as Rust lists the step: in base units at ERA's two decimals.
+        amount: BigInt(15000 + testIndex) * 100n,
+        displayAmount: `${15000 + testIndex}.00`,
         tokenId: 'ERA',
       } as any),
     ];

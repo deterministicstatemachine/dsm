@@ -22,7 +22,7 @@ describe('E2E: Unilateral Transaction Flow', () => {
     // Verify balance response uses bigint (not string)
     const balanceProto = new pb.BalanceGetResponse({
       tokenId: 'ROOT',
-      available: 1000000000n, // 1 billion base units = 10 ERA
+      available: 1000000000n, // 1 billion base units = 10,000,000.00 ERA at ERA's two decimals
     });
 
     expect(balanceProto.tokenId).toBe('ROOT');

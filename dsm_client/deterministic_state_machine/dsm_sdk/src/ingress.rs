@@ -660,6 +660,21 @@ mod tests {
         }
     }
 
+    /// A device as wallet creation creates it, with its router installed as
+    /// the app installs it and no storage nodes named: the router answers what
+    /// this device holds.
+    fn device_with_router(seed: u8) {
+        fresh_process();
+        economic_fixtures::local_device(seed);
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "ingress-router-test".to_string(),
+            storage_endpoints: Vec::new(),
+            enable_offline: false,
+        })
+        .expect("router");
+        install_app_router(Arc::new(router)).expect("install router");
+    }
+
     fn expect_error(response: IngressResponse) -> pb::Error {
         match response.result {
             Some(ingress_response::Result::Error(error)) => error,
@@ -792,15 +807,7 @@ mod tests {
     #[test]
     #[serial]
     fn a_router_query_answer_passes_through_unchanged() {
-        fresh_process();
-        economic_fixtures::local_device(0x44);
-        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
-            node_id: "ingress-router-test".to_string(),
-            storage_endpoints: Vec::new(),
-            enable_offline: false,
-        })
-        .expect("router");
-        install_app_router(Arc::new(router)).expect("install router");
+        device_with_router(0x44);
         let pref = |path: &str, value: &str| {
             dispatch_ingress(IngressRequest {
                 operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
@@ -831,20 +838,124 @@ mod tests {
         }
     }
 
+    /// The record the frontend's tests answer `wallet.amount` from. Jest runs
+    /// no Rust, so the guided tour's practice wallet, which asks Rust for every
+    /// figure it shows, is tested against this process's own answers: each
+    /// request those tests send, framed as the WebView frames it, and the bytes
+    /// this ingress answered, as the JNI hands them back. The committed record
+    /// must equal the live answers; DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const WALLET_AMOUNT_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/tour/__tests__/fixtures/wallet_amount.ingress.bin"
+    );
+
+    /// `wallet.amount` through the ingress: ERA by its committed policy, the
+    /// practice coin at its stated decimals, and a refusal in Rust's words. The
+    /// frontend's record of these answers is this process's own.
+    #[test]
+    #[serial]
+    fn wallet_amount_answers_through_the_ingress_as_the_frontend_records_it() {
+        use pb::wallet_amount_request::{Amount, Unit};
+        device_with_router(0x46);
+
+        // What the practice wallet's tests ask (practiceMode.test.ts).
+        let asked = vec![
+            // Practice ERA, counted by ERA's committed policy.
+            (
+                Unit::TokenId("ERA".to_string()),
+                Amount::Entered("1000".to_string()),
+            ),
+            // 5 of the practice coin sent, and what is left of its 50.
+            (Unit::Decimals(0), Amount::Entered("5".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(45)),
+            // 25 ERA sent, and what is left.
+            (Unit::Decimals(2), Amount::Entered("25".to_string())),
+            (Unit::Decimals(2), Amount::BaseUnits(97_500)),
+            // The faucet's 100 ERA, and the balance after it.
+            (Unit::Decimals(2), Amount::Entered("100".to_string())),
+            (Unit::Decimals(2), Amount::BaseUnits(110_000)),
+            // Finer than ERA counts, and nothing at all.
+            (Unit::Decimals(2), Amount::Entered("1.234".to_string())),
+            (Unit::Decimals(2), Amount::Entered("0".to_string())),
+        ];
+        let mut record = Vec::new();
+        let mut answers = Vec::new();
+        for (unit, amount) in asked {
+            let request = IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: "wallet.amount".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::WalletAmountRequest {
+                            unit: Some(unit),
+                            amount: Some(amount),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                })),
+            }
+            .encode_to_vec();
+            let response = dispatch_ingress_bytes(&request);
+            for part in [&request, &response] {
+                let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+                record.extend_from_slice(&len.to_be_bytes());
+                record.extend_from_slice(part);
+            }
+            answers.push(IngressResponse::decode(response.as_slice()).expect("an IngressResponse"));
+        }
+
+        let forms = |response: IngressResponse| {
+            let answer = expect_ok_bytes(response);
+            match crate::handlers::response_helpers::decode_local_envelope(&answer)
+                .expect("the router's local answer")
+                .payload
+            {
+                Some(dsm::types::proto::envelope::Payload::WalletAmountResponse(r)) => {
+                    (r.base_units, r.display_amount, r.decimals)
+                }
+                other => panic!("wallet.amount answered {other:?}"),
+            }
+        };
+        let mut answers = answers.into_iter();
+        let mut next = || answers.next().expect("an answer to every request");
+        assert_eq!(forms(next()), (100_000, "1000.00".to_string(), 2));
+        assert_eq!(forms(next()), (5, "5".to_string(), 0));
+        assert_eq!(forms(next()), (45, "45".to_string(), 0));
+        assert_eq!(forms(next()), (2_500, "25.00".to_string(), 2));
+        assert_eq!(forms(next()), (97_500, "975.00".to_string(), 2));
+        assert_eq!(forms(next()), (10_000, "100.00".to_string(), 2));
+        assert_eq!(forms(next()), (110_000, "1100.00".to_string(), 2));
+        let refused = expect_error(next());
+        assert!(
+            refused
+                .message
+                .contains("wallet.amount: amount exceeds 2 fractional digits"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(forms(next()), (0, "0.00".to_string(), 2));
+
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => {
+                std::fs::write(WALLET_AMOUNT_RECORD, &record).expect("write the frontend's record")
+            }
+            None => assert_eq!(
+                std::fs::read(WALLET_AMOUNT_RECORD).expect("the frontend's committed record"),
+                record,
+                "the frontend's wallet.amount record differs from this ingress's answers; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+    }
+
     /// A router refusal reaches the caller as an error carrying the router's
     /// own reason: an invoke for a token this device does not hold.
     #[test]
     #[serial]
     fn a_router_invoke_refusal_passes_through_with_its_reason() {
-        fresh_process();
-        economic_fixtures::local_device(0x45);
-        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
-            node_id: "ingress-router-test".to_string(),
-            storage_endpoints: Vec::new(),
-            enable_offline: false,
-        })
-        .expect("router");
-        install_app_router(Arc::new(router)).expect("install router");
+        device_with_router(0x45);
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterInvoke(
                 pb::RouterInvokeOp {

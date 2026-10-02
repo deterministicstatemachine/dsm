@@ -86,12 +86,12 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     // getAllBalances: first empty, then updated
     (dsmClient.getAllBalances as any) = jest.fn()
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
+      .mockResolvedValueOnce([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }]);
 
     // getWalletHistory: first empty, then returns 1 transaction on second invocation
     (dsmClient.getWalletHistory as any) = jest.fn()
       .mockResolvedValueOnce({ transactions: [] })
-      .mockResolvedValueOnce({ transactions: [{ txId: 'tx123', txHash: 'TX123HASH', txType: 'online', type: 'online', amount: 100n, displayAmount: '100', tokenId: 'ERA', recipient: 'peer', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }] });
+      .mockResolvedValueOnce({ transactions: [{ txId: 'tx123', txHash: 'TX123HASH', txType: 'online', type: 'online', amount: 10000n, displayAmount: '100.00', tokenId: 'ERA', recipient: 'peer', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO' }] });
 
     // Minimal contacts and BLE functions used by loadWalletData
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
@@ -125,7 +125,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [contact] });
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
+      .mockResolvedValue([{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockResolvedValue({ success: true });
 
@@ -168,20 +168,20 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     installStandardWalletMocks([contact]);
 
-    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }];
+    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }];
     let historyState: any[] = [];
 
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
     (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
     (dsmClient.sendOnlineTransferSmart as any) = jest.fn().mockImplementation(async () => {
-      balancesState = [{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 75n, displayAmount: '75', decimals: 0 }];
-      historyState = [{ txId: 'tx-online-sender', txHash: 'TXONLINESENDERHASH', txType: 'online', type: 'online', amount: -25n, displayAmount: '-25', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
-      return { success: true, message: 'ok', newBalance: 75n };
+      balancesState = [{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 7500n, displayAmount: '75.00', decimals: 2 }];
+      historyState = [{ txId: 'tx-online-sender', txHash: 'TXONLINESENDERHASH', txType: 'online', type: 'online', amount: -2500n, displayAmount: '-25.00', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO' }];
+      return { success: true, message: 'ok', newBalance: 7500n };
     });
 
     await renderWallet();
 
-    await waitFor(() => expect(screen.getByText('100')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('100.00')).toBeInTheDocument());
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
@@ -195,7 +195,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     await waitFor(() => {
       expect(dsmClient.sendOnlineTransferSmart).toHaveBeenCalledWith('Receiver', '25', undefined, 'ERA');
       expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();
-      expect(screen.getAllByText('75').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText('75.00').length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();
     });
   });
@@ -205,20 +205,20 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     installStandardWalletMocks([contact]);
 
-    let balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 80n, displayAmount: '80', decimals: 0 }];
+    let balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 8000n, displayAmount: '80.00', decimals: 2 }];
     let historyState: any[] = [];
 
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
     (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockImplementation(async () => {
-      balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 55n, displayAmount: '55', decimals: 0 }];
-      historyState = [{ txId: 'tx-offline-sender', txHash: 'TXOFFLINESENDERHASH', txType: 'bilateral_offline', type: 'offline', amount: -25n, displayAmount: '-25', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
+      balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 5500n, displayAmount: '55.00', decimals: 2 }];
+      historyState = [{ txId: 'tx-offline-sender', txHash: 'TXOFFLINESENDERHASH', txType: 'bilateral_offline', type: 'offline', amount: -2500n, displayAmount: '-25.00', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO' }];
       return { accepted: true, result: 'Bilateral transfer complete' };
     });
 
     await renderWallet();
 
-    await waitFor(() => expect(screen.getByText('80')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('80.00')).toBeInTheDocument());
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
@@ -246,7 +246,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
         })
       );
       expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();
-      expect(screen.getAllByText('55').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText('55.00').length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();
     });
   });
@@ -254,7 +254,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   test('online receiver refresh updates visible balance and history in the UI', async () => {
     installStandardWalletMocks([]);
 
-    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 40n, displayAmount: '40', decimals: 0 }];
+    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 4000n, displayAmount: '40.00', decimals: 2 }];
     let historyState: any[] = [];
 
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
@@ -262,17 +262,17 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     await renderWallet();
 
-    await waitFor(() => expect(screen.getByText('40')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('40.00')).toBeInTheDocument());
 
-    balancesState = [{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 65n, displayAmount: '65', decimals: 0 }];
-    historyState = [{ txId: 'tx-online-receiver', txHash: 'TXONLINERECEIVERHASH', txType: 'online', type: 'online', amount: 25n, displayAmount: '25', tokenId: 'ERA', recipient: 'Sender', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
+    balancesState = [{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 6500n, displayAmount: '65.00', decimals: 2 }];
+    historyState = [{ txId: 'tx-online-receiver', txHash: 'TXONLINERECEIVERHASH', txType: 'online', type: 'online', amount: 2500n, displayAmount: '25.00', tokenId: 'ERA', recipient: 'Sender', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO' }];
 
     await act(async () => {
       bridgeEvents.emit('wallet.refresh', { source: 'wallet.send' });
     });
 
     await waitFor(() => {
-      expect(screen.getAllByText('65').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText('65.00').length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();
       expect(screen.getAllByText(/25/).length).toBeGreaterThanOrEqual(1);
     });
@@ -285,10 +285,10 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({
-      items: [{ id: 'inbox-1', preview: 'Incoming online transfer 25 ERA', isStaleRoute: false }],
+      items: [{ id: 'inbox-1', preview: 'Incoming online transfer 25.00 ERA', isStaleRoute: false }],
     });
 
     await renderWallet();
@@ -299,7 +299,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     await waitFor(() => {
       expect(dsmClient.getInbox).toHaveBeenCalled();
-      expect(screen.getByText('Incoming online transfer 25 ERA')).toBeInTheDocument();
+      expect(screen.getByText('Incoming online transfer 25.00 ERA')).toBeInTheDocument();
     });
   });
 
@@ -310,7 +310,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({ items: [] });
 
@@ -332,7 +332,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     installStandardWalletMocks();
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0, protocolDefined: true }]);
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
 
     await renderWallet();
@@ -357,7 +357,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     installStandardWalletMocks();
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0, protocolDefined: true }]);
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
 
     await renderWallet();
@@ -391,12 +391,12 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({
       items: [
-        { id: 'inbox-1', preview: 'From: ALICE Amount: 25 ERA', isStaleRoute: false },
-        { id: 'inbox-2', preview: 'From: BOB Amount: 7 ERA', isStaleRoute: true },
+        { id: 'inbox-1', preview: 'From: ALICE Amount: 25.00 ERA', isStaleRoute: false },
+        { id: 'inbox-2', preview: 'From: BOB Amount: 7.00 ERA', isStaleRoute: true },
       ],
     });
 
@@ -404,8 +404,8 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: /Inbox/ }));
 
-    await waitFor(() => expect(screen.getByText('From: BOB Amount: 7 ERA')).toBeInTheDocument());
-    expect(screen.getByText('From: ALICE Amount: 25 ERA')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('From: BOB Amount: 7.00 ERA')).toBeInTheDocument());
+    expect(screen.getByText('From: ALICE Amount: 25.00 ERA')).toBeInTheDocument();
     expect(screen.getAllByText(/STALE ROUTE/)).toHaveLength(1);
   });
 
@@ -418,7 +418,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', baseUnits: 10000n, displayAmount: '100.00', decimals: 2 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.getInbox as any) = jest.fn().mockResolvedValue({ items: [] });
     const opened = jest.fn();

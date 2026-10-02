@@ -22,7 +22,7 @@ describe('WalletContext balance refresh', () => {
     jest.spyOn(dsmClient, 'getWalletHistory' as any).mockResolvedValue({ transactions: [] });
     jest.spyOn(dsmClient, 'getAllBalances' as any)
       .mockResolvedValueOnce([
-        { tokenId: 'ERA', tokenName: 'ERA Token', balance: 5n, decimals: 0, symbol: 'ERA' },
+        { tokenId: 'ERA', tokenName: 'ERA Token', baseUnits: 500n, displayAmount: '5.00', decimals: 2, symbol: 'ERA' },
       ])
       .mockResolvedValueOnce([]);
     jest.spyOn(bitcoinTap, 'getDbtcBalance').mockResolvedValue(null as any);
