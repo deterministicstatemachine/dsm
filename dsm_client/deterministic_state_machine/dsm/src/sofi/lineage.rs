@@ -831,7 +831,7 @@ mod tests {
     const G: D32 = [0x11; 32];
     use crate::sofi::validation::fixtures::dev;
     const P_POS: u64 = 5;
-    const SIG_ALG: u16 = 0x0001;
+    const SIG_ALG: u16 = crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F;
 
     fn d(byte: u8) -> D32 {
         [byte; 32]

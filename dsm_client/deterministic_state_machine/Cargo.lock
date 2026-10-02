@@ -1107,6 +1107,7 @@ dependencies = [
  "constant_time_eq 0.5.0",
  "crc32fast",
  "derive_more",
+ "dsm-sphincs",
  "ed25519-dalek",
  "env_logger 0.11.10",
  "ff 0.14.0",
@@ -1133,7 +1134,6 @@ dependencies = [
  "protoc-bin-vendored",
  "quickcheck",
  "rand 0.9.4",
- "rand_chacha 0.9.0",
  "rstest",
  "serde",
  "serial_test",
@@ -1167,6 +1167,17 @@ version = "0.1.0"
 dependencies = [
  "embedded-hal",
  "tokio",
+]
+
+[[package]]
+name = "dsm-sphincs"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]

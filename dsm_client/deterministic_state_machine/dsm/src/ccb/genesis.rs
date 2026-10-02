@@ -18,9 +18,16 @@ use crate::crypto::blake3::dsm_domain_hasher;
 /// public key is, so a future variant can never be substituted for the
 /// committed one: the algorithm and the key bytes stand or fall together.
 pub mod sigalg {
-    /// SPHINCS+ SPX256f: 64-byte public key (`2n`, `n = 32`), 49_856-byte
-    /// signature. The only member the beta profile declares.
-    pub const SPHINCS_PLUS_SPX256F: u16 = 0x0001;
+    /// SPHINCS+ SPX256f, construction version 2 (`dsm_sphincs`: the FIPS 205
+    /// structure instantiated with BLAKE3): 64-byte public key (`2n`,
+    /// `n = 32`), 49_856-byte signature. The only member the beta profile
+    /// declares.
+    pub const SPHINCS_PLUS_SPX256F: u16 = 0x0002;
+
+    /// SPHINCS+ SPX256f under construction version 1, retired 2026-10-01
+    /// (security pre-audit item 17): it is undeclared, so no key or
+    /// signature under it is recognized, and the value is never reused.
+    pub const RETIRED_SPHINCS_PLUS_SPX256F_V1: u16 = 0x0001;
 
     /// Declared public-key width for a known algorithm; `None` for an
     /// undeclared one. Enumerations range over values declared in the
@@ -115,4 +122,22 @@ pub fn genesis_v3_commitment(params: &GenesisParamsV3) -> Result<[u8; 32], CcbEr
     let mut h = dsm_domain_hasher(TAG_DSM_GENESIS_V3);
     h.update(&ccb);
     Ok(*h.finalize().as_bytes())
+}
+
+#[cfg(test)]
+mod sigalg_tests {
+    use super::sigalg::{public_key_len, RETIRED_SPHINCS_PLUS_SPX256F_V1, SPHINCS_PLUS_SPX256F};
+    use crate::crypto::sphincs::{public_key_bytes, SphincsVariant, CONSTRUCTION_VERSION};
+
+    /// Only the repaired construction is declared: a key or signature under
+    /// the retired version-1 id names no algorithm.
+    #[test]
+    fn only_the_repaired_sphincs_construction_is_declared() {
+        assert_eq!(CONSTRUCTION_VERSION, 2);
+        assert_eq!(
+            public_key_len(SPHINCS_PLUS_SPX256F),
+            Some(public_key_bytes(SphincsVariant::SPX256f))
+        );
+        assert_eq!(public_key_len(RETIRED_SPHINCS_PLUS_SPX256F_V1), None);
+    }
 }

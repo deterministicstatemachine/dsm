@@ -2269,7 +2269,7 @@ pub(crate) mod fixtures {
     pub(crate) const RESERVE_A: u64 = 10_000;
     pub(crate) const RESERVE_B: u64 = 20_000;
     pub(crate) const AMOUNT_IN: u64 = 1_000;
-    pub(crate) const SIG_ALG: u16 = 0x0001;
+    pub(crate) const SIG_ALG: u16 = crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F;
 
     pub(crate) fn token(byte: u8) -> D32 {
         [byte; 32]
