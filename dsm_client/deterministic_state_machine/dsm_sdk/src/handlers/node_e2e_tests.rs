@@ -231,6 +231,81 @@ async fn a_transfer_reaches_the_nodes_only_sealed_and_arrives() {
     assert!(held > 0, "the transfer went through the nodes");
 }
 
+/// Pre-audit item 4 (owner ruling 2026-10-02): a transfer's memo, ticker
+/// and nonce are in no public object. After a transfer arrives and settles,
+/// no row of any table on any node holds the memo, the nonce, or the ticker
+/// in the length-prefixed form the operation once carried it in — not the
+/// spool, not a register cell, not an admission. The terms searched for are
+/// the ones the sender kept beside its operation, and the recipient shows the
+/// memo it opened: a search for bytes that were never sent proves nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn no_node_holds_a_transfers_memo_ticker_or_nonce() {
+    let p = Pair::boot(100, 0).await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_eq!(p.b.era_balance(), 10);
+
+    p.a.enter();
+    let kept = crate::storage::client_db::get_transaction_history(None, Some(1000), None)
+        .expect("A's history")
+        .into_iter()
+        .find_map(|row| {
+            row.metadata
+                .get(crate::storage::client_db::HISTORY_TERMS_KEY)
+                .cloned()
+        })
+        .expect("A keeps its transfer's terms");
+    let terms = dsm::types::operations::TransferTerms::from_bytes(&kept).expect("the terms");
+    let memo = format!("{}->{} #1", p.a.slot, p.b.slot);
+    assert_eq!(terms.memo, memo, "the memo A sent");
+    assert_eq!(terms.token_id, b"ERA".to_vec());
+    assert!(!terms.nonce.is_empty(), "an online transfer has a nonce");
+    assert!(
+        history(&p.b)
+            .await
+            .windows(memo.len())
+            .any(|w| w == memo.as_bytes()),
+        "B shows the memo it opened"
+    );
+
+    let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    let length_prefixed = |bytes: &[u8]| -> String {
+        let mut framed = (bytes.len() as u32).to_le_bytes().to_vec();
+        framed.extend_from_slice(bytes);
+        hex(&framed)
+    };
+    let needles = [
+        ("the memo in text", memo.clone()),
+        ("the memo in bytes", hex(memo.as_bytes())),
+        ("the nonce", hex(&terms.nonce)),
+        ("the salt", hex(&terms.salt)),
+        (
+            "the ticker as the operation carried it",
+            length_prefixed(&terms.token_id),
+        ),
+    ];
+    let mut rows = 0usize;
+    for node in &p.nodes.nodes {
+        for row in node.stored_rows().await {
+            rows += 1;
+            for (what, needle) in &needles {
+                assert!(
+                    !row.contains(needle.as_str()),
+                    "{} holds {what}: {}",
+                    node.member_id,
+                    row.chars().take(160).collect::<String>()
+                );
+            }
+        }
+    }
+    assert!(rows > 0, "the transfer went through the nodes");
+}
+
 /// DSM Amendment A1, storage spec §3, §4 and §8 (owner ruling 2026-09-25):
 /// an inbox read that did not cover every delivery is not a complete sync. A
 /// delivery lands on the register quorum of members, so a read covers every

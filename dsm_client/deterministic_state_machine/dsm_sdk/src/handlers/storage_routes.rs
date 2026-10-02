@@ -51,14 +51,18 @@ fn ensure_received_history(
     {
         return Ok(());
     }
-    let terms = crate::handlers::recipient_accept::transfer_terms(&v.signed_op)?;
+    let terms = crate::handlers::recipient_accept::transfer_terms(&v.signed_op, &v.terms)?;
     let mut meta: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
     meta.insert("token_id".to_string(), terms.token_id.into_bytes());
     // The operation the receipt's tip binds, so the history can check the
-    // receipt again and read the figures from it.
+    // receipt again and read the figures from it, and the terms that open it.
     meta.insert(
         crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
         v.signed_op.to_bytes(),
+    );
+    meta.insert(
+        crate::storage::client_db::HISTORY_TERMS_KEY.to_string(),
+        v.terms.to_bytes(),
     );
     let proof_data = v
         .receipt
@@ -1554,6 +1558,7 @@ impl AppRouterImpl {
                     core_sdk
                         .apply_incoming_transfer_staged(
                             v.signed_op.clone(),
+                            &v.terms,
                             &tx_id,
                             &sender_b32_for_apply,
                             &v.canonical_operation_bytes,

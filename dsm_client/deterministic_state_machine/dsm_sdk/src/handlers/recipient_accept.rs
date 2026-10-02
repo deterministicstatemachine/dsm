@@ -36,6 +36,9 @@ pub struct VerifiedTransfer {
     /// The ONLY trusted operation: re-derived from the staged canonical bytes
     /// and SIG A under the sender's stored key.
     pub signed_op: Operation,
+    /// The terms that open `signed_op`'s commitment, re-opened from the
+    /// staged bytes.
+    pub terms: dsm::types::operations::TransferTerms,
     /// The exact signed bytes `signed_op` was bound from.
     pub canonical_operation_bytes: Vec<u8>,
     pub signature: Vec<u8>,
@@ -53,7 +56,8 @@ impl VerifiedTransfer {
     }
 }
 
-/// What a transfer moves and says, read from its SIGNED operation.
+/// What a transfer moves and says: its amount from its SIGNED operation, its
+/// token and memo from the terms that open the operation's commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferTerms {
     pub amount: u64,
@@ -64,33 +68,32 @@ pub struct TransferTerms {
 }
 
 impl TransferTerms {
-    /// The terms a signed transfer's own fields state.
+    /// The terms a signed transfer's amount and its opened terms state.
     pub(crate) fn of(
         amount: &dsm::types::token_types::Balance,
-        token_id: &[u8],
-        message: &str,
+        opened: &dsm::types::operations::TransferTerms,
     ) -> Self {
         Self {
             amount: amount.value(),
-            token_id: match String::from_utf8(token_id.to_vec()) {
+            token_id: match String::from_utf8(opened.token_id.clone()) {
                 Ok(text) => text,
                 Err(binary) => crate::util::text_id::encode_base32_crockford(binary.as_bytes()),
             },
-            memo: message.to_string(),
+            memo: opened.memo.clone(),
         }
     }
 }
 
 /// The terms of a transfer — the only ones it is shown or recorded with —
-/// read from its signed operation.
-pub(crate) fn transfer_terms(op: &Operation) -> Result<TransferTerms, String> {
+/// read from its signed operation and the terms that open it. Terms that do
+/// not open the operation's commitment state nothing about it.
+pub(crate) fn transfer_terms(
+    op: &Operation,
+    opened: &dsm::types::operations::TransferTerms,
+) -> Result<TransferTerms, String> {
+    opened.open(op).map_err(|e| e.to_string())?;
     match op {
-        Operation::Transfer {
-            amount,
-            token_id,
-            message,
-            ..
-        } => Ok(TransferTerms::of(amount, token_id, message)),
+        Operation::Transfer { amount, .. } => Ok(TransferTerms::of(amount, opened)),
         other => Err(format!(
             "the signed operation is a {}, not a transfer",
             other.get_operation_type()
@@ -128,12 +131,15 @@ pub fn verified_pair(pair: &StagedPair) -> Result<VerifiedTransfer, String> {
         return Err("the pair's halves were verified under different senders".to_string());
     }
     let signed_op = super::recipient_dispatch::signed_operation_of(&transfer)?;
+    let terms = super::recipient_dispatch::open_terms(&transfer.terms, &signed_op)
+        .map_err(|e| format!("the staged transfer's terms: {e}"))?;
     let receipt = StitchedReceiptV2::from_canonical_protobuf(&receipt_row.evidence_bytes)
         .map_err(|e| format!("the staged receipt no longer decodes: {e}"))?;
     Ok(VerifiedTransfer {
         pair: *pair,
         sender: transfer.sender,
         signed_op,
+        terms,
         canonical_operation_bytes: transfer.canonical_operation_bytes,
         signature: transfer.signature,
         receipt,

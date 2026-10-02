@@ -120,6 +120,12 @@ impl ContactRecord {
 /// row without one has a receipt nothing can check.
 pub const HISTORY_OPERATION_KEY: &str = "operation";
 
+/// The metadata key under which a transfer's history row keeps the canonical
+/// bytes of its terms (`TransferTerms`): its token, nonce, mode and memo, which
+/// its operation carries only by commitment (pre-audit item 4). The row shows
+/// the token and memo only from terms that open the operation it keeps.
+pub const HISTORY_TERMS_KEY: &str = "terms";
+
 pub struct TransactionRecord {
     pub tx_id: String,
     pub tx_hash: String,
@@ -169,6 +175,9 @@ pub struct BilateralSessionRecord {
     /// The frame the session owes its counterparty, delivered again when the
     /// link returns.
     pub owed_frame: Option<Vec<u8>>,
+    /// A transfer step: the canonical bytes of the terms its operation
+    /// commits to (pre-audit item 4). `None` for any other step.
+    pub terms_bytes: Option<Vec<u8>>,
 }
 
 /// Persisted BLE chunk for durable reassembly across connection drops.

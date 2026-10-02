@@ -81,6 +81,19 @@ impl BilateralTransportAdapter {
             .await
     }
 
+    /// A transfer's prepare: the operation and, beside it, the terms it
+    /// commits to (pre-audit item 4).
+    pub async fn create_transfer_prepare_with_commitment(
+        &self,
+        counterparty_device_id: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        terms: dsm::types::operations::TransferTerms,
+    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+        self.bilateral_handler
+            .prepare_bilateral_transfer_with_commitment(counterparty_device_id, operation, terms)
+            .await
+    }
+
     pub async fn create_prepare_accept_envelope(
         &self,
         commitment_hash: [u8; 32],

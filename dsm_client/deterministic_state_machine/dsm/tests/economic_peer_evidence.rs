@@ -37,13 +37,15 @@ fn transfer_to(recipient: [u8; 32], amount: u64) -> Operation {
     Operation::Transfer {
         to_device_id: recipient.to_vec(),
         amount: Balance::amount(amount),
-        token_id: b"ERA".to_vec(),
         policy_commit: era(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![9; 32],
-        recipient: Vec::new(),
-        to: Vec::new(),
-        message: String::new(),
+        terms_commitment: dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![9; 32],
+            mode: TransactionMode::Bilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
+        }
+        .commitment(),
         signature: Vec::new(),
         authority_policy: None,
     }

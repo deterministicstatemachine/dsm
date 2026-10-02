@@ -625,6 +625,7 @@ impl WalletSDK {
     pub fn send_transfer_op_staged_with_admission<A>(
         &self,
         op: dsm::types::operations::Operation,
+        terms: &dsm::types::operations::TransferTerms,
         transaction: &WalletTransaction,
         build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
         write_extra: impl Fn(
@@ -642,6 +643,13 @@ impl WalletSDK {
         if transaction.token_id.is_empty() {
             return Err(DsmError::invalid_operation(
                 "a transfer names the token it moves",
+            ));
+        }
+        // The terms this send records are the ones its operation commits to.
+        terms.open(&op)?;
+        if terms.token_id != transaction.token_id.as_bytes() {
+            return Err(DsmError::invalid_operation(
+                "the transfer's terms name another token than the send",
             ));
         }
         let token_id_owned = transaction.token_id.clone();
@@ -663,6 +671,7 @@ impl WalletSDK {
         log::debug!("[WALLET] send_transfer_op: calling token_sdk.execute_transfer_op...");
         let (new_state, artifacts) = self.token_sdk.execute_transfer_op_staged_with_admission(
             op,
+            &token_id_owned,
             build_artifacts,
             write_extra,
             admission,
@@ -739,6 +748,10 @@ impl WalletSDK {
             meta.insert(
                 crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
                 operation_bytes,
+            );
+            meta.insert(
+                crate::storage::client_db::HISTORY_TERMS_KEY.to_string(),
+                terms.to_bytes(),
             );
             let rec = crate::storage::client_db::TransactionRecord {
                 tx_id: tx_copy.id.clone(),

@@ -47,7 +47,10 @@ pub struct RecognizedTransfer {
     /// The signed operation, with SIG A attached — byte-identical to what the
     /// sender advanced.
     pub op: Operation,
-    /// What the transfer moves and says, read from `op`.
+    /// The terms that open `op`'s commitment: its token, nonce, mode and memo.
+    pub opened: dsm::types::operations::TransferTerms,
+    /// What the transfer moves and says: `op`'s amount, `opened`'s token and
+    /// memo.
     pub terms: super::recipient_accept::TransferTerms,
     pub staged: StagedTransfer,
     /// The economic locator hints this copy carried. Untrusted.
@@ -202,10 +205,7 @@ pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRe
     // check recipient
     let Operation::Transfer {
         to_device_id,
-        nonce,
         amount,
-        token_id,
-        message,
         ..
     } = &op
     else {
@@ -220,6 +220,13 @@ pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRe
             "the signed transfer is addressed to another device".to_string(),
         ));
     }
+    // open the terms: the ticker, nonce and memo are read from terms that
+    // open the signed commitment, and a transfer without them is refused
+    // whole (pre-audit item 4)
+    let opened = match open_terms(&req.transfer_terms, &op) {
+        Ok(terms) => terms,
+        Err(why) => return Ok(NotRecognized(why)),
+    };
     // derive the object key
     let staged = StagedTransfer {
         op_id: transfer_object_id(&op.to_bytes()),
@@ -227,15 +234,17 @@ pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRe
         // Spent in this relationship only, as the apply spends it.
         nonce_hash: crate::storage::client_db::relationship_nonce_hash(
             &dsm::core::bilateral_transaction_manager::compute_smt_key(&here, &sender),
-            nonce,
+            &opened.nonce,
         ),
         canonical_operation_bytes: req.canonical_operation_bytes,
         signature: req.signature,
+        terms: req.transfer_terms,
     };
-    let terms = super::recipient_accept::TransferTerms::of(amount, token_id, message);
+    let terms = super::recipient_accept::TransferTerms::of(amount, &opened);
     Ok(TransferRecognition::Recognized(Box::new(
         RecognizedTransfer {
             op,
+            opened,
             terms,
             staged,
             hint: LocatorHint {
@@ -314,6 +323,22 @@ pub fn recognize_receipt(full_receipt_bytes: &[u8]) -> Result<ReceiptRecognition
         receipt,
         staged,
     })))
+}
+
+/// The terms `terms_bytes` state, once they open `op`'s signed commitment.
+/// Missing, malformed or mismatched terms are the reason the transfer is not
+/// one this device can take.
+pub(crate) fn open_terms(
+    terms_bytes: &[u8],
+    op: &Operation,
+) -> Result<dsm::types::operations::TransferTerms, String> {
+    if terms_bytes.is_empty() {
+        return Err("the transfer carries no terms".to_string());
+    }
+    let terms = dsm::types::operations::TransferTerms::from_bytes(terms_bytes)
+        .map_err(|e| format!("the transfer's terms do not decode: {e}"))?;
+    terms.open(op).map_err(|e| e.to_string())?;
+    Ok(terms)
 }
 
 /// The signed operation of a staged transfer, re-derived from its canonical
@@ -863,6 +888,52 @@ mod tests {
         nothing_staged();
     }
 
+    /// Pre-audit item 4 (owner ruling 2026-10-02): a transfer's terms ride
+    /// inside the sealed request, beside an operation that carries only their
+    /// commitment, and B takes the transfer only when they open it. A transfer
+    /// A signed whose request carries no terms, or terms naming a memo A never
+    /// signed, is not recognized, and nothing is staged. With its own terms it
+    /// is, and B reads the memo and nonce from them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_transfer_without_terms_that_open_it_is_not_recognized() {
+        let (p, one) = sent().await;
+        let tip = a_view_of_b(&p);
+        let terms = era_terms(
+            transfer_nonce(&tip, 5, "ERA", &p.b.device_id),
+            "the memo A signed",
+        );
+        let mut tampered = terms.clone();
+        tampered.memo = "a memo A never signed".to_string();
+        for (carried, why) in [
+            (Vec::new(), "carries no terms"),
+            (tampered.to_bytes(), "do not open"),
+            (vec![0x01, 0x02], "do not decode"),
+        ] {
+            let request = signed_by_a_carrying(&p, p.b.device_id, 5, &terms, carried);
+            let out = ingested(ingest_transfer_half(
+                &request,
+                &one.header_sender,
+                &one.route,
+                "TAMPERED",
+            ));
+            assert!(
+                matches!(&out, Ingested::NotRecognized(w) if w.contains(why)),
+                "{why}: {out:?}"
+            );
+            nothing_staged();
+        }
+        let honest = signed_by_a_carrying(&p, p.b.device_id, 5, &terms, terms.to_bytes());
+        let TransferRecognition::Recognized(recognized) =
+            recognize_transfer(&honest, &one.header_sender).expect("recognition")
+        else {
+            panic!("the transfer with its own terms is recognized");
+        };
+        assert_eq!(recognized.opened, terms);
+        assert_eq!(recognized.terms.memo, "the memo A signed");
+        assert_eq!(recognized.terms.token_id, "ERA");
+    }
+
     /// A transfer A signed to another device, sent to B: SIG A verifies, and
     /// it is still not B's. The other device is A itself, and the nonce the
     /// one A's send would derive. Nothing is staged.
@@ -870,15 +941,9 @@ mod tests {
     #[serial]
     async fn a_transfer_addressed_to_another_device_is_not_recognized() {
         let (p, one) = sent().await;
-        let (tip, _) = a_view_of_b(&p);
+        let tip = a_view_of_b(&p);
         let elsewhere = p.a.device_id;
-        let request = signed_by_a(
-            &p,
-            elsewhere,
-            p.a.ak_pk.clone(),
-            5,
-            transfer_nonce(&tip, 5, "ERA", &elsewhere),
-        );
+        let request = signed_by_a(&p, elsewhere, 5, transfer_nonce(&tip, 5, "ERA", &elsewhere));
         let out = ingested(ingest_transfer_half(
             &request,
             &one.header_sender,
@@ -1165,39 +1230,48 @@ mod tests {
         nothing_staged();
     }
 
-    /// A's relationship tip with B and the key A holds for B: what A's own
-    /// send signs over.
-    fn a_view_of_b(p: &Pair) -> ([u8; 32], Vec<u8>) {
+    /// A's relationship tip with B: what A's own send signs over.
+    fn a_view_of_b(p: &Pair) -> [u8; 32] {
         p.a.enter();
         let b = client_db::get_contact_by_device_id(&p.b.device_id)
             .expect("A's contacts")
             .expect("A holds B as a contact");
-        let tip = crate::handlers::app_router_impl::contact_relationship_tip(&b)
-            .expect("A's relationship tip with B");
-        (tip, b.public_key)
+        crate::handlers::app_router_impl::contact_relationship_tip(&b)
+            .expect("A's relationship tip with B")
     }
 
-    /// A transfer A signs, built as A's send builds one (`to` the recipient's
-    /// device id in Base32, `recipient` the key A holds for it), on the nonce
-    /// A chooses; the locator hints are A's to write. As B's poll reads it.
-    fn signed_by_a(
+    /// Terms of ERA on `nonce`, with `memo`, as A's send builds them.
+    fn era_terms(nonce: Vec<u8>, memo: &str) -> dsm::types::operations::TransferTerms {
+        dsm::types::operations::TransferTerms::new(
+            b"ERA".to_vec(),
+            nonce,
+            dsm::types::operations::TransactionMode::Unilateral,
+            memo.to_string(),
+        )
+    }
+
+    /// A transfer A signs, built as A's send builds one, on the nonce A
+    /// chooses; the locator hints are A's to write. As B's poll reads it.
+    fn signed_by_a(p: &Pair, to_device_id: [u8; 32], amount: u64, nonce: Vec<u8>) -> Vec<u8> {
+        let terms = era_terms(nonce, "");
+        signed_by_a_carrying(p, to_device_id, amount, &terms, terms.to_bytes())
+    }
+
+    /// A transfer A signs committing to `terms`, whose request carries
+    /// `carried` as its terms — honest when they are `terms`' own bytes.
+    fn signed_by_a_carrying(
         p: &Pair,
         to_device_id: [u8; 32],
-        recipient_key: Vec<u8>,
         amount: u64,
-        nonce: Vec<u8>,
+        terms: &dsm::types::operations::TransferTerms,
+        carried: Vec<u8>,
     ) -> Vec<u8> {
         p.a.enter();
         let op = Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(amount),
-            token_id: b"ERA".to_vec(),
             policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA"),
-            mode: dsm::types::operations::TransactionMode::Unilateral,
-            nonce,
-            recipient: recipient_key,
-            to: crate::util::text_id::encode_base32_crockford(&to_device_id).into_bytes(),
-            message: String::new(),
+            terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,
         };
@@ -1213,6 +1287,7 @@ mod tests {
             canonical_operation_bytes: canonical,
             sender_economic_position: 1,
             sender_debit_mutation_index: 0,
+            transfer_terms: carried,
         }
         .encode_to_vec()
     }
@@ -1229,11 +1304,10 @@ mod tests {
             &one.evidence_route,
             &one.evidence_message_id,
         ));
-        let (tip, b_key) = a_view_of_b(&p);
+        let tip = a_view_of_b(&p);
         let other = signed_by_a(
             &p,
             p.b.device_id,
-            b_key,
             7,
             transfer_nonce(&tip, 7, "ERA", &p.b.device_id),
         );
@@ -1283,11 +1357,7 @@ mod tests {
         else {
             panic!("the sent transfer is recognized");
         };
-        let Operation::Transfer { nonce, .. } = &honest.op else {
-            panic!("the sent operation is a transfer");
-        };
-        let (_, b_key) = a_view_of_b(&p);
-        let rival = signed_by_a(&p, p.b.device_id, b_key, 7, nonce.clone());
+        let rival = signed_by_a(&p, p.b.device_id, 7, honest.opened.nonce.clone());
         staged(ingest_transfer_half(
             &rival,
             &one.header_sender,
