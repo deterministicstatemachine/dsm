@@ -14,5 +14,5 @@ blake3 = { version = "1", default-features = false }
 subtle = { version = "2", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["derive", "alloc"] }
 # Deterministic keygen expands the 32-byte seed via ChaCha20 (no_std, no OS RNG).
-rand = { version = "0.9", default-features = false }
+rand = { version = "0.8", default-features = false }
 rand_chacha = { version = "0.9", default-features = false }
