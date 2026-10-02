@@ -1729,7 +1729,7 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
         Registration::NeverRegistered { .. } => {
             return Err(refuse("the position holds no fulfillment"))
         }
-        Registration::RootTaken { .. } | Registration::Unresolved => {
+        Registration::Held(..) | Registration::RootTaken { .. } | Registration::Unresolved => {
             return Err(refuse("no fulfillment is registered at the position yet"))
         }
     };

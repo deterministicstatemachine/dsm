@@ -1414,6 +1414,212 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
     );
 }
 
+/// What a fresh verifier reads of B's position `q` and of the vault's first
+/// key at `r0`: the registration, as its variant and which fulfillment it
+/// names, and where the walk over that key ends.
+fn read_position_and_key(
+    p: &Pair,
+    set: &crate::sdk::storage_set::StorageSet,
+    q: u64,
+    root: &[u8; 32],
+    vault_id: &[u8; 32],
+    r0: &[u8; 32],
+) -> (String, WalkOutcome) {
+    let (own_a, parents_a) = standing_of(&p.a);
+    let ctx = VerifierContext::new(set, Some(own_a), parents_a.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let read = verifier
+        .read_registration(&p.b.genesis, &p.b.device_id, q, root)
+        .expect("read")
+        .expect("decided");
+    let named = |signed: &dsm::sofi::publication::Signed<TraderFulfillmentBody>| {
+        crate::util::text_id::encode_base32_crockford(&derive::fulfillment_id(&signed.body))
+    };
+    let registration = match read.registration() {
+        Registration::Registered(signed) => format!("Registered({})", named(signed)),
+        Registration::Held(signed) => format!("Held({})", named(signed)),
+        Registration::NeverRegistered { fulfillment, .. } => {
+            format!("NeverRegistered({})", named(fulfillment))
+        }
+        Registration::RootTaken { .. } => "RootTaken".to_string(),
+        Registration::Unresolved => "Unresolved".to_string(),
+    };
+    let chain = verifier
+        .chain_until(vault_id, r0)
+        .expect("the vault's chain");
+    let walked = verifier
+        .walk_parent(
+            &BTreeMap::from([(*vault_id, chain)]),
+            vault_id,
+            r0,
+            0,
+            WALK_BUDGET,
+        )
+        .expect("the walk");
+    assert_eq!(
+        walked.not_established, None,
+        "the walk decides every key it meets"
+    );
+    (registration, walked.outcome)
+}
+
+/// Pre-audit item 12, 12j (SoFi Amendment S20): which fulfillment holds
+/// `K_ful(q)`, and so the position and every key its exercises hold, is
+/// decided from the cells' bytes alone, the same whenever it is read. B first
+/// writes, at the leader of its own `K_ful(q)`, a fulfillment `F_a` of its own
+/// naming a precommit `P_a` it has not published; then it trades, and its pair
+/// and its exercise land behind `F_a`. A fresh verifier reads the position and
+/// the vault's first key before `P_a` is published and again after: the two
+/// readings agree; `F_a` holds `K_ful(q)` while `K_root(q)` holds B's other
+/// claim, so neither fulfillment ever registers and B has wedged only its own
+/// position; and the key B's exercise holds is passed over, never consumed and
+/// never left waiting. Before S20 the first read saw B's trade registered, and
+/// the second saw it neither registered nor lost, with the key frozen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_position_reads_the_same_before_and_after_a_precommit_is_published() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let position = admitted_position(&p.b);
+    let q = position + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root).expect("pair");
+    let r0 = {
+        let (own, parents) = standing_of(&p.b);
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        ctx.verifier()
+            .chain(&m.vault_id)
+            .expect("the vault's chain")
+            .roots()[0]
+    };
+
+    // B's own P_a at p, not published, and B's own F_a naming it at q.
+    p.b.enter();
+    let public_key = crate::sdk::signing_authority::current_public_key().expect("B's key");
+    let secret_key = crate::sdk::signing_authority::current_secret_key().expect("B's key");
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    let alg = dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F;
+    let parent = match economic_lineage::get_admitted()
+        .expect("read admitted")
+        .expect("an admitted position")
+    {
+        AdmittedEconomicPosition::SingleRoot { claim_ref, .. } => {
+            dsm::sofi::wire::ParentClaimRef::SingleRoot { claim_ref }
+        }
+        other => panic!("B's p is ordinary: {other:?}"),
+    };
+    let p_a = TraderPrecommitBody::new(
+        p.b.genesis,
+        p.b.device_id,
+        position,
+        parent,
+        [0xE1; 32],
+        vec![PrecommitLeg {
+            vault_id: m.vault_id,
+            parent_root: r0,
+            setup_ref: [0x5E; 32],
+        }],
+        [0xA1; 32],
+        root,
+        set.id(),
+        alg,
+        &public_key,
+    )
+    .expect("P_a");
+    let f_a = TraderFulfillmentBody::new(
+        derive::precommit_id(&p_a),
+        vec![[0x5D; 32]],
+        vec![AttemptEntry {
+            vault_id: m.vault_id,
+            attempt: 0,
+        }],
+        q,
+        alg,
+        &public_key,
+        att_a,
+    )
+    .expect("F_a");
+    let f_sig =
+        dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::fulfillment_signing_digest(&f_a))
+            .expect("B signs F_a");
+    let envelope = Publication::Fulfillment {
+        body: &f_a,
+        signature: &f_sig,
+    }
+    .object_bytes()
+    .expect("F_a envelope");
+    let cell = pair.fulfillment();
+    let entry = RouteEntry::at_leader(
+        cell.namespace().to_vec(),
+        *cell.key(),
+        envelope,
+        cell.route(),
+    );
+    let clients = SetClient::new(&set).expect("the set's members");
+    clients
+        .members()
+        .iter()
+        .find(|member| member.member_id().as_bytes() == cell.route().leader())
+        .expect("the pair's leader")
+        .put_cells(&[(entry.namespace.clone(), entry.key, entry.encode())])
+        .await
+        .expect("the leader keeps it");
+
+    // B trades: its pair and its exercise land behind F_a.
+    invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    let held = {
+        let (own, parents) = standing_of(&p.b);
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        ctx.verifier()
+            .read_attempt_cell(&m.vault_id, &r0, 0)
+            .expect("read")
+            .expect("decided")
+    };
+    let exercise = held
+        .exercise()
+        .expect("B's exercise holds the vault's first key");
+    assert_eq!(exercise.fulfillment().body.position(), q);
+    assert_ne!(exercise.fulfillment().body, f_a);
+
+    let before = read_position_and_key(&p, &set, q, &root, &m.vault_id, &r0);
+    p.b.enter();
+    let p_sig =
+        dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::precommit_signing_digest(&p_a))
+            .expect("B signs P_a");
+    crate::sdk::sofi_publish::publish(
+        &set,
+        &Publication::Precommit {
+            body: &p_a,
+            signature: &p_sig,
+        },
+    )
+    .await
+    .expect("P_a is published");
+    let after = read_position_and_key(&p, &set, q, &root, &m.vault_id, &r0);
+
+    assert_eq!(
+        before, after,
+        "the position and the key read the same whenever"
+    );
+    let f_a_id = crate::util::text_id::encode_base32_crockford(&derive::fulfillment_id(&f_a));
+    assert_eq!(
+        after.0,
+        format!("NeverRegistered({f_a_id})"),
+        "F_a holds K_ful(q) and K_root(q) holds B's other claim: neither ever registers"
+    );
+    assert_eq!(
+        after.1,
+        WalkOutcome::Unresolved { attempt: 1 },
+        "the key B's exercise holds is passed over: its fulfillment can never register"
+    );
+}
+
 /// B's own completion of its pending position, stages 7 and 8 from what
 /// storage holds: what the network took, or what it did not.
 async fn complete(p: &Pair) -> Completion {

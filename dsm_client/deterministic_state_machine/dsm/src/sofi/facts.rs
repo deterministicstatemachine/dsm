@@ -35,7 +35,7 @@ use super::conformance::{
 };
 use super::derive;
 use super::exercise::{AttemptCellRead, RecognizedExercise};
-use super::registration::{Registration, RegistrationRead};
+use super::registration::{PairStanding, RegistrationRead};
 use super::resolution::{
     AttemptWalk, GroundRouteFacts, LegFacts, ParentPosition, ParentStatus, RefutedInHand,
     RouteFacts, VaultChain,
@@ -377,7 +377,10 @@ impl Established {
             fulfillment_id: refutation.fulfillment_id,
             external_commitment: refutation.external_commitment,
             refuted: refutation.refuted,
-            registered: registration.is_registered_as(&exercise.fulfillment().body),
+            registered: matches!(
+                registration.standing_of(&exercise.precommit().body, &exercise.fulfillment().body),
+                PairStanding::Registered
+            ),
         }))
     }
 
@@ -543,24 +546,12 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
             "the registration read is of another position",
         ));
     }
-    let (registered, position_lost) = match reads.registration.registration() {
-        Registration::Registered(signed) => {
-            let ours = signed.body == *fulfillment;
-            (ours, !ours)
-        }
-        Registration::NeverRegistered { .. } => (false, true),
-        // SoFi Amendment S14: the position went to the claim holding K_root(q)
-        // unless that claim is this F's own C_q, whose fulfillment may still be
-        // relayed.
-        Registration::RootTaken { claim } => (
-            false,
-            *claim
-                != crate::storage_cell::entry_digest(
-                    &derive::resolution_claim(precommit, fulfillment).encode(),
-                ),
-        ),
-        Registration::Unresolved => (false, false),
-    };
+    // Where this F stands at its pair, with P in hand (SoFi Amendments S14,
+    // S20): lost to any other fulfillment holding K_ful(q)'s leader link, or
+    // to any claim at K_root(q) other than derive(P, F).
+    let standing = reads.registration.standing_of(precommit, fulfillment);
+    let registered = matches!(standing, PairStanding::Registered);
+    let position_lost = matches!(standing, PairStanding::Lost);
 
     // The trader parent: what `P` names must be what the trader's lineage
     // holds at `p` — the claim final at its `K_root(p)` and the root that
@@ -742,8 +733,7 @@ mod tests {
                 &[],
             );
         }
-        let lookup = BTreeMap::from([(derive::precommit_id(p), p.clone())]);
-        fulfillment_registered(&cells, &ful.evidence(), &root.evidence(), &lookup).unwrap()
+        fulfillment_registered(&cells, &ful.evidence(), &root.evidence()).unwrap()
     }
 
     /// `K^(attempt)` of `vault_id` at `parent_root`, holding `bytes` final

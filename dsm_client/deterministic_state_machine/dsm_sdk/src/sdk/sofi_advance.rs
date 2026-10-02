@@ -738,12 +738,19 @@ pub async fn resolve_pending_position(
         {
             signed.clone()
         }
-        Registration::Registered(..) | Registration::NeverRegistered { .. } => {
+        // This device's own fulfillment holds K_ful(q), and the pair is not
+        // final on it yet.
+        Registration::Held(signed) if derive::fulfillment_id(&signed.body) == fulfillment_id => {
+            return not_yet(NotResolved::NotRegistered)
+        }
+        Registration::Registered(..)
+        | Registration::Held(..)
+        | Registration::NeverRegistered { .. } => {
             return Err(refuse(format!(
                 "position {q} is held by a claim other than the pending fulfillment"
             )))
         }
-        // No fulfillment is final at q yet; the root cell's claim is weighed
+        // No fulfillment holds K_ful(q) yet; the root cell's claim is weighed
         // once this device's own fulfillment is read back there.
         Registration::RootTaken { .. } | Registration::Unresolved => {
             return not_yet(NotResolved::NotRegistered)
