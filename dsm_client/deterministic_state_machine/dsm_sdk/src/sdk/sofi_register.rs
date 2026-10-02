@@ -4,11 +4,13 @@
 //! its position — the two position cells, written together.
 //!
 //! The writer puts the signed envelope of `F` at `K_ful(q)` and
-//! `C_q = SofiResolutionClaim(G, DevID, q, FulfillmentId, R_realize, R_void)`
-//! at `K_root(q)`: both in one transaction at the leader of `s(q)`, then the
-//! same bytes at each later seat of the route (storage spec §9). `C_q` is
-//! computed from the verified `P` and `F` and never caller-supplied, so no
-//! claim that disagrees with `F` can be `F`'s claim. A member stores bytes;
+//! `C_q = SofiResolutionClaim(G, DevID, q, FulfillmentId, R_realize, R_void)`,
+//! signed by the trader (SoFi Amendment S20), at `K_root(q)`: both in one
+//! transaction at the leader of `s(q)`, then the same bytes at each later
+//! seat of the route (storage spec §9). `C_q` is computed from the verified
+//! `P` and `F` and never caller-supplied, so no claim that disagrees with `F`
+//! can be `F`'s claim; the exercise carries the same signed bytes. A member
+//! stores bytes;
 //! it establishes nothing. Whether `F` registered is Core's conclusion from
 //! the cells' route chains (`FulfillmentRegistered`, rebuild step R10), read
 //! by the verifier (`dsm::sofi::resolve::Verifier::read_registration`), never
@@ -146,13 +148,16 @@ pub fn cells_of(
     )
 }
 
-/// What the install wrote: the pair's cells, and what the write produced at
-/// each route position — `K_ful(q)` first, then `K_root(q)`. Registration is
-/// not among these: the verifier reads it from the cells.
+/// What the install wrote: the pair's cells, what the write produced at
+/// each route position — `K_ful(q)` first, then `K_root(q)` — and the
+/// trader's signed `C_q` it wrote at `K_root(q)`, which the exercise carries
+/// (SoFi Amendment S20). Registration is not among these: the verifier reads
+/// it from the cells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
     pub cells: PositionCells,
     pub reports: [WriteReport; 2],
+    pub resolution_claim: Vec<u8>,
 }
 
 /// Install `F` at its position: conformance first — over evidence the
@@ -206,5 +211,9 @@ pub async fn install_fulfillment<R: SofiReads>(
     if !(ful.reached_leader() && root.reached_leader()) {
         return Err(InstallError::LeaderUnreached);
     }
-    Ok(Installed { cells, reports })
+    Ok(Installed {
+        cells,
+        reports,
+        resolution_claim: claim_bytes,
+    })
 }

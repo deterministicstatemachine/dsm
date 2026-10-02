@@ -4243,7 +4243,7 @@ message BleConnectionFailed {
 // Everything a member holds at a key, in arrival order. An empty list is an
 // asserted absence. The member decodes none of the values.
 message CellValuesV1 {
-  repeated bytes values = 1 [(dsm_max_len)=262144];
+  repeated bytes values = 1 [(dsm_max_len)=327680];
   // One arrival record per value, in the same order (storage spec §14).
   repeated ArrivalRecordV1 records = 2;
 }
@@ -4271,7 +4271,7 @@ message ArrivalRecordsV1 {
 message RouteEntryV1 {
   bytes  namespace      = 1 [(dsm_max_len)=128];
   bytes  key            = 2 [(dsm_fixed_len)=32];
-  bytes  value          = 3 [(dsm_max_len)=262144];
+  bytes  value          = 3 [(dsm_max_len)=327680];
   bytes  seat_member_id = 4 [(dsm_max_len)=128]; // the seat at `position`, as the set commits it
   uint32 position       = 5;                     // 0 = the leader, up to 4
   repeated ChainSlotV1 chain = 6;                // one slot per earlier position, in route order
@@ -4319,7 +4319,7 @@ message CellCommitProofV1 {
 message CellPutV1 {
   bytes namespace = 1 [(dsm_max_len)=128];
   bytes key       = 2 [(dsm_fixed_len)=32];
-  bytes value     = 3 [(dsm_max_len)=262144];
+  bytes value     = 3 [(dsm_max_len)=327680];
 }
 
 // Several keys taken in ONE local transaction at the member: all of them or

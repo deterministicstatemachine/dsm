@@ -903,6 +903,14 @@ fn read_var_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError
     Ok(c.take(n)?.to_vec())
 }
 
+/// The encoding twin of [`read_var_bytes`], for a part its type already
+/// bounds: `new` and `decode` both refuse a part over its maximum, which is
+/// far below `u32::MAX`, so the length always fits its prefix.
+fn push_part(out: &mut Vec<u8>, part: &[u8]) {
+    push_u32(out, part.len() as u32);
+    out.extend_from_slice(part);
+}
+
 // ── ValidationRef: 0x003D..=0x0040 ─────────────────────────────────────────
 
 // ── 0x005E SofiExercise ─────────────────────────────────────────────────────
@@ -912,10 +920,14 @@ fn read_var_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError
 /// and `P` in the envelopes their signatures travel in, `P(E)`, the witnesses
 /// and the closure objects — and everything is bound to `F` by hashed
 /// preimages. It names its own attempt through `F` and its own parents
-/// through `P`, so it cannot count at another key.
+/// through `P`, so it cannot count at another key. It also carries the
+/// trader's signed `C_q` (SoFi Amendment S20), so whatever holds a vault key
+/// carries everything needed to register its own `F`: no relayer can sign
+/// `C_q`, and a trader that withholds its pair cannot hold the key forever.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SofiExercise {
     fulfillment: Vec<u8>,
+    resolution_claim: Vec<u8>,
     precommit: Vec<u8>,
     preimage: Vec<u8>,
     witnesses: Vec<Vec<u8>>,
@@ -932,6 +944,7 @@ impl SofiExercise {
     /// not construction.
     pub fn new(
         fulfillment: Vec<u8>,
+        resolution_claim: Vec<u8>,
         precommit: Vec<u8>,
         preimage: Vec<u8>,
         witnesses: Vec<Vec<u8>>,
@@ -939,6 +952,7 @@ impl SofiExercise {
     ) -> Result<Self, SofiWireError> {
         for (field, bytes) in [
             ("fulfillment", &fulfillment),
+            ("resolution claim", &resolution_claim),
             ("precommit", &precommit),
             ("preimage", &preimage),
         ] {
@@ -965,6 +979,7 @@ impl SofiExercise {
         }
         let v = Self {
             fulfillment,
+            resolution_claim,
             precommit,
             preimage,
             witnesses,
@@ -983,6 +998,11 @@ impl SofiExercise {
 
     pub fn fulfillment(&self) -> &[u8] {
         &self.fulfillment
+    }
+
+    /// The trader's signed `C_q`, as `K_root(q)` takes it (class `0x0062`).
+    pub fn resolution_claim(&self) -> &[u8] {
+        &self.resolution_claim
     }
 
     pub fn precommit(&self) -> &[u8] {
@@ -1004,16 +1024,17 @@ impl SofiExercise {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         push_env(&mut out, class::SOFI_EXERCISE);
-        let _ = push_bytes(&mut out, &self.fulfillment);
-        let _ = push_bytes(&mut out, &self.precommit);
-        let _ = push_bytes(&mut out, &self.preimage);
+        push_part(&mut out, &self.fulfillment);
+        push_part(&mut out, &self.resolution_claim);
+        push_part(&mut out, &self.precommit);
+        push_part(&mut out, &self.preimage);
         push_u32(&mut out, self.witnesses.len() as u32);
         for w in &self.witnesses {
-            let _ = push_bytes(&mut out, w);
+            push_part(&mut out, w);
         }
         push_u32(&mut out, self.closure.len() as u32);
         for o in &self.closure {
-            let _ = push_bytes(&mut out, o);
+            push_part(&mut out, o);
         }
         out
     }
@@ -1028,6 +1049,7 @@ impl SofiExercise {
         let mut c = Cursor { b: bytes, i: 0 };
         c.envelope(class::SOFI_EXERCISE, SCHEMA_V1)?;
         let fulfillment = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let resolution_claim = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
         let precommit = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
         let preimage = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
         let n = read_count(&mut c, "witnesses", 1, CANONICAL_MAX_LEGS)?;
@@ -1042,6 +1064,7 @@ impl SofiExercise {
         }
         let v = Self {
             fulfillment,
+            resolution_claim,
             precommit,
             preimage,
             witnesses,

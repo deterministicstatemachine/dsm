@@ -31,13 +31,15 @@ fn err(what: &str, e: impl core::fmt::Display) -> DsmError {
 }
 
 /// The exercise of a request, over the evidence its conformance was decided
-/// on: `F` and `P` in their envelopes, `P(E)`, the canonical witnesses
-/// derived from `P` and the shadows `P(E)` commits, and every closure object
-/// in reference order. A closure object the evidence does not hold is an
-/// error here — the exercise carries the closure, so it cannot be built
-/// without it.
+/// on: `F` and `P` in their envelopes, the trader's signed `C_q` exactly as
+/// the install wrote it at `K_root(q)` (SoFi Amendment S20), `P(E)`, the
+/// canonical witnesses derived from `P` and the shadows `P(E)` commits, and
+/// every closure object in reference order. A closure object the evidence
+/// does not hold is an error here — the exercise carries the closure, so it
+/// cannot be built without it.
 pub fn build_exercise(
     request: &InstallRequest<'_>,
+    resolution_claim: &[u8],
     evidence: &ConformanceEvidence,
 ) -> Result<SofiExercise, DsmError> {
     let canonical =
@@ -74,6 +76,7 @@ pub fn build_exercise(
         }
         .object_bytes()
         .map_err(|e| err("fulfillment envelope", e))?,
+        resolution_claim.to_vec(),
         Publication::Precommit {
             body: request.precommit,
             signature: request.precommit_signature,
