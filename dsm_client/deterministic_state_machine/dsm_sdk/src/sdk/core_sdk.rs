@@ -2528,6 +2528,7 @@ impl CoreSDK {
     pub fn apply_incoming_transfer_staged<A>(
         &self,
         op: dsm::types::operations::Operation,
+        terms: &dsm::types::operations::TransferTerms,
         tx_id: &crate::types::identifiers::TransactionId,
         sender_device_id: &str,
         canonical_operation_bytes: &[u8],
@@ -2551,27 +2552,26 @@ impl CoreSDK {
         };
 
         // ---- validate the request (fail closed) ----
-        let (nonce, amount_val, to_device_id, token_id, signed_policy_commit) = match &op {
+        let (amount_val, to_device_id, signed_policy_commit) = match &op {
             dsm::types::operations::Operation::Transfer {
-                nonce,
                 amount,
                 to_device_id,
-                token_id,
                 policy_commit,
                 ..
-            } => (
-                nonce.clone(),
-                amount.value(),
-                to_device_id.clone(),
-                token_id.clone(),
-                *policy_commit,
-            ),
+            } => (amount.value(), to_device_id.clone(), *policy_commit),
             _ => {
                 return Err(DsmError::invalid_operation(
                     "apply_incoming_transfer_full_state: only Transfer operations are accepted",
                 ))
             }
         };
+        // The nonce and the token are read from terms that open the signed
+        // commitment, and from nothing else (pre-audit item 4).
+        terms.open(&op).map_err(|e| {
+            DsmError::invalid_operation(format!("apply_incoming_transfer_full_state: {e}"))
+        })?;
+        let nonce = terms.nonce.clone();
+        let token_id = terms.token_id.clone();
         if nonce.is_empty() {
             return Err(DsmError::invalid_operation(
                 "apply_incoming_transfer_full_state: empty transfer nonce",

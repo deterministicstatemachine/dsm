@@ -114,6 +114,23 @@ impl OfflineDevice {
     }
 }
 
+/// What a step proposes: its operation and, for a transfer, the terms that
+/// ride beside it (pre-audit item 4).
+#[derive(Clone)]
+struct Proposal {
+    operation: Operation,
+    terms: Option<dsm::types::operations::TransferTerms>,
+}
+
+impl From<Operation> for Proposal {
+    fn from(operation: Operation) -> Self {
+        Self {
+            operation,
+            terms: None,
+        }
+    }
+}
+
 /// An offline step of `operation` from `sender` to `receiver` up to the
 /// receiver's commit, every frame carried as bytes: prepare → accept →
 /// confirm, which the receiver commits. Returns the commitment and the ack the
@@ -121,7 +138,7 @@ impl OfflineDevice {
 async fn to_the_ack(
     sender: &OfflineDevice,
     receiver: &OfflineDevice,
-    operation: Operation,
+    operation: impl Into<Proposal>,
 ) -> ([u8; 32], Vec<u8>) {
     let (commitment, confirm) = to_the_confirm(sender, receiver, operation).await;
     receiver.device.enter();
@@ -139,12 +156,17 @@ async fn to_the_ack(
 async fn to_the_confirm(
     sender: &OfflineDevice,
     receiver: &OfflineDevice,
-    operation: Operation,
+    operation: impl Into<Proposal>,
 ) -> ([u8; 32], Vec<u8>) {
+    let proposal = operation.into();
     sender.device.enter();
     let (prepare, commitment) = sender
         .handler
-        .prepare_bilateral_transaction(receiver.device.device_id, operation)
+        .prepare_bilateral_step(
+            receiver.device.device_id,
+            proposal.operation,
+            proposal.terms,
+        )
         .await
         .expect("the sender prepares");
 
@@ -175,7 +197,7 @@ async fn to_the_confirm(
 async fn offline_step(
     sender: &OfflineDevice,
     receiver: &OfflineDevice,
-    operation: Operation,
+    operation: impl Into<Proposal>,
 ) -> [u8; 32] {
     let (commitment, ack) = to_the_ack(sender, receiver, operation).await;
     sender.device.enter();
@@ -734,7 +756,7 @@ async fn bearer_pair() -> (
     OfflineDevice,
     OfflineDevice,
     crate::test_support::appliance::InstalledAppliance,
-    Operation,
+    Proposal,
 ) {
     let pair = Pair::boot(100, 0).await;
     let a = OfflineDevice::new(&pair.a);
@@ -753,17 +775,95 @@ async fn bearer_pair() -> (
         )
         .await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
-    let operation = Operation::from_bytes(
-        &crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
+    let (bytes, terms) =
+        crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
             &b.device.device_id,
             7,
             "ERA",
             "",
             &dsm::core::token::token_state_manager::era_policy_commit(),
-        ),
-    )
-    .expect("the bearer transfer");
+        );
+    let operation = Proposal {
+        operation: Operation::from_bytes(&bytes).expect("the bearer transfer"),
+        terms: Some(terms),
+    };
     (pair, a, b, appliance, operation)
+}
+
+/// `prepare` with the transfer terms its request carries replaced by
+/// `terms`. The envelope carries no signature of its own: the proposal's
+/// signature covers its commitment, which the terms are not part of.
+fn with_terms(prepare: &[u8], terms: Vec<u8>) -> Vec<u8> {
+    use prost::Message;
+    let mut envelope =
+        crate::envelope::from_canonical_bytes(prepare).expect("the prepare's envelope");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload.as_mut()
+    else {
+        panic!("a prepare carries a transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut() else {
+        panic!("a prepare is an invoke");
+    };
+    let args = invoke.args.as_mut().expect("the prepare's arguments");
+    let mut request = crate::generated::BilateralPrepareRequest::decode(args.body.as_slice())
+        .expect("the prepare request");
+    request.transfer_terms = terms;
+    args.body = request.encode_to_vec();
+    envelope.encode_to_vec()
+}
+
+/// Pre-audit item 4 (owner ruling 2026-10-02): a bearer transfer's terms ride
+/// beside its operation over BLE, and the receiver takes the proposal only
+/// when they open the operation's signed commitment. A prepare whose terms
+/// are missing, name a memo the sender never signed, or do not decode, is
+/// refused before any session exists. The honest prepare is then taken, and
+/// the receiver keeps the terms beside the operation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_bearer_prepare_without_terms_that_open_it_is_refused() {
+    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
+    let terms = operation.terms.clone().expect("a transfer's terms");
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_step(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone(),
+        )
+        .await
+        .expect("A prepares");
+
+    let mut tampered = terms.clone();
+    tampered.memo = "a memo A never signed".to_string();
+    b.device.enter();
+    for (carried, why) in [
+        (Vec::new(), "carries no terms"),
+        (tampered.to_bytes(), "do not open"),
+        (vec![0x01, 0x02], "transfer terms"),
+    ] {
+        let refused = b
+            .handler
+            .handle_prepare_request(&with_terms(&prepare, carried), None)
+            .await
+            .expect_err("refused");
+        assert!(refused.to_string().contains(why), "{why}: {refused}");
+        assert!(
+            crate::storage::client_db::get_bilateral_session(&commitment)
+                .expect("B's sessions")
+                .is_none(),
+            "{why}: B holds no session"
+        );
+    }
+
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("the honest prepare is taken");
+    let held = crate::storage::client_db::get_bilateral_session(&commitment)
+        .expect("B's sessions")
+        .expect("B holds the proposal");
+    assert_eq!(held.terms_bytes, Some(terms.to_bytes()));
 }
 
 /// A bearer step between two devices, every frame carried as bytes, the
@@ -912,7 +1012,7 @@ async fn a_bearer_receipt_holds_only_for_the_write_set_its_spend_makes() {
     let context = ReceiptStateContext {
         device_tree_commitment: &tree,
         author_genesis: a.device.genesis,
-        operation: &operation,
+        operation: &operation.operation,
         bearer: Some(leaves),
     };
     verify_receipt_state(&receipt, &context).expect("the honest bearer receipt holds");
@@ -929,7 +1029,7 @@ async fn a_bearer_receipt_holds_only_for_the_write_set_its_spend_makes() {
 
     // The forger's fold: the writes it keeps, each with the values the rules
     // derive, folded from the receipt's parent root.
-    let (amount, asset) = match &operation {
+    let (amount, asset) = match &operation.operation {
         Operation::Transfer {
             amount,
             policy_commit,
@@ -1091,7 +1191,7 @@ async fn a_bearer_receipt_that_does_not_hold_spends_no_counter_step() {
     a.device.enter();
     let (prepare, commitment) = a
         .handler
-        .prepare_bilateral_transaction(b.device.device_id, operation)
+        .prepare_bilateral_step(b.device.device_id, operation.operation, operation.terms)
         .await
         .expect("A prepares");
     b.device.enter();

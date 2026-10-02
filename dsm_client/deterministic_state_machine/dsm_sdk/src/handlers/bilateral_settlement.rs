@@ -27,45 +27,54 @@ use crate::sdk::token_state::{canonicalize_token_id, TransferFields};
 use crate::sdk::transfer_hooks::TransferMeta;
 use crate::util::text_id::encode_base32_crockford;
 use dsm::types::error::DsmError;
-use dsm::types::operations::Operation;
+use dsm::types::operations::{Operation, TransferTerms};
 
-/// Parse `(amount, token_id)` from raw operation bytes.
+/// `(amount, token_id)` of a step for display: a transfer's amount from its
+/// operation and its token from its session's terms, which opened the
+/// operation when the session was made (`step_terms`).
 ///
-/// Returns `(0, None)` for non-Transfer operations or parse failures.
-fn parse_transfer_fields(operation_bytes: &[u8]) -> (u64, Option<String>) {
-    match Operation::from_bytes(operation_bytes) {
-        Ok(Operation::Transfer {
-            amount, token_id, ..
-        }) => {
-            let amount_u64 = amount.available();
-            let token_str = canonicalize_token_id(&String::from_utf8_lossy(&token_id));
-            let token_opt = if token_str.is_empty() {
-                None
-            } else {
-                Some(token_str)
-            };
-            (amount_u64, token_opt)
-        }
+/// Returns `(0, None)` for non-Transfer operations.
+fn parse_transfer_fields(
+    operation: &Operation,
+    terms: Option<&TransferTerms>,
+) -> (u64, Option<String>) {
+    match operation {
+        Operation::Transfer { amount, .. } => (
+            amount.available(),
+            terms
+                .map(|t| canonicalize_token_id(&String::from_utf8_lossy(&t.token_id)))
+                .filter(|token| !token.is_empty()),
+        ),
         _ => (0, None),
     }
 }
 
-fn parse_transfer(operation_bytes: &[u8]) -> Option<TransferFields> {
-    match Operation::from_bytes(operation_bytes) {
-        Ok(Operation::Transfer {
-            amount,
-            token_id,
-            recipient,
-            to_device_id,
-            ..
-        }) => Some(TransferFields {
-            amount: amount.available(),
-            token_id: canonicalize_token_id(&String::from_utf8_lossy(&token_id)),
-            recipient,
-            to_device_id,
-        }),
-        _ => None,
-    }
+/// A transfer's fields: its amount and recipient from the signed operation,
+/// its token from terms that open the operation's commitment. A transfer
+/// without terms, or with terms that do not open it, settles nothing
+/// (pre-audit item 4).
+fn parse_transfer(
+    operation: &Operation,
+    terms: Option<&TransferTerms>,
+) -> Result<Option<TransferFields>, String> {
+    let Operation::Transfer {
+        amount,
+        to_device_id,
+        ..
+    } = operation
+    else {
+        return Ok(None);
+    };
+    let terms =
+        terms.ok_or_else(|| "bilateral settle: the transfer carries no terms".to_string())?;
+    terms
+        .open(operation)
+        .map_err(|e| format!("bilateral settle: {e}"))?;
+    Ok(Some(TransferFields {
+        amount: amount.available(),
+        token_id: canonicalize_token_id(&String::from_utf8_lossy(&terms.token_id)),
+        to_device_id: to_device_id.clone(),
+    }))
 }
 
 fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
@@ -94,6 +103,8 @@ pub(crate) struct StepSettlement {
     commitment_hash: [u8; 32],
     parent_tip: [u8; 32],
     operation_bytes: Vec<u8>,
+    /// A transfer's terms, kept in its history row beside the operation.
+    terms_bytes: Option<Vec<u8>>,
     is_sender: bool,
     transfer: Option<SettledTransfer>,
 }
@@ -109,9 +120,12 @@ impl StepSettlement {
         commitment_hash: [u8; 32],
         parent_tip: [u8; 32],
         operation_bytes: Vec<u8>,
+        terms: Option<&TransferTerms>,
         is_sender: bool,
     ) -> Result<Self, String> {
-        let transfer = match parse_transfer(&operation_bytes) {
+        let operation = Operation::from_bytes(&operation_bytes)
+            .map_err(|e| format!("bilateral settle: the step's operation does not decode: {e}"))?;
+        let transfer = match parse_transfer(&operation, terms)? {
             Some(t) if t.amount > 0 => {
                 if t.token_id.is_empty() {
                     return Err("bilateral settle: the transfer names no token".to_string());
@@ -137,6 +151,7 @@ impl StepSettlement {
             commitment_hash,
             parent_tip,
             operation_bytes,
+            terms_bytes: terms.map(TransferTerms::to_bytes),
             is_sender,
             transfer,
         })
@@ -221,6 +236,12 @@ impl StepSettlement {
                     crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
                     self.operation_bytes.clone(),
                 );
+                if let Some(terms) = &self.terms_bytes {
+                    m.insert(
+                        crate::storage::client_db::HISTORY_TERMS_KEY.to_string(),
+                        terms.clone(),
+                    );
+                }
                 m
             },
         };
@@ -251,8 +272,12 @@ pub struct DefaultBilateralSettlementDelegate;
 impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
     /// Extract event-display metadata (amount, token_id) from serialised
     /// operation bytes without applying any wallet state changes.
-    fn operation_metadata(&self, operation_bytes: &[u8]) -> (Option<u64>, Option<String>) {
-        let (amount, token_opt) = parse_transfer_fields(operation_bytes);
+    fn operation_metadata(
+        &self,
+        operation: &Operation,
+        terms: Option<&TransferTerms>,
+    ) -> (Option<u64>, Option<String>) {
+        let (amount, token_opt) = parse_transfer_fields(operation, terms);
         let amount_opt = if amount > 0 { Some(amount) } else { None };
         (amount_opt, token_opt)
     }
@@ -274,44 +299,60 @@ mod tests {
 
     #[test]
     fn parse_transfer_fields_returns_canonical_dbtc() {
+        let terms = dsm::types::operations::TransferTerms {
+            token_id: b"DBTC".to_vec(),
+            nonce: vec![],
+            mode: TransactionMode::Bilateral,
+            memo: "memo".to_string(),
+            salt: vec![0x5A; 32],
+        };
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            terms_commitment: terms.commitment(),
             to_device_id: vec![0x11; 32],
             amount: Balance::amount(5),
-            token_id: b"DBTC".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![],
-            recipient: vec![0x11; 32],
-            to: b"recipient".to_vec(),
-            message: "memo".to_string(),
             signature: vec![],
             authority_policy: None,
         };
 
-        let (amount, token_id) = parse_transfer_fields(&op.to_bytes());
+        let (amount, token_id) = parse_transfer_fields(&op, Some(&terms));
         assert_eq!(amount, 5);
         assert_eq!(token_id.as_deref(), Some("dBTC"));
     }
 
+    /// A transfer settles with the token its terms name only when they open
+    /// its commitment; without terms, or with terms that do not open it, it
+    /// settles nothing (pre-audit item 4).
     #[test]
-    fn parse_transfer_preserves_public_key_recipient_bytes() {
-        let recipient_owner = vec![0x42; 64];
+    fn a_transfer_settles_only_with_terms_that_open_it() {
+        let terms = dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![],
+            mode: TransactionMode::Bilateral,
+            memo: "memo".to_string(),
+            salt: vec![0x5A; 32],
+        };
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            terms_commitment: terms.commitment(),
             to_device_id: vec![0x11; 32],
             amount: Balance::amount(7),
-            token_id: b"ERA".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![],
-            recipient: recipient_owner.clone(),
-            to: b"recipient".to_vec(),
-            message: "memo".to_string(),
             signature: vec![],
             authority_policy: None,
         };
 
-        let parsed = super::parse_transfer(&op.to_bytes()).expect("transfer should parse");
-        assert_eq!(parsed.recipient, recipient_owner);
+        let parsed = super::parse_transfer(&op, Some(&terms))
+            .expect("the terms open the transfer")
+            .expect("a transfer");
+        assert_eq!(parsed.token_id, "ERA");
+        assert_eq!(parsed.to_device_id, vec![0x11; 32]);
+
+        let mut other = terms.clone();
+        other.memo = "another memo".to_string();
+        let refused = super::parse_transfer(&op, Some(&other)).expect_err("other terms");
+        assert!(refused.contains("do not open"), "{refused}");
+        let refused = super::parse_transfer(&op, None).expect_err("no terms");
+        assert!(refused.contains("carries no terms"), "{refused}");
     }
 
     /// A step's settlement commits in its advance's transaction: when the
@@ -347,6 +388,7 @@ mod tests {
             [0x34u8; 32],
             [0x71u8; 32],
             Operation::Noop.to_bytes(),
+            None,
             false,
         )
         .expect("resolve");

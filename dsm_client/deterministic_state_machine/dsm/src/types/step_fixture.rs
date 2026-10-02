@@ -116,13 +116,15 @@ impl Party {
         let unsigned = |signature: Vec<u8>| Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: Balance::amount(amount),
-            token_id: token_id.clone(),
             policy_commit: era_policy_commit(),
-            mode: TransactionMode::Unilateral,
-            nonce: nonce.clone(),
-            recipient: receiver.signing_public_key().to_vec(),
-            to: crate::utils::text_id::encode_base32_crockford(&to_device_id).into_bytes(),
-            message: String::new(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: token_id.clone(),
+                nonce: nonce.clone(),
+                mode: TransactionMode::Unilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature,
             authority_policy: None,
         };

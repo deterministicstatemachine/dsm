@@ -74,6 +74,10 @@ pub struct StagedTransfer {
     pub canonical_operation_bytes: Vec<u8>,
     /// SIG A.
     pub signature: Vec<u8>,
+    /// The canonical bytes of the terms that open the operation's
+    /// `terms_commitment`: its ticker, nonce, mode and memo, which no public
+    /// object carries (pre-audit item 4).
+    pub terms: Vec<u8>,
 }
 
 /// A receipt half that passed the ingestion boundary.
@@ -144,11 +148,12 @@ fn row_to_transfer(r: &rusqlite::Row<'_>) -> rusqlite::Result<StagedTransfer> {
         nonce_hash: col32(r, 2, "nonce_hash")?,
         canonical_operation_bytes: r.get(3)?,
         signature: r.get(4)?,
+        terms: r.get(5)?,
     })
 }
 
 const TRANSFER_COLS: &str =
-    "op_id, sender_device_id, nonce_hash, canonical_operation_bytes, signature";
+    "op_id, sender_device_id, nonce_hash, canonical_operation_bytes, signature, terms_bytes";
 
 fn row_to_receipt(r: &rusqlite::Row<'_>) -> rusqlite::Result<StagedReceipt> {
     Ok(StagedReceipt {
@@ -180,14 +185,15 @@ pub fn stage_transfer(t: &StagedTransfer) -> Result<()> {
     conn.execute(
         &format!(
             "INSERT OR IGNORE INTO recipient_staged_transfer({TRANSFER_COLS})
-             VALUES (?1, ?2, ?3, ?4, ?5)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
         ),
         params![
             t.op_id.as_slice(),
             t.sender.as_slice(),
             t.nonce_hash.as_slice(),
             t.canonical_operation_bytes,
-            t.signature
+            t.signature,
+            t.terms
         ],
     )?;
     Ok(())

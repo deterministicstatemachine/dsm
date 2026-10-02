@@ -678,9 +678,17 @@ impl AppRouterImpl {
                 "wallet.send: recipient contact is missing a canonical public key".to_string(),
             );
         }
-        let recipient_owner = contact_record.public_key.clone();
 
         let nonce = transfer_nonce(&chain_tip_arr, intent.amount, &token_id, &to_device_id);
+        // The transfer's terms, under a fresh secret salt. The signed operation
+        // carries only their commitment; they travel inside the sealed request
+        // (pre-audit item 4).
+        let transfer_terms = dsm::types::operations::TransferTerms::new(
+            token_id.as_bytes().to_vec(),
+            nonce.clone(),
+            dsm::types::operations::TransactionMode::Unilateral,
+            intent.memo.clone(),
+        );
         // =====================================================================
         // CANONICAL SIGNATURE GENERATION
         // Sign the canonical Operation bytes (signature field cleared) so the
@@ -699,13 +707,8 @@ impl AppRouterImpl {
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(intent.amount),
-            token_id: token_id.as_bytes().to_vec(),
             policy_commit,
-            mode: dsm::types::operations::TransactionMode::Unilateral,
-            nonce: nonce.clone(),
-            recipient: recipient_owner.clone(),
-            to: to_device_id_str.as_bytes().to_vec(),
-            message: intent.memo.clone(),
+            terms_commitment: transfer_terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,
         };
@@ -879,19 +882,7 @@ impl AppRouterImpl {
 
         // Build the final signed Operation from the SAME signing_op that was used for
         // canonical signature generation, so every verifier reads identical bytes.
-        let signed_op = dsm::types::operations::Operation::Transfer {
-            to_device_id: to_device_id.to_vec(),
-            amount: dsm::types::token_types::Balance::amount(intent.amount),
-            token_id: token_id.as_bytes().to_vec(),
-            policy_commit,
-            mode: dsm::types::operations::TransactionMode::Unilateral,
-            nonce: nonce.clone(),
-            recipient: recipient_owner.clone(),
-            to: to_device_id_str.as_bytes().to_vec(),
-            message: intent.memo.clone(),
-            signature: canonical_signature.clone(),
-            authority_policy: None,
-        };
+        let signed_op = signing_op.with_signature(canonical_signature.clone());
 
         // The pre-send head snapshot is gone: it existed ONLY to let the rollback
         // path revert `bcr_device_heads`, and the advance transaction now unwinds
@@ -1454,19 +1445,7 @@ impl AppRouterImpl {
             log::info!("[wallet.send] Submitting to b0x with canonical signature");
 
             // Build Operation for b0x submission
-            let transfer_op = dsm::types::operations::Operation::Transfer {
-                to_device_id: to_device_id.to_vec(),
-                amount: dsm::types::token_types::Balance::amount(intent.amount),
-                token_id: token_id.as_bytes().to_vec(),
-                policy_commit,
-                mode: dsm::types::operations::TransactionMode::Unilateral,
-                nonce: nonce.to_vec(),
-                recipient: recipient_owner,
-                to: to_device_id_str.as_bytes().to_vec(),
-                message: intent.memo.clone(),
-                signature: canonical_signature.clone(),
-                authority_policy: None,
-            };
+            let transfer_op = signing_op.with_signature(canonical_signature.clone());
 
             // Reuse the genesis already resolved FAIL-CLOSED at the top of this
             // handler. Re-fetching here used to fall back to `vec![0u8; 32]`, which
@@ -1560,6 +1539,7 @@ impl AppRouterImpl {
                 // OUTPUTS of the built admission (correction C).
                 sender_economic_position: econ_target_position,
                 sender_debit_mutation_index: econ_debit_index,
+                transfer_terms: transfer_terms.to_bytes(),
             };
 
             // ============================================================
@@ -1697,6 +1677,7 @@ impl AppRouterImpl {
         };
         let (new_state, artifacts) = match self.wallet.send_transfer_op_staged_with_admission(
             signed_op,
+            &transfer_terms,
             &signed_tx,
             build_online_send_artifacts,
             |tx, _outcome, artifacts: &OnlineSendArtifacts| {

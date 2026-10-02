@@ -615,16 +615,17 @@ async fn a_non_transferable_token_refuses_its_transfer() {
         .expect("A holds B as a contact");
     let tip = crate::handlers::app_router_impl::contact_relationship_tip(&b_contact)
         .expect("A's relationship tip with B");
+    let terms = dsm::types::operations::TransferTerms::new(
+        b"NOTX".to_vec(),
+        crate::handlers::app_router_impl::transfer_nonce(&tip, 25, "NOTX", &p.b.device_id),
+        dsm::types::operations::TransactionMode::Unilateral,
+        String::new(),
+    );
     let unsigned = dsm::types::operations::Operation::Transfer {
         to_device_id: p.b.device_id.to_vec(),
         amount: dsm::types::token_types::Balance::amount(25),
-        token_id: b"NOTX".to_vec(),
         policy_commit: row.policy_commit,
-        mode: dsm::types::operations::TransactionMode::Unilateral,
-        nonce: crate::handlers::app_router_impl::transfer_nonce(&tip, 25, "NOTX", &p.b.device_id),
-        recipient: b_contact.public_key.clone(),
-        to: crate::util::text_id::encode_base32_crockford(&p.b.device_id).into_bytes(),
-        message: String::new(),
+        terms_commitment: terms.commitment(),
         signature: Vec::new(),
         authority_policy: None,
     };
@@ -659,6 +660,7 @@ async fn a_non_transferable_token_refuses_its_transfer() {
     );
     let refused = p.b.router().core_sdk.apply_incoming_transfer_staged(
         signed,
+        &terms,
         &crate::types::identifiers::TransactionId::new("notx-to-b"),
         &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
         &canonical,
@@ -744,16 +746,17 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
         .expect("A holds B as a contact");
     let tip = crate::handlers::app_router_impl::contact_relationship_tip(&b_contact)
         .expect("A's relationship tip with B");
+    let terms = dsm::types::operations::TransferTerms::new(
+        b"NOTX".to_vec(),
+        crate::handlers::app_router_impl::transfer_nonce(&tip, 25, "NOTX", &p.b.device_id),
+        dsm::types::operations::TransactionMode::Unilateral,
+        String::new(),
+    );
     let unsigned = dsm::types::operations::Operation::Transfer {
         to_device_id: p.b.device_id.to_vec(),
         amount: dsm::types::token_types::Balance::amount(25),
-        token_id: b"NOTX".to_vec(),
         policy_commit: row.policy_commit,
-        mode: dsm::types::operations::TransactionMode::Unilateral,
-        nonce: crate::handlers::app_router_impl::transfer_nonce(&tip, 25, "NOTX", &p.b.device_id),
-        recipient: b_contact.public_key.clone(),
-        to: crate::util::text_id::encode_base32_crockford(&p.b.device_id).into_bytes(),
-        message: String::new(),
+        terms_commitment: terms.commitment(),
         signature: Vec::new(),
         authority_policy: None,
     };
@@ -820,6 +823,7 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
         canonical_operation_bytes: canonical,
         sender_economic_position: sender_position,
         sender_debit_mutation_index: 0,
+        transfer_terms: terms.to_bytes(),
     }
     .encode_to_vec();
 

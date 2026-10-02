@@ -292,13 +292,15 @@ impl LiveDevice {
         let op = Operation::Transfer {
             to_device_id: to.devid.to_vec(),
             amount: Balance::amount(amount),
-            token_id: b"ERA".to_vec(),
             policy_commit: era_policy_commit(),
-            mode: TransactionMode::Unilateral,
-            nonce: nonce.to_vec(),
-            recipient: to.devid.to_vec(),
-            to: to.label.as_bytes().to_vec(),
-            message: String::new(),
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: nonce.to_vec(),
+                mode: TransactionMode::Unilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: Vec::new(),
             authority_policy: None,
         };

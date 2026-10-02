@@ -2006,13 +2006,15 @@ mod tests {
         Operation::Transfer {
             to_device_id: devid(0xAA).to_vec(),
             amount: bal(amount),
-            token_id: b"ERA".to_vec(),
             policy_commit,
-            mode: crate::types::operations::TransactionMode::Bilateral,
-            nonce: vec![0x11; 32],
-            recipient: devid(0xAA).to_vec(),
-            to: Vec::new(),
-            message: String::new(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![0x11; 32],
+                mode: crate::types::operations::TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: Vec::new(),
             authority_policy: None,
         }
@@ -2094,13 +2096,15 @@ mod tests {
         let xfer = |to: [u8; 32], amt: u64, pcv: [u8; 32]| Operation::Transfer {
             to_device_id: to.to_vec(),
             amount: bal(amt),
-            token_id: b"ERA".to_vec(),
             policy_commit: pcv,
-            mode: crate::types::operations::TransactionMode::Unilateral,
-            nonce: vec![],
-            recipient: vec![],
-            to: vec![],
-            message: String::new(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![],
+                mode: crate::types::operations::TransactionMode::Unilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: vec![],
             authority_policy: None,
         };
@@ -2183,25 +2187,15 @@ mod tests {
                 Operation::Transfer {
                     to_device_id,
                     amount,
-                    token_id,
                     policy_commit,
-                    mode,
-                    nonce,
-                    recipient,
-                    to,
-                    message,
+                    terms_commitment,
                     signature,
                     ..
                 } => Operation::Transfer {
                     to_device_id,
                     amount,
-                    token_id,
                     policy_commit,
-                    mode,
-                    nonce,
-                    recipient,
-                    to,
-                    message,
+                    terms_commitment,
                     signature,
                     authority_policy: Some(AuthorityPolicy {
                         mode: AuthorityMode::OfflineBearerRequired,
@@ -2236,13 +2230,15 @@ mod tests {
         Operation::Transfer {
             to_device_id: to.devid.to_vec(),
             amount: bal(amount),
-            token_id: b"CUSTOM".to_vec(),
             policy_commit,
-            mode: TransactionMode::Bilateral,
-            nonce: vec![0x5C; 32],
-            recipient: to.devid.to_vec(),
-            to: Vec::new(),
-            message: String::new(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"CUSTOM".to_vec(),
+                nonce: vec![0x5C; 32],
+                mode: TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: Vec::new(),
             authority_policy: None,
         }
@@ -2688,13 +2684,15 @@ mod tests {
         let bearer_op = |amt: u64| Operation::Transfer {
             to_device_id: cp.to_vec(),
             amount: bal(amt),
-            token_id: b"ERA".to_vec(),
             policy_commit: token,
-            mode: TransactionMode::Bilateral,
-            nonce: vec![],
-            recipient: vec![],
-            to: vec![],
-            message: String::new(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![],
+                mode: TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: vec![],
             authority_policy: Some(AuthorityPolicy {
                 mode: AuthorityMode::OfflineBearerRequired,

@@ -728,14 +728,16 @@ mod tests {
     fn sample_operation(tag: &[u8], amount: u64) -> Operation {
         Operation::Transfer {
             policy_commit: [0xD4; 32],
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![0xCC; 8],
+                mode: TransactionMode::Bilateral,
+                memo: String::from_utf8_lossy(tag).into_owned(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             to_device_id: vec![0xA1; 32],
             amount: TokenBalance::amount(amount),
-            token_id: b"ERA".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![0xCC; 8],
-            recipient: vec![0xDD; 64],
-            to: tag.to_vec(),
-            message: String::from_utf8_lossy(tag).into_owned(),
             signature: vec![0xEE; 64],
             authority_policy: None,
         }

@@ -1670,6 +1670,11 @@ message BilateralPrepareRequest {
   // "DSM/bilateral-sign\0" || the proposal's commitment, under its pinned AK:
   // the receiver puts to its user only a proposal the sender signed.
   bytes  sender_signature = 18 [(dsm_max_len)=65535];
+  // The canonical bytes of the transfer's terms (`TransferTerms`), beside the
+  // operation that carries only their commitment (pre-audit item 4). The
+  // receiver refuses the prepare unless they open it. Empty for an operation
+  // that is not a transfer.
+  bytes  transfer_terms = 19 [(dsm_max_len)=4096];
 }
 // A -> B, rides BilateralConfirmRequest (Software-Authority / Hardware-Identity receiver-admit).
 // A discloses its fused-anchor pin material so B can PIN it under the ALREADY-verified contact,
@@ -3255,13 +3260,14 @@ message FaucetClaimResponse {
 }
 
 // ======================= Online Transfer Messages ====================
-// An online transfer on the wire: the signed operation and nothing that
-// restates it. SIG A (`signature`) covers `canonical_operation_bytes`, the
-// unsigned `Operation::Transfer` preimage, and that operation already names
-// the recipient, amount, token, policy commitment, nonce and memo. The
-// recipient decodes every term from those bytes after verifying them; the
-// sender is the stored contact whose key verified them. Nothing else here
-// is authority.
+// An online transfer on the wire: the signed operation, the terms it commits
+// to, and nothing that restates either. SIG A (`signature`) covers
+// `canonical_operation_bytes`, the unsigned `Operation::Transfer` preimage,
+// which names the recipient, amount and policy commitment, and commits to
+// the terms (token, nonce, mode, memo) by a salted hash. The recipient
+// decodes the operation after verifying it and reads the terms only once
+// they open its commitment; the sender is the stored contact whose key
+// verified them. Nothing else here is authority.
 message OnlineTransferRequest {
   // 1-4 and 6 restated terms of the signed operation (token, recipient,
   // amount, memo, nonce), and 7 a sender id nothing signed; 12 named the
@@ -3298,6 +3304,12 @@ message OnlineTransferRequest {
   // predicted beside it.
   uint64 sender_economic_position = 13;
   uint32 sender_debit_mutation_index = 14;
+  // The canonical bytes of the transfer's terms: its ticker, nonce, mode and
+  // memo under a secret salt (`TransferTerms`). The signed operation carries
+  // only their commitment, so these travel here, inside the sealed spool
+  // payload, and in no public object (pre-audit item 4). The recipient
+  // refuses the transfer unless they open the signed commitment.
+  bytes transfer_terms = 15 [(dsm_max_len)=65535];
 }
 
 // ADR 0003: the A-side receipt evidence, carried as its OWN b0x artifact

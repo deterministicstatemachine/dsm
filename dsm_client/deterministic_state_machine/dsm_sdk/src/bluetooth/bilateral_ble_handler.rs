@@ -659,6 +659,20 @@ impl BilateralBleHandler {
         counterparty_device_id: [u8; 32],
         operation: Operation,
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+        self.prepare_bilateral_step(counterparty_device_id, operation, None)
+            .await
+    }
+
+    /// Propose `operation` to `counterparty_device_id`. A transfer carries the
+    /// terms its operation commits to, which ride beside it in the prepare
+    /// and in no public object (pre-audit item 4); any other operation
+    /// carries none.
+    pub async fn prepare_bilateral_step(
+        &self,
+        counterparty_device_id: [u8; 32],
+        operation: Operation,
+        terms: Option<dsm::types::operations::TransferTerms>,
+    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         info!("Preparing BLE bilateral transaction");
 
         // BLE/USB is the OFFLINE transport: value over it is bearer-tier only,
@@ -753,6 +767,12 @@ impl BilateralBleHandler {
         let (sender_kyber_public_key, sender_kyber_binding_sig) =
             crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
 
+        // A transfer carries the terms it commits to, and they open it: one
+        // without them is refused before any precommitment exists.
+        let terms_bytes = terms.as_ref().map(|t| t.to_bytes());
+        let terms =
+            crate::bluetooth::bilateral_session::step_terms(&operation, terms_bytes.as_deref())?;
+
         // Prepare offline transfer in core
         let (pre_commitment, local_genesis_hash) = {
             let mut manager = self.bilateral_tx_manager.write().await;
@@ -822,6 +842,7 @@ impl BilateralBleHandler {
             offline_spend: None,
             parent_tip: Some(pre_commitment.parent_tip),
             owed_frame: None,
+            terms: terms.clone(),
         };
 
         // The session is durable before anything is sent; a session that could
@@ -875,6 +896,10 @@ impl BilateralBleHandler {
             // σ_A over the commitment: the receiver puts to its user only a
             // proposal its sender signed.
             sender_signature: commit_signature,
+            // The transfer's terms, beside the operation that commits to them.
+            transfer_terms: terms
+                .as_ref()
+                .map_or_else(Vec::new, dsm::types::operations::TransferTerms::to_bytes),
         };
 
         let envelope = self
@@ -932,6 +957,18 @@ impl BilateralBleHandler {
         operation: Operation,
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         self.prepare_bilateral_transaction(counterparty_device_id, operation)
+            .await
+    }
+
+    /// [`Self::prepare_bilateral_step`] for a transfer and the terms it
+    /// commits to.
+    pub async fn prepare_bilateral_transfer_with_commitment(
+        &self,
+        counterparty_device_id: [u8; 32],
+        operation: Operation,
+        terms: dsm::types::operations::TransferTerms,
+    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+        self.prepare_bilateral_step(counterparty_device_id, operation, Some(terms))
             .await
     }
 
@@ -1018,6 +1055,13 @@ impl BilateralBleHandler {
         // any session state exists (owner ruling 2026-08-28).
         let operation =
             dsm::bilateral::offline::offline_operation(&prepare_request.operation_data)?;
+        // A transfer's terms ride beside it and must open its signed
+        // commitment: one without them, or with terms that do not open it, is
+        // refused whole before any session exists (pre-audit item 4).
+        let terms = crate::bluetooth::bilateral_session::step_terms(
+            &operation,
+            Some(&prepare_request.transfer_terms),
+        )?;
 
         // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
         // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
@@ -1043,9 +1087,8 @@ impl BilateralBleHandler {
 
         // Capture transfer metadata for the orchestration layer to run hooks.
         // Delegate to the application layer so the transport stays coin-agnostic.
-        let operation_bytes = operation.to_bytes();
         let (meta_amount, meta_token) = if let Some(ref d) = self.settlement_delegate {
-            d.operation_metadata(&operation_bytes)
+            d.operation_metadata(&operation, terms.as_ref())
         } else {
             (None, None)
         };
@@ -1348,7 +1391,7 @@ impl BilateralBleHandler {
                         origin_commitment_hash,
                         counterparty_device_id,
                         sender_genesis,
-                        operation,
+                        (operation, terms),
                         sender_ble_address,
                         in_flight,
                     )
@@ -1460,6 +1503,7 @@ impl BilateralBleHandler {
             offline_spend: None,
             parent_tip: None,
             owed_frame: None,
+            terms,
         };
 
         // The proposal is durable before it is held: one that could not be
@@ -1479,9 +1523,8 @@ impl BilateralBleHandler {
         drop(door);
 
         // Obtain event display metadata from the delegate (coin-agnostic transport).
-        let op_bytes_for_event = session.operation.to_bytes();
         let (amount_opt, token_id_opt) = if let Some(ref d) = self.settlement_delegate {
-            d.operation_metadata(&op_bytes_for_event)
+            d.operation_metadata(&session.operation, session.terms.as_ref())
         } else {
             (None, None)
         };
@@ -1801,7 +1844,7 @@ impl BilateralBleHandler {
         commitment_hash: [u8; 32],
         counterparty_device_id: [u8; 32],
         counterparty_genesis_hash: [u8; 32],
-        operation: Operation,
+        (operation, terms): (Operation, Option<dsm::types::operations::TransferTerms>),
         sender_ble_address: Option<String>,
         in_flight: [u8; 32],
     ) -> Result<Vec<u8>, DsmError> {
@@ -1835,6 +1878,7 @@ impl BilateralBleHandler {
             offline_spend: None,
             parent_tip: None,
             owed_frame: Some(rejection.clone()),
+            terms,
         })
         .await?;
         // No pruning here: it also sweeps the contact's BLE reassembly
@@ -2324,20 +2368,24 @@ impl BilateralBleHandler {
             if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
                 &session.operation,
             ) {
-                match (session.receiver_challenge, &session.operation) {
+                match (
+                    session.receiver_challenge,
+                    &session.operation,
+                    &session.terms,
+                ) {
                     (
                         Some(r_r),
                         Operation::Transfer {
-                            token_id,
                             authority_policy: Some(authority_policy),
                             ..
                         },
+                        Some(terms),
                     ) => {
                         let object_id = dsm::crypto::blake3::domain_hash_bytes(
                             dsm::crypto::domain::TaggedHashDomain::from_static(
                                 b"DSM/bearer-object/v1",
                             ),
-                            token_id,
+                            &terms.token_id,
                         );
                         let payload_hash = dsm::crypto::blake3::domain_hash_bytes(
                             dsm::crypto::domain::TaggedHashDomain::from_static(
@@ -2401,15 +2449,24 @@ impl BilateralBleHandler {
                 (
                     Some((staged, _)),
                     dsm::types::operations::Operation::Transfer {
-                        amount, token_id, ..
+                        amount,
+                        policy_commit,
+                        ..
                     },
                 ) => {
-                    // §9.5: independently resolve the sender's installed policy_commit.
-                    // Unresolved is a REFUSAL — the deleted online-debit fallback used to
-                    // stand in here, and empty deltas without a spend would only die
-                    // later in the conservation guard; fail at the seam instead.
+                    // §9.5: independently resolve the sender's installed policy_commit
+                    // for the token the step's terms name; it must be the asset the
+                    // operation signs. Unresolved is a REFUSAL — the deleted online-debit
+                    // fallback used to stand in here, and empty deltas without a spend
+                    // would only die later in the conservation guard; fail at the seam
+                    // instead.
+                    let terms = session.terms.as_ref().ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "bearer transfer refused: the session holds no transfer terms",
+                        )
+                    })?;
                     let asset = crate::bridge::app_router()
-                        .map(|r| r.resolve_policy_commit_strict(token_id))
+                        .map(|r| r.resolve_policy_commit_strict(&terms.token_id))
                         .ok_or_else(|| {
                             DsmError::state_machine(
                                 "send_bilateral_confirm: app_router not installed; cannot \
@@ -2420,9 +2477,16 @@ impl BilateralBleHandler {
                             DsmError::invalid_operation(format!(
                                 "bearer transfer refused: policy_commit unresolved for token {} \
                                  — {e}",
-                                String::from_utf8_lossy(token_id)
+                                String::from_utf8_lossy(&terms.token_id)
                             ))
                         })?;
+                    if asset != *policy_commit {
+                        return Err(DsmError::invalid_operation(format!(
+                            "bearer transfer refused: token {} is not the asset the operation \
+                             signs",
+                            String::from_utf8_lossy(&terms.token_id)
+                        )));
+                    }
                     Some(dsm::types::device_state::OfflineSpend {
                         anchor_bundle_b: staged.pin.bundle,
                         asset,
@@ -3405,10 +3469,18 @@ impl BilateralBleHandler {
         let receiver_deltas: Vec<dsm::types::device_state::BalanceDelta> = match &session.operation
         {
             Operation::Transfer {
-                amount, token_id, ..
+                amount,
+                policy_commit: signed_policy_commit,
+                ..
             } => {
                 // §9.5: independently resolve the receiver's installed
-                // policy_commit. Never absorb the peer's commit.
+                // policy_commit for the token the opened terms name. Never
+                // absorb the peer's commit: the signed one must be it.
+                let terms = session.terms.as_ref().ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "receiver confirm: the session holds no transfer terms",
+                    )
+                })?;
                 let policy_commit = crate::bridge::app_router()
                     .ok_or_else(|| {
                         DsmError::state_machine(
@@ -3416,13 +3488,19 @@ impl BilateralBleHandler {
                              credited asset",
                         )
                     })?
-                    .resolve_policy_commit_strict(token_id)
+                    .resolve_policy_commit_strict(&terms.token_id)
                     .map_err(|e| {
                         DsmError::invalid_operation(format!(
                             "receiver confirm: policy_commit unresolved for token {}: {e}",
-                            String::from_utf8_lossy(token_id)
+                            String::from_utf8_lossy(&terms.token_id)
                         ))
                     })?;
+                if policy_commit != *signed_policy_commit {
+                    return Err(DsmError::invalid_operation(format!(
+                        "receiver confirm: token {} is not the asset the operation signs",
+                        String::from_utf8_lossy(&terms.token_id)
+                    )));
+                }
                 vec![dsm::types::device_state::BalanceDelta {
                     policy_commit,
                     direction: dsm::types::device_state::BalanceDirection::Credit,
@@ -3458,6 +3536,7 @@ impl BilateralBleHandler {
             commitment_hash,
             held_tip,
             session.operation.to_bytes(),
+            session.terms.as_ref(),
             false,
         )
         .map_err(|e| DsmError::invalid_operation(format!("receiver confirm: {e}")))?;
@@ -3607,7 +3686,7 @@ impl BilateralBleHandler {
         let transaction_hash = new_chain_tip;
         let pending_key = session.local_commitment_hash.unwrap_or(commitment_hash);
         let (amount_opt, token_id_opt) = match &self.settlement_delegate {
-            Some(d) => d.operation_metadata(&session.operation.to_bytes()),
+            Some(d) => d.operation_metadata(&session.operation, session.terms.as_ref()),
             None => (None, None),
         };
         if let Some(router) = crate::bridge::app_router() {
@@ -3786,6 +3865,7 @@ impl BilateralBleHandler {
             session_anchor_leaf,
             session_sent_child_root,
             session_offline_spend,
+            session_terms,
         ) = {
             let sessions = self.sessions.sessions.lock().await;
             let sess = match sessions.get(commitment_hash) {
@@ -3828,6 +3908,7 @@ impl BilateralBleHandler {
                 sess.anchor_leaf.clone(),
                 sess.sent_child_root,
                 sess.offline_spend,
+                sess.terms.clone(),
             )
         };
 
@@ -3835,7 +3916,7 @@ impl BilateralBleHandler {
         // completion events without inspecting token-specific Operation fields.
         let op_bytes = session_operation.to_bytes();
         let (event_amount_opt, event_token_id_opt) = if let Some(ref d) = self.settlement_delegate {
-            d.operation_metadata(&op_bytes)
+            d.operation_metadata(&session_operation, session_terms.as_ref())
         } else {
             (None, None)
         };
@@ -3943,6 +4024,7 @@ impl BilateralBleHandler {
             *commitment_hash,
             prepared.parent_tip,
             op_bytes.clone(),
+            session_terms.as_ref(),
             true,
         ) {
             Ok(s) => s,
@@ -4480,14 +4562,16 @@ mod tests {
     fn online_tier_transfer(counterparty: [u8; 32]) -> Operation {
         Operation::Transfer {
             policy_commit: [0u8; 32],
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![9],
+                mode: TransactionMode::Bilateral,
+                memo: "online".to_string(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             to_device_id: counterparty.to_vec(),
             amount: Balance::amount(1),
-            token_id: b"ERA".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![9],
-            recipient: counterparty.to_vec(),
-            to: counterparty.to_vec(),
-            message: "online".to_string(),
             signature: Vec::new(),
             authority_policy: None,
         }
@@ -4562,6 +4646,7 @@ mod tests {
             sender_kyber_public_key: vec![],
             sender_kyber_binding_sig: vec![],
             sender_signature: vec![],
+            transfer_terms: Vec::new(),
         };
         let envelope = generated::Envelope {
             version: 3,
@@ -4677,6 +4762,7 @@ mod tests {
                     ),
                 )
                 .expect("sigma_A"),
+            transfer_terms: Vec::new(),
         };
         let envelope = generated::Envelope {
             version: 3,
@@ -4776,6 +4862,7 @@ mod tests {
             offline_spend: None,
             parent_tip: None,
             owed_frame: None,
+            terms: None,
         };
         let pending = [0xA6u8; 32];
         let answered = [0xA7u8; 32];
@@ -4990,6 +5077,7 @@ mod tests {
                 offline_spend: None,
                 parent_tip: None,
                 owed_frame: None,
+                terms: None,
             })
             .await;
         let mut signed = b"DSM/bilateral-sign\0".to_vec();
@@ -5092,27 +5180,31 @@ mod tests {
 
         let stale_op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![1],
+                mode: TransactionMode::Bilateral,
+                memo: "stale".to_string(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::amount(1),
-            token_id: b"ERA".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![1],
-            recipient: counterparty_device_id.to_vec(),
-            to: counterparty_device_id.to_vec(),
-            message: "stale".to_string(),
             signature: Vec::new(),
             authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
         };
         let next_op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![2],
+                mode: TransactionMode::Bilateral,
+                memo: "fresh".to_string(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::amount(1),
-            token_id: b"ERA".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![2],
-            recipient: counterparty_device_id.to_vec(),
-            to: counterparty_device_id.to_vec(),
-            message: "fresh".to_string(),
             signature: Vec::new(),
             authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
         };
@@ -5152,6 +5244,7 @@ mod tests {
             offline_spend: None,
             parent_tip: None,
             owed_frame: None,
+            terms: None,
         };
         store_bilateral_session(&in_flight.to_record().expect("the row")).expect("persist");
         handler.test_insert_session(in_flight).await;
@@ -5201,14 +5294,16 @@ mod tests {
             counterparty_genesis_hash: Some([0x54u8; 32]),
             operation: Operation::Transfer {
                 policy_commit: [0x0Fu8; 32],
+                terms_commitment: dsm::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![1; 32],
+                    mode: TransactionMode::Bilateral,
+                    memo: String::new(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: counterparty.to_vec(),
                 amount: Balance::amount(1),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![1; 32],
-                recipient: counterparty.to_vec(),
-                to: counterparty.to_vec(),
-                message: String::new(),
                 signature: Vec::new(),
                 authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
             },
@@ -5228,6 +5323,7 @@ mod tests {
             }),
             parent_tip: Some(tip),
             owed_frame: None,
+            terms: None,
         };
         handler
             .persist_session(&session)
@@ -5454,6 +5550,7 @@ mod tests {
             spend_asset: None,
             spend_amount: None,
             owed_frame: None,
+            terms_bytes: None,
         }
     }
 
