@@ -5,7 +5,7 @@ import { FxLayer, FxProvider, useFx } from '../FxProvider';
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
 import { LOCK_SETUP_COMPLETE_EVENT } from '../../../services/lock/lockService';
 
-function Harness({ appState, soundEnabled }: { appState?: 'securing_device' | 'wallet_ready' | 'locked'; soundEnabled?: boolean }) {
+function Harness({ appState, soundEnabled }: { appState?: 'securing_device' | 'publication_pending' | 'wallet_ready' | 'locked'; soundEnabled?: boolean }) {
   return (
     <FxProvider appState={appState} soundEnabled={soundEnabled}>
       <Trigger />
@@ -83,6 +83,20 @@ describe('FxProvider', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     rerender(<Harness appState="wallet_ready" />);
     expect(screen.getByRole('dialog', { name: 'Device ready' })).toBeInTheDocument();
+  });
+
+  it('celebrates a device set up here whose identity is published after the securing screen', () => {
+    const { rerender } = render(<Harness appState="securing_device" />);
+    rerender(<Harness appState="publication_pending" />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    rerender(<Harness appState="wallet_ready" />);
+    expect(screen.getByRole('dialog', { name: 'Device ready' })).toBeInTheDocument();
+  });
+
+  it('plays nothing when a launch passes the publishing screen on its way to the wallet', () => {
+    const { rerender } = render(<Harness appState="publication_pending" />);
+    rerender(<Harness appState="wallet_ready" />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('plays the lock scene only when the lock was just set up', () => {
