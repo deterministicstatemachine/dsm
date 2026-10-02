@@ -572,7 +572,9 @@ mod tests {
         let mut hostile = bytes.clone();
         let alg_at = 4 + 2 + 4 + s.encode().len();
         assert_eq!(&hostile[alg_at..alg_at + 2], &ALG.to_be_bytes());
-        hostile[alg_at..alg_at + 2].copy_from_slice(&0x0002u16.to_be_bytes());
+        hostile[alg_at..alg_at + 2].copy_from_slice(
+            &crate::ccb::genesis::sigalg::RETIRED_SPHINCS_PLUS_SPX256F_V1.to_be_bytes(),
+        );
         assert!(
             SignedSofiObject::decode(&hostile).is_ok(),
             "the envelope itself parses"

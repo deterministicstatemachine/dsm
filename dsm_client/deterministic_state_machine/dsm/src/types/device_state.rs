@@ -3502,7 +3502,14 @@ mod tests {
         let devid = [0xB9u8; 32];
         let head = DeviceState::new(genesis, devid, pk.clone());
         let body = SofiSetupBody::new(
-            genesis, devid, 5, [0xC1; 32], [0x66; 32], [0x67; 32], 0x0001, &pk,
+            genesis,
+            devid,
+            5,
+            [0xC1; 32],
+            [0x66; 32],
+            [0x67; 32],
+            crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &pk,
         )
         .unwrap();
         // A setup runs on the device's self-loop, as `admitted_self_loop_operation` runs it.

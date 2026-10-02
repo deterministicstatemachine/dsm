@@ -17,7 +17,6 @@ unused_must_use = "deny"
 
 [features]
 default = []                     # NO JNI, demos, or HTTP features in core - pure business logic
-sphincs-trace = []                # Enable verbose SPHINCS+ tracing (debug only)
 # Issue #181 Finding 2: NON_PAPER_MODE testnet/signet bypass is OFF by default.
 # Without this feature, all Bitcoin networks (including Testnet/Signet) require
 # checkpoint-rooted header chains and entry-anchor verification — i.e. the
@@ -68,7 +67,8 @@ blake3 = "1.5.0"
 hmac = "0.13.0"
 sha2 = "0.11.0"
 pbkdf2 = "0.13.0"
-rand_chacha = "0.9.0"
+# SPHINCS+: the one implementation, shared with the anchor firmware.
+dsm-sphincs = { path = "../../../crates/dsm-sphincs" }
 getrandom = "0.4.2"
 merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }

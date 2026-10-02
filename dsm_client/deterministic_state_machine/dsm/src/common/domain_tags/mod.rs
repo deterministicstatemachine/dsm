@@ -173,7 +173,7 @@ mod tests {
     // +1 with the vault token locator (SoFi Amendment S16).
     // +1 with the signed resolution claim's digest (SoFi Amendment S20), and
     // +1 with the relationship-scoped transfer nonce (pre-audit item 5).
-    const EXPECTED_TAG_COUNT: usize = 354;
+    const EXPECTED_TAG_COUNT: usize = 353;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

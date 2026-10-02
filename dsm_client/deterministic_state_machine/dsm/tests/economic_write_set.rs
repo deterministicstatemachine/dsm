@@ -704,7 +704,7 @@ fn sofi_setup_operation() -> Operation {
         sofi_vault_id(),
         [0x66; 32],
         [0x67; 32],
-        0x0001,
+        dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F,
         &[0x01; 64],
     )
     .expect("a setup body");
@@ -1077,7 +1077,7 @@ fn a_setup_naming_a_foreign_genesis_is_refused() {
         sofi_vault_id(),
         [0x66; 32],
         [0x67; 32],
-        0x0001,
+        dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F,
         &[0x01; 64],
     )
     .expect("a setup body");
@@ -1149,7 +1149,7 @@ fn a_setups_root_is_the_root_its_own_transition_produces() {
         sofi_vault_id(),
         [0x66; 32],
         [0xEE; 32], // not the derived root
-        0x0001,
+        dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F,
         &[0x01; 64],
     )
     .expect("a setup body");

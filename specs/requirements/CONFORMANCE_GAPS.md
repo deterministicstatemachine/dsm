@@ -2617,6 +2617,74 @@ Mutation controls (item 13, restored byte for byte): the policy re-admitting `'u
 
 Mutation control (item 16): the gate run on the previous manifest fails, "activity com.dsm.wallet.debug.PicoSelfTestActivity is exported".
 
+### 6.70 SPHINCS+ construction version 2: the FIPS 205 structure, BLAKE3 kept (`security/sphincs-structure-repair`, pre-audit item 17, 2026-10-01)
+
+**The finding.** The pre-audit map of SPHINCS+ found that version 1 did not have the properties a SPHINCS+-style proof assumes. Both copies had them alike: the host's `dsm/src/crypto/sphincs.rs` and the firmware's `crates/dsm-sphincs`.
+- **A FORS key was not bound to its hypertree leaf.** The FORS address carried the FORS tree number in the key-pair word and never the leaf, so all `2^h'` leaves of a bottom tree shared one FORS instance. Estimated from the standard FORS-reuse bound, at `2^64` signatures that costs about 37 bits on SPX256f and about 31 on SPX128f. The loss is negligible at `2^30` or fewer.
+- **WOTS+ compression and hypertree nodes shared addresses.** An L-tree ran under the hashtree type, and for key pair 0 it produced the same addresses as the internal nodes over different inputs.
+- **PRF omitted `PK.seed`.** Top-layer addresses are common to every key, so a multi-key search could pool targets.
+- **Tree heights were off by one.** A FORS leaf's F and the first internal H shared an address, and every PRF call shared its chain's address.
+- **`H_msg` produced `n + 12` bytes, not FIPS `m`.**
+- **The layout comment contradicted the code.** The two copies had no equivalence test, and no build linked both.
+
+**The ruling.** Owner, 2026-10-01: "Pick **“Fix structure, keep BLAKE3.”**", as a clean cryptographic version break with a new algorithm identifier, regenerated vectors, re-provisioned keys, a rebuilt anchor firmware, and mutation tests that collapse each separation. On the claim: "It restores the structural assumptions needed for a SPHINCS+-style proof, but BLAKE3 remains a non-FIPS/custom instantiation. That distinction should be explicit in the conformance record and auditor handoff."
+
+**The fix.**
+- **One implementation.** `crates/dsm-sphincs` is the only copy. `dsm::crypto::sphincs` re-exports it, maps its errors and adds key generation from OS entropy, so the host and the anchor firmware cannot drift.
+- **The FIPS 205 structure.** Every algorithm follows FIPS 205 §5–§10 with its 32-byte ADRS, its seven address types and `setTypeAndClear`:
+  - a FORS key's key pair is the signing leaf, and its tree index is `i·2^a + j`;
+  - secrets are drawn under `WOTS_PRF` / `FORS_PRF`;
+  - WOTS+ compression is `T_len` under `WOTS_PK`;
+  - heights count from the leaves;
+  - `H_msg` yields `m` bytes.
+- **The BLAKE3 instantiation.**
+  - PRF is keyed by `derive_key("DSM/sphincs/v2/prf", SK.seed)` over `PK.seed ‖ ADRS`.
+  - F/H/T are keyed by `derive_key("DSM/sphincs/v2/thash", PK.seed)` over `ADRS ‖ M`.
+  - `PRF_msg` is keyed by `derive_key("DSM/sphincs/v2/prf-msg", SK.prf)`.
+  - `H_msg` runs in derive-key mode under `"DSM/sphincs/v2/h-msg"`.
+  - Signing is deterministic (`opt_rand = PK.seed`), and a signature is verified before it is returned.
+- **The algorithm id.** `sigalg::SPHINCS_PLUS_SPX256F` is `0x0002`. `RETIRED_SPHINCS_PLUS_SPX256F_V1` (`0x0001`) is undeclared, so nothing signed under version 1 is recognized, and the value is never reused.
+- **Removed.** The `DSM/sphincs-kdf` tag, the `sphincs-trace` feature, the duplicate KAT file and `rand_chacha` as a direct `dsm` dependency. Fixtures now take their algorithm id from `sigalg`, not from a literal 1.
+- **The anchor firmware.** `dsm-anchor-pico` and `dsm-anchor-secure-monitor` build against version 2 (`cargo build --release --locked`, thumbv8m).
+
+**Tests** (`dsm-sphincs`):
+- `every_hash_call_has_its_own_address` records every hash call by address across a key generation, three signatures and their verifications. No address is hashed with two inputs or roles, and all seven types are in use.
+- `a_fors_key_belongs_to_the_leaf_that_signs_it` checks that every FORS call is at layer 0, in the signing tree, with the signing leaf as key pair, and that the count is exact.
+- `two_leaves_of_one_tree_hold_different_fors_keys`.
+- `the_prf_binds_the_public_seed`.
+- `the_address_is_the_fips_205_layout` and `changing_the_address_type_clears_every_type_specific_word`.
+- `base_2b_and_the_wots_checksum_follow_fips_205` and `sizes_and_digest_lengths_are_fips_205s`.
+- `a_flipped_bit_anywhere_in_a_signature_does_not_verify` flips one bit per n-byte block, with all eight bit positions, plus every public-key byte and the message.
+- `a_malformed_signature_or_key_does_not_verify`.
+- `a_secret_key_whose_root_is_not_its_own_signs_nothing`.
+- `frozen_construction_vectors`: SPX128f and SPX256f. These are tripwires, not known-answer tests.
+
+**Mutation controls.** Each was run on the committed code and restored afterwards.
+
+| Mutation | Red test |
+|---|---|
+| FORS key pair set to 0 instead of the leaf | `a_fors_key_belongs_to_the_leaf_that_signs_it` |
+| `WOTS_PK` replaced by `TREE` | `every_hash_call_has_its_own_address` (the type set). The address words alone still separated these calls. |
+| `WOTS_PRF` replaced by `WOTS_HASH` | `every_hash_call_has_its_own_address` |
+| `FORS_PRF` replaced by `FORS_TREE` | `every_hash_call_has_its_own_address` |
+| FORS heights from 0 at the first internal level, in signer and verifier (version 1's off-by-one) | `every_hash_call_has_its_own_address`, `a_fors_key_belongs_to_the_leaf_that_signs_it`, `frozen_construction_vectors` |
+| PRF without `PK.seed` | `the_prf_binds_the_public_seed` |
+| `setTypeAndClear` no longer clears words 5–7 | `every_hash_call_has_its_own_address` |
+| Verify before release removed | `a_secret_key_whose_root_is_not_its_own_signs_nothing` |
+
+**A clean cut.** Every SPHINCS+ public key and signature changes, and the same mnemonic derives a different identity.
+- The rig phones need their app data wiped, and the anchors need re-flashing.
+- Vectors that moved: `dsm_sphincs::tests::frozen_construction_vectors` (new, SPX128f and SPX256f); `dsm::crypto::signatures::tests::default_entropy_keypair_digest_is_stable` (public and secret key digests); `ccb_conformance::genesis_params_v3_agrees_with_an_independent_construction` (the algorithm bytes); `sofi_v8_independent::derivations_match_the_independent_hasher_and_the_frozen_golden_digests` (the setup reference, the precommit id, and the single and multivault external commitments, each over a body that carries the algorithm id). Each still equals its independent construction; only the frozen digests moved.
+- The conformance evidence index now covers `dsm_sphincs`, whose tests run on the root board.
+
+**Open, for the independent review.** The handoff package lists the questions. In short:
+- whether BLAKE3 is adequate as the tweakable hash, PRF and message hash at n = 16, 24 and 32;
+- fault exposure under deterministic signing on the anchors;
+- the ChaCha20 seed expansion;
+- whether to retain the instantiation or migrate to standard SLH-DSA before mainnet.
+
+Outside this round: the anchor firmware's signing call sites turn an error into an empty signature (`unwrap_or_default`). Separately, `crates/dsm-anchor-hw-verifier/Cargo.lock` was already stale against `dsm_sdk` before this change. Only this change's own lines were added to it.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
@@ -2892,7 +2960,7 @@ Mutation control (item 16): the gate run on the previous manifest fails, "activi
 | MR-DSM-0256 | Met | `dsm_storage_node::db::pg::put_cell`; `dsm_storage_node::db::pg::require_durable_commit_posture`; `dsm_storage_node::db::pg::register_incarnation`; `dsm_storage_node::NodeStorageSet::new` | `dsm_storage_node::db::cell_properties::every_value_put_at_a_key_is_held_in_arrival_order`; `dsm_storage_node::db::cell_properties::concurrent_writers_on_one_key_lose_nothing`; `dsm_storage_node::db::cell_properties::held_values_and_index_entries_survive_reopening_the_store`; `dsm_storage_node::db::pg::durable_posture_tests::a_weaker_posture_is_refused_and_the_refusal_names_the_setting`; `dsm_storage_node::storage_set_tests::a_node_whose_register_was_rebuilt_refuses_to_serve_the_configured_set` | db/sqlite.rs is gone and the node runs on Postgres only; cells keep every value in order across reopening and schema migration, a non-durable server is refused, and a restored or rebuilt register is a new incarnation that refuses to serve the old set. |
 | MR-DSM-0257 | Met | `dsm::route_chain::Route::of`; `dsm::route_chain::RoutedCell::new`; `dsm::economic::native_reserve::SuccessorCell::of` | `dsm::route_chain::tests::a_route_is_the_fisher_yates_permutation_of_the_committed_set`; `dsm::route_chain::tests::a_cell_is_routed_only_over_the_committed_set`; `dsm::economic::native_reserve::tests::a_successor_cell_is_routed_over_the_set_its_parent_commits`; `dsm::economic::native_reserve::tests::finality_without_the_deterministic_leader_is_impossible` | sofi::arith::resolve was deleted in #976; the route is Fisher-Yates over the committed set from a committed-state seed, and RoutedCell::new refuses members that do not re-derive the committed set id. |
 | MR-DSM-0258 | Met | `dsm::route_chain::evaluate`; `dsm::route_chain::Missing`; `dsm::economic::native_reserve::walk_lineage` | `dsm::route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in`; `dsm::route_chain::tests::the_state_is_the_count_of_valid_links`; `dsm::economic::native_reserve::tests::finality_without_the_deterministic_leader_is_impossible`; `dsm::economic::native_reserve::tests::the_walk_never_turns_unavailable_or_budget_into_a_head` | sofi::arith::resolve was deleted in #976; an unread leader is Missing and fewer than two further links is not Final, so the cell waits and a walk never turns an outage into a head. |
-| MR-DSM-0259 | Met | `dsm::crypto::blake3`; `dsm::crypto::sphincs`; `dsm::crypto::kyber` | `dsm::crypto::sphincs::tests::sign_verify_each_variant`; `dsm::crypto::blake3::tests_domain_hash::domain_hash_includes_nul_terminator` | — |
+| MR-DSM-0259 | Met | `dsm::crypto::blake3`; `dsm::crypto::sphincs`; `dsm::crypto::kyber` | `dsm_sphincs::tests::each_variant_signs_and_verifies`; `dsm_sphincs::tests::every_hash_call_has_its_own_address`; `dsm::crypto::blake3::tests_domain_hash::domain_hash_includes_nul_terminator` | Re-verified 2026-10-01 (§6.70). SPHINCS+ is construction version 2 (`crates/dsm-sphincs`, signature algorithm `0x0002`): the FIPS 205 structure instantiated with BLAKE3. It restores the structural assumptions a SPHINCS+-style proof needs; BLAKE3 remains a non-FIPS, custom instantiation awaiting independent review. |
 | MR-DSM-0260 | Not code | `lean4/DSMGuardedTripwire.lean`, `lean4/DSMCardinality.lean` | — | Formal artifacts confirmed present. |
 | MR-DSM-0261 | Not code | `tla/DSM_ProtocolCore.tla`, `tla/DSM_Abstract.tla` | — | Formal artifacts confirmed present. |
 | MR-DSM-0262 | Not code | `tla/DSM_Abstract.tla` / `DSM_ProtocolCore.tla` | — | Formal artifact. |
@@ -3026,7 +3094,7 @@ Mutation control (item 16): the gate run on the previous manifest fails, "activi
 | MR-SOFI-0108 | Met | `dsm::ccb`; `dsm::sofi::admission::admissible` (OwnerAuthorityDsmSuccessor) | `dsm::sofi::admission::tests::beta_refuses_the_reserved_owner_authority` | — |
 | MR-SOFI-0109 | Met | `dsm::sofi::wire::objects::SignedSofiObject` | `dsm::sofi_v8_independent::the_signed_envelope_matches_the_independent_encoder` | — |
 | MR-SOFI-0110 | Met | `dsm::sofi::derive`; `dsm::sofi::signature` (id over body) | `dsm::sofi::signature::tests::a_second_valid_signature_over_one_body_is_the_same_object` | — |
-| MR-SOFI-0111 | Met | `dsm::crypto::sphincs` (sk_prf‖m) | `dsm::sofi::signature::tests::a_second_valid_signature_over_one_body_is_the_same_object` | — |
+| MR-SOFI-0111 | Met | `dsm::crypto::sphincs` (R is PRF_msg over SK.prf, PK.seed and the message; construction version 2) | `dsm::sofi::signature::tests::a_second_valid_signature_over_one_body_is_the_same_object` | — |
 | MR-SOFI-0112 | Met | `dsm::sofi::derive` | `dsm::sofi_v8_independent::derivations_match_the_independent_hasher_and_the_frozen_golden_digests` | Golden vector + independent hasher |
 | MR-SOFI-0113 | Met | `dsm::sofi::derive` | `dsm::sofi_v8_independent::derivations_match_the_independent_hasher_and_the_frozen_golden_digests` | — |
 | MR-SOFI-0114 | Met | `dsm::sofi::derive` | `dsm::sofi_v8_independent::derivations_match_the_independent_hasher_and_the_frozen_golden_digests` | — |
