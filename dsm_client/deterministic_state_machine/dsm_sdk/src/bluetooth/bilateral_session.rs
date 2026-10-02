@@ -260,8 +260,9 @@ impl BilateralBleSession {
                 ))
             }
         };
-        let terms = step_terms(&operation, record.terms_bytes.as_deref())
-            .map_err(|e| DsmError::invalid_operation(format!("persisted bilateral session: {e}")))?;
+        let terms = step_terms(&operation, record.terms_bytes.as_deref()).map_err(|e| {
+            DsmError::invalid_operation(format!("persisted bilateral session: {e}"))
+        })?;
         Ok(Self {
             commitment_hash,
             local_commitment_hash: None,
@@ -302,9 +303,9 @@ pub fn step_terms(
             terms.open(operation)?;
             Ok(Some(terms))
         }
-        (Operation::Transfer { .. }, _) => Err(DsmError::invalid_operation(
-            "the transfer carries no terms",
-        )),
+        (Operation::Transfer { .. }, _) => {
+            Err(DsmError::invalid_operation("the transfer carries no terms"))
+        }
         (_, Some(bytes)) if !bytes.is_empty() => Err(DsmError::invalid_operation(format!(
             "a {} carries no transfer terms",
             operation.get_operation_type()

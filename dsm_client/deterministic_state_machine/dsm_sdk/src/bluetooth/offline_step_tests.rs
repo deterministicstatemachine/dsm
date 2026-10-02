@@ -775,13 +775,14 @@ async fn bearer_pair() -> (
         )
         .await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
-    let (bytes, terms) = crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
-        &b.device.device_id,
-        7,
-        "ERA",
-        "",
-        &dsm::core::token::token_state_manager::era_policy_commit(),
-    );
+    let (bytes, terms) =
+        crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
+            &b.device.device_id,
+            7,
+            "ERA",
+            "",
+            &dsm::core::token::token_state_manager::era_policy_commit(),
+        );
     let operation = Proposal {
         operation: Operation::from_bytes(&bytes).expect("the bearer transfer"),
         terms: Some(terms),
@@ -800,8 +801,7 @@ fn with_terms(prepare: &[u8], terms: Vec<u8>) -> Vec<u8> {
     else {
         panic!("a prepare carries a transaction");
     };
-    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut()
-    else {
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut() else {
         panic!("a prepare is an invoke");
     };
     let args = invoke.args.as_mut().expect("the prepare's arguments");

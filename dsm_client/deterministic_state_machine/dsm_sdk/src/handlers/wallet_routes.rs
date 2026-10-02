@@ -813,8 +813,8 @@ impl AppRouterImpl {
                                         })?;
                                 let terms = super::recipient_accept::transfer_terms(&op, &opened)
                                     .map_err(|e| {
-                                        format!("wallet.history: transaction {}: {e}", t.tx_id)
-                                    })?;
+                                    format!("wallet.history: transaction {}: {e}", t.tx_id)
+                                })?;
                                 (terms.amount, terms.token_id, terms.memo)
                             }
                             None => {
