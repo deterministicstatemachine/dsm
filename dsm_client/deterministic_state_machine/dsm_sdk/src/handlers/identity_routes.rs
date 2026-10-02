@@ -225,4 +225,57 @@ mod tests {
         short.signing_public_key.pop();
         assert!(refusal(&code_of(&short)).contains("signing key is 63 bytes"));
     }
+
+    /// Where the guided tour's practice contact code is kept in the frontend.
+    const PRACTICE_CONTACT_FILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/tour/practiceContact.ts"
+    );
+
+    /// The guided tour's practice contact, bob: a card on the beta network,
+    /// written as this module writes a contact code. The tour has the user
+    /// paste the code into Add Contact, where Rust reads it for real (a read
+    /// the practice sandbox lets through) and practice mode adds bob. The
+    /// frontend's file must hold exactly this code, one Rust reads back as the
+    /// card; DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    #[test]
+    #[serial_test::serial]
+    fn the_tour_practice_contact_code_is_one_rust_reads() {
+        identity();
+        let card = generated::ContactQrV3 {
+            device_id: vec![0xB0; 32],
+            network: String::from_utf8(dsm::economic::register::BETA_NETWORK_ID.to_vec())
+                .expect("the beta network id is UTF-8"),
+            genesis_hash: vec![0xB1; 32],
+            signing_public_key: vec![0xB2; 64],
+            preferred_alias: "bob".into(),
+        };
+        let code = code_of(&card);
+        assert_eq!(
+            read_contact_code(&code).expect("Rust reads the practice code"),
+            card
+        );
+
+        let file = format!(
+            "// SPDX-License-Identifier: Apache-2.0\n\
+             //\n\
+             // The guided tour's practice contact, bob: his contact code, as Rust writes\n\
+             // one. Written by the dsm_sdk test\n\
+             // `the_tour_practice_contact_code_is_one_rust_reads` (handlers/identity_routes.rs),\n\
+             // which fails when this file and Rust's encoding differ. Rust reads it when\n\
+             // it is pasted into Add Contact; adding bob is practice mode's.\n\
+             export const PRACTICE_CONTACT_CODE =\n  '{code}';\n"
+        );
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => std::fs::write(PRACTICE_CONTACT_FILE, &file)
+                .expect("write the frontend's practice contact"),
+            None => assert_eq!(
+                std::fs::read_to_string(PRACTICE_CONTACT_FILE)
+                    .expect("the frontend's committed practice contact"),
+                file,
+                "the frontend's practice contact code differs from Rust's encoding; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+    }
 }

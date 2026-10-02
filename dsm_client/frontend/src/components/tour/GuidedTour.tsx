@@ -102,6 +102,8 @@ export default function GuidedTour({ appState }: Props): React.JSX.Element | nul
   const [screen, setScreen] = useState<Box | null>(null);
   const [shown, setShown] = useState(0);
   const [celebrating, setCelebrating] = useState(false);
+  // What became of copying the step's text: which step, and whether the clipboard took it.
+  const [clip, setClip] = useState<{ step: string; outcome: 'copied' | 'refused' } | null>(null);
   const armed = useRef(false);
   const lastValue = useRef<{ value: string; since: number } | null>(null);
 
@@ -311,6 +313,7 @@ export default function GuidedTour({ appState }: Props): React.JSX.Element | nul
   if (!step || celebrating || typeof document === 'undefined') return null;
 
   const handsOn = Boolean(step.wait);
+  const copy = step.copy;
   const placement = placeDialog(target, screen);
   const frame = screen ?? { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight };
   const dialogStyle: React.CSSProperties = { left: frame.left + 8, width: Math.max(frame.width - 16, 200) };
@@ -365,6 +368,29 @@ export default function GuidedTour({ appState }: Props): React.JSX.Element | nul
             {typing ? <span className="gt-caret">▌</span> : null}
           </p>
           <p id="gt-body" className="gt-sr">{text}</p>
+          {copy ? (
+            <div className="gt-clip" onClick={(event) => event.stopPropagation()}>
+              <code className="gt-clip__text">{copy.text}</code>
+              <button
+                type="button"
+                className="gt-btn"
+                onClick={() => {
+                  const at = step.id;
+                  const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
+                  if (!clipboard) {
+                    setClip({ step: at, outcome: 'refused' });
+                    return;
+                  }
+                  clipboard.writeText(copy.text).then(
+                    () => setClip({ step: at, outcome: 'copied' }),
+                    () => setClip({ step: at, outcome: 'refused' }),
+                  );
+                }}
+              >
+                {clip?.step !== step.id ? copy.label : clip.outcome === 'copied' ? 'Copied' : 'Select it'}
+              </button>
+            </div>
+          ) : null}
         </div>
         <div className="gt-controls">
           <button

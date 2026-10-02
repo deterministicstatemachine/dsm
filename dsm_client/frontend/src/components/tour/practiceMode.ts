@@ -5,16 +5,21 @@
 // While the tour runs, the real screens stay on screen but the calls they make
 // for the things a beginner tries (balances, contacts, history, sending, the
 // faucet, adding a contact) are answered from a small in-memory practice
-// wallet. Every other call whose name says it changes state is refused. When
-// the tour ends, the real client is put back exactly as it was, so nothing the
-// user does in the tour ever reaches the device's real state.
+// wallet. That is a convenience. What keeps the real wallet untouched is the
+// bridge: entering practice puts it in its sandbox (bridge/practiceGate.ts),
+// where only reads reach native code, whatever module makes the call. When the
+// tour ends, the real client and the bridge are put back exactly as they were.
 //
 // Every figure the practice wallet shows is Rust's. It asks `wallet.amount` to
 // parse what the user typed and to render each balance it keeps, as the real
 // wallet's figures are parsed and rendered, so practice ERA counts as ERA does.
 
 import { dsmClient } from '../../services/dsmClient';
+import { enterPracticeSandbox, leavePracticeSandbox } from '../../bridge/practiceGate';
 import { walletAmount } from '../../dsm/amount';
+import { encodeBase32Crockford } from '../../utils/textId';
+import { routerQueryBin } from '../../dsm/WebViewBridge';
+import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
 import type { AmountForms } from '../../dsm/amount';
 import type {
   DomainContact,
@@ -24,16 +29,6 @@ import type {
 import type { TokenBalanceView } from '../../dsm/types';
 
 export type PracticeEvent = 'sent' | 'claimed' | 'contactAdded';
-
-export const PRACTICE_BLOCKED_MESSAGE =
-  'Practice mode: this is switched off until the tour ends. Your real wallet is untouched.';
-
-/** Calls whose names start like this change state, so practice mode refuses them. */
-const STATE_CHANGING =
-  /^(send|load|unload|create|claim|add|remove|delete|publish|withdraw|deposit|swap|import|export|mint|burn|update|accept|reject|register|approve|revoke|write|reset|close|open|unlock|lock|execute|submit|broadcast|sign|pair|unpair|sync|reconcile|recover|restore|enroll|admit|fund|redeem|transfer|post|put|store|bind|advance|commit|finalize|apply|generate|start|stop|cancel|retry|refresh|clear|forget|rotate|set)/;
-
-/** Real even in practice: display preferences only. */
-const ALWAYS_REAL = new Set(['getPreference', 'setPreference']);
 
 // Practice ids use only Base32 Crockford characters, so any code that decodes
 // an id keeps working.
@@ -85,11 +80,28 @@ function freshState(): PracticeState {
 }
 
 /**
+ * Whether Rust lists ERA as a protocol-defined asset: its row in the router's
+ * `balance.list`, which lists ERA at any balance. The wallet never decides this
+ * from a ticker (TokenBalanceView.protocolDefined), and practice ERA does not
+ * either.
+ */
+async function eraIsProtocolDefined(): Promise<boolean> {
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('balance.list', new Uint8Array(0)));
+  if (env.payload.case !== 'balancesListResponse') {
+    throw new Error(`balance.list: the SDK answered ${String(env.payload.case)}, not balancesListResponse`);
+  }
+  const era = env.payload.value.balances.find((row) => row.tokenId === 'ERA');
+  if (!era) throw new Error('balance.list: Rust listed no ERA row');
+  return era.protocolDefined;
+}
+
+/**
  * Practice ERA as Rust counts ERA: the tour's starting amount parsed at the
  * decimals of ERA's committed policy, and the welcome payment that brought it.
  */
 async function seedEra(state: PracticeState): Promise<void> {
   const held = await walletAmount({ tokenId: 'ERA' }, { entered: PRACTICE_ERA_HELD });
+  const protocolDefined = await eraIsProtocolDefined();
   state.balances.unshift({
     tokenId: 'ERA',
     tokenName: 'ERA',
@@ -97,7 +109,7 @@ async function seedEra(state: PracticeState): Promise<void> {
     decimals: held.decimals,
     baseUnits: held.baseUnits,
     displayAmount: held.displayAmount,
-    protocolDefined: true,
+    protocolDefined,
   });
   state.history.push({
     txId: 'practice-welcome',
@@ -218,8 +230,9 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
       const token = tokenId;
       await ready();
       const result = await inTurn(() => debit(state, token, enteredAmount));
-      // The real call answers a refusal as { success, message }.
-      if ('refused' in result) return { success: false, message: result.refused };
+      // The real call answers { success, message }: success is whether the debit went through.
+      const sent = !('refused' in result);
+      if ('refused' in result) return { success: sent, message: result.refused };
       recordSend(state, recipientDeviceId, token, result.taken, memo, 'online');
       emit('sent');
       return { success: true, newBalance: result.balance };
@@ -231,7 +244,9 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
       const token = params.tokenId;
       await ready();
       const result = await inTurn(() => debit(state, token, params.amount));
-      if ('refused' in result) return { accepted: false, result: result.refused };
+      // As the real call answers: accepted is whether the debit went through.
+      const sent = !('refused' in result);
+      if ('refused' in result) return { accepted: sent, result: result.refused };
       recordSend(state, params.to, token, result.taken, params.memo, 'offline');
       emit('sent');
       return { accepted: true, result: 'Practice transfer complete' };
@@ -249,27 +264,29 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
         message: `Practice: claimed ${paid.displayAmount} ERA`,
       };
     },
-    addContact: async (input: { alias: string; genesisHash: string | Uint8Array; deviceId: string | Uint8Array }) => {
+    // Answers in the shape the real addContact does (AddContactResult), for the
+    // card Rust read from the contact code the user entered.
+    addContact: async (input: { alias: string; deviceId: Uint8Array; genesisHash: Uint8Array; signingPublicKey: Uint8Array }) => {
       await pause(400);
+      const contactId = encodeBase32Crockford(input.deviceId);
+      // As Rust names a contact added with no alias: by its device id's first eight characters.
+      const alias = input.alias.trim() || contactId.slice(0, 8);
       state.contacts.push({
-        alias: input.alias,
-        genesisHash: typeof input.genesisHash === 'string' ? input.genesisHash : practiceId('PRACT1CEGENES1S'),
-        deviceId: typeof input.deviceId === 'string' ? input.deviceId : practiceId('PRACT1CEDEV1CE'),
-        signingPublicKey: practiceId('PRACT1CEKEY'),
+        alias,
+        deviceId: contactId,
+        genesisHash: encodeBase32Crockford(input.genesisHash),
+        signingPublicKey: encodeBase32Crockford(input.signingPublicKey),
         pairing: 'idle',
         genesisVerifiedOnline: true,
         sendReady: true,
         sendCheckState: 'ready',
       });
       emit('contactAdded');
-      return { ok: true };
+      // Accepted when the practice wallet now holds the contact, as the real
+      // answer reports the contact stored.
+      const accepted = state.contacts.some((held) => held.deviceId === contactId);
+      return { accepted, contactId, alias };
     },
-  };
-}
-
-function refused(name: string): AnyFn {
-  return async () => {
-    throw new Error(`${PRACTICE_BLOCKED_MESSAGE} (${name})`);
   };
 }
 
@@ -286,18 +303,12 @@ class PracticeMode {
     if (this.state) return;
     const state = freshState();
     this.state = state;
+    enterPracticeSandbox();
     const client = dsmClient as unknown as Record<string, unknown>;
-    const simulated = simulations(state, (event) => this.listeners.forEach((listener) => listener(event)));
-    for (const key of Object.keys(client)) {
-      const value = client[key];
-      if (typeof value !== 'function' || ALWAYS_REAL.has(key)) continue;
-      if (Object.prototype.hasOwnProperty.call(simulated, key)) {
-        this.originals.set(key, value);
-        client[key] = simulated[key];
-      } else if (STATE_CHANGING.test(key)) {
-        this.originals.set(key, value);
-        client[key] = refused(key);
-      }
+    const answers = simulations(state, (event) => this.listeners.forEach((listener) => listener(event)));
+    for (const key of Object.keys(answers)) {
+      this.originals.set(key, client[key]);
+      client[key] = answers[key];
     }
   }
 
@@ -309,6 +320,7 @@ class PracticeMode {
     });
     this.originals.clear();
     this.state = null;
+    leavePracticeSandbox();
   }
 
   onEvent(listener: (event: PracticeEvent) => void): () => void {

@@ -94,7 +94,7 @@ function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32,
       </div>
 
       {recentTransactions.length > 0 && (
-        <section className="recent-transactions" style={{ marginBottom: 8 }}>
+        <section className="recent-transactions" style={{ marginBottom: 8 }} data-tour="recent-activity">
           <h3 className="sb-section-title">Recent Activity</h3>
           <div className="transaction-items">
             {recentTransactions.map((tx) => (
@@ -112,7 +112,7 @@ function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32,
         </section>
       )}
 
-      <Disclosure summary="Wallet identity">
+      <Disclosure summary="Wallet identity" className="wallet-identity">
         <div className="sb-kv">
           <span className="sb-kv__k">Genesis</span>
           <span className="sb-kv__v sb-kv__v--mono">{genesisB32 || '—'}</span>

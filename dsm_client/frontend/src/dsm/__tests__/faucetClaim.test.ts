@@ -29,15 +29,15 @@ describe('claimFaucet', () => {
         case: 'faucetClaimResponse',
         value: new pb.FaucetClaimResponse({
           success: true,
-          tokensReceived: 10000n,
-          message: 'claimed 100.00 ERA (economic position 3)',
+          tokensReceived: 100n,
+          message: 'claimed 100 ERA (economic position 3)',
         }),
       }),
     );
 
     const res = await dsm.claimFaucet();
 
-    expect(res).toEqual({ success: true, tokensReceived: 10000n, message: 'claimed 100.00 ERA (economic position 3)' });
+    expect(res).toEqual({ success: true, tokensReceived: 100n, message: 'claimed 100 ERA (economic position 3)' });
     const [method, args] = invoke.mock.calls[0];
     expect(method).toBe('faucet.claim');
     const req = pb.FaucetClaimRequest.fromBinary(pb.ArgPack.fromBinary(args as Uint8Array).body);
