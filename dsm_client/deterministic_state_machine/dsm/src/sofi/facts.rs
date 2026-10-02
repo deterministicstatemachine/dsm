@@ -237,8 +237,7 @@ pub struct GroundReads<'a> {
 #[derive(Debug, Clone)]
 pub struct GroundFacts {
     pub(crate) external_commitment: D32,
-    pub(crate) registered: bool,
-    pub(crate) position_lost: bool,
+    pub(crate) pair: PairStanding,
     pub(crate) parent: ParentPosition,
     pub(crate) parent_pre_root: D32,
     /// One per leg of `P`, in P's leg order.
@@ -255,7 +254,7 @@ impl GroundFacts {
     pub(crate) fn route_ground(&self) -> GroundRouteFacts<'_> {
         GroundRouteFacts {
             external_commitment: self.external_commitment,
-            position_lost: self.position_lost,
+            pair: self.pair,
             parent: self.parent,
             parent_pre_root: self.parent_pre_root,
             legs: &self.legs,
@@ -285,9 +284,8 @@ impl GroundFacts {
 pub struct EstablishedFacts {
     pub(crate) fulfillment_id: D32,
     pub(crate) external_commitment: D32,
-    pub(crate) registered: bool,
+    pub(crate) pair: PairStanding,
     pub(crate) conformance: Validation,
-    pub(crate) position_lost: bool,
     pub(crate) parent: ParentPosition,
     pub(crate) parent_pre_root: D32,
     pub(crate) validation: Validation,
@@ -323,9 +321,8 @@ impl EstablishedFacts {
     pub(crate) fn route_facts(&self) -> RouteFacts<'_> {
         RouteFacts {
             external_commitment: self.external_commitment,
-            registered: self.registered,
+            pair: self.pair,
             conformance: self.conformance,
-            position_lost: self.position_lost,
             parent: self.parent,
             parent_pre_root: self.parent_pre_root,
             validation: self.validation,
@@ -359,13 +356,13 @@ pub enum Established {
 }
 
 /// A position whose exercise is refuted in hand, with the one fact the
-/// ladder asks of it: whether that exercise registered.
+/// ladder asks of it: where that exercise stands at its pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefutedPosition {
     pub(crate) fulfillment_id: D32,
     pub(crate) external_commitment: D32,
     pub(crate) refuted: RefutedInHand,
-    pub(crate) registered: bool,
+    pub(crate) pair: PairStanding,
 }
 
 impl Established {
@@ -390,10 +387,8 @@ impl Established {
             fulfillment_id: refutation.fulfillment_id,
             external_commitment: refutation.external_commitment,
             refuted: refutation.refuted,
-            registered: matches!(
-                registration.standing_of(&exercise.precommit().body, &exercise.fulfillment().body),
-                PairStanding::Registered
-            ),
+            pair: registration
+                .standing_of(&exercise.precommit().body, &exercise.fulfillment().body),
         }))
     }
 
@@ -494,14 +489,13 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
             facts.parent = chain.status_of(*generation, &leg.parent_root);
         }
     }
-    let storage_resolved =
-        ground.registered && legs.iter().all(|l| permanently_resolved(&l.cell, &e));
+    let storage_resolved = ground.pair == PairStanding::Registered
+        && legs.iter().all(|l| permanently_resolved(&l.cell, &e));
     Ok(EstablishedFacts {
         fulfillment_id: derive::fulfillment_id(fulfillment),
         external_commitment: e,
-        registered: ground.registered,
+        pair: ground.pair,
         conformance,
-        position_lost: ground.position_lost,
         parent: ground.parent,
         parent_pre_root: ground.parent_pre_root,
         validation,
@@ -566,10 +560,9 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
     }
     // Where this F stands at its pair, with P in hand (SoFi Amendments S14,
     // S20): lost to any other fulfillment holding K_ful(q)'s leader link, or
-    // to any claim at K_root(q) other than derive(P, F).
-    let standing = reads.registration.standing_of(precommit, fulfillment);
-    let registered = matches!(standing, PairStanding::Registered);
-    let position_lost = matches!(standing, PairStanding::Lost);
+    // to any claim at K_root(q) other than derive(P, F); misbodied when that
+    // claim names F under another body.
+    let pair = reads.registration.standing_of(precommit, fulfillment);
 
     // The trader parent: what `P` names must be what the trader's lineage
     // holds at `p` — the claim final at its `K_root(p)` and the root that
@@ -644,8 +637,7 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
     }
     Ok(GroundFacts {
         external_commitment: e,
-        registered,
-        position_lost,
+        pair,
         parent,
         parent_pre_root: *precommit.void_root(),
         legs,
@@ -666,8 +658,8 @@ mod tests {
     use crate::sofi::publication::Publication;
     use crate::sofi::registration::{fulfillment_registered, PositionCells};
     use crate::sofi::resolution::{
-        classify_attempt, resolve_position, trader_parent_impossible, walk, AttemptClass,
-        Incomplete, KeyFacts, Resolution,
+        classify_attempt, consumed_route, resolve_position, trader_parent_impossible, walk,
+        AttemptClass, Incomplete, KeyFacts, Resolution,
     };
     use crate::sofi::validation::fixtures::{swap_fixture_n, Fixture};
     use crate::sofi::validation::trader_credits;
@@ -888,8 +880,7 @@ mod tests {
         let f = &r.exercise.fulfillment().body;
         assert_eq!(facts.fulfillment_id(), &derive::fulfillment_id(f));
         assert_eq!(facts.external_commitment(), p.external_commitment());
-        assert!(facts.registered);
-        assert!(!facts.position_lost);
+        assert_eq!(facts.pair, PairStanding::Registered);
         assert_eq!(
             facts.conformance,
             Validation::Valid,
@@ -1189,6 +1180,45 @@ mod tests {
         );
     }
 
+    /// Pre-audit 12k, SoFi Amendment S20 (owner ruling, 2026-10-01: "same
+    /// bytes => same terminal verdict for local and peer resolution"): a pair
+    /// final on `F` whose root cell names `F` under another body than
+    /// `derive(P, F)` is misbodied. The trader's own ladder resolves the
+    /// position Invalid, as a peer's walk does, and the vault's key is
+    /// skipped, never consumed. On the old code the ladder read the pair as
+    /// not registered and waited for good.
+    #[test]
+    fn a_pair_final_on_its_fulfillment_under_another_body_resolves_invalid() {
+        let (_, mut r) = reads(1, &[0]);
+        let p = r.exercise.precommit().body.clone();
+        let f = r.exercise.fulfillment().body.clone();
+        let forged = SofiResolutionClaim {
+            realize_root: [0xBD; 32],
+            ..derive::resolution_claim(&p, &f)
+        };
+        r.registration = registration_read(
+            &p,
+            &f,
+            &r.exercise.fulfillment().signature,
+            p.void_root(),
+            Some(forged),
+        );
+        let facts = r.establish(&r.legs()).expect("every read decides");
+        assert_eq!(facts.pair, PairStanding::Misbodied);
+        assert_eq!(
+            resolve_position(&facts.route_facts()),
+            Ok(Resolution::Invalid),
+            "the lineage's verdict is the peers'"
+        );
+        assert!(!consumed_route(&facts.route_facts()));
+        let (class, ..) = classify_attempt(&facts.route_facts(), &facts.legs[0]);
+        assert_eq!(
+            class,
+            AttemptClass::Skipped,
+            "the vault's key is passed over"
+        );
+    }
+
     /// Registration is read from the pair, never assumed: with `C_q` not
     /// final at `K_root(q)` the position is unregistered, the ladder stops
     /// at rung 0, and nothing is lost either.
@@ -1205,8 +1235,7 @@ mod tests {
             None,
         );
         let facts = r.establish(&r.legs()).expect("every read decides");
-        assert!(!facts.registered);
-        assert!(!facts.position_lost);
+        assert_eq!(facts.pair, PairStanding::Pending);
         assert!(!facts.storage_resolved);
         assert_eq!(
             resolve_position(&facts.route_facts()),
@@ -1334,9 +1363,8 @@ mod tests {
                     0,
                     RouteFacts {
                         external_commitment: OTHER_E,
-                        registered: true,
+                        pair: PairStanding::Registered,
                         conformance: Validation::Valid,
-                        position_lost: false,
                         parent: ParentPosition::SingleRoot {
                             named: *built.precommit.parent_claim_ref(),
                             held: *built.precommit.parent_claim_ref(),
@@ -1381,7 +1409,7 @@ mod tests {
         else {
             panic!("a refutation")
         };
-        assert!(position.registered);
+        assert_eq!(position.pair, PairStanding::Registered);
         assert_eq!(position.refuted, RefutedInHand::Conformance);
 
         let other = InHandRefutation {
@@ -1415,6 +1443,6 @@ mod tests {
         else {
             panic!("a refutation")
         };
-        assert!(!position.registered);
+        assert_eq!(position.pair, PairStanding::Pending);
     }
 }
