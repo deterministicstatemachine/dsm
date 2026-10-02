@@ -2470,7 +2470,7 @@ mod tests {
             let new = || {
                 TransferTerms::new(
                     b"ERA".to_vec(),
-                    vec![0x4E; 32],
+                    Vec::new(),
                     TransactionMode::Unilateral,
                     "rent, october".to_string(),
                 )

@@ -1047,9 +1047,11 @@ impl TokenSDK {
 
         let current_state = self.core_sdk.get_current_state()?;
         let fee_policy_commit = self.resolve_policy_commit_strict("ERA")?;
+        // No nonce: nothing spends one for this transfer, and its fresh terms
+        // salt already makes each fee transfer's operation bytes its own.
         let fee_terms = dsm::types::operations::TransferTerms::new(
             b"ERA".to_vec(),
-            self.generate_nonce(),
+            Vec::new(),
             TransactionMode::Bilateral,
             "Fee payment".to_string(),
         );
