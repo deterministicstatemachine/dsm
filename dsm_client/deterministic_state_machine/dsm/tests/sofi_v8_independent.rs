@@ -511,7 +511,7 @@ fn derivations_match_the_independent_hasher_and_the_frozen_golden_digests() {
     assert_eq!(rho, indep::h("DSM/sofi/setup-ref/v1", &[&s.encode()]));
     assert_eq!(
         cf(&rho),
-        "4CBT38T1Y1PRB0XAM5K4SK80XZGVW0RN5WKNT1TRH2RP7MXXFK70"
+        "JKD0ME91Q7TVAVQKC31Y0B5M6Q4AJ5AAVQBDTEPXE0BYZM8P3DHG"
     );
     assert_eq!(
         d::setup_signing_digest(&s),
@@ -525,7 +525,7 @@ fn derivations_match_the_independent_hasher_and_the_frozen_golden_digests() {
     );
     assert_eq!(
         cf(&pid),
-        "Z4JXZM2DVSRH1048RAM3XHFDW020JN1SY1KMR6QJX1E37YAESHEG"
+        "P463KWR66VB4KQNWNS9X95G04813QBKHPY3G5YQHX756S276DJXG"
     );
     assert_eq!(
         d::precommit_signing_digest(&p),
@@ -584,7 +584,7 @@ fn derivations_match_the_independent_hasher_and_the_frozen_golden_digests() {
     );
     assert_eq!(
         cf(&e1),
-        "9SX91Y54Z2X1FMTVH1SG7730V350BDCFSCJK0ZSMXY6XPFQYV66G"
+        "QGKQ8JMEBC0Y0N2KZ2M8FVXKGPYBQ7PF2RRSFTMJGA1A7XEDQ740"
     );
 
     let gamma_digest = indep::h("DSM/sofi/route-leg-set/v1", &[&gamma.encode()]);
@@ -599,7 +599,7 @@ fn derivations_match_the_independent_hasher_and_the_frozen_golden_digests() {
     );
     assert_eq!(
         cf(&e2),
-        "2YKH5ZG0BXMBGZ00JQ3QB1VHFA2700ZMKBM2T86Q925CSW6FB96G"
+        "YWW3VPR3QTS73THNDZR99H39V8MBD62PQ4FVXZDCFE53S8JZMZF0"
     );
 
     assert_eq!(
@@ -875,10 +875,13 @@ fn keys_and_algorithms_are_validated() {
             got: 63
         })
     ));
-    // An altered algorithm in the bytes changes the signed body and fails to decode.
+    // An altered algorithm in the bytes changes the signed body and fails to
+    // decode: here, the retired version-1 id.
     let mut b = setup_body().encode();
     let alg_at = 4 + 32 + 32 + 8 + 32 + 32 + 32;
-    b[alg_at + 1] = 0x02;
+    assert_eq!(b[alg_at..alg_at + 2], ALG.to_be_bytes());
+    b[alg_at..alg_at + 2]
+        .copy_from_slice(&dsm::ccb::sigalg::RETIRED_SPHINCS_PLUS_SPX256F_V1.to_be_bytes());
     assert!(matches!(
         SofiSetupBody::decode(&b),
         Err(DecodeError::Invalid(_))
