@@ -334,3 +334,40 @@ async fn a_put_answers_with_the_arrival_record_a_verifier_replays() {
         .collect();
     assert_eq!(got, returned, "get reports what put returned");
 }
+
+/// A cell takes a value up to Core's largest route entry and refuses one
+/// byte more, alone and in a batch, and holds nothing from a refused put. The
+/// limit is `dsm::route_chain::MAX_ENTRY_BYTES`, so it moves with Core's
+/// largest value (a SoFi exercise) and with nothing else. Both values are
+/// well under the request body limit, so the refusal is the cell's own.
+#[tokio::test]
+async fn a_cell_takes_the_largest_route_entry_and_refuses_a_byte_more() {
+    let app = member("cells_value_cap").await;
+    let at_cap = vec![0xC5u8; dsm::route_chain::MAX_ENTRY_BYTES];
+    let over = vec![0xC5u8; dsm::route_chain::MAX_ENTRY_BYTES + 1];
+
+    assert_eq!(
+        put(&app, Some(NS), &key(0xC1), &over).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(get(&app, &key(0xC1)).await.1, Vec::<Vec<u8>>::new());
+    let taken = put(&app, Some(NS), &key(0xC1), &at_cap).await;
+    assert!(
+        taken.is_success(),
+        "a value at the limit was refused: {taken}"
+    );
+    assert_eq!(get(&app, &key(0xC1)).await.1, vec![at_cap.clone()]);
+
+    let one = |value: &[u8]| vec![(NS.as_bytes().to_vec(), [0xC2u8; 32], value.to_vec())];
+    assert_eq!(
+        put_batch(&app, one(&over)).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(get(&app, &key(0xC2)).await.1, Vec::<Vec<u8>>::new());
+    let taken = put_batch(&app, one(&at_cap)).await;
+    assert!(
+        taken.is_success(),
+        "a batched value at the limit was refused: {taken}"
+    );
+    assert_eq!(get(&app, &key(0xC2)).await.1, vec![at_cap]);
+}
