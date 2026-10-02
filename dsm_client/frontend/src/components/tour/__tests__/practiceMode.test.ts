@@ -15,6 +15,8 @@
 import { join } from 'path';
 import { answerFromRustRecord } from '../../../tests/helpers/rustIngressRecord';
 import { dsmClient } from '../../../services/dsmClient';
+import { routerQueryBin } from '../../../dsm/WebViewBridge';
+import { decodeFramedEnvelopeV3 } from '../../../dsm/decoding';
 import { practiceMode, PRACTICE_CONTACT_ALIAS, PRACTICE_CONTACT_DEVICE_ID } from '../practiceMode';
 import { encodeBase32Crockford } from '../../../utils/textId';
 
@@ -95,6 +97,16 @@ describe('practice ERA counts as Rust counts ERA', () => {
   beforeAll(() => answerFromRustRecord(RECORD));
   beforeEach(() => practiceMode.enter());
   afterEach(() => practiceMode.leave());
+
+  it('states practice ERA as protocol-defined exactly as Rust lists ERA', async () => {
+    const listed = decodeFramedEnvelopeV3(await routerQueryBin('balance.list', new Uint8Array(0)));
+    if (listed.payload.case !== 'balancesListResponse') {
+      throw new Error(`balance.list answered ${String(listed.payload.case)}`);
+    }
+    const rust = listed.payload.value.balances.find((row) => row.tokenId === 'ERA');
+    if (!rust) throw new Error('Rust listed no ERA row');
+    expect((await eraRow()).protocolDefined).toBe(rust.protocolDefined);
+  });
 
   it("holds the tour's 1000 ERA at ERA's decimals, and the welcome payment that brought it", async () => {
     expect(await eraRow()).toEqual(
