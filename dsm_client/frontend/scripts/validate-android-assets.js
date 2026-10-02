@@ -71,7 +71,18 @@ for (const name of ['dsm_env_config.toml', 'ca.crt']) {
   }
 }
 
-if (!ok) {
+// The policy the shipped page runs under (pre-audit item 13).
+const policyProblems = existsExact('index.html')
+  ? require('./webview-policy').policyProblems(fs.readFileSync(path.join(ASSETS_DIR, 'index.html'), 'utf8'))
+  : [];
+for (const problem of policyProblems) {
+  console.error(`Error: index.html's Content-Security-Policy: ${problem}`);
+}
+if (policyProblems.length === 0) {
+  console.log("OK: index.html's Content-Security-Policy admits no eval and no unhashed inline script");
+}
+
+if (!ok || policyProblems.length > 0) {
   console.error(`\nAsset validation failed in ${ASSETS_DIR}`);
   process.exit(1);
 }
