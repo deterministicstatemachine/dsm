@@ -11114,6 +11114,16 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
    */
   senderSignature = new Uint8Array(0);
 
+  /**
+   * The canonical bytes of the transfer's terms (`TransferTerms`), beside the
+   * operation that carries only their commitment (pre-audit item 4). The
+   * receiver refuses the prepare unless they open it. Empty for an operation
+   * that is not a transfer.
+   *
+   * @generated from field: bytes transfer_terms = 19;
+   */
+  transferTerms = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralPrepareRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11132,6 +11142,7 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 16, name: "sender_kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 17, name: "sender_kyber_binding_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 18, name: "sender_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 19, name: "transfer_terms", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareRequest {
@@ -20740,13 +20751,14 @@ export class FaucetClaimResponse extends Message<FaucetClaimResponse> {
 
 /**
  * ======================= Online Transfer Messages ====================
- * An online transfer on the wire: the signed operation and nothing that
- * restates it. SIG A (`signature`) covers `canonical_operation_bytes`, the
- * unsigned `Operation::Transfer` preimage, and that operation already names
- * the recipient, amount, token, policy commitment, nonce and memo. The
- * recipient decodes every term from those bytes after verifying them; the
- * sender is the stored contact whose key verified them. Nothing else here
- * is authority.
+ * An online transfer on the wire: the signed operation, the terms it commits
+ * to, and nothing that restates either. SIG A (`signature`) covers
+ * `canonical_operation_bytes`, the unsigned `Operation::Transfer` preimage,
+ * which names the recipient, amount and policy commitment, and commits to
+ * the terms (token, nonce, mode, memo) by a salted hash. The recipient
+ * decodes the operation after verifying it and reads the terms only once
+ * they open its commitment; the sender is the stored contact whose key
+ * verified them. Nothing else here is authority.
  *
  * @generated from message dsm.OnlineTransferRequest
  */
@@ -20788,6 +20800,17 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
    */
   senderDebitMutationIndex = 0;
 
+  /**
+   * The canonical bytes of the transfer's terms: its ticker, nonce, mode and
+   * memo under a secret salt (`TransferTerms`). The signed operation carries
+   * only their commitment, so these travel here, inside the sealed spool
+   * payload, and in no public object (pre-audit item 4). The recipient
+   * refuses the transfer unless they open the signed commitment.
+   *
+   * @generated from field: bytes transfer_terms = 15;
+   */
+  transferTerms = new Uint8Array(0);
+
   constructor(data?: PartialMessage<OnlineTransferRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -20800,6 +20823,7 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
     { no: 11, name: "canonical_operation_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "sender_economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 14, name: "sender_debit_mutation_index", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 15, name: "transfer_terms", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineTransferRequest {

@@ -587,13 +587,16 @@ pub(crate) fn wallet_amount(
     })
 }
 
+/// An offline transfer's canonical operation bytes and the terms it commits
+/// to, which ride beside it over BLE and in no public object (pre-audit
+/// item 4).
 pub(crate) fn encode_offline_transfer_operation_canonical(
     to_device_id: &[u8; 32],
     amount: u64,
     token_id: &str,
     memo: &str,
     policy_commit: &[u8; 32],
-) -> Vec<u8> {
+) -> (Vec<u8>, dsm::types::operations::TransferTerms) {
     // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"):
     // the canonical offline-bearer authority policy rides on the transfer so
     // `operation_requires_offline_bearer` fires and the send drives the
@@ -603,20 +606,21 @@ pub(crate) fn encode_offline_transfer_operation_canonical(
         "[wallet.sendOffline] offline-bearer authority policy bound: policy_id={}",
         crate::util::text_id::encode_base32_crockford(&policy.policy_id)
     );
-    dsm::types::operations::Operation::Transfer {
+    let terms = dsm::types::operations::TransferTerms::new(
+        canonicalize_token_id(token_id).into_bytes(),
+        Vec::new(),
+        dsm::types::operations::TransactionMode::Bilateral,
+        memo.to_string(),
+    );
+    let operation = dsm::types::operations::Operation::Transfer {
         to_device_id: to_device_id.to_vec(),
         amount: dsm::types::token_types::Balance::amount(amount),
-        token_id: canonicalize_token_id(token_id).into_bytes(),
         policy_commit: *policy_commit,
-        mode: dsm::types::operations::TransactionMode::Bilateral,
-        nonce: Vec::new(),
-        recipient: to_device_id.to_vec(),
-        to: crate::util::text_id::encode_base32_crockford(to_device_id).into_bytes(),
-        message: memo.to_string(),
+        terms_commitment: terms.commitment(),
         signature: Vec::new(),
         authority_policy: Some(policy),
-    }
-    .to_bytes()
+    };
+    (operation.to_bytes(), terms)
 }
 
 impl AppRouterImpl {
@@ -769,11 +773,12 @@ impl AppRouterImpl {
                         // Prefix to avoid ambiguity with other ids and keep stable format.
                         let safe_id: String = format!("tx_{}", t.tx_hash);
 
-                        // A row that keeps its signed operation shows the terms
-                        // that operation carries — the same bytes its receipt
-                        // badge is checked against. Only a row with no operation
-                        // (a faucet claim, a Bitcoin event) shows its stored
-                        // figures.
+                        // A row that keeps its signed operation shows its amount
+                        // from that operation — the same bytes its receipt badge
+                        // is checked against — and its token and memo from the
+                        // terms it keeps, once they open the operation. Only a
+                        // row with no operation (a faucet claim, a Bitcoin event)
+                        // shows its stored figures.
                         let (amount, token_id, memo) = match t
                             .metadata
                             .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
@@ -787,8 +792,27 @@ impl AppRouterImpl {
                                         t.tx_id
                                     )
                                 })?;
-                                let terms =
-                                    super::recipient_accept::transfer_terms(&op).map_err(|e| {
+                                let kept = t
+                                    .metadata
+                                    .get(crate::storage::client_db::HISTORY_TERMS_KEY)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "wallet.history: transaction {} keeps no terms for \
+                                             its operation",
+                                            t.tx_id
+                                        )
+                                    })?;
+                                let opened =
+                                    dsm::types::operations::TransferTerms::from_bytes(kept)
+                                        .map_err(|e| {
+                                            format!(
+                                                "wallet.history: transaction {}'s terms do not \
+                                                 decode: {e}",
+                                                t.tx_id
+                                            )
+                                        })?;
+                                let terms = super::recipient_accept::transfer_terms(&op, &opened)
+                                    .map_err(|e| {
                                         format!("wallet.history: transaction {}: {e}", t.tx_id)
                                     })?;
                                 (terms.amount, terms.token_id, terms.memo)
@@ -1104,7 +1128,7 @@ impl AppRouterImpl {
                         ))
                     }
                 };
-                let operation_bytes = encode_offline_transfer_operation_canonical(
+                let (operation_bytes, transfer_terms) = encode_offline_transfer_operation_canonical(
                     &counterparty_device_id,
                     transfer_amount,
                     &token_id,
@@ -1120,6 +1144,11 @@ impl AppRouterImpl {
                             ))
                         }
                     };
+                // The terms that ride beside the operation open it, as the
+                // receiver will check before it takes the step.
+                if let Err(e) = transfer_terms.open(&operation) {
+                    return err(format!("wallet.sendOffline: {e}"));
+                }
 
                 #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
                 {
@@ -1173,7 +1202,11 @@ impl AppRouterImpl {
                         }
                     }
                     let (prepare_envelope, commitment_hash) = match transport_adapter
-                        .create_prepare_message_with_commitment(counterparty_device_id, operation)
+                        .create_transfer_prepare_with_commitment(
+                            counterparty_device_id,
+                            operation,
+                            transfer_terms,
+                        )
                         .await
                     {
                         Ok(v) => v,
@@ -1696,7 +1729,7 @@ mod tests {
     #[test]
     fn offline_transfer_operation_encodes_canonical_dbtc_token_id() {
         let to_device_id = [0xabu8; 32];
-        let bytes = encode_offline_transfer_operation_canonical(
+        let (bytes, terms) = encode_offline_transfer_operation_canonical(
             &to_device_id,
             42,
             "DBTC",
@@ -1705,12 +1738,14 @@ mod tests {
         );
 
         let op = Operation::from_bytes(&bytes).expect("transfer op should decode");
-        match op {
-            Operation::Transfer { token_id, .. } => {
-                assert_eq!(String::from_utf8(token_id).unwrap(), "dBTC");
-            }
-            other => panic!("expected transfer op, got {other:?}"),
-        }
+        terms.open(&op).expect("the terms open the operation");
+        assert_eq!(String::from_utf8(terms.token_id.clone()).unwrap(), "dBTC");
+        assert_eq!(terms.memo, "memo");
+        let encoded = String::from_utf8_lossy(&bytes);
+        assert!(
+            !encoded.contains("dBTC") && !encoded.contains("memo"),
+            "the operation carries neither the token nor the memo"
+        );
     }
 
     /// A display amount is parsed back into base units with the token's

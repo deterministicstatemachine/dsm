@@ -285,6 +285,41 @@ impl Node {
     }
 }
 
+impl Node {
+    /// Every row of every table in this node's own database, each as the
+    /// text Postgres renders it (`row_to_json`: byte columns as `\\x` and
+    /// lowercase hex): everything an operator of this node can read.
+    pub async fn stored_rows(&self) -> Vec<String> {
+        let client = self.state.db_pool.get().await.expect("node db connection");
+        let tables: Vec<String> = client
+            .query(
+                "SELECT table_name::text FROM information_schema.tables
+                 WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
+                &[],
+            )
+            .await
+            .expect("the node's tables")
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert!(!tables.is_empty(), "{} holds no tables", self.member_id);
+        let mut rows = Vec::new();
+        for table in tables {
+            for row in client
+                .query(
+                    &format!("SELECT row_to_json(t)::text FROM \"{table}\" t"),
+                    &[],
+                )
+                .await
+                .expect("the table's rows")
+            {
+                rows.push(format!("{table}: {}", row.get::<_, String>(0)));
+            }
+        }
+        rows
+    }
+}
+
 impl Drop for Node {
     fn drop(&mut self) {
         if let Some(serving) = self.serving.take() {

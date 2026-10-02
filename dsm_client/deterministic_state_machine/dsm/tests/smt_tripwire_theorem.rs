@@ -99,14 +99,16 @@ fn compute_initial_chain_tip(
 fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     let op = Operation::Transfer {
         policy_commit: [0u8; 32],
+        terms_commitment: dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![0u8; 16],
+            mode: TransactionMode::Bilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
+        }
+        .commitment(),
         to_device_id: recipient.to_vec(),
         amount: Balance::amount(amount),
-        token_id: b"ERA".to_vec(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![0u8; 16],
-        recipient: recipient.to_vec(),
-        to: recipient.to_vec(),
-        message: String::new(),
         signature: vec![],
         authority_policy: None,
     };

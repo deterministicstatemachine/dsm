@@ -136,14 +136,16 @@ async fn test_bilateral_relationship_anchor_generation() {
 fn test_operation_serialization() {
     let op = Operation::Transfer {
         policy_commit: [0u8; 32],
+        terms_commitment: dsm::types::operations::TransferTerms {
+            token_id: b"DSM_TOKEN".to_vec(),
+            nonce: vec![1, 2, 3, 4],
+            mode: TransactionMode::Bilateral,
+            memo: "Test transfer".to_string(),
+            salt: vec![0x5A; 32],
+        }
+        .commitment(),
         to_device_id: b"recipient_123".to_vec(),
         amount: Balance::amount(100),
-        token_id: b"DSM_TOKEN".to_vec(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![1, 2, 3, 4],
-        recipient: b"Bob".to_vec(),
-        to: b"recipient_123".to_vec(),
-        message: "Test transfer".to_string(),
         signature: vec![],
         authority_policy: None,
     };

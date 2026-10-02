@@ -30,12 +30,17 @@ use crate::storage::client_db::{deserialize_operation, serialize_operation, Bila
 /// implementation is
 /// [`DefaultBilateralSettlementDelegate`](crate::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate).
 pub trait BilateralSettlementDelegate: Send + Sync {
-    /// Extract display metadata from raw operation bytes.
+    /// Extract display metadata from a step's operation and, for a transfer,
+    /// the terms that open it.
     ///
     /// Returns `(amount, token_id)`.  Both values may be `None` for
     /// non-transfer operations.  Used to populate event notification fields;
     /// must not mutate any state.
-    fn operation_metadata(&self, operation_bytes: &[u8]) -> (Option<u64>, Option<String>);
+    fn operation_metadata(
+        &self,
+        operation: &Operation,
+        terms: Option<&dsm::types::operations::TransferTerms>,
+    ) -> (Option<u64>, Option<String>);
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +103,10 @@ pub struct BilateralBleSession {
     /// A rejected step keeps the signed rejection (or cancellation) that
     /// ended it, the answer to the counterparty's next frame for the step.
     pub owed_frame: Option<Vec<u8>>,
+    /// A transfer step: the terms its operation commits to — token, nonce,
+    /// mode and memo — which travel beside the operation over BLE and in no
+    /// public object (pre-audit item 4). `None` for any other step.
+    pub terms: Option<dsm::types::operations::TransferTerms>,
 }
 
 /// The kind of an offline protocol frame, whatever carries it.
@@ -191,6 +200,7 @@ impl BilateralBleSession {
             spend_asset,
             spend_amount,
             owed_frame: self.owed_frame.clone(),
+            terms_bytes: self.terms.as_ref().map(|t| t.to_bytes()),
         })
     }
 
@@ -250,6 +260,8 @@ impl BilateralBleSession {
                 ))
             }
         };
+        let terms = step_terms(&operation, record.terms_bytes.as_deref())
+            .map_err(|e| DsmError::invalid_operation(format!("persisted bilateral session: {e}")))?;
         Ok(Self {
             commitment_hash,
             local_commitment_hash: None,
@@ -271,7 +283,33 @@ impl BilateralBleSession {
             offline_spend,
             parent_tip: array32("parent_tip", record.parent_tip.as_ref())?,
             owed_frame: record.owed_frame.clone(),
+            terms,
         })
+    }
+}
+
+/// The terms an offline step carries beside `operation`: a transfer's, which
+/// must open its signed commitment, and none for any other operation. A
+/// transfer without terms, or terms that do not open it, is refused whole
+/// (pre-audit item 4).
+pub fn step_terms(
+    operation: &Operation,
+    terms_bytes: Option<&[u8]>,
+) -> Result<Option<dsm::types::operations::TransferTerms>, DsmError> {
+    match (operation, terms_bytes) {
+        (Operation::Transfer { .. }, Some(bytes)) if !bytes.is_empty() => {
+            let terms = dsm::types::operations::TransferTerms::from_bytes(bytes)?;
+            terms.open(operation)?;
+            Ok(Some(terms))
+        }
+        (Operation::Transfer { .. }, _) => Err(DsmError::invalid_operation(
+            "the transfer carries no terms",
+        )),
+        (_, Some(bytes)) if !bytes.is_empty() => Err(DsmError::invalid_operation(format!(
+            "a {} carries no transfer terms",
+            operation.get_operation_type()
+        ))),
+        (_, _) => Ok(None),
     }
 }
 
@@ -395,6 +433,7 @@ mod tests {
             offline_spend: None,
             parent_tip: None,
             owed_frame: None,
+            terms: None,
         }
     }
 

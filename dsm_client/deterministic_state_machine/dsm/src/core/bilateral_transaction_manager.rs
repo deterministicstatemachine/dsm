@@ -1026,14 +1026,16 @@ mod tests {
     fn signed_transfer_op(kp: &SignatureKeyPair, message: &str, nonce: u8) -> Operation {
         let mut op = Operation::Transfer {
             policy_commit: [0u8; 32],
-            token_id: b"ERA".to_vec(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![nonce; 8],
+                mode: TransactionMode::Bilateral,
+                memo: message.to_string(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             to_device_id: vec![9u8; 32],
             amount: Balance::amount(1),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![nonce; 8],
-            recipient: vec![9u8; 32],
-            to: b"b32recipient".to_vec(),
-            message: message.to_string(),
             signature: Vec::new(),
             authority_policy: None,
         };

@@ -74,13 +74,15 @@ fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
     Operation::Transfer {
         to_device_id: vec![1; 32],
         amount: Balance::amount(5),
-        token_id: b"ERA".to_vec(),
         policy_commit,
-        mode: TransactionMode::Bilateral,
-        nonce: vec![0; 8],
-        recipient: Vec::new(),
-        to: Vec::new(),
-        message: String::new(),
+        terms_commitment: dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![0; 8],
+            mode: TransactionMode::Bilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
+        }
+        .commitment(),
         signature: Vec::new(),
         authority_policy: None,
     }

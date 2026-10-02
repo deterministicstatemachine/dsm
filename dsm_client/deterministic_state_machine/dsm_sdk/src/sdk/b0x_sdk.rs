@@ -383,6 +383,9 @@ pub struct B0xSubmissionParams {
     /// exact write set. Untrusted locators on the wire, never authority.
     pub sender_economic_position: u64,
     pub sender_debit_mutation_index: u32,
+    /// The canonical bytes of the terms `transaction` commits to. They ride
+    /// inside the sealed request and nowhere public (pre-audit item 4).
+    pub transfer_terms: Vec<u8>,
 }
 
 pub struct B0xSDK {
@@ -1666,8 +1669,10 @@ impl B0xSDK {
         };
         let to_device_id_bytes = to_device_id.clone();
 
-        // The signed operation and nothing that restates it: the recipient reads
-        // every term from the bytes SIG A covers.
+        // The signed operation and the terms it commits to, and nothing that
+        // restates either: the recipient reads the recipient, amount and asset
+        // from the bytes SIG A covers, and the token, nonce and memo from
+        // terms that open its commitment. The request travels sealed.
         let arg_pack = dsm::types::proto::ArgPack {
             schema_hash: None,
             codec: dsm::types::proto::Codec::Proto as i32,
@@ -1676,6 +1681,7 @@ impl B0xSDK {
                 canonical_operation_bytes: params.canonical_operation_bytes.clone(),
                 sender_economic_position: params.sender_economic_position,
                 sender_debit_mutation_index: params.sender_debit_mutation_index,
+                transfer_terms: params.transfer_terms.clone(),
             }
             .encode_to_vec(),
         };
@@ -2074,7 +2080,6 @@ impl B0xSDK {
             dsm::types::operations::Operation::Transfer {
                 to_device_id,
                 amount,
-                token_id,
                 ..
             } => {
                 if to_device_id.len() != 32 {
@@ -2089,7 +2094,12 @@ impl B0xSDK {
                         None::<std::io::Error>,
                     ));
                 }
-                if token_id.is_empty() {
+                // The terms ride beside the operation and must open it: the
+                // recipient refuses a transfer whose terms do not.
+                let terms =
+                    dsm::types::operations::TransferTerms::from_bytes(&params.transfer_terms)?;
+                terms.open(&params.transaction)?;
+                if terms.token_id.is_empty() {
                     return Err(DsmError::internal(
                         "token_id cannot be empty",
                         None::<std::io::Error>,
@@ -3199,19 +3209,21 @@ mod tests {
     /// A production-shaped transfer submission: production-sized SIG A and
     /// canonical operation bytes, no inline receipt (ADR 0003).
     fn params_base() -> B0xSubmissionParams {
+        let terms = dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![0x7E; 32],
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
+        };
         B0xSubmissionParams {
             recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
             recipient_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
             transaction: dsm::types::operations::Operation::Transfer {
                 to_device_id: vec![0x44; 32],
                 amount: dsm::types::token_types::Balance::amount(100),
-                token_id: b"ERA".to_vec(),
                 policy_commit: [0x0F; 32],
-                mode: dsm::types::operations::TransactionMode::Unilateral,
-                nonce: vec![0x7E; 32],
-                recipient: vec![0x44; 32],
-                to: vec![0x44; 32],
-                message: String::new(),
+                terms_commitment: terms.commitment(),
                 signature: vec![0xA5; sphincs_sig_len()],
                 authority_policy: None,
             },
@@ -3222,6 +3234,7 @@ mod tests {
             submission_id: crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
             sender_economic_position: 0,
             sender_debit_mutation_index: 0,
+            transfer_terms: terms.to_bytes(),
         }
     }
 

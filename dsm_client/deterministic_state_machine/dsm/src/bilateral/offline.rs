@@ -603,14 +603,16 @@ mod tests {
     fn bearer_transfer(to: [u8; 32]) -> Operation {
         Operation::Transfer {
             policy_commit: [0x0F; 32],
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"TOK".to_vec(),
+                nonce: vec![1; 8],
+                mode: TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             to_device_id: to.to_vec(),
             amount: Balance::amount(3),
-            token_id: b"TOK".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![1; 8],
-            recipient: to.to_vec(),
-            to: to.to_vec(),
-            message: String::new(),
             signature: Vec::new(),
             authority_policy: Some(crate::types::operations::canonical_offline_bearer_policy()),
         }

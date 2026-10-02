@@ -284,42 +284,30 @@ mod tests {
         let balance = dsm::types::token_types::Balance::amount(1000);
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"dBTC".to_vec(),
+                nonce: vec![0xBBu8; 16],
+                mode: dsm::types::operations::TransactionMode::Bilateral,
+                memo: "test transfer".to_string(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             to_device_id: vec![0xAAu8; 32],
             amount: balance,
-            token_id: b"dBTC".to_vec(),
-            mode: dsm::types::operations::TransactionMode::Bilateral,
-            nonce: vec![0xBBu8; 16],
-            recipient: vec![0xCCu8; 32],
-            to: vec![0xDDu8; 32],
-            message: "test transfer".to_string(),
             signature: vec![0xEEu8; 64],
             authority_policy: None,
         };
         let bytes = serialize_operation(&op);
         let back = deserialize_operation(&bytes).expect("deserialize transfer");
+        assert_eq!(back, op, "the transfer round-trips");
         match back {
             Operation::Transfer {
                 to_device_id,
                 amount,
-                token_id,
-                mode,
-                nonce,
-                recipient,
-                to,
-                message,
                 ..
             } => {
                 assert_eq!(to_device_id, vec![0xAAu8; 32]);
                 assert_eq!(amount.value(), 1000);
-                assert_eq!(token_id, b"dBTC".to_vec());
-                assert!(matches!(
-                    mode,
-                    dsm::types::operations::TransactionMode::Bilateral
-                ));
-                assert_eq!(nonce, vec![0xBBu8; 16]);
-                assert_eq!(recipient, vec![0xCCu8; 32]);
-                assert_eq!(to, vec![0xDDu8; 32]);
-                assert_eq!(message, "test transfer");
             }
             _ => panic!("expected Transfer variant"),
         }
