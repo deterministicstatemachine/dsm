@@ -70,6 +70,13 @@ pub enum ParentPosition {
     /// The `C_p` that `P` names selects no root, ever: another claim holds
     /// `p`, so it never registered there, or it resolved Invalid. Terminal.
     ConditionalNoRoot,
+    /// Lineage validation established the trader's lineage Invalid at or
+    /// before `p` (an Invalid step, or a divergent write-once register cell
+    /// it quarantines): that lineage holds no claim at `p`, ever, whatever
+    /// `P` names. Terminal (SoFi §23.3; Amendment S13: "No trade whose
+    /// trader's lineage is known invalid can occupy a vault key
+    /// indefinitely").
+    LineageInvalid,
 }
 
 /// A trader-position result. Every one is permanent (Amendment S7). Core
@@ -480,38 +487,44 @@ impl RouteFacts<'_> {
     }
 }
 
-/// `TraderParentCompatible(P)`: the parent is an ordinary claim the trader
-/// holds at `p`, at exactly the root this operation was built on, or a
-/// conditional claim that selected exactly that root. The parent is always resolved here: Core resolves only over complete
-/// facts, the predecessor's resolution among them (Amendment S7).
-pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
+/// The root a terminal parent leaves `P` standing on: the root the ordinary
+/// claim `P` names installed, when the trader's lineage holds that very claim
+/// at `p`; the root a conditional `C_p` selected. `None` when the parent
+/// leaves `P` on no root, ever: an ordinary claim the lineage does not hold
+/// at `p`, a `C_p` that selects no root, or a lineage known Invalid at or
+/// before `p`.
+fn root_left_by(parent: &ParentPosition) -> Option<&[u8; 32]> {
     match parent {
         ParentPosition::SingleRoot {
             named,
             held,
             held_root,
-        } => named == held && held_root == parent_pre_root,
-        ParentPosition::ConditionalSelected { selected_root } => selected_root == parent_pre_root,
-        ParentPosition::ConditionalNoRoot => false,
+        } => (named == held).then_some(held_root),
+        ParentPosition::ConditionalSelected { selected_root } => Some(selected_root),
+        ParentPosition::ConditionalNoRoot | ParentPosition::LineageInvalid => None,
     }
+}
+
+/// `TraderParentCompatible(P)`: the parent is an ordinary claim the trader
+/// holds at `p`, at exactly the root this operation was built on, or a
+/// conditional claim that selected exactly that root. The parent is always
+/// resolved here: Core resolves only over complete facts, the predecessor's
+/// resolution among them (Amendment S7).
+pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
+    root_left_by(parent) == Some(parent_pre_root)
 }
 
 /// `TraderParentImpossible(P)`: the parent is terminal and did not select the
 /// root this operation was built on — either it selected nothing (Invalid), or
 /// it selected the other branch — or it is an ordinary claim the trader does
-/// not hold at `p`, or holds at another root.
+/// not hold at `p`, or holds at another root, or the trader's lineage is
+/// known Invalid at or before `p`, so it holds nothing there.
 ///
-/// Objective and monotone.
+/// A [`ParentPosition`] is always terminal: a parent not established yet is
+/// no fact at all (`NotEstablished::ParentUnresolved`). So the parent is
+/// impossible exactly when it is not compatible. Objective and monotone.
 pub fn trader_parent_impossible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
-    match parent {
-        ParentPosition::ConditionalNoRoot => true,
-        ParentPosition::ConditionalSelected { selected_root } => selected_root != parent_pre_root,
-        ParentPosition::SingleRoot {
-            named,
-            held,
-            held_root,
-        } => named != held || held_root != parent_pre_root,
-    }
+    !trader_parent_compatible(parent, parent_pre_root)
 }
 
 /// `ConsumedRoute(F, E)` (Section 23.2): registered, conforming, statically
