@@ -311,9 +311,13 @@ mod tests {
             GenesisParamsV3::new(nonce, NET, 3, sigalg::SPHINCS_PLUS_SPX256F, &[0u8; 32]).is_err(),
             "32 bytes is not a SPX256f public key"
         );
+        let retired = sigalg::RETIRED_SPHINCS_PLUS_SPX256F_V1;
         assert!(
-            GenesisParamsV3::new(nonce, NET, 3, 0x0002, &[0u8; 64]).is_err(),
-            "0x0002 is not a declared signature_alg"
+            matches!(
+                GenesisParamsV3::new(nonce, NET, 3, retired, &[0u8; 64]),
+                Err(crate::ccb::CcbError::UnknownSignatureAlg { alg }) if alg == retired
+            ),
+            "the retired version-1 id is not a declared signature_alg"
         );
     }
 }
