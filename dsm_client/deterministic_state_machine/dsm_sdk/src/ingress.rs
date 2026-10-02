@@ -850,8 +850,10 @@ mod tests {
     );
 
     /// `wallet.amount` through the ingress: ERA by its committed policy, the
-    /// practice coin at its stated decimals, and a refusal in Rust's words. The
-    /// frontend's record of these answers is this process's own.
+    /// practice coin at its stated decimals, and a refusal in Rust's words; and
+    /// `balance.list`, whose ERA row is where the practice wallet reads that ERA
+    /// is protocol-defined, as every screen reads it. The frontend's record of
+    /// these answers is this process's own.
     #[test]
     #[serial]
     fn wallet_amount_answers_through_the_ingress_as_the_frontend_records_it() {
@@ -904,6 +906,40 @@ mod tests {
                 record.extend_from_slice(part);
             }
             answers.push(IngressResponse::decode(response.as_slice()).expect("an IngressResponse"));
+        }
+
+        // The practice wallet's ERA row states ERA as Rust lists it
+        // (practiceMode.ts `seedEra`): the router's `balance.list`, which lists
+        // ERA at any balance, asked as the WebView asks it, with no arguments.
+        let listed_request = IngressRequest {
+            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                method: "balance.list".to_string(),
+                args: Vec::new(),
+            })),
+        }
+        .encode_to_vec();
+        let listed_response = dispatch_ingress_bytes(&listed_request);
+        for part in [&listed_request, &listed_response] {
+            let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+            record.extend_from_slice(&len.to_be_bytes());
+            record.extend_from_slice(part);
+        }
+        let listed = expect_ok_bytes(
+            IngressResponse::decode(listed_response.as_slice()).expect("an IngressResponse"),
+        );
+        match crate::handlers::response_helpers::decode_local_envelope(&listed)
+            .expect("the router's local answer")
+            .payload
+        {
+            Some(dsm::types::proto::envelope::Payload::BalancesListResponse(list)) => {
+                let era = list
+                    .balances
+                    .iter()
+                    .find(|row| row.token_id == "ERA")
+                    .expect("balance.list lists ERA at any balance");
+                assert!(era.protocol_defined, "Rust lists ERA as protocol-defined");
+            }
+            other => panic!("balance.list answered {other:?}"),
         }
 
         let forms = |response: IngressResponse| {
