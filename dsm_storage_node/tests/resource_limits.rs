@@ -211,3 +211,63 @@ fn a_connection_that_never_finishes_its_headers_is_closed() {
         }
     });
 }
+
+/// A device's wait on its spools is held on purpose, so it sits outside the
+/// node's request time and its count of requests in flight. With one slot and
+/// a one-second request time, a wait held for longer than that is answered
+/// `200` with nothing ready, not `408`, and a health check made while it is
+/// held is served at once.
+#[test]
+fn a_held_wait_takes_no_slot_and_outlasts_the_request_time() {
+    common::runtime().block_on(async {
+        let app = node("rl_wait", limits(1, Duration::from_secs(1))).await;
+        let spool = dsm::utils::text_id::encode_base32_crockford(&[0x5Bu8; 32]);
+        let request = dsm::types::proto::B0xWaitRequest {
+            marks: vec![dsm::types::proto::B0xWaitMark {
+                address: spool,
+                from_seq: 1,
+            }],
+            wait_ms: 2_500,
+        };
+        let wait = common::ok_or_panic(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/b0x/wait")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(prost::Message::encode_to_vec(&request))),
+            "request",
+        );
+        let started = std::time::Instant::now();
+        let held = tokio::spawn(app.clone().oneshot(wait));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let health = match tokio::time::timeout(Duration::from_secs(2), app.oneshot(health())).await
+        {
+            Ok(answer) => common::ok_or_panic(answer, "the app answers"),
+            Err(elapsed) => panic!("a held wait kept the node's one slot: {elapsed}"),
+        };
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let answer = match tokio::time::timeout(Duration::from_secs(10), held).await {
+            Ok(joined) => common::ok_or_panic(common::ok_or_panic(joined, "task"), "answer"),
+            Err(elapsed) => panic!("the wait was never answered: {elapsed}"),
+        };
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert!(
+            started.elapsed() >= Duration::from_millis(2_500),
+            "the wait was cut short of its time"
+        );
+        let body = common::ok_or_panic(
+            axum::body::to_bytes(answer.into_body(), usize::MAX).await,
+            "body",
+        );
+        let ready = common::ok_or_panic(
+            <dsm::types::proto::B0xWaitResponse as prost::Message>::decode(body.as_ref()),
+            "a wait answer",
+        );
+        assert!(
+            ready.ready.is_empty(),
+            "nothing landed, and the wait named a spool"
+        );
+    });
+}

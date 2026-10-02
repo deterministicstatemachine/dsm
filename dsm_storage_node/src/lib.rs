@@ -35,6 +35,8 @@ pub struct AppState {
     /// database connection, so closers queued behind one another hold no
     /// connection and cannot starve every other request of the pool.
     pub closing: Arc<tokio::sync::Mutex<()>>,
+    /// Devices' waits on their spools (long-poll), woken by each submit.
+    pub spool_waits: api::transport::b0x::SpoolWaits,
 }
 
 /// This node's view of the canonical storage set it belongs to.
@@ -159,6 +161,7 @@ impl AppState {
             storage_set: None,
             mirror_sync: Arc::new(tokio::sync::Mutex::new(())),
             closing: Arc::new(tokio::sync::Mutex::new(())),
+            spool_waits: api::transport::b0x::SpoolWaits::default(),
         })
     }
 
@@ -357,6 +360,11 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
             axum::http::StatusCode::REQUEST_TIMEOUT,
             limits.request_timeout,
         ))
+        // A device's wait on its spools is held open on purpose, so it sits
+        // outside the timeout and the concurrency limit above: the wait
+        // bounds its own length and the number held (b0x::MAX_WAIT,
+        // b0x::MAX_WAITERS), and holds no database connection while it waits.
+        .merge(crate::api::transport::b0x::wait_router(state.clone()))
         .layer(TraceLayer::new_for_http())
         .layer(crate::node_identity_echo_layer(
             state.member_id_header.clone(),

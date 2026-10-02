@@ -530,6 +530,116 @@ pub(crate) fn certresync_message_id(method: &str, recipient_tip: &[u8], body: &[
     h.finalize().as_bytes()[..16].to_vec()
 }
 
+/// Where `storage.sync` last read each member's spool at each address to its
+/// end, in this process: `(address, endpoint)` to the position after the last
+/// entry seen. A wait on that spool ([`wait_on_member`]) wakes for what lands
+/// from there. Kept in memory only: a process that has not yet read a spool
+/// to its end waits from its read position, and its first sync records the
+/// end.
+static SPOOL_ENDS: once_cell::sync::Lazy<std::sync::Mutex<HashMap<(String, String), u64>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// The spool ends. A writer that panicked left at worst one stale end, and a
+/// stale end only wakes a wait early.
+fn spool_ends() -> std::sync::MutexGuard<'static, HashMap<(String, String), u64>> {
+    match SPOOL_ENDS.lock() {
+        Ok(ends) => ends,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn record_spool_end(address: &str, endpoint: &str, end: u64) {
+    spool_ends().insert((address.to_string(), endpoint.to_string()), end);
+}
+
+/// Where a sync last read the spool at `address` on `endpoint` to its end,
+/// in this process.
+pub(crate) fn spool_end(address: &str, endpoint: &str) -> Option<u64> {
+    spool_ends()
+        .get(&(address.to_string(), endpoint.to_string()))
+        .copied()
+}
+
+/// How much longer than the wait itself a wait request may take: the round
+/// trip, and a member slow to answer at the end of its wait.
+const WAIT_TRANSPORT_SLACK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What a member answered a wait on this device's spools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WaitAnswer {
+    /// These spools hold an entry at or after their mark.
+    Ready(Vec<String>),
+    /// Nothing landed while the member held the wait.
+    Quiet,
+    /// The member does not hold waits: a node that does not serve them yet
+    /// (`404`), or one holding as many as it can (`503`).
+    NotHeld(reqwest::StatusCode),
+}
+
+/// Hold a wait on `marks` (spool address, position) at the member at
+/// `endpoint`, for at most `wait` (storage spec §8, long-poll). Reads
+/// nothing and moves nothing: what landed is read by the next sync.
+pub(crate) async fn wait_on_member(
+    client: &reqwest::Client,
+    endpoint: &str,
+    marks: &[(String, u64)],
+    wait: std::time::Duration,
+) -> Result<WaitAnswer, DsmError> {
+    let request = dsm::types::proto::B0xWaitRequest {
+        marks: marks
+            .iter()
+            .map(|(address, from_seq)| dsm::types::proto::B0xWaitMark {
+                address: address.clone(),
+                from_seq: *from_seq,
+            })
+            .collect(),
+        wait_ms: u32::try_from(wait.as_millis()).map_err(|e| {
+            DsmError::internal(format!("wait of {wait:?}: {e}"), None::<std::io::Error>)
+        })?,
+    };
+    let url = format!("{}/api/v2/b0x/wait", endpoint.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/protobuf")
+        .header("Accept", "application/protobuf")
+        .timeout(wait + WAIT_TRANSPORT_SLACK)
+        .body(request.encode_to_vec())
+        .send()
+        .await
+        .map_err(|e| {
+            DsmError::network(format!("b0x wait at {endpoint}: {e}"), None::<std::io::Error>)
+        })?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+    {
+        return Ok(WaitAnswer::NotHeld(status));
+    }
+    if !status.is_success() {
+        return Err(DsmError::network(
+            format!("b0x wait at {endpoint} answered HTTP {status}"),
+            None::<std::io::Error>,
+        ));
+    }
+    let bytes = resp.bytes().await.map_err(|e| {
+        DsmError::network(
+            format!("b0x wait answer from {endpoint}: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let answer = dsm::types::proto::B0xWaitResponse::decode(bytes.as_ref()).map_err(|e| {
+        DsmError::network(
+            format!("b0x wait answer from {endpoint} does not decode: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    if answer.ready.is_empty() {
+        Ok(WaitAnswer::Quiet)
+    } else {
+        Ok(WaitAnswer::Ready(answer.ready))
+    }
+}
+
 impl B0xSDK {
     fn hash_b0x_component(
         domain_tag: dsm::crypto::domain::TaggedHashDomain<'_>,
@@ -2380,6 +2490,11 @@ impl B0xSDK {
             // not reach is read from there again.
             let read_answered = !failed && malformed.is_none();
             let capped = read_answered && stop == ReadStop::PageCap;
+            // A sync that read this member's spool to its end has seen all of
+            // it: a wait on this spool wakes for what lands after.
+            if from == ReadFrom::Resume && read_answered && stop == ReadStop::End {
+                record_spool_end(b0x_address, &epc, cursor);
+            }
             if from == ReadFrom::Resume && read_answered {
                 b0x_consumed::set_scan_cursor(b0x_address, &epc, capped.then_some(cursor))
                     .map_err(local)?;

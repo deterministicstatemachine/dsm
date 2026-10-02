@@ -2535,6 +2535,25 @@ message SequencedBatchEnvelope {
   uint64 next_seq = 2; // next sequence number to request
 }
 
+// A device waiting on its spools (storage spec §8, long-poll). The node
+// answers as soon as any listed spool holds an entry at or after the position
+// given for it, or with none listed once `wait_ms` has passed. Nothing is read,
+// marked or changed by a wait: a device that never waits reads exactly what it
+// would have, only later.
+message B0xWaitMark {
+  string address  = 1; // the spool key, Base32 Crockford of 32 bytes
+  uint64 from_seq = 2; // wake for an entry at or after this position
+}
+
+message B0xWaitRequest {
+  repeated B0xWaitMark marks = 1;
+  uint32 wait_ms = 2; // how long the node may hold the request; the node caps it
+}
+
+message B0xWaitResponse {
+  repeated string ready = 1; // the listed spools holding an entry at or after their position
+}
+
 // =============================== ENVELOPE ============================
 // The sender of an addressed envelope. A local answer (this device's Core or
 // SDK answering its own caller) makes no sender claim and carries no Headers.
