@@ -31,6 +31,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <!-- The one-time "let DSM run in the background" dialog (BatteryExemption):
+         the wallet keeps its own connection to the storage nodes while the
+         phone sleeps, with no push service in between. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
     <!-- Notifications (Android 13+) for FGS persistent notif -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
