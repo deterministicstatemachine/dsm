@@ -57,7 +57,8 @@ prompt_keystore_password() {
     exit 1
   fi
 
-  read -r -s -p "Keystore password ($DSM_KEYSTORE_PATH): " DSM_KEYSTORE_PASSWORD
+  # IFS= keeps a leading or trailing space: read would strip it, and keytool would not.
+  IFS= read -r -s -p "Keystore password ($DSM_KEYSTORE_PATH): " DSM_KEYSTORE_PASSWORD
   echo
   export DSM_KEYSTORE_PASSWORD
 }
