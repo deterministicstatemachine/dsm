@@ -378,6 +378,82 @@ async fn a_set_mate_that_never_answers_fails_the_sync_and_frees_it() {
     }
 }
 
+/// A set-mate whose answer outgrows any ByteCommit fails the sync, and the
+/// node reads no further than a ByteCommit could reach instead of taking in
+/// whatever it is sent (storage spec §14, mirror sync: what a node keeps is a
+/// ByteCommit). The set-mate names itself correctly and then streams without
+/// end, counting what it gets to send before the node hangs up on it.
+#[tokio::test]
+async fn a_set_mate_whose_answer_never_ends_is_read_no_further_than_a_byte_commit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    /// Where the set-mate stops on its own, for a node that never hangs up.
+    const FLOOD: usize = 128 << 20;
+    let (flood, flood_url) = listener().await;
+    let sent = Arc::new(AtomicUsize::new(0));
+    // How the set-mate's stream ended: the error its next write met once the
+    // node had hung up, or nothing while it is still sending.
+    let hung_up = Arc::new(tokio::sync::Mutex::new(None::<std::io::ErrorKind>));
+    let (counted, ended) = (sent.clone(), hung_up.clone());
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = flood.accept().await {
+            let (counted, ended) = (counted.clone(), ended.clone());
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                match socket.read(&mut request).await {
+                    Ok(n) if n > 0 => {}
+                    _ => return,
+                }
+                let streamed: std::io::Result<()> = async {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nx-dsm-node-id: dsm-node-a\r\n\
+                              content-type: application/octet-stream\r\n\r\n",
+                        )
+                        .await?;
+                    let chunk = [0xA5u8; 64 * 1024];
+                    while counted.load(Ordering::SeqCst) < FLOOD {
+                        socket.write_all(&chunk).await?;
+                        counted.fetch_add(chunk.len(), Ordering::SeqCst);
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(e) = streamed {
+                    *ended.lock().await = Some(e.kind());
+                }
+            });
+        }
+    });
+    let b = app(node_state(
+        "bc_flood_b",
+        "dsm-node-b",
+        &["dsm-node-a", "dsm-node-b"],
+        &[("dsm-node-a", &flood_url)],
+    )
+    .await);
+    assert_eq!(sync(&b).await, StatusCode::BAD_GATEWAY);
+    // The set-mate learns the node hung up at its next write that the
+    // socket's buffers cannot take.
+    let mut how = None;
+    for _ in 0..50 {
+        how = *hung_up.lock().await;
+        if how.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let read = sent.load(Ordering::SeqCst);
+    assert!(
+        how.is_some(),
+        "the node never hung up on an answer that kept coming ({read} bytes sent)"
+    );
+    assert!(
+        read < 16 << 20,
+        "the node took in {read} bytes of one answer, where a ByteCommit is a few hundred"
+    );
+}
+
 /// A set-mate that does not answer at its configured endpoint fails the
 /// sync; the node does not report the sync as done.
 #[tokio::test]

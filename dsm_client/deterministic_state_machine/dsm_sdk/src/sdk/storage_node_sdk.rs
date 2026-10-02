@@ -36,11 +36,11 @@ fn ca_error(what: String) -> DsmError {
     DsmError::storage(what, None::<std::io::Error>)
 }
 
-/// Read the env config and every CA certificate it names. With no env config
-/// the client trusts the system store only. A config that exists but cannot
-/// be read or parsed, or that names a certificate that cannot be read, is an
-/// error: a client built without a certificate the config requires cannot
-/// reach the members that use it.
+/// Read the env config and every CA certificate it names. A config that
+/// cannot be read or parsed, or that names a certificate that cannot be read,
+/// is an error: a client built without a certificate the config requires
+/// cannot reach the members that use it. With no env config there is no CA,
+/// and [`member_client`] builds no client from no CA.
 fn resolve_ca_material() -> Result<CaMaterial, DsmError> {
     let env_path = crate::network::resolved_env_config_path();
     let Some(path) = env_path.as_ref() else {
@@ -63,8 +63,9 @@ fn read_ca_certs(path: &str) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, DsmEr
     let config: toml::Value = toml::from_str(&text)
         .map_err(|e| ca_error(format!("storage client: env config {path}: {e}")))?;
     let mut certs = Vec::new();
-    // An absent key trusts the system store only; a key that is present but
-    // not a list of paths is a malformed config, not an empty one.
+    // An absent key names no CA, and no member can then be known by its
+    // certificate; a key that is present but not a list of paths is a
+    // malformed config, not an empty one.
     let entries = match config.get("custom_ca_certs") {
         None => None,
         Some(value) => Some(value.as_array().ok_or_else(|| {
@@ -107,46 +108,165 @@ const MEMBER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// ordering reads it.
 const MEMBER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Build a client from resolved material: the expensive step (TLS
-/// configuration, connection pool), run only when the material changes.
-fn build_client_from(material: &CaMaterial) -> Result<reqwest::Client, DsmError> {
-    let mut builder = reqwest::Client::builder()
+/// A member is reached only over `https://`: its identity is the
+/// certificate it presents, and plain HTTP presents none.
+pub fn require_https(endpoint: &str) -> Result<(), DsmError> {
+    match endpoint.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("https") => Ok(()),
+        _ => Err(ca_error(format!(
+            "storage member endpoint {endpoint} is not https://: a member is known by its \
+             certificate, and plain HTTP presents none"
+        ))),
+    }
+}
+
+/// Accepts a member's certificate only when it chains to one of the CAs the
+/// env config names AND names the member, as a DNS name among its subject
+/// alternative names, whatever address the member was dialled at. A member
+/// signs nothing (storage spec §2), so the certificate is the only thing that
+/// says which member answered; a certificate for another member of the same
+/// set, at this member's address, is refused.
+#[derive(Debug)]
+struct NamesTheMember {
+    chain: std::sync::Arc<rustls::client::WebPkiServerVerifier>,
+    member: rustls::pki_types::ServerName<'static>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for NamesTheMember {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _dialled: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        self.chain
+            .verify_server_cert(end_entity, intermediates, &self.member, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.chain.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.chain.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.chain.supported_verify_schemes()
+    }
+}
+
+/// The client for `member_id`, built from resolved material: it trusts the
+/// CAs the material holds and nothing else (no system store), and accepts
+/// only a certificate that names `member_id`.
+fn build_member_client(
+    material: &CaMaterial,
+    member_id: &str,
+) -> Result<reqwest::Client, DsmError> {
+    use rustls::pki_types::pem::PemObject;
+    if material.certs.is_empty() {
+        return Err(ca_error(
+            "storage client: the env config names no CA (`custom_ca_certs`), so no member \
+             can be known by its certificate"
+                .to_string(),
+        ));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for (cert_path, bytes) in &material.certs {
+        let mut held = 0usize;
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(bytes) {
+            let cert = cert.map_err(|e| {
+                ca_error(format!(
+                    "storage client: CA certificate {}: {e}",
+                    cert_path.display()
+                ))
+            })?;
+            roots.add(cert).map_err(|e| {
+                ca_error(format!(
+                    "storage client: CA certificate {}: {e}",
+                    cert_path.display()
+                ))
+            })?;
+            held += 1;
+        }
+        if held == 0 {
+            return Err(ca_error(format!(
+                "storage client: {} holds no certificate",
+                cert_path.display()
+            )));
+        }
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        std::sync::Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .map_err(|e| ca_error(format!("storage client: {e}")))?;
+    let member = rustls::pki_types::ServerName::try_from(member_id.to_string()).map_err(|e| {
+        ca_error(format!(
+            "storage member id {member_id} is not a name a certificate can carry: {e}"
+        ))
+    })?;
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| ca_error(format!("storage client: {e}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(NamesTheMember { chain, member }))
+        .with_no_client_auth();
+    reqwest::Client::builder()
         .user_agent("DSM-SDK/1.0")
         .connect_timeout(MEMBER_CONNECT_TIMEOUT)
-        .timeout(MEMBER_REQUEST_TIMEOUT);
-    for (cert_path, bytes) in &material.certs {
-        let cert = reqwest::Certificate::from_pem(bytes).map_err(|e| {
-            ca_error(format!(
-                "storage client: CA certificate {}: {e}",
-                cert_path.display()
-            ))
-        })?;
-        builder = builder.add_root_certificate(cert);
-    }
-    builder
+        .timeout(MEMBER_REQUEST_TIMEOUT)
+        .use_preconfigured_tls(config)
         .build()
         .map_err(|e| ca_error(format!("storage client: {e}")))
 }
 
-/// The HTTP client for storage members, one per CA material. The material is
-/// re-read on every call, so a re-pointed config or a replaced certificate
-/// takes effect; the client itself is built once per material and shared.
-pub fn build_ca_aware_client() -> Result<reqwest::Client, DsmError> {
+/// The HTTP client for the member `member_id`, reached at `endpoint`: over
+/// `https://` only, trusting only the CAs the env config names, and accepting
+/// only a certificate that names `member_id`. The material is re-read on
+/// every call, so a re-pointed config or a replaced certificate takes effect;
+/// each member's client is built once per material and shared.
+pub fn member_client(member_id: &str, endpoint: &str) -> Result<reqwest::Client, DsmError> {
+    require_https(endpoint)?;
     let material = resolve_ca_material()?;
-    let mut slot = CA_AWARE_CLIENT
+    let mut slot = MEMBER_CLIENTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((cached, client)) = slot.as_ref() {
-        if *cached == material {
+    if let Some((cached, clients)) = slot.as_ref() {
+        if let Some(client) = clients.get(member_id).filter(|_| *cached == material) {
             return Ok(client.clone());
         }
     }
-    let client = build_client_from(&material)?;
-    *slot = Some((material, client.clone()));
+    let client = build_member_client(&material, member_id)?;
+    match slot.as_mut() {
+        Some((cached, clients)) if *cached == material => {
+            clients.insert(member_id.to_string(), client.clone());
+        }
+        _ => {
+            let clients = MemberClients::from([(member_id.to_string(), client.clone())]);
+            *slot = Some((material, clients));
+        }
+    }
     Ok(client)
 }
 
-static CA_AWARE_CLIENT: std::sync::Mutex<Option<(CaMaterial, reqwest::Client)>> =
+type MemberClients = std::collections::HashMap<String, reqwest::Client>;
+
+static MEMBER_CLIENTS: std::sync::Mutex<Option<(CaMaterial, MemberClients)>> =
     std::sync::Mutex::new(None);
 
 // ── One member ──────────────────────────────────────────────────────────────
@@ -157,6 +277,20 @@ pub struct MemberClient {
     member_id: String,
     endpoint: String,
     client: reqwest::Client,
+}
+
+/// `error` and every error under it, outermost first: a transport error's
+/// own text says only that a request failed, and the reason (a refused
+/// certificate, a reset connection) is underneath it.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(under) = cause {
+        text.push_str(": ");
+        text.push_str(&under.to_string());
+        cause = under.source();
+    }
+    text
 }
 
 /// A member's answer: `Ok(Some)` for a `200`/`201` body, `Ok(None)` for `204`
@@ -170,7 +304,7 @@ async fn answer(request: reqwest::RequestBuilder) -> Result<Option<Vec<u8>>, Str
     let response = request
         .send()
         .await
-        .map_err(|e| format!("transport: {e}"))?;
+        .map_err(|e| format!("transport: {}", with_causes(&e)))?;
     match response.status().as_u16() {
         200 | 201 => response
             .bytes()
@@ -213,12 +347,16 @@ pub struct LatestByteCommitRead {
 }
 
 impl MemberClient {
-    pub fn new(member_id: &str, endpoint: &str, client: reqwest::Client) -> Self {
-        Self {
+    /// The member `member_id` at `endpoint`, reached with a client that
+    /// accepts only `member_id`'s certificate ([`member_client`]). The client
+    /// is built here, from the member id, so a member's name and the identity
+    /// its connection checks cannot disagree.
+    pub fn new(member_id: &str, endpoint: &str) -> Result<Self, DsmError> {
+        Ok(Self {
             member_id: member_id.to_string(),
             endpoint: endpoint.trim_end_matches('/').to_string(),
-            client,
-        }
+            client: member_client(member_id, endpoint)?,
+        })
     }
 
     pub fn member_id(&self) -> &str {
@@ -505,7 +643,7 @@ impl MemberClient {
             Ok(response) => response,
             Err(e) => {
                 return LatestByteCommitRead {
-                    answer: LatestByteCommit::Unanswered(format!("transport: {e}")),
+                    answer: LatestByteCommit::Unanswered(format!("transport: {}", with_causes(&e))),
                     answered_as: None,
                 }
             }
@@ -553,13 +691,12 @@ pub struct SetClient {
 
 impl SetClient {
     pub fn new(set: &StorageSet) -> Result<Self, DsmError> {
-        let client = build_ca_aware_client()?;
         Ok(Self {
             members: set
                 .members()
                 .iter()
-                .map(|m| MemberClient::new(&m.member_id, &m.endpoint, client.clone()))
-                .collect(),
+                .map(|m| MemberClient::new(&m.member_id, &m.endpoint))
+                .collect::<Result<_, DsmError>>()?,
         })
     }
 
@@ -735,10 +872,7 @@ impl SetClient {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
-    use super::{
-        build_ca_aware_client, build_client_from, read_ca_certs, CaMaterial, LatestByteCommit,
-        MemberClient,
-    };
+    use super::{build_member_client, read_ca_certs, CaMaterial, LatestByteCommit, MemberClient};
 
     /// The env config the app bundles names the CA bundled beside it, and the
     /// storage client builds from that CA through the same reader and builder
@@ -754,10 +888,13 @@ mod tests {
         let certs = read_ca_certs(path).expect("the bundled CA is named and readable");
         assert_eq!(certs.len(), 1, "exactly the fleet's CA");
         assert!(certs[0].0.ends_with("ca.crt"));
-        build_client_from(&CaMaterial {
-            env_path: Some(path.to_string()),
-            certs,
-        })
+        build_member_client(
+            &CaMaterial {
+                env_path: Some(path.to_string()),
+                certs,
+            },
+            "dsm-node-1",
+        )
         .expect("the storage client builds from the bundled CA");
     }
 
@@ -898,8 +1035,10 @@ mod tests {
 
     /// A member that answers the first request it is sent at once, whatever
     /// was asked, with `payload` under `namespace`, and then opens `opened`.
+    /// It serves `tls`, a certificate naming the member it stands in for, so
+    /// a device reaches it as it reaches that member.
     async fn substituting(
-        scheme: &str,
+        tls: axum_server::tls_rustls::RustlsConfig,
         namespace: &'static [u8],
         payload: &'static [u8],
         opened: std::sync::Arc<tokio::sync::Semaphore>,
@@ -909,8 +1048,10 @@ mod tests {
             .await
             .expect("a member port");
         let port = listener.local_addr().expect("its address").port();
+        let acceptor = tokio_rustls::TlsAcceptor::from(tls.get_inner());
         tokio::spawn(async move {
-            let (mut inbound, ..) = listener.accept().await.expect("the member accepts");
+            let (inbound, ..) = listener.accept().await.expect("the member accepts");
+            let mut inbound = acceptor.accept(inbound).await.expect("the TLS handshake");
             let mut request = Vec::new();
             let mut chunk = [0u8; 1024];
             while !request.windows(4).any(|end| end == b"\r\n\r\n") {
@@ -931,7 +1072,7 @@ mod tests {
             inbound.flush().await.expect("the answer sent");
             opened.add_permits(1);
         });
-        format!("{scheme}://127.0.0.1:{port}")
+        format!("https://127.0.0.1:{port}")
     }
 
     /// A fetch keeps the first bytes that re-hash to the address, not the
@@ -944,7 +1085,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn a_fetch_passes_over_a_member_that_answers_first_with_other_bytes() {
-        let _fleet = crate::test_support::one_device::Fleet::start();
+        let fleet = crate::test_support::one_device::Fleet::start();
         let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
             .expect("the pinned set");
         const NAMESPACE: &[u8] = b"DSM/test/first-bytes-that-verify";
@@ -965,7 +1106,8 @@ mod tests {
                     .split_once("://")
                     .expect("an endpoint names its scheme");
                 let endpoint = if position == 0 {
-                    substituting(scheme, NAMESPACE, b"other bytes", opened.clone()).await
+                    let tls = fleet.tls_for(&member.member_id).await;
+                    substituting(tls, NAMESPACE, b"other bytes", opened.clone()).await
                 } else {
                     relay_after(scheme, target.to_string(), opened.clone()).await
                 };
@@ -997,15 +1139,11 @@ mod tests {
     fn a_member_that_answers_404_took_nothing() {
         let fleet = crate::test_support::one_device::Fleet::start();
         let endpoint = fleet.endpoints()[0].clone();
-        let client = build_ca_aware_client().expect("a client");
         let ns = dsm::crypto::domain::TaggedHashDomain::try_new(b"DSM/test/404-is-not-an-answer")
             .expect("a domain");
         crate::runtime::get_runtime().block_on(async {
-            let wrong = MemberClient::new(
-                "dsm-node-1",
-                &format!("{endpoint}/not-the-api"),
-                client.clone(),
-            );
+            let wrong = MemberClient::new("dsm-node-1", &format!("{endpoint}/not-the-api"))
+                .expect("a client");
             assert!(wrong.put_immutable(ns, b"bytes").await.is_err());
             assert!(wrong
                 .append_index(b"DSM/test/index", &[0x41; 32], &[0x42; 32])
@@ -1017,7 +1155,7 @@ mod tests {
                 LatestByteCommit::Unanswered("answered HTTP 404".to_string())
             );
 
-            let right = MemberClient::new("dsm-node-1", &endpoint, client);
+            let right = MemberClient::new("dsm-node-1", &endpoint).expect("a client");
             right
                 .put_immutable(ns, b"bytes")
                 .await
@@ -1037,18 +1175,17 @@ mod tests {
     /// A member's latest ByteCommit is shown only as that member's own. The
     /// member states "no cycle" until one closes, then the ByteCommit it
     /// closed; the node that answers echoes the member id it is configured
-    /// as. Reached where the set names ANOTHER member, the same node's
-    /// ByteCommit names itself, so there is no ByteCommit of that member's to
-    /// show, and the echo says who answered. On the storage node's own app,
-    /// on Postgres.
+    /// as. Reached as ANOTHER member, at this node's address, nothing is
+    /// read at all: the node's certificate names the member it is, and a
+    /// client for another member refuses it before any request is sent. On
+    /// the storage node's own app, on Postgres.
     #[test]
     #[serial_test::serial]
     fn a_members_latest_bytecommit_is_its_own_or_there_is_none() {
         let fleet = crate::test_support::one_device::Fleet::start();
         let endpoint = fleet.endpoints()[0].clone();
-        let client = build_ca_aware_client().expect("a client");
         crate::runtime::get_runtime().block_on(async {
-            let member = MemberClient::new("dsm-node-1", &endpoint, client.clone());
+            let member = MemberClient::new("dsm-node-1", &endpoint).expect("a client");
             let before = member.latest_bytecommit().await;
             assert_eq!(before.answer, LatestByteCommit::NoCycle);
             assert_eq!(before.answered_as.as_deref(), Some(&b"dsm-node-1"[..]));
@@ -1074,16 +1211,19 @@ mod tests {
             assert_eq!(commit.cycle_index, cycle);
             assert_eq!(after.answered_as.as_deref(), Some(&b"dsm-node-1"[..]));
 
-            let misnamed = MemberClient::new("dsm-node-2", &endpoint, client);
+            let misnamed = MemberClient::new("dsm-node-2", &endpoint).expect("a client");
             let read = misnamed.latest_bytecommit().await;
-            assert_eq!(
-                read.answer,
-                LatestByteCommit::Unanswered(
-                    "answered with a ByteCommit naming dsm-node-1".to_string()
-                ),
-                "another member's ByteCommit is never shown as this member's"
+            let LatestByteCommit::Unanswered(why) = &read.answer else {
+                panic!(
+                    "dsm-node-1's node answered a client for dsm-node-2: {:?}",
+                    read.answer
+                );
+            };
+            assert!(
+                why.contains("certificate not valid for name \"dsm-node-2\""),
+                "the connection is refused because the certificate names another member: {why}"
             );
-            assert_eq!(read.answered_as.as_deref(), Some(&b"dsm-node-1"[..]));
+            assert_eq!(read.answered_as, None, "nothing was read from the node");
         });
     }
 
@@ -1096,10 +1236,65 @@ mod tests {
         (dir, path)
     }
 
-    /// An absent `custom_ca_certs` trusts the system store only; a present one
-    /// is a list of readable certificate paths or the config is malformed —
-    /// a scalar, a table, a non-string entry or an unreadable file is an
-    /// error, never "no certificates".
+    /// An absent `custom_ca_certs` names no CA; a present one is a list of
+    /// readable certificate paths or the config is malformed — a scalar, a
+    /// table, a non-string entry or an unreadable file is an error, never
+    /// "no certificates".
+    /// A member is known only by a certificate from a CA the env config
+    /// names, so no client is built from no CA (the system store is never
+    /// trusted in its place), nor from a named file that holds no
+    /// certificate, nor for a member id no certificate can carry.
+    #[test]
+    fn no_client_is_built_without_a_named_ca_or_for_an_unnameable_member() {
+        let none = CaMaterial {
+            env_path: None,
+            certs: Vec::new(),
+        };
+        let refused = build_member_client(&none, "dsm-node-1").unwrap_err();
+        assert!(refused.to_string().contains("names no CA"), "{refused}");
+
+        let not_pem = CaMaterial {
+            env_path: None,
+            certs: vec![(std::path::PathBuf::from("root.pem"), b"PEM".to_vec())],
+        };
+        let refused = build_member_client(&not_pem, "dsm-node-1").unwrap_err();
+        assert!(
+            refused.to_string().contains("holds no certificate"),
+            "{refused}"
+        );
+
+        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("a CA")
+            .cert
+            .pem()
+            .into_bytes();
+        let named = CaMaterial {
+            env_path: None,
+            certs: vec![(std::path::PathBuf::from("ca.pem"), ca)],
+        };
+        build_member_client(&named, "dsm-node-1").expect("a client for a nameable member");
+        let refused = build_member_client(&named, "not a name").unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("not a name a certificate can carry"),
+            "{refused}"
+        );
+    }
+
+    /// Only `https://` reaches a member: a plain or schemeless endpoint gets
+    /// no client at all.
+    #[test]
+    fn a_member_endpoint_that_is_not_https_gets_no_client() {
+        for endpoint in ["http://127.0.0.1:8080", "127.0.0.1:8080"] {
+            let refused = super::member_client("dsm-node-1", endpoint).unwrap_err();
+            assert!(
+                refused.to_string().contains("not https://"),
+                "{endpoint}: {refused}"
+            );
+        }
+    }
+
     #[test]
     fn custom_ca_certs_is_a_list_of_readable_paths_or_an_error() {
         let (_d, path) = config("network_id = \"x\"\n");

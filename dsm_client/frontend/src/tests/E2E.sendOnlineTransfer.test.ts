@@ -121,12 +121,13 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeErrorResponseFramed(nativeError));
     jest.spyOn(require('../dsm/WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
-    const res = await dsm.sendOnlineTransferSmart('alice', 9n, 'smart path', 'ERA');
+    const alice = new Uint8Array(32).fill(0xa1);
+    const res = await dsm.sendOnlineTransferSmart(encodeBase32Crockford(alice), 9n, 'smart path', 'ERA');
 
     expect(mockAppRouterInvoke).toHaveBeenCalledWith('wallet.sendSmart', expect.any(Uint8Array));
     const [, argPackBytes] = mockAppRouterInvoke.mock.calls[0];
     const req = decodeOnlineTransferSmartRequest(argPackBytes);
-    expect(req.recipient).toBe('alice');
+    expect(req.recipientDeviceId).toEqual(alice);
     expect(req.amount).toBe('9');
     expect(req.memo).toBe('smart path');
     expect(res.success).toBe(false);

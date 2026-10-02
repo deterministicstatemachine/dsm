@@ -4,8 +4,9 @@
 //! successor key.
 //!
 //! The value written to each successor key of a route is one canonical
-//! object, [`SofiExercise`], carrying the signed envelope of `F`, the signed
-//! envelope of `P`, `P(E)`, every `G_j` and every closure object. At the key
+//! object, [`SofiExercise`], carrying the signed envelope of `F`, the
+//! trader's signed `C_q`, the signed envelope of `P`, `P(E)`, every `G_j` and
+//! every closure object. At the key
 //! `K^(a)` of vault `v` at parent `R_n`, the value that counts is the first
 //! exercise at the leader whose `F` names `(v, a)` in its attempts and whose
 //! `P` names `(v, R_n)` in its legs — everything else at the key counts as
@@ -18,14 +19,18 @@
 //! is not validation: whether the route it carries realizes is the ladder's
 //! question (rebuild step R12), answered from the same bytes.
 
+use crate::economic::claim_envelope::RegisteredEconomicClaim;
+use crate::economic::register::{economic_root_register_key, root_claim_naming};
 use crate::route_chain::{
     check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
     CellReading, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
+use super::conformance::closure_object_verifies;
 use super::derive;
 use super::publication::{
     recognize_policy_fulfillment, recognize_precommit, recognize_fulfillment, Signed,
 };
+use super::registration::fulfillment_proves_the_device;
 use super::wire::{
     DlvPolicyFulfillmentBody, SettlementPreimage, SofiExercise, TraderFulfillmentBody,
     TraderPrecommitBody, ValidationRef,
@@ -34,14 +39,16 @@ use super::wire::{
 type D32 = [u8; 32];
 
 /// An exercise whose bytes rebuilt into the objects it carries, bound to one
-/// another: `F` is `P`'s, `P(E)` recomputes `P`'s `E`, the witnesses are the
-/// set `F` commits, and the closure carries one object per reference in
-/// `𝒞_E^pre`. [`recognize_exercise`] is its only constructor and the fields
-/// are read-only, so every one of these bindings holds for every value of
-/// the type.
+/// another: `F` is `P`'s and proves `P`'s device, the signed `C_q` is the
+/// claim of this `P` and `F` and proves its own authority, `P(E)` recomputes
+/// `P`'s `E`, the witnesses are the set `F` commits, and the closure carries
+/// one object per reference in `𝒞_E^pre`. [`recognize_exercise`] is its only
+/// constructor and the fields are read-only, so every one of these bindings
+/// holds for every value of the type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecognizedExercise {
     fulfillment: Signed<TraderFulfillmentBody>,
+    resolution_claim: Vec<u8>,
     precommit: Signed<TraderPrecommitBody>,
     preimage: SettlementPreimage,
     witnesses: Vec<DlvPolicyFulfillmentBody>,
@@ -53,6 +60,13 @@ impl RecognizedExercise {
     /// `F`, signed.
     pub fn fulfillment(&self) -> &Signed<TraderFulfillmentBody> {
         &self.fulfillment
+    }
+
+    /// The trader's signed `C_q`, exactly as the trader signed it: what a
+    /// relayer writes at `K_root(q)`, since only the trader can sign it (SoFi
+    /// Amendment S20). Its body is `derive::resolution_claim(P, F)`.
+    pub fn resolution_claim(&self) -> &[u8] {
+        &self.resolution_claim
     }
 
     /// `P`, signed.
@@ -114,6 +128,30 @@ pub fn recognize_exercise(bytes: &[u8]) -> Option<RecognizedExercise> {
     {
         return None;
     }
+    // F proves P's device from its own bytes (SoFi Amendment S20): its key,
+    // with the AttA it carries, derives the DevID P names. Any other F can
+    // never hold the trader's K_ful(q), so its exercise holds no vault key.
+    if !fulfillment_proves_the_device(&fulfillment.body, precommit.body.device_id()) {
+        return None;
+    }
+    // The trader's signed C_q (S20), recognized exactly as K_root(q) would
+    // recognize it: a claim that proves its own authority there, the
+    // signature verifying under the key it carries and that key with its
+    // AttA deriving the device it names, and whose body is the C_q of this P
+    // and F. That device is P's, as F's key with F's AttA derives it, and one
+    // DevID has one (key, AttA), so C_q is signed under the key F is.
+    // Whatever holds a vault key therefore carries everything a relayer needs
+    // to register its F, and a trader that withholds its pair cannot hold the
+    // key forever.
+    let own_claim = derive::resolution_claim(&precommit.body, &fulfillment.body);
+    let k_root =
+        economic_root_register_key(&own_claim.genesis, &own_claim.device_id, own_claim.position);
+    if !matches!(
+        root_claim_naming(exercise.resolution_claim(), &k_root),
+        Some(RegisteredEconomicClaim::ConditionalSofi(held)) if held == own_claim
+    ) {
+        return None;
+    }
     let preimage = SettlementPreimage::decode(exercise.preimage()).ok()?;
     let e = derive::recompute_e(&preimage).ok()?;
     if e != *precommit.body.external_commitment() {
@@ -142,11 +180,22 @@ pub fn recognize_exercise(bytes: &[u8]) -> Option<RecognizedExercise> {
     if fulfillment.body.policy_fulfillment_set() != ids.as_slice() {
         return None;
     }
-    if exercise.closure().len() != preimage.settlement().closure().refs().len() {
+    // The closure is bound to `F` through `E` too (§17.5): each object is the
+    // one its reference in `𝒞_E^pre` names, by the rule conformance item 8
+    // decides it by. Bytes carrying any other object are not this
+    // exercise, so they hold no key and can never stand where it should.
+    let refs = preimage.settlement().closure().refs();
+    if exercise.closure().len() != refs.len() {
         return None;
+    }
+    for (reference, bytes) in refs.iter().zip(exercise.closure()) {
+        if !closure_object_verifies(reference, bytes).is_some_and(|verifies| verifies) {
+            return None;
+        }
     }
     Some(RecognizedExercise {
         fulfillment,
+        resolution_claim: exercise.resolution_claim().to_vec(),
         precommit,
         preimage,
         witnesses,
@@ -348,7 +397,7 @@ pub(crate) mod fixtures {
     use crate::sofi::conformance::derive_policy_fulfillments;
     use crate::sofi::derive::precommit_id;
     use crate::sofi::publication::Publication;
-    use crate::sofi::validation::fixtures::{trader_keys, Fixture};
+    use crate::sofi::validation::fixtures::{signed_c_q, trader_keys, Fixture};
     use crate::sofi::wire::AttemptEntry;
 
     /// The trader's key, as every fixture `P` commits it.
@@ -368,9 +417,9 @@ pub(crate) mod fixtures {
         pub(crate) fulfillment: TraderFulfillmentBody,
     }
 
-    /// One operation as an exercise: F over `attempts`, the canonical
-    /// witnesses over the shadows P(E) commits, and the parent claim its
-    /// closure references.
+    /// One operation as an exercise: F over `attempts`, the trader's signed
+    /// `C_q` of `P` and `F`, the canonical witnesses over the shadows P(E)
+    /// commits, and the parent claim its closure references.
     pub(crate) fn exercise(f: &Fixture, attempts: &[u64]) -> Built {
         let p = &f.precommit;
         let canonical = derive::canonical_legs(&f.preimage).unwrap();
@@ -405,6 +454,7 @@ pub(crate) mod fixtures {
             p.position() + 1,
             ALG,
             key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let x = SofiExercise::new(
@@ -414,6 +464,7 @@ pub(crate) mod fixtures {
             }
             .object_bytes()
             .unwrap(),
+            signed_c_q(derive::resolution_claim(p, &fb)),
             Publication::Precommit {
                 body: p,
                 signature: &signed(derive::precommit_signing_digest(p)),
@@ -444,8 +495,11 @@ mod tests {
     use super::fixtures::*;
     use super::*;
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
+    use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
     use crate::sofi::publication::Publication;
-    use crate::sofi::validation::fixtures::swap_fixture_n;
+    use crate::sofi::registration::fulfillment_proves_the_device;
+    use crate::sofi::validation::fixtures::{signed_c_q, swap_fixture_n, TRADER_ATT_A};
+    use crate::sofi::wire::SignedSofiResolutionClaim;
     use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
     use crate::route_chain::{CellFact, ChainState, ROUTE_LEN};
 
@@ -504,6 +558,7 @@ mod tests {
         // F of another P.
         let bent = SofiExercise::new(
             ox.fulfillment().to_vec(),
+            ox.resolution_claim().to_vec(),
             x.precommit().to_vec(),
             x.preimage().to_vec(),
             x.witnesses().to_vec(),
@@ -514,6 +569,7 @@ mod tests {
         // A preimage that is not this P's.
         let bent = SofiExercise::new(
             x.fulfillment().to_vec(),
+            x.resolution_claim().to_vec(),
             x.precommit().to_vec(),
             other.preimage.encode().unwrap(),
             x.witnesses().to_vec(),
@@ -526,6 +582,7 @@ mod tests {
         ws.swap(0, 1);
         let bent = SofiExercise::new(
             x.fulfillment().to_vec(),
+            x.resolution_claim().to_vec(),
             x.precommit().to_vec(),
             x.preimage().to_vec(),
             ws,
@@ -542,6 +599,7 @@ mod tests {
         ws[0] = wrong_shadow.encode();
         let bent = SofiExercise::new(
             x.fulfillment().to_vec(),
+            x.resolution_claim().to_vec(),
             x.precommit().to_vec(),
             x.preimage().to_vec(),
             ws,
@@ -570,6 +628,7 @@ mod tests {
                 }
                 .object_bytes()
                 .unwrap(),
+                honest.exercise.resolution_claim().to_vec(),
                 Publication::Precommit {
                     body: p,
                     signature: p_sig,
@@ -604,6 +663,7 @@ mod tests {
             fb.position(),
             ALG,
             &other_pk,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let foreign_sig = crate::crypto::sphincs::sphincs_sign(
@@ -640,6 +700,132 @@ mod tests {
             attempt_resolution(&at, &only_junk.evidence()).map(|r| r.fact()),
             Ok(CellFact::Open)
         );
+    }
+
+    /// SoFi Amendment S20: the exercise carries the trader's signed `C_q` of
+    /// its own `P` and `F`, so a relayer can register `F` from the exercise's
+    /// bytes alone. An exercise counts only when that claim is there, is the
+    /// claim `P` and `F` derive, and proves its own authority. Each bent
+    /// alone is nothing.
+    #[test]
+    fn an_exercise_carries_the_traders_signed_claim_of_its_own_p_and_f() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb) = (&honest.precommit, &honest.fulfillment);
+        let x = &honest.exercise;
+        let with = |claim: Vec<u8>| {
+            SofiExercise::new(
+                x.fulfillment().to_vec(),
+                claim,
+                x.precommit().to_vec(),
+                x.preimage().to_vec(),
+                x.witnesses().to_vec(),
+                x.closure().to_vec(),
+            )
+            .unwrap()
+            .encode()
+        };
+        let own = derive::resolution_claim(p, fb);
+        let recognized = recognize_exercise(&x.encode()).unwrap();
+        assert_eq!(
+            recognized.resolution_claim(),
+            x.resolution_claim(),
+            "the claim a relayer carries is the trader's bytes exactly"
+        );
+        assert_eq!(
+            *SignedSofiResolutionClaim::decode(recognized.resolution_claim())
+                .unwrap()
+                .claim(),
+            own
+        );
+
+        // No signed claim: bytes that are none, and the bare C_q.
+        assert!(recognize_exercise(&with(b"not a claim".to_vec())).is_none());
+        assert!(recognize_exercise(&with(own.encode())).is_none());
+
+        // The trader's signed claim of another fulfillment of this P: it
+        // proves its own authority, and it is not this F's claim. Mutation:
+        // drop the body comparison.
+        let other_f = exercise(&f, &[1, 0]).fulfillment;
+        let other = derive::resolution_claim(p, &other_f);
+        assert_ne!(other, own);
+        assert!(recognize_exercise(&with(signed_c_q(other))).is_none());
+
+        // This F's claim under the trader's signature of another claim: the
+        // signature does not verify over this one. Mutation: drop the
+        // verification.
+        let misplaced = SignedSofiResolutionClaim::new(
+            own,
+            ALG,
+            key(),
+            TRADER_ATT_A,
+            &signed(derive::resolution_claim_signing_digest(
+                &other,
+                ALG,
+                key(),
+                &TRADER_ATT_A,
+            )),
+        )
+        .unwrap();
+        assert!(recognize_exercise(&with(misplaced.encode())).is_none());
+
+        // This F's claim signed by another device: the signature verifies
+        // under the key it carries, and that key does not derive the device
+        // the claim names.
+        let (other_pk, other_sk) = generate_sphincs_keypair().unwrap();
+        let foreign = SignedSofiResolutionClaim::new(
+            own,
+            ALG,
+            &other_pk,
+            TRADER_ATT_A,
+            &sphincs_sign(
+                &other_sk,
+                &derive::resolution_claim_signing_digest(&own, ALG, &other_pk, &TRADER_ATT_A),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(recognize_exercise(&with(foreign.encode())).is_none());
+    }
+
+    /// SoFi Amendment S20: `F` proves `P`'s device from its own bytes, its key
+    /// with the `AttA` it carries deriving the DevID `P` names. An `F` under
+    /// the trader's key with another `AttA` verifies, and so does the claim
+    /// the trader signs for it under its own `AttA`; but that `F` can never
+    /// hold the trader's `K_ful(q)`, so an exercise carrying it must hold no
+    /// vault key. Mutation: drop the device check.
+    #[test]
+    fn an_exercise_whose_fulfillment_does_not_prove_the_traders_device_is_nothing() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb) = (&honest.precommit, &honest.fulfillment);
+        let x = &honest.exercise;
+        let stray = TraderFulfillmentBody::new(
+            *fb.precommit_id(),
+            fb.policy_fulfillment_set().to_vec(),
+            fb.attempts().to_vec(),
+            fb.position(),
+            ALG,
+            key(),
+            [0x5A; 32],
+        )
+        .unwrap();
+        assert!(!fulfillment_proves_the_device(&stray, p.device_id()));
+        let bent = SofiExercise::new(
+            Publication::Fulfillment {
+                body: &stray,
+                signature: &signed(derive::fulfillment_signing_digest(&stray)),
+            }
+            .object_bytes()
+            .unwrap(),
+            signed_c_q(derive::resolution_claim(p, &stray)),
+            x.precommit().to_vec(),
+            x.preimage().to_vec(),
+            x.witnesses().to_vec(),
+            x.closure().to_vec(),
+        )
+        .unwrap();
+        assert!(recognize_exercise(&bent.encode()).is_none());
     }
 
     /// An exercise final at its attempt cell has a completion proof built
@@ -706,6 +892,7 @@ mod tests {
             }
             .object_bytes()
             .unwrap(),
+            built.exercise.resolution_claim().to_vec(),
             Publication::Precommit {
                 body: &built.precommit,
                 signature: &junk,

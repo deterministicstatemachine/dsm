@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only. Merged into the main manifest for the debug variant; a release build
+     declares none of this (pre-audit item 16). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- H2 bench self-test: launched when the Pico anchor attaches over USB-OTG (that launch
+             also grants USB permission for the device). Replays one OP_SPI_PASSTHROUGH round-trip
+             and logs whether the phone reached the real TROPIC01. Debug bring-up only: it is
+             exported, and a launch carrying its confirmation extras runs irreversible chip
+             operations (counter init, birth cage), so it is declared for debug builds alone. -->
+        <activity
+            android:name="com.dsm.wallet.debug.PicoSelfTestActivity"
+            android:exported="true"
+            android:label="Pico USB self-test"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/pico_device_filter" />
+        </activity>
+    </application>
+</manifest>

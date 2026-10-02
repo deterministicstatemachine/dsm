@@ -1107,6 +1107,7 @@ dependencies = [
  "constant_time_eq 0.5.0",
  "crc32fast",
  "derive_more",
+ "dsm-sphincs",
  "ed25519-dalek",
  "env_logger 0.11.10",
  "ff 0.14.0",
@@ -1133,7 +1134,6 @@ dependencies = [
  "protoc-bin-vendored",
  "quickcheck",
  "rand 0.9.4",
- "rand_chacha 0.9.0",
  "rstest",
  "serde",
  "serial_test",
@@ -1170,6 +1170,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsm-sphincs"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "dsm_sdk"
 version = "0.1.0-beta.3"
 dependencies = [
@@ -1180,6 +1191,7 @@ dependencies = [
  "arrayref",
  "async-trait",
  "axum",
+ "axum-server",
  "base32",
  "bincode",
  "bip39",
@@ -1264,6 +1276,7 @@ dependencies = [
  "deadpool-postgres",
  "dsm",
  "futures",
+ "hyper-util",
  "log",
  "prost 0.14.3",
  "rand 0.8.6",
@@ -4419,6 +4432,7 @@ dependencies = [
  "http-body-util",
  "iri-string",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",

@@ -13,8 +13,8 @@ to real silicon:
 - **`WitnessSig`** → WOTS-over-BLAKE3 (`dsm_anchor_core::sig::WotsBlake3`), the
   per-transfer TROPIC-keyed hardware witness.
 - **`PartitionSig`** → BLAKE3-SPHINCS+ SPX128f ([`dsm-sphincs`](../dsm-sphincs)),
-  the RP2350 secure-partition certificate scheme — byte-compatible with the DSM
-  receiver's verifier (`DSM/sphincs-kdf`).
+  the RP2350 secure-partition certificate scheme — the same crate the DSM
+  receiver verifies with (construction version 2).
 
 On boot it enrolls (one-way birth fuse → bundle `B`, fused head `A₀`, boot head
 `J₀`, partition keypair), runs the boot fence, executes a self-test

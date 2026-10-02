@@ -10,18 +10,20 @@
 //! It is a conclusion, never a record: no member computes it, no member
 //! writes it, and nothing here consults anything but what the members hold.
 //! `Final` at each cell is the route-chain rule of storage spec §9 over the
-//! recognized view — an object naming `K_ful(q)` is a fulfillment envelope
-//! whose body sits at position `q` and whose `P` names the trader whose key it
-//! is; an object naming `K_root(q)` is a registered claim whose coordinates
-//! derive that key. Bytes that are neither count as nothing anywhere.
+//! recognized view. An object naming `K_ful(q)` is a fulfillment envelope at
+//! position `q` under a key that derives the trader's device; an object
+//! naming `K_root(q)` is a registered claim whose coordinates derive that
+//! key. Both are decided from the bytes alone (SoFi Amendment S20), so what
+//! holds each cell, and whether the pair is registered, is the same for every
+//! reader at every time. Bytes that are neither count as nothing anywhere.
 //!
 //! Because at most one value has a valid leader link at `K_ful(q)`, at most
 //! one fulfillment is registered per position. Registered is not conforming
 //! and not valid (Section 20.2): what this module answers is only whether the
-//! exercise happened.
+//! exercise happened. Whether the claim at `K_root(q)` is exactly
+//! `derive(P, F)` is checked where `P` is in hand ([`RegistrationRead::standing_of`]).
 
-use std::collections::BTreeMap;
-
+use crate::economic::claim_envelope::RegisteredEconomicClaim;
 use crate::economic::register::{position_seed, read_root_cell, RootCell};
 use crate::route_chain::{
     check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
@@ -33,47 +35,33 @@ use super::wire::{TraderFulfillmentBody, TraderPrecommitBody};
 
 type D32 = [u8; 32];
 
-/// The precommits a reader fetched by `PrecommitId` (R8) for the fulfillment
-/// candidates it saw. A candidate whose `P` is not in hand names nothing
-/// yet: without `P`, neither the trader it belongs to nor `C_q` is known.
-pub trait PrecommitLookup {
-    fn precommit(&self, id: &D32) -> Option<&TraderPrecommitBody>;
+/// Whether `F` proves its own authority for a cell of `device_id` (DSM
+/// Amendment A10, SoFi Amendment S20): its key, with the `AttA` it carries,
+/// derives that device. Decided from `F`'s bytes alone.
+pub fn fulfillment_proves_the_device(body: &TraderFulfillmentBody, device_id: &D32) -> bool {
+    crate::core::identity::genesis_v2::derive_devid(
+        body.claimant_public_key(),
+        body.claimant_att_a(),
+    ) == *device_id
 }
 
-impl PrecommitLookup for BTreeMap<D32, TraderPrecommitBody> {
-    fn precommit(&self, id: &D32) -> Option<&TraderPrecommitBody> {
-        self.get(id)
-    }
-}
-
-/// An object naming `K_ful(q)` of trader `(G, DevID)`: a fulfillment
-/// envelope that recognizes (R8), whose body's position is `q`, and whose
-/// `P` — fetched by the id the body names — is that trader's. A fulfillment
-/// of another trader or another position written at this key is nothing:
-/// neither a rival nor a winner, however early it arrived.
+/// An object naming `K_ful(q)` of the trader whose device is `device_id`
+/// (SoFi Amendment S20): a fulfillment envelope that recognizes under its own
+/// key (R8), whose body's position is `q`, and whose key and `AttA` derive
+/// `device_id` ([`fulfillment_proves_the_device`]). Decided from `F`'s bytes
+/// alone: `P` is never read here. `F` carries no genesis; the cell's key is
+/// derived from `(G, DevID, q)`, and only the holder of `DevID`'s key can
+/// write an `F` that passes, so whatever holds the trader's `K_ful(q)` is the
+/// trader's own act. Anything else written at this key is nothing: neither a
+/// rival nor a winner, however early it arrived.
 pub fn names_fulfillment_key(
     bytes: &[u8],
-    genesis: &D32,
     device_id: &D32,
     position: u64,
-    precommits: &impl PrecommitLookup,
 ) -> Option<Signed<TraderFulfillmentBody>> {
     let signed = recognize_fulfillment(bytes)?.1;
-    if signed.body.position() != position {
-        return None;
-    }
-    let precommit = precommits.precommit(signed.body.precommit_id())?;
-    if precommit.genesis() != genesis || precommit.device_id() != device_id {
-        return None;
-    }
-    // F is signed under the key its P commits; each was verified under its
-    // own body's key when it was recognized.
-    if signed.body.signature_alg() != precommit.signature_alg()
-        || signed.body.claimant_public_key() != precommit.claimant_public_key()
-    {
-        return None;
-    }
-    Some(signed)
+    (signed.body.position() == position && fulfillment_proves_the_device(&signed.body, device_id))
+        .then_some(signed)
 }
 
 /// The two cells of trader `(G, DevID)`'s position `q` as Core derives them
@@ -149,6 +137,11 @@ pub struct RegistrationRead {
     position: u64,
     parent_root: D32,
     registration: Registration,
+    /// The id of the claim holding `K_root(q)`'s leader link, in any state:
+    /// the entry digest of its exact bytes, or of its derived body for a
+    /// conditional claim (SoFi Amendment S20). `None` while the leader holds
+    /// no claim.
+    root_claim: Option<D32>,
 }
 
 impl RegistrationRead {
@@ -176,6 +169,11 @@ impl RegistrationRead {
         self.registration
     }
 
+    /// The id of the claim holding `K_root(q)`'s leader link, if any.
+    pub fn root_claim(&self) -> Option<&D32> {
+        self.root_claim.as_ref()
+    }
+
     /// Whether this read is of the position `fulfillment` claims for
     /// `precommit`'s trader, routed by the root `precommit` was built on.
     pub fn is_of(
@@ -189,10 +187,77 @@ impl RegistrationRead {
             && self.parent_root == *precommit.void_root()
     }
 
-    /// `FulfillmentRegistered(q, F)` for exactly `fulfillment`: registered,
-    /// and the registered envelope's body is this one.
-    pub fn is_registered_as(&self, fulfillment: &TraderFulfillmentBody) -> bool {
-        matches!(&self.registration, Registration::Registered(signed) if signed.body == *fulfillment)
+    /// Where `fulfillment`, of `precommit`, stands at this pair, with `P` in
+    /// hand (SoFi Amendments S14 and S20). `F` is lost when another
+    /// fulfillment holds `K_ful(q)`'s leader link, in any state (§23.1: once
+    /// the leader keeps a value, no other is ever final there), or when
+    /// `K_root(q)`'s leader link is held by a claim other than
+    /// `derive(P, F)`: another fulfillment's, an ordinary transition's, or
+    /// one naming `F` whose body is not `F`'s. When that last one is final
+    /// with `F` final at `K_ful(q)`, the pair is matched by `F`'s id and its
+    /// body is not `F`'s claim: misbodied, which loses `F` and makes the
+    /// position Invalid for the trader's lineage (S20). Registered when the
+    /// pair is final on `F` and on exactly `derive(P, F)`. All but Pending
+    /// are permanent.
+    pub fn standing_of(
+        &self,
+        precommit: &TraderPrecommitBody,
+        fulfillment: &TraderFulfillmentBody,
+    ) -> PairStanding {
+        let own = crate::storage_cell::entry_digest(
+            &derive::resolution_claim(precommit, fulfillment).encode(),
+        );
+        let root_is_another = self.root_claim.is_some_and(|claim| claim != own);
+        if root_is_another
+            && matches!(&self.registration, Registration::Registered(held) if held.body == *fulfillment)
+        {
+            return PairStanding::Misbodied;
+        }
+        let holder = match &self.registration {
+            Registration::Registered(signed)
+            | Registration::Held(signed)
+            | Registration::NeverRegistered {
+                fulfillment: signed,
+                ..
+            } => Some(&signed.body),
+            Registration::RootTaken { .. } | Registration::Unresolved => None,
+        };
+        if root_is_another || holder.is_some_and(|held| held != fulfillment) {
+            return PairStanding::Lost;
+        }
+        match self.registration {
+            Registration::Registered(..) => PairStanding::Registered,
+            Registration::Held(..)
+            | Registration::NeverRegistered { .. }
+            | Registration::RootTaken { .. }
+            | Registration::Unresolved => PairStanding::Pending,
+        }
+    }
+}
+
+/// Where one fulfillment stands at its position pair, with its `P` in hand
+/// ([`RegistrationRead::standing_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairStanding {
+    /// `FulfillmentRegistered(F)`, the pair's claim being exactly
+    /// `derive(P, F)`.
+    Registered,
+    /// Not yet: `F` may still register.
+    Pending,
+    /// `F` can never register at `q` (SoFi Amendments S14, S20). Permanent.
+    Lost,
+    /// The pair is final on `F`, matched by its id, but the claim at
+    /// `K_root(q)` is not `derive(P, F)`: it names `F` under another body.
+    /// `F` is lost there (S14's skip, no Void) and the position is Invalid
+    /// for the trader's lineage (S20). Permanent.
+    Misbodied,
+}
+
+impl PairStanding {
+    /// `F` can never register at `q`: lost to another claim, or to its own
+    /// pair under another body. What the S14 skip reads.
+    pub fn is_lost(self) -> bool {
+        matches!(self, Self::Lost | Self::Misbodied)
     }
 }
 
@@ -203,56 +268,50 @@ pub enum PositionCell {
     Root,
 }
 
-/// `FulfillmentRegistered` at position `q`, as the reads establish it.
+/// `FulfillmentRegistered` at position `q`, as the reads establish it from
+/// the two cells' bytes alone (SoFi Amendment S20).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Registration {
-    /// `Final(K_ful(q), F)` and `Final(K_root(q), C_q)`: the exercise. The
-    /// registered fulfillment, in the envelope the members hold.
+    /// `Final(K_ful(q), F)` and `Final(K_root(q), C_q)`, the claim naming
+    /// `FulfillmentId(F)`: the exercise. The registered fulfillment, in the
+    /// envelope the members hold. Whether that claim is exactly
+    /// `derive(P, F)` is checked where `P` is in hand.
     Registered(Signed<TraderFulfillmentBody>),
-    /// `F` is final at `K_ful(q)` but `K_root(q)` is final on another claim
-    /// — an ordinary transition, or another fulfillment's claim, got to the
-    /// leader first. This `F` is not registered and never will be
-    /// (PairMutualExclusion): the position went to the other claim.
+    /// `F` holds `K_ful(q)`'s leader link, and `K_root(q)`'s leader link is
+    /// held by a claim that does not name it: an ordinary transition, or
+    /// another fulfillment's claim, got to the leader first. This `F` is not
+    /// registered and never will be (PairMutualExclusion): the position went
+    /// to the other claim.
     NeverRegistered {
         fulfillment: Signed<TraderFulfillmentBody>,
         settled_at: PositionCell,
     },
-    /// No fulfillment is final at `K_ful(q)`, and `K_root(q)` is held by the
-    /// claim whose entry digest is `claim`: final, or holding the leader link,
-    /// so no other value will ever be final there (§9 finality 2). An `F` at
-    /// `q` whose own `C_q` is another claim can never register (SoFi
-    /// Amendment S14); one whose `C_q` it is waits for its fulfillment to be
-    /// relayed.
+    /// `F` holds `K_ful(q)`'s leader link, leader-held, preserved or final,
+    /// and the pair is not final on it yet. `F` may still register, and no
+    /// other fulfillment ever will (§23.1).
+    Held(Signed<TraderFulfillmentBody>),
+    /// No fulfillment holds `K_ful(q)`'s leader link, and `K_root(q)`'s is
+    /// held by the claim whose id is `claim`. An `F` at `q` whose own `C_q`
+    /// it is not can never register (SoFi Amendment S14); one whose `C_q` it
+    /// is waits for its fulfillment to be relayed.
     RootTaken { claim: D32 },
-    /// Not registered yet: a cell is open, or the value holding it is not
-    /// final yet.
+    /// Neither cell's leader holds a recognized value yet.
     Unresolved,
 }
 
-/// A fulfillment recognized at `K_ful(q)`: its entry digest, the signed
-/// fulfillment, and the precommit it names.
-type RecognizedFulfillment = (D32, (Signed<TraderFulfillmentBody>, TraderPrecommitBody));
-
 /// The recognizer of `K_ful(q)`: fulfillment envelopes naming the key
-/// ([`names_fulfillment_key`]), with the precommit each names, identified by
-/// the entry digest of their exact bytes.
-fn fulfillment_at<'a>(
-    cells: &'a PositionCells,
-    precommits: &'a impl PrecommitLookup,
-) -> impl Fn(&[u8]) -> Option<RecognizedFulfillment> + 'a {
+/// ([`names_fulfillment_key`]), identified by the entry digest of their exact
+/// bytes.
+fn fulfillment_at(
+    cells: &PositionCells,
+) -> impl Fn(&[u8]) -> Option<(D32, Signed<TraderFulfillmentBody>)> + '_ {
     move |bytes| {
         let signed = names_fulfillment_key(
             bytes,
-            cells.root.genesis(),
             cells.root.device_id(),
             cells.root.economic_position(),
-            precommits,
         )?;
-        let precommit = precommits.precommit(signed.body.precommit_id())?.clone();
-        Some((
-            crate::storage_cell::entry_digest(bytes),
-            (signed, precommit),
-        ))
+        Some((crate::storage_cell::entry_digest(bytes), signed))
     }
 }
 
@@ -262,14 +321,8 @@ fn fulfillment_at<'a>(
 pub fn fulfillment_completion(
     cells: &PositionCells,
     evidence: &CellEvidence,
-    precommits: &impl PrecommitLookup,
 ) -> Result<Option<(Signed<TraderFulfillmentBody>, CompletionProof)>, Missing> {
-    Ok(completion_proof(
-        &cells.fulfillment,
-        evidence,
-        fulfillment_at(cells, precommits),
-    )?
-    .map(|((signed, ..), proof)| (signed, proof)))
+    completion_proof(&cells.fulfillment, evidence, fulfillment_at(cells))
 }
 
 /// Check a kept completion proof of `K_ful(q)` against the reads in
@@ -278,89 +331,82 @@ pub fn check_fulfillment_completion(
     cells: &PositionCells,
     evidence: &CellEvidence,
     proof: &CompletionProof,
-    precommits: &impl PrecommitLookup,
 ) -> Result<Signed<TraderFulfillmentBody>, ProofRefusal> {
-    check_completion_proof(
-        &cells.fulfillment,
-        evidence,
-        proof,
-        fulfillment_at(cells, precommits),
-    )
-    .map(|(signed, ..)| signed)
+    check_completion_proof(&cells.fulfillment, evidence, proof, fulfillment_at(cells))
 }
 
 /// Derive `FulfillmentRegistered(q)` from the route-chain evidence of the
 /// two position cells: `K_ful(q)` over [`names_fulfillment_key`], `K_root(q)`
 /// over the register reader's rule
 /// ([`crate::economic::register::root_claim_naming`]; `C_q` is one such
-/// claim). `Err` names what the evidence does not yet show at a cell whose
-/// answer is needed: a network status, never an answer about the position.
+/// claim), the pair matched by `FulfillmentId(F)`. `Err` names what the
+/// evidence does not yet show at a cell whose answer is needed: a network
+/// status, never an answer about the position.
 pub fn fulfillment_registered(
     cells: &PositionCells,
     fulfillment_evidence: &CellEvidence,
     root_evidence: &CellEvidence,
-    precommits: &impl PrecommitLookup,
 ) -> Result<RegistrationRead, Missing> {
-    let registration = registration_of(cells, fulfillment_evidence, root_evidence, precommits)?;
+    let root = read_root_cell(&cells.root, root_evidence)?;
+    let root_claim = match &root {
+        CellReading::Held { id, .. } => Some(*id),
+        CellReading::Open => None,
+    };
+    let registration = match evaluate(
+        &cells.fulfillment,
+        fulfillment_evidence,
+        fulfillment_at(cells),
+    )? {
+        CellReading::Open => match root {
+            CellReading::Held { id, .. } => Registration::RootTaken { claim: id },
+            CellReading::Open => Registration::Unresolved,
+        },
+        CellReading::Held {
+            object: signed,
+            state,
+            ..
+        } => match root {
+            CellReading::Held {
+                object: claim,
+                state: root_state,
+                ..
+            } if names_the_fulfillment(&claim, &signed.body) => {
+                if matches!(state, ChainState::Final) && matches!(root_state, ChainState::Final) {
+                    Registration::Registered(signed)
+                } else {
+                    Registration::Held(signed)
+                }
+            }
+            // Another claim holds the leader link at K_root(q): final or not
+            // yet, no other value will ever be final there (§9 finality 2).
+            CellReading::Held { .. } => Registration::NeverRegistered {
+                fulfillment: signed,
+                settled_at: PositionCell::Root,
+            },
+            CellReading::Open => Registration::Held(signed),
+        },
+    };
     Ok(RegistrationRead {
         genesis: *cells.root.genesis(),
         device_id: *cells.root.device_id(),
         position: cells.root.economic_position(),
         parent_root: cells.parent_root,
         registration,
+        root_claim,
     })
 }
 
-fn registration_of(
-    cells: &PositionCells,
-    fulfillment_evidence: &CellEvidence,
-    root_evidence: &CellEvidence,
-    precommits: &impl PrecommitLookup,
-) -> Result<Registration, Missing> {
-    let fulfillment = evaluate(
-        &cells.fulfillment,
-        fulfillment_evidence,
-        fulfillment_at(cells, precommits),
-    )?;
-    let (signed, precommit) = match fulfillment {
-        CellReading::Held {
-            object,
-            state: ChainState::Final,
-            ..
-        } => object,
-        CellReading::Held {
-            state: ChainState::LeaderHeld | ChainState::Preserved,
-            ..
-        }
-        | CellReading::Open => {
-            // No fulfillment is final at K_ful(q) yet. The position may still
-            // have gone to a claim at K_root(q), and whatever holds it is the
-            // claim every F at q is measured against (SoFi Amendment S14).
-            return Ok(match read_root_cell(&cells.root, root_evidence)? {
-                CellReading::Held { id, .. } => Registration::RootTaken { claim: id },
-                CellReading::Open => Registration::Unresolved,
-            });
-        }
-    };
-    // The root cell's reading identifies its claim by the entry digest of
-    // its exact bytes, so `C_q` holds the cell exactly when the ids agree.
-    let claim = crate::storage_cell::entry_digest(
-        &derive::resolution_claim(&precommit, &signed.body).encode(),
-    );
-    Ok(match read_root_cell(&cells.root, root_evidence)? {
-        CellReading::Held {
-            id,
-            state: ChainState::Final,
-            ..
-        } if id == claim => Registration::Registered(signed),
-        // Another claim holds the leader link at K_root(q): final or not
-        // yet, no other value will ever be final there (§9 finality 2).
-        CellReading::Held { id, .. } if id != claim => Registration::NeverRegistered {
-            fulfillment: signed,
-            settled_at: PositionCell::Root,
-        },
-        CellReading::Held { .. } | CellReading::Open => Registration::Unresolved,
-    })
+/// Whether the claim at `K_root(q)` names `fulfillment` (SoFi Amendment
+/// S20): a conditional claim whose `fulfillment_id` is `FulfillmentId(F)`.
+fn names_the_fulfillment(
+    claim: &RegisteredEconomicClaim,
+    fulfillment: &TraderFulfillmentBody,
+) -> bool {
+    matches!(
+        claim,
+        RegisteredEconomicClaim::ConditionalSofi(c)
+            if c.fulfillment_id == derive::fulfillment_id(fulfillment)
+    )
 }
 
 #[cfg(test)]
@@ -369,10 +415,10 @@ mod tests {
     use super::*;
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
     use crate::sofi::publication::Publication;
-    use crate::sofi::validation::fixtures::{swap_fixture_n, trader_keys, DEV, G};
+    use crate::sofi::validation::fixtures::{signed_c_q, swap_fixture_n, trader_keys, dev, G};
     use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
     use crate::route_chain::ROUTE_LEN;
-    use crate::sofi::wire::AttemptEntry;
+    use crate::sofi::wire::{AttemptEntry, SofiResolutionClaim};
 
     /// The trader's key, as every fixture `P` commits it.
     fn key() -> &'static [u8] {
@@ -398,6 +444,7 @@ mod tests {
             position,
             ALG,
             key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -411,51 +458,109 @@ mod tests {
         .unwrap()
     }
 
-    fn lookup(p: &TraderPrecommitBody) -> BTreeMap<D32, TraderPrecommitBody> {
-        BTreeMap::from([(derive::precommit_id(p), p.clone())])
-    }
-
-    /// The key is `(G, DevID, q)`: an envelope at another position, of a
-    /// precommit not in hand, or of another trader's precommit is nothing.
+    /// The key is `(G, DevID, q)`, and what names it is decided from `F`'s
+    /// bytes alone (SoFi Amendment S20): an envelope at another position, or
+    /// under a key that does not derive this device, is nothing, and no `P`
+    /// is read to decide it, so whether the `P` it names is published yet
+    /// changes nothing.
     #[test]
     fn only_a_fulfillment_of_this_trader_at_this_position_names_the_key() {
         let p = swap_fixture_n(2).precommit;
         let q = p.position() + 1;
         let f = fulfillment(&p, q);
         let bytes = envelope(&f);
-        let known = lookup(&p);
         assert_eq!(
-            names_fulfillment_key(&bytes, &G, &DEV, q, &known).map(|s| s.body),
+            names_fulfillment_key(&bytes, &dev(), q).map(|s| s.body),
             Some(f.clone())
         );
-        assert!(names_fulfillment_key(&bytes, &G, &DEV, q + 1, &known).is_none());
-        assert!(names_fulfillment_key(&bytes, &[0x33; 32], &DEV, q, &known).is_none());
-        let unknown: BTreeMap<D32, TraderPrecommitBody> = BTreeMap::new();
-        assert!(
-            names_fulfillment_key(&bytes, &G, &DEV, q, &unknown).is_none(),
-            "without P neither the trader nor C_q is known"
-        );
-        assert!(names_fulfillment_key(b"not an envelope", &G, &DEV, q, &known).is_none());
+        assert!(names_fulfillment_key(&bytes, &dev(), q + 1).is_none());
+        assert!(names_fulfillment_key(&bytes, &[0x33; 32], q).is_none());
+        assert!(names_fulfillment_key(b"not an envelope", &dev(), q).is_none());
+    }
+
+    /// DSM Amendment A10, SoFi Amendment S20: `F` proves its own authority
+    /// for `K_ful(q)`. A squatter that publishes its own `P` naming the
+    /// victim's device, and an `F` of it — each verifying under the
+    /// squatter's key — names no cell of the victim's, with the squatter's
+    /// `AttA` or the victim's, even with that `P` in hand: the key does not
+    /// derive the victim's device, decided from `F`'s bytes alone.
+    #[test]
+    fn a_fulfillment_under_a_key_that_does_not_derive_the_trader_names_no_cell() {
+        let p = swap_fixture_n(2).precommit;
+        let q = p.position() + 1;
+        let (squatter_pk, squatter_sk) =
+            crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let squatters_p = TraderPrecommitBody::new(
+            *p.genesis(),
+            *p.device_id(),
+            p.position(),
+            *p.parent_claim_ref(),
+            *p.external_commitment(),
+            p.legs().to_vec(),
+            *p.realize_root(),
+            *p.void_root(),
+            *p.storage_set_id(),
+            ALG,
+            &squatter_pk,
+        )
+        .unwrap();
+        for att_a in [[0x5A; 32], crate::sofi::validation::fixtures::TRADER_ATT_A] {
+            let squat = TraderFulfillmentBody::new(
+                derive::precommit_id(&squatters_p),
+                vec![[0x01; 32], [0x02; 32]],
+                squatters_p
+                    .legs()
+                    .iter()
+                    .map(|l| AttemptEntry {
+                        vault_id: l.vault_id,
+                        attempt: 0,
+                    })
+                    .collect(),
+                q,
+                ALG,
+                &squatter_pk,
+                att_a,
+            )
+            .unwrap();
+            assert!(!fulfillment_proves_the_device(&squat, &dev()));
+            let bytes = Publication::Fulfillment {
+                body: &squat,
+                signature: &crate::crypto::sphincs::sphincs_sign(
+                    &squatter_sk,
+                    &derive::fulfillment_signing_digest(&squat),
+                )
+                .unwrap(),
+            }
+            .object_bytes()
+            .unwrap();
+            assert!(
+                names_fulfillment_key(&bytes, &dev(), q).is_none(),
+                "a squatter's F names no cell of the victim's"
+            );
+        }
+        // The trader's own F of its own P names the cell.
+        let f = fulfillment(&p, q);
+        assert!(fulfillment_proves_the_device(&f, &dev()));
+        assert!(names_fulfillment_key(&envelope(&f), &dev(), q).is_some());
     }
 
     /// `K_ful(q)` is named only by a fulfillment the trader signed: its
-    /// signature verifies under the key its body commits, and that key is the
-    /// one its `P` commits. An unsigned or foreign-key `F` naming the right
-    /// trader, position and `P` is nothing, so first at the leader it holds
-    /// nothing.
+    /// signature verifies under the key its body commits, and that key, with
+    /// the `AttA` it carries, derives the trader's device (SoFi Amendment
+    /// S20). An unsigned or foreign-key `F` naming the right position and
+    /// `P` is nothing, so first at the leader it holds nothing.
     #[test]
-    fn only_a_fulfillment_signed_under_its_precommits_key_names_the_key() {
+    fn only_a_fulfillment_signed_under_a_key_of_this_device_names_the_key() {
         let p = swap_fixture_n(2).precommit;
         let q = p.position() + 1;
         let f = fulfillment(&p, q);
-        let known = lookup(&p);
         let unsigned = Publication::Fulfillment {
             body: &f,
             signature: &[0x77; 8],
         }
         .object_bytes()
         .unwrap();
-        assert!(names_fulfillment_key(&unsigned, &G, &DEV, q, &known).is_none());
+        assert!(names_fulfillment_key(&unsigned, &dev(), q).is_none());
 
         let (other_pk, other_sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
         let foreign = TraderFulfillmentBody::new(
@@ -465,6 +570,7 @@ mod tests {
             q,
             ALG,
             &other_pk,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let foreign_bytes = Publication::Fulfillment {
@@ -477,26 +583,26 @@ mod tests {
         }
         .object_bytes()
         .unwrap();
-        assert!(names_fulfillment_key(&foreign_bytes, &G, &DEV, q, &known).is_none());
+        assert!(names_fulfillment_key(&foreign_bytes, &dev(), q).is_none());
 
         // First at the leader, the unsigned F blocks nothing.
         let cells = PositionCells::new(
             &G,
-            &DEV,
+            &dev(),
             q,
             &[0x5E; 32],
             &committed_set(),
             &committed_set_id(),
         )
         .expect("the committed set");
-        let claim = derive::resolution_claim(&p, &f).encode();
+        let claim = signed_c_q(derive::resolution_claim(&p, &f));
         let mut ful = Cell::at(cells.fulfillment());
         ful.write(&unsigned, ROUTE_LEN - 1, &[]);
         ful.write(&envelope(&f), ROUTE_LEN - 1, &[]);
         let mut root = Cell::at(cells.root().routed());
         root.write(&claim, ROUTE_LEN - 1, &[]);
         assert!(matches!(
-            fulfillment_registered(&cells, &ful.evidence(), &root.evidence(), &known)
+            fulfillment_registered(&cells, &ful.evidence(), &root.evidence())
                 .map(|r| r.into_registration()),
             Ok(Registration::Registered(ref s)) if s.body == f
         ));
@@ -510,10 +616,9 @@ mod tests {
         let q = p.position() + 1;
         let f = fulfillment(&p, q);
         let bytes = envelope(&f);
-        let known = lookup(&p);
         let cells = PositionCells::new(
             &G,
-            &DEV,
+            &dev(),
             q,
             &[0x5E; 32],
             &committed_set(),
@@ -523,52 +628,37 @@ mod tests {
         let mut seats = Cell::at(cells.fulfillment());
         seats.write(&bytes, 1, &[]);
         assert!(matches!(
-            fulfillment_completion(&cells, &seats.evidence(), &known),
+            fulfillment_completion(&cells, &seats.evidence()),
             Ok(None)
         ));
         let mut seats = Cell::at(cells.fulfillment());
         seats.write(&bytes, ROUTE_LEN - 1, &[]);
-        let Ok(Some((proven, proof))) = fulfillment_completion(&cells, &seats.evidence(), &known)
-        else {
+        let Ok(Some((proven, proof))) = fulfillment_completion(&cells, &seats.evidence()) else {
             panic!("a final fulfillment has a completion proof")
         };
         assert_eq!(proven.body, f);
-        let checked = check_fulfillment_completion(&cells, &seats.evidence(), &proof, &known)
+        let checked = check_fulfillment_completion(&cells, &seats.evidence(), &proof)
             .expect("the kept proof checks");
         assert_eq!(checked.body, f);
     }
 
-    /// The predicate over the two cells: both final, the root on this F's
-    /// own claim — registered; the root held by another claim of this
-    /// position, final or not — never; anything short of final at either
-    /// cell — unresolved; an unread leader — not decided on this evidence.
+    /// The predicate over the two cells, from their bytes alone (SoFi
+    /// Amendment S20): both final, the root on a claim naming this `F` —
+    /// registered; the root held by a claim naming another fulfillment,
+    /// final or not — never; this `F` holding the fulfillment cell's leader
+    /// link with the pair not final on it — held; no fulfillment holding it
+    /// — the root cell's claim named, or nothing decided; an unread leader —
+    /// not decided on this evidence.
     #[test]
     fn registration_needs_both_cells_final_and_the_root_on_this_claim() {
         let p = swap_fixture_n(2).precommit;
         let q = p.position() + 1;
         let f = fulfillment(&p, q);
         let bytes = envelope(&f);
-        let known = lookup(&p);
-        let claim = derive::resolution_claim(&p, &f).encode();
-        let rival = TraderFulfillmentBody::new(
-            derive::precommit_id(&p),
-            vec![[0x03; 32], [0x04; 32]],
-            f.attempts().to_vec(),
-            q,
-            ALG,
-            key(),
-        )
-        .unwrap();
-        let other_claim = derive::resolution_claim(&p, &rival).encode();
-        let cells = PositionCells::new(
-            &G,
-            &DEV,
-            q,
-            &[0x5E; 32],
-            &committed_set(),
-            &committed_set_id(),
-        )
-        .expect("the committed set");
+        let claim = signed_c_q(derive::resolution_claim(&p, &f));
+        let rival = rival_of(&p, &f);
+        let other_claim = signed_c_q(derive::resolution_claim(&p, &rival));
+        let cells = cells_at(q);
         let written = |at: &RoutedCell, value: &[u8], last: usize| {
             let mut c = Cell::at(at);
             c.write(value, last, &[]);
@@ -577,7 +667,7 @@ mod tests {
         let ful_cell = |value: &[u8], last: usize| written(cells.fulfillment(), value, last);
         let root_cell = |value: &[u8], last: usize| written(cells.root().routed(), value, last);
         let reg = |ful: &CellEvidence, root: &CellEvidence| {
-            fulfillment_registered(&cells, ful, root, &known).map(|r| r.into_registration())
+            fulfillment_registered(&cells, ful, root).map(|r| r.into_registration())
         };
         let registered = Signed {
             body: f.clone(),
@@ -600,21 +690,26 @@ mod tests {
         }
         assert_eq!(
             reg(&final_ful, &root_cell(&claim, 1)),
-            Ok(Registration::Unresolved),
+            Ok(Registration::Held(registered.clone())),
             "the claim is preserved, not final"
         );
         assert_eq!(
             reg(&final_ful, &root_cell(b"not a claim", ROUTE_LEN - 1)),
-            Ok(Registration::Unresolved)
+            Ok(Registration::Held(registered.clone())),
+            "no claim yet at K_root(q)"
         );
-        // No fulfillment final at K_ful(q): the root cell's claim is named,
-        // and weighed by each F against its own C_q (SoFi Amendment S14).
-        let claim_id = crate::storage_cell::entry_digest(&claim);
-        let other_id = crate::storage_cell::entry_digest(&other_claim);
         assert_eq!(
             reg(&ful_cell(&bytes, 1), &root_cell(&claim, ROUTE_LEN - 1)),
-            Ok(Registration::RootTaken { claim: claim_id })
+            Ok(Registration::Held(registered.clone())),
+            "the fulfillment is preserved, not final"
         );
+        // No fulfillment holds K_ful(q): the root cell's claim is named, and
+        // weighed by each F against its own C_q (SoFi Amendment S14). A
+        // conditional claim is named by its derived body (SoFi Amendment S20).
+        let claim_id =
+            crate::storage_cell::entry_digest(&derive::resolution_claim(&p, &f).encode());
+        let other_id =
+            crate::storage_cell::entry_digest(&derive::resolution_claim(&p, &rival).encode());
         assert_eq!(
             reg(
                 &ful_cell(b"garbage", ROUTE_LEN - 1),
@@ -629,7 +724,7 @@ mod tests {
                     &root_cell(&other_claim, last)
                 ),
                 Ok(Registration::RootTaken { claim: other_id }),
-                "no fulfillment final, another claim at K_root(q) through position {last}"
+                "no fulfillment, another claim at K_root(q) through position {last}"
             );
         }
         assert_eq!(
@@ -643,5 +738,107 @@ mod tests {
         let mut unread_root = root_cell(&claim, ROUTE_LEN - 1);
         unread_root.seats[0].values = None;
         assert_eq!(reg(&final_ful, &unread_root), Err(Missing::LeaderUnread));
+    }
+
+    /// Pre-audit item 12, 12j (SoFi Amendments S14 and S20): where a
+    /// fulfillment stands at its pair, with its `P` in hand. Registered when
+    /// the pair is final on it and on exactly `derive(P, F)`. Lost, for good,
+    /// when another fulfillment holds `K_ful(q)`'s leader link in any state —
+    /// leader-held alone is enough (§23.1) — or when `K_root(q)`'s leader link
+    /// is held by a claim other than `derive(P, F)`: another fulfillment's,
+    /// or one naming this `F` whose body is not `F`'s. Pending otherwise.
+    #[test]
+    fn a_fulfillment_is_lost_to_any_other_leader_and_to_any_claim_not_its_own() {
+        let p = swap_fixture_n(2).precommit;
+        let q = p.position() + 1;
+        let f = fulfillment(&p, q);
+        let rival = rival_of(&p, &f);
+        let cells = cells_at(q);
+        let own_claim = derive::resolution_claim(&p, &f);
+        let at = |ful: Option<(&TraderFulfillmentBody, usize)>,
+                  root: Option<(SofiResolutionClaim, usize)>| {
+            let mut ful_cell = Cell::at(cells.fulfillment());
+            if let Some((body, last)) = ful {
+                ful_cell.write(&envelope(body), last, &[]);
+            }
+            let mut root_cell = Cell::at(cells.root().routed());
+            if let Some((claim, last)) = root {
+                root_cell.write(&signed_c_q(claim), last, &[]);
+            }
+            fulfillment_registered(&cells, &ful_cell.evidence(), &root_cell.evidence())
+                .expect("both leaders read")
+        };
+        let last = ROUTE_LEN - 1;
+        let standing =
+            |read: &RegistrationRead, body: &TraderFulfillmentBody| read.standing_of(&p, body);
+
+        let registered = at(Some((&f, last)), Some((own_claim, last)));
+        assert_eq!(standing(&registered, &f), PairStanding::Registered);
+        assert_eq!(standing(&registered, &rival), PairStanding::Lost);
+
+        // The rival holds K_ful(q)'s leader link, only leader-held, and
+        // K_root(q) holds F's own claim: F can never be final behind it.
+        let behind = at(Some((&rival, 0)), Some((own_claim, last)));
+        assert_eq!(standing(&behind, &f), PairStanding::Lost);
+        assert_eq!(standing(&behind, &rival), PairStanding::Lost);
+
+        let held = at(Some((&f, 0)), None);
+        assert_eq!(standing(&held, &f), PairStanding::Pending);
+        assert_eq!(standing(&held, &rival), PairStanding::Lost);
+
+        let root_only = at(None, Some((own_claim, last)));
+        assert_eq!(standing(&root_only, &f), PairStanding::Pending);
+        assert_eq!(standing(&root_only, &rival), PairStanding::Lost);
+
+        // A claim naming F's id, with a body that is not derive(P, F): the
+        // pair matches by id, and where P is in hand F is misbodied (lost,
+        // and the position Invalid for the lineage, SoFi Amendment S20; 12k).
+        let forged = SofiResolutionClaim {
+            realize_root: [0xBD; 32],
+            ..own_claim
+        };
+        let mismatched = at(Some((&f, last)), Some((forged, last)));
+        assert!(matches!(
+            mismatched.registration(),
+            Registration::Registered(signed) if signed.body == f
+        ));
+        assert_eq!(standing(&mismatched, &f), PairStanding::Misbodied);
+        assert!(standing(&mismatched, &f).is_lost());
+        // Not final yet, the same claim already loses F, and the lineage
+        // waits for the pair to settle before it reads the verdict.
+        let settling = at(Some((&f, last)), Some((forged, 0)));
+        assert_eq!(standing(&settling, &f), PairStanding::Lost);
+
+        let nothing = at(None, None);
+        assert_eq!(standing(&nothing, &f), PairStanding::Pending);
+    }
+
+    /// The pair at position `q` of the fixture trader, routed by a fixed
+    /// parent root.
+    fn cells_at(q: u64) -> PositionCells {
+        PositionCells::new(
+            &G,
+            &dev(),
+            q,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set")
+    }
+
+    /// Another fulfillment of the same `P` at the same position, signed by
+    /// the same trader: a different policy-fulfillment set, so a different id.
+    fn rival_of(p: &TraderPrecommitBody, f: &TraderFulfillmentBody) -> TraderFulfillmentBody {
+        TraderFulfillmentBody::new(
+            derive::precommit_id(p),
+            vec![[0x03; 32], [0x04; 32]],
+            f.attempts().to_vec(),
+            f.position(),
+            ALG,
+            key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
+        )
+        .unwrap()
     }
 }

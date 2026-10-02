@@ -118,6 +118,28 @@
   line-height: 1.45;
 }
 
+/* Text a step hands the user, such as a code to paste: selectable, with a copy button. */
+.gt-clip {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin-top: 6px;
+}
+
+.gt-clip__text {
+  flex: 1;
+  min-width: 0;
+  max-height: 4.5em;
+  overflow-y: auto;
+  padding: 4px;
+  font-size: 8px;
+  line-height: 1.4;
+  word-break: break-all;
+  user-select: all;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+}
+
 .gt-caret {
   animation: gt-blink 1s steps(1) infinite;
 }

@@ -28,8 +28,8 @@ use super::derive::{self, policy_fulfillment_id, precommit_id};
 use super::publication::{recognize_setup, Signed};
 use super::signature::{verify_fulfillment, verify_precommit, SignatureError};
 use super::wire::{
-    ParentClaimRef, next_position, DlvPolicyFulfillmentBody, SettlementPreimage,
-    SofiResolutionClaim, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
+    ParentClaimRef, next_position, DlvPolicyFulfillmentBody, SettlementPreimage, SofiWireError,
+    TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
 };
 
 type D32 = [u8; 32];
@@ -497,7 +497,7 @@ impl Items {
 
 /// Whether `bytes` are the object a closure reference names, under that
 /// variant's own rule. `None` when no bytes could ever satisfy the reference.
-fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bool> {
+pub(crate) fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bool> {
     Some(match reference {
         ValidationRef::ContentAddr { object_class, addr } => {
             derive::closure_content_address(*object_class, bytes)? == *addr
@@ -508,12 +508,17 @@ fn closure_object_verifies(reference: &ValidationRef, bytes: &[u8]) -> Option<bo
             device_id,
             position,
             fulfillment_id,
-        } => SofiResolutionClaim::decode(bytes).is_ok_and(|c| {
-            c.genesis == *genesis
-                && c.device_id == *device_id
-                && c.position == *position
-                && c.fulfillment_id == *fulfillment_id
-        }),
+            // The conditional claim as `K_root(p)` holds it: the trader-signed
+            // `C_q`, recognized with its key bound to the device it names (DSM
+            // Amendment A10, SoFi Amendment S20).
+        } => matches!(
+            crate::economic::claim_envelope::decode_registered_economic_claim(bytes),
+            Ok(crate::economic::claim_envelope::RegisteredEconomicClaim::ConditionalSofi(c))
+                if c.genesis == *genesis
+                    && c.device_id == *device_id
+                    && c.position == *position
+                    && c.fulfillment_id == *fulfillment_id
+        ),
         ValidationRef::Setup { setup_ref } => {
             recognize_setup(bytes).is_some_and(|(rho, _)| rho == *setup_ref)
         }
@@ -785,12 +790,12 @@ mod tests {
     use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
     use crate::sofi::validation::fixtures::{
         policies, policy_addr, setup_body_for, setup_envelope_for, setup_ref_for,
-        swap_fixture_with, swap_fixture_with_setups, trader_keys, vault_id_of, DEV, G, P_POS,
-        SETUP_POS, SIG_ALG,
+        swap_fixture_with, swap_fixture_with_setups, trader_keys, vault_id_of, dev, G, P_POS,
+        SETUP_POS, SIG_ALG, signed_c_q,
     };
     use crate::sofi::wire::{
-        AttemptEntry, PreEClosureIndex, PrecommitLeg, SofiSetupBody, MAX_AUTH_ENVELOPES,
-        MAX_CLOSURE_OBJECT_BYTES, MAX_VALIDATION_FETCH_BYTES,
+        AttemptEntry, PreEClosureIndex, PrecommitLeg, SofiResolutionClaim, SofiSetupBody,
+        MAX_AUTH_ENVELOPES, MAX_CLOSURE_OBJECT_BYTES, MAX_VALIDATION_FETCH_BYTES,
     };
 
     #[test]
@@ -902,6 +907,7 @@ mod tests {
             precommit.position() + 1,
             precommit.signature_alg(),
             precommit.claimant_public_key(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -922,6 +928,7 @@ mod tests {
             position,
             SIG_ALG,
             key,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
     }
@@ -937,7 +944,7 @@ mod tests {
         let market_bytes = market.encode();
         let claim = SofiResolutionClaim {
             genesis: G,
-            device_id: DEV,
+            device_id: dev(),
             position: 3,
             fulfillment_id: token(0x42),
             realize_root: token(0x43),
@@ -954,11 +961,11 @@ mod tests {
             (
                 ValidationRef::ConditionalClaim {
                     genesis: G,
-                    device_id: DEV,
+                    device_id: dev(),
                     position: 3,
                     fulfillment_id: token(0x42),
                 },
-                claim.encode(),
+                signed_c_q(claim),
             ),
             (
                 ValidationRef::Setup {
@@ -1204,7 +1211,7 @@ mod tests {
     /// A root claim of the fixture trader at `position` over `root`, naming
     /// the manifest `manifest`, signed under `(pk, sk)`.
     fn root_claim(position: u64, root: D32, manifest: D32, pk: &[u8], sk: &[u8]) -> Vec<u8> {
-        root_claim_of(G, DEV, position, root, manifest, pk, sk)
+        root_claim_of(G, dev(), position, root, manifest, pk, sk)
     }
 
     /// The same claim, naming the trader `(genesis, device)`.
@@ -1226,6 +1233,7 @@ mod tests {
             token(0x77),
             SIG_ALG,
             pk,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         crate::economic::claim_envelope::sign_economic_root_claim(&body, sk).unwrap()
@@ -1329,13 +1337,27 @@ mod tests {
     }
 
     /// P conformance rules 2 and 3: a claim under the trader's key that names
-    /// another genesis, device, position or root is not the parent P extends.
+    /// another genesis, position or root is not the parent P extends. One that
+    /// names another device does not even verify: the trader's key with its
+    /// AttA derives only its own device (DSM Amendment A10).
     #[test]
     fn a_parent_claim_of_another_position_or_root_does_not_conform() {
         let root = one_hop_root();
+        let another_device = root_claim_of(G, token(0x23), P_POS, root, token(0x78), pk(), sk());
+        let reference = ValidationRef::SingleRootClaim {
+            claim_ref: derive::claim_ref(&another_device),
+        };
+        let (f, closure) = one_hop_with(BTreeMap::from([(reference, another_device.clone())]));
+        let parent = ParentClaimRef::SingleRoot {
+            claim_ref: derive::claim_ref(&another_device),
+        };
+        let (fb, f_sig, ev) = exercised(&f, closure, parent, pk(), sk());
+        assert_eq!(
+            fulfillment_conformance(&fb, &f_sig, &ev),
+            invalid(FulfillmentConformanceError::ParentClaimDoesNotVerify)
+        );
         for claim in [
-            root_claim_of(token(0x12), DEV, P_POS, root, token(0x78), pk(), sk()),
-            root_claim_of(G, token(0x23), P_POS, root, token(0x78), pk(), sk()),
+            root_claim_of(token(0x12), dev(), P_POS, root, token(0x78), pk(), sk()),
             root_claim(P_POS + 1, root, token(0x78), pk(), sk()),
             root_claim(P_POS, token(0x5A), token(0x78), pk(), sk()),
         ] {
@@ -1423,12 +1445,13 @@ mod tests {
             position,
             SIG_ALG,
             pk,
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         let fulfillment_id = derive::fulfillment_id(&parent);
         let claim = SofiResolutionClaim {
             genesis: G,
-            device_id: DEV,
+            device_id: dev(),
             position: P_POS,
             fulfillment_id,
             realize_root: token(0x34),
@@ -1436,15 +1459,16 @@ mod tests {
         };
         let reference = ValidationRef::ConditionalClaim {
             genesis: G,
-            device_id: DEV,
+            device_id: dev(),
             position: P_POS,
             fulfillment_id,
         };
-        (parent, reference, claim.encode())
+        (parent, reference, signed_c_q(claim))
     }
 
-    /// P conformance rule 8 for a conditional parent: `C_p` carries no key,
-    /// so P's key is the key of the `F` whose id P names — in hand, or the
+    /// P conformance rule 8 for a conditional parent: `C_p` is signed by the
+    /// trader device (SoFi Amendment S20), and P's key is the key of the `F`
+    /// whose id P names — in hand, or the
     /// item is missing; another key, or an `F` at another position, does not
     /// conform. An `F` that is not the one P names binds nothing, whatever
     /// key it carries.
@@ -1488,6 +1512,7 @@ mod tests {
             P_POS,
             SIG_ALG,
             pk(),
+            crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap();
         assert_eq!(
@@ -1745,19 +1770,19 @@ mod tests {
             (rho, fulfillment_conformance(&f, &sign_f(&f), &ev))
         };
         // Another trader's setup of this vault.
-        let (rho, verdict) = with_hop_0_setup(setup_at(0, token(0x33), DEV, SETUP_POS));
+        let (rho, verdict) = with_hop_0_setup(setup_at(0, token(0x33), dev(), SETUP_POS));
         assert_eq!(
             verdict,
             invalid(FulfillmentConformanceError::SetupNamesAnotherTraderOrVault { setup_ref: rho })
         );
         // This trader's setup of another vault.
-        let (rho, verdict) = with_hop_0_setup(setup_at(1, G, DEV, SETUP_POS));
+        let (rho, verdict) = with_hop_0_setup(setup_at(1, G, dev(), SETUP_POS));
         assert_eq!(
             verdict,
             invalid(FulfillmentConformanceError::SetupNamesAnotherTraderOrVault { setup_ref: rho })
         );
         // The right setup, at the operation's own position: not before it.
-        let (rho, verdict) = with_hop_0_setup(setup_at(0, G, DEV, P_POS));
+        let (rho, verdict) = with_hop_0_setup(setup_at(0, G, dev(), P_POS));
         assert_eq!(
             verdict,
             invalid(FulfillmentConformanceError::SetupNotBeforeTheOperation { setup_ref: rho })

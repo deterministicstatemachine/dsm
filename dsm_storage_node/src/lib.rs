@@ -31,6 +31,10 @@ pub struct AppState {
     /// Held for the whole of a ByteCommit mirror sync, so one sync runs at a
     /// time and a caller asking again waits for it instead of repeating it.
     pub mirror_sync: Arc<tokio::sync::Mutex<()>>,
+    /// Held while a cycle closes. A closer waits here, before it takes a
+    /// database connection, so closers queued behind one another hold no
+    /// connection and cannot starve every other request of the pool.
+    pub closing: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// This node's view of the canonical storage set it belongs to.
@@ -154,6 +158,7 @@ impl AppState {
             set_client,
             storage_set: None,
             mirror_sync: Arc::new(tokio::sync::Mutex::new(())),
+            closing: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -271,22 +276,53 @@ mod storage_set_tests {
 #[derive(Debug, Clone, Copy)]
 pub struct AppLimits {
     pub body_limit_bytes: usize,
+    /// Requests in flight at once, across every route together.
     pub concurrency_limit: usize,
+    /// How long one request may take, from the moment it waits for a slot
+    /// under `concurrency_limit` until it is answered, its body included.
+    /// A transport bound, as an unreachable node is: a request cut off here
+    /// is answered `408` and changes nothing, so no protocol fact depends on
+    /// it (storage spec §1 rule 4).
+    pub request_timeout: std::time::Duration,
 }
 
 /// The node's whole app: every route it serves, with its limits and layers.
 /// `/api/v2/health`: ok only over a live Postgres. A node whose store is
 /// down is not healthy, whatever its process is doing.
-async fn health(state: std::sync::Arc<AppState>) -> (axum::http::StatusCode, String) {
+/// What went wrong stays in the node's log: the answer names no host,
+/// user, database or driver message.
+async fn health(state: std::sync::Arc<AppState>) -> (axum::http::StatusCode, &'static str) {
     use axum::http::StatusCode;
     let client = match state.db_pool.get().await {
         Ok(client) => client,
-        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("postgres: {e}")),
+        Err(e) => {
+            log::error!("health: no database connection: {e}");
+            return (StatusCode::SERVICE_UNAVAILABLE, "postgres unavailable");
+        }
     };
     match client.simple_query("SELECT 1").await {
-        Ok(_) => (StatusCode::OK, "ok".to_string()),
-        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, format!("postgres: {e}")),
+        Ok(_) => (StatusCode::OK, "ok"),
+        Err(e) => {
+            log::error!("health: the database did not answer: {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, "postgres unavailable")
+        }
     }
+}
+
+/// Bound every connection the node accepts before a request on it reaches
+/// the app: a client that opens a connection and never finishes sending a
+/// request's headers is cut off after `header_read`, instead of holding the
+/// connection open for as long as it likes. The server is given a timer for
+/// this, as the HTTP library needs one to keep any bound; without it the
+/// bound is never kept. A transport bound only (storage spec §1 rule 4).
+pub fn bound_connections(
+    builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
+    header_read: std::time::Duration,
+) {
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(header_read);
 }
 
 /// The binary serves exactly this, and so do tests that stand up real nodes,
@@ -294,8 +330,8 @@ async fn health(state: std::sync::Arc<AppState>) -> (axum::http::StatusCode, Str
 pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Router<()> {
     use axum::routing::get;
     use axum::Router;
-    use tower::limit::ConcurrencyLimitLayer;
-    use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
+    use tower::limit::GlobalConcurrencyLimitLayer;
+    use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
     Router::new()
         .route(
@@ -312,7 +348,15 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
         // envelopes never opened.
         .merge(crate::api::transport::b0x::router(state.clone()))
         .layer(RequestBodyLimitLayer::new(limits.body_limit_bytes))
-        .layer(ConcurrencyLimitLayer::new(limits.concurrency_limit))
+        // One limit for the whole node. A router applies a layer to each
+        // route on its own, so a per-service limit would be one limit per
+        // route; this one shares a single count across all of them.
+        .layer(GlobalConcurrencyLimitLayer::new(limits.concurrency_limit))
+        // Outside the limit, so waiting for a slot is bounded too.
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            limits.request_timeout,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(crate::node_identity_echo_layer(
             state.member_id_header.clone(),

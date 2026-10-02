@@ -21095,13 +21095,6 @@ export class RelationshipFinalizedV1 extends Message<RelationshipFinalizedV1> {
  */
 export class OnlineTransferSmartRequest extends Message<OnlineTransferSmartRequest> {
   /**
-   * Alias or Base32 ID
-   *
-   * @generated from field: string recipient = 1;
-   */
-  recipient = "";
-
-  /**
    * Decimal string
    *
    * @generated from field: string amount = 2;
@@ -21118,6 +21111,14 @@ export class OnlineTransferSmartRequest extends Message<OnlineTransferSmartReque
    */
   memo = "";
 
+  /**
+   * The contact the user chose, by its device id: the one identity a contact
+   * is keyed by.
+   *
+   * @generated from field: bytes recipient_device_id = 5;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
   constructor(data?: PartialMessage<OnlineTransferSmartRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21126,10 +21127,10 @@ export class OnlineTransferSmartRequest extends Message<OnlineTransferSmartReque
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.OnlineTransferSmartRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "recipient", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 4, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineTransferSmartRequest {
@@ -22336,7 +22337,7 @@ export class StorageSyncRequest extends Message<StorageSyncRequest> {
   pushPending = false;
 
   /**
-   * max inbox items to pull (0 = default 100)
+   * max inbox items to read from each route (0 = default 100)
    *
    * @generated from field: uint32 limit = 3;
    */
@@ -22409,6 +22410,15 @@ export class StorageSyncResponse extends Message<StorageSyncResponse> {
    */
   errors: string[] = [];
 
+  /**
+   * Inbox routes holding more than this sync took (a read stopped at its
+   * page cap, or more entries than the route's budget): a status, not an
+   * error. The next sync resumes each where it stopped.
+   *
+   * @generated from field: repeated string more_pending = 6;
+   */
+  morePending: string[] = [];
+
   constructor(data?: PartialMessage<StorageSyncResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22422,6 +22432,7 @@ export class StorageSyncResponse extends Message<StorageSyncResponse> {
     { no: 3, name: "processed", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 4, name: "pushed", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 5, name: "errors", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 6, name: "more_pending", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageSyncResponse {

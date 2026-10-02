@@ -57,6 +57,10 @@ pub struct TestDevice {
     seq: Arc<AtomicU64>,
 }
 
+/// How many times one funding claim's held admission is resumed before the
+/// harness gives up on it.
+const FUNDING_RESUMES: usize = 4;
+
 impl TestDevice {
     /// Create the device's identity the way wallet creation does, in its own
     /// (empty) database slot. Leaves the device entered.
@@ -209,9 +213,33 @@ impl TestDevice {
         self.enter();
         let core = self.router().core_sdk.clone();
         for claim in 0..(whole_era / payout) {
-            crate::sdk::faucet_claim_flow::claim_era_faucet(&core, economic_fixtures::NETWORK)
+            // A claim whose admission is held (its evidence not yet final at
+            // every member a verifier reads) is finished by resuming that
+            // admission, exactly as the device resumes it before anything
+            // else. A failure with nothing held is a refusal.
+            let mut outcome =
+                crate::sdk::faucet_claim_flow::claim_era_faucet(&core, economic_fixtures::NETWORK)
+                    .await
+                    .map(drop);
+            let mut resumed = 0;
+            while let Err(e) = outcome {
+                let held = core
+                    .device_head()
+                    .and_then(|head| head.pending_economic_admission().cloned());
+                resumed += 1;
+                let Some(pending) = held.filter(|_| resumed <= FUNDING_RESUMES) else {
+                    panic!("funding claim {claim}: {e}");
+                };
+                // The members a verifier reads catch up between attempts.
+                tokio::time::sleep(std::time::Duration::from_millis(250 * resumed as u64)).await;
+                outcome = crate::sdk::economic_admission_flow::resume_pending_admission(
+                    &core,
+                    economic_fixtures::NETWORK,
+                    pending,
+                )
                 .await
-                .unwrap_or_else(|e| panic!("funding claim {claim}: {e}"));
+                .map(drop);
+            }
         }
     }
 
@@ -234,8 +262,9 @@ impl TestDevice {
 
     /// As [`send`](Self::send), for any asset this device holds, by ticker —
     /// a created token moves through exactly the route ERA does. The request is
-    /// the one the frontend builds (`dsm/transactions.ts`): the recipient in
-    /// Base32, the amount as the display string in the token's own decimals.
+    /// the one the frontend builds (`dsm/transactions.ts`): the recipient by
+    /// its device id, the amount as the display string in the token's own
+    /// decimals.
     /// The SDK owns every protocol field.
     pub async fn send_token(
         &self,
@@ -250,7 +279,7 @@ impl TestDevice {
         self.invoke(
             "wallet.sendSmart",
             &generated::OnlineTransferSmartRequest {
-                recipient: crate::util::text_id::encode_base32_crockford(&to.device_id),
+                recipient_device_id: to.device_id.to_vec(),
                 amount: crate::handlers::wallet_routes::format_base_units_for_display(
                     amount, decimals,
                 ),
@@ -337,7 +366,7 @@ impl Pair {
         // Fresh nodes per pair: each test gets empty registers, so no earlier
         // test's claims sit where this one will write.
         let nodes = NodeSet::start().await;
-        let fleet = economic_fixtures::point_sdk_at(&nodes.members());
+        let fleet = economic_fixtures::point_sdk_at(&nodes.members(), nodes.ca_pem());
         let mut a = TestDevice::create("A", 0x0A);
         let mut b = TestDevice::create("B", 0x0B);
         a.boot(&fleet).await;

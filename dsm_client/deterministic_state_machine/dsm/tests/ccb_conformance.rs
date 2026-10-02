@@ -518,7 +518,8 @@ fn genesis_params_v3_agrees_with_an_independent_construction() {
         nonce.to_vec(),
         indep::bytes_field(&net),
         indep::u32be(3),
-        indep::u16be(0x0001),
+        // SPHINCS+ SPX256f, construction version 2.
+        indep::u16be(0x0002),
         indep::bytes_field(&pk),
     ]
     .concat();

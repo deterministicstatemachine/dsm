@@ -253,26 +253,6 @@ pub fn get_contact_by_device_id(device_id: &[u8]) -> Result<Option<ContactRecord
     Ok(result)
 }
 
-/// Get contact by alias.
-/// Returns None if not found.
-pub fn get_contact_by_alias(alias: &str) -> Result<Option<ContactRecord>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result = conn
-        .query_row(
-            &format!("SELECT {CONTACT_COLUMNS} FROM contacts WHERE alias = ?1"),
-            params![alias],
-            contact_from_row,
-        )
-        .optional()?;
-
-    Ok(result)
-}
-
 /// The signing key of the contact whose device id is `device_id_str`
 /// (Base32 Crockford), or `None` when no contact has that device id.
 pub fn get_contact_public_key_by_device_id(device_id_str: &str) -> Result<Option<Vec<u8>>> {
@@ -992,18 +972,5 @@ mod tests {
         assert!(all.len() >= 2);
         assert!(all.iter().any(|c| c.alias == "bob"));
         assert!(all.iter().any(|c| c.alias == "carol"));
-    }
-
-    #[test]
-    #[serial]
-    fn get_contact_by_alias_finds_stored_contact() {
-        init_test_db();
-        let contact = make_contact([0x04u8; 32], "dave");
-        store_contact(&contact).expect("store");
-
-        let found = get_contact_by_alias("dave")
-            .expect("query")
-            .expect("contact exists");
-        assert_eq!(found.device_id, [0x04u8; 32].to_vec());
     }
 }

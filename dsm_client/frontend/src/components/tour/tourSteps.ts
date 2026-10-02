@@ -2,10 +2,14 @@
 //
 // The guided tour, step by step. Each step names the real screen it runs on,
 // the real element it points at, and, for hands-on steps, what the user has to
-// do before the tour moves on. Everything the user does runs in practice mode.
+// do before the tour moves on. Everything the user does runs in practice mode:
+// the bridge lets only reads through, so the steps that show what a write does
+// (creating a token, trading, the lock, a ring backup) walk through the real
+// screen with that write switched off.
 
 import type { ScreenType } from '../../types/app';
 import type { PracticeEvent } from './practiceMode';
+import { PRACTICE_CONTACT_CODE } from './practiceContact';
 
 export type TourWait =
   /** Move on once this screen is open. */
@@ -35,6 +39,8 @@ export type TourStep = {
   menuItem?: string;
   /** Clicking an element matching this selector means the user backed out: go back one step. */
   backOn?: string;
+  /** Text the user needs on this step, such as a code to paste: shown selectable, with a button that copies it. */
+  copy?: { label: string; text: string };
 };
 
 export const TOUR_STEPS: ReadonlyArray<TourStep> = [
@@ -101,7 +107,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'wallet',
     target: '.sb-tabs[aria-label="Wallet sections"]',
     title: 'Wallet tabs',
-    body: 'These tabs switch the wallet between Overview, Send, History and Bitcoin. Swapping lives on the TRADE screen.',
+    body: 'These tabs switch the wallet between its overview, sending, and your history. Swapping lives on the TRADE screen.',
   },
   {
     id: 'go-send',
@@ -118,45 +124,6 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     target: '.send-tab > .sb-card',
     title: 'Your token ticker',
     body: "Do you see this? That short name is the token's ticker, the quickest way to know which token you're dealing with. The number beside it is how much of it you hold.",
-  },
-  {
-    id: 'mode',
-    screen: 'wallet',
-    target: '.send-tab [aria-label="Transaction mode"]',
-    title: 'Online or offline',
-    body: "Online goes through the storage nodes and waits in their inbox, even if they're asleep. Offline goes phone to phone over Bluetooth when you're side by side. Let's look at Offline for a moment.",
-  },
-  {
-    id: 'go-offline',
-    screen: 'wallet',
-    target: '.send-tab [aria-label="Transaction mode"] button:nth-of-type(2)',
-    title: 'Try Offline',
-    body: 'Tap Offline. An offline send needs two more things besides Bluetooth, and they appear here.',
-    wait: { kind: 'selector', selector: '[data-tour="offline-funding"]' },
-    prompt: 'Tap Offline',
-  },
-  {
-    id: 'offline-funding',
-    screen: 'wallet',
-    target: '[data-tour="offline-funding"]',
-    title: 'Offline funding',
-    body: 'Offline sends spend from a separate pot: your offline allocation, which the anchor appliance guards. Offline Funding moves tokens from your online account into that pot, and back again. The i beside it explains the two balances.',
-  },
-  {
-    id: 'appliance',
-    screen: 'wallet',
-    target: '[data-tour="appliance-setup"]',
-    title: 'The appliance',
-    body: "The DSM Anchor appliance plugs into this phone's USB port. Appliance shows whether it is connected and walks you through the first plug-in. Android asks for permission once; after that it connects on its own whenever you choose Offline.",
-  },
-  {
-    id: 'go-online',
-    screen: 'wallet',
-    target: '.send-tab [aria-label="Transaction mode"] button:nth-of-type(1)',
-    title: 'Back to Online',
-    body: "We'll send online in this tour. Tap Online.",
-    wait: { kind: 'gone', selector: '[data-tour="offline-funding"]' },
-    prompt: 'Tap Online',
   },
   {
     id: 'info',
@@ -231,6 +198,61 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     body: "Done. Your practice balance went down by exactly what you sent. For real, it would now be waiting in alice's inbox, even if her phone is off.",
   },
   {
+    id: 'recent-activity',
+    screen: 'wallet',
+    target: '[data-tour="recent-activity"]',
+    title: 'Recent activity',
+    body: 'Your latest payments, newest first. Tap one to open it: its memo, who it was from and to, and its receipt.',
+  },
+  {
+    id: 'wallet-identity',
+    screen: 'wallet',
+    target: '.wallet-identity',
+    title: 'Who this wallet is',
+    body: "Wallet identity holds this wallet's genesis and this device's id. Open it when someone needs to check it is really you.",
+  },
+  {
+    id: 'go-history',
+    screen: 'wallet',
+    target: '.sb-tabs[aria-label="Wallet sections"] button:nth-of-type(3)',
+    title: 'Your history',
+    body: 'Open History.',
+    wait: { kind: 'selector', selector: '.history-tab' },
+    prompt: 'Tap History',
+  },
+  {
+    id: 'history',
+    screen: 'wallet',
+    target: '.history-tab',
+    title: 'Everything, in order',
+    body: 'Every payment, faucet claim, token you made and trade you did, newest first, each with a badge saying what it was. Tap one for its details.',
+  },
+  {
+    id: 'go-inbox',
+    screen: 'wallet',
+    target: 'button[aria-label^="Inbox"]',
+    title: 'Your inbox',
+    body: 'Payments sent to you online wait on your storage nodes until this phone picks them up. Tap Inbox.',
+    wait: { kind: 'selector', selector: '[role="dialog"][aria-label="Inbox"]' },
+    prompt: 'Tap Inbox',
+  },
+  {
+    id: 'inbox',
+    screen: 'wallet',
+    target: '[role="dialog"][aria-label="Inbox"]',
+    title: 'What came in',
+    body: 'This is your real inbox, only read. Recently applied is what this phone has already counted. Queued on storage node is still waiting to be picked up; it lands on its own.',
+  },
+  {
+    id: 'close-inbox',
+    screen: 'wallet',
+    target: '[aria-label="Close inbox"]',
+    title: 'Close it',
+    body: 'Close the inbox.',
+    wait: { kind: 'gone', selector: '[role="dialog"][aria-label="Inbox"]' },
+    prompt: 'Tap ×',
+  },
+  {
     id: 'go-tokens',
     screen: 'home',
     target: '.dsm-menu-item[data-label="TOKENS"]',
@@ -252,7 +274,32 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'accounts',
     target: '[data-tour="create-token"]',
     title: 'Your own token',
-    body: 'Create Token makes a token of your own, under rules you set when you make it.',
+    body: 'Create Token makes a token of your own, under rules you set when you make it. Tap it to look inside.',
+    wait: { kind: 'selector', selector: '.token-wizard' },
+    prompt: 'Tap Create Token',
+  },
+  {
+    id: 'token-wizard',
+    screen: 'accounts',
+    target: '.token-wizard',
+    title: 'Three pages',
+    body: 'Identity: its ticker, name, decimals and coin. Supply: the whole amount that will ever exist, whether holders may burn it, and who may hold it. Review: the creation fee, paid in ERA and burned. None of it can change afterwards. In practice, Create is switched off.',
+  },
+  {
+    id: 'close-wizard',
+    screen: 'accounts',
+    target: '.token-wizard .sb-popover__close',
+    title: 'Close it',
+    body: "We won't make one now. Close it.",
+    wait: { kind: 'gone', selector: '.token-wizard' },
+    prompt: 'Tap ×',
+  },
+  {
+    id: 'add-token',
+    screen: 'accounts',
+    target: '[data-tour="add-token"]',
+    title: "Someone else's token",
+    body: "Add Token takes the policy anchor a token's creator shares, and learns its rules so this wallet can hold it. Nothing is issued and no fee is paid.",
   },
   {
     id: 'go-faucet',
@@ -302,7 +349,21 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'accounts',
     target: '.token-card.is-open .sb-card--dark',
     title: 'What a token is',
-    body: "Its supply, its decimals and who defined it: the rules it was made with, and nobody can change them. A token you adopted also offers Burn, which destroys some of what you hold, and Forget, which hides it.",
+    body: 'Its supply, its decimals and who defined it: the rules it was made with, and nobody can change them.',
+  },
+  {
+    id: 'token-actions',
+    screen: 'accounts',
+    target: '.token-card.is-open',
+    title: 'Burn and Forget',
+    body: "A token someone created shows more here. Burn destroys some of what you hold, when its rules allow it. Forget stops listing it; adding it again brings it back. ERA is the protocol's own, so it has neither. In practice, both are switched off.",
+  },
+  {
+    id: 'token-share',
+    screen: 'accounts',
+    target: '.token-card.is-open',
+    title: 'Sharing a token',
+    body: "A created token's card also shows its policy anchor, with Copy Anchor, and a QR that others scan to add it. A token travels by its anchor, never by its name.",
   },
   {
     id: 'go-trade',
@@ -322,11 +383,25 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     body: 'This is SoFi: sovereign finance. Swap trades one token for another. Liquidity is where that comes from: vaults that people like you put up. No exchange sits in the middle; it settles between devices.',
   },
   {
+    id: 'swap-pay',
+    screen: 'sofi',
+    target: '[data-tour="swap-pay"]',
+    title: 'What you pay',
+    body: 'Type how much you pay and pick the token. Only a token that carries a policy anchor can trade, so in practice this list is empty.',
+  },
+  {
+    id: 'swap-get',
+    screen: 'sofi',
+    target: '[data-tour="swap-get"]',
+    title: 'What you get',
+    body: "Pick the token you want, or paste its policy anchor if you don't hold it yet.",
+  },
+  {
     id: 'trade-quote',
     screen: 'sofi',
     target: '.swap-tab .sb-btn--primary.sb-btn--block',
     title: 'Quote, then trade',
-    body: "Pick what you pay and what you want, then Quote. You see the exact amount you'd get before anything moves. Trade lands at a position, or is void if someone else's trade won the race, and then nothing moved. We won't trade in the tour.",
+    body: "Quote finds a route through people's vaults and shows its hops, what you'd get, and the least you'll accept. Trade then lands at a position, or is void if someone else's trade won the race, and then nothing moved. In practice, Trade is switched off.",
   },
   {
     id: 'go-liquidity',
@@ -340,9 +415,23 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
   {
     id: 'liquidity-vault',
     screen: 'sofi',
-    target: '.liquidity-tab .sb-btn--primary.sb-btn--block',
+    target: '[data-tour="liquidity-create"]',
     title: 'Your own liquidity vault',
-    body: 'Create Liquidity Vault puts two of your tokens into a vault of your own, at the price their amounts set. Every trade against it pays you the fee you choose. Close it any time and the reserves come back to you.',
+    body: 'Pick two of your tokens and how much of each to put in: their amounts set the price. The fee, in basis points, is what every trade against your vault pays you. In practice, Create is switched off.',
+  },
+  {
+    id: 'liquidity-close',
+    screen: 'sofi',
+    target: '[data-tour="liquidity-close"]',
+    title: 'Closing a vault',
+    body: 'Close takes a vault of yours by its id and gives both reserves back to you. Storage lists your vaults, with their live reserves, under DLVs.',
+  },
+  {
+    id: 'liquidity-relay',
+    screen: 'sofi',
+    target: '.sofi-relay',
+    title: 'Relaying',
+    body: "If someone's trade was registered but never finished, anyone can complete it here with their genesis, device id and position. You will rarely need it.",
   },
   {
     id: 'resolve',
@@ -366,14 +455,60 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'contacts',
     target: '[data-tour="contacts-tabs"]',
     title: 'Your contacts',
-    body: "My Contacts lists everyone you've added. Add Contact scans someone's code to add them. My QR shows your own code, so others can add you.",
+    body: "My Contacts lists everyone you've added. Add Contact takes someone's code to add them. My QR shows your own code, so others can add you.",
   },
   {
-    id: 'add-contact',
+    id: 'go-add-contact',
     screen: 'contacts',
     target: '[data-tour="contacts-tabs"] button:nth-of-type(2)',
-    title: 'Adding someone',
-    body: "Add Contact scans the code on their phone, or takes it pasted. What you add is their device, not a name: the name is only the label you give it.",
+    title: 'Add someone',
+    body: "Let's add a practice contact, bob. Open Add Contact.",
+    wait: { kind: 'selector', selector: '[data-tour="contact-code"]' },
+    prompt: 'Tap Add Contact',
+  },
+  {
+    id: 'paste-code',
+    screen: 'contacts',
+    target: '[data-tour="contact-code"]',
+    title: "Bob's code",
+    body: "Normally you'd scan their QR, or paste a code they sent you. Here is bob's: copy it, paste it into the box, then tap Use Contact Code.",
+    copy: { label: 'Copy', text: PRACTICE_CONTACT_CODE },
+    wait: { kind: 'selector', selector: '.qr-scanner [role="dialog"]' },
+    prompt: 'Paste it, then Use Contact Code',
+  },
+  {
+    id: 'add-bob',
+    screen: 'contacts',
+    target: '.qr-scanner [role="dialog"]',
+    title: 'Contact found',
+    body: "Your wallet read the code: this is bob's device and genesis. What you add is his device; the name is only your label for him. Tap Add.",
+    wait: { kind: 'event', event: 'contactAdded' },
+    prompt: 'Tap Add',
+  },
+  {
+    id: 'go-my-contacts',
+    screen: 'contacts',
+    target: '[data-tour="contacts-tabs"] button:nth-of-type(1)',
+    title: 'There he is',
+    body: 'Open My Contacts.',
+    wait: { kind: 'selector', selector: '[data-tour="contact-list"]' },
+    prompt: 'Tap My Contacts',
+  },
+  {
+    id: 'open-contact',
+    screen: 'contacts',
+    target: '[data-tour="contact-list"]',
+    title: 'Open a contact',
+    body: 'Tap a contact to open it.',
+    wait: { kind: 'selector', selector: '[data-tour="contact-list"] .sb-row__detail' },
+    prompt: 'Tap a contact',
+  },
+  {
+    id: 'contact-detail',
+    screen: 'contacts',
+    target: '[data-tour="contact-list"] .sb-row__detail',
+    title: 'Who they are',
+    body: "Their device, their genesis, the tip of your chain with them, and their key: what every payment between you is checked against. Stitched receipts are the payments you've exchanged, each with its proof.",
   },
   {
     id: 'go-my-qr',
@@ -413,7 +548,7 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'storage',
     target: '.sb-tabs[aria-label="Storage sections"]',
     title: 'Storage nodes',
-    body: "Storage nodes keep copies of what you publish, so people can reach you while you're offline. They hold bytes and decide nothing. These tabs show your set and each node in it.",
+    body: "Storage nodes keep copies of what you publish, so people can reach you while you're offline. They hold bytes and decide nothing. Three tabs: your set, each node in it, and your vaults.",
   },
   {
     id: 'storage-set',
@@ -439,6 +574,22 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     body: 'One row per node, with a dot for whether it answered. Tap a row for what it holds of yours. A quiet node is only quiet: nodes keep bytes and decide nothing.',
   },
   {
+    id: 'go-dlvs',
+    screen: 'storage',
+    target: '.sb-tabs[aria-label="Storage sections"] button:nth-of-type(3)',
+    title: 'Your vaults',
+    body: 'Open DLVs.',
+    wait: { kind: 'selector', selector: '[data-tour="liquidity-vaults"]' },
+    prompt: 'Tap DLVs',
+  },
+  {
+    id: 'dlvs',
+    screen: 'storage',
+    target: '[data-tour="liquidity-vaults"]',
+    title: 'Liquidity vaults',
+    body: "The vaults you've put up for trading, read from your storage nodes, each with its live reserves. This is your real list: practice makes no vaults.",
+  },
+  {
     id: 'go-settings',
     screen: 'home',
     target: '.dsm-menu-item[data-label="SETTINGS"]',
@@ -460,7 +611,23 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     screen: 'settings',
     target: '[aria-labelledby="security-section-title"]',
     title: 'Lock it',
-    body: 'Lock the wallet with a PIN, a button combo or your fingerprint, so nobody else can open it.',
+    body: "Lock the wallet with a PIN or a combo of the shell's buttons, so nobody else can open it.",
+  },
+  {
+    id: 'go-lock',
+    screen: 'settings',
+    target: '[aria-labelledby="security-section-title"] .sb-btn--primary',
+    title: 'Setting the lock',
+    body: 'Tap Configure wallet lock.',
+    wait: { kind: 'screen', screen: 'lock_setup' },
+    prompt: 'Tap Configure wallet lock',
+  },
+  {
+    id: 'lock-setup',
+    screen: 'lock_setup',
+    target: '.lock-setup-screen',
+    title: 'PIN or combo',
+    body: 'Choose a PIN or a sequence of the shell buttons, and enter it twice. You can have it lock whenever you leave the app, and pick how long it waits before locking. Too many wrong tries wait out a cooldown. In practice, saving is switched off.',
   },
   {
     id: 'ring',
@@ -468,6 +635,20 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     target: '[aria-labelledby="nfc-section-title"]',
     title: 'Ring backup',
     body: 'An NFC ring can carry your backup. If you lose this phone, the ring brings your wallet back on a new one.',
+  },
+  {
+    id: 'nfc-backup',
+    screen: 'nfc_recovery',
+    target: '.nfc-recovery-screen',
+    title: 'Backing up to a ring',
+    body: 'Manage backup shows whether your backup is on, writes your recovery capsule to the ring, and rebuilds it when your wallet changes. Turning it on shows a recovery phrase to write down. In practice, all of it is switched off.',
+  },
+  {
+    id: 'nfc-recover',
+    screen: 'recovery',
+    target: '.recovery-screen',
+    title: 'Getting it back',
+    body: 'Inspect or recover reads a ring and, with your recovery phrase, checks what it holds. On a new phone, that brings your wallet back.',
   },
   {
     id: 'replay',

@@ -207,8 +207,17 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
     let (pk, sk) = generate_sphincs_keypair().unwrap();
     let d = |b: u8| [b; 32];
 
-    let setup =
-        SofiSetupBody::new(d(0x11), d(0x22), 5, d(0xC1), d(0x66), d(0x67), 0x0001, &pk).unwrap();
+    let setup = SofiSetupBody::new(
+        d(0x11),
+        d(0x22),
+        5,
+        d(0xC1),
+        d(0x66),
+        d(0x67),
+        dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F,
+        &pk,
+    )
+    .unwrap();
     let fulfillment = TraderFulfillmentBody::new(
         d(0x0A),
         vec![d(0x71)],
@@ -217,8 +226,9 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
             attempt: 0,
         }],
         6,
-        0x0001,
+        dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F,
         &pk,
+        [0xA7; 32],
     )
     .unwrap();
 

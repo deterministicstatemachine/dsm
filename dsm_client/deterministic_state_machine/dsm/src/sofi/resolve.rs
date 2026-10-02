@@ -30,8 +30,7 @@ use crate::economic::register::root_completion;
 use crate::economic::state::EconomicLeafState;
 use crate::economic::tree::EconomicSmt;
 use crate::route_chain::{
-    CellEvidence, CellFact, ChainState, CompletionProof, Missing as CellMissing, RouteEntry,
-    RoutedCell,
+    CellEvidence, CellFact, ChainState, CompletionProof, Missing as CellMissing, RoutedCell,
 };
 
 use super::conformance::{
@@ -45,12 +44,13 @@ use super::exercise::{
 use super::facts::{
     establish, establish_ground, refuted_in_hand, Established, EstablishedFacts, ExerciseReads,
     GroundFacts, GroundReads, InHandRefutation, LegReads, NotEstablished, ResolvedParent,
+    TraderAtParent,
 };
 use super::lineage::{
     advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted, genesis_root,
     vault_leaves_at_genesis, AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
 };
-use super::publication::{recognize_fulfillment, recognize_setup, Signed};
+use super::publication::{recognize_setup, Signed};
 use super::registration::{
     fulfillment_completion, fulfillment_registered, PositionCells, Registration, RegistrationRead,
 };
@@ -101,15 +101,6 @@ pub const SIBLING_DEPTH: usize = 2;
 
 /// Acquisition rounds before the evidence is `Exhausted`.
 pub const ACQUIRE_ROUNDS: usize = 3;
-
-/// Cells read per leg when acquiring what an attempt skipped past: the same
-/// bound the walk uses, for the same reason. Past it the earlier keys are
-/// unread, never assumed skipped.
-pub const PRIOR_ATTEMPT_BUDGET: usize = WALK_BUDGET;
-
-/// Fulfillment candidates one read of `K_ful(q)` may name before the pair is
-/// unavailable to this verifier: each names a `P` fetched by id (R8).
-pub const NAMED_PRECOMMIT_BUDGET: usize = 64;
 
 /// A read that could not be made: a member did not answer, a local store
 /// failed. A network status, never a verdict, and never a fact about the
@@ -255,19 +246,6 @@ pub trait SofiReads {
         evidence: &CellEvidence,
         proof: &CompletionProof,
     ) -> Result<(), ReadFailure>;
-}
-
-/// Every value the cell's copies carry, seat by seat in route order and in
-/// each seat's arrival order: the bytes a recognizer is shown. What does not
-/// decode as a route entry carries nothing.
-pub fn carried_values(evidence: &CellEvidence) -> impl Iterator<Item = Vec<u8>> + '_ {
-    evidence
-        .seats
-        .iter()
-        .filter_map(|seat| seat.values.as_ref())
-        .flatten()
-        .filter_map(|bytes| RouteEntry::decode(bytes))
-        .map(|entry| entry.value)
 }
 
 /// This device's own `R_econ` leaves, checked against the root they claim to
@@ -699,13 +677,10 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// Once registered, the completion proofs of both cells are kept (SoFi
     /// Amendment S10).
     ///
-    /// Recognizing a value at `K_ful(q)` needs the `P` it names: every
-    /// fulfillment envelope any seat holds at the key names one, and those
-    /// are read by id (R8), at most [`NAMED_PRECOMMIT_BUDGET`] of them. A `P`
-    /// the read could not decide leaves the cell undecided — the call fails,
-    /// and a later read can answer — so that no later value is read as the
-    /// first recognized one while an earlier one's `P` is merely not in
-    /// hand. The inner `Err` is what the reads do not yet show.
+    /// Both cells are decided from their bytes alone (SoFi Amendment S20):
+    /// no precommit is read, so nothing a fulfillment names can make this
+    /// read wait, and the answer is the same at every time. The inner `Err` is
+    /// what the reads do not yet show.
     pub fn read_registration(
         &self,
         genesis: &D32,
@@ -716,46 +691,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         let cells = self.position_cells(genesis, device_id, position, parent_root)?;
         let ful_evidence = self.reads.cell(cells.fulfillment())?;
         let root_evidence = self.reads.cell(cells.root().routed())?;
-
-        let mut precommits: BTreeMap<D32, TraderPrecommitBody> = BTreeMap::new();
-        let mut named: Vec<D32> = Vec::new();
-        for value in carried_values(&ful_evidence) {
-            if let Some((.., signed)) = recognize_fulfillment(&value) {
-                let id = *signed.body.precommit_id();
-                if !named.contains(&id) {
-                    named.push(id);
-                }
-            }
-        }
-        if named.len() > NAMED_PRECOMMIT_BUDGET {
-            return Err(VerifierFailure::Read(format!(
-                "fulfillment register: {} precommits are named at K_ful({position}), past the \
-                 budget of {NAMED_PRECOMMIT_BUDGET}",
-                named.len()
-            )));
-        }
-        for id in named {
-            match self.reads.precommit(&id)? {
-                Resolved::Kept(precommit) => {
-                    precommits.insert(id, precommit.body);
-                }
-                Resolved::None => {}
-                Resolved::Unavailable => {
-                    return Err(VerifierFailure::Read(
-                        "fulfillment register: a precommit a candidate names could not be read"
-                            .to_string(),
-                    ))
-                }
-            }
-        }
-
-        let registration =
-            match fulfillment_registered(&cells, &ful_evidence, &root_evidence, &precommits) {
-                Ok(registration) => registration,
-                Err(missing) => return Ok(Err(missing)),
-            };
+        let registration = match fulfillment_registered(&cells, &ful_evidence, &root_evidence) {
+            Ok(registration) => registration,
+            Err(missing) => return Ok(Err(missing)),
+        };
         if let Registration::Registered(..) = registration.registration() {
-            let (.., ful_proof) = fulfillment_completion(&cells, &ful_evidence, &precommits)
+            let (.., ful_proof) = fulfillment_completion(&cells, &ful_evidence)
                 .map_err(|missing| {
                     VerifierFailure::Read(format!("fulfillment completion: {missing:?}"))
                 })?
@@ -781,24 +722,23 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(Ok(registration))
     }
 
-    /// The cells an attempt above zero skips past, read from the committed
-    /// set: for every leg the fulfillment names at attempt `a`, the storage
-    /// fact at `K^(0) … K^(a-1)` of that leg's vault at its parent root.
+    /// The cell an attempt above zero skips past, read from the committed
+    /// set: for every leg the fulfillment names at attempt `a > 0`, the
+    /// storage fact at `K^(a-1)` of that leg's vault at its parent root.
     ///
     /// ONE PATH, SHARED (owner ruling, §44.4). The producer's install (R9)
-    /// and the verifier's resolution (R12) read the same cells the same way,
+    /// and the verifier's resolution (R12) read the same cell the same way,
     /// because they answer the same question: conformance item 5 requires
-    /// the key before this one to have a permanent storage resolution. A key
-    /// whose reads do not decide it yet, or past `budget`, is absent from the
-    /// map, and conformance names it missing. An attempt of zero has no
-    /// earlier key and contributes no entry.
+    /// the key before this one to have a permanent storage resolution
+    /// (§20.2), and that key alone, however many keys come before it. A key
+    /// whose reads do not decide it yet is absent from the map, and
+    /// conformance names it missing. An attempt of zero has no earlier key
+    /// and contributes no entry.
     pub fn acquire_prior_attempts(
         &self,
         precommit: &TraderPrecommitBody,
         fulfillment: &TraderFulfillmentBody,
-        budget: usize,
     ) -> Result<BTreeMap<(D32, u64), CellFact>, VerifierFailure> {
-        let reach = u64::try_from(budget).unwrap_or(u64::MAX);
         let mut cells = BTreeMap::new();
         for entry in fulfillment.attempts() {
             // F naming a leg P does not is conformance item 4's refusal;
@@ -810,16 +750,15 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             else {
                 continue;
             };
-            for earlier in 0..entry.attempt.min(reach) {
-                match self.read_attempt_cell(&leg.vault_id, &leg.parent_root, earlier)? {
-                    Ok(read) => {
-                        cells.insert((entry.vault_id, earlier), read.fact());
-                    }
-                    Err(undecided) => {
-                        log::info!(
-                            "[sofi verifier] K^({earlier}) is not decided yet: {undecided:?}"
-                        )
-                    }
+            let Some(earlier) = entry.attempt.checked_sub(1) else {
+                continue;
+            };
+            match self.read_attempt_cell(&leg.vault_id, &leg.parent_root, earlier)? {
+                Ok(read) => {
+                    cells.insert((entry.vault_id, earlier), read.fact());
+                }
+                Err(undecided) => {
+                    log::info!("[sofi verifier] K^({earlier}) is not decided yet: {undecided:?}")
                 }
             }
         }
@@ -879,11 +818,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             preimage: objects.preimage.clone(),
             closure,
             setups,
-            prior_attempts: self.acquire_prior_attempts(
-                objects.precommit,
-                objects.fulfillment,
-                PRIOR_ATTEMPT_BUDGET,
-            )?,
+            prior_attempts: self.acquire_prior_attempts(objects.precommit, objects.fulfillment)?,
             parent_fulfillment,
         })
     }
@@ -1367,7 +1302,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         // parent is not established yet, which is not a fact about this
         // vault; the second runs once those chains have been walked.
         for pass in 0..2 {
-            let walked = self.walk_chain(
+            let mut walked = self.walk_chain(
                 &*chains,
                 *vault_id,
                 *current,
@@ -1376,6 +1311,11 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 CHAIN_DEPTH,
                 BTreeMap::new(),
             )?;
+            // The budget chunks the walk and never ends it (§23.6): however
+            // many keys junk holds, the walk resumes past them.
+            while let WalkOutcome::Continue { .. } = walked.outcome {
+                walked = self.continue_walk(&*chains, walked, WALK_BUDGET)?;
+            }
             match walked.outcome {
                 WalkOutcome::Consumed { .. } => {
                     let Some(exercise) = walked.consumed else {
@@ -1764,7 +1704,10 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                             }
                         };
                     // `AttemptLive`: every earlier key of this leg's chain is
-                    // skipped, established by walking them.
+                    // skipped, established by walking them. The keys are read
+                    // in chunks of the walk's budget, which never ends the
+                    // walk (§23.6), and then walked once from the first key
+                    // over everything read.
                     let walk = if attempt == 0 {
                         None
                     } else {
@@ -1775,21 +1718,47 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         let Some(below) = depth.checked_sub(1) else {
                             return Ok(Err(not_live));
                         };
-                        let earlier =
-                            usize::try_from(attempt).map_or(WALK_BUDGET, |a| a.min(WALK_BUDGET));
-                        let chain = self.walk_chain(
+                        let chunk_from = |cursor: u64| {
+                            usize::try_from(attempt - cursor)
+                                .map_or(WALK_BUDGET, |keys| keys.min(WALK_BUDGET))
+                        };
+                        let mut chunk = self.walk_chain(
                             chains,
                             leg.vault_id,
                             leg.parent_root,
                             0,
-                            earlier,
+                            chunk_from(0),
                             below,
                             BTreeMap::new(),
                         )?;
-                        if let Some(why) = chain.not_established {
-                            return Ok(Err(why));
+                        loop {
+                            if let Some(why) = chunk.not_established {
+                                return Ok(Err(why));
+                            }
+                            match chunk.outcome {
+                                WalkOutcome::Continue { cursor } if cursor < attempt => {
+                                    chunk = self.walk_chain(
+                                        chains,
+                                        leg.vault_id,
+                                        leg.parent_root,
+                                        cursor,
+                                        chunk_from(cursor),
+                                        below,
+                                        chunk.known,
+                                    )?;
+                                }
+                                WalkOutcome::Continue { .. }
+                                | WalkOutcome::Consumed { .. }
+                                | WalkOutcome::Unresolved { .. }
+                                | WalkOutcome::CounterExhausted { .. } => break,
+                            }
                         }
-                        Some(chain.walk)
+                        let keys_below = usize::try_from(attempt).map_err(|e| {
+                            VerifierFailure::Refused(format!("attempt {attempt}: {e}"))
+                        })?;
+                        Some(walk(&leg.vault_id, &leg.parent_root, 0, keys_below, |a| {
+                            chunk.known.get(&a).and_then(KeyKnown::key_facts)
+                        }))
                     };
                     (cell, walk)
                 }
@@ -1851,62 +1820,76 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(establish(&reads))
     }
 
-    /// The conditional parent `exercise`'s `P` names, resolved: this
-    /// verifier's own resolution when it is the one `P` names, and otherwise
-    /// the root the trader's lineage selected at that position, by
-    /// frontier-relative verification of the lineage (DSM Amendment A8; SoFi
-    /// Amendment S15). `None` for a single-root parent, which needs no
-    /// resolution, and for a conditional one the reads do not establish:
-    /// the facts then report it unresolved, and nothing is refuted.
-    fn parent_for(&self, exercise: &RecognizedExercise) -> Option<ResolvedParent> {
+    /// What the trader's lineage holds at the position `exercise`'s `P`
+    /// names as its parent — the claim final at its `K_root(p)` and the root
+    /// that claim installed — as this verifier establishes it: its own
+    /// admitted position when that is the claim `P` names, and otherwise the
+    /// frontier-relative walk of the trader's lineage (DSM Amendment A8; SoFi
+    /// Amendment S15). Whether what is held is what `P` names is the facts'
+    /// to decide (§6.62). A lineage the walk establishes Invalid at or before
+    /// that position, or quarantines for a divergent write-once register
+    /// cell, holds nothing there, ever: the verdict reaches the facts as such
+    /// (SoFi Amendment S13, the same classes `validation::setup_lineage`
+    /// reads). `None` while the reads do not establish the lineage at that
+    /// position: the facts then report the parent unresolved, and nothing is
+    /// refuted.
+    fn parent_for(&self, exercise: &RecognizedExercise) -> Option<TraderAtParent> {
         let precommit = &exercise.precommit().body;
-        let ParentClaimRef::Conditional { fulfillment_id } = precommit.parent_claim_ref() else {
-            return None;
-        };
         let position = precommit.position();
         if let Some(own) = self.parent {
-            if own.fulfillment_id == *fulfillment_id && own.economic_position == position {
-                return Some(own);
+            if own.named == *precommit.parent_claim_ref() && own.economic_position == position {
+                return Some(TraderAtParent::Held(own));
             }
         }
-        match self
-            .reads
-            .trader_root_at(precommit.genesis(), precommit.device_id(), position)
-        {
-            Ok((root, named)) => parent_named(
-                position,
-                fulfillment_id,
-                root.economic_position(),
-                root.economic_root(),
-                named,
-            ),
-            // The reads do not establish the lineage at that position yet.
-            Err(..) => None,
-        }
+        trader_at_parent(
+            position,
+            self.reads
+                .trader_root_at(precommit.genesis(), precommit.device_id(), position),
+        )
     }
 }
 
-/// The parent a `P` at `position` names by `fulfillment_id`, when the trader's
-/// lineage, verified to that position, selected `root` at `root_position` and
-/// is named there by `named`: only the very position `P` names, held by that
-/// very fulfillment, resolves it. Anything else is not the parent `P` names.
-fn parent_named(
+/// What the walk of a trader's lineage to `position` establishes there
+/// (DSM Amendment A8; SoFi Amendment S15): the claim it holds and its root;
+/// or, when the walk establishes the lineage Invalid at or before `position`
+/// — an Invalid step, or a divergent write-once register cell it
+/// quarantines — that it holds nothing there, ever (SoFi Amendment S13, the
+/// classes `validation::setup_lineage` reads). Evidence not in hand and a
+/// position the walk cannot pass yet establish nothing.
+fn trader_at_parent(
     position: u64,
-    fulfillment_id: &D32,
+    walked: Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure>,
+) -> Option<TraderAtParent> {
+    match walked {
+        Ok((root, named)) => held_at(
+            position,
+            root.economic_position(),
+            root.economic_root(),
+            named,
+        )
+        .map(TraderAtParent::Held),
+        Err(PeerLineageFailure::Invalid(..) | PeerLineageFailure::Quarantined(..)) => {
+            Some(TraderAtParent::LineageInvalid)
+        }
+        Err(PeerLineageFailure::Incomplete(..) | PeerLineageFailure::Unresolved(..)) => None,
+    }
+}
+
+/// What a trader's lineage holds at `position`, from a walk that reached
+/// `root_position`: the claim `named` final there and the `root` it
+/// installed. A walk that reached another position holds nothing at this
+/// one.
+fn held_at(
+    position: u64,
     root_position: u64,
     root: D32,
     named: ParentClaimRef,
 ) -> Option<ResolvedParent> {
-    match named {
-        ParentClaimRef::Conditional {
-            fulfillment_id: held,
-        } if held == *fulfillment_id && root_position == position => Some(ResolvedParent {
-            economic_position: position,
-            selected_root: root,
-            fulfillment_id: *fulfillment_id,
-        }),
-        ParentClaimRef::Conditional { .. } | ParentClaimRef::SingleRoot { .. } => None,
-    }
+    (root_position == position).then_some(ResolvedParent {
+        economic_position: position,
+        selected_root: root,
+        named,
+    })
 }
 
 /// Resolves another trader's conditional position for a frontier-relative
@@ -1935,17 +1918,15 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
         ),
         PeerLineageFailure,
     > {
-        // When `q − 1` was itself a SoFi position, the walk resolved it and
-        // `previous` is the root that resolution selected: what a `P` naming
-        // that fulfillment as its parent was built on.
-        let resolved = match parent {
-            ParentClaimRef::Conditional { fulfillment_id } => Some(ResolvedParent {
-                economic_position: previous.economic_position(),
-                selected_root: previous.economic_root(),
-                fulfillment_id: *fulfillment_id,
-            }),
-            ParentClaimRef::SingleRoot { .. } => None,
-        };
+        // The walk authenticated `q − 1` itself: `parent` is the claim it
+        // accepted there and `previous` the root it holds — for a SoFi
+        // position, the root that resolution selected. What a `P` at `q`
+        // names as its parent is compared against exactly that (§6.62).
+        let resolved = Some(ResolvedParent {
+            economic_position: previous.economic_position(),
+            selected_root: previous.economic_root(),
+            named: *parent,
+        });
         let verifier = Verifier::new(
             self.reads,
             self.members,
@@ -2020,11 +2001,19 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
-        // `held` counts only as the claim (P, F) derive: registration holds F
-        // registered only while `K_root(q)` is final on exactly that claim
-        // (`registration::fulfillment_registered`), and a final value is the
-        // cell's only one, so its two roots are the ones the resolution
-        // chooses between.
+        // `held` counts only as the claim (P, F) derive (Amendment S15).
+        // Registration pairs the cells by `FulfillmentId(F)` from their bytes
+        // alone (Amendment S20), so the body is compared here, where `P` is in
+        // hand: a claim naming F with another body is not F's `C_q`, and the
+        // position is Invalid for the trader's lineage. A final value is the
+        // cell's only one, so once they agree its two roots are the ones the
+        // resolution chooses between.
+        if derive::resolution_claim(&precommit, &fulfillment.body) != *held {
+            return Err(Invalid(format!(
+                "position {q}: the claim at K_root(q) names the fulfillment, but it is not the \
+                 claim its P and F derive"
+            )));
+        }
 
         // The exercise, read back from the first leg's cell.
         let first = precommit
@@ -2141,38 +2130,83 @@ mod tests {
         assert_eq!(remembered(&memo, &other, [accepted.as_slice()]), None);
     }
 
+    /// Pre-audit 12f, SoFi Amendment S13: the walk's verdict reaches the
+    /// facts as what it is. A lineage the walk establishes Invalid at or
+    /// before `p`, or quarantines for a divergent register cell, holds
+    /// nothing at `p`, ever; evidence not in hand and a position the walk
+    /// cannot pass yet establish nothing; a walk that holds a claim at `p`
+    /// holds it there and nowhere else. On the old code every failure read as
+    /// no parent, so a key held on an invalid lineage waited forever.
     #[test]
-    fn only_the_position_and_fulfillment_p_names_resolve_its_parent() {
-        let (position, wanted, root) = (7, [0xF7; 32], [0x77; 32]);
-        let held = |fulfillment_id| ParentClaimRef::Conditional { fulfillment_id };
+    fn the_walks_verdict_on_a_traders_lineage_reaches_the_facts() {
+        use crate::economic::provenance::PeerLineageFailure as F;
+        for verdict in [
+            F::Invalid("a step's witness does not fold".to_string()),
+            F::Quarantined("two claims hold the register cell".to_string()),
+        ] {
+            assert_eq!(
+                trader_at_parent(7, Err(verdict)),
+                Some(TraderAtParent::LineageInvalid)
+            );
+        }
+        for pending in [
+            F::Incomplete("the register cell is not decided yet".to_string()),
+            F::Unresolved("a conditional position has not resolved".to_string()),
+        ] {
+            assert_eq!(trader_at_parent(7, Err(pending)), None);
+        }
+        let named = ParentClaimRef::SingleRoot {
+            claim_ref: [0xC7; 32],
+        };
+        let at = |position| {
+            ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                    economic_position: position,
+                    economic_root: [0x77; 32],
+                    claim_ref: [0xC7; 32],
+                },
+            )
+            .expect("an ordinary admitted position")
+        };
         assert_eq!(
-            parent_named(position, &wanted, position, root, held(wanted)),
-            Some(ResolvedParent {
-                economic_position: position,
-                selected_root: root,
-                fulfillment_id: wanted,
-            })
+            trader_at_parent(7, Ok((at(7), named))),
+            Some(TraderAtParent::Held(ResolvedParent {
+                economic_position: 7,
+                selected_root: [0x77; 32],
+                named,
+            }))
         );
-        assert_eq!(
-            parent_named(position, &wanted, position, root, held([0xF8; 32])),
-            None,
-            "another fulfillment holds the position"
-        );
-        assert_eq!(
-            parent_named(position, &wanted, position + 1, root, held(wanted)),
-            None,
-            "the root of another position"
-        );
-        assert_eq!(
-            parent_named(
-                position,
-                &wanted,
-                position,
-                root,
-                ParentClaimRef::SingleRoot { claim_ref: wanted }
-            ),
-            None,
-            "an ordinary position is no conditional parent"
-        );
+        assert_eq!(trader_at_parent(7, Ok((at(6), named))), None);
+    }
+
+    /// What a walk holds counts only at the position it reached: there it is
+    /// the claim final at `K_root(p)` and its root, whichever kind of claim
+    /// that is, for the facts to compare with what `P` names (§6.62); a walk
+    /// that reached another position holds nothing at `p`.
+    #[test]
+    fn what_a_walk_holds_counts_only_at_the_position_it_reached() {
+        let (position, root) = (7, [0x77; 32]);
+        for named in [
+            ParentClaimRef::Conditional {
+                fulfillment_id: [0xF7; 32],
+            },
+            ParentClaimRef::SingleRoot {
+                claim_ref: [0xC7; 32],
+            },
+        ] {
+            assert_eq!(
+                held_at(position, position, root, named),
+                Some(ResolvedParent {
+                    economic_position: position,
+                    selected_root: root,
+                    named,
+                })
+            );
+            assert_eq!(
+                held_at(position, position + 1, root, named),
+                None,
+                "the root of another position"
+            );
+        }
     }
 }

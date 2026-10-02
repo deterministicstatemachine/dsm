@@ -165,7 +165,7 @@ function SendTabInner({
         }
       } else {
         const res = await dsmClient.sendOnlineTransferSmart(
-          contact.alias,
+          sendForm.selectedContactKey,
           sendForm.amount.trim(),
           sendForm.note || undefined,
           tokenId,
