@@ -1,0 +1,18 @@
+PRINT INSTRUCTIONS - pocket case for Raspberry Pi Pico 2W + Tropic Click
+REV D - LED opening is now a slot (LED exact position varies; slot covers it).
+BOOTSEL pinhole: 2.5 mm left of center, 14.5 mm from USB edge (official data).
+Units: millimeters. Material: PETG preferred, PLA fine.
+Layer 0.2 mm, 3 perimeters, 25% infill, NO supports, no brim needed.
+All 3 files print flat side down, already oriented.
+
+1) stencil.stl - 10-minute flat plate. Print FIRST. Lay it on the bare
+   Pico 2W board, USB edge against the two witness slots, corners in the
+   L-windows. The small hole must sit over the white BOOTSEL button; the
+   LED must be visible somewhere inside the small slot near the USB.
+2) base.stl    - the case body (~2 h) - unchanged
+3) lid.stl     - the top cap (~1 h)
+
+Approx sizes: base/lid 56 x 34 x 16 mm footprint. Total ~35 g of filament.
+REV E - side walls, the two lid-screw bosses and the lid countersinks moved out
+        0.75 mm per side (case 1.5 mm wider) so the Pico clears the bosses.
+        Nothing on the centre line moved. Footprint now ~60.5 x 33.6 mm.
