@@ -2453,7 +2453,7 @@ This is the owner's beta security pre-audit, item 12 (P1): "cheap garbage must n
 | Another fulfillment's leader link loses nothing (the old S14 exception) | Both tests red |
 | A registered pair's body is not compared | The unit test red |
 
-The resolution's body check (Invalid in `peer_position`) has no test of its own yet.
+The resolution's body check (Invalid in `peer_position`) is tested by `dsm_sdk::handlers::node_e2e_tests::a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the_lineage` (`77dc9cfc1`). B writes its pair with a claim it signs naming its `F` under another `R_realize`. The pair registers, matched by `F`'s id; a peer walking B's lineage to `q` gets Invalid with the check's reason, and the vault's walk passes over the key B's exercise holds. Mutation: the check comparing only the fulfillment id → red (the walk reads `q` as unresolved, not Invalid). The test found 12k below.
 
 **12e. A trader that withheld its pair held the vault's key (closed).**
 
@@ -2479,8 +2479,22 @@ The resolution's body check (Invalid in `peer_position`) has no test of its own 
 | `verify_resolution_claim` dropped from claim recognition | The same test red: this claim under another claim's signature is accepted |
 | Recognition drops `fulfillment_proves_the_device` | `an_exercise_whose_fulfillment_does_not_prove_the_traders_device_is_nothing` red |
 
+**12f. A parent on a lineage known invalid left the key waiting (closed).**
+
+| Field | Record |
+|---|---|
+| Severity | High |
+| Files | `dsm/src/sofi/resolve.rs` · `trader_at_parent` (new), `Verifier::parent_for`; `dsm/src/sofi/facts.rs` · `TraderAtParent` (new), `parent_position`; `dsm/src/sofi/resolution.rs` · `ParentPosition::LineageInvalid` (new), `root_left_by` (new), `trader_parent_compatible`, `trader_parent_impossible`; `lean4/DSMSofiAtomicity.lean` · `ParentState.lineageInvalid` |
+| Exploit | The walk of a trader's lineage (DSM Amendment A8) reports a lineage Invalid at or before `p`, or quarantined for a divergent write-once register cell, as a failure. `parent_for` read every failure as "not established", so the facts saw no parent and the key the exercise held waited forever. A trader whose lineage is invalid between its setups and `p` (setups checked at an earlier position pass S13) could write an exercise naming any parent at `p` and hold a vault key for good: §23.5 arm (iv) exists so that an impossible operation cannot strand a DLV key. A conditional parent that resolved Invalid is the same case. |
+| Violates | SoFi §23.3 (`TraderParentImpossible(P)` when `C_p` is terminal and selected no root); Amendment S13: "No trade whose trader's lineage is known invalid can occupy a vault key indefinitely because that lineage can never yield an accepted claim." MR-SOFI-0234. |
+| Verification | `dsm::sofi::resolve::tests::the_walks_verdict_on_a_traders_lineage_reaches_the_facts` (Invalid and Quarantined reach the facts as a lineage known invalid; Incomplete and Unresolved as nothing; a held claim only at the position the walk reached). `dsm::sofi::facts::tests::a_parent_on_a_lineage_known_invalid_is_terminal` (single-root and conditional named claims alike: the position Invalid, the vault's key Skipped). Lean `parent_on_an_invalid_lineage_is_invalid` with its witness in `the_trader_parent_rungs_are_not_vacuous`. No node test: an invalid lineage on the nodes needs a step that verifies as wrong, which the harness cannot produce from a device; the classification is the one `validation::setup_lineage` already applies to setups (S13), tested the same way. |
+| Closure condition | The walk's verdict reaches the facts as what it is: `TraderAtParent::LineageInvalid`, so `ParentPosition::LineageInvalid`, terminal whatever `P` names, never compatible and always impossible. The two predicates now derive from the root the parent leaves `P` standing on (`root_left_by`); impossible is not compatible, since a `ParentPosition` is always terminal. |
+| Status | Closed (`819396e0e`). |
+
+Mutation controls (12f, restored byte for byte): the walk's verdict read as no parent → `the_walks_verdict_on_a_traders_lineage_reaches_the_facts` red; a lineage known invalid read as no fact → `a_parent_on_a_lineage_known_invalid_is_terminal` red; `lineageInvalid` dropped from Lean's `parentImpossible` → three proofs fail to check.
+
 **Open: found here, not built.**
-- **12f. A conditional parent that resolved Invalid.** §23.3 makes this parent impossible too (`C_p` terminal, no root). The A8 walk reports an Invalid position as a failure, so `trader_root_at` fails, the facts see no parent, and the key waits forever. A single-root parent whose lineage is known invalid at or before `p` is the same case, as Amendment S13 already decides for setups. The walk's verdict has to reach the facts as a terminal parent. Mine, next. Verification: read at the code.
+- **12k. The trader's own device does not resolve a misbodied pair Invalid (found by the 12j body-check test).** `K_root(q)` holding a claim that names `F` with another body than `derive(P, F)` is Invalid for the trader's lineage (S20: "the position resolves Invalid for the trader's lineage. The vault and the lineage therefore agree"). A peer's walk says so (`peer_position`), and the vault skips the key (`standing_of` → Lost). The trader's own device does not: `standing_of` reads the pair as Lost, the facts set `registered` false, and the ladder's rung 0 waits (`Incomplete::NotRegistered`), so `sofi.resolve` answers `RetriesExhausted` on every call and the position stays fenced. Only the trader's own key can sign such a claim (S20), so no other party can cause it, and the effect is the same as Invalid (nothing advances past `q`); the trader's own status disagrees with every peer's. The fix is a fact the ladder reads: the pair final on `F` with a claim naming `F` under another body resolves Invalid at rung 0 (Rust `resolve_position`, Lean `resolve`). Verification: `a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the_lineage` showed B's own `sofi.resolve` answering `RetriesExhausted`. For the owner: fix on #1096, or record as accepted (self-inflicted).
 - **12g. A defeated route strands its other legs (owner ruling).** A route is Void when a reserved key's leader holds another exercise first (§24 rung 8). That is not an arm of `RouteImpossible` (§23.5 arms i–iv), so the route's other final cells are skipped only once the lost leg's parent is consumed elsewhere or orphaned. A trader that owns a vault no one else trades can hold another vault's key indefinitely: route through both, leg 1 final, leg 2's key taken first by its own other exercise. Like S14, this is a fact about `F`, not about `P` and `E`. It needs an amendment: a final cell whose fulfillment's reserved key went to another exercise is skipped. Verification: read at the code (`route_impossible`, `classify_attempt`).
 - **12h. Withheld evidence holds a key (owner ruling).** A registered exercise whose trader never publishes an object conformance or validation needs, such as the setup a leg names, can never be classified. §5.3 lets that position stay unresolved, but none of the skips applies, so it also holds the vault's key forever. The spec's remedy is the challenge rule (Amendment S1, storage §9.1), and Amendment S7 puts it outside beta. Verification: read at the code.
 - **12i. Locators anyone can compute in advance can be flooded first (owner ruling, and one fix in reach).** An index scan that exceeds its budget is Unavailable (§11). A locator computable before the honest object exists can be filled first with appends of junk, past the budget, for good.
@@ -2547,11 +2561,11 @@ Also: `a_credits_source_is_validated_through_its_own_segment` (B validates C's f
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
 | DSM high-level (MR-DSM) | 277 | 96 | 95 | 39 | 0 | 29 | 18 |
-| SoFi (MR-SOFI) | 362 | 236 | 87 | 18 | 4 | 17 | 0 |
+| SoFi (MR-SOFI) | 362 | 237 | 86 | 18 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **943** | **406** | **201** | **114** | **4** | **64** | **154** |
+| **All** | **943** | **407** | **200** | **114** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3074,7 +3088,7 @@ Also: `a_credits_source_is_validated_through_its_own_segment` (B validates C's f
 | MR-SOFI-0231 | Met | `dsm::sofi::resolution::walk`; `dsm::sofi::resolution::classify_attempt` | `dsm::sofi::resolution::tests::the_walk_is_chunking_equivalent` | — |
 | MR-SOFI-0232 | Met | `dsm::sofi::resolution::walk`; `dsm::sofi::resolution::classify_attempt` | `dsm::sofi::resolution::tests::the_walk_is_chunking_equivalent` | — |
 | MR-SOFI-0233 | Met | `dsm::sofi::resolution::consumed_route` | `dsm::sofi::resolution::tests::a_route_with_one_leg_still_open_is_not_consumed` | — |
-| MR-SOFI-0234 | Partial | `dsm::sofi::resolution::trader_parent_compatible`; `dsm::sofi::resolution::trader_parent_impossible`; `dsm::sofi::facts::parent_position` | `dsm::sofi::resolution::tests::the_trader_parent_arm_is_monotone`; `dsm::sofi::facts::tests::a_conditional_parent_another_claim_holds_selects_no_root` | Terminal absence is established when another claim holds `p` (§6.66 12d; until 2026-10-01 that parent was not established, so nothing built on it was ever skipped). Partial: a conditional parent that resolved Invalid still reaches the facts as not established, because the A8 walk's Invalid verdict does not reach them (§6.66 12f). |
+| MR-SOFI-0234 | Met | `dsm::sofi::resolution::trader_parent_compatible`; `dsm::sofi::resolution::trader_parent_impossible`; `dsm::sofi::facts::parent_position`; `dsm::sofi::resolve::trader_at_parent` | `dsm::sofi::resolution::tests::the_trader_parent_arm_is_monotone`; `dsm::sofi::facts::tests::a_conditional_parent_another_claim_holds_selects_no_root`; `dsm::sofi::facts::tests::a_parent_on_a_lineage_known_invalid_is_terminal`; `dsm::sofi::resolve::tests::the_walks_verdict_on_a_traders_lineage_reaches_the_facts` | Terminal absence is established when another claim holds `p` (§6.66 12d), and when the walk establishes the trader's lineage Invalid at or before `p` (§6.66 12f, Amendment S13): the parent is terminal, the position Invalid and its keys skipped. |
 | MR-SOFI-0235 | Met | `dsm::sofi::resolution::trader_parent_compatible`; `dsm::sofi::resolution::trader_parent_impossible` | `dsm::sofi::resolution::tests::the_trader_parent_arm_is_monotone` | — |
 | MR-SOFI-0236 | Met | `dsm::sofi::resolution::classify_attempt`; `dsm::sofi::resolution::consumed_route` (one E per route) | `dsm::sofi::resolution::tests::legs_final_on_different_commitments_are_not_one_route` | — |
 | MR-SOFI-0237 | Met | `dsm::sofi::resolution::route_impossible` | `dsm::sofi::resolution::tests::a_stranded_final_cell_of_an_impossible_route_is_skipped` | — |
