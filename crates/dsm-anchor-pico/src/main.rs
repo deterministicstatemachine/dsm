@@ -17,7 +17,7 @@
 //! identity witnesses over the one DSM root-advance message `M_{i+1}` and nothing else:
 //!   - `σ^chip` — the resident non-exportable Ed25519 key inside TROPIC01 (`eddsa_sign`),
 //!   - `σ^host` — BLAKE3-SPHINCS+ SPX128f, the RP2350 secure-partition key (`dsm_sphincs`),
-//!     byte-compatible with the DSM receiver's verifier (`DSM/sphincs-kdf`).
+//!     the same crate the DSM receiver verifies with (construction version 2).
 //! There is no boot fence, no MAC-and-destroy witness, and no on-device counter-read / verify
 //! path — the counter is moved only as a local floor at commit and is never read by a receiver.
 //!

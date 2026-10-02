@@ -56,7 +56,6 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_ATTA_V2,
     TAG_DSM_CHAIN_HEAD_AT_REST_V2,
     TAG_DSM_KYBER_RECIPIENT_PUB_V1,
-    TAG_DSM_SPHINCS_KDF,
     TAG_DSM_SPHINCS_SEED,
     TAG_DSM_STEP_SALT,
     TAG_DSM_TLS_CERT_HASH,

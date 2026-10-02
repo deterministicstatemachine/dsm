@@ -47,10 +47,8 @@ mod tests {
         }
 
         /// Non-malleability: corrupting the signature randomizer `R` (first n
-        /// bytes) makes verify fail.  SPHINCS+ WOTS+ chains tolerate many
-        /// single-byte flips inside the authentication path, but the leading
-        /// randomizer `R` feeds into the message hash that determines all FORS
-        /// indices — corrupting it is always fatal.
+        /// bytes) makes verify fail: `R` feeds the message hash that selects
+        /// every FORS index and the signing leaf.
         #[test]
         fn pbt_sphincs_signature_tamper(
             msg in proptest::collection::vec(any::<u8>(), 1..=256),

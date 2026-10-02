@@ -751,13 +751,14 @@ mod tests {
             ALG,
             "the alg field is where the layout says it is"
         );
-        bytes[alg_at..alg_at + 2].copy_from_slice(&0x0002u16.to_be_bytes());
+        let retired = crate::ccb::genesis::sigalg::RETIRED_SPHINCS_PLUS_SPX256F_V1;
+        bytes[alg_at..alg_at + 2].copy_from_slice(&retired.to_be_bytes());
         let patched = crate::sofi::wire::SignedSofiObject::decode(&bytes)
             .expect("an undeclared alg decodes so it can be named");
         assert_eq!(
             verify_signed_object(&patched, &pk),
             Err(SignatureError::EnvelopeAlgDisagreesWithBody {
-                envelope: 0x0002,
+                envelope: retired,
                 body: ALG
             })
         );
