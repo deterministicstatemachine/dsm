@@ -581,18 +581,8 @@ fn is_cell_copy_at(entry: &RouteEntry, cell: &RoutedCell, position: usize) -> bo
 }
 
 /// The cell's position-0 copies in the leader's arrival log, in arrival
-/// order: the values the leader link is chosen from (§9 route chains, rule
-/// 3). A reader that must fetch what its recognizer needs before evaluating
-/// the cell fetches it for these, in this order, and for nothing any other
-/// seat holds. Nothing when the leader is unread.
-pub fn leader_copies<'e>(
-    cell: &'e RoutedCell,
-    ev: &'e CellEvidence,
-) -> impl Iterator<Item = RouteEntry> + 'e {
-    leader_log_copies(cell, ev).map(|(.., entry)| entry)
-}
-
-/// [`leader_copies`], each with its index in the leader's log.
+/// order, each with its index in that log: the values the leader link is
+/// chosen from (§9 route chains, rule 3). Nothing when the leader is unread.
 fn leader_log_copies<'e>(
     cell: &'e RoutedCell,
     ev: &'e CellEvidence,

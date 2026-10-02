@@ -21,7 +21,6 @@
 //! lineage walker (`economic::peer_lineage::PeerEvidenceFetcher`), which
 //! walks a foreign lineage the same way.
 
-use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ccb::StorageSetMembers;
@@ -31,8 +30,7 @@ use crate::economic::register::root_completion;
 use crate::economic::state::EconomicLeafState;
 use crate::economic::tree::EconomicSmt;
 use crate::route_chain::{
-    leader_copies, CellEvidence, CellFact, ChainState, CompletionProof, Missing as CellMissing,
-    RoutedCell,
+    CellEvidence, CellFact, ChainState, CompletionProof, Missing as CellMissing, RoutedCell,
 };
 
 use super::conformance::{
@@ -51,10 +49,9 @@ use super::lineage::{
     advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted, genesis_root,
     vault_leaves_at_genesis, AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
 };
-use super::publication::{recognize_fulfillment, recognize_setup, Signed};
+use super::publication::{recognize_setup, Signed};
 use super::registration::{
-    fulfillment_completion, fulfillment_registered, names_fulfillment_key, PositionCells,
-    Registration, RegistrationRead,
+    fulfillment_completion, fulfillment_registered, PositionCells, Registration, RegistrationRead,
 };
 use super::resolution::{
     skip_without_evidence, walk, AttemptClass, AttemptWalk, KeyFacts, RecordedGeneration,
@@ -103,11 +100,6 @@ pub const SIBLING_DEPTH: usize = 2;
 
 /// Acquisition rounds before the evidence is `Exhausted`.
 pub const ACQUIRE_ROUNDS: usize = 3;
-
-/// Fulfillments in the leader's log at `K_ful(q)` whose `P` one read may
-/// fetch before the pair is unavailable to this verifier: each names a `P`
-/// fetched by id (R8).
-pub const NAMED_PRECOMMIT_BUDGET: usize = 64;
 
 /// A read that could not be made: a member did not answer, a local store
 /// failed. A network status, never a verdict, and never a fact about the
@@ -679,17 +671,10 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// Once registered, the completion proofs of both cells are kept (SoFi
     /// Amendment S10).
     ///
-    /// Recognizing a value at `K_ful(q)` needs the `P` it names, read by id
-    /// (R8). Only the leader's log decides which value holds the cell: the
-    /// first copy there that names the key (`route_chain::leader_copies`, the
-    /// candidates the leader link is chosen from). So the `P`s read are those
-    /// of the fulfillments in that log, in arrival order, until one names the
-    /// key, and at most [`NAMED_PRECOMMIT_BUDGET`] of them; nothing another
-    /// member holds is read. A `P` the read could not decide leaves the cell
-    /// undecided — the call fails, and a later read can answer — so that no
-    /// later value is read as the first recognized one while an earlier
-    /// one's `P` is merely not in hand. The inner `Err` is what the reads do
-    /// not yet show.
+    /// Both cells are decided from their bytes alone (SoFi Amendment S20):
+    /// no precommit is read, so nothing a fulfillment names can make this
+    /// read wait, and the answer is the same at every time. The inner `Err` is
+    /// what the reads do not yet show.
     pub fn read_registration(
         &self,
         genesis: &D32,
@@ -700,54 +685,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         let cells = self.position_cells(genesis, device_id, position, parent_root)?;
         let ful_evidence = self.reads.cell(cells.fulfillment())?;
         let root_evidence = self.reads.cell(cells.root().routed())?;
-
-        let mut precommits: BTreeMap<D32, TraderPrecommitBody> = BTreeMap::new();
-        let mut fetched = 0;
-        for copy in leader_copies(cells.fulfillment(), &ful_evidence) {
-            let Some((.., signed)) = recognize_fulfillment(&copy.value) else {
-                continue;
-            };
-            if signed.body.position() != position {
-                continue;
-            }
-            let id = *signed.body.precommit_id();
-            if let Entry::Vacant(slot) = precommits.entry(id) {
-                if fetched == NAMED_PRECOMMIT_BUDGET {
-                    return Err(VerifierFailure::Read(format!(
-                        "fulfillment register: the leader's log at K_ful({position}) names more \
-                         precommits than the budget of {NAMED_PRECOMMIT_BUDGET}"
-                    )));
-                }
-                fetched += 1;
-                match self.reads.precommit(&id)? {
-                    Resolved::Kept(precommit) => {
-                        slot.insert(precommit.body);
-                    }
-                    // No `P`, so the value names no key: the leader link is
-                    // past it.
-                    Resolved::None => continue,
-                    Resolved::Unavailable => {
-                        return Err(VerifierFailure::Read(
-                            "fulfillment register: a precommit a candidate names could not be read"
-                                .to_string(),
-                        ))
-                    }
-                }
-            }
-            if names_fulfillment_key(&copy.value, genesis, device_id, position, &precommits)
-                .is_some()
-            {
-                break;
-            }
-        }
-
-        let registration =
-            match fulfillment_registered(&cells, &ful_evidence, &root_evidence, &precommits) {
-                Ok(registration) => registration,
-                Err(missing) => return Ok(Err(missing)),
-            };
+        let registration = match fulfillment_registered(&cells, &ful_evidence, &root_evidence) {
+            Ok(registration) => registration,
+            Err(missing) => return Ok(Err(missing)),
+        };
         if let Registration::Registered(..) = registration.registration() {
-            let (.., ful_proof) = fulfillment_completion(&cells, &ful_evidence, &precommits)
+            let (.., ful_proof) = fulfillment_completion(&cells, &ful_evidence)
                 .map_err(|missing| {
                     VerifierFailure::Read(format!("fulfillment completion: {missing:?}"))
                 })?
@@ -2030,11 +1973,19 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
-        // `held` counts only as the claim (P, F) derive: registration holds F
-        // registered only while `K_root(q)` is final on exactly that claim
-        // (`registration::fulfillment_registered`), and a final value is the
-        // cell's only one, so its two roots are the ones the resolution
-        // chooses between.
+        // `held` counts only as the claim (P, F) derive (Amendment S15).
+        // Registration pairs the cells by `FulfillmentId(F)` from their bytes
+        // alone (Amendment S20), so the body is compared here, where `P` is in
+        // hand: a claim naming F with another body is not F's `C_q`, and the
+        // position is Invalid for the trader's lineage. A final value is the
+        // cell's only one, so once they agree its two roots are the ones the
+        // resolution chooses between.
+        if derive::resolution_claim(&precommit, &fulfillment.body) != *held {
+            return Err(Invalid(format!(
+                "position {q}: the claim at K_root(q) names the fulfillment, but it is not the \
+                 claim its P and F derive"
+            )));
+        }
 
         // The exercise, read back from the first leg's cell.
         let first = precommit
