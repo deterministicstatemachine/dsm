@@ -82,24 +82,23 @@ impl AppRouterImpl {
                             ))
                         }
                     };
-                    let (amount, token_id, to_device_id) =
-                        match (&operation, terms) {
-                            (
-                                dsm::types::operations::Operation::Transfer {
-                                    amount,
-                                    to_device_id,
-                                    ..
-                                },
-                                Some(terms),
-                            ) => (amount.available(), terms.token_id, to_device_id.clone()),
-                            (other, _) => {
-                                return err(format!(
-                                    "bilateral.pending_list: a stored session carries a {} \
+                    let (amount, token_id, to_device_id) = match (&operation, terms) {
+                        (
+                            dsm::types::operations::Operation::Transfer {
+                                amount,
+                                to_device_id,
+                                ..
+                            },
+                            Some(terms),
+                        ) => (amount.available(), terms.token_id, to_device_id.clone()),
+                        (other, _) => {
+                            return err(format!(
+                                "bilateral.pending_list: a stored session carries a {} \
                                      operation, not a transfer",
-                                    other.get_operation_type()
-                                ))
-                            }
-                        };
+                                other.get_operation_type()
+                            ))
+                        }
+                    };
                     let token_id = match String::from_utf8(token_id) {
                         Ok(token_id) => token_id,
                         Err(e) => {

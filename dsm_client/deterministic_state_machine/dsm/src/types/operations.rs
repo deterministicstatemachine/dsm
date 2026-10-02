@@ -198,7 +198,9 @@ impl TransferTerms {
         }
         let mut input = data;
         if get_u8(&mut input)? != TRANSFER_TERMS_V1 {
-            return Err(DsmError::invalid_operation("unknown transfer terms version"));
+            return Err(DsmError::invalid_operation(
+                "unknown transfer terms version",
+            ));
         }
         let salt = get_bytes(&mut input)?;
         if salt.len() < TRANSFER_TERMS_MIN_SALT {
@@ -762,7 +764,10 @@ pub enum EgressAsset {
     /// Egress of the asset whose CPTA policy commit is `policy_commit`, of
     /// `amount` units: a transfer, which names its asset by commit only. The
     /// gate resolves the commit to the token it locks under.
-    Committed { policy_commit: [u8; 32], amount: u64 },
+    Committed {
+        policy_commit: [u8; 32],
+        amount: u64,
+    },
     /// A value-egress operation whose canonical bearer-asset id cannot be determined
     /// (e.g. a vault-keyed DLV unlock/claim, or a tokenless DLV). The gate FAILS CLOSED on
     /// this whenever any recovery lock is present — it cannot prove the op avoids a locked
@@ -2425,8 +2430,12 @@ mod tests {
         #[test]
         fn terms_round_trip_and_open_the_transfer_that_commits_to_them() {
             let t = terms();
-            assert_eq!(TransferTerms::from_bytes(&t.to_bytes()).expect("decodes"), t);
-            t.open(&committing(&t)).expect("the terms open their transfer");
+            assert_eq!(
+                TransferTerms::from_bytes(&t.to_bytes()).expect("decodes"),
+                t
+            );
+            t.open(&committing(&t))
+                .expect("the terms open their transfer");
         }
 
         /// Every term is bound: a change to any one of them, the salt
@@ -3216,7 +3225,9 @@ mod tests {
                 assert_eq!(amount.value(), 42);
                 assert_eq!(terms_commitment, &unit_terms().commitment());
             }
-            unit_terms().open(&bound).expect("the signed terms open the bound transfer");
+            unit_terms()
+                .open(&bound)
+                .expect("the signed terms open the bound transfer");
 
             // Signature re-attached, and re-clearing reproduces the exact preimage.
             assert_eq!(bound.get_signature(), Some(sig));

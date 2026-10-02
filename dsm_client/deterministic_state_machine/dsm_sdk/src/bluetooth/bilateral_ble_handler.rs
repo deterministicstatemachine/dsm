@@ -770,10 +770,8 @@ impl BilateralBleHandler {
         // A transfer carries the terms it commits to, and they open it: one
         // without them is refused before any precommitment exists.
         let terms_bytes = terms.as_ref().map(|t| t.to_bytes());
-        let terms = crate::bluetooth::bilateral_session::step_terms(
-            &operation,
-            terms_bytes.as_deref(),
-        )?;
+        let terms =
+            crate::bluetooth::bilateral_session::step_terms(&operation, terms_bytes.as_deref())?;
 
         // Prepare offline transfer in core
         let (pre_commitment, local_genesis_hash) = {
@@ -899,10 +897,9 @@ impl BilateralBleHandler {
             // proposal its sender signed.
             sender_signature: commit_signature,
             // The transfer's terms, beside the operation that commits to them.
-            transfer_terms: terms.as_ref().map_or_else(
-                Vec::new,
-                dsm::types::operations::TransferTerms::to_bytes,
-            ),
+            transfer_terms: terms
+                .as_ref()
+                .map_or_else(Vec::new, dsm::types::operations::TransferTerms::to_bytes),
         };
 
         let envelope = self
@@ -2373,7 +2370,11 @@ impl BilateralBleHandler {
             if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
                 &session.operation,
             ) {
-                match (session.receiver_challenge, &session.operation, &session.terms) {
+                match (
+                    session.receiver_challenge,
+                    &session.operation,
+                    &session.terms,
+                ) {
                     (
                         Some(r_r),
                         Operation::Transfer {
@@ -4763,7 +4764,7 @@ mod tests {
                     ),
                 )
                 .expect("sigma_A"),
-                transfer_terms: Vec::new(),
+            transfer_terms: Vec::new(),
         };
         let envelope = generated::Envelope {
             version: 3,

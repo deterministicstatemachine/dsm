@@ -65,7 +65,8 @@ fn parse_transfer(
     else {
         return Ok(None);
     };
-    let terms = terms.ok_or_else(|| "bilateral settle: the transfer carries no terms".to_string())?;
+    let terms =
+        terms.ok_or_else(|| "bilateral settle: the transfer carries no terms".to_string())?;
     terms
         .open(operation)
         .map_err(|e| format!("bilateral settle: {e}"))?;

@@ -266,7 +266,10 @@ async fn no_node_holds_a_transfers_memo_ticker_or_nonce() {
     assert_eq!(terms.token_id, b"ERA".to_vec());
     assert!(!terms.nonce.is_empty(), "an online transfer has a nonce");
     assert!(
-        history(&p.b).await.windows(memo.len()).any(|w| w == memo.as_bytes()),
+        history(&p.b)
+            .await
+            .windows(memo.len())
+            .any(|w| w == memo.as_bytes()),
         "B shows the memo it opened"
     );
 
@@ -281,7 +284,10 @@ async fn no_node_holds_a_transfers_memo_ticker_or_nonce() {
         ("the memo in bytes", hex(memo.as_bytes())),
         ("the nonce", hex(&terms.nonce)),
         ("the salt", hex(&terms.salt)),
-        ("the ticker as the operation carried it", length_prefixed(&terms.token_id)),
+        (
+            "the ticker as the operation carried it",
+            length_prefixed(&terms.token_id),
+        ),
     ];
     let mut rows = 0usize;
     for node in &p.nodes.nodes {
