@@ -15,6 +15,8 @@
 
 import { dsmClient } from '../../services/dsmClient';
 import { walletAmount } from '../../dsm/amount';
+import { routerQueryBin } from '../../dsm/WebViewBridge';
+import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
 import type { AmountForms } from '../../dsm/amount';
 import type {
   DomainContact,
@@ -85,11 +87,28 @@ function freshState(): PracticeState {
 }
 
 /**
+ * Whether Rust lists ERA as a protocol-defined asset: its row in the router's
+ * `balance.list`, which lists ERA at any balance. The wallet never decides this
+ * from a ticker (TokenBalanceView.protocolDefined), and practice ERA does not
+ * either.
+ */
+async function eraIsProtocolDefined(): Promise<boolean> {
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('balance.list', new Uint8Array(0)));
+  if (env.payload.case !== 'balancesListResponse') {
+    throw new Error(`balance.list: the SDK answered ${String(env.payload.case)}, not balancesListResponse`);
+  }
+  const era = env.payload.value.balances.find((row) => row.tokenId === 'ERA');
+  if (!era) throw new Error('balance.list: Rust listed no ERA row');
+  return era.protocolDefined;
+}
+
+/**
  * Practice ERA as Rust counts ERA: the tour's starting amount parsed at the
  * decimals of ERA's committed policy, and the welcome payment that brought it.
  */
 async function seedEra(state: PracticeState): Promise<void> {
   const held = await walletAmount({ tokenId: 'ERA' }, { entered: PRACTICE_ERA_HELD });
+  const protocolDefined = await eraIsProtocolDefined();
   state.balances.unshift({
     tokenId: 'ERA',
     tokenName: 'ERA',
@@ -97,7 +116,7 @@ async function seedEra(state: PracticeState): Promise<void> {
     decimals: held.decimals,
     baseUnits: held.baseUnits,
     displayAmount: held.displayAmount,
-    protocolDefined: true,
+    protocolDefined,
   });
   state.history.push({
     txId: 'practice-welcome',
@@ -218,8 +237,9 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
       const token = tokenId;
       await ready();
       const result = await inTurn(() => debit(state, token, enteredAmount));
-      // The real call answers a refusal as { success, message }.
-      if ('refused' in result) return { success: false, message: result.refused };
+      // The real call answers { success, message }: success is whether the debit went through.
+      const sent = !('refused' in result);
+      if ('refused' in result) return { success: sent, message: result.refused };
       recordSend(state, recipientDeviceId, token, result.taken, memo, 'online');
       emit('sent');
       return { success: true, newBalance: result.balance };
@@ -231,7 +251,9 @@ function simulations(state: PracticeState, emit: (event: PracticeEvent) => void)
       const token = params.tokenId;
       await ready();
       const result = await inTurn(() => debit(state, token, params.amount));
-      if ('refused' in result) return { accepted: false, result: result.refused };
+      // As the real call answers: accepted is whether the debit went through.
+      const sent = !('refused' in result);
+      if ('refused' in result) return { accepted: sent, result: result.refused };
       recordSend(state, params.to, token, result.taken, params.memo, 'offline');
       emit('sent');
       return { accepted: true, result: 'Practice transfer complete' };
