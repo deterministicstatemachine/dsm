@@ -218,16 +218,6 @@ impl TokenSDK {
                 data,
                 message,
             },
-            Operation::Transfer {
-                amount,
-                token_id,
-                recipient,
-                ..
-            } => CoreOperation::Transfer {
-                token_id: token_id.clone(),
-                recipient: recipient.clone(),
-                amount: amount.value(),
-            },
             _ => CoreOperation::Generic {
                 operation_type: "generic".to_string(),
                 data: vec![],
@@ -570,16 +560,17 @@ impl TokenSDK {
                 let sender = self.core_sdk.get_current_state()?.device_info.device_id;
 
                 let policy_commit = self.resolve_policy_commit_strict(token_id)?;
+                let terms = dsm::types::operations::TransferTerms::new(
+                    token_id.as_bytes().to_vec(),
+                    Vec::new(),
+                    TransactionMode::Bilateral,
+                    "Transfer operation via TokenSDK".to_string(),
+                );
                 let mut op = Operation::Transfer {
                     to_device_id: recipient.to_vec(),
                     amount: Balance::amount(*amount),
-                    token_id: token_id.as_bytes().to_vec(),
                     policy_commit,
-                    mode: TransactionMode::Bilateral,
-                    nonce: Vec::new(),
-                    message: "Transfer operation via TokenSDK".to_string(),
-                    recipient: recipient.to_vec(),
-                    to: crate::util::text_id::encode_base32_crockford(recipient).into_bytes(),
+                    terms_commitment: terms.commitment(),
                     signature: Vec::new(),
                     authority_policy: None,
                 };
@@ -1056,16 +1047,17 @@ impl TokenSDK {
 
         let current_state = self.core_sdk.get_current_state()?;
         let fee_policy_commit = self.resolve_policy_commit_strict("ERA")?;
+        let fee_terms = dsm::types::operations::TransferTerms::new(
+            b"ERA".to_vec(),
+            self.generate_nonce(),
+            TransactionMode::Bilateral,
+            "Fee payment".to_string(),
+        );
         let mut fee_transfer_op = Operation::Transfer {
             to_device_id: b"system.fee.device_id".to_vec(),
             amount: Balance::amount(fee),
-            token_id: b"ERA".to_vec(),
             policy_commit: fee_policy_commit,
-            mode: TransactionMode::Bilateral,
-            nonce: self.generate_nonce(),
-            message: "Fee payment".to_string(),
-            recipient: b"system.fee.device_id".to_vec(),
-            to: b"system.fee.device_id".to_vec(),
+            terms_commitment: fee_terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,
         };
@@ -1116,6 +1108,7 @@ impl TokenSDK {
     pub fn execute_transfer_op_staged_with_admission<A>(
         &self,
         op: Operation,
+        token_id: &str,
         build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
         write_extra: impl Fn(
             &rusqlite::Transaction<'_>,
@@ -1124,18 +1117,16 @@ impl TokenSDK {
         ) -> Result<(), DsmError>,
         admission: Option<crate::sdk::core_sdk::AdmissionPlan<'_>>,
     ) -> Result<(State, A), DsmError> {
-        // Extract fields for balance cache updates before consuming the operation
-        let (token_id, amount_val, recipient_device_id) = match &op {
+        // Extract fields for balance cache updates before consuming the operation.
+        // The operation names its asset by policy commit; `token_id` is the one
+        // its terms name, and it must be that asset.
+        let (signed_policy_commit, amount_val, recipient_device_id) = match &op {
             Operation::Transfer {
-                token_id,
+                policy_commit,
                 amount,
                 to_device_id,
                 ..
-            } => (
-                String::from_utf8_lossy(token_id).into_owned(),
-                amount.value(),
-                to_device_id.clone(),
-            ),
+            } => (*policy_commit, amount.value(), to_device_id.clone()),
             _ => {
                 return Err(DsmError::invalid_operation(
                     "execute_transfer_op requires a Transfer operation",
@@ -1156,9 +1147,15 @@ impl TokenSDK {
             })?;
         let rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient_devid);
-        let policy_commit = self.resolve_policy_commit_strict(&token_id)?;
+        let token_id = token_id.to_string();
+        if self.resolve_policy_commit_strict(&token_id)? != signed_policy_commit {
+            return Err(DsmError::invalid_operation(format!(
+                "the transfer's terms name {token_id}, whose policy is not the one its \
+                 operation commits to"
+            )));
+        }
         let deltas = [dsm::types::device_state::BalanceDelta {
-            policy_commit,
+            policy_commit: signed_policy_commit,
             direction: dsm::types::device_state::BalanceDirection::Debit,
             amount: amount_val,
         }];

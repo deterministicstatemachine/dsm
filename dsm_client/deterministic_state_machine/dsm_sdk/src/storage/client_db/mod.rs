@@ -451,7 +451,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// accepted there. It is written only in the transaction that accepts the
 /// step, and nothing behind it is read again, so there is no Invalid
 /// re-walk and no `closure_stored` watermark.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 27;
+///
+/// 28: a transfer's terms — its ticker, nonce, mode and memo, under a secret
+/// salt — are kept beside its signed operation, which carries only their
+/// commitment (pre-audit item 4): `recipient_staged_transfer.terms_bytes`
+/// and `bilateral_sessions.terms_bytes`.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 28;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1173,7 +1178,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             sender_device_id          BLOB NOT NULL,
             nonce_hash                BLOB NOT NULL,
             canonical_operation_bytes BLOB NOT NULL,
-            signature                 BLOB NOT NULL
+            signature                 BLOB NOT NULL,
+            terms_bytes               BLOB NOT NULL
         );
         CREATE TABLE IF NOT EXISTS recipient_staged_receipt(
             commitment        BLOB PRIMARY KEY,
@@ -1348,7 +1354,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             spend_anchor_bundle       BLOB,
             spend_asset               BLOB,
             spend_amount              INTEGER,
-            owed_frame                BLOB
+            owed_frame                BLOB,
+            terms_bytes               BLOB
         );
 
         CREATE TABLE IF NOT EXISTS transactions(

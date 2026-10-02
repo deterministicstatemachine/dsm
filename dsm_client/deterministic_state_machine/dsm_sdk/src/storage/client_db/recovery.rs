@@ -1283,38 +1283,77 @@ pub fn any_recovery_locked_assets() -> Result<bool> {
 /// ADDITION to the identity-level [`value_egress_block_reason`] and persists per-asset after
 /// recovery activation.
 pub fn asset_egress_block_reason(op: &Operation) -> Option<String> {
-    const UNREADABLE: &str = "bearer-asset lock state unreadable: egress blocked (fail-closed)";
     match op.egress_asset() {
         EgressAsset::NotEgress => None,
-        EgressAsset::Unidentified => match any_recovery_locked_assets() {
-            Ok(true) => Some(
-                "egress operation's bearer asset cannot be identified while recovery locks are \
-                 active: blocked (fail-closed)"
-                    .to_string(),
-            ),
-            Ok(false) => None,
-            Err(_) => Some(UNREADABLE.to_string()),
-        },
-        EgressAsset::Asset { token_id, amount } => match get_asset_lock(&token_id) {
-            Ok(None) => None,
-            Ok(Some(lock)) => {
-                if !lock.state.permits_egress() {
-                    return Some(format!(
-                        "bearer asset is {} (recovery): egress refused until reconciled",
-                        lock.state.label()
-                    ));
-                }
-                if lock.state.is_frontier_capped() && amount > lock.frontier_cap {
-                    return Some(format!(
-                        "bearer-asset egress {amount} exceeds reconciled frontier {} (Reduced): \
-                         refused",
-                        lock.frontier_cap
-                    ));
-                }
-                None
+        EgressAsset::Unidentified => unidentified_egress_block_reason(),
+        EgressAsset::Asset { token_id, amount } => asset_lock_block_reason(&token_id, amount),
+        // A transfer names its asset by policy commit (pre-audit item 4): the
+        // names it locks under are the builtin's, or the registry's id and
+        // ticker for it. An asset this device cannot name is blocked while
+        // any lock is held.
+        EgressAsset::Committed {
+            policy_commit,
+            amount,
+        } => {
+            let names: Vec<Vec<u8>> =
+                match dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(
+                    &policy_commit,
+                ) {
+                    Some(builtin) => vec![builtin.as_bytes().to_vec()],
+                    None => match super::token_registry::get_token_by_policy_commit(&policy_commit)
+                    {
+                        Ok(Some(row)) => vec![row.token_id.into_bytes(), row.ticker.into_bytes()],
+                        Ok(None) => return unidentified_egress_block_reason(),
+                        Err(e) => {
+                            return Some(format!(
+                                "token registry unreadable: egress blocked (fail-closed): {e}"
+                            ))
+                        }
+                    },
+                };
+            names
+                .iter()
+                .find_map(|name| asset_lock_block_reason(name, amount))
+        }
+    }
+}
+
+const UNREADABLE: &str = "bearer-asset lock state unreadable: egress blocked (fail-closed)";
+
+/// The block on an egress whose asset cannot be named: any lock held.
+fn unidentified_egress_block_reason() -> Option<String> {
+    match any_recovery_locked_assets() {
+        Ok(true) => Some(
+            "egress operation's bearer asset cannot be identified while recovery locks are \
+             active: blocked (fail-closed)"
+                .to_string(),
+        ),
+        Ok(false) => None,
+        Err(e) => Some(format!("{UNREADABLE}: {e}")),
+    }
+}
+
+/// The block the lock held under `token_id` puts on an egress of `amount`.
+fn asset_lock_block_reason(token_id: &[u8], amount: u64) -> Option<String> {
+    match get_asset_lock(token_id) {
+        Ok(None) => None,
+        Ok(Some(lock)) => {
+            if !lock.state.permits_egress() {
+                return Some(format!(
+                    "bearer asset is {} (recovery): egress refused until reconciled",
+                    lock.state.label()
+                ));
             }
-            Err(_) => Some(UNREADABLE.to_string()),
-        },
+            if lock.state.is_frontier_capped() && amount > lock.frontier_cap {
+                return Some(format!(
+                    "bearer-asset egress {amount} exceeds reconciled frontier {} (Reduced): \
+                     refused",
+                    lock.frontier_cap
+                ));
+            }
+            None
+        }
+        Err(e) => Some(format!("{UNREADABLE}: {e}")),
     }
 }
 
@@ -1694,13 +1733,15 @@ mod tests {
         Operation::Transfer {
             to_device_id: vec![0xCC; 32],
             amount: Balance::amount(amount),
-            token_id: token_id.to_vec(),
             policy_commit: [0u8; 32],
-            mode: TransactionMode::Unilateral,
-            nonce: vec![],
-            recipient: vec![],
-            to: vec![],
-            message: String::new(),
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: token_id.to_vec(),
+                nonce: vec![],
+                mode: TransactionMode::Unilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: vec![],
             authority_policy: None,
         }

@@ -104,6 +104,163 @@ pub fn canonical_offline_bearer_policy() -> AuthorityPolicy {
     }
 }
 
+/// Version tag leading the canonical bytes of [`TransferTerms`].
+pub const TRANSFER_TERMS_V1: u8 = 1;
+
+/// The least salt a transfer's terms may carry: 128 bits.
+pub const TRANSFER_TERMS_MIN_SALT: usize = 16;
+
+/// What a transfer says beyond what admits it (security pre-audit item 4,
+/// owner ruling 2026-10-02: one shape, BLE carries the terms).
+///
+/// The signed [`Operation::Transfer`] keeps what an admission needs: the
+/// recipient, the amount, the asset's policy commit and the authority policy.
+/// Everything else is here, and the operation carries only
+/// [`TransferTerms::commitment`]. Terms travel inside the sealed spool payload
+/// online and beside the operation on BLE, never in any public object, so
+/// public evidence of a transfer holds no memo, ticker or nonce.
+///
+/// `salt` is secret: drawn fresh for each transfer and carried only with the
+/// terms. Without it a memo or nonce could be confirmed against the public
+/// commitment by guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferTerms {
+    /// The token's id (its ticker).
+    pub token_id: Vec<u8>,
+    /// The transfer's nonce, spent in its relationship.
+    pub nonce: Vec<u8>,
+    /// Bilateral or unilateral execution mode.
+    pub mode: TransactionMode,
+    /// The sender's memo.
+    pub memo: String,
+    /// The secret salt, at least [`TRANSFER_TERMS_MIN_SALT`] bytes.
+    pub salt: Vec<u8>,
+}
+
+impl TransferTerms {
+    /// Terms under a fresh 256-bit salt from the operating system's RNG.
+    pub fn new(token_id: Vec<u8>, nonce: Vec<u8>, mode: TransactionMode, memo: String) -> Self {
+        Self {
+            token_id,
+            nonce,
+            mode,
+            memo,
+            salt: crate::crypto::rng::random_bytes(32),
+        }
+    }
+
+    /// Canonical bytes: the version tag, then the salt, ticker, nonce, mode and
+    /// memo, each length-prefixed as in [`Operation::to_bytes`].
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use crate::types::serialization::{put_bytes, put_str, put_u8};
+        let mut out = Vec::new();
+        put_u8(&mut out, TRANSFER_TERMS_V1);
+        put_bytes(&mut out, &self.salt);
+        put_bytes(&mut out, &self.token_id);
+        put_bytes(&mut out, &self.nonce);
+        put_u8(
+            &mut out,
+            match self.mode {
+                TransactionMode::Bilateral => 0,
+                TransactionMode::Unilateral => 1,
+            },
+        );
+        put_str(&mut out, &self.memo);
+        out
+    }
+
+    /// Decode canonical terms. Every byte must be consumed, and a salt shorter
+    /// than [`TRANSFER_TERMS_MIN_SALT`] is refused.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DsmError> {
+        fn take<'a>(inp: &mut &'a [u8], n: usize) -> Result<&'a [u8], DsmError> {
+            if inp.len() < n {
+                return Err(DsmError::invalid_operation(format!(
+                    "transfer terms end early: {n} bytes wanted, {} held",
+                    inp.len()
+                )));
+            }
+            let (head, rest) = inp.split_at(n);
+            *inp = rest;
+            Ok(head)
+        }
+        fn get_u8(inp: &mut &[u8]) -> Result<u8, DsmError> {
+            Ok(take(inp, 1)?[0])
+        }
+        fn get_bytes(inp: &mut &[u8]) -> Result<Vec<u8>, DsmError> {
+            let mut len = [0u8; 4];
+            len.copy_from_slice(take(inp, 4)?);
+            Ok(take(inp, u32::from_le_bytes(len) as usize)?.to_vec())
+        }
+        fn get_str(inp: &mut &[u8]) -> Result<String, DsmError> {
+            String::from_utf8(get_bytes(inp)?).map_err(|e| {
+                DsmError::invalid_operation(format!("transfer terms memo is not UTF-8: {e}"))
+            })
+        }
+        let mut input = data;
+        if get_u8(&mut input)? != TRANSFER_TERMS_V1 {
+            return Err(DsmError::invalid_operation("unknown transfer terms version"));
+        }
+        let salt = get_bytes(&mut input)?;
+        if salt.len() < TRANSFER_TERMS_MIN_SALT {
+            return Err(DsmError::invalid_operation(format!(
+                "transfer terms salt is {} bytes; at least {TRANSFER_TERMS_MIN_SALT} are required",
+                salt.len()
+            )));
+        }
+        let token_id = get_bytes(&mut input)?;
+        let nonce = get_bytes(&mut input)?;
+        let mode = match get_u8(&mut input)? {
+            0 => TransactionMode::Bilateral,
+            1 => TransactionMode::Unilateral,
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "transfer terms mode {other} is not a mode"
+                )))
+            }
+        };
+        let memo = get_str(&mut input)?;
+        if !input.is_empty() {
+            return Err(DsmError::invalid_operation(format!(
+                "trailing bytes after transfer terms: {} leftover",
+                input.len()
+            )));
+        }
+        Ok(Self {
+            token_id,
+            nonce,
+            mode,
+            memo,
+            salt,
+        })
+    }
+
+    /// `C = H(DSM/transfer-terms; salt ‖ terms)`, over the canonical bytes.
+    pub fn commitment(&self) -> [u8; 32] {
+        crate::crypto::blake3::domain_hash_bytes(
+            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/transfer-terms/v1"),
+            &self.to_bytes(),
+        )
+    }
+
+    /// Open `operation`'s commitment with these terms: it must be a transfer
+    /// whose `terms_commitment` is exactly [`Self::commitment`]. Terms that do
+    /// not open it say nothing about the transfer, and the transfer is refused.
+    pub fn open(&self, operation: &Operation) -> Result<(), DsmError> {
+        match operation {
+            Operation::Transfer {
+                terms_commitment, ..
+            } if *terms_commitment == self.commitment() => Ok(()),
+            Operation::Transfer { .. } => Err(DsmError::invalid_operation(
+                "the transfer's terms do not open its signed commitment",
+            )),
+            other => Err(DsmError::invalid_operation(format!(
+                "terms open a transfer, not a {}",
+                other.get_operation_type()
+            ))),
+        }
+    }
+}
+
 /// Primary state transition operation enum (no Serde in canonical path).
 ///
 /// Each variant represents a distinct kind of state transition in the DSM
@@ -153,28 +310,24 @@ pub enum Operation {
         forward_link: Option<Vec<u8>>,
     },
     /// Transfer tokens from the current device to a recipient.
+    ///
+    /// Only what an admission needs is public; the ticker, nonce, mode and
+    /// memo are the [`TransferTerms`] the operation commits to (pre-audit
+    /// item 4). Canonical tag 37; tag 3, the shape that carried them in the
+    /// clear, is retired and never reassigned.
     Transfer {
         /// Raw 32-byte recipient device identifier (canonical bytes; no text encodings on op path).
         to_device_id: Vec<u8>,
         /// Token amount to transfer (must be > 0 for validity).
         amount: Balance,
-        /// Binary identifier of the token type being transferred.
-        token_id: Vec<u8>,
         /// CPTA policy commitment (32B) binding this transfer to the token's
         /// canonical policy (§9.5: "All TokenOps MUST include policy_commit;
         /// verifiers reject if it differs from the token's creation
         /// policy_commit"). See token-policy-readiness doctrine §4.
         policy_commit: [u8; 32],
-        /// Bilateral (3-phase commit) or unilateral execution mode.
-        mode: TransactionMode,
-        /// Unique nonce preventing replay of this transfer.
-        nonce: Vec<u8>,
-        /// Raw recipient identifier for policy/precommit matching (kept as bytes).
-        recipient: Vec<u8>,
-        /// Binary recipient address or alias.
-        to: Vec<u8>,
-        /// Human-readable transfer description.
-        message: String,
+        /// [`TransferTerms::commitment`] of the terms that travel beside this
+        /// operation and nowhere public.
+        terms_commitment: [u8; 32],
         /// Sender's SPHINCS+ signature authorizing this transfer.
         signature: Vec<u8>,
         /// Authority-proof requirement for this transfer. `Some` opts into the offline-bearer
@@ -606,6 +759,10 @@ pub enum EgressAsset {
     /// egress quantity used for the `Reduced`-frontier cap; `u64::MAX` when an egress op
     /// cannot be sized (treated as exceeding any reduced frontier — fail-closed).
     Asset { token_id: Vec<u8>, amount: u64 },
+    /// Egress of the asset whose CPTA policy commit is `policy_commit`, of
+    /// `amount` units: a transfer, which names its asset by commit only. The
+    /// gate resolves the commit to the token it locks under.
+    Committed { policy_commit: [u8; 32], amount: u64 },
     /// A value-egress operation whose canonical bearer-asset id cannot be determined
     /// (e.g. a vault-keyed DLV unlock/claim, or a tokenless DLV). The gate FAILS CLOSED on
     /// this whenever any recovery lock is present — it cannot prove the op avoids a locked
@@ -728,10 +885,14 @@ impl Operation {
         match self {
             // Ingress-only; the invariant is_value_egress() == !NotEgress holds.
             FaucetClaim { .. } => EgressAsset::NotEgress,
+            // A transfer names its asset by policy commit only: its ticker is
+            // in its terms, which no public object carries (pre-audit item 4).
             Transfer {
-                token_id, amount, ..
-            } => EgressAsset::Asset {
-                token_id: token_id.clone(),
+                policy_commit,
+                amount,
+                ..
+            } => EgressAsset::Committed {
+                policy_commit: *policy_commit,
                 amount: amount.value(),
             },
             Burn {
@@ -927,29 +1088,22 @@ impl Operation {
             Transfer {
                 to_device_id,
                 amount,
-                token_id,
                 policy_commit,
-                mode,
-                nonce,
-                recipient,
-                to,
-                message,
+                terms_commitment,
                 signature,
                 authority_policy,
             } => {
-                put_u8(&mut out, 3);
+                // Tag 3 carried the ticker, nonce, mode, memo and recipient
+                // key in the clear; it is retired (pre-audit item 4).
+                put_u8(&mut out, 37);
                 put_bytes(&mut out, to_device_id);
                 // Balance canonical
                 let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
-                put_bytes(&mut out, token_id);
                 // CPTA policy commitment (§9.5) — bound into the signed bytes.
                 put_bytes(&mut out, policy_commit);
-                put_mode(&mut out, mode);
-                put_bytes(&mut out, nonce);
-                put_bytes(&mut out, recipient);
-                put_bytes(&mut out, to);
-                put_str(&mut out, message.as_str());
+                // The terms, by their salted commitment only.
+                put_bytes(&mut out, terms_commitment);
                 // Sender signature (online) or empty for bilateral (signatures in receipt)
                 put_bytes(&mut out, signature);
                 // Append-only authority-policy tail: None emits NOTHING (byte-identical to every
@@ -1449,20 +1603,21 @@ impl Operation {
                     forward_link,
                 }
             }
+            // Retired: the transfer shape that carried its terms in the clear.
             3 => {
+                return Err(DsmError::invalid_operation(
+                    "op tag 3 is retired: a transfer carries its terms by commitment (tag 37)",
+                ))
+            }
+            37 => {
                 let to_device_id = get_bytes(&mut input)?;
                 let amount = dec_balance(&mut input)?;
-                let token_id = get_bytes(&mut input)?;
                 // CPTA policy commitment (§9.5) — required, exactly 32 bytes.
                 let policy_commit: [u8; 32] =
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("transfer policy_commit must be 32 bytes")
                     })?;
-                let mode = dec_mode(&mut input)?;
-                let nonce = get_bytes(&mut input)?;
-                let recipient = get_bytes(&mut input)?;
-                let to = get_bytes(&mut input)?;
-                let message = get_str(&mut input)?;
+                let terms_commitment = get_arr32(&mut input)?;
                 // The signature field is always encoded (empty when the
                 // signatures ride in the receipt): one transfer, one encoding.
                 let signature = get_bytes(&mut input)?;
@@ -1503,13 +1658,8 @@ impl Operation {
                 Transfer {
                     to_device_id,
                     amount,
-                    token_id,
                     policy_commit,
-                    mode,
-                    nonce,
-                    recipient,
-                    to,
-                    message,
+                    terms_commitment,
                     signature,
                     authority_policy,
                 }
@@ -2188,13 +2338,15 @@ mod tests {
         let make = |ap: Option<AuthorityPolicy>| Operation::Transfer {
             to_device_id: b"rcpt".to_vec(),
             amount: test_balance(100),
-            token_id: b"ERA".to_vec(),
             policy_commit: [7u8; 32],
-            mode: TransactionMode::Bilateral,
-            nonce: vec![1, 2, 3],
-            recipient: b"rcpt".to_vec(),
-            to: b"rcpt".to_vec(),
-            message: "m".to_string(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![1, 2, 3],
+                mode: TransactionMode::Bilateral,
+                memo: "m".to_string(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: vec![9, 9, 9],
             authority_policy: ap,
         };
@@ -2243,6 +2395,122 @@ mod tests {
     // ------------------------------------------------------------------ //
     //  Round-trip tests for every variant
     // ------------------------------------------------------------------ //
+    /// Pre-audit item 4 (owner ruling 2026-10-02): a transfer carries its
+    /// ticker, nonce, mode and memo only by a salted commitment, and the
+    /// terms open it or say nothing about it.
+    mod transfer_terms {
+        use super::*;
+
+        fn terms() -> TransferTerms {
+            TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![0x4E; 32],
+                mode: TransactionMode::Unilateral,
+                memo: "rent, october".to_string(),
+                salt: vec![0x5A; 32],
+            }
+        }
+
+        fn committing(terms: &TransferTerms) -> Operation {
+            Operation::Transfer {
+                to_device_id: vec![0x11; 32],
+                amount: test_balance(42),
+                policy_commit: [0x0F; 32],
+                terms_commitment: terms.commitment(),
+                signature: Vec::new(),
+                authority_policy: None,
+            }
+        }
+
+        #[test]
+        fn terms_round_trip_and_open_the_transfer_that_commits_to_them() {
+            let t = terms();
+            assert_eq!(TransferTerms::from_bytes(&t.to_bytes()).expect("decodes"), t);
+            t.open(&committing(&t)).expect("the terms open their transfer");
+        }
+
+        /// Every term is bound: a change to any one of them, the salt
+        /// included, is terms that do not open the transfer.
+        #[test]
+        fn terms_that_differ_in_anything_do_not_open_the_transfer() {
+            let op = committing(&terms());
+            let changed: [fn(&mut TransferTerms); 5] = [
+                |t| t.token_id = b"dBTC".to_vec(),
+                |t| t.nonce[0] ^= 1,
+                |t| t.mode = TransactionMode::Bilateral,
+                |t| t.memo.push('!'),
+                |t| t.salt[31] ^= 1,
+            ];
+            for change in changed {
+                let mut other = terms();
+                change(&mut other);
+                let refused = other.open(&op).expect_err("other terms");
+                assert!(refused.to_string().contains("do not open"), "{refused}");
+            }
+            let refused = terms().open(&Operation::Noop).expect_err("not a transfer");
+            assert!(refused.to_string().contains("not a noop"), "{refused}");
+        }
+
+        /// The salt is drawn fresh for each transfer, never from what the
+        /// transfer makes public: the same ticker, nonce, mode and memo commit
+        /// differently every time, so a guessed memo cannot be confirmed
+        /// against the public commitment.
+        #[test]
+        fn a_salt_is_fresh_for_every_transfer() {
+            let new = || {
+                TransferTerms::new(
+                    b"ERA".to_vec(),
+                    vec![0x4E; 32],
+                    TransactionMode::Unilateral,
+                    "rent, october".to_string(),
+                )
+            };
+            let (one, two) = (new(), new());
+            assert!(one.salt.len() >= TRANSFER_TERMS_MIN_SALT);
+            assert_ne!(one.salt, two.salt, "a salt is drawn for each transfer");
+            assert_ne!(one.commitment(), two.commitment());
+        }
+
+        #[test]
+        fn a_short_salt_trailing_bytes_or_an_unknown_version_do_not_decode() {
+            let mut short = terms();
+            short.salt = vec![0x5A; TRANSFER_TERMS_MIN_SALT - 1];
+            let refused = TransferTerms::from_bytes(&short.to_bytes()).expect_err("short salt");
+            assert!(refused.to_string().contains("salt"), "{refused}");
+
+            let mut trailing = terms().to_bytes();
+            trailing.push(0);
+            TransferTerms::from_bytes(&trailing).expect_err("trailing bytes");
+
+            let mut version = terms().to_bytes();
+            version[0] = TRANSFER_TERMS_V1 + 1;
+            TransferTerms::from_bytes(&version).expect_err("an unknown version");
+        }
+
+        /// The operation's bytes hold the commitment and none of the terms.
+        #[test]
+        fn a_transfer_operation_carries_no_term_in_the_clear() {
+            let t = terms();
+            let bytes = committing(&t).to_bytes();
+            assert_eq!(bytes[0], 37, "a transfer is tag 37");
+            let holds = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+            assert!(!holds(t.memo.as_bytes()), "the memo");
+            assert!(!holds(&t.nonce), "the nonce");
+            assert!(!holds(&t.salt), "the salt");
+            assert!(holds(&t.commitment()), "the commitment");
+        }
+
+        /// Tag 3 carried the terms in the clear; it is retired, so no
+        /// operation of that shape decodes.
+        #[test]
+        fn the_retired_transfer_tag_does_not_decode() {
+            let mut bytes = committing(&terms()).to_bytes();
+            bytes[0] = 3;
+            let refused = Operation::from_bytes(&bytes).expect_err("tag 3");
+            assert!(refused.to_string().contains("retired"), "{refused}");
+        }
+    }
+
     mod roundtrip {
         use super::*;
 
@@ -2295,14 +2563,16 @@ mod tests {
         fn transfer_no_precommit() {
             roundtrip(&Operation::Transfer {
                 policy_commit: [0u8; 32],
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![0xFF; 16],
+                    mode: TransactionMode::Bilateral,
+                    memo: "send tokens".into(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(500),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![0xFF; 16],
-                recipient: vec![0x02; 32],
-                to: vec![0x03; 32],
-                message: "send tokens".into(),
                 signature: vec![0xAA; 64],
                 authority_policy: None,
             });
@@ -2627,14 +2897,16 @@ mod tests {
 
             let transfer = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: vec![],
+                    nonce: vec![],
+                    mode: TransactionMode::Bilateral,
+                    memo: String::new(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: vec![],
                 amount: test_balance(1),
-                token_id: vec![],
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
                 signature: vec![],
                 authority_policy: None,
             };
@@ -2720,14 +2992,16 @@ mod tests {
         fn clears_transfer_signature() {
             let op = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![0xFF; 16],
+                    mode: TransactionMode::Bilateral,
+                    memo: String::new(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![0xFF; 16],
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
                 signature: vec![0xAA; 64],
                 authority_policy: None,
             };
@@ -2844,13 +3118,15 @@ mod tests {
             let mut bytes = Operation::Transfer {
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
-                token_id: b"ERA".to_vec(),
                 policy_commit: [0u8; 32],
-                mode: TransactionMode::Unilateral,
-                nonce: vec![0xFF; 16],
-                recipient: vec![0x02; 32],
-                to: vec![0x03; 32],
-                message: "x".into(),
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![0xFF; 16],
+                    mode: TransactionMode::Unilateral,
+                    memo: "x".into(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 signature: vec![0xAA; 32],
                 authority_policy: None,
             }
@@ -2890,19 +3166,24 @@ mod tests {
         /// sign over `signing_op.to_bytes()` with an EMPTY signature field, and
         /// that exact buffer is the `canonical_operation_bytes` preimage.
         /// Returns `(canonical_bytes, signature, signer_public_key)`.
+        fn unit_terms() -> TransferTerms {
+            TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![0xAB; 16],
+                mode: TransactionMode::Unilateral,
+                memo: "unit".into(),
+                salt: vec![0x5A; 32],
+            }
+        }
+
         fn signed_transfer() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             let kp =
                 generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
             let signing_op = Operation::Transfer {
                 to_device_id: vec![0x11; 32],
                 amount: test_balance(42),
-                token_id: b"ERA".to_vec(),
                 policy_commit: [0u8; 32],
-                mode: TransactionMode::Unilateral,
-                nonce: vec![0xAB; 16],
-                recipient: vec![0x22; 32],
-                to: vec![0x33; 32],
-                message: "unit".into(),
+                terms_commitment: unit_terms().commitment(),
                 signature: Vec::new(),
                 authority_policy: None,
             };
@@ -2927,16 +3208,15 @@ mod tests {
             if let Operation::Transfer {
                 to_device_id,
                 amount,
-                token_id,
-                nonce,
+                terms_commitment,
                 ..
             } = &bound
             {
                 assert_eq!(to_device_id, &vec![0x11; 32]);
                 assert_eq!(amount.value(), 42);
-                assert_eq!(token_id, &b"ERA".to_vec());
-                assert_eq!(nonce, &vec![0xAB; 16]);
+                assert_eq!(terms_commitment, &unit_terms().commitment());
             }
+            unit_terms().open(&bound).expect("the signed terms open the bound transfer");
 
             // Signature re-attached, and re-clearing reproduces the exact preimage.
             assert_eq!(bound.get_signature(), Some(sig));
@@ -3066,14 +3346,16 @@ mod tests {
         fn encoding_is_deterministic() {
             let op = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![0xAA; 16],
+                    mode: TransactionMode::Bilateral,
+                    memo: "test".into(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(42),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![0xAA; 16],
-                recipient: vec![0x02; 32],
-                to: vec![0x03; 32],
-                message: "test".into(),
                 signature: vec![0xBB; 64],
                 authority_policy: None,
             };

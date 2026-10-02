@@ -60,25 +60,43 @@ impl AppRouterImpl {
                         ));
                     };
 
+                    let operation = match deserialize_operation(&s.operation_bytes) {
+                        Ok(operation) => operation,
+                        Err(e) => {
+                            return err(format!(
+                                "bilateral.pending_list: a stored session's operation \
+                                 does not decode: {e}"
+                            ))
+                        }
+                    };
+                    // The token is the one the step's terms name, and they open
+                    // its operation (pre-audit item 4).
+                    let terms = match crate::bluetooth::bilateral_session::step_terms(
+                        &operation,
+                        s.terms_bytes.as_deref(),
+                    ) {
+                        Ok(terms) => terms,
+                        Err(e) => {
+                            return err(format!(
+                                "bilateral.pending_list: a stored session's terms: {e}"
+                            ))
+                        }
+                    };
                     let (amount, token_id, to_device_id) =
-                        match deserialize_operation(&s.operation_bytes) {
-                            Ok(dsm::types::operations::Operation::Transfer {
-                                amount,
-                                token_id,
-                                to_device_id,
-                                ..
-                            }) => (amount.available(), token_id, to_device_id),
-                            Ok(other) => {
+                        match (&operation, terms) {
+                            (
+                                dsm::types::operations::Operation::Transfer {
+                                    amount,
+                                    to_device_id,
+                                    ..
+                                },
+                                Some(terms),
+                            ) => (amount.available(), terms.token_id, to_device_id.clone()),
+                            (other, _) => {
                                 return err(format!(
                                     "bilateral.pending_list: a stored session carries a {} \
                                      operation, not a transfer",
                                     other.get_operation_type()
-                                ))
-                            }
-                            Err(e) => {
-                                return err(format!(
-                                    "bilateral.pending_list: a stored session's operation \
-                                     does not decode: {e}"
                                 ))
                             }
                         };
@@ -212,13 +230,15 @@ mod pending_list_tests {
         let operation = Operation::Transfer {
             to_device_id: peer.to_vec(),
             amount: dsm::types::token_types::Balance::amount(3),
-            token_id: b"ERA".to_vec(),
             policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
-            mode: TransactionMode::Bilateral,
-            nonce: commitment[..16].to_vec(),
-            recipient: peer.to_vec(),
-            to: peer.to_vec(),
-            message: String::new(),
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: commitment[..16].to_vec(),
+                mode: TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: Vec::new(),
             authority_policy: None,
         };
@@ -242,6 +262,7 @@ mod pending_list_tests {
             spend_asset: None,
             spend_amount: None,
             owed_frame: None,
+            terms_bytes: None,
         }
     }
 

@@ -309,6 +309,7 @@ mod tests {
             sender_signature: vec![],
             sender_kyber_public_key: vec![],
             sender_kyber_binding_sig: vec![],
+            transfer_terms: Vec::new(),
         };
         let body = req.encode_to_vec();
         let env = make_invoke_envelope("bilateral.prepare", &body);
@@ -362,6 +363,7 @@ mod tests {
             sender_signature: vec![],
             sender_kyber_public_key: vec![],
             sender_kyber_binding_sig: vec![],
+            transfer_terms: Vec::new(),
         };
         let body = req.encode_to_vec();
         let mut env = make_invoke_envelope("bilateral.prepare", &body);
