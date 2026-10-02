@@ -75,6 +75,18 @@
             android:exported="false"
             android:initOrder="1000" />
 
+        <!-- The debug report file the share sheet hands to the app the user picks
+             (DiagnosticsReport); only the report's cache directory is exposed. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/diagnostics_paths" />
+        </provider>
+
         <!-- MAIN ACTIVITY (WebView container + deterministic JS bridge) -->
         <activity
             android:name="com.dsm.wallet.ui.MainActivity"

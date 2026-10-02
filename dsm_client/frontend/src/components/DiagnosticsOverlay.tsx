@@ -79,7 +79,8 @@ export default function DiagnosticsOverlay() {
     clearBridgeError,
     gatherDiagnostics,
     copyDiagnostics,
-    downloadDiagnostics,
+    shareDiagnostics,
+    sharesInFlight,
     sendDiagnosticsTelemetry,
     openGitHubIssue,
     openGitHubFeedback,
@@ -141,7 +142,7 @@ export default function DiagnosticsOverlay() {
             <div style={{ ...sectionCardStyle, marginBottom: 10, color: 'var(--text-dark)', fontSize: '11px' }}>
               <div style={{ marginBottom: 8, fontWeight: 700 }}>Suggested actions</div>
               <ul style={{ marginTop: 0, marginBottom: 8, paddingLeft: 18, fontSize: '10px', lineHeight: 1.35 }}>
-              <li>Copy or download the diagnostics and attach them to an issue.</li>
+              <li>Share report sends the full report, the app log of this device included, to the app you pick.</li>
               <li>Collect device logs (adb logcat) for a full trace.</li>
               <li>If you consent, save diagnostics into the local native log before filing a report.</li>
               </ul>
@@ -171,7 +172,7 @@ export default function DiagnosticsOverlay() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
                 <button data-testid="send-diagnostics" disabled={!telemetryConsent || !diagnostics} onClick={() => void sendDiagnosticsTelemetry()} style={{ ...actionButtonStyle, opacity: (!telemetryConsent || !diagnostics) ? 0.5 : 1, cursor: (!telemetryConsent || !diagnostics) ? 'not-allowed' : 'pointer' }}>Save to local log</button>
                 <button data-testid="copy-diagnostics" onClick={() => void copyDiagnostics()} style={actionButtonStyle}>Copy</button>
-                <button data-testid="download-diagnostics" onClick={() => downloadDiagnostics()} style={actionButtonStyle}>Download</button>
+                <button data-testid="share-diagnostics" disabled={sharesInFlight > 0} onClick={() => { shareDiagnostics(); }} style={actionButtonStyle}>{sharesInFlight > 0 ? 'Preparing…' : 'Share report'}</button>
                 <button data-testid="open-issue" onClick={() => openGitHubIssue()} style={actionButtonStyle}>Open beta bug report</button>
                 <button data-testid="open-feedback" onClick={() => openGitHubFeedback()} style={actionButtonStyle}>Send feedback</button>
               </div>

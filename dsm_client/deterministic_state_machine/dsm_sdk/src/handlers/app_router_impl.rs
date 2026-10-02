@@ -34,6 +34,14 @@ use crate::sdk::core_sdk::CoreSDK;
 use dsm::types::state_types::DeviceInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// How long `wallet.send` keeps syncing for the recipient's finality
+/// certificate before the send-ready authority refuses: the certificate
+/// normally follows this device's acceptance within seconds.
+const SEND_CERT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The pause between those syncs.
+const SEND_CERT_POLL: std::time::Duration = std::time::Duration::from_millis(1_500);
 use tokio::sync::Mutex;
 
 use super::response_helpers::{pack_envelope_ok, err};
@@ -561,6 +569,55 @@ impl AppRouterImpl {
                 return err(format!(
                     "wallet.send: failed to refresh relationship state before send: {e}"
                 ));
+            }
+        }
+        // The finality barrier a send meets most often is seconds from clearing:
+        // this device accepted a transfer from the recipient, and the
+        // recipient's certificate for it is on its way back. Rather than refuse
+        // at once, keep syncing for the certificate a bounded while; the
+        // send-ready authority below still decides.
+        let cert_wait_started = std::time::Instant::now();
+        loop {
+            match crate::storage::client_db::counterparty_awaits_peer_finalization(&to_device_id) {
+                Ok(awaiting) if awaiting => {}
+                Ok(_) => break,
+                Err(e) => {
+                    return err(format!(
+                        "wallet.send: the acceptance finality state is unreadable: {e}"
+                    ))
+                }
+            }
+            let waited = cert_wait_started.elapsed();
+            if waited >= SEND_CERT_WAIT {
+                log::info!(
+                    "[wallet.send] the recipient's finality certificate did not arrive within {}s",
+                    SEND_CERT_WAIT.as_secs()
+                );
+                break;
+            }
+            log::info!(
+                "[wallet.send] waiting for the recipient's finality certificate ({} ms so far)",
+                waited.as_millis()
+            );
+            tokio::time::sleep(SEND_CERT_POLL).await;
+            match self
+                .run_storage_sync_request(crate::sdk::inbox_poller::poll_sync_request())
+                .await
+            {
+                Ok(resp) => {
+                    if !resp.errors.is_empty() {
+                        log::warn!(
+                            "wallet.send: certificate sync completed with {} error(s): {:?}",
+                            resp.errors.len(),
+                            resp.errors
+                        );
+                    }
+                }
+                Err(e) => {
+                    return err(format!(
+                        "wallet.send: failed to sync for the recipient's finality certificate: {e}"
+                    ));
+                }
             }
         }
         let contact_record =
