@@ -1871,6 +1871,7 @@ impl AppRouterImpl {
                         processed: report.processed,
                         pushed: report.pushed,
                         errors: report.errors,
+                        more_pending: report.more_pending,
                     },
                     Err(failure) => generated::StorageSyncResponse {
                         success: false,
@@ -1878,6 +1879,7 @@ impl AppRouterImpl {
                         processed: failure.report.processed,
                         pushed: failure.report.pushed,
                         errors: failure.report.errors,
+                        more_pending: failure.report.more_pending,
                     },
                 };
                 pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(response))
@@ -1889,9 +1891,9 @@ impl AppRouterImpl {
 }
 
 /// `StorageSyncRequest.limit` when the request leaves it 0 (the wire
-/// contract's default).
+/// contract's default): the most entries one sync reads from each route.
 const STORAGE_SYNC_DEFAULT_LIMIT: usize = 100;
-/// The most inbox items one sync pulls.
+/// The largest per-route budget a request may ask for.
 const STORAGE_SYNC_MAX_LIMIT: u32 = 200;
 
 /// A decoded `storage.sync` request.
@@ -1937,6 +1939,10 @@ struct StorageSyncReport {
     /// route no member answered for, or one read from too few members. What
     /// was read is processed; the run is not complete (storage spec §4).
     inbox_incomplete: Option<String>,
+    /// The routes holding more than this sync took: a read that stopped at
+    /// its page cap, or more entries than the route's budget. A status, never
+    /// an error; the next sync resumes each where it stopped.
+    more_pending: Vec<String>,
 }
 
 /// A sync that could not run to its end, with what it did before it stopped.
@@ -1962,15 +1968,41 @@ enum StaleOrIngested {
     Stale(crate::handlers::recipient_dispatch::StaleCopy),
 }
 
+/// What a sync records about the copies it read, by route: copies of decided
+/// objects consumed by the id the spool holds them by, and copies that never
+/// will be anything this device can take passed over by their content.
+#[derive(Default)]
+struct CopiesTaken {
+    consume: std::collections::BTreeMap<String, Vec<String>>,
+    pass_over: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl CopiesTaken {
+    fn consume(&mut self, address: &str, message_id: &str) {
+        self.consume
+            .entry(address.to_string())
+            .or_default()
+            .push(message_id.to_string());
+    }
+
+    fn pass_over(&mut self, address: &str, copy_key: &str) {
+        self.pass_over
+            .entry(address.to_string())
+            .or_default()
+            .push(copy_key.to_string());
+    }
+}
+
 /// Act on what the boundary made of one copy read at `address` under
-/// `message_id`. A copy of an object the canonical apply has decided is
-/// consumed, under the id the spool holds it by; a copy that is not recognized
-/// is left unconsumed and recorded nowhere.
+/// `message_id`, whose content key is `copy_key`. A copy of an object the
+/// canonical apply has decided is consumed, under the id the spool holds it
+/// by; a copy that is not recognized is passed over by its content.
 fn take_in_copy(
     copy: Result<StaleOrIngested, String>,
     address: &str,
     message_id: &str,
-    consume_now: &mut std::collections::BTreeMap<String, Vec<String>>,
+    copy_key: &str,
+    taken: &mut CopiesTaken,
     report: &mut StorageSyncReport,
 ) {
     use crate::handlers::recipient_dispatch::{Ingested, StaleCopy};
@@ -2012,16 +2044,23 @@ fn take_in_copy(
     };
     match ingested {
         Ingested::Staged => {}
-        Ingested::Decided => consume_now
-            .entry(address.to_string())
-            .or_default()
-            .push(message_id.to_string()),
-        // Recorded nowhere: a copy that is not a transfer or receipt this
-        // device can take stays on the spool as raw material (Amendment A1).
-        Ingested::NotRecognized(why) => log::info!(
-            "[storage.sync] copy {message_id} on {}.. is not recognized: {why}",
-            short_route(address)
-        ),
+        Ingested::Decided => taken.consume(address, message_id),
+        // Not being recognized is a fact about the copy's own bytes against
+        // the keys this device pins for the contact; what this device cannot
+        // decide yet is an `Err` or a staged copy, never this. So the copy
+        // never will be taken here, and it is passed over (owner ruling,
+        // 2026-10-01, pre-audit item 11: junk classified terminally is not
+        // charged forever). By its content, never its id: anyone can spool a
+        // copy under an honest message's id, and the honest copy is still
+        // read. The spool keeps it as raw material (Amendment A1); nothing is
+        // recorded about it beyond this device's read.
+        Ingested::NotRecognized(why) => {
+            log::info!(
+                "[storage.sync] copy {message_id} on {}.. is not recognized: {why}",
+                short_route(address)
+            );
+            taken.pass_over(address, copy_key);
+        }
     }
 }
 
@@ -2048,6 +2087,7 @@ impl AppRouterImpl {
             pushed: 0,
             errors: Vec::new(),
             inbox_incomplete: None,
+            more_pending: Vec::new(),
         };
         let storage_endpoints = match crate::sdk::storage_set::pinned_endpoints() {
             Ok(endpoints) => endpoints,
@@ -2074,6 +2114,18 @@ impl AppRouterImpl {
 
     /// Pull every rotated inbox route, process what arrived, and drive the
     /// durable completion passes that do not depend on this pull.
+    ///
+    /// `limit` is each route's budget (owner ruling, 2026-10-01, pre-audit
+    /// item 11): a route reads at most `limit` entries per sync, and one
+    /// whose budget runs out with entries left is reported `more_pending`, a
+    /// status and not an error; the next sync resumes it. No route can spend
+    /// another's budget, so junk on one route never keeps another unread. A
+    /// read resumes where the last one stopped (`retrieve_resuming`), so
+    /// repeated syncs work through a route however much waits on it. A copy
+    /// classified terminally (one that opens to none of the spooled payloads,
+    /// a request that is not what its method names, or a copy this device can
+    /// never take) is passed over by its content, so it is charged once and
+    /// never again, and an honest copy spooled under the same id is still read.
     async fn pull_and_process_inbox(
         &self,
         mut report: StorageSyncReport,
@@ -2109,17 +2161,15 @@ impl AppRouterImpl {
 
         // Copies whose object the canonical apply has already decided, by the
         // address and message id they were read under: consumed directly.
-        let mut consume_now: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
+        // Copies that never will be anything this device can take, by their
+        // content: passed over.
+        let mut taken = CopiesTaken::default();
         let mut pulled = 0usize;
         // Routes read to full coverage, routes read partially, and routes no
         // member answered for. Only the first kind says "nothing more there".
         let (mut routes_read, mut routes_partial, mut routes_unread) = (0usize, 0usize, 0usize);
         for tagged in tagged_addresses {
-            if pulled >= limit {
-                break;
-            }
-            let retrieved = b0x_sdk.retrieve_from_b0x_v2(&tagged.address).await;
+            let retrieved = b0x_sdk.retrieve_resuming(&tagged.address).await;
             // Replies ride the same spool as forward transfers, as distinct
             // payloads; they are drained whether or not this route yielded
             // transfers, since a reply alone can release a pending gate.
@@ -2152,7 +2202,8 @@ impl AppRouterImpl {
                     copy,
                     &tagged.address,
                     &artifact.message_id,
-                    &mut consume_now,
+                    &artifact.copy_key,
+                    &mut taken,
                     &mut report,
                 );
             }
@@ -2170,7 +2221,7 @@ impl AppRouterImpl {
             self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
                 .await;
 
-            let polled = match retrieved {
+            let (polled, read_on) = match retrieved {
                 Ok(outcome) => {
                     if let crate::sdk::b0x_sdk::SpoolCoverage::Partial { responded, needed } =
                         outcome.coverage
@@ -2185,7 +2236,12 @@ impl AppRouterImpl {
                     } else {
                         routes_read += 1;
                     }
-                    outcome.entries
+                    // Opened, and none of the payloads a device spools: never
+                    // will be.
+                    for copy_key in &outcome.unknown {
+                        taken.pass_over(&tagged.address, copy_key);
+                    }
+                    (outcome.entries, outcome.more)
                 }
                 Err(e) => {
                     routes_unread += 1;
@@ -2196,13 +2252,23 @@ impl AppRouterImpl {
                     continue;
                 }
             };
-            let remaining = limit - pulled;
-            for entry in polled.into_iter().take(remaining) {
+            // More on this route than this sync takes: a read that stopped at
+            // its page cap, or more entries than the route's budget. The next
+            // sync resumes it.
+            if read_on || polled.len() > limit {
+                report
+                    .more_pending
+                    .push(format!("{}..", short_route(&tagged.address)));
+            }
+            for entry in polled.into_iter().take(limit) {
                 pulled += 1;
                 // Only transfers are the transfer pipeline's business; the
                 // boundary reads every value-bearing field from the signed
-                // operation it verifies itself.
+                // operation it verifies itself. A request whose body is not
+                // what its method names never will be: passed over by its
+                // content, so it is not charged to this route's budget again.
                 if entry.kind != crate::sdk::b0x_sdk::B0xEntryKind::Transfer {
+                    taken.pass_over(&tagged.address, &entry.copy_key);
                     continue;
                 }
                 let copy = if stale {
@@ -2224,17 +2290,30 @@ impl AppRouterImpl {
                     copy,
                     &entry.inbox_key,
                     &entry.transaction_id,
-                    &mut consume_now,
+                    &entry.copy_key,
+                    &mut taken,
                     &mut report,
                 );
             }
         }
-        // At most `limit`, which the request bounds by STORAGE_SYNC_MAX_LIMIT.
+        // At most `limit` per route, which the request bounds by
+        // STORAGE_SYNC_MAX_LIMIT, over the few routes this device's contacts
+        // give it: far below u32::MAX.
         report.pulled = pulled as u32;
-        for (route, ids) in consume_now {
+        for (route, ids) in taken.consume {
             if let Err(e) = b0x_sdk.record_consumed_b0x(&route, ids).await {
                 report.errors.push(format!(
                     "consume decided copies on {}..: {e}",
+                    short_route(&route)
+                ));
+            }
+        }
+        for (route, copy_keys) in taken.pass_over {
+            if let Err(e) =
+                crate::storage::client_db::b0x_consumed::record_passed_over(&route, &copy_keys)
+            {
+                report.errors.push(format!(
+                    "pass over unrecognized copies on {}..: {e}",
                     short_route(&route)
                 ));
             }

@@ -193,8 +193,12 @@ impl RegistrationRead {
     /// the leader keeps a value, no other is ever final there), or when
     /// `K_root(q)`'s leader link is held by a claim other than
     /// `derive(P, F)`: another fulfillment's, an ordinary transition's, or
-    /// one naming `F` whose body is not `F`'s. Registered when the pair is
-    /// final on `F` and on exactly `derive(P, F)`. Both are permanent.
+    /// one naming `F` whose body is not `F`'s. When that last one is final
+    /// with `F` final at `K_ful(q)`, the pair is matched by `F`'s id and its
+    /// body is not `F`'s claim: misbodied, which loses `F` and makes the
+    /// position Invalid for the trader's lineage (S20). Registered when the
+    /// pair is final on `F` and on exactly `derive(P, F)`. All but Pending
+    /// are permanent.
     pub fn standing_of(
         &self,
         precommit: &TraderPrecommitBody,
@@ -204,6 +208,11 @@ impl RegistrationRead {
             &derive::resolution_claim(precommit, fulfillment).encode(),
         );
         let root_is_another = self.root_claim.is_some_and(|claim| claim != own);
+        if root_is_another
+            && matches!(&self.registration, Registration::Registered(held) if held.body == *fulfillment)
+        {
+            return PairStanding::Misbodied;
+        }
         let holder = match &self.registration {
             Registration::Registered(signed)
             | Registration::Held(signed)
@@ -237,6 +246,19 @@ pub enum PairStanding {
     Pending,
     /// `F` can never register at `q` (SoFi Amendments S14, S20). Permanent.
     Lost,
+    /// The pair is final on `F`, matched by its id, but the claim at
+    /// `K_root(q)` is not `derive(P, F)`: it names `F` under another body.
+    /// `F` is lost there (S14's skip, no Void) and the position is Invalid
+    /// for the trader's lineage (S20). Permanent.
+    Misbodied,
+}
+
+impl PairStanding {
+    /// `F` can never register at `q`: lost to another claim, or to its own
+    /// pair under another body. What the S14 skip reads.
+    pub fn is_lost(self) -> bool {
+        matches!(self, Self::Lost | Self::Misbodied)
+    }
 }
 
 /// Which of the two cells settled the answer.
@@ -769,7 +791,8 @@ mod tests {
         assert_eq!(standing(&root_only, &rival), PairStanding::Lost);
 
         // A claim naming F's id, with a body that is not derive(P, F): the
-        // pair matches by id, and F is lost where P is in hand.
+        // pair matches by id, and where P is in hand F is misbodied (lost,
+        // and the position Invalid for the lineage, SoFi Amendment S20; 12k).
         let forged = SofiResolutionClaim {
             realize_root: [0xBD; 32],
             ..own_claim
@@ -779,7 +802,12 @@ mod tests {
             mismatched.registration(),
             Registration::Registered(signed) if signed.body == f
         ));
-        assert_eq!(standing(&mismatched, &f), PairStanding::Lost);
+        assert_eq!(standing(&mismatched, &f), PairStanding::Misbodied);
+        assert!(standing(&mismatched, &f).is_lost());
+        // Not final yet, the same claim already loses F, and the lineage
+        // waits for the pair to settle before it reads the verdict.
+        let settling = at(Some((&f, last)), Some((forged, 0)));
+        assert_eq!(standing(&settling, &f), PairStanding::Lost);
 
         let nothing = at(None, None);
         assert_eq!(standing(&nothing, &f), PairStanding::Pending);

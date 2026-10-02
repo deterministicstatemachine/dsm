@@ -1105,7 +1105,7 @@ Tests for the radio's word: `BleCoordinatorRadioTest` (7: a refused advertising 
 - Kotlin · UnifiedContactBridge.kt `removeContact`, `hasContactForDeviceId`, with their `Unified` functions, externals and JNI exports: nothing calls them. A contacts pass.
 - `dsm_sdk` · bluetooth/bilateral_ble_handler.rs `handle_prepare_request`: a prepare that is not for this relationship is not meaningless bytes to the receiver, though its parent can never match. The receiver never checks that the prepare is for it: it logs the target and carries on. When the sender is also its contact, the tip mismatch stores the sender's claimed tip as a live-peer claim, and that claim blocks the receiving appliance's sends to the sender, online as well as offline (`wallet.send` checks the same readiness); nothing outside recovery clears it. The receiver also answers with a signed rejection, which the sender drops, and emits a rejected event to its own app. A throwaway probe reproduced it: send-ready before, then blocked with "Live peer reported a different relationship tip". The target field is not under the sender's signature; the operation inside the signed commitment names the recipient. The Kotlin fallback below is one way such a prepare arrives.
 - Kotlin · bridge/ble/BleCoordinator.kt `resolveSession`: when the address a transfer names is not a live session and no identity matches it, the transfer goes to the one ready peer, whichever appliance that is. A prepare for one contact can reach another appliance; the fallback picks a destination the SDK did not choose. A transport pass.
-- Kotlin · AndroidManifest.xml `PicoSelfTestActivity`: a bench self-test its own comment calls debug bring-up only, exported and launched on USB attach in the production manifest. The hardware track's.
+- Kotlin · AndroidManifest.xml `PicoSelfTestActivity`: a bench self-test its own comment calls debug bring-up only, exported and launched on USB attach in the production manifest. The hardware track's. **Closed by pre-audit item 16 (§6.69):** declared in the debug manifest only.
 - `proto` · `BilateralReconciliationRequest`, `BilateralReconciliationResponse`, `BleFrameType` 10–11, with their arms in `dsm_sdk` bluetooth/frame_classify.rs and wire/mod.rs: reconciliation was deleted (a fork is a Tripwire violation, not reconcilable) and its frames outlived it; the request's `include_peer_status` and `ble_address` name the peer status read deleted above. A backend wire pass.
 - frontend · SofiScreen: orders a vault's token pair bytewise before sending it (§28) — a protocol rule applied above Rust. The SoFi track's screen.
 - frontend · dsm/transactions.ts `schedulePostAcceptRefreshes`: after Accept, four re-reads of the wallet on a frame cadence (0/0.5/1/2 s) beside Rust's TRANSFER_COMPLETE announcement, kept because whether the announcement alone reaches the screen on a device is undecided; a device run decides, and the cadence goes if it does.
@@ -2307,7 +2307,22 @@ The timeouts are `Duration`s handed to the HTTP and pool libraries. `no_clock_re
 - **Capping the mirror's distinct ByteCommits per member and cycle.** Spec §14 rule 6 keeps every one.
 - **Committing the CA with the storage set.** It is configured today.
 
-**Open, SOFI's sync design:** in `pull_and_process_inbox`, an entry that never becomes a transfer counts against the sync's limit and is never consumed. Routes the limit leaves unread are not reported, and reporting them would make every limit-capped sync fail (`inbox_incomplete` stops the sync). Both depend on what a limit-capped sync means.
+**Item 11, what a limit-capped sync means (SOFI, `security/beta-pre-audit-remaining`, 2026-10-02; closed).** The open question this section left: an entry that never became a transfer counted against the sync's limit and was never consumed, and routes the limit left unread were not reported. The owner's ruling (2026-10-01): each route gets its own budget; a route left with more is resumable status (`more_pending`), not an error; junk classified terminally is not charged again; no route can starve another; repeated syncs make bounded progress through a route.
+
+| What was wrong | Now | Test | Mutation control |
+|---|---|---|---|
+| `StorageSyncRequest.limit` was one budget for the whole sync, spent route by route. Junk on the first route read spent all of it, and the routes after it were neither read nor reported; the sync still answered complete. | `limit` is each route's budget, and every route is read on every sync (`pull_and_process_inbox`). | `dsm_sdk::handlers::node_e2e_tests::a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through` | The global break restored → red (the payment on the other route never lands). |
+| A route holding more than the sync took was reported nowhere. | `StorageSyncResponse.more_pending` (field 6) names it: either its read stopped at the page cap (`RetrievalOutcome::more`) or it held more entries than its budget. The sync still succeeds. | the test above; `…::a_copy_that_waits_hides_nothing_more_than_a_page_cap_behind_it` | Never reported → both red. The page cap not reported → the second red. |
+| An entry that never became a transfer was left on the spool and charged against the budget on every sync. | A copy classified terminally is passed over. That covers a request whose body is not what its method names, a transfer or receipt the boundary returns `NotRecognized` for, and a copy that opens to none of the spooled payloads (`RetrievalOutcome::unknown`). `NotRecognized` is a fact about the copy's own bytes against the keys this device pins; anything this device cannot decide yet comes back as an `Err` or a staged copy instead. Every payload a device spools is one of the read's five discriminators. | both tests above | Unrecognized requests not passed over → the first red. Unknown copies not passed over → the second red. |
+| Found in review of the hand-off, never released: the work in progress consumed junk by message id. The id is cleartext on the spool, and the node keeps a second copy under an id it already holds (`dsm_storage_node::api::transport::b0x::tests::an_envelope_reusing_a_message_id_is_kept_after_the_first`). One junk copy under an honest message's id would therefore have hidden the honest copy for good. That is the shadowing `envelope_merge_key` closed for the merge. | Passed over by content: `b0x_passed_over(address, copy_key)`, where `copy_key` is the copy's `envelope_merge_key` (message id and content digest), checked after the copy opens. `b0x_consumed` keeps consumption by id, for copies of decided objects only. | `…::a_copy_passed_over_hides_no_other_copy_under_its_id`; `dsm_sdk::storage::client_db::b0x_consumed::tests::a_copy_passed_over_is_its_content_and_consumes_no_id` | Consumed by id → red: the second sync takes nothing (`pulled: 0`). |
+| Every read of a member started at the read position and read at most 16 pages of 64. A copy that is never consumed holds that position, so anything more than 1,024 entries behind it was never read, whether passed over or not. A third party can make such a copy, for example a countersign whose body is not one. | `storage.sync` reads with `B0xSDK::retrieve_resuming`. Each member's read resumes at a persisted cursor (`b0x_scan_cursor`) and goes back to the read position once it reaches the end of the spool. A resumed read never moves the position. `inbox.pull` reads from the position and moves no cursor. | the page-cap test | The read never resumes → red (the payment never lands). |
+| Found in review of the hand-off: the poller entered eager mode on any `more_pending`. A route pinned as above is pending again on every pass from the position, which would have held the poller at 8 s instead of 60 s. | Eager on `more_pending` only when the sync took entries (`inbox_poller::enters_eager_mode`). | `dsm_sdk::sdk::inbox_poller::tests::a_pending_route_hurries_the_poller_only_while_entries_are_taken`; the page-cap test's last pass | Any pending route hurries the poller → both red. |
+
+Also, without a dedicated test: the read keeps copies in spool order rather than hash order, so a sync that takes only part of a route takes the oldest, and nothing spooled later gets ahead of them.
+
+Each mutation was applied, its named tests run, and the code restored (2026-10-02). No node change, so nothing for the fleet.
+
+**Open:** a countersign, finality certificate or cert-resync message whose body is junk is refused by its own path and left on the spool, not passed over. It is never charged against the entry budget, and with the resuming read it hides nothing. But a route holding one re-reads what lies behind it each time the read returns to the position: at most 16 pages per member, at the normal cadence. Passing these over needs each path's terminal outcomes named, for example `CountersignOutcome::WireRejected` and `NoProposal`.
 
 ### 6.65 A position cell's occupant proves its own authority (`security/core-root-cell-binding`, pre-audit item 1, 2026-10-01)
 
@@ -2453,7 +2468,7 @@ This is the owner's beta security pre-audit, item 12 (P1): "cheap garbage must n
 | Another fulfillment's leader link loses nothing (the old S14 exception) | Both tests red |
 | A registered pair's body is not compared | The unit test red |
 
-The resolution's body check (Invalid in `peer_position`) has no test of its own yet.
+The resolution's body check (Invalid in `peer_position`) is tested by `dsm_sdk::handlers::node_e2e_tests::a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the_lineage` (`77dc9cfc1`). B writes its pair with a claim it signs naming its `F` under another `R_realize`. The pair registers, matched by `F`'s id; a peer walking B's lineage to `q` gets Invalid with the check's reason, and the vault's walk passes over the key B's exercise holds. Mutation: the check comparing only the fulfillment id → red (the walk reads `q` as unresolved, not Invalid). The test found 12k below.
 
 **12e. A trader that withheld its pair held the vault's key (closed).**
 
@@ -2479,8 +2494,35 @@ The resolution's body check (Invalid in `peer_position`) has no test of its own 
 | `verify_resolution_claim` dropped from claim recognition | The same test red: this claim under another claim's signature is accepted |
 | Recognition drops `fulfillment_proves_the_device` | `an_exercise_whose_fulfillment_does_not_prove_the_traders_device_is_nothing` red |
 
+**12f. A parent on a lineage known invalid left the key waiting (closed).**
+
+| Field | Record |
+|---|---|
+| Severity | High |
+| Files | `dsm/src/sofi/resolve.rs` · `trader_at_parent` (new), `Verifier::parent_for`; `dsm/src/sofi/facts.rs` · `TraderAtParent` (new), `parent_position`; `dsm/src/sofi/resolution.rs` · `ParentPosition::LineageInvalid` (new), `root_left_by` (new), `trader_parent_compatible`, `trader_parent_impossible`; `lean4/DSMSofiAtomicity.lean` · `ParentState.lineageInvalid` |
+| Exploit | The walk of a trader's lineage (DSM Amendment A8) reports a lineage Invalid at or before `p`, or quarantined for a divergent write-once register cell, as a failure. `parent_for` read every failure as "not established", so the facts saw no parent and the key the exercise held waited forever. A trader whose lineage is invalid between its setups and `p` (setups checked at an earlier position pass S13) could write an exercise naming any parent at `p` and hold a vault key for good: §23.5 arm (iv) exists so that an impossible operation cannot strand a DLV key. A conditional parent that resolved Invalid is the same case. |
+| Violates | SoFi §23.3 (`TraderParentImpossible(P)` when `C_p` is terminal and selected no root); Amendment S13: "No trade whose trader's lineage is known invalid can occupy a vault key indefinitely because that lineage can never yield an accepted claim." MR-SOFI-0234. |
+| Verification | `dsm::sofi::resolve::tests::the_walks_verdict_on_a_traders_lineage_reaches_the_facts` (Invalid and Quarantined reach the facts as a lineage known invalid; Incomplete and Unresolved as nothing; a held claim only at the position the walk reached). `dsm::sofi::facts::tests::a_parent_on_a_lineage_known_invalid_is_terminal` (single-root and conditional named claims alike: the position Invalid, the vault's key Skipped). Lean `parent_on_an_invalid_lineage_is_invalid` with its witness in `the_trader_parent_rungs_are_not_vacuous`. No node test: an invalid lineage on the nodes needs a step that verifies as wrong, which the harness cannot produce from a device; the classification is the one `validation::setup_lineage` already applies to setups (S13), tested the same way. |
+| Closure condition | The walk's verdict reaches the facts as what it is: `TraderAtParent::LineageInvalid`, so `ParentPosition::LineageInvalid`, terminal whatever `P` names, never compatible and always impossible. The two predicates now derive from the root the parent leaves `P` standing on (`root_left_by`); impossible is not compatible, since a `ParentPosition` is always terminal. |
+| Status | Closed (`819396e0e`). |
+
+Mutation controls (12f, restored byte for byte): the walk's verdict read as no parent → `the_walks_verdict_on_a_traders_lineage_reaches_the_facts` red; a lineage known invalid read as no fact → `a_parent_on_a_lineage_known_invalid_is_terminal` red; `lineageInvalid` dropped from Lean's `parentImpossible` → three proofs fail to check.
+
+**12k. The trader's own device did not resolve a misbodied pair Invalid (closed).** Found by the 12j body-check test.
+
+| Field | Record |
+|---|---|
+| Severity | Low: only the trader's own key can sign the claim, and nothing advanced past the position either way |
+| Files | `dsm/src/sofi/registration.rs` · `PairStanding::Misbodied` (new), `PairStanding::is_lost` (new), `RegistrationRead::standing_of`; `dsm/src/sofi/facts.rs` · `GroundFacts`, `EstablishedFacts`, `RefutedPosition` carry `pair`; `dsm/src/sofi/resolution.rs` · `RouteFacts::pair`, `resolve_position` rung 0, `resolve_refuted_in_hand`, `consumed_route`, `classify_attempt`, `skip_without_evidence`; `lean4/DSMSofiAtomicity.lean` · `Facts.misbodied`, `resolve`, `Evolves.misbodied` |
+| Exploit | A pair final on `F` whose root claim names `F` under another body than `derive(P, F)` is Invalid for the trader's lineage (S20), and every peer's walk read it so (`peer_position`). The trader's own ladder read the pair as merely lost: rung 0 answered `NotRegistered`, so `sofi.resolve` answered `RetriesExhausted` on every call. The device and its peers disagreed about the same bytes. |
+| Violates | SoFi Amendment S20 ("the position resolves Invalid for the trader's lineage. The vault and the lineage therefore agree"). Owner ruling, 2026-10-01 ("Fix now"): "same bytes => same terminal verdict for local and peer resolution; no retry/incomplete result once all required evidence is present; no advancing past the Invalid position; update the Rust resolution path and corresponding Lean model; add a dedicated regression test for this exact local/peer agreement case; mutation-test removal of the new fact/check and require the test to fail." |
+| Verification | `dsm_sdk::handlers::node_e2e_tests::a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the_lineage`: a peer walking B's lineage to `q` reads Invalid, and B's own `sofi.resolve` answers `(q, Invalid)`; on the old code `(q, RetriesExhausted)`. `dsm::sofi::facts::tests::a_pair_final_on_its_fulfillment_under_another_body_resolves_invalid` (the ladder Invalid, nothing consumed, the key skipped). `dsm::sofi::registration::tests::a_fulfillment_is_lost_to_any_other_leader_and_to_any_claim_not_its_own` (Misbodied once final, Lost while settling). Lean `a_misbodied_pair_is_invalid`, `the_misbodied_rung_is_not_vacuous`, and `resolution_is_permanent` over the new rung. |
+| Closure condition | The pair standing is the one fact the ladder reads for registration (`pair` replaces `registered` and `position_lost`); `Misbodied` resolves Invalid at rung 0 for the trader's own lineage and is lost for the vault's S14 skip, exactly as a peer reads it. |
+| Status | Closed (`55daf37bf`). |
+
+Mutation controls (12k, restored byte for byte): rung 0 reading `Misbodied` as not registered → the facts test and the node test red (`(4, 4)` where `(4, 3)` is required); the `Misbodied` fact removed from `standing_of` → two unit tests red; the Lean rung dropped → the misbodied theorems and three structural proofs fail.
+
 **Open: found here, not built.**
-- **12f. A conditional parent that resolved Invalid.** §23.3 makes this parent impossible too (`C_p` terminal, no root). The A8 walk reports an Invalid position as a failure, so `trader_root_at` fails, the facts see no parent, and the key waits forever. A single-root parent whose lineage is known invalid at or before `p` is the same case, as Amendment S13 already decides for setups. The walk's verdict has to reach the facts as a terminal parent. Mine, next. Verification: read at the code.
 - **12g. A defeated route strands its other legs (owner ruling).** A route is Void when a reserved key's leader holds another exercise first (§24 rung 8). That is not an arm of `RouteImpossible` (§23.5 arms i–iv), so the route's other final cells are skipped only once the lost leg's parent is consumed elsewhere or orphaned. A trader that owns a vault no one else trades can hold another vault's key indefinitely: route through both, leg 1 final, leg 2's key taken first by its own other exercise. Like S14, this is a fact about `F`, not about `P` and `E`. It needs an amendment: a final cell whose fulfillment's reserved key went to another exercise is skipped. Verification: read at the code (`route_impossible`, `classify_attempt`).
 - **12h. Withheld evidence holds a key (owner ruling).** A registered exercise whose trader never publishes an object conformance or validation needs, such as the setup a leg names, can never be classified. §5.3 lets that position stay unresolved, but none of the skips applies, so it also holds the vault's key forever. The spec's remedy is the challenge rule (Amendment S1, storage §9.1), and Amendment S7 puts it outside beta. Verification: read at the code.
 - **12i. Locators anyone can compute in advance can be flooded first (owner ruling, and one fix in reach).** An index scan that exceeds its budget is Unavailable (§11). A locator computable before the honest object exists can be filled first with appends of junk, past the budget, for good.
@@ -2542,16 +2584,49 @@ Also: `a_credits_source_is_validated_through_its_own_segment` (B validates C's f
 
 **Still open.** `peer_root_at`, the SoFi walk, records nothing, so §6.53's liveness bound on vault owners stands. The ruling's "Cache/update validated frontiers" answers the owner question recorded there, and SOFI holds the change.
 
+### 6.69 The WebView runs only the app's own scripts and goes nowhere else; a release build exports the launcher only (`security/beta-pre-audit-remaining`, pre-audit items 13 and 16, 2026-10-01)
+
+The owner's beta security pre-audit, items 13 ("WebView hardening: Remove `unsafe-eval`, reduce/remove `unsafe-inline`, lock navigation/origins down and preserve the packaged-origin-only native bridge") and 16 ("Exported Android component hardening: Review and restrict exported activities/components capable of irreversible or security-sensitive actions"). Audited at main `e736dbca7` by a read-only pass over `public/index.html`, `MainActivity.kt` and the manifests; the tree was unchanged after it.
+
+**Item 13. The WebView admitted any script and any address (closed).**
+
+| Field | Record |
+|---|---|
+| Severity | Medium (P2) |
+| Files | `dsm_client/frontend/public/index.html` (the policy); `dsm_client/frontend/webpack.config.js` · `InlineScriptHashes` (new), the web-development devtool; `dsm_client/frontend/scripts/webview-policy.js` (new), `validate-android-assets.js`; `dsm_client/android/.../ui/WebNavigationPolicy.kt` (new), `MainActivity.kt` · `shouldOverrideUrlLoading`, `onCreateWindow`, `openOutside` (new); `tools/sanitize-android-index.js` (deleted) |
+| Exploit | Any script that reached the page ran: `script-src` admitted `'unsafe-inline'` and `'unsafe-eval'`, so an injection anywhere in what the page renders would run with the native bridge in reach. Any http(s) link the page followed was handed to another app with `ACTION_VIEW` (data in the URL leaves the device), every other scheme (`file:`, `content:`, `intent:`, `data:`) loaded in the WebView itself, and an exception while deciding loaded it too. `window.open` was forwarded to `ACTION_VIEW` unfiltered. |
+| Violates | The pre-audit's item 13; the packaged-origin-only bridge (the port is posted to the app's origin alone, and nothing else may become the page). |
+| Verification | The shipped page, served locally, runs its three inline scripts and mounts React with no violation; an injected inline script is blocked (`securitypolicyviolation`, `script-src-elem`). `validate-android-assets.js` (CI's `npm run build`) passes on the shipped page. `WebNavigationPolicyTest` (3 tests): the app's assets load; the QR link and the issue form are the only ways out; fourteen other addresses are refused. Android unit tests 262/0. |
+| Closure condition | `script-src 'self'` plus the SHA-256 of each inline script the emitted page carries, written by the build; no `'unsafe-eval'` anywhere; `base-uri`, `form-action`, `frame-src` and `object-src` `'none'`; the shipped page is checked by CI. Every navigation and new window goes through `WebNavigationPolicy`: the app's own assets load, `dsm://native/qr/start` opens the scanner, the beta issue form (`https://github.com/deterministicstatemachine/dsm/issues/new`) opens in the browser, everything else is refused. |
+| Residual | `style-src` keeps `'unsafe-inline'`: six `<style>` blocks, one `style` attribute in `index.html` and a JSX `<style>` element (`AppContent.tsx`). Styles execute no script, and `connect-src`/`img-src` limit what a style can reach. `allowContentAccess` stays at its default: setting it needs a boolean literal the real-code guard refuses, and `content:` loads are refused by both the policy (`img-src`, `connect-src`) and the navigation policy. |
+| Status | Closed (`35109e75b`). |
+
+Mutation controls (item 13, restored byte for byte): the policy re-admitting `'unsafe-inline' 'unsafe-eval'` → the validator fails on both; `InlineScriptHashes` removed → the validator names the token left in the policy and the three inline scripts it no longer admits; the navigation policy opening any http(s) address → `every_other_address_is_refused` red.
+
+**Item 16. An exported bench tool ran irreversible chip operations for any app (closed).**
+
+| Field | Record |
+|---|---|
+| Severity | Medium (P2) |
+| Files | `dsm_client/android/app/src/main/AndroidManifest.xml`; `src/debug/AndroidManifest.xml` (new), `src/debug/res/xml/pico_device_filter.xml` (moved); `ci/android_exported_components.sh` (new), `ci/production_safety_checks.sh` |
+| Exploit | `PicoSelfTestActivity`, a bench self-test its own comment calls "Debug bring-up only" (§6.29), was exported by the main manifest with no permission. Any installed app could start it with an explicit intent; with its confirmation extras it calls `Unified.counterInitMax()` and `Unified.birthCageSlot0()`, the second labelled irreversible. Their Rust side is compiled only with `on_device_installs`, but nothing in the manifest depended on that. |
+| Violates | The pre-audit's item 16. |
+| Verification | `ci/android_exported_components.sh`: every component states `android:exported`, only `MainActivity` is exported, and it answers `MAIN` alone with no data filter. The release merged manifest declares no `PicoSelfTestActivity`; the debug one does. The other components were reviewed: `MainActivity` reads nothing from its launching intent and registers its receivers `RECEIVER_NOT_EXPORTED`; `QrScannerActivity`, `BleBackgroundService`, `DsmInitProvider` and `IncompatibleDeviceScreen` are not exported; there is no deep link, NFC intent filter or boot receiver. |
+| Closure condition | A release build declares the debug tool nowhere; the gate fails on any other exported component. |
+| Status | Closed (`b629a75c3`). |
+
+Mutation control (item 16): the gate run on the previous manifest fails, "activity com.dsm.wallet.debug.PicoSelfTestActivity is exported".
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
 | DSM high-level (MR-DSM) | 277 | 96 | 95 | 39 | 0 | 29 | 18 |
-| SoFi (MR-SOFI) | 362 | 236 | 87 | 18 | 4 | 17 | 0 |
+| SoFi (MR-SOFI) | 362 | 237 | 86 | 18 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **943** | **406** | **201** | **114** | **4** | **64** | **154** |
+| **All** | **943** | **407** | **200** | **114** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3074,7 +3149,7 @@ Also: `a_credits_source_is_validated_through_its_own_segment` (B validates C's f
 | MR-SOFI-0231 | Met | `dsm::sofi::resolution::walk`; `dsm::sofi::resolution::classify_attempt` | `dsm::sofi::resolution::tests::the_walk_is_chunking_equivalent` | — |
 | MR-SOFI-0232 | Met | `dsm::sofi::resolution::walk`; `dsm::sofi::resolution::classify_attempt` | `dsm::sofi::resolution::tests::the_walk_is_chunking_equivalent` | — |
 | MR-SOFI-0233 | Met | `dsm::sofi::resolution::consumed_route` | `dsm::sofi::resolution::tests::a_route_with_one_leg_still_open_is_not_consumed` | — |
-| MR-SOFI-0234 | Partial | `dsm::sofi::resolution::trader_parent_compatible`; `dsm::sofi::resolution::trader_parent_impossible`; `dsm::sofi::facts::parent_position` | `dsm::sofi::resolution::tests::the_trader_parent_arm_is_monotone`; `dsm::sofi::facts::tests::a_conditional_parent_another_claim_holds_selects_no_root` | Terminal absence is established when another claim holds `p` (§6.66 12d; until 2026-10-01 that parent was not established, so nothing built on it was ever skipped). Partial: a conditional parent that resolved Invalid still reaches the facts as not established, because the A8 walk's Invalid verdict does not reach them (§6.66 12f). |
+| MR-SOFI-0234 | Met | `dsm::sofi::resolution::trader_parent_compatible`; `dsm::sofi::resolution::trader_parent_impossible`; `dsm::sofi::facts::parent_position`; `dsm::sofi::resolve::trader_at_parent` | `dsm::sofi::resolution::tests::the_trader_parent_arm_is_monotone`; `dsm::sofi::facts::tests::a_conditional_parent_another_claim_holds_selects_no_root`; `dsm::sofi::facts::tests::a_parent_on_a_lineage_known_invalid_is_terminal`; `dsm::sofi::resolve::tests::the_walks_verdict_on_a_traders_lineage_reaches_the_facts` | Terminal absence is established when another claim holds `p` (§6.66 12d), and when the walk establishes the trader's lineage Invalid at or before `p` (§6.66 12f, Amendment S13): the parent is terminal, the position Invalid and its keys skipped. |
 | MR-SOFI-0235 | Met | `dsm::sofi::resolution::trader_parent_compatible`; `dsm::sofi::resolution::trader_parent_impossible` | `dsm::sofi::resolution::tests::the_trader_parent_arm_is_monotone` | — |
 | MR-SOFI-0236 | Met | `dsm::sofi::resolution::classify_attempt`; `dsm::sofi::resolution::consumed_route` (one E per route) | `dsm::sofi::resolution::tests::legs_final_on_different_commitments_are_not_one_route` | — |
 | MR-SOFI-0237 | Met | `dsm::sofi::resolution::route_impossible` | `dsm::sofi::resolution::tests::a_stranded_final_cell_of_an_impossible_route_is_skipped` | — |

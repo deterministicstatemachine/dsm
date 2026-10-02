@@ -264,6 +264,35 @@ pub struct RetrievalOutcome {
     pub responded: usize,
     pub members: usize,
     pub coverage: SpoolCoverage,
+    /// The copies that opened for this device and are none of the payloads a
+    /// device spools (a transfer, its evidence, a countersign, a finality
+    /// certificate, a cert resync), by `envelope_merge_key`. They never will
+    /// be; the consumer may pass them over.
+    pub unknown: Vec<String>,
+    /// Whether some member's read stopped at its page cap rather than at the
+    /// end of its spool: there is more on this route than this read reached.
+    pub more: bool,
+}
+
+/// Where a read of one member's spool starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadFrom {
+    /// The read position, below which everything is consumed. A read from it
+    /// leaves no cursor: a preview reads here and moves nothing a sync reads.
+    Position,
+    /// Where `storage.sync`'s previous read of this member stopped at its page
+    /// cap, or the read position when it did not. The read leaves its own
+    /// cursor for the next (pre-audit item 11).
+    Resume,
+}
+
+/// Where one member's read stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadStop {
+    /// At the end of the member's spool: nothing more there.
+    End,
+    /// At the page cap: the spool goes on past where this read stopped.
+    PageCap,
 }
 
 /// What kind of request a polled entry carries. Nothing about its content is
@@ -295,13 +324,18 @@ pub struct B0xEntry {
     /// boundary verifies SIG A over the canonical operation inside them. Empty
     /// for a message.
     pub transfer_wire_bytes: Vec<u8>,
+    /// This copy's `envelope_merge_key`: its message id and content digest.
+    /// A copy passed over is recorded under it, never under the id alone.
+    pub copy_key: String,
 }
 
 /// One A-side evidence artifact, with the message id the spool holds it by —
-/// the id its consumed marker is written with.
+/// the id its consumed marker is written with — and its `envelope_merge_key`,
+/// the key it is passed over by.
 #[derive(Debug, Clone)]
 pub struct EvidenceArtifact {
     pub message_id: String,
+    pub copy_key: String,
     pub evidence: dsm::types::proto::ReceiptEvidenceA,
 }
 
@@ -2118,9 +2152,32 @@ impl B0xSDK {
     /// ([`SpoolCoverage`]): a read that did not reach enough members to meet
     /// every delivery is partial, and no caller may take it for "nothing
     /// more".
+    ///
+    /// Each member is read from the read position and no cursor is left: a
+    /// preview (`inbox.pull`) moves nothing the next sync reads.
     pub async fn retrieve_from_b0x_v2(
         &mut self,
         b0x_address: &str,
+    ) -> Result<RetrievalOutcome, DsmError> {
+        self.retrieve_from(b0x_address, ReadFrom::Position).await
+    }
+
+    /// [`Self::retrieve_from_b0x_v2`] for `storage.sync`: each member's read
+    /// resumes where the previous one stopped at its page cap, and leaves its
+    /// own cursor for the next; a read that reaches the end of a member's
+    /// spool sends the next back to the read position. Repeated syncs work
+    /// through a route however much waits on it (pre-audit item 11).
+    pub async fn retrieve_resuming(
+        &mut self,
+        b0x_address: &str,
+    ) -> Result<RetrievalOutcome, DsmError> {
+        self.retrieve_from(b0x_address, ReadFrom::Resume).await
+    }
+
+    async fn retrieve_from(
+        &mut self,
+        b0x_address: &str,
+        from: ReadFrom,
     ) -> Result<RetrievalOutcome, DsmError> {
         use crate::storage::client_db::b0x_consumed;
         let local = |e: anyhow::Error| {
@@ -2151,22 +2208,42 @@ impl B0xSDK {
         // This device's key, once for the whole read: without it nothing can
         // be opened, which is this device's state and not the envelopes'.
         let kyber_secret = local_kyber_secret()?;
-        let mut map: HashMap<String, dsm::types::proto::Envelope> = HashMap::new();
+        // Each distinct copy once, by `envelope_merge_key`, in the order the
+        // spools hold them: a consumer that takes only some takes the oldest,
+        // and nothing spooled later gets ahead of them.
+        let mut copies: Vec<(String, dsm::types::proto::Envelope)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Members whose spool was read to an answer. None is not an empty
         // inbox: nothing was read (storage spec §4).
         let mut answered = 0usize;
+        // Members whose read answered and stopped at its page cap.
+        let mut capped_members = 0usize;
         for epc in endpoints {
             // `position`: below it, everything on this node is consumed.
             // `cursor`: where the next page is read from. A message still
             // waiting (one half of a pair) stops `position`, never `cursor`,
             // so nothing behind it is held up.
             let mut position = b0x_consumed::read_position(b0x_address, &epc).map_err(local)?;
-            let mut cursor = position;
-            let mut consumed_run = true;
+            let resumed_at = match from {
+                ReadFrom::Position => None,
+                ReadFrom::Resume => b0x_consumed::scan_cursor(b0x_address, &epc)
+                    .map_err(local)?
+                    .filter(|resume| *resume > position),
+            };
+            let mut cursor = match resumed_at {
+                Some(resume) => resume,
+                None => position,
+            };
+            // Only a read that starts at the position can move it: one that
+            // resumed past it has not read what lies between.
+            let mut consumed_run = resumed_at.is_none();
             let mut failed = false;
             // Why this node's answer is not a spool's, when it is not:
             // nothing past it is read or advanced by it.
             let mut malformed: Option<String> = None;
+            // Where the read stopped: at the page cap unless a page ends the
+            // spool first.
+            let mut stop = ReadStop::PageCap;
             let mut pages = 0;
             'pages: while pages < Self::MAX_RETRIEVE_PAGES_PER_NODE {
                 pages += 1;
@@ -2179,7 +2256,10 @@ impl B0xSDK {
                     .send()
                     .await;
                 let batch = match resp {
-                    Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => break,
+                    Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
+                        stop = ReadStop::End;
+                        break;
+                    }
                     Ok(r) if r.status().is_success() => {
                         let bytes = match r.bytes().await {
                             Ok(b) => b,
@@ -2210,6 +2290,7 @@ impl B0xSDK {
                     }
                 };
                 if batch.envelopes.is_empty() || batch.next_seq <= cursor {
+                    stop = ReadStop::End;
                     break;
                 }
                 if batch.next_seq > Self::MAX_SPOOL_POSITION {
@@ -2257,8 +2338,22 @@ impl B0xSDK {
                     // envelope: it holds up nothing behind it.
                     match open_sealed(&kyber_secret, &env) {
                         Ok(inner) => {
+                            // A copy this device passed over is not read
+                            // again: by its content, so another copy under
+                            // the same id still is.
+                            let copy_key = envelope_merge_key(&inner);
+                            if b0x_consumed::is_passed_over(b0x_address, &copy_key)
+                                .map_err(local)?
+                            {
+                                if consumed_run {
+                                    position = position.max(after);
+                                }
+                                continue;
+                            }
                             consumed_run = false;
-                            map.entry(envelope_merge_key(&inner)).or_insert(inner);
+                            if seen.insert(copy_key.clone()) {
+                                copies.push((copy_key, inner));
+                            }
                         }
                         Err(e) => {
                             warn!("b0x envelope {} does not open: {}", id, e);
@@ -2271,6 +2366,17 @@ impl B0xSDK {
                 cursor = batch.next_seq;
             }
             b0x_consumed::advance_read_position(b0x_address, &epc, position).map_err(local)?;
+            // A read that failed leaves the cursor where it was: what it did
+            // not reach is read from there again.
+            let read_answered = !failed && malformed.is_none();
+            let capped = read_answered && stop == ReadStop::PageCap;
+            if from == ReadFrom::Resume && read_answered {
+                b0x_consumed::set_scan_cursor(b0x_address, &epc, capped.then_some(cursor))
+                    .map_err(local)?;
+            }
+            if capped {
+                capped_members += 1;
+            }
             if let Some(why) = &malformed {
                 warn!("b0x retrieve from {}: {}", epc, why);
             }
@@ -2291,7 +2397,8 @@ impl B0xSDK {
         let coverage = SpoolCoverage::of(answered, members, self.quorum_k);
 
         let mut entries = Vec::new();
-        for env in map.into_values() {
+        let mut unknown = Vec::new();
+        for (copy_key, env) in copies {
             // §16.6 reply window: an acceptance artifact is NOT a forward transfer and
             // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
             // (never a trial-decode) and buffered for the sender-finalization path;
@@ -2340,13 +2447,20 @@ impl B0xSDK {
                 );
                 self.pending_evidence_artifacts.push(EvidenceArtifact {
                     message_id,
+                    copy_key,
                     evidence,
                 });
                 continue;
             }
-            if let Some(mut e) = self.envelope_to_b0x_entry(env) {
-                e.inbox_key = b0x_address.to_string();
-                entries.push(e);
+            match self.envelope_to_b0x_entry(env, &copy_key) {
+                Some(mut e) => {
+                    e.inbox_key = b0x_address.to_string();
+                    entries.push(e);
+                }
+                None => {
+                    info!("📬 copy {copy_key} on {b0x_address} is none of the spooled payloads");
+                    unknown.push(copy_key);
+                }
             }
         }
         info!(
@@ -2358,6 +2472,8 @@ impl B0xSDK {
             responded: answered,
             members,
             coverage,
+            unknown,
+            more: capped_members > 0,
         })
     }
 
@@ -2389,7 +2505,11 @@ impl B0xSDK {
     // Helpers
     // ------------------------------------------------------------------------
 
-    fn envelope_to_b0x_entry(&self, env: dsm::types::proto::Envelope) -> Option<B0xEntry> {
+    fn envelope_to_b0x_entry(
+        &self,
+        env: dsm::types::proto::Envelope,
+        copy_key: &str,
+    ) -> Option<B0xEntry> {
         let tid = text_id::encode_base32_crockford(&env.message_id);
         let sender_dev = match &env.headers {
             Some(h) => crate::util::text_id::encode_base32_crockford(&h.device_id),
@@ -2418,6 +2538,7 @@ impl B0xSDK {
                         reason: "the wallet.send invoke carries no request".to_string(),
                     },
                     transfer_wire_bytes: Vec::new(),
+                    copy_key: copy_key.to_string(),
                 });
             };
             // The request bytes, exactly as they arrived. Nothing in them is
@@ -2430,6 +2551,7 @@ impl B0xSDK {
                 sender_device_id: sender_dev,
                 kind: B0xEntryKind::Transfer,
                 transfer_wire_bytes: arg_pack.body.clone(),
+                copy_key: copy_key.to_string(),
             });
         }
         None
@@ -2812,9 +2934,11 @@ mod tests {
             p.fleet.endpoints(),
         )
         .expect("B's spool client");
+        let copy_key = envelope_merge_key(&inner);
         let entry = sdk
-            .envelope_to_b0x_entry(inner.clone())
+            .envelope_to_b0x_entry(inner.clone(), &copy_key)
             .expect("a transfer entry");
+        assert_eq!(entry.copy_key, copy_key, "the entry carries its copy's key");
         assert_eq!(entry.kind, B0xEntryKind::Transfer);
         assert_eq!(entry.transaction_id, one.message_id);
         assert_eq!(
@@ -2854,7 +2978,10 @@ mod tests {
             };
             invoke.args = None;
         }
-        let entry = sdk.envelope_to_b0x_entry(stripped).expect("still listed");
+        let copy_key = envelope_merge_key(&stripped);
+        let entry = sdk
+            .envelope_to_b0x_entry(stripped, &copy_key)
+            .expect("still listed");
         assert!(
             matches!(&entry.kind, B0xEntryKind::Unrecognized { reason } if reason.contains("carries no request")),
             "{:?}",
@@ -3723,7 +3850,9 @@ mod tests {
     /// nothing else: no trial decode, no size heuristic. An evidence half and a
     /// legacy full-receipt reply on the retired `wallet.acceptanceReceipt`
     /// method are both `None` here, and the legacy one is not a transfer either
-    /// — it matches no discriminator and is dropped, never consumed.
+    /// — it matches no discriminator. The read lists it among the copies of no
+    /// spooled payload, which a sync passes over by its content; no id is ever
+    /// consumed for it.
     #[test]
     #[serial_test::serial]
     fn retrieve_discriminates_a_countersign_delta_by_its_method_only() {
@@ -3740,9 +3869,10 @@ mod tests {
         assert!(B0xSDK::decode_receipt_evidence_a(&legacy).is_none());
         let (device_b32, core, fleet) = test_device();
         let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
+        let copy_key = envelope_merge_key(&legacy);
         assert!(
-            sdk.envelope_to_b0x_entry(legacy).is_none(),
-            "a legacy full-receipt reply is not a transfer and must be dropped, not consumed"
+            sdk.envelope_to_b0x_entry(legacy, &copy_key).is_none(),
+            "a legacy full-receipt reply is not a transfer"
         );
     }
 }

@@ -57,6 +57,10 @@ pub struct TestDevice {
     seq: Arc<AtomicU64>,
 }
 
+/// How many times one funding claim's held admission is resumed before the
+/// harness gives up on it.
+const FUNDING_RESUMES: usize = 4;
+
 impl TestDevice {
     /// Create the device's identity the way wallet creation does, in its own
     /// (empty) database slot. Leaves the device entered.
@@ -209,9 +213,33 @@ impl TestDevice {
         self.enter();
         let core = self.router().core_sdk.clone();
         for claim in 0..(whole_era / payout) {
-            crate::sdk::faucet_claim_flow::claim_era_faucet(&core, economic_fixtures::NETWORK)
+            // A claim whose admission is held (its evidence not yet final at
+            // every member a verifier reads) is finished by resuming that
+            // admission, exactly as the device resumes it before anything
+            // else. A failure with nothing held is a refusal.
+            let mut outcome =
+                crate::sdk::faucet_claim_flow::claim_era_faucet(&core, economic_fixtures::NETWORK)
+                    .await
+                    .map(drop);
+            let mut resumed = 0;
+            while let Err(e) = outcome {
+                let held = core
+                    .device_head()
+                    .and_then(|head| head.pending_economic_admission().cloned());
+                resumed += 1;
+                let Some(pending) = held.filter(|_| resumed <= FUNDING_RESUMES) else {
+                    panic!("funding claim {claim}: {e}");
+                };
+                // The members a verifier reads catch up between attempts.
+                tokio::time::sleep(std::time::Duration::from_millis(250 * resumed as u64)).await;
+                outcome = crate::sdk::economic_admission_flow::resume_pending_admission(
+                    &core,
+                    economic_fixtures::NETWORK,
+                    pending,
+                )
                 .await
-                .unwrap_or_else(|e| panic!("funding claim {claim}: {e}"));
+                .map(drop);
+            }
         }
     }
 
