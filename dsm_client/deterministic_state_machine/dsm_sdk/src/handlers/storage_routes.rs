@@ -1871,6 +1871,7 @@ impl AppRouterImpl {
                         processed: report.processed,
                         pushed: report.pushed,
                         errors: report.errors,
+                        more_pending: report.more_pending,
                     },
                     Err(failure) => generated::StorageSyncResponse {
                         success: false,
@@ -1878,6 +1879,7 @@ impl AppRouterImpl {
                         processed: failure.report.processed,
                         pushed: failure.report.pushed,
                         errors: failure.report.errors,
+                        more_pending: failure.report.more_pending,
                     },
                 };
                 pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(response))
@@ -1889,9 +1891,9 @@ impl AppRouterImpl {
 }
 
 /// `StorageSyncRequest.limit` when the request leaves it 0 (the wire
-/// contract's default).
+/// contract's default): the most entries one sync reads from each route.
 const STORAGE_SYNC_DEFAULT_LIMIT: usize = 100;
-/// The most inbox items one sync pulls.
+/// The largest per-route budget a request may ask for.
 const STORAGE_SYNC_MAX_LIMIT: u32 = 200;
 
 /// A decoded `storage.sync` request.
@@ -1937,6 +1939,9 @@ struct StorageSyncReport {
     /// route no member answered for, or one read from too few members. What
     /// was read is processed; the run is not complete (storage spec §4).
     inbox_incomplete: Option<String>,
+    /// The routes whose budget this sync spent with entries still unread: a
+    /// status, never an error. The next sync resumes each where it stopped.
+    more_pending: Vec<String>,
 }
 
 /// A sync that could not run to its end, with what it did before it stopped.
@@ -2016,12 +2021,22 @@ fn take_in_copy(
             .entry(address.to_string())
             .or_default()
             .push(message_id.to_string()),
-        // Recorded nowhere: a copy that is not a transfer or receipt this
-        // device can take stays on the spool as raw material (Amendment A1).
-        Ingested::NotRecognized(why) => log::info!(
-            "[storage.sync] copy {message_id} on {}.. is not recognized: {why}",
-            short_route(address)
-        ),
+        // A copy on this route that is not a transfer or receipt this device
+        // can take never will be: a route is one contact's, whose key this
+        // device holds. Consumed on this device only (owner ruling,
+        // 2026-10-01, pre-audit item 11: junk classified terminally is not
+        // charged forever); the spool keeps it as raw material (Amendment
+        // A1), and nothing is recorded about it beyond this device's read.
+        Ingested::NotRecognized(why) => {
+            log::info!(
+                "[storage.sync] copy {message_id} on {}.. is not recognized: {why}",
+                short_route(address)
+            );
+            consume_now
+                .entry(address.to_string())
+                .or_default()
+                .push(message_id.to_string());
+        }
     }
 }
 
@@ -2048,6 +2063,7 @@ impl AppRouterImpl {
             pushed: 0,
             errors: Vec::new(),
             inbox_incomplete: None,
+            more_pending: Vec::new(),
         };
         let storage_endpoints = match crate::sdk::storage_set::pinned_endpoints() {
             Ok(endpoints) => endpoints,
@@ -2074,6 +2090,15 @@ impl AppRouterImpl {
 
     /// Pull every rotated inbox route, process what arrived, and drive the
     /// durable completion passes that do not depend on this pull.
+    ///
+    /// `limit` is each route's budget (owner ruling, 2026-10-01, pre-audit
+    /// item 11): a route reads at most `limit` entries per sync, and one
+    /// whose budget runs out with entries left is reported `more_pending`, a
+    /// status and not an error; the next sync resumes it. No route can spend
+    /// another's budget, so junk on one route never keeps another unread. An
+    /// entry classified terminally (a request that is not what its method
+    /// names, or a copy this device can never take) is consumed on this
+    /// device, so it is charged once and never again.
     async fn pull_and_process_inbox(
         &self,
         mut report: StorageSyncReport,
@@ -2116,9 +2141,6 @@ impl AppRouterImpl {
         // member answered for. Only the first kind says "nothing more there".
         let (mut routes_read, mut routes_partial, mut routes_unread) = (0usize, 0usize, 0usize);
         for tagged in tagged_addresses {
-            if pulled >= limit {
-                break;
-            }
             let retrieved = b0x_sdk.retrieve_from_b0x_v2(&tagged.address).await;
             // Replies ride the same spool as forward transfers, as distinct
             // payloads; they are drained whether or not this route yielded
@@ -2196,13 +2218,23 @@ impl AppRouterImpl {
                     continue;
                 }
             };
-            let remaining = limit - pulled;
-            for entry in polled.into_iter().take(remaining) {
+            if polled.len() > limit {
+                report
+                    .more_pending
+                    .push(format!("{}..", short_route(&tagged.address)));
+            }
+            for entry in polled.into_iter().take(limit) {
                 pulled += 1;
                 // Only transfers are the transfer pipeline's business; the
                 // boundary reads every value-bearing field from the signed
-                // operation it verifies itself.
+                // operation it verifies itself. A request whose body is not
+                // what its method names never will be: consumed here, so it
+                // is not charged to this route's budget again.
                 if entry.kind != crate::sdk::b0x_sdk::B0xEntryKind::Transfer {
+                    consume_now
+                        .entry(tagged.address.clone())
+                        .or_default()
+                        .push(entry.transaction_id.clone());
                     continue;
                 }
                 let copy = if stale {
@@ -2229,7 +2261,9 @@ impl AppRouterImpl {
                 );
             }
         }
-        // At most `limit`, which the request bounds by STORAGE_SYNC_MAX_LIMIT.
+        // At most `limit` per route, which the request bounds by
+        // STORAGE_SYNC_MAX_LIMIT, over the few routes this device's contacts
+        // give it: far below u32::MAX.
         report.pulled = pulled as u32;
         for (route, ids) in consume_now {
             if let Err(e) = b0x_sdk.record_consumed_b0x(&route, ids).await {

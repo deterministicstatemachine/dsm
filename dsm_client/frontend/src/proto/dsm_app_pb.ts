@@ -22337,7 +22337,7 @@ export class StorageSyncRequest extends Message<StorageSyncRequest> {
   pushPending = false;
 
   /**
-   * max inbox items to pull (0 = default 100)
+   * max inbox items to read from each route (0 = default 100)
    *
    * @generated from field: uint32 limit = 3;
    */
@@ -22410,6 +22410,14 @@ export class StorageSyncResponse extends Message<StorageSyncResponse> {
    */
   errors: string[] = [];
 
+  /**
+   * Inbox routes whose budget this sync spent with entries still unread:
+   * a status, not an error. The next sync resumes each where it stopped.
+   *
+   * @generated from field: repeated string more_pending = 6;
+   */
+  morePending: string[] = [];
+
   constructor(data?: PartialMessage<StorageSyncResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22423,6 +22431,7 @@ export class StorageSyncResponse extends Message<StorageSyncResponse> {
     { no: 3, name: "processed", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 4, name: "pushed", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 5, name: "errors", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 6, name: "more_pending", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StorageSyncResponse {

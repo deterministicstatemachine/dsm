@@ -289,6 +289,178 @@ async fn an_inbox_read_that_did_not_cover_every_delivery_is_not_a_complete_sync(
     assert_eq!(count(), before + 1);
 }
 
+/// `storage.sync` as the poller makes it, with `limit` as each route's budget.
+async fn sync_with_budget(d: &TestDevice, limit: u32) -> generated::StorageSyncResponse {
+    d.enter();
+    let params = generated::ArgPack {
+        codec: generated::Codec::Proto as i32,
+        body: generated::StorageSyncRequest {
+            limit,
+            ..crate::sdk::inbox_poller::poll_sync_request()
+        }
+        .encode_to_vec(),
+        schema_hash: None,
+    }
+    .encode_to_vec();
+    let answered = d
+        .router()
+        .query(AppQuery {
+            path: "storage.sync".to_string(),
+            params,
+        })
+        .await;
+    assert!(
+        answered.success,
+        "storage.sync: {:?}",
+        answered.error_message
+    );
+    let env = crate::handlers::response_helpers::decode_local_envelope(&answered.data)
+        .expect("storage.sync answers an envelope");
+    match env.payload {
+        Some(Payload::StorageSyncResponse(resp)) => resp,
+        other => panic!("storage.sync answered {other:?}"),
+    }
+}
+
+/// Junk `from` seals to `to` on `route`: a `wallet.send` that carries no
+/// request, which `to` opens and can never take. Its message id.
+async fn deliver_junk(from: &TestDevice, to: &TestDevice, route: &str) -> String {
+    use dsm::types::proto::{universal_op, Envelope, Headers, Invoke, UniversalOp, UniversalTx};
+    from.enter();
+    let message_id: [u8; 16] = rand::random();
+    let id = crate::util::text_id::encode_base32_crockford(&message_id);
+    let inner = Envelope {
+        version: 3,
+        headers: Some(Headers {
+            device_id: from.device_id.to_vec(),
+            genesis_hash: from.genesis.to_vec(),
+        }),
+        message_id: message_id.to_vec(),
+        payload: Some(Payload::UniversalTx(UniversalTx {
+            ops: vec![UniversalOp {
+                kind: Some(universal_op::Kind::Invoke(Invoke {
+                    method: "wallet.send".to_string(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })),
+    }
+    .encode_to_vec();
+    crate::sdk::b0x_sdk::seal_for(&to.device_id, &id, &inner).expect("sealed to the recipient");
+    let mut sdk = crate::sdk::b0x_sdk::B0xSDK::new(
+        crate::util::text_id::encode_base32_crockford(&from.device_id),
+        from.router().core_sdk.clone(),
+        crate::sdk::storage_set::pinned_endpoints().expect("the pinned set"),
+    )
+    .expect("a spool client");
+    sdk.submit_stored_envelope(route, &id)
+        .await
+        .expect("delivered to its quorum");
+    id
+}
+
+/// Pre-audit item 11, the owner's ruling (2026-10-01): each inbox route has
+/// its own budget, a route whose budget runs out with entries left is
+/// `more_pending` (a status, never a failure), junk classified terminally is
+/// consumed so it is charged once, and repeated syncs work through a route
+/// however much junk it holds. B's first route holds more junk than one
+/// sync's budget; B's other contact pays B on the second route.
+///
+/// - The payment lands in the first sync: junk on one route keeps no other
+///   route unread (on the old code the global limit was spent on the junk and
+///   the second route was never read, with the sync reported complete).
+/// - That sync succeeds and names the first route `more_pending`.
+/// - The next sync works through the rest; every junk entry is consumed, so
+///   none is charged again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through() {
+    let p = Pair::boot(100, 0).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.add_contact(&p.b).await;
+    p.b.add_contact(&c).await;
+    c.fund_admitted(100).await;
+
+    // B's routes, in the order a sync reads them (sorted by address): one per
+    // contact. The junk goes on the route read first, and the contact on the
+    // other route pays, so the old global budget is spent before the payment
+    // is reached.
+    p.b.enter();
+    let contacts = crate::storage::client_db::get_all_contacts().expect("B's contacts");
+    let routes = crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
+        p.b.genesis,
+        p.b.device_id,
+        &contacts,
+    )
+    .expect("B's routes");
+    assert_eq!(routes.len(), 2, "one route per contact");
+    let junked = routes[0].address.clone();
+    let first_read = contacts
+        .iter()
+        .find(|k| {
+            let tip = crate::handlers::app_router_impl::contact_relationship_tip(k)
+                .expect("a relationship tip");
+            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&p.b.genesis, &p.b.device_id, &tip)
+                .expect("the route's address")
+                == junked
+        })
+        .expect("the route read first is a contact's");
+    let (junker, payer) = if first_read.device_id == p.a.device_id.to_vec() {
+        (&p.a, &c)
+    } else {
+        (&c, &p.a)
+    };
+
+    let budget = 3;
+    let mut junk = Vec::new();
+    for _ in 0..budget + 2 {
+        junk.push(deliver_junk(junker, &p.b, &junked).await);
+    }
+    let paid = payer.send(&p.b, 10).await;
+    assert!(paid.success, "{:?}", paid.error_message);
+
+    let consumed = |ids: &[String]| {
+        p.b.enter();
+        ids.iter()
+            .filter(|id| {
+                crate::storage::client_db::b0x_consumed::is_consumed(&junked, id)
+                    .expect("the consumed record")
+            })
+            .count()
+    };
+
+    let first = sync_with_budget(&p.b, budget).await;
+    assert!(first.success, "{:?}", first.errors);
+    assert_eq!(
+        p.b.era_balance(),
+        10,
+        "the payment on the other route landed"
+    );
+    assert_eq!(
+        first.more_pending.len(),
+        1,
+        "the junked route is more_pending: {:?}",
+        first.more_pending
+    );
+    assert_eq!(
+        consumed(&junk),
+        budget as usize,
+        "one budget's worth, consumed"
+    );
+
+    let second = sync_with_budget(&p.b, budget).await;
+    assert!(second.success, "{:?}", second.errors);
+    assert!(second.more_pending.is_empty(), "{:?}", second.more_pending);
+    assert_eq!(
+        consumed(&junk),
+        junk.len(),
+        "the rest of the junk, consumed"
+    );
+}
+
 /// SoFi §51 (`ReleaseRule::AllAtCreation`): creating a token puts its whole
 /// genesis supply in the creator's balance, in the creating transition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
