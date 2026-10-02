@@ -289,6 +289,350 @@ async fn an_inbox_read_that_did_not_cover_every_delivery_is_not_a_complete_sync(
     assert_eq!(count(), before + 1);
 }
 
+/// `storage.sync` as the poller makes it, with `limit` as each route's budget.
+async fn sync_with_budget(d: &TestDevice, limit: u32) -> generated::StorageSyncResponse {
+    d.enter();
+    let params = generated::ArgPack {
+        codec: generated::Codec::Proto as i32,
+        body: generated::StorageSyncRequest {
+            limit,
+            ..crate::sdk::inbox_poller::poll_sync_request()
+        }
+        .encode_to_vec(),
+        schema_hash: None,
+    }
+    .encode_to_vec();
+    let answered = d
+        .router()
+        .query(AppQuery {
+            path: "storage.sync".to_string(),
+            params,
+        })
+        .await;
+    assert!(
+        answered.success,
+        "storage.sync: {:?}",
+        answered.error_message
+    );
+    let env = crate::handlers::response_helpers::decode_local_envelope(&answered.data)
+        .expect("storage.sync answers an envelope");
+    match env.payload {
+        Some(Payload::StorageSyncResponse(resp)) => resp,
+        other => panic!("storage.sync answered {other:?}"),
+    }
+}
+
+/// A copy `from` composes under `message_id` with one invoke, `method` with
+/// `body` (no request at all when `body` is `None`).
+fn invoke_copy(
+    from: &TestDevice,
+    message_id: [u8; 16],
+    method: &str,
+    body: Option<Vec<u8>>,
+) -> dsm::types::proto::Envelope {
+    use dsm::types::proto::{universal_op, Envelope, Headers, Invoke, UniversalOp, UniversalTx};
+    Envelope {
+        version: 3,
+        headers: Some(Headers {
+            device_id: from.device_id.to_vec(),
+            genesis_hash: from.genesis.to_vec(),
+        }),
+        message_id: message_id.to_vec(),
+        payload: Some(Payload::UniversalTx(UniversalTx {
+            ops: vec![UniversalOp {
+                kind: Some(universal_op::Kind::Invoke(Invoke {
+                    method: method.to_string(),
+                    args: body.map(|body| generated::ArgPack {
+                        codec: generated::Codec::Proto as i32,
+                        body,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })),
+    }
+}
+
+/// `inner`, sealed by `from` to `to` and spooled on `route` to its quorum.
+/// Its copy key (`envelope_merge_key`), the key a sync passes it over by.
+async fn spool_sealed(
+    from: &TestDevice,
+    to: &TestDevice,
+    route: &str,
+    inner: &dsm::types::proto::Envelope,
+) -> String {
+    from.enter();
+    let id = crate::util::text_id::encode_base32_crockford(&inner.message_id);
+    crate::sdk::b0x_sdk::seal_for(&to.device_id, &id, &inner.encode_to_vec())
+        .expect("sealed to the recipient");
+    let mut sdk = crate::sdk::b0x_sdk::B0xSDK::new(
+        crate::util::text_id::encode_base32_crockford(&from.device_id),
+        from.router().core_sdk.clone(),
+        crate::sdk::storage_set::pinned_endpoints().expect("the pinned set"),
+    )
+    .expect("a spool client");
+    sdk.submit_stored_envelope(route, &id)
+        .await
+        .expect("delivered to its quorum");
+    crate::sdk::b0x_sdk::envelope_merge_key(inner)
+}
+
+/// Junk `from` seals to `to` on `route`: a `wallet.send` that carries no
+/// request, which `to` opens and can never take. Its copy key.
+async fn deliver_junk(from: &TestDevice, to: &TestDevice, route: &str) -> String {
+    let inner = invoke_copy(from, rand::random(), "wallet.send", None);
+    spool_sealed(from, to, route, &inner).await
+}
+
+/// How many of `copy_keys` `d` has passed over on `route`.
+fn passed_over(d: &TestDevice, route: &str, copy_keys: &[String]) -> usize {
+    d.enter();
+    copy_keys
+        .iter()
+        .filter(|key| {
+            crate::storage::client_db::b0x_consumed::is_passed_over(route, key)
+                .expect("the pass-over record")
+        })
+        .count()
+}
+
+/// B's route with `contact`, as B's sync reads it now.
+fn route_with(b: &TestDevice, contact: &TestDevice) -> String {
+    b.enter();
+    let contacts = crate::storage::client_db::get_all_contacts().expect("B's contacts");
+    let record = contacts
+        .iter()
+        .find(|k| k.device_id == contact.device_id.to_vec())
+        .expect("a contact of B's");
+    let tip = crate::handlers::app_router_impl::contact_relationship_tip(record)
+        .expect("a relationship tip");
+    crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&b.genesis, &b.device_id, &tip)
+        .expect("the route's address")
+}
+
+/// Pre-audit item 11, the owner's ruling (2026-10-01): each inbox route has
+/// its own budget, a route whose budget runs out with entries left is
+/// `more_pending` (a status, never a failure), junk classified terminally is
+/// passed over so it is charged once, and repeated syncs work through a route
+/// however much junk it holds. B's first route holds more junk than one
+/// sync's budget; B's other contact pays B on the second route.
+///
+/// - The payment lands in the first sync: junk on one route keeps no other
+///   route unread (on the old code the global limit was spent on the junk and
+///   the second route was never read, with the sync reported complete).
+/// - That sync succeeds and names the first route `more_pending`.
+/// - The next sync works through the rest; every junk entry is passed over,
+///   so none is charged again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through() {
+    let p = Pair::boot(100, 0).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.add_contact(&p.b).await;
+    p.b.add_contact(&c).await;
+    c.fund_admitted(100).await;
+
+    // B's routes, in the order a sync reads them (sorted by address): one per
+    // contact. The junk goes on the route read first, and the contact on the
+    // other route pays, so the old global budget is spent before the payment
+    // is reached.
+    p.b.enter();
+    let contacts = crate::storage::client_db::get_all_contacts().expect("B's contacts");
+    let routes = crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
+        p.b.genesis,
+        p.b.device_id,
+        &contacts,
+    )
+    .expect("B's routes");
+    assert_eq!(routes.len(), 2, "one route per contact");
+    let junked = routes[0].address.clone();
+    let first_read = contacts
+        .iter()
+        .find(|k| {
+            let tip = crate::handlers::app_router_impl::contact_relationship_tip(k)
+                .expect("a relationship tip");
+            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&p.b.genesis, &p.b.device_id, &tip)
+                .expect("the route's address")
+                == junked
+        })
+        .expect("the route read first is a contact's");
+    let (junker, payer) = if first_read.device_id == p.a.device_id.to_vec() {
+        (&p.a, &c)
+    } else {
+        (&c, &p.a)
+    };
+
+    let budget = 3;
+    let mut junk = Vec::new();
+    for _ in 0..budget + 2 {
+        junk.push(deliver_junk(junker, &p.b, &junked).await);
+    }
+    let paid = payer.send(&p.b, 10).await;
+    assert!(paid.success, "{:?}", paid.error_message);
+
+    let first = sync_with_budget(&p.b, budget).await;
+    assert!(first.success, "{:?}", first.errors);
+    assert_eq!(
+        p.b.era_balance(),
+        10,
+        "the payment on the other route landed"
+    );
+    assert_eq!(
+        first.more_pending.len(),
+        1,
+        "the junked route is more_pending: {:?}",
+        first.more_pending
+    );
+    assert_eq!(
+        passed_over(&p.b, &junked, &junk),
+        budget as usize,
+        "one budget's worth, passed over"
+    );
+
+    let second = sync_with_budget(&p.b, budget).await;
+    assert!(second.success, "{:?}", second.errors);
+    assert!(second.more_pending.is_empty(), "{:?}", second.more_pending);
+    assert_eq!(
+        passed_over(&p.b, &junked, &junk),
+        junk.len(),
+        "the rest of the junk, passed over"
+    );
+}
+
+/// Pre-audit item 11: a copy is passed over by its content, never by the id it
+/// is spooled under. Anyone can spool a copy under another message's id, and
+/// the node keeps both (storage spec §8). Passing junk over by id would hide
+/// every copy under that id for good, an honest one included, which is the
+/// shadowing `envelope_merge_key` closed for the merge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_copy_passed_over_hides_no_other_copy_under_its_id() {
+    let p = Pair::boot(100, 0).await;
+    // C, a third party: C holds B's keys to seal to; B does not know C.
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.add_contact(&p.b).await;
+    let route = route_with(&p.b, &p.a);
+    let id: [u8; 16] = rand::random();
+
+    let junk = spool_sealed(
+        &p.a,
+        &p.b,
+        &route,
+        &invoke_copy(&p.a, id, "wallet.send", None),
+    )
+    .await;
+    let first = sync_with_budget(&p.b, 10).await;
+    assert!(first.success, "{:?}", first.errors);
+    assert_eq!(first.pulled, 1, "the junk was read: {first:?}");
+
+    // Another copy under the same id, other content, from another device.
+    let other = spool_sealed(
+        &c,
+        &p.b,
+        &route,
+        &invoke_copy(&c, id, "wallet.send", Some(vec![0xFF])),
+    )
+    .await;
+    assert_ne!(other, junk, "two copies, one id");
+    let second = sync_with_budget(&p.b, 10).await;
+    assert!(second.success, "{:?}", second.errors);
+    assert_eq!(
+        second.pulled, 1,
+        "the other copy under the id was read, not hidden by the first: {second:?}"
+    );
+    assert_eq!(
+        passed_over(&p.b, &route, &[junk, other]),
+        2,
+        "each copy passed over by its own content"
+    );
+}
+
+/// Pre-audit item 11: a sync's read resumes where the last one stopped. A copy
+/// that is never consumed (here a countersign whose body is not one, which
+/// the sender's path refuses and leaves) holds the read position where it is.
+/// On the old code every read started there and read at most its page cap, so
+/// what lay more than a cap behind it was never read, junk passed over or not.
+/// A third party puts one such copy on B's route with A, a cap's worth of
+/// copies that open to none of the spooled payloads behind it, and A then
+/// pays B.
+///
+/// - The first sync stops at the cap before the payment, names the route
+///   `more_pending`, and passes over the junk it read.
+/// - The second resumes where the first stopped, and the payment lands.
+/// - A route that is pending while nothing was taken from it does not hurry
+///   the poller (`inbox_poller::enters_eager_mode`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_copy_that_waits_hides_nothing_more_than_a_page_cap_behind_it() {
+    let p = Pair::boot(100, 0).await;
+    // C, a third party: C holds B's keys to seal to; B does not know C.
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.add_contact(&p.b).await;
+    let route = route_with(&p.b, &p.a);
+
+    let pin = invoke_copy(
+        &c,
+        rand::random(),
+        crate::sdk::b0x_sdk::RECEIPT_COUNTERSIGN_B_METHOD,
+        Some(vec![0xFF]),
+    );
+    spool_sealed(&c, &p.b, &route, &pin).await;
+    // One page past the cap (64 entries a page, 16 pages a read).
+    let cap = 16 * 64;
+    let mut junk = Vec::with_capacity(cap + 64);
+    for _ in 0..cap + 64 {
+        let unknown = invoke_copy(&c, rand::random(), "no.such.payload", None);
+        junk.push(spool_sealed(&c, &p.b, &route, &unknown).await);
+    }
+    let paid = p.a.send(&p.b, 10).await;
+    assert!(paid.success, "{:?}", paid.error_message);
+
+    let first = sync_with_budget(&p.b, 10).await;
+    assert!(first.success, "{:?}", first.errors);
+    assert_eq!(p.b.era_balance(), 0, "the first read stops at its cap");
+    assert_eq!(first.more_pending.len(), 1, "{:?}", first.more_pending);
+    let read = passed_over(&p.b, &route, &junk);
+    assert!(
+        read > 0 && read < junk.len(),
+        "the junk the first read reached is passed over: {read} of {}",
+        junk.len()
+    );
+
+    let second = sync_with_budget(&p.b, 10).await;
+    assert!(second.success, "{:?}", second.errors);
+    assert_eq!(
+        p.b.era_balance(),
+        10,
+        "the next read resumed and the payment landed"
+    );
+    assert_eq!(
+        passed_over(&p.b, &route, &junk),
+        junk.len(),
+        "all the junk, passed over"
+    );
+
+    // Back at the waiting copy, the read goes over what it passed over; the
+    // route is pending, nothing is taken, and the poller is not hurried.
+    let lap = sync_with_budget(&p.b, 10).await;
+    assert!(lap.success, "{:?}", lap.errors);
+    assert_eq!(lap.pulled, 0, "nothing taken: {lap:?}");
+    assert_eq!(lap.more_pending.len(), 1, "{:?}", lap.more_pending);
+    assert!(
+        !crate::sdk::inbox_poller::enters_eager_mode(
+            lap.processed,
+            lap.pulled,
+            lap.more_pending.len()
+        ),
+        "a pending route from which nothing was taken leaves the poller at its cadence"
+    );
+}
+
 /// SoFi §51 (`ReleaseRule::AllAtCreation`): creating a token puts its whole
 /// genesis supply in the creator's balance, in the creating transition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
