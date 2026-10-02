@@ -89,4 +89,9 @@ impl Fleet {
         );
         endpoints
     }
+
+    /// The TLS a member serves, from the nodes' CA ([`NodeSet::tls_for`]).
+    pub async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
+        self.nodes.tls_for(member_id).await
+    }
 }

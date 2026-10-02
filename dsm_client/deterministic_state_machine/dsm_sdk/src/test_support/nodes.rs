@@ -296,7 +296,7 @@ impl Drop for Node {
 /// The network's pinned register members, one node each.
 pub struct NodeSet {
     pub nodes: Vec<Node>,
-    ca_pem: Vec<u8>,
+    ca: TestCa,
 }
 
 /// The process's rustls provider, installed as the node binary's `main`
@@ -404,17 +404,23 @@ impl NodeSet {
                 requests,
             });
         }
-        Self {
-            nodes,
-            ca_pem: ca.pem,
-        }
+        Self { nodes, ca }
+    }
+
+    /// The TLS a member serves, from this node set's CA: a certificate naming
+    /// `member_id` and the loopback address. For a test that stands a member
+    /// up at another address, as an operator moving its node would: a device
+    /// that reaches it there knows it by this certificate, as it knows the
+    /// node.
+    pub async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
+        self.ca.tls_for(member_id).await
     }
 
     /// The PEM of this node set's CA: what a device's env config names in
     /// `custom_ca_certs` to reach these nodes, as the bundled config names the
     /// fleet's.
     pub fn ca_pem(&self) -> &[u8] {
-        &self.ca_pem
+        &self.ca.pem
     }
 
     /// Every node as `(member id, endpoint, register incarnation)`, in pin
