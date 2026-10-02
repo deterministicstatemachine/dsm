@@ -21,8 +21,7 @@ On boot it enrolls (one-way birth fuse → bundle `B`, fused head `A₀`, boot h
 (boot→prepare→commit→emit→finalize, then verifies the release under the §22
 acceptance predicate), and serves the appliance over USB-CDC.
 
-The design is the spec `dsm_anticlone.instructions.md` (the paper *Boot Fenced
-Fused Anchor Authority for DSM Offline Bearer State*).
+The design is the spec [Boot Fenced Fused Anchor Authority for DSM Offline Bearer State](https://www.deterministicstatemachine.org/DSM_Software_Authority_Hardware_Identity.pdf).
 
 ## Build & flash
 
