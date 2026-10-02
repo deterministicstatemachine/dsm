@@ -465,6 +465,7 @@ fn a_claim_binds_its_register_set_and_validates_its_key_width() {
         [0x55; 32],
         sigalg::SPHINCS_PLUS_SPX256F,
         &pk,
+        [0xA7; 32],
     )
     .expect("valid");
     let b = EconomicRootClaimBody::new(
@@ -477,6 +478,7 @@ fn a_claim_binds_its_register_set_and_validates_its_key_width() {
         [0x66; 32],
         sigalg::SPHINCS_PLUS_SPX256F,
         &pk,
+        [0xA7; 32],
     )
     .expect("valid");
     assert_ne!(
@@ -486,7 +488,10 @@ fn a_claim_binds_its_register_set_and_validates_its_key_width() {
     );
 
     assert!(matches!(
-        EconomicRootClaimBody::new(G, DEV, 7, [0; 32], [0; 32], [0; 32], 0xFFFF, &pk).unwrap_err(),
+        EconomicRootClaimBody::new(
+            G, DEV, 7, [0x33; 32], [0x44; 32], [0x55; 32], 0xFFFF, &pk, [0xA7; 32]
+        )
+        .unwrap_err(),
         CcbError::UnknownSignatureAlg { .. }
     ));
     assert!(matches!(
@@ -499,6 +504,7 @@ fn a_claim_binds_its_register_set_and_validates_its_key_width() {
             [0; 32],
             sigalg::SPHINCS_PLUS_SPX256F,
             &[0xAB; 32],
+            [0xA7; 32],
         )
         .unwrap_err(),
         CcbError::KeyLengthMismatch { .. }

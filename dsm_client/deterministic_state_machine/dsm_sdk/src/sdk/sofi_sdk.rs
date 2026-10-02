@@ -17,7 +17,7 @@
 //! ```text
 //! draft_trade / draft_route / draft_close  ->  PrecommitDraft (gives m_P)
 //!                    caller signs m_P
-//! build_fulfillment(draft, p_signature, attempts)  ->  Produced (gives m_F)
+//! build_fulfillment(draft, p_signature, attempts, att_a)  ->  Produced (gives m_F)
 //! ```
 //!
 //! ## What each operation's signature covers
@@ -96,6 +96,10 @@ pub enum BuildError {
     /// The producer's tree is not the predecessor's root, so `R_T^setup`
     /// computed from it would describe a mutation of some other state.
     PreTreeIsNotThePredecessor,
+    /// `P`'s key, with the `AttA` given, does not derive the device `P` names,
+    /// so `F` would occupy no cell of it (DSM Amendment A10, SoFi Amendment
+    /// S20).
+    KeyIsNotTheDevices,
 }
 
 impl core::fmt::Display for BuildError {
@@ -120,6 +124,11 @@ impl core::fmt::Display for BuildError {
                 f,
                 "the producer's economic tree is not the validated predecessor's root: \
                  R_T^setup derived from it would describe a mutation of another state"
+            ),
+            Self::KeyIsNotTheDevices => write!(
+                f,
+                "the precommit's key, with this device's AttA, does not derive the device it \
+                 names; the fulfillment would occupy no cell of it"
             ),
             Self::SetupAlreadyExists => write!(
                 f,
@@ -623,8 +632,19 @@ pub fn build_fulfillment(
     draft: &PrecommitDraft,
     precommit_signature: Vec<u8>,
     attempts: &[(D32, u64)],
+    claimant_att_a: D32,
 ) -> Result<Produced, BuildError> {
     let precommit = &draft.precommit;
+    // F occupies K_ful(q) only under a key that, with its AttA, derives the
+    // device P names (DSM Amendment A10, SoFi Amendment S20). A producer that
+    // built one otherwise would hand the trader an F that names no cell.
+    if dsm::core::identity::genesis_v2::derive_devid(
+        precommit.claimant_public_key(),
+        &claimant_att_a,
+    ) != *precommit.device_id()
+    {
+        return Err(BuildError::KeyIsNotTheDevices);
+    }
     // THE P SIGNATURE IS VERIFIED, NOT COUNTED. `F` names a `P` that storage
     // will refuse unless `m_P` verifies under the key `P` commits, so a
     // producer that only checked for non-empty bytes would hand the trader an
@@ -659,6 +679,7 @@ pub fn build_fulfillment(
         dsm::sofi::wire::next_position(precommit.position())?,
         precommit.signature_alg(),
         precommit.claimant_public_key(),
+        claimant_att_a,
     )?;
     // The mechanical half of F ingress, run before the operation exists: a
     // complete canonical policy set, one attempt per leg, the successor

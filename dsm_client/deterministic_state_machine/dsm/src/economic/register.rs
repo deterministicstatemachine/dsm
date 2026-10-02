@@ -153,12 +153,25 @@ pub fn read_root_cell(
     evaluate(&cell.cell, evidence, claim_at(cell))
 }
 
-/// The recognizer of a root cell: claims naming its key, identified by the
-/// entry digest of their exact bytes.
+/// The recognizer of a root cell: claims naming its key.
+///
+/// A single-root claim is identified by the entry digest of its exact bytes,
+/// which its writer retains and replays. A conditional claim is identified by
+/// the entry digest of its derived body, `C_q`: the trader's signature makes
+/// it an occupant (SoFi Amendment S20), but `C_q` is what every reader
+/// recomputes from `(P, F)` and compares, and a verifier cannot reproduce the
+/// signed bytes.
 fn claim_at(cell: &RootCell) -> impl Fn(&[u8]) -> Option<([u8; 32], RegisteredEconomicClaim)> + '_ {
     move |bytes| {
-        root_claim_naming(bytes, cell.cell.key())
-            .map(|claim| (crate::storage_cell::entry_digest(bytes), claim))
+        root_claim_naming(bytes, cell.cell.key()).map(|claim| {
+            let id = match &claim {
+                RegisteredEconomicClaim::SingleRoot(_) => crate::storage_cell::entry_digest(bytes),
+                RegisteredEconomicClaim::ConditionalSofi(c) => {
+                    crate::storage_cell::entry_digest(&c.encode())
+                }
+            };
+            (id, claim)
+        })
     }
 }
 
@@ -597,7 +610,34 @@ impl RegisteredEconomicRoot {
 mod registered_root_construction_tests {
     use super::*;
     use crate::economic::claim::EconomicRootClaimBody;
+    use crate::economic::claim_envelope::device_fixture::{device, signed_by, signed_conditional};
     use crate::economic::claim_envelope::{decode_registered_economic_claim, sign_economic_root_claim};
+    use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+    use crate::route_chain::{ChainState, ROUTE_LEN};
+    use crate::sofi::wire::SofiResolutionClaim;
+
+    fn conditional(device_id: [u8; 32], position: u64) -> SofiResolutionClaim {
+        SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id,
+            position,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        }
+    }
+
+    fn root_cell(device_id: &[u8; 32], position: u64) -> RootCell {
+        RootCell::new(
+            &[0x11; 32],
+            device_id,
+            position,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set")
+    }
 
     /// THE ONLY WAY TO A REGISTERED ROOT IS A VERIFIED CLAIM.
     ///
@@ -608,19 +648,20 @@ mod registered_root_construction_tests {
     /// verified claim, so there is no field for a caller to choose.
     #[test]
     fn a_registered_root_is_a_projection_of_a_verified_claim() {
-        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let d = device([0xA7; 32]).unwrap();
         let body = EconomicRootClaimBody::new(
             [0x11; 32],
-            [0x22; 32],
+            d.devid,
             9,
             [0xC0; 32],
             [0xD0; 32],
             [0x77; 32],
             crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-            &pk,
+            &d.pk,
+            d.att_a,
         )
         .unwrap();
-        let envelope = sign_economic_root_claim(&body, &sk).unwrap();
+        let envelope = sign_economic_root_claim(&body, &d.sk).unwrap();
         let verified = decode_registered_economic_claim(&envelope)
             .unwrap()
             .single_root()
@@ -630,14 +671,14 @@ mod registered_root_construction_tests {
         let registered = RegisteredEconomicRoot::from_verified_single_root(&verified);
         // Every field is the claim's, not an argument.
         assert_eq!(registered.trader_genesis(), [0x11; 32]);
-        assert_eq!(registered.trader_devid(), [0x22; 32]);
+        assert_eq!(registered.trader_devid(), d.devid);
         assert_eq!(registered.economic_position(), 9);
         assert_eq!(registered.post_economic_root(), [0xC0; 32]);
         assert_eq!(registered.admission_manifest_addr(), [0xD0; 32]);
         assert_eq!(registered.storage_set_id(), [0x77; 32]);
         assert_eq!(
             registered.register_key(),
-            economic_root_register_key(&[0x11; 32], &[0x22; 32], 9)
+            economic_root_register_key(&[0x11; 32], &d.devid, 9)
         );
     }
 
@@ -648,51 +689,29 @@ mod registered_root_construction_tests {
     /// is what makes it impossible to forget.
     #[test]
     fn a_conditional_claim_has_nothing_to_construct_from() {
-        let conditional = crate::sofi::wire::SofiResolutionClaim {
-            genesis: [0x11; 32],
-            device_id: [0x22; 32],
-            position: 9,
-            fulfillment_id: [0xF1; 32],
-            realize_root: [0xA1; 32],
-            void_root: [0xB1; 32],
-        };
-        let decoded = decode_registered_economic_claim(&conditional.encode()).unwrap();
+        let d = device([0xA7; 32]).unwrap();
+        let decoded = decode_registered_economic_claim(
+            &signed_conditional(conditional(d.devid, 9), &d).unwrap(),
+        )
+        .unwrap();
         // The only path to the constructor's argument refuses, and there is no
         // second path: `RegisteredEconomicRoot` has no public fields and no
         // other constructor.
         assert!(decoded.single_root().is_err());
     }
 
-    /// A root cell names what holds it by the entry digest of its exact
-    /// bytes, and the read carries those bytes: this key's claim, not the
-    /// claim the leader took first, which names the next position's key.
+    /// A root cell names what holds it, and the read carries the exact bytes
+    /// that hold it: this key's claim, not the claim the leader took first,
+    /// which names the next position's key. A conditional claim is named by
+    /// its derived body, which every reader recomputes from `(P, F)`; the
+    /// signed bytes are what the cell holds.
     #[test]
     fn a_held_root_cell_carries_the_exact_bytes_that_hold_it() {
-        use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
-        use crate::route_chain::{ChainState, ROUTE_LEN};
-        let claim = crate::sofi::wire::SofiResolutionClaim {
-            genesis: [0x11; 32],
-            device_id: [0x22; 32],
-            position: 9,
-            fulfillment_id: [0xF1; 32],
-            realize_root: [0xA1; 32],
-            void_root: [0xB1; 32],
-        };
-        let bytes = claim.encode();
-        let cell = RootCell::new(
-            &[0x11; 32],
-            &[0x22; 32],
-            9,
-            &[0x5E; 32],
-            &committed_set(),
-            &committed_set_id(),
-        )
-        .expect("the committed set");
-        let elsewhere = crate::sofi::wire::SofiResolutionClaim {
-            position: 10,
-            ..claim
-        }
-        .encode();
+        let d = device([0xA7; 32]).unwrap();
+        let claim = conditional(d.devid, 9);
+        let bytes = signed_conditional(claim, &d).unwrap();
+        let cell = root_cell(&d.devid, 9);
+        let elsewhere = signed_conditional(conditional(d.devid, 10), &d).unwrap();
         let mut seats = Cell::at(cell.routed());
         seats.write(&elsewhere, ROUTE_LEN - 1, &[]);
         seats.write(&bytes, ROUTE_LEN - 1, &[]);
@@ -705,11 +724,59 @@ mod registered_root_construction_tests {
         assert_eq!(
             (id, value, state),
             (
-                crate::storage_cell::entry_digest(&bytes),
+                crate::storage_cell::entry_digest(&claim.encode()),
                 bytes,
                 ChainState::Final
             )
         );
+    }
+
+    /// DSM Amendment A10: a claim in the trader's name that the trader's
+    /// device did not sign counts for nothing at the trader's cell, however
+    /// early it arrived. A squatter's `C_q`, and a squatter's single-root
+    /// claim, written first at every seat, leave the cell to the trader's
+    /// own claim.
+    #[test]
+    fn a_squatters_claim_written_first_does_not_hold_the_cell() {
+        let trader = device([0xA7; 32]).unwrap();
+        let squatter = device([0x5A; 32]).unwrap();
+        let cell = root_cell(&trader.devid, 9);
+        let squat_conditional =
+            signed_by(conditional(trader.devid, 9), &squatter, trader.att_a).unwrap();
+        let squat_root = sign_economic_root_claim(
+            &EconomicRootClaimBody::new(
+                [0x11; 32],
+                trader.devid,
+                9,
+                [0xE0; 32],
+                [0xD0; 32],
+                [0x77; 32],
+                crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+                &squatter.pk,
+                squatter.att_a,
+            )
+            .unwrap(),
+            &squatter.sk,
+        )
+        .unwrap();
+        let ours = signed_conditional(conditional(trader.devid, 9), &trader).unwrap();
+
+        let mut seats = Cell::at(cell.routed());
+        seats.write(&squat_conditional, ROUTE_LEN - 1, &[]);
+        seats.write(&squat_root, ROUTE_LEN - 1, &[]);
+        seats.write(&conditional(trader.devid, 9).encode(), ROUTE_LEN - 1, &[]);
+        // Nothing the squatter wrote holds the cell.
+        assert_eq!(
+            read_root_cell(&cell, &seats.evidence()),
+            Ok(CellReading::Open)
+        );
+
+        seats.write(&ours, ROUTE_LEN - 1, &[]);
+        let Ok(CellReading::Held { value, state, .. }) = read_root_cell(&cell, &seats.evidence())
+        else {
+            panic!("the trader's own claim holds the cell")
+        };
+        assert_eq!((value, state), (ours, ChainState::Final));
     }
 
     /// A claim final at its root cell has a completion proof built from the
@@ -717,26 +784,9 @@ mod registered_root_construction_tests {
     /// alone has none.
     #[test]
     fn a_final_root_claim_has_a_completion_proof_that_checks() {
-        use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
-        use crate::route_chain::ROUTE_LEN;
-        let claim = crate::sofi::wire::SofiResolutionClaim {
-            genesis: [0x11; 32],
-            device_id: [0x22; 32],
-            position: 9,
-            fulfillment_id: [0xF1; 32],
-            realize_root: [0xA1; 32],
-            void_root: [0xB1; 32],
-        };
-        let bytes = claim.encode();
-        let cell = RootCell::new(
-            &[0x11; 32],
-            &[0x22; 32],
-            9,
-            &[0x5E; 32],
-            &committed_set(),
-            &committed_set_id(),
-        )
-        .expect("the committed set");
+        let d = device([0xA7; 32]).unwrap();
+        let bytes = signed_conditional(conditional(d.devid, 9), &d).unwrap();
+        let cell = root_cell(&d.devid, 9);
         let mut held = Cell::at(cell.routed());
         held.write(&bytes, 0, &[]);
         assert_eq!(root_completion(&cell, &held.evidence()), Ok(None));

@@ -2549,7 +2549,6 @@ impl CoreSDK {
         use crate::storage::client_db::{
             self as cdb, CanonicalApplyInsertOutcome, CanonicalApplyLookup, CanonicalApplyRecord,
         };
-        use crate::storage::codecs::hash_blake3_bytes;
 
         // ---- validate the request (fail closed) ----
         let (nonce, amount_val, to_device_id, token_id, signed_policy_commit) = match &op {
@@ -2644,7 +2643,9 @@ impl CoreSDK {
             out.copy_from_slice(&h.finalize().as_bytes()[..32]);
             out
         };
-        let nonce_hash = hash_blake3_bytes(&nonce);
+        // The nonce is spent in this relationship only (security pre-audit item
+        // 5): another contact's transfer cannot spend it first.
+        let nonce_hash = cdb::relationship_nonce_hash(&rel_key, &nonce);
         let canonical_apply_id = cdb::compute_canonical_apply_id(
             &rel_key,
             &parent_tip,
@@ -2780,7 +2781,7 @@ impl CoreSDK {
                   artifacts: &A|
                   -> Result<(), DsmError> {
                 // Nonce consumption INSIDE the full-state transaction.
-                let spent = cdb::is_nonce_spent_with_conn(tx, &nonce).map_err(|e| {
+                let spent = cdb::is_nonce_spent_with_conn(tx, &rel_key, &nonce).map_err(|e| {
                     DsmError::internal(
                         format!("in-tx nonce check failed: {e}"),
                         None::<std::convert::Infallible>,
@@ -2791,13 +2792,20 @@ impl CoreSDK {
                         "full-state apply race: nonce consumed concurrently (fail closed)",
                     ));
                 }
-                cdb::mark_nonce_spent_with_conn(tx, &nonce, &tx_id_str, &sender_arr, amount_val)
-                    .map_err(|e| {
-                        DsmError::internal(
-                            format!("in-tx nonce consume failed: {e}"),
-                            None::<std::convert::Infallible>,
-                        )
-                    })?;
+                cdb::mark_nonce_spent_with_conn(
+                    tx,
+                    &rel_key,
+                    &nonce,
+                    &tx_id_str,
+                    &sender_arr,
+                    amount_val,
+                )
+                .map_err(|e| {
+                    DsmError::internal(
+                        format!("in-tx nonce consume failed: {e}"),
+                        None::<std::convert::Infallible>,
+                    )
+                })?;
                 // Canonical apply record with the AUTHORITATIVE applied B roots
                 // and B pair from the state mutation itself.
                 let record = record_for(outcome);

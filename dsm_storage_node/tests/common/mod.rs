@@ -143,6 +143,7 @@ pub fn served(state: std::sync::Arc<dsm_storage_node::AppState>) -> axum::Router
         dsm_storage_node::AppLimits {
             body_limit_bytes: 1_048_576,
             concurrency_limit: 256,
+            request_timeout: std::time::Duration::from_secs(60),
         },
     )
 }

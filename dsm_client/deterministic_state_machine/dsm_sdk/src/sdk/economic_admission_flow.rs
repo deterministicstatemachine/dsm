@@ -806,6 +806,18 @@ async fn finish_locked(
     {
         Some((_, bytes)) => bytes,
         None => {
+            // The claim proves its own authority for this device's cell: it
+            // carries the AttA under which this key derives the device id
+            // (DSM Amendment A10). A key that does not derive it would sign a
+            // claim recognition refuses, so none is signed.
+            let att_a = crate::sdk::signing_authority::current_att_a()
+                .map_err(|e| storage_err("signing authority", e))?;
+            if dsm::core::identity::genesis_v2::derive_devid(&public_key, &att_a) != devid {
+                return Err(DsmError::invalid_operation(
+                    "root claim: this device's key and AttA do not derive its device id — \
+                     local identity incoherent; refusing to sign a claim for its cell",
+                ));
+            }
             let body = dsm::economic::claim::EconomicRootClaimBody::new(
                 genesis,
                 devid,
@@ -815,6 +827,7 @@ async fn finish_locked(
                 set.id(),
                 dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
                 &public_key,
+                att_a,
             )
             .map_err(|e| storage_err("root claim body", e))?;
             let bytes = sign_economic_root_claim(&body, &secret_key)
@@ -1309,6 +1322,11 @@ pub(crate) struct RecipientAdmissionPrereqs {
     /// frontier for the sender once the transfer is accepted (DSM Amendment
     /// A8), recorded in the accept transaction and never before it.
     pub sender_frontier: dsm::economic::peer_lineage::PeerFrontier,
+    /// The frontier each of the sender's credit sources reached in this
+    /// prevalidation, each at a step whose whole segment passed: recorded in
+    /// the same accept transaction, so a later credit from that source
+    /// validates only the suffix (DSM Amendment A8).
+    pub source_frontiers: Vec<dsm::economic::peer_lineage::PeerFrontier>,
 }
 
 /// Prevalidate an inbound online transfer BEFORE any durable local state
@@ -1383,14 +1401,14 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     let walk = {
         let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
             .map_err(|e| incomplete(format!("SoFi reads: {e}")))?;
-        recorder.validated_peer_transition(
+        recorder.validated_peer_lineage(
             peer_genesis,
             peer_devid,
             sender_economic_position,
             &sofi.peer_position_resolver(),
         )
     };
-    let peer = walk.map_err(|e| match e {
+    let lineage = walk.map_err(|e| match e {
         dsm::economic::provenance::PeerLineageFailure::Invalid(m) => {
             terminal(format!("sender lineage INVALID: {m}"))
         }
@@ -1409,6 +1427,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
             incomplete(format!("sender lineage is undecided: {m}"))
         }
     })?;
+    let (peer, source_frontiers) = lineage.into_parts();
 
     // ── The sender-side conjuncts — the SAME implementation the verifier's
     // credit arm runs post-accept, so the two can never drift ──────────────
@@ -1512,6 +1531,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         prepared,
         pinned_canonical_bytes: canonical_operation_bytes.to_vec(),
         sender_frontier,
+        source_frontiers,
     })
 }
 

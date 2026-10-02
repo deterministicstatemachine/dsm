@@ -467,30 +467,30 @@ fn registered_naming(
     post_root: [u8; 32],
     manifest_addr: [u8; 32],
 ) -> RegisteredEconomicRoot {
-    registered_for_trader(G, *dev(), position, post_root, manifest_addr)
+    registered_for_trader(G, trader(), ATTA, position, post_root, manifest_addr)
 }
 
-/// A registered root of the trader `(genesis, device)`.
+/// A registered root of the trader `(genesis, derive_devid(pk, att_a))`,
+/// signed by that device (DSM Amendment A10).
 fn registered_for_trader(
     genesis: [u8; 32],
-    device: [u8; 32],
+    signer: &(Vec<u8>, Vec<u8>),
+    att_a: [u8; 32],
     position: u64,
     post_root: [u8; 32],
     manifest_addr: [u8; 32],
 ) -> RegisteredEconomicRoot {
-    static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    let (pk, sk) = KEYS.get_or_init(|| {
-        dsm::crypto::sphincs::generate_sphincs_keypair().expect("a claimant keypair")
-    });
+    let (pk, sk) = signer;
     let body = dsm::economic::claim::EconomicRootClaimBody::new(
         genesis,
-        device,
+        dsm::core::identity::genesis_v2::derive_devid(pk, &att_a),
         position,
         post_root,
         manifest_addr,
         canonical_set_id(),
         dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
         pk,
+        att_a,
     )
     .expect("a claim body");
     let envelope =
@@ -597,8 +597,12 @@ fn a_registered_claim_of_another_trader_is_refused() {
     let manifest = manifest_for(&fx.witness);
     let accepted = accepted_for(&fx.op);
     let addr = manifest.addr().expect("addressable");
-    for (genesis, device) in [([0x99; 32], *dev()), (G, [0x98; 32])] {
-        let foreign = registered_for_trader(genesis, device, 1, fx.post_root, addr);
+    static OTHER: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    let other = OTHER.get_or_init(|| {
+        dsm::crypto::sphincs::generate_sphincs_keypair().expect("another trader's keypair")
+    });
+    for (genesis, signer, att_a) in [([0x99; 32], trader(), ATTA), (G, other, [0x98; 32])] {
+        let foreign = registered_for_trader(genesis, signer, att_a, 1, fx.post_root, addr);
         assert!(matches!(
             run(&fx, &foreign, &manifest, &fx.witness, &accepted),
             Err(EconomicValidationError::RegisteredClaimNamesAnotherTrader)

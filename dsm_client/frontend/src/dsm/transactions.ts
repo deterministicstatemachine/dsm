@@ -51,20 +51,25 @@ function schedulePostAcceptRefreshes(): void {
   requestAnimationFrame(tick);
 }
 
+/**
+ * `wallet.sendSmart`: an online send to the contact the user chose, named by
+ * its device id (the Base32 key the send screen selects it by, or its bytes).
+ * Never by alias: an alias is a label two contacts can share. Rust refuses a
+ * device id that is not 32 bytes, or not an added contact.
+ */
 export async function sendOnlineTransferSmart(
-    alias: string,
+    to: string | Uint8Array,
     amount: string | number | bigint,
     memo?: string,
     tokenId?: string
 ): Promise<{ success: boolean; message?: string; newBalance?: bigint }> {
     try {
-      const recipient = String(alias ?? '').trim();
-      if (!recipient) {
-        return { success: false, message: 'Recipient alias is required' };
-      }
+      const recipientDeviceId = typeof to === 'string'
+        ? new Uint8Array(decodeBase32Crockford(to.trim()))
+        : new Uint8Array(to);
 
       const smartReq = new pb.OnlineTransferSmartRequest({
-        recipient,
+        recipientDeviceId,
         amount: String(amount),
         tokenId: String(tokenId ?? '').trim(),
         memo: memo || '',

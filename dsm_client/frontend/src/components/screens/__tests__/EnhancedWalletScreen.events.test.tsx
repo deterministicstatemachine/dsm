@@ -193,7 +193,12 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
     await waitFor(() => {
-      expect(dsmClient.sendOnlineTransferSmart).toHaveBeenCalledWith('Receiver', '25', undefined, 'ERA');
+      expect(dsmClient.sendOnlineTransferSmart).toHaveBeenCalledWith(
+        encodeBase32Crockford(contact.deviceId),
+        '25',
+        undefined,
+        'ERA',
+      );
       expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();
       expect(screen.getAllByText('75.00').length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();

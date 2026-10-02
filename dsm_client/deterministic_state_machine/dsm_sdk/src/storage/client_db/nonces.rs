@@ -1,78 +1,41 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Nonce tracking and atomic receive transfer (replay prevention).
+//! Spent transfer nonces (replay prevention), each scoped to the relationship
+//! that carries it.
 
 use anyhow::{anyhow, Result};
-use log::{info, warn};
 use rusqlite::params;
 
-use super::get_connection;
-use crate::storage::codecs::hash_blake3_bytes;
-
-/// Check if a nonce has already been spent (replay attack prevention).
-/// Returns true if the nonce is already in the spent_nonces table.
-pub fn is_nonce_spent(nonce: &[u8]) -> Result<bool> {
-    if nonce.is_empty() {
-        return Ok(false); // Empty nonce cannot be checked
-    }
-    let nonce_hash = hash_blake3_bytes(nonce);
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned in is_nonce_spent, recovering");
-        poisoned.into_inner()
-    });
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM spent_nonces WHERE nonce_hash = ?1",
-        params![&nonce_hash[..]],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-/// Mark a nonce as spent (must be called atomically with balance credit).
-/// Returns error if nonce was already spent (replay attack detected).
-pub fn mark_nonce_spent(nonce: &[u8], tx_id: &str, sender_id: &[u8], amount: u64) -> Result<()> {
-    if nonce.is_empty() {
-        return Err(anyhow!("Cannot mark empty nonce as spent"));
-    }
-    let nonce_hash = hash_blake3_bytes(nonce);
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned in mark_nonce_spent, recovering");
-        poisoned.into_inner()
-    });
-
-    // Use INSERT without OR IGNORE - will fail if nonce already exists (replay attack)
-    let result = conn.execute(
-        "INSERT INTO spent_nonces(nonce_hash, tx_id, sender_id, amount) VALUES(?1, ?2, ?3, ?4)",
-        params![&nonce_hash[..], tx_id, sender_id, amount as i64],
+/// `H(DSM/relationship-nonce/v1 ‖ relationship_key ‖ nonce)`: the key a
+/// transfer nonce is spent under.
+///
+/// A nonce is unique within the relationship that carries it. The replay rule
+/// itself is the relationship's own (relationship, parent) record
+/// (MR-DSM-0170); this is the nonce check beside it, and it must not reach
+/// across relationships. A sender's nonce derives from public inputs, so with
+/// a nonce spent across every relationship, another contact could spend this
+/// relationship's next nonce first and have its transfer dropped as decided
+/// (security pre-audit item 5).
+pub fn relationship_nonce_hash(relationship_key: &[u8; 32], nonce: &[u8]) -> [u8; 32] {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+        dsm::common::domain_tags::TAG_DSM_RELATIONSHIP_NONCE,
     );
-
-    match result {
-        Ok(_) => {
-            info!("[spent_nonces] Marked nonce as spent for tx {}", tx_id);
-            Ok(())
-        }
-        Err(rusqlite::Error::SqliteFailure(err, _))
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            warn!(
-                "[spent_nonces] REPLAY ATTACK DETECTED: nonce already spent for tx {}",
-                tx_id
-            );
-            Err(anyhow!("Replay attack detected: nonce already spent"))
-        }
-        Err(e) => Err(e.into()),
-    }
+    h.update(relationship_key);
+    h.update(nonce);
+    *h.finalize().as_bytes()
 }
 
-/// `is_nonce_spent` against a caller-supplied connection/transaction — for use
+/// Whether `nonce` is spent in the relationship `relationship_key`, read
 /// INSIDE the single full-state apply transaction (§16.6 single-commit apply).
 /// `&rusqlite::Transaction` derefs to `&Connection`, so pass `&tx`.
-pub fn is_nonce_spent_with_conn(conn: &rusqlite::Connection, nonce: &[u8]) -> Result<bool> {
+pub fn is_nonce_spent_with_conn(
+    conn: &rusqlite::Connection,
+    relationship_key: &[u8; 32],
+    nonce: &[u8],
+) -> Result<bool> {
     if nonce.is_empty() {
-        return Ok(false);
+        return Err(anyhow!("an empty nonce is not a nonce"));
     }
-    let nonce_hash = hash_blake3_bytes(nonce);
+    let nonce_hash = relationship_nonce_hash(relationship_key, nonce);
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM spent_nonces WHERE nonce_hash = ?1",
         params![&nonce_hash[..]],
@@ -81,11 +44,14 @@ pub fn is_nonce_spent_with_conn(conn: &rusqlite::Connection, nonce: &[u8]) -> Re
     Ok(count > 0)
 }
 
-/// `mark_nonce_spent` against a caller-supplied connection/transaction — the
-/// nonce consumption commits (or rolls back) WITH the rest of the full-state
-/// apply transaction, never as a separate durability boundary.
+/// Spend `nonce` in the relationship `relationship_key` against a
+/// caller-supplied connection/transaction: the consumption commits (or rolls
+/// back) WITH the rest of the full-state apply transaction, never as a
+/// separate durability boundary. A nonce already spent in this relationship
+/// is refused.
 pub fn mark_nonce_spent_with_conn(
     conn: &rusqlite::Connection,
+    relationship_key: &[u8; 32],
     nonce: &[u8],
     tx_id: &str,
     sender_id: &[u8],
@@ -94,7 +60,7 @@ pub fn mark_nonce_spent_with_conn(
     if nonce.is_empty() {
         return Err(anyhow!("Cannot mark empty nonce as spent"));
     }
-    let nonce_hash = hash_blake3_bytes(nonce);
+    let nonce_hash = relationship_nonce_hash(relationship_key, nonce);
     let result = conn.execute(
         "INSERT INTO spent_nonces(nonce_hash, tx_id, sender_id, amount) VALUES(?1, ?2, ?3, ?4)",
         params![&nonce_hash[..], tx_id, sender_id, amount as i64],
@@ -115,6 +81,19 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    const REL_A: [u8; 32] = [0xA1; 32];
+    const REL_B: [u8; 32] = [0xB2; 32];
+    /// Each relationship's chain tip, one of the public inputs its next
+    /// transfer's nonce derives from.
+    const TIP_A: [u8; 32] = [0xA7; 32];
+    const TIP_B: [u8; 32] = [0xB7; 32];
+
+    /// The nonce the next transfer of `amount` ERA carries in a relationship
+    /// whose chain tip is `tip`, as the SDK derives it (§4.1).
+    fn next_nonce(tip: &[u8; 32], amount: u64) -> Vec<u8> {
+        crate::handlers::app_router_impl::transfer_nonce(tip, amount, "ERA", &[0xD1; 32])
+    }
+
     fn init_test_db() {
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
@@ -122,52 +101,54 @@ mod tests {
     }
 
     #[test]
-    fn is_nonce_spent_returns_false_for_empty_nonce() {
-        assert!(!is_nonce_spent(&[]).unwrap());
-    }
-
-    #[test]
-    fn mark_nonce_spent_rejects_empty_nonce() {
-        let err = mark_nonce_spent(&[], "tx-1", b"sender", 100).unwrap_err();
+    #[serial]
+    fn an_empty_nonce_is_refused() {
+        init_test_db();
+        let binding = crate::storage::client_db::get_connection().expect("db");
+        let conn = binding.lock().expect("db lock");
+        let err = mark_nonce_spent_with_conn(&conn, &REL_A, &[], "tx-1", b"sender", 100)
+            .expect_err("an empty nonce is not spendable");
+        assert!(err.to_string().contains("empty nonce"));
+        let err = is_nonce_spent_with_conn(&conn, &REL_A, &[]).expect_err("nor checkable");
         assert!(err.to_string().contains("empty nonce"));
     }
 
     #[test]
-    fn hash_blake3_bytes_is_deterministic() {
-        let h1 = hash_blake3_bytes(b"test-nonce-data");
-        let h2 = hash_blake3_bytes(b"test-nonce-data");
-        assert_eq!(h1, h2);
-        assert_ne!(h1, [0u8; 32]);
-    }
-
-    #[test]
-    fn hash_blake3_bytes_different_inputs_differ() {
-        let h1 = hash_blake3_bytes(b"nonce-alpha");
-        let h2 = hash_blake3_bytes(b"nonce-beta");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
     #[serial]
-    fn mark_and_check_nonce_spent() {
+    fn a_nonce_is_spent_once_in_its_relationship() {
         init_test_db();
-
-        let nonce = b"unique-nonce-42";
-        assert!(!is_nonce_spent(nonce).unwrap());
-
-        mark_nonce_spent(nonce, "tx-42", b"sender-a", 500).expect("mark spent");
-        assert!(is_nonce_spent(nonce).unwrap());
-    }
-
-    #[test]
-    #[serial]
-    fn mark_nonce_spent_detects_replay() {
-        init_test_db();
-
-        let nonce = b"replay-nonce";
-        mark_nonce_spent(nonce, "tx-first", b"sender", 100).expect("first mark");
-
-        let err = mark_nonce_spent(nonce, "tx-duplicate", b"sender", 100).unwrap_err();
+        let binding = crate::storage::client_db::get_connection().expect("db");
+        let conn = binding.lock().expect("db lock");
+        let nonce = next_nonce(&TIP_A, 500);
+        assert!(!is_nonce_spent_with_conn(&conn, &REL_A, &nonce).expect("read"));
+        mark_nonce_spent_with_conn(&conn, &REL_A, &nonce, "tx-42", b"sender-a", 500)
+            .expect("mark spent");
+        assert!(is_nonce_spent_with_conn(&conn, &REL_A, &nonce).expect("read"));
+        let err = mark_nonce_spent_with_conn(&conn, &REL_A, &nonce, "tx-again", b"sender-a", 500)
+            .expect_err("a second spend in the relationship is a replay");
         assert!(err.to_string().contains("Replay attack"));
+    }
+
+    /// Security pre-audit item 5: the same nonce bytes spent in one
+    /// relationship are not spent in another, so a contact cannot spend
+    /// another contact's predicted nonce first and have its transfer dropped.
+    /// The nonce is the one relationship B's next transfer carries, derived
+    /// from B's public inputs; contact Y spends those bytes in A first.
+    #[test]
+    #[serial]
+    fn a_nonce_spent_in_one_relationship_is_not_spent_in_another() {
+        init_test_db();
+        let binding = crate::storage::client_db::get_connection().expect("db");
+        let conn = binding.lock().expect("db lock");
+        let predicted = next_nonce(&TIP_B, 100);
+        mark_nonce_spent_with_conn(&conn, &REL_A, &predicted, "tx-a", b"contact-y", 1)
+            .expect("spent in A");
+        assert!(!is_nonce_spent_with_conn(&conn, &REL_B, &predicted).expect("read"));
+        mark_nonce_spent_with_conn(&conn, &REL_B, &predicted, "tx-b", b"contact-x", 100)
+            .expect("still spendable in B");
+        assert_ne!(
+            relationship_nonce_hash(&REL_A, &predicted),
+            relationship_nonce_hash(&REL_B, &predicted)
+        );
     }
 }

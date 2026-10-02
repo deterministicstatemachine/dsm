@@ -42,17 +42,30 @@ for entry in "${FORBIDDEN[@]}"; do
 done
 echo "  ✓ the relay holds no device state"
 
-# 2. The relay's entry points take a set and a content address, nothing more.
-for fn in relay_fulfillment relay_position_pair; do
+# 2. The relay's entry points take a set and public coordinates, nothing more:
+#    a fulfillment's content address, or the vault key an exercise holds
+#    (SoFi Amendment S20: the exercise carries everything its pair needs).
+relay_entry() {
+  local fn="$1" what="$2"; shift 2
+  local sig
   sig=$(awk "/pub async fn ${fn}\\(/{f=1} f{print} f&&/-> Result/{exit}" "$relay")
   [[ -n "$sig" ]] || { echo "[FAIL] $relay no longer defines $fn"; exit 1; }
-  if ! grep -q 'set: &StorageSet' <<<"$sig" || ! grep -q 'fulfillment_id: &D32' <<<"$sig"; then
-    echo "[FAIL] $fn no longer takes exactly (committed set, fulfillment id):"
+  for param in 'set: &StorageSet' "$@"; do
+    if ! grep -qF "$param" <<<"$sig"; then
+      echo "[FAIL] $fn no longer takes exactly ($what):"
+      echo "$sig"
+      exit 1
+    fi
+  done
+  if [[ $(grep -c ':' <<<"$(sed -n '/(/,/)/p' <<<"$sig" | grep -vE 'pub async fn')") -ne $(( $# + 1 )) ]]; then
+    echo "[FAIL] $fn takes more than ($what):"
     echo "$sig"
     exit 1
   fi
-done
-echo "  ✓ a relay is reached with a committed set and a content address"
+}
+relay_entry relay_fulfillment "committed set, fulfillment id" 'fulfillment_id: &D32'
+relay_entry relay_exercise "committed set, vault key" 'vault_id: &D32' 'parent_root: &D32' 'attempt: u64'
+echo "  ✓ a relay is reached with a committed set and public coordinates"
 
 # 3. The owner-local half still requires the owning device. A relay-shaped
 #    signature here would be the same conflation wearing the other face.
