@@ -33,6 +33,8 @@ const READ_METHODS = new Set([
   'getPreference',
   'getArchitectureInfo',
   'getDiagnosticsLog',
+  // Writes only the report file in the app's cache, then opens the share sheet.
+  'shareDiagnosticsReport',
 ]);
 
 /** The preferences the tour's shell lessons change: how the app looks and sounds. */

@@ -229,6 +229,17 @@ class SinglePathWebViewBridge(private val context: Context) {
                     BridgeLogger.readLogBytes()
                 }
 
+                // Diagnostics: write the debug report (the summary in the payload, the
+                // app log, the bridge log) and open the share sheet with it. Answers the
+                // report's size in bytes, as decimal UTF-8.
+                "shareDiagnosticsReport" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("shareDiagnosticsReport: no active activity")
+                    val report = DiagnosticsReport.write(act, String(payload, Charsets.UTF_8))
+                    DiagnosticsReport.share(act, report)
+                    report.length().toString().toByteArray(Charsets.UTF_8)
+                }
+
                 // Diagnostics: Architecture Info
                 "getArchitectureInfo" -> {
                     BridgeDiagnosticsHandler.getArchitectureInfo(::escapeForString)

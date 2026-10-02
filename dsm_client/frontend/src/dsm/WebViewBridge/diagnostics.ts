@@ -23,6 +23,21 @@ export async function getDiagnosticsLog(): Promise<Uint8Array> {
 }
 
 /**
+ * Has the native side write the debug report (this summary, the app's log,
+ * the bridge log) and open the Android share sheet with it. Answers the
+ * report's size in bytes. A WebView cannot save a file, so the report is
+ * written and shared natively.
+ */
+export async function shareDiagnosticsReport(summary: string): Promise<number> {
+  const bytes = await callBin("shareDiagnosticsReport", new TextEncoder().encode(summary));
+  const size = Number(new TextDecoder().decode(bytes));
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new Error(`shareDiagnosticsReport answered no report size (${bytes.length} bytes)`);
+  }
+  return size;
+}
+
+/**
  * The device's architecture compatibility as the native checker measured it.
  * A check that failed is the bridge's error, not a status.
  */

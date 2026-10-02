@@ -11,6 +11,9 @@ class App : Application() {
         Log.d("DSM-App", "App.onCreate()")
         // BLE events arrive with no context of their own; the relay persists through this one.
         com.dsm.wallet.bridge.BleEventRelay.attach(this)
+        // The debug report's app log is kept on disk from process start: logcat's
+        // own buffer holds only minutes of it.
+        com.dsm.wallet.bridge.DiagnosticsReport.startRollingLog(this)
         // The library load is DsmInitProvider's and SDK initialisation is
         // MainActivity.initDsmAndSignalReady's; this class holds no native work.
     }
