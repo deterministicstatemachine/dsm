@@ -48,6 +48,7 @@ const balances = [
     tokenId: 'ERA',
     baseUnits: 26400n,
     displayAmount: '264.00',
+    decimals: 2,
     protocolDefined: true,
     genesisSupplyDisplay: '80000000000.00',
     policyAnchorB32: 'ERAANCHOR0000',
@@ -294,13 +295,13 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
   it("shows what the faucet released in Rust's words, and Rust's refusal", async () => {
     (dsmClient.claimFaucet as jest.Mock).mockResolvedValueOnce({
       success: true,
-      tokensReceived: 100n,
-      message: 'claimed 100 ERA (economic position 3)',
+      tokensReceived: 10000n,
+      message: 'claimed 100.00 ERA (economic position 3)',
     });
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByRole('button', { name: 'Faucet' }));
     fireEvent.click(await screen.findByRole('button', { name: 'CLAIM FAUCET' }));
-    expect(await screen.findByText('claimed 100 ERA (economic position 3)')).toBeInTheDocument();
+    expect(await screen.findByText('claimed 100.00 ERA (economic position 3)')).toBeInTheDocument();
     expect(dsmClient.claimFaucet).toHaveBeenCalledWith();
 
     (dsmClient.claimFaucet as jest.Mock).mockResolvedValueOnce({
@@ -311,13 +312,14 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     expect(await screen.findByText('faucet.claim: the reserve is spent')).toBeInTheDocument();
   });
 
-  /// The panel's decimals are the ones Rust reports for the token. A table in
-  /// this screen said ERA took 2 decimals while Rust renders ERA whole.
+  /// The panel's decimals are the ones Rust reports for the token, never a
+  /// table of the screen's own: ERA's committed policy carries two (SoFi
+  /// Amendment S18).
   it("shows a protocol token's decimals as Rust reports them", async () => {
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByText('ERA'));
     const label = await screen.findByText('Decimals');
-    expect(label.nextElementSibling).toHaveTextContent(/^0$/);
+    expect(label.nextElementSibling).toHaveTextContent(/^2$/);
   });
 
   /// The typed amount reaches Rust unchanged — no client-side rescaling.

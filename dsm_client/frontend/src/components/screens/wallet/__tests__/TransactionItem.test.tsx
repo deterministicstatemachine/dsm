@@ -69,7 +69,7 @@ describe('TransactionItem renders the row Rust reported', () => {
       tokenId: '',
       recipient: 'RK10195E',
       moves: [
-        { policyCommit: 'ERACOMMIT', tokenId: 'ERA', amount: BigInt(-50), displayAmount: '-50.00' },
+        { policyCommit: 'ERACOMMIT', tokenId: 'ERA', amount: BigInt(-5000), displayAmount: '-50.00' },
         { policyCommit: 'RIGTCOMMIT', tokenId: 'RIGT', amount: BigInt(332665), displayAmount: '3326.65' },
       ],
     });

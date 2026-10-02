@@ -46,7 +46,7 @@ const connected = {
 };
 
 const era = (offline?: { baseUnits: bigint; displayAmount: string }) => ({
-  tokenId: 'ERA', symbol: 'ERA', tokenName: 'ERA', baseUnits: 90n, displayAmount: '90', decimals: 0, protocolDefined: true, offline,
+  tokenId: 'ERA', symbol: 'ERA', tokenName: 'ERA', baseUnits: 9000n, displayAmount: '90.00', decimals: 2, offline,
 });
 
 function renderSend(props: { balances?: any[]; loadWalletData?: jest.Mock } = {}) {
@@ -54,7 +54,7 @@ function renderSend(props: { balances?: any[]; loadWalletData?: jest.Mock } = {}
   render(
     <SendTab
       contacts={[]}
-      balances={props.balances ?? [era({ baseUnits: 10n, displayAmount: '10' })]}
+      balances={props.balances ?? [era({ baseUnits: 1000n, displayAmount: '10.00' })]}
       onCancel={jest.fn()}
       onSendComplete={jest.fn()}
       loadWalletData={loadWalletData}
@@ -78,7 +78,7 @@ describe('SendTab offline funding and appliance', () => {
 
   it('online mode shows the online amount and never touches the appliance', () => {
     renderSend();
-    expect(screen.getByText('90')).toBeInTheDocument();
+    expect(screen.getByText('90.00')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Offline Funding' })).not.toBeInTheDocument();
     expect(getAnchorStatus).not.toHaveBeenCalled();
   });
@@ -89,8 +89,8 @@ describe('SendTab offline funding and appliance', () => {
     expect(screen.getByRole('button', { name: 'About offline funding' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Appliance/ })).toBeInTheDocument();
     // The card shows the pot an offline send spends, not the online amount.
-    expect(screen.getByText('10')).toBeInTheDocument();
-    expect(screen.queryByText('90')).not.toBeInTheDocument();
+    expect(screen.getByText('10.00')).toBeInTheDocument();
+    expect(screen.queryByText('90.00')).not.toBeInTheDocument();
     await waitFor(() => expect(getAnchorStatus).toHaveBeenCalledTimes(1));
   });
 
@@ -98,7 +98,8 @@ describe('SendTab offline funding and appliance', () => {
     renderOffline({ balances: [era(undefined)] });
     expect(screen.getByText('—')).toBeInTheDocument();
     expect(screen.getByText(/unknown until the appliance connects/)).toBeInTheDocument();
-    expect(screen.queryByText('0')).not.toBeInTheDocument();
+    // ERA's zero, as Rust renders it at two decimals.
+    expect(screen.queryByText('0.00')).not.toBeInTheDocument();
   });
 
   it('re-reads the wallet once the appliance is connected, so the balances can name their allocations', async () => {
@@ -109,28 +110,28 @@ describe('SendTab offline funding and appliance', () => {
 
   it("Offline Funding loads through Rust with the amount as typed and shows Rust's answer", async () => {
     (dsmClient.loadOfflineCash as jest.Mock).mockResolvedValue({
-      onlineDisplay: '85',
-      allocationDisplay: '15',
-      message: 'loaded 5 ERA — offline allocation now 15, online 85',
+      onlineDisplay: '85.00',
+      allocationDisplay: '15.00',
+      message: 'loaded 5.00 ERA — offline allocation now 15.00, online 85.00',
     });
     const { loadWalletData } = renderOffline();
     fireEvent.click(screen.getByRole('button', { name: 'Offline Funding' }));
     const dialog = screen.getByRole('dialog', { name: 'Offline Funding' });
-    expect(within(dialog).getByText('90 ERA')).toBeInTheDocument();
-    expect(within(dialog).getByText('10 ERA')).toBeInTheDocument();
+    expect(within(dialog).getByText('90.00 ERA')).toBeInTheDocument();
+    expect(within(dialog).getByText('10.00 ERA')).toBeInTheDocument();
     fireEvent.change(within(dialog).getByLabelText('Amount'), { target: { value: '5' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Load' }));
     await waitFor(() => expect(dsmClient.loadOfflineCash).toHaveBeenCalledWith('ERA', '5'));
-    expect(await within(dialog).findByText(/offline allocation now 15/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/offline allocation now 15\.00/)).toBeInTheDocument();
     expect(loadWalletData).toHaveBeenCalledTimes(1);
     expect(dsmClient.unloadOfflineCash).not.toHaveBeenCalled();
   });
 
   it('Unload to online goes the other way through Rust', async () => {
     (dsmClient.unloadOfflineCash as jest.Mock).mockResolvedValue({
-      onlineDisplay: '95',
-      allocationDisplay: '5',
-      message: 'unloaded 5 ERA — offline allocation now 5, online 95',
+      onlineDisplay: '95.00',
+      allocationDisplay: '5.00',
+      message: 'unloaded 5.00 ERA — offline allocation now 5.00, online 95.00',
     });
     renderOffline();
     fireEvent.click(screen.getByRole('button', { name: 'Offline Funding' }));
@@ -139,7 +140,7 @@ describe('SendTab offline funding and appliance', () => {
     fireEvent.change(within(dialog).getByLabelText('Amount'), { target: { value: '5' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Unload' }));
     await waitFor(() => expect(dsmClient.unloadOfflineCash).toHaveBeenCalledWith('ERA', '5'));
-    expect(await within(dialog).findByText(/offline allocation now 5/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/offline allocation now 5\.00/)).toBeInTheDocument();
     expect(dsmClient.loadOfflineCash).not.toHaveBeenCalled();
   });
 

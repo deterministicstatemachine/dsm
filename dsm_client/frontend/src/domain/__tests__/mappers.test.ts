@@ -35,15 +35,15 @@ describe('domain mappers', () => {
         fromDeviceId: b(0x11),
         toDeviceId: b(0x22),
         tokenId: 'ERA',
-        amount: 5n,
+        amount: 500n,
         txHash: b(0x33),
-        amountSigned: -5n,
+        amountSigned: -500n,
         txType: TransactionType.TX_TYPE_ONLINE,
         status: 'confirmed',
         recipient: 'alice',
         memo: 'lunch',
         receiptVerified: false,
-        displayAmount: '-5',
+        displayAmount: '-5.00',
         ...overrides,
       });
 
@@ -54,8 +54,8 @@ describe('domain mappers', () => {
           txHash: toBase32Crockford(b(0x33)),
           txType: 'online',
           type: 'online',
-          amount: -5n,
-          displayAmount: '-5',
+          amount: -500n,
+          displayAmount: '-5.00',
           tokenId: 'ERA',
           recipient: 'alice',
           status: 'confirmed',
@@ -94,15 +94,15 @@ describe('domain mappers', () => {
           txType: TransactionType.TX_TYPE_FAUCET,
           fromDeviceId: new Uint8Array(0),
           recipient: 'ERA reserve (faucet)',
-          amountSigned: 100n,
-          displayAmount: '100',
+          amountSigned: 10000n,
+          displayAmount: '100.00',
         }),
       ]);
       expect(claim.txType).toBe('faucet');
       expect(claim.type).toBeUndefined();
       expect(claim.fromDeviceId).toBeUndefined();
       expect(claim.recipient).toBe('ERA reserve (faucet)');
-      expect(claim.amount).toBe(100n);
+      expect(claim.amount).toBe(10000n);
     });
 
     it('refuses a faucet claim that names a sender device', () => {
@@ -123,7 +123,7 @@ describe('domain mappers', () => {
           displayAmount: '',
           recipient: 'VAULTID',
           moves: [
-            new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amountSigned: -10n, displayAmount: '-10' }),
+            new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amountSigned: -1000n, displayAmount: '-10.00' }),
             new TokenMove({ policyCommit: b(0x42), tokenId: 'TKN', amountSigned: 90n, displayAmount: '90' }),
           ],
         }),
@@ -131,7 +131,7 @@ describe('domain mappers', () => {
       expect(trade.txType).toBe('sofi_trade');
       expect(trade.recipient).toBe('VAULTID');
       expect(trade.moves).toEqual([
-        { policyCommit: toBase32Crockford(b(0x41)), tokenId: 'ERA', amount: -10n, displayAmount: '-10' },
+        { policyCommit: toBase32Crockford(b(0x41)), tokenId: 'ERA', amount: -1000n, displayAmount: '-10.00' },
         { policyCommit: toBase32Crockford(b(0x42)), tokenId: 'TKN', amount: 90n, displayAmount: '90' },
       ]);
     });

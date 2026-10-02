@@ -2483,7 +2483,9 @@ impl AppRouter for AppRouterImpl {
                 self.handle_identity_query(q).await
             }
             // Balance/wallet query routes
-            "balance.get" | "balance.list" | "wallet.history" => self.handle_wallet_query(q).await,
+            "balance.get" | "balance.list" | "wallet.history" | "wallet.amount" => {
+                self.handle_wallet_query(q).await
+            }
             // Contacts routes
             "contacts.list" | "contacts.readContactCode" => self.handle_contacts_query(q).await,
             // Prefs routes
