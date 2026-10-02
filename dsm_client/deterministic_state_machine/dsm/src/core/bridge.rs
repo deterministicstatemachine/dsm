@@ -591,6 +591,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::TokenCreateResponse(_)
             | gp::envelope::Payload::TokenBurnResponse(_)
             | gp::envelope::Payload::TokenFeeScheduleResponse(_)
+            | gp::envelope::Payload::WalletAmountResponse(_)
             | gp::envelope::Payload::SofiVaultCreatedResponse(_)
             | gp::envelope::Payload::SofiFindRouteResponse(_)
             | gp::envelope::Payload::SofiPositionResponse(_)

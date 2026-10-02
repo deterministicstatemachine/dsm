@@ -741,13 +741,19 @@ impl SetClient {
             .await
     }
 
-    /// The first member's bytes that re-hash to `addr` under the namespace
-    /// they came with. The content address is the check: a member can fail
-    /// to serve an object, never substitute one. `None` when no member holds
-    /// such bytes.
+    /// The first bytes a member answers that re-hash to `addr` under the
+    /// namespace they came with. The content address is the check: a member
+    /// can fail to serve an object, never substitute one, so whichever
+    /// member's bytes verify first are the object's bytes, and the answers
+    /// still on their way are not waited for. Every member is asked at once.
+    /// `None` when no member holds such bytes.
     pub async fn fetch_verified(&self, addr: &[u8; 32]) -> Option<Vec<u8>> {
-        let reads = self.get_immutable(addr).await;
-        for (member, read) in self.members.iter().zip(reads) {
+        let mut answers: futures::stream::FuturesUnordered<_> = self
+            .members
+            .iter()
+            .map(|member| async move { (member, member.get_immutable(addr).await) })
+            .collect();
+        while let Some((member, read)) = futures::StreamExt::next(&mut answers).await {
             let ObjectRead::Bytes { namespace, payload } = read else {
                 continue;
             };
@@ -993,6 +999,127 @@ mod tests {
             assert_eq!(
                 took as usize, everyone,
                 "every member took the put, each asked while the others were"
+            );
+        });
+    }
+
+    /// A relay in front of one member that carries nothing until `opened`
+    /// has a permit, then carries every connection both ways.
+    async fn relay_after(
+        scheme: &str,
+        target: String,
+        opened: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a relay port");
+        let port = listener.local_addr().expect("its address").port();
+        tokio::spawn(async move {
+            loop {
+                let (mut inbound, ..) = listener.accept().await.expect("the relay accepts");
+                let (target, opened) = (target.clone(), opened.clone());
+                tokio::spawn(async move {
+                    drop(opened.acquire().await.expect("the relay is opened"));
+                    let mut outbound = tokio::net::TcpStream::connect(&target)
+                        .await
+                        .expect("the relay reaches its member");
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
+                    {
+                        log::debug!("relay: {e}");
+                    }
+                });
+            }
+        });
+        format!("{scheme}://127.0.0.1:{port}")
+    }
+
+    /// A member that answers the first request it is sent at once, whatever
+    /// was asked, with `payload` under `namespace`, and then opens `opened`.
+    async fn substituting(
+        scheme: &str,
+        namespace: &'static [u8],
+        payload: &'static [u8],
+        opened: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a member port");
+        let port = listener.local_addr().expect("its address").port();
+        tokio::spawn(async move {
+            let (mut inbound, ..) = listener.accept().await.expect("the member accepts");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                let read = inbound.read(&mut chunk).await.expect("the request");
+                assert!(read > 0, "the request ended before its head did");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nx-namespace: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                String::from_utf8_lossy(namespace),
+                payload.len()
+            );
+            inbound
+                .write_all(head.as_bytes())
+                .await
+                .expect("the answer's head");
+            inbound.write_all(payload).await.expect("the answer");
+            inbound.flush().await.expect("the answer sent");
+            opened.add_permits(1);
+        });
+        format!("{scheme}://127.0.0.1:{port}")
+    }
+
+    /// A fetch keeps the first bytes that re-hash to the address, not the
+    /// first answer. Here every member holds the object, but the first
+    /// member is replaced by one that answers at once with other bytes under
+    /// the object's namespace, and every other member is reached only after
+    /// it has answered: its bytes always arrive first. They are passed over,
+    /// and the object fetched is the one the members hold. On the storage
+    /// node's own app, on Postgres.
+    #[test]
+    #[serial_test::serial]
+    fn a_fetch_passes_over_a_member_that_answers_first_with_other_bytes() {
+        let _fleet = crate::test_support::one_device::Fleet::start();
+        let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+            .expect("the pinned set");
+        const NAMESPACE: &[u8] = b"DSM/test/first-bytes-that-verify";
+        let ns = dsm::crypto::domain::TaggedHashDomain::try_new(NAMESPACE).expect("a domain");
+        crate::runtime::get_runtime().block_on(async {
+            let direct = super::SetClient::new(&set).expect("a client");
+            assert_eq!(
+                direct.put_immutable(ns, b"the object").await as usize,
+                set.members().len()
+            );
+            let addr = dsm::storage_object::immutable_addr(ns, b"the object");
+
+            let opened = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+            let mut members = Vec::new();
+            for (position, member) in set.members().iter().enumerate() {
+                let (scheme, target) = member
+                    .endpoint
+                    .split_once("://")
+                    .expect("an endpoint names its scheme");
+                let endpoint = if position == 0 {
+                    substituting(scheme, NAMESPACE, b"other bytes", opened.clone()).await
+                } else {
+                    relay_after(scheme, target.to_string(), opened.clone()).await
+                };
+                members.push(crate::sdk::storage_set::StorageMember {
+                    endpoint,
+                    ..member.clone()
+                });
+            }
+            let substituted = crate::sdk::storage_set::StorageSet::new(members).expect("the set");
+            let fetched = super::SetClient::new(&substituted)
+                .expect("a client")
+                .fetch_verified(&addr)
+                .await;
+            assert_eq!(
+                fetched.as_deref(),
+                Some(&b"the object"[..]),
+                "the bytes that verify, not the first answer"
             );
         });
     }

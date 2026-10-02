@@ -235,10 +235,14 @@ pub trait SofiReads {
     /// Record a generation the walk established.
     fn record_generation(&self, post: &VaultPostState) -> Result<(), ReadFailure>;
     /// Keep the completion proof of the value final at `cell` (storage spec
-    /// §9 rule 11).
+    /// §9 rule 11), with the reads `evidence` that showed it final. A final
+    /// value holds the cell for good, so those reads answer for the cell
+    /// again for as long as the reads are kept; nothing else read at a cell
+    /// does.
     fn keep_completion(
         &self,
         cell: &RoutedCell,
+        evidence: &CellEvidence,
         proof: &CompletionProof,
     ) -> Result<(), ReadFailure>;
 }
@@ -659,7 +663,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         "attempt completion: a final exercise has no completion proof".to_string(),
                     )
                 })?;
-            self.reads.keep_completion(cell.routed(), &proof)?;
+            self.reads
+                .keep_completion(cell.routed(), &evidence, &proof)?;
         }
         Ok(Ok(read))
     }
@@ -700,7 +705,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     )
                 })?;
             self.reads
-                .keep_completion(cells.fulfillment(), &ful_proof)?;
+                .keep_completion(cells.fulfillment(), &ful_evidence, &ful_proof)?;
             let (.., root_proof) = root_completion(cells.root(), &root_evidence)
                 .map_err(|missing| {
                     VerifierFailure::Read(format!("root claim completion: {missing:?}"))
@@ -711,7 +716,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     )
                 })?;
             self.reads
-                .keep_completion(cells.root().routed(), &root_proof)?;
+                .keep_completion(cells.root().routed(), &root_evidence, &root_proof)?;
         }
         Ok(Ok(registration))
     }
