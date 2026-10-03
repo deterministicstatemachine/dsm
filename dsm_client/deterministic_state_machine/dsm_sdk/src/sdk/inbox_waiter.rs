@@ -15,12 +15,12 @@
 //!
 //! The waiter runs while the poller runs, and stops with it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::sync::Notify;
-use tokio::time::Instant;
 
 use crate::sdk::b0x_sdk::WaitAnswer;
 
@@ -123,10 +123,50 @@ struct Plan {
     needed: usize,
 }
 
+/// Members left out of the next waits, each for [`MEMBER_REST`], put back
+/// by a timer of its own. No clock is read: a rest is a sleep.
+#[derive(Clone, Default)]
+struct Resting(Arc<Mutex<HashSet<String>>>);
+
+impl Resting {
+    /// The resting members. A timer that panicked left at worst one member
+    /// resting until it is next rested.
+    fn members(&self) -> MutexGuard<'_, HashSet<String>> {
+        match self.0.lock() {
+            Ok(members) => members,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn contains(&self, endpoint: &str) -> bool {
+        self.members().contains(endpoint)
+    }
+
+    /// Leave `endpoint` out of the waits for [`MEMBER_REST`].
+    fn rest(&self, endpoint: String) {
+        if !self.members().insert(endpoint.clone()) {
+            return;
+        }
+        let resting = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(MEMBER_REST).await;
+            resting.members().remove(&endpoint);
+        });
+    }
+}
+
+/// How soon a member named a spool: before [`QUICK_ROUND`] had passed since
+/// the round began, or after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pace {
+    Quick,
+    Held,
+}
+
 /// How a round ended.
 enum Round {
     /// A member named a spool holding something new.
-    Ready,
+    Ready(Pace),
     /// Every member's wait ran out with nothing new, or no member held one.
     Quiet,
     /// A sync moved the routes this device reads: wait on the new ones.
@@ -140,11 +180,11 @@ async fn run() {
     // a wait would only wake for what that sync is about to read anyway.
     wait_for_cycle_after(crate::sdk::inbox_poller::cycles_completed(), SYNC_WAIT).await;
 
-    let mut resting: HashMap<String, Instant> = HashMap::new();
+    let resting = Resting::default();
     let mut holding: HashSet<String> = HashSet::new();
     let mut quick_rounds: u32 = 0;
     while !crate::sdk::inbox_poller::poller_stopping() {
-        let plan = match plan(&mut resting) {
+        let plan = match plan(&resting) {
             Ok(Some(plan)) => plan,
             Ok(None) => {
                 uncovered();
@@ -159,8 +199,7 @@ async fn run() {
             }
         };
 
-        let started = Instant::now();
-        let round = hold(&plan, &mut resting, &mut holding).await;
+        let round = hold(&plan, &resting, &mut holding).await;
         MEMBERS_NEEDED.store(plan.needed, Ordering::SeqCst);
         MEMBERS_HOLDING.store(holding.len(), Ordering::SeqCst);
         match round {
@@ -169,11 +208,10 @@ async fn run() {
             Round::Quiet => {
                 quick_rounds = 0;
             }
-            Round::Ready => {
-                quick_rounds = if started.elapsed() < QUICK_ROUND {
-                    quick_rounds.saturating_add(1)
-                } else {
-                    0
+            Round::Ready(pace) => {
+                quick_rounds = match pace {
+                    Pace::Quick => quick_rounds.saturating_add(1),
+                    Pace::Held => 0,
                 };
                 let before = crate::sdk::inbox_poller::cycles_completed();
                 crate::sdk::inbox_poller::resume_poller();
@@ -202,7 +240,7 @@ pub(crate) fn backoff_after(quick_rounds: u32) -> Duration {
 
 /// This device's routes and where each member's spool at each was read to,
 /// or `None` when there is nothing to wait on yet.
-fn plan(resting: &mut HashMap<String, Instant>) -> Result<Option<Plan>, String> {
+fn plan(resting: &Resting) -> Result<Option<Plan>, String> {
     let Some(device) = crate::sdk::app_state::AppState::get_device_id() else {
         return Ok(None);
     };
@@ -242,11 +280,9 @@ fn plan(resting: &mut HashMap<String, Instant>) -> Result<Option<Plan>, String> 
     let quorum_k =
         crate::storage::client_db::publication::quorum_for(profile.members.len()) as usize;
 
-    let now = Instant::now();
-    resting.retain(|_, until| *until > now);
     let mut members = Vec::with_capacity(set.members().len());
     for member in set.members() {
-        if resting.contains_key(&member.endpoint) {
+        if resting.contains(&member.endpoint) {
             continue;
         }
         let client =
@@ -281,11 +317,7 @@ fn plan(resting: &mut HashMap<String, Instant>) -> Result<Option<Plan>, String> 
 /// a spool, every wait runs out, a sync moves the routes, or the poller
 /// stops. Keeps the members that held their wait to an answer in `holding`,
 /// and rests those that failed or do not hold waits.
-async fn hold(
-    plan: &Plan,
-    resting: &mut HashMap<String, Instant>,
-    holding: &mut HashSet<String>,
-) -> Round {
+async fn hold(plan: &Plan, resting: &Resting, holding: &mut HashSet<String>) -> Round {
     let mut waits = tokio::task::JoinSet::new();
     for member in &plan.members {
         let endpoint = member.endpoint.clone();
@@ -297,6 +329,9 @@ async fn hold(
         });
     }
     let cycles_at_start = crate::sdk::inbox_poller::cycles_completed();
+    let quick = tokio::time::sleep(QUICK_ROUND);
+    tokio::pin!(quick);
+    let mut pace = Pace::Quick;
     loop {
         let cycle_done = crate::sdk::inbox_poller::cycle_done();
         tokio::pin!(cycle_done);
@@ -329,7 +364,7 @@ async fn hold(
                             "[inbox_waiter] {endpoint} has new entries on {} route(s): syncing",
                             ready.len()
                         );
-                        return Round::Ready;
+                        return Round::Ready(pace);
                     }
                     Ok(WaitAnswer::Quiet) => {
                         holding.insert(endpoint);
@@ -340,15 +375,16 @@ async fn hold(
                              reads it"
                         );
                         holding.remove(&endpoint);
-                        resting.insert(endpoint, Instant::now() + MEMBER_REST);
+                        resting.rest(endpoint);
                     }
                     Err(e) => {
                         log::warn!("[inbox_waiter] wait at {endpoint} failed: {e}");
                         holding.remove(&endpoint);
-                        resting.insert(endpoint, Instant::now() + MEMBER_REST);
+                        resting.rest(endpoint);
                     }
                 }
             }
+            () = &mut quick, if pace == Pace::Quick => pace = Pace::Held,
             () = &mut cycle_done => {}
             () = &mut stop => return Round::Stopped,
         }
@@ -396,7 +432,8 @@ fn plan_differs(plan: &Plan, now: BTreeSet<String>) -> bool {
 /// Wait until a poller cycle after the `before`-th has completed, `limit`
 /// passes, or the poller stops.
 async fn wait_for_cycle_after(before: u64, limit: Duration) {
-    let deadline = Instant::now() + limit;
+    let limit_passed = tokio::time::sleep(limit);
+    tokio::pin!(limit_passed);
     loop {
         let cycle_done = crate::sdk::inbox_poller::cycle_done();
         tokio::pin!(cycle_done);
@@ -412,7 +449,7 @@ async fn wait_for_cycle_after(before: u64, limit: Duration) {
         tokio::select! {
             () = &mut cycle_done => {}
             () = &mut stop => return,
-            () = tokio::time::sleep_until(deadline) => return,
+            () = &mut limit_passed => return,
         }
     }
 }
@@ -464,7 +501,6 @@ mod tests {
                 .expect("a member client");
         let address = crate::util::text_id::encode_base32_crockford(&[0x7Au8; 32]);
 
-        let started = Instant::now();
         let waiting = {
             let (client, endpoint, marks) = (
                 client.clone(),
@@ -497,7 +533,6 @@ mod tests {
             .expect("the waiting task")
             .expect("the member answered the wait");
         assert_eq!(answer, WaitAnswer::Ready(vec![address.clone()]));
-        assert!(started.elapsed() < Duration::from_secs(10));
 
         let met =
             crate::sdk::b0x_sdk::wait_on_member(&client, &member.endpoint, &[(address.clone(), 1)])
