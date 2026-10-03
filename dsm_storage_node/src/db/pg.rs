@@ -642,6 +642,28 @@ pub async fn spool_list_from_seq(
         .collect())
 }
 
+/// The spools among `marks` that hold an entry at or after the position
+/// given for each: `(spool key, position)` pairs in, spool keys out. Reads
+/// only; a device waiting on its spools asks this.
+pub async fn spool_ready(pool: &Pool, marks: &[(String, i64)]) -> Result<Vec<String>> {
+    let (keys, positions): (Vec<&str>, Vec<i64>) = marks
+        .iter()
+        .map(|(key, from)| (key.as_str(), *from))
+        .unzip();
+    let client = pool.get().await?;
+    let stmt = client
+        .prepare_cached(
+            "SELECT m.device_id FROM unnest($1::text[], $2::int8[]) AS m(device_id, from_seq)
+             WHERE EXISTS (
+               SELECT 1 FROM inbox_spool s
+               WHERE s.device_id = m.device_id AND s.seq_num >= m.from_seq
+             )",
+        )
+        .await?;
+    let rows = client.query(&stmt, &[&keys, &positions]).await?;
+    Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
+}
+
 /// The node's connection pool type.
 pub type DBPool = Pool;
 

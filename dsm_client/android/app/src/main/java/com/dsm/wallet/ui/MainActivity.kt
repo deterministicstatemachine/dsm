@@ -1340,6 +1340,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             } catch (t: Throwable) {
                 Log.w(tag, "onStart: startForegroundService failed", t)
             }
+            BatteryExemption.askOnce(this)
         }
         val intent = Intent(this, BleBackgroundService::class.java)
         try {

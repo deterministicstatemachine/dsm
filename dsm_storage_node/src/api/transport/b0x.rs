@@ -19,6 +19,58 @@ use dsm::utils::text_id;
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024; // 128 KiB (normalized)
 const MAX_BATCH_RETRIEVE: i64 = 64;
 
+/// How long the deployed node holds a wait before answering that nothing
+/// landed ([`crate::AppLimits::wait_bound`]): under the idle cut-off of
+/// phones, carriers and NAT tables, so a held request is answered rather than
+/// dropped on the way.
+pub const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Spools one wait may name: every inbox route of a device with a few hundred
+/// contacts.
+pub const MAX_WAIT_MARKS: usize = 512;
+
+/// Waits the node holds at once. One more is answered `503` at once, and the
+/// device falls back to reading on its own schedule.
+pub const MAX_WAITERS: usize = 4096;
+
+/// A wait request's body: [`MAX_WAIT_MARKS`] marks fit well inside it.
+const MAX_WAIT_BODY_BYTES: usize = 64 * 1024;
+
+/// Arrivals buffered for waits that have not yet looked at them. A wait that
+/// falls further behind looks at its spools again instead.
+const ARRIVALS_BUFFER: usize = 1024;
+
+/// The spools that took an entry, announced to every wait (storage spec §8,
+/// long-poll), and the slots waits are held in. In-process: a node's spool is
+/// written by its own submit route alone.
+#[derive(Clone)]
+pub struct SpoolWaits {
+    arrivals: tokio::sync::broadcast::Sender<String>,
+    slots: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for SpoolWaits {
+    fn default() -> Self {
+        let (arrivals, _receiver) = tokio::sync::broadcast::channel(ARRIVALS_BUFFER);
+        Self {
+            arrivals,
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_WAITERS)),
+        }
+    }
+}
+
+impl SpoolWaits {
+    /// Wake every wait on `spool_key`. With no wait held there is no one to
+    /// wake, and the send has nowhere to go.
+    fn announce(&self, spool_key: &str) {
+        if self.arrivals.receiver_count() > 0 {
+            if let Err(e) = self.arrivals.send(spool_key.to_string()) {
+                log::error!("b0x submit: the arrival on {spool_key} reached no wait: {e}");
+            }
+        }
+    }
+}
+
 /// The spool key `value` names, in its one canonical spelling, or `None`
 /// when it is not Base32 Crockford of 32 bytes. Base32 Crockford reads
 /// several spellings as the same bytes (either case, `I` and `L` for `1`,
@@ -48,6 +100,26 @@ pub fn router(app: Arc<AppState>) -> Router<()> {
         .layer(Extension(app))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             MAX_ENVELOPE_BYTES,
+        ))
+}
+
+/// A device's wait on its spools (long-poll), held until something lands
+/// or `bound` passes, when it is answered `204`: a transport bound like the
+/// request timeout, so no protocol fact depends on it (storage spec §1 rule
+/// 4), and the node reads no clock for it. Held on purpose, so it is served
+/// outside the node's request timeout and concurrency limit
+/// ([`crate::build_app`]): [`MAX_WAITERS`] bounds it instead, and a held wait
+/// holds no database connection.
+pub fn wait_router(app: Arc<AppState>, bound: std::time::Duration) -> Router<()> {
+    Router::new()
+        .route("/api/v2/b0x/wait", post(wait_for_spools))
+        .layer(Extension(app))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            MAX_WAIT_BODY_BYTES,
+        ))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::NO_CONTENT,
+            bound,
         ))
 }
 
@@ -81,7 +153,90 @@ async fn submit_b0x_envelope(
             log::error!("b0x submit: spool_insert failed: {e:?}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    app.spool_waits.announce(&recipient_spool_key);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Answer once any spool a [`dsm::types::proto::B0xWaitRequest`] names holds
+/// an entry at or after the position given for it: `200` with those spools
+/// in a `B0xWaitResponse`. Until then the wait is held; the router answers
+/// `204` once its bound passes ([`wait_router`]). `400` for a request that is
+/// not one, `503` when [`MAX_WAITERS`] waits are already held. Nothing is
+/// read out, marked or changed: the device reads its spools as it always
+/// does.
+async fn wait_for_spools(
+    Extension(app): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<axum::response::Response, StatusCode> {
+    use tokio::sync::broadcast::error::RecvError;
+
+    require_protobuf(&headers)?;
+    let request = dsm::types::proto::B0xWaitRequest::decode(body.as_ref()).map_err(|e| {
+        log::info!("b0x wait: the request does not decode: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+    if request.marks.is_empty() || request.marks.len() > MAX_WAIT_MARKS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut marks = Vec::with_capacity(request.marks.len());
+    for mark in &request.marks {
+        let key = canonical_spool_key(&mark.address).ok_or(StatusCode::BAD_REQUEST)?;
+        // Positions are the node's own sequence numbers; one past every one a
+        // spool can hold was never handed out.
+        let from = i64::try_from(mark.from_seq).map_err(|e| {
+            log::info!(
+                "b0x wait: position {} is not a spool position: {e}",
+                mark.from_seq
+            );
+            StatusCode::BAD_REQUEST
+        })?;
+        marks.push((key, from));
+    }
+    let watched: std::collections::HashSet<String> =
+        marks.iter().map(|(key, _from)| key.clone()).collect();
+
+    let Ok(_slot) = app.spool_waits.slots.clone().try_acquire_owned() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    // Subscribed before the first look, so an entry that lands between the
+    // look and the wait still wakes it.
+    let mut arrivals = app.spool_waits.arrivals.subscribe();
+    loop {
+        let ready = crate::db::spool_ready(&app.db_pool, &marks)
+            .await
+            .map_err(|e| {
+                log::error!("b0x wait: spool_ready failed: {e:?}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        if !ready.is_empty() {
+            return Ok(wait_answer(ready));
+        }
+        loop {
+            match arrivals.recv().await {
+                Ok(key) if watched.contains(&key) => break,
+                Ok(_elsewhere) => continue,
+                // Arrivals went by unseen: look at the spools again.
+                Err(RecvError::Lagged(missed)) => {
+                    log::debug!("b0x wait: {missed} arrival(s) went by unseen; looking again");
+                    break;
+                }
+                // The node is shutting down: nothing more will land here.
+                Err(RecvError::Closed) => return Ok(StatusCode::NO_CONTENT.into_response()),
+            }
+        }
+    }
+}
+
+/// A wait's answer: the spools that hold an entry for it.
+fn wait_answer(ready: Vec<String>) -> axum::response::Response {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/octet-stream"),
+    );
+    let answer = dsm::types::proto::B0xWaitResponse { ready };
+    (StatusCode::OK, headers, answer.encode_to_vec()).into_response()
 }
 
 /// Up to [`MAX_BATCH_RETRIEVE`] entries of the spool named by

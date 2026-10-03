@@ -16723,6 +16723,135 @@ export class SequencedBatchEnvelope extends Message<SequencedBatchEnvelope> {
 }
 
 /**
+ * A device waiting on its spools (storage spec §8, long-poll). The node
+ * answers as soon as any listed spool holds an entry at or after the position
+ * given for it, or with no content once its own bound has passed. Nothing is
+ * read, marked or changed by a wait: a device that never waits reads exactly
+ * what it would have, only later.
+ *
+ * @generated from message dsm.B0xWaitMark
+ */
+export class B0xWaitMark extends Message<B0xWaitMark> {
+  /**
+   * the spool key, Base32 Crockford of 32 bytes
+   *
+   * @generated from field: string address = 1;
+   */
+  address = "";
+
+  /**
+   * wake for an entry at or after this position
+   *
+   * @generated from field: uint64 from_seq = 2;
+   */
+  fromSeq = protoInt64.zero;
+
+  constructor(data?: PartialMessage<B0xWaitMark>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.B0xWaitMark";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "from_seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): B0xWaitMark {
+    return new B0xWaitMark().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): B0xWaitMark {
+    return new B0xWaitMark().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): B0xWaitMark {
+    return new B0xWaitMark().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: B0xWaitMark | PlainMessage<B0xWaitMark> | undefined, b: B0xWaitMark | PlainMessage<B0xWaitMark> | undefined): boolean {
+    return proto3.util.equals(B0xWaitMark, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.B0xWaitRequest
+ */
+export class B0xWaitRequest extends Message<B0xWaitRequest> {
+  /**
+   * @generated from field: repeated dsm.B0xWaitMark marks = 1;
+   */
+  marks: B0xWaitMark[] = [];
+
+  constructor(data?: PartialMessage<B0xWaitRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.B0xWaitRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "marks", kind: "message", T: B0xWaitMark, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): B0xWaitRequest {
+    return new B0xWaitRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): B0xWaitRequest {
+    return new B0xWaitRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): B0xWaitRequest {
+    return new B0xWaitRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: B0xWaitRequest | PlainMessage<B0xWaitRequest> | undefined, b: B0xWaitRequest | PlainMessage<B0xWaitRequest> | undefined): boolean {
+    return proto3.util.equals(B0xWaitRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.B0xWaitResponse
+ */
+export class B0xWaitResponse extends Message<B0xWaitResponse> {
+  /**
+   * the listed spools holding an entry at or after their position
+   *
+   * @generated from field: repeated string ready = 1;
+   */
+  ready: string[] = [];
+
+  constructor(data?: PartialMessage<B0xWaitResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.B0xWaitResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ready", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): B0xWaitResponse {
+    return new B0xWaitResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): B0xWaitResponse {
+    return new B0xWaitResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): B0xWaitResponse {
+    return new B0xWaitResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: B0xWaitResponse | PlainMessage<B0xWaitResponse> | undefined, b: B0xWaitResponse | PlainMessage<B0xWaitResponse> | undefined): boolean {
+    return proto3.util.equals(B0xWaitResponse, a, b);
+  }
+}
+
+/**
  * =============================== ENVELOPE ============================
  * The sender of an addressed envelope. A local answer (this device's Core or
  * SDK answering its own caller) makes no sender claim and carries no Headers.

@@ -120,6 +120,11 @@ export function FxLayer() {
 /** App-wide cues: bridge events and app-state transitions that deserve a scene. */
 function useFxCues(play: (req: FxRequest) => void, appState: AppState | undefined, lastConfirmAt: React.MutableRefObject<number>) {
   const prevState = useRef<AppState | undefined>(appState);
+  // Times the securing screen was shown in this run: the device is being set
+  // up here, so its becoming ready is news. An ordinary launch of a device set
+  // up long ago can pass the publishing screen for a moment on its way to the
+  // wallet; that is not news, and plays nothing.
+  const securedThisRun = useRef(0);
   const lockArmedUntil = useRef(0);
   const pairedAt = useRef<Map<string, number>>(new Map());
 
@@ -192,8 +197,14 @@ function useFxCues(play: (req: FxRequest) => void, appState: AppState | undefine
   useEffect(() => {
     const prev = prevState.current;
     prevState.current = appState;
+    if (appState === 'securing_device') securedThisRun.current += 1;
     if (prev === appState || !appState) return;
-    if ((prev === 'securing_device' || prev === 'publication_pending') && appState === 'wallet_ready') {
+    if (
+      securedThisRun.current > 0 &&
+      (prev === 'securing_device' || prev === 'publication_pending') &&
+      appState === 'wallet_ready'
+    ) {
+      securedThisRun.current = 0;
       play({ anim: 'trace', title: 'Device ready', caption: 'Your device key is enrolled and your identity is published', key: 'anchored' });
     }
     if (appState === 'locked' && Date.now() < lockArmedUntil.current) {
