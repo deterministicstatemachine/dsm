@@ -560,8 +560,13 @@ pub(crate) fn spool_end(address: &str, endpoint: &str) -> Option<u64> {
         .copied()
 }
 
-/// How much longer than the wait itself a wait request may take: the round
-/// trip, and a member slow to answer at the end of its wait.
+/// How long a member holds a wait before answering that nothing landed: the
+/// deployed node's bound (`dsm_storage_node::api::transport::b0x::MAX_WAIT`).
+pub(crate) const MEMBER_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// How much longer than the member's bound a wait request may take: the
+/// round trip, and a member slow to answer at the end of its bound. A member
+/// that has not answered by then did not answer.
 const WAIT_TRANSPORT_SLACK: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// What a member answered a wait on this device's spools.
@@ -569,7 +574,7 @@ const WAIT_TRANSPORT_SLACK: std::time::Duration = std::time::Duration::from_secs
 pub(crate) enum WaitAnswer {
     /// These spools hold an entry at or after their mark.
     Ready(Vec<String>),
-    /// Nothing landed while the member held the wait.
+    /// Nothing landed while the member held the wait (`204`).
     Quiet,
     /// The member does not hold waits: a node that does not serve them yet
     /// (`404`), or one holding as many as it can (`503`).
@@ -577,13 +582,13 @@ pub(crate) enum WaitAnswer {
 }
 
 /// Hold a wait on `marks` (spool address, position) at the member at
-/// `endpoint`, for at most `wait` (storage spec §8, long-poll). Reads
+/// `endpoint` until it answers (storage spec §8, long-poll): at once when an
+/// entry is past its mark, when one lands, or `204` after its bound. Reads
 /// nothing and moves nothing: what landed is read by the next sync.
 pub(crate) async fn wait_on_member(
     client: &reqwest::Client,
     endpoint: &str,
     marks: &[(String, u64)],
-    wait: std::time::Duration,
 ) -> Result<WaitAnswer, DsmError> {
     let request = dsm::types::proto::B0xWaitRequest {
         marks: marks
@@ -593,29 +598,32 @@ pub(crate) async fn wait_on_member(
                 from_seq: *from_seq,
             })
             .collect(),
-        wait_ms: u32::try_from(wait.as_millis()).map_err(|e| {
-            DsmError::internal(format!("wait of {wait:?}: {e}"), None::<std::io::Error>)
-        })?,
     };
     let url = format!("{}/api/v2/b0x/wait", endpoint.trim_end_matches('/'));
     let resp = client
         .post(&url)
         .header("Content-Type", "application/protobuf")
         .header("Accept", "application/protobuf")
-        .timeout(wait + WAIT_TRANSPORT_SLACK)
+        .timeout(MEMBER_WAIT_BOUND + WAIT_TRANSPORT_SLACK)
         .body(request.encode_to_vec())
         .send()
         .await
         .map_err(|e| {
-            DsmError::network(format!("b0x wait at {endpoint}: {e}"), None::<std::io::Error>)
+            DsmError::network(
+                format!("b0x wait at {endpoint}: {e}"),
+                None::<std::io::Error>,
+            )
         })?;
     let status = resp.status();
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(WaitAnswer::Quiet);
+    }
     if status == reqwest::StatusCode::NOT_FOUND
         || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
     {
         return Ok(WaitAnswer::NotHeld(status));
     }
-    if !status.is_success() {
+    if status != reqwest::StatusCode::OK {
         return Err(DsmError::network(
             format!("b0x wait at {endpoint} answered HTTP {status}"),
             None::<std::io::Error>,
@@ -634,10 +642,12 @@ pub(crate) async fn wait_on_member(
         )
     })?;
     if answer.ready.is_empty() {
-        Ok(WaitAnswer::Quiet)
-    } else {
-        Ok(WaitAnswer::Ready(answer.ready))
+        return Err(DsmError::network(
+            format!("b0x wait at {endpoint} answered 200 naming no spool"),
+            None::<std::io::Error>,
+        ));
     }
+    Ok(WaitAnswer::Ready(answer.ready))
 }
 
 impl B0xSDK {

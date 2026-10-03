@@ -287,6 +287,12 @@ pub struct AppLimits {
     /// is answered `408` and changes nothing, so no protocol fact depends on
     /// it (storage spec §1 rule 4).
     pub request_timeout: std::time::Duration,
+    /// How long a device's wait on its spools (long-poll) is held before the
+    /// node answers that nothing landed. A transport bound like
+    /// `request_timeout`, outside it: no protocol fact depends on it (storage
+    /// spec §1 rule 4). The deployed node holds
+    /// [`api::transport::b0x::MAX_WAIT`].
+    pub wait_bound: std::time::Duration,
 }
 
 /// The node's whole app: every route it serves, with its limits and layers.
@@ -364,7 +370,10 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
         // outside the timeout and the concurrency limit above: the wait
         // bounds its own length and the number held (b0x::MAX_WAIT,
         // b0x::MAX_WAITERS), and holds no database connection while it waits.
-        .merge(crate::api::transport::b0x::wait_router(state.clone()))
+        .merge(crate::api::transport::b0x::wait_router(
+            state.clone(),
+            limits.wait_bound,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(crate::node_identity_echo_layer(
             state.member_id_header.clone(),

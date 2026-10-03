@@ -24,10 +24,6 @@ use tokio::time::Instant;
 
 use crate::sdk::b0x_sdk::WaitAnswer;
 
-/// How long a member is asked to hold each wait: the node's own cap
-/// (`dsm_storage_node::api::transport::b0x::MAX_WAIT`).
-const WAIT: Duration = Duration::from_secs(25);
-
 /// How long a member that failed a wait, or does not hold them, is left out
 /// of the next ones. The poller reads it meanwhile.
 const MEMBER_REST: Duration = Duration::from_secs(30);
@@ -296,8 +292,7 @@ async fn hold(
         let client = member.client.clone();
         let marks = member.marks.clone();
         waits.spawn(async move {
-            let answer =
-                crate::sdk::b0x_sdk::wait_on_member(&client, &endpoint, &marks, WAIT).await;
+            let answer = crate::sdk::b0x_sdk::wait_on_member(&client, &endpoint, &marks).await;
             (endpoint, answer)
         });
     }
@@ -454,8 +449,8 @@ mod tests {
     /// On the storage node's own code, over TLS as a device reaches it: a
     /// wait held at a member on a spool past its last entry is answered,
     /// naming the spool, when an envelope lands there; a wait whose mark is
-    /// already met is answered at once; and one whose mark is past the end
-    /// runs its length and names nothing.
+    /// already met is answered at once; and one whose mark is past the end is
+    /// held.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_wait_held_at_a_member_is_answered_when_a_delivery_lands() {
@@ -477,7 +472,7 @@ mod tests {
                 vec![(address.clone(), 1)],
             );
             tokio::spawn(async move {
-                crate::sdk::b0x_sdk::wait_on_member(&client, &endpoint, &marks, WAIT).await
+                crate::sdk::b0x_sdk::wait_on_member(&client, &endpoint, &marks).await
             })
         };
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -504,27 +499,24 @@ mod tests {
         assert_eq!(answer, WaitAnswer::Ready(vec![address.clone()]));
         assert!(started.elapsed() < Duration::from_secs(10));
 
-        let met = crate::sdk::b0x_sdk::wait_on_member(
-            &client,
-            &member.endpoint,
-            &[(address.clone(), 1)],
-            WAIT,
-        )
-        .await
-        .expect("the member answers");
+        let met =
+            crate::sdk::b0x_sdk::wait_on_member(&client, &member.endpoint, &[(address.clone(), 1)])
+                .await
+                .expect("the member answers");
         assert_eq!(met, WaitAnswer::Ready(vec![address.clone()]));
 
-        let started = Instant::now();
-        let past_the_end = crate::sdk::b0x_sdk::wait_on_member(
-            &client,
-            &member.endpoint,
-            &[(address, 2)],
-            Duration::from_millis(400),
-        )
-        .await
-        .expect("the member answers");
-        assert_eq!(past_the_end, WaitAnswer::Quiet);
-        assert!(started.elapsed() >= Duration::from_millis(400));
+        let past_the_end = {
+            let (client, endpoint, marks) = (client, member.endpoint.clone(), vec![(address, 2)]);
+            tokio::spawn(async move {
+                crate::sdk::b0x_sdk::wait_on_member(&client, &endpoint, &marks).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !past_the_end.is_finished(),
+            "a wait whose mark is past the spool's last entry was answered"
+        );
+        past_the_end.abort();
     }
 
     /// The back-off starts at one second after the third quick round in a

@@ -16725,9 +16725,9 @@ export class SequencedBatchEnvelope extends Message<SequencedBatchEnvelope> {
 /**
  * A device waiting on its spools (storage spec §8, long-poll). The node
  * answers as soon as any listed spool holds an entry at or after the position
- * given for it, or with none listed once `wait_ms` has passed. Nothing is read,
- * marked or changed by a wait: a device that never waits reads exactly what it
- * would have, only later.
+ * given for it, or with no content once its own bound has passed. Nothing is
+ * read, marked or changed by a wait: a device that never waits reads exactly
+ * what it would have, only later.
  *
  * @generated from message dsm.B0xWaitMark
  */
@@ -16784,13 +16784,6 @@ export class B0xWaitRequest extends Message<B0xWaitRequest> {
    */
   marks: B0xWaitMark[] = [];
 
-  /**
-   * how long the node may hold the request; the node caps it
-   *
-   * @generated from field: uint32 wait_ms = 2;
-   */
-  waitMs = 0;
-
   constructor(data?: PartialMessage<B0xWaitRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -16800,7 +16793,6 @@ export class B0xWaitRequest extends Message<B0xWaitRequest> {
   static readonly typeName = "dsm.B0xWaitRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "marks", kind: "message", T: B0xWaitMark, repeated: true },
-    { no: 2, name: "wait_ms", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): B0xWaitRequest {

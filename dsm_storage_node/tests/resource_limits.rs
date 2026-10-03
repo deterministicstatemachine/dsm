@@ -31,6 +31,7 @@ fn limits(concurrency_limit: usize, request_timeout: Duration) -> AppLimits {
         body_limit_bytes: 1_048_576,
         concurrency_limit,
         request_timeout,
+        wait_bound: dsm_storage_node::api::transport::b0x::MAX_WAIT,
     }
 }
 
@@ -214,20 +215,25 @@ fn a_connection_that_never_finishes_its_headers_is_closed() {
 
 /// A device's wait on its spools is held on purpose, so it sits outside the
 /// node's request time and its count of requests in flight. With one slot and
-/// a one-second request time, a wait held for longer than that is answered
-/// `200` with nothing ready, not `408`, and a health check made while it is
-/// held is served at once.
+/// a one-second request time, a wait held for its 2.5-second bound is answered
+/// `204` once the bound passes, not `408` at the request time, and a health
+/// check made while it is held is served at once.
 #[test]
 fn a_held_wait_takes_no_slot_and_outlasts_the_request_time() {
     common::runtime().block_on(async {
-        let app = node("rl_wait", limits(1, Duration::from_secs(1))).await;
-        let spool = dsm::utils::text_id::encode_base32_crockford(&[0x5Bu8; 32]);
+        let app = node(
+            "rl_wait",
+            AppLimits {
+                wait_bound: Duration::from_millis(2_500),
+                ..limits(1, Duration::from_secs(1))
+            },
+        )
+        .await;
         let request = dsm::types::proto::B0xWaitRequest {
             marks: vec![dsm::types::proto::B0xWaitMark {
-                address: spool,
+                address: dsm::utils::text_id::encode_base32_crockford(&[0x5Bu8; 32]),
                 from_seq: 1,
             }],
-            wait_ms: 2_500,
         };
         let wait = common::ok_or_panic(
             Request::builder()
@@ -252,22 +258,10 @@ fn a_held_wait_takes_no_slot_and_outlasts_the_request_time() {
             Ok(joined) => common::ok_or_panic(common::ok_or_panic(joined, "task"), "answer"),
             Err(elapsed) => panic!("the wait was never answered: {elapsed}"),
         };
-        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(answer.status(), StatusCode::NO_CONTENT);
         assert!(
             started.elapsed() >= Duration::from_millis(2_500),
-            "the wait was cut short of its time"
-        );
-        let body = common::ok_or_panic(
-            axum::body::to_bytes(answer.into_body(), usize::MAX).await,
-            "body",
-        );
-        let ready = common::ok_or_panic(
-            <dsm::types::proto::B0xWaitResponse as prost::Message>::decode(body.as_ref()),
-            "a wait answer",
-        );
-        assert!(
-            ready.ready.is_empty(),
-            "nothing landed, and the wait named a spool"
+            "the wait was cut short of its bound"
         );
     });
 }

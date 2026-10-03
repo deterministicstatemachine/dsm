@@ -299,6 +299,7 @@ async fn async_main() -> Result<()> {
             request_timeout: std::time::Duration::from_secs(u64::try_from(
                 server_config.request_timeout_secs,
             )?),
+            wait_bound: dsm_storage_node::api::transport::b0x::MAX_WAIT,
         },
     );
 
