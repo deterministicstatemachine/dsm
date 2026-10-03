@@ -9,7 +9,7 @@
 //! by making the frontend the authority over inbox discovery timing.
 
 use prost::Message;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
@@ -40,6 +40,21 @@ const FOREGROUND_POLL_INTERVAL_MS: u64 = 5_000;
 
 /// Number of consecutive eager-interval polls before reverting to default.
 const EAGER_POLL_CYCLES: u32 = 5;
+
+/// Poll interval while settlement work is outstanding and the inbox waiter's
+/// waits cover the fleet ([`crate::sdk::inbox_waiter::covers_fleet`]): a
+/// reply or a certificate wakes a sync the moment it lands, and this poll
+/// only retries what an arrival does not drive — a release object not yet
+/// fetchable, a delivery that failed.
+const COVERED_SETTLEMENT_POLL_INTERVAL_MS: u64 = 5_000;
+
+/// Poll interval while the app is on screen, nothing is settling, and the
+/// waits cover the fleet: a safety net only, an arrival wakes a sync at once.
+const COVERED_FOREGROUND_POLL_INTERVAL_MS: u64 = 30_000;
+
+/// Poller cycles completed in this process, and the signal each one gives.
+static CYCLES_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static CYCLE_DONE: once_cell::sync::Lazy<Notify> = once_cell::sync::Lazy::new(Notify::new);
 
 /// Global poller state.
 static POLLER_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -161,6 +176,8 @@ pub fn start_poller() {
             }
 
             let (processed, pulled, more_pending) = run_inbox_sync_cycle_counted("poll").await;
+            CYCLES_COMPLETED.fetch_add(1, Ordering::SeqCst);
+            CYCLE_DONE.notify_waiters();
             #[cfg(test)]
             POLLER_CYCLE_DONE.notify_waiters();
             // Settlement-urgent covers BOTH directions: the sender awaiting an
@@ -189,15 +206,21 @@ pub fn start_poller() {
                 eager_remaining = eager_remaining.saturating_sub(1);
             }
 
-            let interval_ms = if pending_gate_active {
-                PENDING_GATE_POLL_INTERVAL_MS
+            let activity = if pending_gate_active {
+                Activity::Settling
             } else if crate::sdk::session_manager::app_in_foreground() {
-                FOREGROUND_POLL_INTERVAL_MS
+                Activity::OnScreen
             } else if eager_remaining > 0 {
-                EAGER_POLL_INTERVAL_MS
+                Activity::Eager
             } else {
-                DEFAULT_POLL_INTERVAL_MS
+                Activity::Idle
             };
+            let waits = if crate::sdk::inbox_waiter::covers_fleet() {
+                Waits::CoverFleet
+            } else {
+                Waits::DoNotCover
+            };
+            let interval_ms = poll_interval_ms(activity, waits);
 
             // Wait for either the poll interval or a wake-up signal.
             tokio::select! {
@@ -210,6 +233,59 @@ pub fn start_poller() {
 
         log::info!("[inbox_poller] Background poller stopped");
     });
+    crate::sdk::inbox_waiter::start();
+}
+
+/// What the device is doing, as the poller's cadence reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Activity {
+    /// Settlement work is outstanding ([`has_pending_settlement_work`]).
+    Settling,
+    /// The app is on screen and nothing is settling.
+    OnScreen,
+    /// A recent cycle took something: follow-ups come soon.
+    Eager,
+    /// None of these.
+    Idle,
+}
+
+/// Whether the inbox waiter's waits cover the fleet
+/// ([`crate::sdk::inbox_waiter::covers_fleet`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Waits {
+    CoverFleet,
+    DoNotCover,
+}
+
+/// The time to the next poll: the settlement cadence while a transfer is
+/// settling, the on-screen cadence while the app is shown, the eager one
+/// after an exchange, else the idle minute. While the waits cover the fleet
+/// an arrival wakes a sync at once, so the settlement and on-screen cadences
+/// slow to a safety net.
+pub(crate) fn poll_interval_ms(activity: Activity, waits: Waits) -> u64 {
+    match (activity, waits) {
+        (Activity::Settling, Waits::CoverFleet) => COVERED_SETTLEMENT_POLL_INTERVAL_MS,
+        (Activity::Settling, Waits::DoNotCover) => PENDING_GATE_POLL_INTERVAL_MS,
+        (Activity::OnScreen, Waits::CoverFleet) => COVERED_FOREGROUND_POLL_INTERVAL_MS,
+        (Activity::OnScreen, Waits::DoNotCover) => FOREGROUND_POLL_INTERVAL_MS,
+        (Activity::Eager, _) => EAGER_POLL_INTERVAL_MS,
+        (Activity::Idle, _) => DEFAULT_POLL_INTERVAL_MS,
+    }
+}
+
+/// Poller cycles completed in this process.
+pub(crate) fn cycles_completed() -> u64 {
+    CYCLES_COMPLETED.load(Ordering::SeqCst)
+}
+
+/// Resolves when the next poller cycle completes.
+pub(crate) fn cycle_done() -> tokio::sync::futures::Notified<'static> {
+    CYCLE_DONE.notified()
+}
+
+/// Whether the poller has been told to stop.
+pub(crate) fn poller_stopping() -> bool {
+    POLLER_STOP.load(Ordering::SeqCst)
 }
 
 /// True while this device owes the network a settlement step that only polling
@@ -271,12 +347,14 @@ pub fn stop_poller_for_lifecycle() -> anyhow::Result<bool> {
 pub fn stop_poller() {
     POLLER_STOP.store(true, Ordering::SeqCst);
     POLLER_WAKE.notify_one();
+    crate::sdk::inbox_waiter::wake_to_stop();
 }
 
 /// Wake the poller immediately (e.g. app foreground, bilateral commit).
 pub fn resume_poller() {
     if POLLER_RUNNING.load(Ordering::SeqCst) {
         POLLER_WAKE.notify_one();
+        crate::sdk::inbox_waiter::start();
     } else {
         // If poller isn't running, start it.
         start_poller();
@@ -662,6 +740,24 @@ mod tests {
     }
 
     // ── push_inbox_event_to_webview is no-op on non-android ──
+
+    /// While a transfer settles the poller checks every 2 s, and every 5 s
+    /// while the app is on screen; with the waits covering the fleet an
+    /// arrival syncs at once, so those slow to 5 s and 30 s. An eager burst
+    /// and the idle minute are the same either way.
+    #[test]
+    fn the_waits_covering_the_fleet_slow_the_settling_and_on_screen_polls() {
+        use Activity::{Eager, Idle, OnScreen, Settling};
+        use Waits::{CoverFleet, DoNotCover};
+        assert_eq!(poll_interval_ms(Settling, DoNotCover), 2_000);
+        assert_eq!(poll_interval_ms(Settling, CoverFleet), 5_000);
+        assert_eq!(poll_interval_ms(OnScreen, DoNotCover), 5_000);
+        assert_eq!(poll_interval_ms(OnScreen, CoverFleet), 30_000);
+        assert_eq!(poll_interval_ms(Eager, DoNotCover), 8_000);
+        assert_eq!(poll_interval_ms(Eager, CoverFleet), 8_000);
+        assert_eq!(poll_interval_ms(Idle, DoNotCover), 60_000);
+        assert_eq!(poll_interval_ms(Idle, CoverFleet), 60_000);
+    }
 
     #[test]
     fn a_pending_route_hurries_the_poller_only_while_entries_are_taken() {
