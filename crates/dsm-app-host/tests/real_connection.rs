@@ -275,18 +275,26 @@ impl Host {
         }
     }
 
-    /// One faucet claim for this account.
+    /// ERA from the faucet for this account. A claim whose admission is held
+    /// (its evidence not yet final at every member a verifier reads) is
+    /// finished by the next claim, which then claims again, as a player
+    /// claiming again finishes it: the account may hold more than one payout.
     async fn claim_faucet(&self) {
         let request = pb::FaucetClaimRequest {
             device_id: self.device_id().await.to_vec(),
-        };
-        match self
-            .call(Route::Invoke, "faucet.claim", request.encode_to_vec())
-            .await
-        {
-            Ok(Payload::FaucetClaimResponse(r)) => assert!(r.success, "{}", r.message),
-            other => panic!("{} faucet.claim answered {other:?}", self.name),
         }
+        .encode_to_vec();
+        until(&format!("{} claims ERA", self.name), || {
+            let request = request.clone();
+            async move {
+                match self.call(Route::Invoke, "faucet.claim", request).await? {
+                    Payload::FaucetClaimResponse(r) if r.success => Ok(()),
+                    Payload::FaucetClaimResponse(r) => Err(r.message),
+                    other => Err(format!("faucet.claim answered {other:?}")),
+                }
+            }
+        })
+        .await;
     }
 
     /// What this account's `balance.list` reports it can spend of `ticker`:
