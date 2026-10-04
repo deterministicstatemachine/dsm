@@ -614,6 +614,34 @@ async fn a_wallet_connects_and_the_game_drives_it_within_its_grant() {
     assert_eq!(replayed.sessions[0].last_seq, outside);
     assert_eq!(replayed.sessions[0].last_error, "");
     assert_eq!(balance(&p.b, &wild), wild_before, "no payment ran again");
+
+    // An object the game did not issue, offered as if it had: the wallet
+    // roots it and finds its committed policy names another creator.
+    let foreign = create_token(&p.b, "OTHER", 5).await;
+    let posing = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::AcceptIssued(
+            generated::ConnectAcceptIssuedV1 {
+                anchor: foreign.to_vec(),
+            },
+        ),
+    )
+    .await;
+    sync_and_deliver(&p, &relay).await;
+    let entry = wallet_log(&p.b, &session, posing).await;
+    assert_eq!(
+        generated::ConnectOutcome::try_from(entry.outcome),
+        Ok(generated::ConnectOutcome::Failed),
+        "{}",
+        entry.detail
+    );
+    assert!(
+        entry.detail.contains("names another creator"),
+        "{}",
+        entry.detail
+    );
 }
 
 /// A wallet's answer is never evidence. An answer saying "paid" with no
