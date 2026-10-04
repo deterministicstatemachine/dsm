@@ -4630,6 +4630,7 @@ message ConnectPendingV1 {
   string display_name = 3;
   string summary      = 4; // the request as Rust renders it
   string reason       = 5; // why the grant does not cover it
+  bool   approved     = 6; // the player approved it: a payment waiting for its relationship with the application to settle, carried out by the next sync
 }
 message ConnectPendingListV1 {
   repeated ConnectPendingV1 pending = 1;
@@ -4727,7 +4728,15 @@ message ConnectReplyV1 {
     AppRequestBatchV1    requests = 7;
     ConnectAppStatusV1   status   = 8;
     ConnectRequestRefV1  request  = 9;
+    ConnectDecidedV1     decided  = 10;
   }
+}
+
+// connect.respond: what became of the player's decision, as Rust renders it.
+message ConnectDecidedV1 {
+  ConnectSessionV1 session = 1;
+  ConnectOutcome   outcome = 2; // UNSPECIFIED while an approved payment waits for its relationship with the application to settle
+  string           line    = 3; // what happened, for the screen to show as it is
 }
 
 // connect.app.offerOf: an offer this account made, by its digest, as its

@@ -124,6 +124,29 @@ enum Flow {
     NotYet(String),
 }
 
+/// One processor at a time: the replay guard is read and a request carried
+/// out under it as one step, whichever of the listener's sync, a sync the
+/// player starts, the player's own decision or a disconnect reaches it first.
+static PROCESSING: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+
+/// What became of a request the player approved.
+enum Approved {
+    /// Carried out or failed, and answered.
+    Done(generated::ConnectOutcome, String),
+    /// A payment waiting for its relationship with the application to
+    /// settle: the approval is kept and the next sync carries it out.
+    Waits(String),
+}
+
+/// The session `sid`, while its application is connected.
+fn connected(sid: &[u8; 32]) -> Result<store::WalletSession, String> {
+    store::session(sid)
+        .map_err(|e| e.to_string())?
+        .filter(|s| s.connected == store::SessionStatus::Connected)
+        .ok_or_else(|| "the application was disconnected".to_string())
+}
+
 /// Whether a payment to `app` can be constructed now. A relationship that is
 /// catching up is not a refusal: the payment waits for it.
 fn payment_waits(app: &[u8; 32]) -> Option<String> {
@@ -162,7 +185,7 @@ impl AppRouterImpl {
         let result = match i.method.as_str() {
             "connect.approve" => self.connect_approve(&i.args).await,
             "connect.respond" => self.connect_respond(&i.args).await,
-            "connect.disconnect" => connect_disconnect(&i.args),
+            "connect.disconnect" => connect_disconnect(&i.args).await,
             "connect.sync" => self.connect_sync().await,
             "connect.app.offer" => connect_app_offer(&i.args),
             "connect.app.accept" => self.connect_app_accept(&i.args).await,
@@ -314,36 +337,90 @@ impl AppRouterImpl {
         const ROUTE: &str = "connect.respond";
         let req: generated::ConnectRespondRequestV1 = body(args, ROUTE)?;
         let sid = d32(&req.session_id, "the session")?;
+        let one = PROCESSING.lock().await;
         let session = store::session(&sid)
             .map_err(|e| format!("{ROUTE}: {e}"))?
             .filter(|s| s.connected == store::SessionStatus::Connected)
             .ok_or_else(|| format!("{ROUTE}: no such connected application"))?;
-        let pending = store::pending(&sid, req.seq)
+        let held = store::pending(&sid, req.seq)
             .map_err(|e| format!("{ROUTE}: {e}"))?
             .ok_or_else(|| format!("{ROUTE}: request {} is not waiting", req.seq))?;
-        let (request_body, request) = read_request(&pending.request, &session)?;
+        let (request_body, request) = read_request(&held.request, &session)?;
         let summary = describe_request(&request);
-        let executed = match generated::ConnectDecision::try_from(req.decision) {
+        let name = session.display_name.clone();
+        let (outcome, line) = match generated::ConnectDecision::try_from(req.decision) {
             Ok(generated::ConnectDecision::Approve) => {
-                self.execute(&session, request_body.seq, &request).await
+                match self.carry_out_approved(&session, &held).await? {
+                    Approved::Done(generated::ConnectOutcome::CarriedOut, _) => (
+                        generated::ConnectOutcome::CarriedOut,
+                        format!("{name}: {summary}, carried out."),
+                    ),
+                    Approved::Done(outcome, reason) => {
+                        (outcome, format!("{name}: {summary}, not carried out: {reason}"))
+                    }
+                    Approved::Waits(why) => (
+                        generated::ConnectOutcome::Unspecified,
+                        format!(
+                            "{name}: {summary}, approved. It is carried out once the relationship with {name} settles: {why}"
+                        ),
+                    ),
+                }
             }
-            Ok(generated::ConnectDecision::Decline) => Executed {
-                outcome: generated::ConnectOutcome::Declined,
-                reason: "the player declined it".into(),
-                result: None,
-            },
+            Ok(generated::ConnectDecision::Decline) => {
+                let declined = Executed {
+                    outcome: generated::ConnectOutcome::Declined,
+                    reason: "the player declined it".into(),
+                    result: None,
+                };
+                self.finish(&session, request_body.seq, summary.clone(), declined, None)?;
+                (
+                    generated::ConnectOutcome::Declined,
+                    format!("{name}: {summary}, declined."),
+                )
+            }
             _ => return Err(format!("{ROUTE}: approve or decline")),
         };
-        // Approved by hand, outside the grant: it never counts against the
-        // grant's totals.
-        self.finish(&session, request_body.seq, summary, executed, None)?;
+        drop(one);
         // The answer goes out now; the queue behind it moves on.
         let delivered = match deliver_owed(&session).await {
             Ok(()) => String::new(),
             Err(e) => format!("the answer is owed, not delivered yet: {e}"),
         };
         crate::sdk::connect::wallet::start_listener()?;
-        Ok(Reply::Session(wallet_session_view(&session, delivered)?))
+        let now = store::session(&sid)
+            .map_err(|e| format!("{ROUTE}: {e}"))?
+            .ok_or_else(|| format!("{ROUTE}: the session vanished"))?;
+        Ok(Reply::Decided(generated::ConnectDecidedV1 {
+            session: Some(wallet_session_view(&now, delivered)?),
+            outcome: outcome as i32,
+            line,
+        }))
+    }
+
+    /// Carry out a request the player approved. A payment waits while the
+    /// relationship with the application is catching up: the approval is
+    /// kept, and the next sync carries it out. Called under [`PROCESSING`].
+    async fn carry_out_approved(
+        &self,
+        session: &store::WalletSession,
+        held: &store::PendingRow,
+    ) -> Result<Approved, String> {
+        let (request_body, request) = read_request(&held.request, session)?;
+        if let Request::Pay { .. } = &request {
+            if let Some(why) = payment_waits(&session.app_device_id) {
+                store::approve_pending(&session.session_id, request_body.seq)
+                    .map_err(|e| e.to_string())?;
+                return Ok(Approved::Waits(why));
+            }
+        }
+        let summary = describe_request(&request);
+        let executed = self.execute(session, request_body.seq, &request).await;
+        let outcome = executed.outcome;
+        let reason = executed.reason.clone();
+        // Approved by hand, outside the grant: it never counts against the
+        // grant's totals.
+        self.finish(session, request_body.seq, summary, executed, None)?;
+        Ok(Approved::Done(outcome, reason))
     }
 
     /// One pass over every connected application: deliver owed answers,
@@ -373,26 +450,39 @@ impl AppRouterImpl {
     async fn sync_session(&self, session: &store::WalletSession) -> Result<(), String> {
         let relay = Relay::new(&session.endpoint, session.cert_pin)?;
         deliver_owed(session).await?;
-        let waiting = store::pending_all()
+        // A request waiting for the player holds every later one behind it.
+        // One the player approved is carried out once it can be.
+        let held = store::pending_all()
             .map_err(|e| e.to_string())?
             .into_iter()
-            .any(|p| p.session_id == session.session_id);
-        if waiting {
-            return Ok(());
+            .find(|p| p.session_id == session.session_id);
+        if let Some(held) = held {
+            if held.state != store::PendingState::Approved {
+                return Ok(());
+            }
+            let one = PROCESSING.lock().await;
+            let current = connected(&session.session_id)?;
+            let approved = self.carry_out_approved(&current, &held).await?;
+            drop(one);
+            if let Approved::Waits(why) = approved {
+                return Err(format!(
+                    "request {} is approved and waits for the relationship with the application to settle: {why}",
+                    held.seq
+                ));
+            }
+            deliver_owed(&current).await?;
         }
-        let batch = relay
-            .requests(&session.session_id, session.last_seq)
-            .await?;
+        let after = connected(&session.session_id)?.last_seq;
+        let batch = relay.requests(&session.session_id, after).await?;
         for request in &batch.requests {
-            // Re-read: each processed request moves the guard.
-            let current = store::session(&session.session_id)
-                .map_err(|e| e.to_string())?
-                .filter(|s| s.connected == store::SessionStatus::Connected)
-                .ok_or_else(|| "the application was disconnected".to_string())?;
-            match self
+            let one = PROCESSING.lock().await;
+            // Re-read under the lock: each processed request moves the guard.
+            let current = connected(&session.session_id)?;
+            let flow = self
                 .process(&current, &relay, &request.encode_to_vec())
-                .await?
-            {
+                .await?;
+            drop(one);
+            match flow {
                 Flow::Processed => deliver_owed(&current).await?,
                 Flow::Seen => {}
                 Flow::Waiting => break,
@@ -453,6 +543,7 @@ impl AppRouterImpl {
                     seq,
                     request: request_bytes.to_vec(),
                     reason: reason.clone(),
+                    state: store::PendingState::Waiting,
                 })
                 .map_err(|e| e.to_string())?;
                 // A notice that it waits: what the application may show
@@ -999,6 +1090,7 @@ fn pending_list() -> Result<generated::ConnectPendingListV1, String> {
             display_name: session.display_name.clone(),
             summary,
             reason: row.reason,
+            approved: row.state == store::PendingState::Approved,
         });
     }
     Ok(generated::ConnectPendingListV1 { pending })
@@ -1024,10 +1116,13 @@ fn connect_log(params: &[u8]) -> Result<Reply, String> {
     Ok(Reply::Log(generated::ConnectLogV1 { entries }))
 }
 
-fn connect_disconnect(args: &[u8]) -> Result<Reply, String> {
+async fn connect_disconnect(args: &[u8]) -> Result<Reply, String> {
     let req: generated::ConnectSessionRefV1 = body(args, "connect.disconnect")?;
     let sid = d32(&req.session_id, "the session")?;
+    // A request being carried out finishes first; none starts after.
+    let one = PROCESSING.lock().await;
     store::disconnect(&sid).map_err(|e| format!("connect.disconnect: {e}"))?;
+    drop(one);
     let session = store::session(&sid)
         .map_err(|e| format!("connect.disconnect: {e}"))?
         .ok_or_else(|| "connect.disconnect: the session vanished".to_string())?;

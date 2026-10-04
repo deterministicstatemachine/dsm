@@ -880,12 +880,14 @@ fn create_schema(conn: &Connection) -> Result<()> {
             spent          INTEGER NOT NULL,
             PRIMARY KEY (session_id, policy_commit)
         );
-        -- A request outside its grant, waiting for the player.
+        -- A request outside its grant, waiting for the player, or approved by
+        -- the player and waiting for its relationship with the application.
         CREATE TABLE IF NOT EXISTS connect_pending(
             session_id  BLOB NOT NULL,
             seq         INTEGER NOT NULL,
             request     BLOB NOT NULL,
             reason      TEXT NOT NULL,
+            state       TEXT NOT NULL CHECK (state IN ('waiting', 'approved')),
             PRIMARY KEY (session_id, seq)
         );
         -- What the wallet did with each request it processed.

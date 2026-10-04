@@ -63,6 +63,15 @@ export interface Pending {
   displayName: string;
   summary: string;
   reason: string;
+  /** Approved by the player: a payment waiting for its relationship with the app to settle. */
+  approved: boolean;
+}
+
+/** What became of the player's decision, as Rust renders it. */
+export interface Decided {
+  session: Session;
+  outcome: 'carriedOut' | 'declined' | 'failed' | 'waits';
+  line: string;
 }
 
 /** What the wallet did with one request. */
@@ -142,15 +151,28 @@ export async function pending(): Promise<Pending[]> {
     displayName: p.displayName,
     summary: p.summary,
     reason: p.reason,
+    approved: p.approved,
   }));
 }
 
 /** connect.respond: the player's decision on a waiting request. */
-export async function respond(sessionId: Uint8Array, seq: bigint, choice: 'approve' | 'decline'): Promise<Session> {
+export async function respond(sessionId: Uint8Array, seq: bigint, choice: 'approve' | 'decline'): Promise<Decided> {
   const decision = choice === 'approve' ? pb.ConnectDecision.APPROVE : pb.ConnectDecision.DECLINE;
   const r = await invoke('connect.respond', new pb.ConnectRespondRequestV1({ sessionId: new Uint8Array(sessionId), seq, decision }).toBinary());
-  if (r.case !== 'session') throw new Error(`connect.respond answered ${r.case ?? 'nothing'}`);
-  return session(r.value);
+  if (r.case !== 'decided') throw new Error(`connect.respond answered ${r.case ?? 'nothing'}`);
+  const s = r.value.session;
+  if (s === undefined) throw new Error('connect.respond answered no session');
+  return { session: session(s), outcome: decidedOutcome(r.value.outcome), line: r.value.line };
+}
+
+function decidedOutcome(o: pb.ConnectOutcome): Decided['outcome'] {
+  switch (o) {
+    case pb.ConnectOutcome.CARRIED_OUT: return 'carriedOut';
+    case pb.ConnectOutcome.DECLINED: return 'declined';
+    case pb.ConnectOutcome.FAILED: return 'failed';
+    case pb.ConnectOutcome.UNSPECIFIED: return 'waits';
+    default: throw new Error(`connect.respond answered outcome ${o}`);
+  }
 }
 
 /** connect.disconnect: the application's grant ends. */
