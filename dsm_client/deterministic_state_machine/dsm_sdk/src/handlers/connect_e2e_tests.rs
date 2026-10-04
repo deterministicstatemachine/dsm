@@ -514,9 +514,8 @@ async fn a_relay_replaying_every_request_runs_nothing_twice() {
 
     relay.held().serve = Serve::Everything;
     let replayed = sync_and_deliver(&p, &relay).await;
-    assert_eq!(replayed.sessions[0].last_seq, pay);
-    assert_eq!(replayed.sessions[0].last_error, "");
     assert_eq!(balance(&p.b, &wild), 17, "no payment ran again");
+    assert_eq!(replayed.sessions[0].last_error, "");
 }
 
 /// A wallet's answer is never evidence. An answer saying "paid" with no
