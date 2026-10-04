@@ -89,6 +89,11 @@ pub fn granted_scopes(accept_body: &[u8]) -> Result<Vec<Scope>, String> {
 
 /// A token as the player reads it: its symbol and an amount in its decimals,
 /// or its anchor's first characters while this device has not rooted it.
+/// An amount as the player reads it, by what this device has rooted.
+pub(crate) fn amount_text(policy_commit: &[u8; 32], amount: u64) -> String {
+    amount_of(policy_commit, amount, &Names::new())
+}
+
 fn amount_of(policy_commit: &[u8; 32], amount: u64, names: &Names) -> String {
     match name_of(policy_commit, names) {
         Some((symbol, decimals)) => format!(
