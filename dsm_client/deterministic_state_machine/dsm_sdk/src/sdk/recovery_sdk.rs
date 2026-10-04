@@ -332,10 +332,12 @@ impl RecoverySDK {
 
         // Cache the BIP39 wallet seed — the canonical Genesis v2 root-secret input
         // (mnemonic -> wallet_seed -> s0 -> Smaster). Lives for the unlocked session so
-        // device-key + per-step EK/ML-KEM derivations can re-derive it, and is ALSO sealed
-        // at rest (hardware Keystore on Android) so the signer rebuilds on cold start
-        // without the mnemonic. The seed is a one-way BIP39 derivation — NOT the mnemonic,
-        // never reversible to it; the mnemonic itself is never persisted.
+        // device-key + per-step EK/ML-KEM derivations can re-derive it. On Android it is
+        // ALSO sealed at rest under the Keystore key so the signer rebuilds on cold start
+        // without the mnemonic; off Android no platform key holds it, so nothing is
+        // written and the next start unlocks from the mnemonic. The seed is a one-way BIP39
+        // derivation — NOT the mnemonic, never reversible to it; the mnemonic itself is
+        // never persisted.
         {
             let seed = bip39::Mnemonic::parse(mnemonic)
                 .map_err(|e| DsmError::InvalidState(format!("invalid mnemonic: {e}")))?
@@ -348,13 +350,15 @@ impl RecoverySDK {
             }
             // Seal the seed at rest (non-fatal: the session is already usable; failure only
             // means the next cold start will require the mnemonic again).
+            #[cfg(all(target_os = "android", feature = "jni"))]
             if let Err(e) = Self::persist_wallet_seed(&seed) {
                 log::warn!("[RECOVERY_SDK] Failed to seal wallet seed (non-fatal): {e}");
             }
         }
 
-        // Persist the key encrypted by a device-bound wrapping key so it
-        // survives app restarts without requiring the mnemonic again.
+        // Seal the recovery key under the same Keystore key so the NFC capsule keeps
+        // refreshing across app restarts without the mnemonic. Off Android: memory only.
+        #[cfg(all(target_os = "android", feature = "jni"))]
         if let Err(e) = Self::persist_recovery_key(&key) {
             log::warn!("[RECOVERY_SDK] Failed to persist recovery key (non-fatal): {e}");
         }
@@ -1173,21 +1177,10 @@ impl RecoverySDK {
         Ok(receipt.content_id())
     }
 
-    /// Derive a device-bound wrapping key from device_id + genesis_hash.
-    /// Used to encrypt the recovery key before persisting to SQLite.
-    fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
-        let device_id = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| DsmError::InvalidState("Device ID not available".into()))?;
-        let genesis_hash = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
-        let mut hasher = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist\0");
-        hasher.update(&device_id);
-        hasher.update(&genesis_hash);
-        Ok(*hasher.finalize().as_bytes())
-    }
-
     /// Seal the BIP39 wallet seed at rest via the hardware-backed seed vault so the
     /// signer can be rebuilt on cold start without the mnemonic. The seed is a one-way
     /// derivation from the paper mnemonic (never the mnemonic, never reversible to it).
+    #[cfg(all(target_os = "android", feature = "jni"))]
     pub fn persist_wallet_seed(seed: &[u8]) -> Result<(), DsmError> {
         let blob = crate::sdk::seed_vault::seal(seed)?;
         crate::storage::client_db::recovery::store_encrypted_wallet_seed(&blob)
@@ -1204,6 +1197,7 @@ impl RecoverySDK {
     /// `Ok(true)` if the seed is now cached, `Ok(false)` if no sealed bundle exists.
     /// On a biometric/PIN-gated Keystore key, `seed_vault::open` triggers the platform
     /// auth prompt; a denied/absent auth surfaces as `Err` (fail closed → locked UI).
+    #[cfg(all(target_os = "android", feature = "jni"))]
     pub fn load_and_cache_wallet_seed() -> Result<bool, DsmError> {
         if Self::get_cached_wallet_seed().is_some() {
             return Ok(true);
@@ -1240,78 +1234,35 @@ impl RecoverySDK {
         }
     }
 
-    /// Encrypt the recovery key with a device-bound wrapping key and store in SQLite.
-    /// Format: nonce (24 bytes) || ciphertext+tag.
+    /// Seal the recovery key `K_R` under this device's Keystore key (the seed vault) and
+    /// store the blob, so the NFC capsule refreshes after a restart without the mnemonic.
+    #[cfg(all(target_os = "android", feature = "jni"))]
     fn persist_recovery_key(key: &[u8; 32]) -> Result<(), DsmError> {
-        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-        use chacha20poly1305::aead::Aead;
-
-        let wrapping_key = Self::device_wrapping_key()?;
-        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
-            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
-
-        // Nonce derived from wrapping key AND plaintext — safe even if the
-        // mnemonic (and therefore key) changes between persist calls.
-        let nonce_hash = {
-            let mut h = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist-nonce\0");
-            h.update(&wrapping_key);
-            h.update(key);
-            h.finalize()
-        };
-        let nonce = XNonce::from_slice(&nonce_hash.as_bytes()[..24]);
-
-        let ciphertext = cipher
-            .encrypt(nonce, key.as_ref())
-            .map_err(|e| DsmError::InvalidState(format!("recovery key encryption: {e}")))?;
-
-        // Store nonce || ciphertext so decrypt doesn't need to re-derive from plaintext.
-        let mut blob = Vec::with_capacity(24 + ciphertext.len());
-        blob.extend_from_slice(nonce.as_slice());
-        blob.extend_from_slice(&ciphertext);
-
+        let blob = crate::sdk::seed_vault::seal(key)?;
         crate::storage::client_db::recovery::store_encrypted_recovery_key(&blob)
-            .map_err(|e| DsmError::InvalidState(format!("persist encrypted key: {e}")))?;
-
+            .map_err(|e| DsmError::InvalidState(format!("persist sealed recovery key: {e}")))?;
         log::info!(
-            "[RECOVERY_SDK] Recovery key persisted (encrypted, {} bytes)",
+            "[RECOVERY_SDK] Recovery key sealed at rest ({} bytes)",
             blob.len()
         );
         Ok(())
     }
 
-    /// Load the persisted encrypted recovery key, decrypt it, and cache in memory.
-    /// Returns Ok(true) if loaded, Ok(false) if no persisted key exists.
+    /// Open the sealed recovery key with this device's Keystore key and cache it in
+    /// memory. Answers whether a sealed key was there to open; none is not an error.
+    #[cfg(all(target_os = "android", feature = "jni"))]
     fn load_persisted_recovery_key() -> Result<bool, DsmError> {
-        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-        use chacha20poly1305::aead::Aead;
-
         let blob = match crate::storage::client_db::recovery::load_encrypted_recovery_key() {
             Ok(Some(b)) => b,
             Ok(None) => return Ok(false),
             Err(e) => {
                 return Err(DsmError::InvalidState(format!(
-                    "load encrypted recovery key: {e}"
+                    "load sealed recovery key: {e}"
                 )))
             }
         };
 
-        if blob.len() < 24 {
-            return Err(DsmError::InvalidState(format!(
-                "persisted key blob too short: {} bytes",
-                blob.len()
-            )));
-        }
-
-        let nonce = XNonce::from_slice(&blob[..24]);
-        let ciphertext = &blob[24..];
-
-        let wrapping_key = Self::device_wrapping_key()?;
-        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
-            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
-
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| DsmError::InvalidState(format!("recovery key decryption: {e}")))?;
+        let plaintext = crate::sdk::seed_vault::open(&blob)?;
 
         if plaintext.len() != 32 {
             return Err(DsmError::InvalidState(format!(
@@ -1948,32 +1899,42 @@ impl RecoverySDK {
     /// Refresh the pending NFC capsule if backup is enabled and a key is available.
     ///
     /// Called by the transport layer (Kotlin) after every state-mutating operation.
-    /// If the in-memory key was lost (app restart), this auto-loads the persisted
-    /// encrypted key from SQLite before creating the capsule.
+    /// If the in-memory key was lost (app restart), on Android this opens the
+    /// Keystore-sealed key from SQLite before creating the capsule. Off Android the
+    /// key is held in memory only, so after a restart the refresh waits for the mnemonic.
     pub fn maybe_refresh_nfc_capsule() {
         if !Self::is_nfc_backup_enabled() {
             return;
         }
 
-        // Auto-load persisted key if the in-memory cache was lost (app restart).
+        // Open the sealed key if the in-memory cache was lost (app restart).
+        #[cfg(all(target_os = "android", feature = "jni"))]
         if !Self::has_cached_key() {
-            log::info!("[NFC_BACKUP] No cached key — attempting to load persisted key");
+            log::info!("[NFC_BACKUP] No cached key — attempting to open the sealed key");
             match Self::load_persisted_recovery_key() {
                 Ok(true) => {
-                    log::info!("[NFC_BACKUP] Persisted key loaded successfully");
+                    log::info!("[NFC_BACKUP] Sealed key opened");
                 }
                 Ok(false) => {
                     log::warn!(
-                        "[NFC_BACKUP] No persisted key found — capsule refresh skipped. \
+                        "[NFC_BACKUP] No sealed key found — capsule refresh skipped. \
                          User must re-enter mnemonic via Settings."
                     );
                     return;
                 }
                 Err(e) => {
-                    log::warn!("[NFC_BACKUP] Failed to load persisted key: {e}");
+                    log::warn!("[NFC_BACKUP] Failed to open the sealed key: {e}");
                     return;
                 }
             }
+        }
+        #[cfg(not(all(target_os = "android", feature = "jni")))]
+        if !Self::has_cached_key() {
+            log::warn!(
+                "[NFC_BACKUP] No recovery key in memory, and none is held at rest off \
+                 Android — capsule refresh skipped until the mnemonic is entered."
+            );
+            return;
         }
 
         match Self::create_capsule_from_current_state_with_cached_key() {
@@ -2338,5 +2299,50 @@ mod tests {
                 (b"a2".to_vec(), 2)
             ]
         );
+    }
+
+    /// Off Android no platform key holds the wallet seed or the recovery key, so an
+    /// unlock writes neither to the client store: a host unlocks from its mnemonic on
+    /// every start (owner ruling, 2026-10-04). Unlocked as a host restarts — its identity
+    /// installed, then the mnemonic — so a wrap keyed on the device's public ids, or on a
+    /// constant the program carries, would have something to write: either is readable
+    /// by anyone holding the store.
+    #[cfg(not(all(target_os = "android", feature = "jni")))]
+    #[test]
+    #[serial_test::serial]
+    fn off_android_an_unlock_leaves_no_secret_at_rest() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let identity = crate::economic_fixtures::create_identity(0x5e);
+        assert_eq!(
+            crate::sdk::app_state::AppState::get_device_id().as_deref(),
+            Some(identity.device_id.as_slice()),
+            "the identity is installed before the restart's unlock"
+        );
+
+        RecoverySDK::derive_and_cache_key(&crate::economic_fixtures::test_mnemonic(0x5e))
+            .expect("unlock from the mnemonic");
+        assert_eq!(
+            RecoverySDK::get_cached_wallet_seed().as_deref(),
+            Some(identity.wallet_seed.as_slice()),
+            "the session holds the wallet seed"
+        );
+        assert!(RecoverySDK::has_cached_key(), "the session holds K_R");
+
+        let sealed_seed = crate::storage::client_db::recovery::load_encrypted_wallet_seed()
+            .expect("read the store");
+        assert_eq!(
+            sealed_seed, None,
+            "no wallet seed is written at rest off Android"
+        );
+        let sealed_key = crate::storage::client_db::recovery::load_encrypted_recovery_key()
+            .expect("read the store");
+        assert_eq!(
+            sealed_key, None,
+            "no recovery key is written at rest off Android"
+        );
+
+        RecoverySDK::clear_cached_key();
     }
 }

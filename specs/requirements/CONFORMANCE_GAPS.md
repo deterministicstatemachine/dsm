@@ -449,7 +449,7 @@ The deterministic clock (`dsm::utils::deterministic_time`, the SDK's `util::dete
 | `dsm_storage_node` · replication.rs, api/transport/gossip.rs, api/registry/discovery.rs | Gossip, replication and discovery carry ticks (`StorageNodeInfoV1.last_seen_tick`, `GossipMessageV1.sender_tick`, `AdminMaintenanceResponseV1.tick`). MR-DSM-0055 allows logical ticks for ordering inside a node; the storage-node sweep checks that these are logical, advance, and reach nothing protocol-relevant, and that gossip exists in the storage spec at all. Resolved (2026-10-01, `fix/dsm-core-receiver-checks-and-node-clock-row`): the three files and every one of the tick fields are gone from the tree (`git grep` outside `specs/` finds none of `last_seen_tick`, `sender_tick`, `GossipMessageV1`, `StorageNodeInfoV1`, `AdminMaintenanceResponseV1`). The node orders by arrival sequence, and `dsm_storage_node::no_clock_reads::no_node_source_reads_a_clock` holds MR-DSM-0055. |
 | frontend | Talks to storage nodes directly (`storageNodeService.getObject`, `objectBrowserService`, `E2E.storage.integration`), a layer skip; `DiagnosticsBundle.tick: 0` and `PendingBilateralRecord.tick: idx + 1` are fabricated; `useTransactions` defaults type and status. Frontend sweep. The storage parts are resolved on `fix/frontend-storage-integration` and `useTransactions` on `fix/frontend-sweep-continued` (§6.29); the fabricated `PendingBilateralRecord.tick` was removed by #977; the store's `seq` is the order the native query returned the rows in, display only. |
 | `dsm` · sofi/exercise.rs, sofi/registration.rs, economic/register.rs, economic/native_reserve.rs · `check_*_completion` | The completion-proof verifiers (storage §9 rule 9) have no production caller: no party yet receives a kept proof to check. The two under `sofi` are in the G1 baseline with this reason. |
-| recovery boundary | `get_latest_capsule_metadata` counts counterparties through unrelated tables with `unwrap_or(0)` under a "for now … proxy" comment; `recovery_sdk` reads the genesis hash with `unwrap_or_default()`. |
+| recovery boundary | `get_latest_capsule_metadata` counts counterparties through unrelated tables with `unwrap_or(0)` under a "for now … proxy" comment; `recovery_sdk` reads the genesis hash with `unwrap_or_default()`. The read that fed the recovery-key wrap is deleted with the wrap (§6.72); the capsule builder's read remains. |
 
 ### 6.9 The dead-code pass (branch `fix/beta-skeleton-compile`, 2026-09-24)
 
@@ -2724,6 +2724,44 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 **A clean cut.** Every transfer's operation bytes change shape, so its digest, op id and tip do too. Nothing signed under tag 3 decodes. This ships with SPHINCS+ version 2 (§6.70), which already re-provisions every device.
 
 **Open.** On BLE the terms ride beside the operation in the clear, as the prepare always has: BLE is a direct link between the two parties, and the ruling chose it. `TokenSDK`'s generic transfer and its token-creation fee transfer commit to terms that nothing carries, so a recipient could not open them. Neither is reached today: `TokenOperation::Transfer` is built nowhere outside `TokenSDK`, and the one `TokenOperation::Create` the SDK builds (dBTC registration) charges no fee.
+
+### 6.72 The wallet seed and the recovery key are sealed only under a platform key (`security/platform-vault-seed-and-recovery-key`, pre-audit item 9, 2026-10-04)
+
+**Scope.** Recovery and identity are a dependency boundary this round. This records two at-rest secrets the in-scope SDK writes and fixes them; it does not audit the recovery subsystem.
+
+**The finding.**
+- **The wallet seed, off Android.** On every build but Android with `jni`, `sdk::seed_vault` sealed the Genesis v2 wallet seed with XChaCha20-Poly1305 under `host_software_key()`, a key derived from the constant `DSM/seed-vault-host-key/v1`. Every build holds that key, so the blob `RecoverySDK::derive_and_cache_key` → `persist_wallet_seed` writes to the client store (`encrypted_wallet_seed`) was readable by anyone holding the store. No production build reached this path until `crates/dsm-app-host` (DSM Amendment A11, #1112), which runs the SDK on macOS and Linux. That host unlocks from its operator's mnemonic file and never reads the blob, but every unlock wrote it. Nothing off Android reads it: `load_and_cache_wallet_seed`'s one caller is `init::build_ble_stack_for_identity`, compiled for Android with `bluetooth` only.
+- **The recovery key, on every platform.** `persist_recovery_key` wrapped the NFC recovery key `K_R` under `BLAKE3(DSM/recovery-persist; device_id ‖ genesis_hash)`, Android included, and the comment called the wrap "device-bound". Both inputs are public identifiers, and a missing genesis read as zero bytes (`unwrap_or_default()`). Anyone holding the store and the device's public ids could unwrap `K_R` (`encrypted_recovery_key`), and with it open the device's NFC recovery capsules.
+
+**The ruling.** Owner, 2026-10-04: "No seal off Android" for the wallet seed, and "Seal K_R in the vault" for the recovery key.
+
+**The fix.**
+- `sdk::seed_vault` is compiled for Android with `jni` only. `seal` and `open` are the `KeystoreVault` upcall. `host_software_key`, the host XChaCha20 fallback and its tests are deleted. `persist_wallet_seed` and `load_and_cache_wallet_seed` exist on Android only.
+- `derive_and_cache_key` seals the wallet seed and `K_R` on Android only. Elsewhere both live in memory for the session, and a host unlocks from its mnemonic on every start, as `dsm-app-host` does. Off Android nothing is refused: the capability does not exist there, and the compiler says so.
+- `persist_recovery_key` and `load_persisted_recovery_key` seal and open `K_R` through `seed_vault`, under the Keystore key that holds the seed. `device_wrapping_key` is deleted, and with it the genesis read that defaulted to zero bytes.
+- `maybe_refresh_nfc_capsule`: on Android, after a restart it opens the sealed key. Off Android, with no key in memory, it skips the refresh and says the mnemonic is needed.
+- Kotlin: `KeystoreSealer(alias)` is one `AndroidKeyStore` AES-256/GCM key. `KeystoreVault` is the production instance on `dsm_seed_vault_key_v1`, and its JNI surface is unchanged. `KeystoreVault.wipeKey`, which nothing called, is deleted.
+
+**Tests.**
+- `dsm_sdk::sdk::recovery_sdk::tests::off_android_an_unlock_leaves_no_secret_at_rest`: a device is created as wallet creation creates it, then unlocked from its mnemonic as a host restart unlocks it. The session holds the wallet seed and `K_R`; the store holds neither blob.
+- Android instrumented, `com.dsm.wallet.security.KeystoreVaultTest`, on the CI managed device (`pixel6Api34`, API 34 ATD), 3/3. Every key is a real `AndroidKeyStore` key under a test alias; the app's own alias is never touched.
+  - `aBlobSealedOnOneDeviceDoesNotOpenUnderAnotherDevicesKey`: a seed sealed under one alias opens under it and throws `AEADBadTagException` under another device's key.
+  - `aBlobDoesNotOpenOnceItsKeyIsGone`: with its alias deleted, the same alias's new key does not open the blob.
+  - `aSealedBlobCarriesNoPlaintextAndRefusesTampering`: the ciphertext is not the seed, and one flipped tag bit is refused.
+
+**Mutation controls.** Each was run on the committed code and restored afterwards.
+
+| Mutation | Red test |
+|---|---|
+| The constant-key host seal restored (`seed_vault`'s host fallback, `persist_wallet_seed` ungated) | `off_android_an_unlock_leaves_no_secret_at_rest` ("no wallet seed is written at rest off Android": a 104-byte blob in the store) |
+| `K_R` wrapped under `BLAKE3(device_id ‖ genesis_hash)` again, ungated | `off_android_an_unlock_leaves_no_secret_at_rest` ("no recovery key is written at rest off Android") |
+| `KeystoreSealer` keyed by one constant AES key instead of its Keystore alias | `aBlobSealedOnOneDeviceDoesNotOpenUnderAnotherDevicesKey` and `aBlobDoesNotOpenOnceItsKeyIsGone` ("expected AEADBadTagException to be thrown, but nothing was thrown"); the tamper test stays green, as it should |
+
+**A clean cut.** A `K_R` blob an Android device stored under the old wrap does not open under the Keystore key. The refresh logs the failure and waits until the mnemonic is entered again, which overwrites the blob. Stores written off Android by earlier builds keep the constant-key seed blob and the old `K_R` blob until a full wipe (`clear_cached_key`). Nothing reads them, but the seed blob opens under the key every earlier build carries, so an operator deletes them.
+
+**Requirements.** No MR row changes status. MR-DSM-0238 is the recovery boundary's one imported property (key consumption), and this does not touch it.
+
+**Open.** S-LOCK is unchanged: the Keystore key requires no user authentication. On Android the vault keeps the secrets from anyone holding the store off the device, not from code running as the app.
 
 ## 7 Totals
 

@@ -1802,7 +1802,6 @@ bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	b15d482d5ea6d4cc
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	bddae2d20fd62577
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	c7f29ca1eda35b73
-bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	f53d53a8704eb03f
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	feeab4b5073ed699
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	48262a5ecdf731a0
 bool-literal	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	d43502db59e172bb
@@ -4268,7 +4267,6 @@ rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/rec
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	2e71c8cd061466da
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	3693c4727fe2d0aa
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	6b0ce82627b9e6ca
-rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	c55f104309a052ea
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	dfd74fcc66075097
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs	6310a00fb916c477
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs	9826e7dfead085c6
@@ -5843,8 +5841,6 @@ rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/runt
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/seed_vault.rs	1a906b07c78760e1
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/seed_vault.rs	cd254efaeb6b7908
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs	1fc4e2a74515e873
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_reads.rs	0bf42ef1cf8d619b
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_sdk.rs	c45b9af992c369a8
