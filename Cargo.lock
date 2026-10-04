@@ -1186,10 +1186,14 @@ dependencies = [
  "axum-server",
  "dsm",
  "dsm_sdk",
+ "dsm_storage_node",
  "env_logger",
  "log",
  "prost 0.14.4",
  "rcgen",
+ "reqwest",
+ "rustls",
+ "serial_test",
  "tokio",
 ]
 

@@ -22,3 +22,14 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 rcgen = "0.14.8"
 log = "0.4.32"
 env_logger = "0.11.10"
+
+[dev-dependencies]
+# The real connection, in tests (tests/real_connection.rs): this binary run as
+# two processes against the storage node's own code on Postgres, the harness
+# the SDK's suites run (dsm_sdk/src/test_support/nodes.rs, shared by #[path]).
+dsm_storage_node = { path = "../../dsm_storage_node" }
+rustls = { version = "0.23.37", features = ["ring"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
+serial_test = "3.5.0"
+# The test starts, kills and restarts the host as processes.
+tokio = { version = "1.52.3", features = ["process"] }

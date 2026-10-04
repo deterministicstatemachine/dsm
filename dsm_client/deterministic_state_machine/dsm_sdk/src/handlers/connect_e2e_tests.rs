@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! DSM Connect end to end (DSM Amendment A11), on storage nodes.
+//! DSM Connect on storage nodes (DSM Amendment A11): what the real connection
+//! cannot hold still.
+//!
+//! The connection as deployed — the application's own host and relay, the
+//! wallet's listener and both inbox pollers, nothing carried by hand — is
+//! `crates/dsm-app-host/tests/real_connection.rs`. These tests hold what it
+//! cannot: an ordering the test forces, and a relay that misbehaves.
 //!
 //! Two devices on the pinned set's nodes on Postgres (`test_support::nodes`):
 //! A is a Web2 application's own account, B a player's wallet. Every step is
-//! a production route on the device that takes it. Between them sits a
-//! store-and-forward relay over TLS: it serves the offer and the requests A
-//! signed and keeps what B posts, and the test carries what it kept to A.
-//! That is all a relay is under A11 — transport — so the relay here holds
-//! nothing either side did not sign.
+//! a production route on the device that takes it. Between them sits the
+//! test's store-and-forward relay over TLS: it serves the offer and the
+//! requests A signed and keeps what B posts, and the test carries what it
+//! kept to A when the test decides. A relay is only transport under A11, so
+//! one that replays, withholds or forges is the adversary both sides must
+//! withstand.
 
 use std::sync::{Arc, Mutex};
 
@@ -23,7 +30,7 @@ use generated::envelope::Payload;
 use prost::Message;
 use serial_test::serial;
 
-use super::node_e2e_tests::{args, balance, create_token, create_vault, era, invoke, payload};
+use super::node_e2e_tests::{args, balance, create_token, era, invoke, payload};
 use crate::bridge::{AppQuery, AppRouter as _};
 use crate::test_support::two_device::{Pair, TestDevice};
 use crate::util::text_id::{decode_base32_crockford, encode_base32_crockford};
@@ -403,65 +410,23 @@ fn outcome(s: &generated::ConnectAppStatusV1) -> generated::ConnectOutcome {
     generated::ConnectOutcome::try_from(s.outcome).expect("a known outcome")
 }
 
-/// A wallet connects to a game's own account, and the game drives it within
-/// its grant: an object the game issued is accepted only once its policy
-/// re-hashes to its anchor and names the game as creator; a payment counts
-/// only once the transfer is accepted onto the game's own relationship; a
-/// holdings proof is verified by the game against the wallet's root; a swap
-/// is an ordinary SoFi trade through the game's vault; a request outside the
-/// grant waits for the player; a relay replaying old requests runs nothing
-/// twice.
+/// A payment under the grant, asked while the wallet has received from the
+/// game and the game has not yet taken the countersign: it waits, unanswered
+/// and unspent, and the first sync after the relationship settles carries it
+/// out. The game counts it only from the transfer its own account accepted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_wallet_connects_and_the_game_drives_it_within_its_grant() {
+async fn a_payment_under_the_grant_waits_while_the_relationship_settles() {
     let p = Pair::boot(500, 200).await;
     let wild = create_token(&p.a, "WILD", 1_000_000).await;
-    let moss = create_token(&p.a, "MS0001", 1).await;
-    let vault = create_vault(&p.a, (era(), 5_000), (wild, 5_000)).await;
     let relay = ForwardRelay::start().await;
     let made = offer(&p.a, &relay, &wild).await;
     let session = connect(&p, &relay, &made.code).await;
-
-    // The coin: the game's account pays it like any transfer.
     let sent = p.a.send_token(&p.b, "WILD", 50).await;
     assert!(sent.success, "{:?}", sent.error_message);
     p.b.sync().await;
     assert_eq!(balance(&p.b, &wild), 50);
 
-    // A creature: an object of supply one. The wallet roots it under the
-    // grant, and only then can it be delivered.
-    let accept = request(
-        &p.a,
-        &relay,
-        &session,
-        generated::connect_app_request_intent_v1::Kind::AcceptIssued(
-            generated::ConnectAcceptIssuedV1 {
-                anchor: moss.to_vec(),
-            },
-        ),
-    )
-    .await;
-    sync_clean(&p, &relay).await;
-    carried_out(&p.b, &session, accept).await;
-    let accepted = status(&p.a, &session, accept).await;
-    assert_eq!(outcome(&accepted), generated::ConnectOutcome::CarriedOut);
-    assert_eq!(
-        fact(&accepted),
-        generated::ConnectFact::None,
-        "accepting establishes nothing the game may grant on"
-    );
-    p.b.enter();
-    let rooted = crate::storage::client_db::token_registry::get_token_by_policy_commit(&moss)
-        .expect("the registry")
-        .expect("the wallet rooted the creature");
-    assert_eq!(rooted.creator_device_id, p.a.device_id);
-    let delivered = p.a.send_token(&p.b, "MS0001", 1).await;
-    assert!(delivered.success, "{:?}", delivered.error_message);
-    p.b.sync().await;
-    assert_eq!(balance(&p.b, &moss), 1);
-
-    // A payment: the wallet pays under the grant, and the game counts it
-    // only from the transfer its own account accepted.
     let pay = request(
         &p.a,
         &relay,
@@ -473,8 +438,6 @@ async fn a_wallet_connects_and_the_game_drives_it_within_its_grant() {
         }),
     )
     .await;
-    // The wallet received from the game and the game has not taken its
-    // countersign yet: the payment waits, unanswered and unspent.
     let waited = sync_and_deliver(&p, &relay).await;
     assert_eq!(waited.sessions[0].last_seq, pay - 1);
     assert!(
@@ -485,11 +448,8 @@ async fn a_wallet_connects_and_the_game_drives_it_within_its_grant() {
         waited.sessions[0].last_error
     );
     assert_eq!(balance(&p.b, &wild), 50);
-    // The game's account takes in what it is owed and finalizes, and the
-    // wallet takes in the finality, as each one's inbox poller does; the next
-    // sync carries the payment out.
-    p.a.sync().await;
-    p.b.sync().await;
+
+    settle(&p).await;
     sync_clean(&p, &relay).await;
     carried_out(&p.b, &session, pay).await;
     assert_eq!(balance(&p.b, &wild), 47);
@@ -500,165 +460,45 @@ async fn a_wallet_connects_and_the_game_drives_it_within_its_grant() {
         "{}",
         paid.fact_detail
     );
-    // The supply, less the vault's reserve and the coin sent, plus the payment.
-    assert_eq!(balance(&p.a, &wild), 1_000_000 - 5_000 - 50 + 3);
+    assert_eq!(balance(&p.a, &wild), 1_000_000 - 50 + 3);
+}
 
-    // Holdings: a proof the game verifies itself.
-    let holdings = request(
-        &p.a,
-        &relay,
-        &session,
-        generated::connect_app_request_intent_v1::Kind::Holdings(generated::ConnectHoldingsV1 {
-            policy_commits: vec![wild.to_vec(), moss.to_vec()],
-        }),
-    )
-    .await;
-    sync_clean(&p, &relay).await;
-    carried_out(&p.b, &session, holdings).await;
-    let proven = status(&p.a, &session, holdings).await;
-    assert_eq!(
-        fact(&proven),
-        generated::ConnectFact::Holdings,
-        "{}",
-        proven.fact_detail
-    );
-    let held: std::collections::BTreeMap<Vec<u8>, u64> = proven
-        .holdings
-        .iter()
-        .map(|h| (h.policy_commit.clone(), h.amount))
-        .collect();
-    assert_eq!(
-        held,
-        std::collections::BTreeMap::from([(wild.to_vec(), 47), (moss.to_vec(), 1)])
-    );
+/// A relay that serves every request the session has, whatever the wallet
+/// asks for: a request the wallet already carried out is never carried out
+/// again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_relay_replaying_every_request_runs_nothing_twice() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    settle(&p).await;
 
-    // A swap: an ordinary SoFi trade through the game's vault.
-    let era_before = balance(&p.b, &era());
-    let swap = request(
-        &p.a,
-        &relay,
-        &session,
-        generated::connect_app_request_intent_v1::Kind::Swap(generated::ConnectSwapV1 {
-            token_in: era().to_vec(),
-            token_out: wild.to_vec(),
-            amount_in: 500,
-            min_amount_out: 1,
-        }),
-    )
-    .await;
-    sync_clean(&p, &relay).await;
-    carried_out(&p.b, &session, swap).await;
-    let swapped = status(&p.a, &session, swap).await;
-    assert_eq!(
-        outcome(&swapped),
-        generated::ConnectOutcome::CarriedOut,
-        "{}",
-        swapped.reason
-    );
-    assert_eq!(balance(&p.b, &era()), era_before - 500);
-    assert!(balance(&p.b, &wild) > 47, "the trade gave the wallet WILD");
-    let vaults = invoke(&p.a, "sofi.vaults", args(&generated::SofiVaultsRequest {})).await;
-    let Payload::SofiVaultsResponse(owned) = payload(&vaults) else {
-        panic!("sofi.vaults answered another payload");
-    };
-    let ours = owned
-        .vaults
-        .iter()
-        .find(|v| v.vault_id == vault.to_vec())
-        .expect("the game's vault");
-    assert!(
-        ours.generation >= 1,
-        "the trade shows through the game's own vault"
-    );
-
-    // Outside the grant: ERA was never payable to the game. It waits for the
-    // player, and the player declines it.
-    let outside = request(
+    let pay = request(
         &p.a,
         &relay,
         &session,
         generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
-            policy_commit: era().to_vec(),
-            amount: 1,
+            policy_commit: wild.to_vec(),
+            amount: 3,
             memo: String::new(),
         }),
     )
     .await;
-    sync_and_deliver(&p, &relay).await;
-    let waiting = status(&p.a, &session, outside).await;
-    assert_eq!(
-        outcome(&waiting),
-        generated::ConnectOutcome::AwaitingApproval
-    );
-    let pending = query(&p.b, "connect.pending", Vec::new()).await;
-    let Reply::Pending(list) = reply(&pending) else {
-        panic!("connect.pending answered another reply");
-    };
-    assert_eq!(list.pending.len(), 1);
-    assert_eq!(list.pending[0].seq, outside);
-    let era_held = balance(&p.b, &era());
-    let declined = invoke(
-        &p.b,
-        "connect.respond",
-        args(&generated::ConnectRespondRequestV1 {
-            session_id: session.to_vec(),
-            seq: outside,
-            decision: generated::ConnectDecision::Decline as i32,
-        }),
-    )
-    .await;
-    let Reply::Decided(decided) = reply(&declined) else {
-        panic!("connect.respond answered another reply");
-    };
-    assert_eq!(
-        generated::ConnectOutcome::try_from(decided.outcome),
-        Ok(generated::ConnectOutcome::Declined)
-    );
-    assert!(decided.line.ends_with("declined."), "{}", decided.line);
-    let answers = std::mem::take(&mut relay.held().responses);
-    for answer in answers {
-        reply(&invoke(&p.a, "connect.app.respond", args_raw(answer)).await);
-    }
-    let after = status(&p.a, &session, outside).await;
-    assert_eq!(outcome(&after), generated::ConnectOutcome::Declined);
-    assert_eq!(fact(&after), generated::ConnectFact::None);
-    assert_eq!(balance(&p.b, &era()), era_held, "nothing was paid");
+    sync_clean(&p, &relay).await;
+    carried_out(&p.b, &session, pay).await;
+    assert_eq!(balance(&p.b, &wild), 17);
 
-    // A relay that replays every request: nothing runs twice.
     relay.held().serve = Serve::Everything;
-    let wild_before = balance(&p.b, &wild);
     let replayed = sync_and_deliver(&p, &relay).await;
-    assert_eq!(replayed.sessions[0].last_seq, outside);
+    assert_eq!(replayed.sessions[0].last_seq, pay);
     assert_eq!(replayed.sessions[0].last_error, "");
-    assert_eq!(balance(&p.b, &wild), wild_before, "no payment ran again");
-
-    // An object the game did not issue, offered as if it had: the wallet
-    // roots it and finds its committed policy names another creator.
-    let foreign = create_token(&p.b, "OTHER", 5).await;
-    let posing = request(
-        &p.a,
-        &relay,
-        &session,
-        generated::connect_app_request_intent_v1::Kind::AcceptIssued(
-            generated::ConnectAcceptIssuedV1 {
-                anchor: foreign.to_vec(),
-            },
-        ),
-    )
-    .await;
-    sync_and_deliver(&p, &relay).await;
-    let entry = wallet_log(&p.b, &session, posing).await;
-    assert_eq!(
-        generated::ConnectOutcome::try_from(entry.outcome),
-        Ok(generated::ConnectOutcome::Failed),
-        "{}",
-        entry.detail
-    );
-    assert!(
-        entry.detail.contains("names another creator"),
-        "{}",
-        entry.detail
-    );
+    assert_eq!(balance(&p.b, &wild), 17, "no payment ran again");
 }
 
 /// A wallet's answer is never evidence. An answer saying "paid" with no
@@ -892,136 +732,12 @@ async fn a_wallet_refuses_an_offer_the_code_does_not_vouch_for() {
     );
 }
 
-/// B disconnects `session`.
-async fn disconnect(p: &Pair, session: &[u8; 32]) {
-    let ended = invoke(
-        &p.b,
-        "connect.disconnect",
-        args(&generated::ConnectSessionRefV1 {
-            session_id: session.to_vec(),
-        }),
-    )
-    .await;
-    let Reply::Session(view) = reply(&ended) else {
-        panic!("connect.disconnect answered another reply");
-    };
-    assert_eq!(
-        generated::ConnectSessionStatus::try_from(view.status),
-        Ok(generated::ConnectSessionStatus::Disconnected)
-    );
-}
-
 /// The game's account takes in what it is owed and finalizes, and the
 /// wallet takes in the finality, as each one's inbox poller does: the
 /// relationship is ready for the wallet's next payment.
 async fn settle(p: &Pair) {
     p.a.sync().await;
     p.b.sync().await;
-}
-
-/// Disconnecting ends the grant. A payment the grant carried out while
-/// connected is never carried out once asked after the disconnect, and a
-/// request waiting on the phone goes with the grant and can no longer be
-/// approved.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn a_disconnected_application_drives_nothing() {
-    let p = Pair::boot(500, 200).await;
-    let wild = create_token(&p.a, "WILD", 1_000_000).await;
-    let relay = ForwardRelay::start().await;
-    let first = offer(&p.a, &relay, &wild).await;
-    let session = connect(&p, &relay, &first.code).await;
-    let sent = p.a.send_token(&p.b, "WILD", 20).await;
-    assert!(sent.success, "{:?}", sent.error_message);
-    p.b.sync().await;
-    settle(&p).await;
-
-    // Connected: a payment inside the grant runs.
-    let ran = request(
-        &p.a,
-        &relay,
-        &session,
-        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
-            policy_commit: wild.to_vec(),
-            amount: 3,
-            memo: String::new(),
-        }),
-    )
-    .await;
-    sync_clean(&p, &relay).await;
-    carried_out(&p.b, &session, ran).await;
-    assert_eq!(balance(&p.b, &wild), 17);
-    settle(&p).await;
-
-    // Disconnected: the same payment, asked next, is never carried out.
-    disconnect(&p, &session).await;
-    let pay = request(
-        &p.a,
-        &relay,
-        &session,
-        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
-            policy_commit: wild.to_vec(),
-            amount: 3,
-            memo: String::new(),
-        }),
-    )
-    .await;
-    let synced = sync_and_deliver(&p, &relay).await;
-    assert_eq!(balance(&p.b, &wild), 17, "nothing was paid");
-    assert!(synced.sessions.is_empty(), "{:?}", synced.sessions);
-    let unanswered = status(&p.a, &session, pay).await;
-    assert_eq!(outcome(&unanswered), generated::ConnectOutcome::Unspecified);
-    assert_eq!(fact(&unanswered), generated::ConnectFact::None);
-
-    // Connected again from a new code: a request outside the grant waits for
-    // the player.
-    let second = offer(&p.a, &relay, &wild).await;
-    let again = connect(&p, &relay, &second.code).await;
-    let outside = request(
-        &p.a,
-        &relay,
-        &again,
-        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
-            policy_commit: era().to_vec(),
-            amount: 1,
-            memo: String::new(),
-        }),
-    )
-    .await;
-    sync_clean(&p, &relay).await;
-    assert_eq!(
-        outcome(&status(&p.a, &again, outside).await),
-        generated::ConnectOutcome::AwaitingApproval
-    );
-
-    // Disconnected: the waiting request went with the grant, and approving
-    // it pays nothing.
-    disconnect(&p, &again).await;
-    let era_held = balance(&p.b, &era());
-    let approved = invoke(
-        &p.b,
-        "connect.respond",
-        args(&generated::ConnectRespondRequestV1 {
-            session_id: again.to_vec(),
-            seq: outside,
-            decision: generated::ConnectDecision::Approve as i32,
-        }),
-    )
-    .await;
-    assert_eq!(balance(&p.b, &era()), era_held, "nothing was paid");
-    assert!(
-        approved
-            .error_message
-            .as_deref()
-            .is_some_and(|e| e.contains("no such connected application")),
-        "{:?}",
-        approved.error_message
-    );
-    let pending = query(&p.b, "connect.pending", Vec::new()).await;
-    let Reply::Pending(list) = reply(&pending) else {
-        panic!("connect.pending answered another reply");
-    };
-    assert!(list.pending.is_empty(), "{:?}", list.pending);
 }
 
 /// A holdings request may name an object the wallet never held. The wallet

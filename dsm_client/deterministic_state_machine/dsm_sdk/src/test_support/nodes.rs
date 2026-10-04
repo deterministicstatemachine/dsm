@@ -362,7 +362,6 @@ impl NodeSet {
     /// nodes for as long as it runs.
     pub async fn start() -> Self {
         tls_provider_installed();
-        crate::sdk::final_reads::forget_everything();
         let pinned = dsm::economic::register::pinned_root_register_members(NETWORK)
             .expect("the beta network is pinned");
         let members: Vec<(String, [u8; 32])> = pinned
