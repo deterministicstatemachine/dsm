@@ -245,14 +245,17 @@ impl AppRouterImpl {
         // anchor here, as rooting it on approval will.
         let mut names = Names::new();
         for anchor in &verified.anchors {
-            if let Ok(..) = super::wallet_routes::token_of_commit(anchor) {
-                continue;
-            }
-            let policy = self
-                .verified_policy(*anchor)
-                .await
-                .map_err(|e| format!("{ROUTE}: a token the offer names: {e}"))?;
-            names.insert(*anchor, (policy.ticker, policy.decimals));
+            let named = match super::wallet_routes::token_of_commit(anchor) {
+                Ok(rooted) => rooted,
+                Err(..) => {
+                    let policy = self
+                        .verified_policy(*anchor)
+                        .await
+                        .map_err(|e| format!("{ROUTE}: a token the offer names: {e}"))?;
+                    (policy.ticker, policy.decimals)
+                }
+            };
+            names.insert(*anchor, named);
         }
         Ok(Reply::Preview(generated::ConnectPreviewV1 {
             offer_digest: verified.digest.to_vec(),
