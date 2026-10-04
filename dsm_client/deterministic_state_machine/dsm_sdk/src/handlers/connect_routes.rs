@@ -117,6 +117,27 @@ enum Flow {
     /// Outside its grant: it waits for the player, and so does every later
     /// request of the session.
     Waiting,
+    /// Inside its grant but not yet constructible: its relationship with the
+    /// application is catching up (a transfer the wallet received awaits the
+    /// application's finality). Nothing is answered or spent; the next sync
+    /// tries it again.
+    NotYet(String),
+}
+
+/// Whether a payment to `app` can be constructed now. A relationship that is
+/// catching up is not a refusal: the payment waits for it.
+fn payment_waits(app: &[u8; 32]) -> Option<String> {
+    let status = super::relationship_status::derive_local_send_status_for_device_id(app);
+    match (
+        status.send_ready,
+        generated::RelationshipSendBlockReason::try_from(status.send_block_reason),
+    ) {
+        (ready, _) if ready => None,
+        (_, Ok(generated::RelationshipSendBlockReason::PendingCatchup)) => {
+            Some(super::relationship_status::status_message(&status))
+        }
+        _ => None,
+    }
 }
 
 impl AppRouterImpl {
@@ -375,6 +396,7 @@ impl AppRouterImpl {
                 Flow::Processed => deliver_owed(&current).await?,
                 Flow::Seen => {}
                 Flow::Waiting => break,
+                Flow::NotYet(why) => return Err(why),
             }
         }
         Ok(())
@@ -413,6 +435,13 @@ impl AppRouterImpl {
         };
         match decide(&scopes, &request, &spent_of, &issued) {
             Decision::InScope { spend } => {
+                if let Request::Pay { .. } = &request {
+                    if let Some(why) = payment_waits(&session.app_device_id) {
+                        return Ok(Flow::NotYet(format!(
+                            "request {seq} waits for the relationship with the application to settle: {why}"
+                        )));
+                    }
+                }
                 let executed = self.execute(session, seq, &request).await;
                 let spend = executed.spend(spend);
                 self.finish(session, seq, summary, executed, spend)?;
@@ -761,7 +790,13 @@ impl AppRouterImpl {
                         self,
                         AppQuery {
                             path: "storage.sync".into(),
-                            params: generated::StorageSyncRequest::default().encode_to_vec(),
+                            // The sync the inbox poller makes.
+                            params: generated::ArgPack {
+                                codec: generated::Codec::Proto as i32,
+                                body: crate::sdk::inbox_poller::poll_sync_request().encode_to_vec(),
+                                ..Default::default()
+                            }
+                            .encode_to_vec(),
                         },
                     )
                     .await;

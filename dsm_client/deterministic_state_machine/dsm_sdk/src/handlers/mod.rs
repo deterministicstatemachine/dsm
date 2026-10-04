@@ -29,6 +29,8 @@ pub mod bilateral_routes;
 pub mod bitcoin_helpers;
 pub mod bitcoin_invoke_routes;
 pub mod bitcoin_query_routes;
+#[cfg(test)]
+mod connect_e2e_tests;
 pub mod connect_routes;
 pub mod contacts_routes;
 #[cfg(test)]
