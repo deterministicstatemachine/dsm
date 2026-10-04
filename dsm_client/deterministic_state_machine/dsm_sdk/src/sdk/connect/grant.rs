@@ -308,10 +308,12 @@ fn within(scope: &Scope, token: &[u8; 32], amount: u64, spent: u64) -> Decision 
     let Some(cap) = scope.cap(token) else {
         return Decision::Outside("the grant does not let it spend this token".into());
     };
+    let shown = |n: u64| super::wallet::amount_text(token, n);
     if amount > cap.per_request {
         return Decision::Outside(format!(
-            "{amount} is above the {} the grant allows per request",
-            cap.per_request
+            "{} is above the {} the grant allows per request",
+            shown(amount),
+            shown(cap.per_request)
         ));
     }
     match spent.checked_add(amount) {
@@ -319,8 +321,10 @@ fn within(scope: &Scope, token: &[u8; 32], amount: u64, spent: u64) -> Decision 
             spend: Some((*token, amount)),
         },
         _ => Decision::Outside(format!(
-            "{amount} more would pass the grant's total of {} ({spent} spent)",
-            cap.total
+            "{} more would pass the grant's total of {} ({} spent)",
+            shown(amount),
+            shown(cap.total),
+            shown(spent)
         )),
     }
 }
