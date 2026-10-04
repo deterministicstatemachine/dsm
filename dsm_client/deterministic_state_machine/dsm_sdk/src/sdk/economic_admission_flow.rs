@@ -110,6 +110,25 @@ pub(crate) fn validated_root_or_activate(
     activate(snapshot).map_err(|e| DsmError::invalid_operation(e.to_string()))
 }
 
+/// This device's admitted economic root and the tree that recomputes it, for
+/// a holdings proof to a connected application (DSM Amendment A11): the
+/// proof names `(position, root)` for a foreign verifier, which validates the
+/// root itself, and re-derives nothing. `None` before the first admission: a
+/// device that has admitted nothing has no position to prove at, and proving
+/// never activates it.
+pub(crate) fn admitted_root_and_tree(
+) -> Result<Option<(ValidatedEconomicRoot, EconomicSmt, AdmittedPreState)>, DsmError> {
+    let Some(admitted) =
+        economic_lineage::get_admitted().map_err(|e| storage_err("load admitted", e))?
+    else {
+        return Ok(None);
+    };
+    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
+        .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
+    let (tree, pre) = producer_tree_and_pre_state(&validated)?;
+    Ok(Some((validated, tree, pre)))
+}
+
 /// Rebuild the producer-side economic tree.
 ///
 /// Strategy A (cache) with root-equality admission; the cache is NEVER an

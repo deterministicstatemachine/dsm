@@ -106,6 +106,13 @@ pub(crate) async fn hold_off_for_two_device_harness() -> PollerHold {
     PollerHold(())
 }
 
+/// Whether the two-device harness holds the background tasks off: the
+/// connect listener defers to the same hold as the poller.
+#[cfg(test)]
+pub(crate) fn background_held() -> bool {
+    POLLER_HOLDS.load(Ordering::SeqCst) > 0
+}
+
 #[cfg(test)]
 impl Drop for PollerHold {
     fn drop(&mut self) {

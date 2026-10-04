@@ -36,6 +36,7 @@ pub mod app_state; // Shared application state management
 pub mod apply_outcome; // §16.6 tri-state full-state apply outcome
 pub mod b0x_sdk;
 pub mod chain_tip_store;
+pub mod connect; // DSM Connect: a Web2 application connected to a wallet (DSM Amendment A11)
 pub mod core_sdk;
 pub mod identity_publication; // publication-quorum lifecycle for device identities
 pub mod inbox_poller;
