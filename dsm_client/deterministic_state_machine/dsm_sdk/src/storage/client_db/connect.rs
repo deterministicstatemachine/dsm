@@ -284,6 +284,31 @@ pub fn spent_all(session_id: &[u8; 32]) -> Result<Vec<([u8; 32], u64)>> {
     Ok(rows)
 }
 
+/// Where a request outside its grant stands with the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingState {
+    /// Waiting for the player's decision.
+    Waiting,
+    /// Approved by the player: a payment waiting for its relationship with
+    /// the application to settle, carried out by the next sync.
+    Approved,
+}
+
+const PENDING_WAITING: &str = "waiting";
+const PENDING_APPROVED: &str = "approved";
+
+fn pending_state(text: &str) -> rusqlite::Result<PendingState> {
+    match text {
+        PENDING_WAITING => Ok(PendingState::Waiting),
+        PENDING_APPROVED => Ok(PendingState::Approved),
+        other => Err(rusqlite::Error::InvalidColumnType(
+            4,
+            format!("pending state {other}"),
+            rusqlite::types::Type::Text,
+        )),
+    }
+}
+
 /// A request waiting for the player.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingRow {
@@ -292,7 +317,21 @@ pub struct PendingRow {
     /// The `AppRequestV1` bytes, verified when they arrived.
     pub request: Vec<u8>,
     pub reason: String,
+    pub state: PendingState,
 }
+
+fn pending_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PendingRow> {
+    let state: String = r.get(4)?;
+    Ok(PendingRow {
+        session_id: column_32(r, 0)?,
+        seq: u64_of(r, 1)?,
+        request: r.get(2)?,
+        reason: r.get(3)?,
+        state: pending_state(&state)?,
+    })
+}
+
+const PENDING_COLUMNS: &str = "session_id, seq, request, reason, state";
 
 /// Hold `seq` for the player. Only the next request after `last_seq` can
 /// wait: requests are processed in order.
@@ -317,13 +356,14 @@ pub fn put_pending(row: &PendingRow) -> Result<()> {
         ));
     }
     tx.execute(
-        "INSERT OR IGNORE INTO connect_pending(session_id, seq, request, reason) \
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT OR IGNORE INTO connect_pending(session_id, seq, request, reason, state) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             row.session_id.as_slice(),
             i64_of(row.seq)?,
             row.request,
-            row.reason
+            row.reason,
+            PENDING_WAITING
         ],
     )?;
     tx.commit()?;
@@ -335,18 +375,11 @@ pub fn pending_all() -> Result<Vec<PendingRow>> {
     let conn = binding
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
-    let mut stmt = conn.prepare(
-        "SELECT session_id, seq, request, reason FROM connect_pending ORDER BY session_id, seq",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {PENDING_COLUMNS} FROM connect_pending ORDER BY session_id, seq"
+    ))?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok(PendingRow {
-                session_id: column_32(r, 0)?,
-                seq: u64_of(r, 1)?,
-                request: r.get(2)?,
-                reason: r.get(3)?,
-            })
-        })?
+        .query_map([], pending_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -358,19 +391,30 @@ pub fn pending(session_id: &[u8; 32], seq: u64) -> Result<Option<PendingRow>> {
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
     Ok(conn
         .query_row(
-            "SELECT session_id, seq, request, reason FROM connect_pending \
-             WHERE session_id = ?1 AND seq = ?2",
+            &format!(
+                "SELECT {PENDING_COLUMNS} FROM connect_pending WHERE session_id = ?1 AND seq = ?2"
+            ),
             params![session_id.as_slice(), i64_of(seq)?],
-            |r| {
-                Ok(PendingRow {
-                    session_id: column_32(r, 0)?,
-                    seq: u64_of(r, 1)?,
-                    request: r.get(2)?,
-                    reason: r.get(3)?,
-                })
-            },
+            pending_row,
         )
         .optional()?)
+}
+
+/// The player approved `seq` of `session_id`, and it waits for its
+/// relationship with the application: the next sync carries it out.
+pub fn approve_pending(session_id: &[u8; 32], seq: u64) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let changed = conn.execute(
+        "UPDATE connect_pending SET state = ?3 WHERE session_id = ?1 AND seq = ?2",
+        params![session_id.as_slice(), i64_of(seq)?, PENDING_APPROVED],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("request {seq} is not waiting"));
+    }
+    Ok(())
 }
 
 /// One processed request, as the Apps screen lists it.

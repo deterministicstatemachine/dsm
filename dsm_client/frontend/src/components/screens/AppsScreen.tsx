@@ -228,10 +228,9 @@ export default function AppsScreen(): React.JSX.Element {
 
   const onDecide = (p: connect.Pending, choice: 'approve' | 'decline') =>
     run(choice === 'approve' ? 'Approving' : 'Declining', async () => {
-      await connect.respond(p.sessionId, p.seq, choice);
-      return choice === 'approve'
-        ? `${p.displayName}: ${p.summary}, carried out.`
-        : `${p.displayName}: ${p.summary}, declined.`;
+      const decided = await connect.respond(p.sessionId, p.seq, choice);
+      if (decided.outcome === 'failed') throw new Error(decided.line);
+      return decided.line;
     });
 
   const tabs: ReadonlyArray<{ id: AppsTab; label: string }> = [
@@ -344,13 +343,18 @@ export default function AppsScreen(): React.JSX.Element {
               <section className="sb-card" key={`${encodeBase32Crockford(p.sessionId)}:${p.seq.toString()}`}>
                 <b>{p.displayName}</b>: {p.summary}
                 <div className="sb-hint">Outside what you approved: {p.reason}</div>
+                {p.approved && (
+                  <div className="sb-hint">Approved. It is carried out once your relationship with {p.displayName} settles.</div>
+                )}
                 <div className="sb-row">
                   <button type="button" className="sb-btn" disabled={busy} onClick={() => onDecide(p, 'decline')}>
                     DECLINE
                   </button>
-                  <button type="button" className="sb-btn sb-btn--primary" disabled={busy} onClick={() => onDecide(p, 'approve')}>
-                    APPROVE
-                  </button>
+                  {!p.approved && (
+                    <button type="button" className="sb-btn sb-btn--primary" disabled={busy} onClick={() => onDecide(p, 'approve')}>
+                      APPROVE
+                    </button>
+                  )}
                 </div>
               </section>
             ))

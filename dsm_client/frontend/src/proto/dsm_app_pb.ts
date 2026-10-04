@@ -28564,6 +28564,13 @@ export class ConnectPendingV1 extends Message<ConnectPendingV1> {
    */
   reason = "";
 
+  /**
+   * the player approved it: a payment waiting for its relationship with the application to settle, carried out by the next sync
+   *
+   * @generated from field: bool approved = 6;
+   */
+  approved = false;
+
   constructor(data?: PartialMessage<ConnectPendingV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -28577,6 +28584,7 @@ export class ConnectPendingV1 extends Message<ConnectPendingV1> {
     { no: 3, name: "display_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 4, name: "summary", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "approved", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectPendingV1 {
@@ -29313,6 +29321,12 @@ export class ConnectReplyV1 extends Message<ConnectReplyV1> {
      */
     value: ConnectRequestRefV1;
     case: "request";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDecidedV1 decided = 10;
+     */
+    value: ConnectDecidedV1;
+    case: "decided";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectReplyV1>) {
@@ -29332,6 +29346,7 @@ export class ConnectReplyV1 extends Message<ConnectReplyV1> {
     { no: 7, name: "requests", kind: "message", T: AppRequestBatchV1, oneof: "reply" },
     { no: 8, name: "status", kind: "message", T: ConnectAppStatusV1, oneof: "reply" },
     { no: 9, name: "request", kind: "message", T: ConnectRequestRefV1, oneof: "reply" },
+    { no: 10, name: "decided", kind: "message", T: ConnectDecidedV1, oneof: "reply" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectReplyV1 {
@@ -29348,6 +29363,61 @@ export class ConnectReplyV1 extends Message<ConnectReplyV1> {
 
   static equals(a: ConnectReplyV1 | PlainMessage<ConnectReplyV1> | undefined, b: ConnectReplyV1 | PlainMessage<ConnectReplyV1> | undefined): boolean {
     return proto3.util.equals(ConnectReplyV1, a, b);
+  }
+}
+
+/**
+ * connect.respond: what became of the player's decision, as Rust renders it.
+ *
+ * @generated from message dsm.ConnectDecidedV1
+ */
+export class ConnectDecidedV1 extends Message<ConnectDecidedV1> {
+  /**
+   * @generated from field: dsm.ConnectSessionV1 session = 1;
+   */
+  session?: ConnectSessionV1;
+
+  /**
+   * UNSPECIFIED while an approved payment waits for its relationship with the application to settle
+   *
+   * @generated from field: dsm.ConnectOutcome outcome = 2;
+   */
+  outcome = ConnectOutcome.UNSPECIFIED;
+
+  /**
+   * what happened, for the screen to show as it is
+   *
+   * @generated from field: string line = 3;
+   */
+  line = "";
+
+  constructor(data?: PartialMessage<ConnectDecidedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDecidedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session", kind: "message", T: ConnectSessionV1 },
+    { no: 2, name: "outcome", kind: "enum", T: proto3.getEnumType(ConnectOutcome) },
+    { no: 3, name: "line", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDecidedV1 {
+    return new ConnectDecidedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDecidedV1 {
+    return new ConnectDecidedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDecidedV1 {
+    return new ConnectDecidedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDecidedV1 | PlainMessage<ConnectDecidedV1> | undefined, b: ConnectDecidedV1 | PlainMessage<ConnectDecidedV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDecidedV1, a, b);
   }
 }
 
