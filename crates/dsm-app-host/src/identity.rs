@@ -34,8 +34,13 @@ fn startup(operation: pb::startup_request::Operation) -> Result<(), String> {
 }
 
 /// The startup a phone runs: the storage directory, the network's config,
-/// then the SDK. An account created before comes back with its sealed seed.
+/// then the SDK. The account's directory is the operator's alone: it holds
+/// the recovery mnemonic and the SDK's store.
 pub fn start_sdk(args: &Args) -> Result<(), String> {
+    std::fs::create_dir_all(&args.data_dir)
+        .map_err(|e| format!("{}: {e}", args.data_dir.display()))?;
+    std::fs::set_permissions(&args.data_dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("{}: {e}", args.data_dir.display()))?;
     let store = args.data_dir.join("sdk");
     std::fs::create_dir_all(&store).map_err(|e| format!("{}: {e}", store.display()))?;
     startup(pb::startup_request::Operation::SetStorageBaseDir(
@@ -66,6 +71,26 @@ fn query(method: &str, args: Vec<u8>) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("{method}: {e}"))
 }
 
+/// An account created before: unlocked from the operator's mnemonic, as a
+/// phone's mnemonic unlock derives its wallet seed, then its identity
+/// context restored. The SDK's at-rest seal is not what unlocks it: off
+/// Android that seal is not held by the platform.
+fn restore(args: &Args, device_id: &[u8]) -> Result<(), String> {
+    let path = args.data_dir.join("RECOVERY_MNEMONIC");
+    let mnemonic =
+        std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    dsm_sdk::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(mnemonic.trim())
+        .map_err(|e| format!("unlocking this account from {}: {e}", path.display()))?;
+    let genesis_hash = dsm_sdk::sdk::app_state::AppState::get_genesis_hash()
+        .ok_or_else(|| "the store holds this account's device id but no genesis".to_string())?;
+    startup(pb::startup_request::Operation::RestoreIdentityContext(
+        pb::RestoreIdentityContextOp {
+            device_id: device_id.to_vec(),
+            genesis_hash,
+        },
+    ))
+}
+
 fn account(device_id: &[u8]) -> Result<Account, String> {
     let device_id: [u8; 32] = device_id
         .try_into()
@@ -82,6 +107,7 @@ fn account(device_id: &[u8]) -> Result<Account, String> {
 /// recovered, and it is the operator's to keep.
 pub fn ensure_identity(args: &Args) -> Result<Account, String> {
     if let Some(device_id) = dsm_sdk::sdk::app_state::AppState::get_device_id() {
+        restore(args, &device_id)?;
         return account(&device_id);
     }
     let words = pb::ArgPack::decode(query("system.generateMnemonic", Vec::new())?.as_slice())

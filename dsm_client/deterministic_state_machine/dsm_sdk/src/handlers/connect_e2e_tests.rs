@@ -236,6 +236,16 @@ async fn connect(p: &Pair, relay: &ForwardRelay, code: &str) -> [u8; 32] {
     };
     assert_eq!(preview.display_name, "Wildstate");
     assert_eq!(preview.app_device_id, p.a.device_id.to_vec());
+    // The wallet has not rooted the game's coin yet, and still names it: the
+    // approval screen reads the policy the anchor commits to.
+    assert!(
+        preview
+            .scope_lines
+            .iter()
+            .any(|l| l.contains("10 WILD a time")),
+        "{:?}",
+        preview.scope_lines
+    );
     let approved = invoke(
         &p.b,
         "connect.approve",
@@ -470,7 +480,7 @@ async fn a_wallet_connects_and_the_game_drives_it_within_its_grant() {
     assert!(
         waited.sessions[0]
             .last_error
-            .contains("waits for the relationship"),
+            .contains("the relationship with the application is settling"),
         "{}",
         waited.sessions[0].last_error
     );

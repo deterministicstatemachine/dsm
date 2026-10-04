@@ -38,6 +38,17 @@ fn balance_leaf(key: &[u8; 32], policy_commit: [u8; 32], amount: u64) -> Result<
     Ok(leaf_node(key, Some(&value)))
 }
 
+/// The position this device is still admitting, if one is: a proof waits
+/// for it rather than prove an earlier position.
+pub(crate) fn admission_pending(core: &CoreSDK) -> Result<Option<u64>, String> {
+    let head = core
+        .device_head()
+        .ok_or_else(|| "this device has no head".to_string())?;
+    Ok(head
+        .pending_economic_admission()
+        .map(|pending| pending.economic_position))
+}
+
 /// This device's balances of `policy_commits` at its latest admitted
 /// position, each with its path to the root admitted there.
 pub(crate) fn prove(
