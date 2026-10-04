@@ -9,6 +9,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as connect from '../../dsm/connect';
+import { onConnectLink, takeConnectLink } from '../../dsm/connectLink';
 import { encodeBase32Crockford } from '../../utils/textId';
 import { Disclosure, Notice, ScreenFrame, ScreenTabs, middleTruncate } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
@@ -134,6 +135,21 @@ export default function AppsScreen(): React.JSX.Element {
     } catch (e: unknown) {
       setStatus({ kind: 'error', text: `Reading connected apps failed: ${messageOf(e)}` });
     }
+  }, []);
+
+  // A link from an app on this phone handed over a code: it fills the field,
+  // and the player reads it as they would a pasted one.
+  useEffect(() => {
+    const show = () => {
+      const linked = takeConnectLink();
+      if (linked === null) return;
+      setTab('apps');
+      setOffer(null);
+      setCode(linked);
+      setStatus({ kind: 'info', text: 'An app on this phone handed over its connect code. READ it to see what it asks for.' });
+    };
+    show();
+    return onConnectLink(show);
   }, []);
 
   useEffect(() => {
