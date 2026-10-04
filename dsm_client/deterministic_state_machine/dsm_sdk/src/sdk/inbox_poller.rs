@@ -136,6 +136,22 @@ pub(crate) fn poller_start_deferred() -> bool {
     POLLER_START_DEFERRED.load(Ordering::SeqCst)
 }
 
+/// Stop the poller and wait until its task has ended, so a test that started
+/// one leaves nothing syncing behind it. A task in its initial delay ends
+/// when the delay does, one in a sync cycle when the cycle does. `Err` when
+/// it still runs two minutes after the stop.
+#[cfg(test)]
+pub(crate) fn stop_poller_and_wait() -> Result<(), String> {
+    stop_poller();
+    for _ in 0..12_000 {
+        if !POLLER_RUNNING.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Err("the poller was told to stop and still runs two minutes later".into())
+}
+
 /// Held by the poller task for as long as it runs, and clears the running
 /// flag when it ends, however it ends. A sync cycle that panics unwinds
 /// through it, so a later start is not refused as "already running" by a
