@@ -114,6 +114,7 @@ jest.mock('../../TokenCreationDialog', () => ({
 
 import AccountsScreen from '../AccountsScreen';
 import { burnToken, addTokenByAnchor, forgetToken, tokenAdoptionQr } from '../../../dsm/policies';
+import { NATIVE_QR_SCANNER_ACTIVE_EVENT } from '../../../dsm/qrScannerState';
 
 describe('AccountsScreen — the screen TOKENS actually opens', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -255,6 +256,63 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
 
     expect(await screen.findByText(/the policy fetched names ticker XYZ, not ABC/)).toBeInTheDocument();
     expect(screen.queryByText(/added$/)).not.toBeInTheDocument();
+  });
+
+  /// THE GAP THIS CLOSES. An expanded token shows a code to scan, and the
+  /// add form could only take typed text: the code was unreadable by the one
+  /// screen that needs it. SCAN QR opens the native camera Add Contact uses,
+  /// and what it reads goes to Rust as read, through the same add path the
+  /// typed anchor takes (whose answers the tests above render).
+  it('adds a token from the code the camera reads', async () => {
+    const opened: boolean[] = [];
+    const onActive = (e: Event) => opened.push((e as CustomEvent<{ active: boolean }>).detail.active);
+    window.addEventListener(NATIVE_QR_SCANNER_ACTIVE_EVENT, onActive);
+    render(<AccountsScreen />);
+    await screen.findByText('MYTOK');
+
+    fireEvent.click(screen.getByRole('button', { name: '+ Add Token (CPTA)' }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'SCAN QR' }));
+    });
+    window.removeEventListener(NATIVE_QR_SCANNER_ACTIVE_EVENT, onActive);
+    // The camera was asked to open, once.
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toBeTruthy();
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('dsm-event', {
+        detail: { topic: 'qr_scan_result', payloadText: 'dsm:token/v1:SCANNED' },
+      }));
+    });
+
+    expect(addTokenByAnchor).toHaveBeenCalledTimes(1);
+    expect(addTokenByAnchor).toHaveBeenCalledWith({ anchorBase32: 'dsm:token/v1:SCANNED' });
+  });
+
+  /// A cancelled scan answers with empty text: nothing is sent to Rust, and the
+  /// form stays open for typing. A result this form did not ask for (another
+  /// screen's scan) is not its to add.
+  it('adds nothing on a cancelled scan or a scan it did not start', async () => {
+    render(<AccountsScreen />);
+    await screen.findByText('MYTOK');
+
+    fireEvent.click(screen.getByRole('button', { name: '+ Add Token (CPTA)' }));
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('dsm-event', {
+        detail: { topic: 'qr_scan_result', payloadText: 'dsm:token/v1:NOT_ASKED' },
+      }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'SCAN QR' }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('dsm-event', {
+        detail: { topic: 'qr_scan_result', payloadText: '' },
+      }));
+    });
+
+    expect(addTokenByAnchor).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('CPTA policy anchor')).toHaveValue('');
   });
 
   it('offers FORGET on a token this device holds, and calls it by token id', async () => {

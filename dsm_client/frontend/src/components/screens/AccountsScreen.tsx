@@ -2,7 +2,7 @@
 // AccountsScreen — Tokens: every balance Rust lists (with its committed
 // policy's facts), creating and adopting tokens, and the ERA faucet.
 
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { useWallet } from '../../contexts/WalletContext';
 import { useDpadNav } from '../../hooks/useDpadNav';
@@ -65,6 +65,10 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   /// hold a token whose policy it does not have, so this is the step between
   /// someone creating a token and this device being able to receive any.
   const [addingAnchor, setAddingAnchor] = useState<string | null>(null);
+  /// A camera scan this form started and has not heard back from. The camera
+  /// answers on the shared `dsm-event` channel, so a result is this form's
+  /// only while it is waiting for one.
+  const tokenScanRef = useRef<'idle' | 'waiting'>('idle');
   /// The adopted token's identifiers, kept on screen until dismissed. A
   /// snackbar that fades is not an acknowledgement for something the user may
   /// need to write down or check against the creating device.
@@ -221,9 +225,10 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     }
   }, [supplyAction, amount, loadBalances, refreshAll]);
 
-  /// Add a token by CPTA anchor and show whatever Rust decided.
-  const runAddToken = useCallback(async () => {
-    const anchor = (addingAnchor || '').trim();
+  /// Add a token by CPTA anchor, or by the `dsm:token/v1:` URI its code
+  /// carries, and show whatever Rust decided.
+  const addToken = useCallback(async (entered: string) => {
+    const anchor = entered.trim();
     if (!anchor) return;
     setBusy(true);
     setError(null);
@@ -249,7 +254,44 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     } finally {
       setBusy(false);
     }
-  }, [addingAnchor, loadBalances]);
+  }, [loadBalances]);
+
+  const runAddToken = useCallback(async () => {
+    if (addingAnchor === null) return;
+    await addToken(addingAnchor);
+  }, [addingAnchor, addToken]);
+
+  /// Open the same native camera Add Contact uses, to read the code an
+  /// expanded token shows. Its text is added the moment it comes back.
+  const scanTokenQr = useCallback(async () => {
+    if (tokenScanRef.current === 'waiting') return;
+    setError(null);
+    setSuccessMsg(null);
+    tokenScanRef.current = 'waiting';
+    try {
+      const { startNativeQrScannerViaRouter } = await import('../../dsm/WebViewBridge');
+      await startNativeQrScannerViaRouter();
+    } catch (e) {
+      tokenScanRef.current = 'idle';
+      setError(e instanceof Error ? e.message : 'The camera could not be opened');
+    }
+  }, []);
+
+  useEffect(() => {
+    const onScanResult = async (e: Event) => {
+      const ce = e as CustomEvent<{ topic: string; payloadText?: string }>;
+      if (ce.detail?.topic !== 'qr_scan_result' || tokenScanRef.current !== 'waiting') return;
+      tokenScanRef.current = 'idle';
+      const scanned = ce.detail.payloadText;
+      // Empty: the scan was cancelled, or the camera read nothing.
+      if (typeof scanned !== 'string' || !scanned.trim()) return;
+      // The field shows what was read, so a refusal can be checked or retried.
+      setAddingAnchor(scanned.trim());
+      await addToken(scanned);
+    };
+    window.addEventListener('dsm-event', onScanResult);
+    return () => window.removeEventListener('dsm-event', onScanResult);
+  }, [addToken]);
 
   // --- D-pad navigation ---
   // Items: [Balances tab, Faucet tab, Create token, ...content items]
@@ -296,7 +338,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       info={(
         <InfoTip title="Tokens">
           <p><b>Balances</b> lists every token this wallet holds, as Rust reports it. Open one for the facts its committed policy fixes: who defines it, its decimals, its whole supply, and what it permits.</p>
-          <p><b>Create Token</b> makes a token of your own under rules you set when you make it. <b>Add Token</b> adopts a token someone else created, from its CPTA anchor, so this device can hold it.</p>
+          <p><b>Create Token</b> makes a token of your own under rules you set when you make it. <b>Add Token</b> adopts a token someone else created, from its CPTA anchor or by scanning the code its holder opens on the token, so this device can hold it.</p>
           <p><b>Faucet</b> releases ERA from the network&apos;s reserve under ERA&apos;s committed policy, so you can try things.</p>
         </InfoTip>
       )}
@@ -356,7 +398,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
           {addingAnchor !== null && (
             <section className="sb-card">
               <div className="sb-field" style={{ marginBottom: 8 }}>
-                <label htmlFor="add-token-anchor">Policy anchor of the token to add</label>
+                <label htmlFor="add-token-anchor">Policy anchor of the token to add, or scan its code</label>
                 <input
                   id="add-token-anchor"
                   type="text"
@@ -376,6 +418,14 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                   onClick={() => setAddingAnchor(null)}
                 >
                   CANCEL
+                </button>
+                <button
+                  type="button"
+                  className="sb-btn"
+                  disabled={busy}
+                  onClick={scanTokenQr}
+                >
+                  SCAN QR
                 </button>
                 <button
                   type="button"
