@@ -2617,6 +2617,8 @@ Mutation controls (item 13, restored byte for byte): the policy re-admitting `'u
 
 Mutation control (item 16): the gate run on the previous manifest fails, "activity com.dsm.wallet.debug.PicoSelfTestActivity is exported".
 
+
+**Amended (owner, 2026-10-04, DSM Amendment A11):** the launcher also answers one VIEW filter, `dsm:` links whose scheme-specific part starts `connect/v1:`, so a game on the same phone can open the wallet's Apps screen with a connect code filled in. `ci/android_exported_components.sh` admits exactly that filter and still fails any other. The link carries a code only; the wallet reads it when the player asks.
 ### 6.70 SPHINCS+ construction version 2: the FIPS 205 structure, BLAKE3 kept (`security/sphincs-structure-repair`, pre-audit item 17, 2026-10-01)
 
 **The finding.** The pre-audit map of SPHINCS+ found that version 1 did not have the properties a SPHINCS+-style proof assumes. Both copies had them alike: the host's `dsm/src/crypto/sphincs.rs` and the firmware's `crates/dsm-sphincs`.
@@ -2728,6 +2730,8 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 ### 6.72 A Web2 application connects to a wallet (`feat/dsm-connect-wallet-apps`, DSM Amendment A11, 2026-10-04)
 
 **The direction.** Owner, 2026-10-04, for DSM Creatures, an RPGJS game kept Web2 with DSM underneath (§78's game): "it needs to be like Wallet Connect, kind of"; "It should basically just allow you to control it through the game once it's connected, so you don't have to go back and forth between the two". Owner choices the same day: the application's own endpoint is the relay; the wallet's consent is a scoped grant approved once on the device; the design is written in the Explainer's Part III before any code (DSM Amendment A11, approved as written the same day).
+
+**Ruling (owner, 2026-10-04, in chat):** the game also runs on the player's phone, and a wallet on the same phone connects by "Deep link (amend item 16)": the release manifest's launcher may answer a `dsm:connect/v1:` link, and nothing else beyond MAIN (§6.69 amended accordingly).
 
 **What it requires.** The application is a DSM account of its own and never holds a player's keys. Pairing goes through a `dsm:connect/v1:` code naming the endpoint, a pin of its certificate and an offer digest; the offer and the wallet's answer are signed under `DSM/connect/offer` and `DSM/connect/accept`, and each side adds the other as a contact before the first step. Requests and answers are signed under `DSM/connect/request` and `DSM/connect/response`. The relay is transport, never evidence: a payment is a transfer accepted onto the application's own relationship, a trade is what the SoFi predicates accept, an issued object is accepted only after its policy re-hashes to the anchor, and holdings are a Sparse Merkle proof against the holder's root validated from the application's frontier (Amendment A8), current only while the next register cell is empty at its leader. A grant counts its own spend in the wallet, its highest carried-out sequence number is its replay guard, and nothing expires by time.
 
