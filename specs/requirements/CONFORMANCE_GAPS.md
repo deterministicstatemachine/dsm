@@ -2759,6 +2759,14 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 - Nothing serialized processing. The listener's sync, a sync the player starts, the player's decision and a disconnect could each read the replay guard before another recorded the request it was carrying out. One processing lock now spans reading the guard and carrying the request out, and a disconnect waits for the request in flight.
 - The Apps screen reported "carried out" after an approval whatever happened. `connect.respond` now answers with the outcome and a line Rust renders, and the screen shows that line.
 
+**Found on the phones** (three A16s on the beta fleet, the game's account on `dsm-app-host`, 2026-10-04):
+- A holdings request that arrived while the wallet was still admitting its latest position was answered FAILED. Like a payment on a settling relationship, it now waits unanswered, and the next sync proves it.
+- Before approval, the consent screen named the game's coin as "base units of R0MGXNJR": the wallet had not rooted it yet. The preview now names each offered token from its policy, fetched and re-hashed to its anchor (display only), and fails if a policy cannot be had, as approving would.
+- A request past a cap explained itself in base units. It now says "25.00 ERA is above the 20.00 ERA the grant allows per request".
+- `dsm-app-host` could not restart: the SDK defers an existing identity's context until its wallet seed is cached, and nothing cached it. The host now unlocks from the operator's mnemonic file, and its directory is the operator's alone. Off Android the SDK's at-rest seal uses a constant key, so it is not what unlocks the host (filed separately).
+
+What ran on the phones: connect by code with pinned TLS; the starter issued as a supply-1 object, rooted under the grant and delivered; the welcome coin; a capsule bought under the grant, granted only once the game's account accepted the transfer; verified holdings at each step; a SoFi quote and swap through the game's vault with no tap; a swap past the per-request cap waiting on the phone until approved, then carried out. Relay over `adb reverse`: the computer's firewall held incoming connections to the host.
+
 **Tests.** Node-backed (`dsm_sdk::handlers::connect_e2e_tests`, two devices on the pinned set's nodes on Postgres, a store-and-forward TLS relay between them that carries only signed bytes):
 - `a_wallet_connects_and_the_game_drives_it_within_its_grant`:
   - connect;
@@ -2784,6 +2792,7 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 
 **Open.**
 - MR-DSM-0292: whether a spent total ends the whole grant, or only its spending kinds (today: only the spending kinds).
+- A holdings request waiting on a pending admission has no automated test: the harness admits each position within the transition that makes it, so no request can arrive between the two. It was observed on the phones.
 - The per-request re-read of a session is reached alone only by a disconnect that lands while a sync is between requests. No test drives that interleaving; with the sync's own filter in place the re-read's mutation stays green.
 - A holdings proof walks the wallet's lineage from the application's frontier. Until the application has accepted a step from the wallet it has none, so the walk starts at the wallet's activation, within the walk budget.
 
