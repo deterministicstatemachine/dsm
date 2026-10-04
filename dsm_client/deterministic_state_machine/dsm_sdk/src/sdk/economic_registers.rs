@@ -171,6 +171,59 @@ impl LiveRegisterResolver<'_> {
             .map_err(|e| incomplete("root register set", e))
     }
 
+    /// A step's manifest names the three objects a walk asks for next: the
+    /// authority evidence, the transition witness and the successor evidence.
+    /// They are fetched together into the kept objects, so the walk's three
+    /// asks find them there instead of each waiting on a round trip of its
+    /// own. A fetch that fails here changes nothing: the walk asks for that
+    /// object itself and meets the failure there.
+    fn prefetch_step_objects(&self, manifest_bytes: &[u8]) {
+        use dsm::common::domain_tags::{
+            TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE, TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE,
+            TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+        };
+        let manifest = match dsm::economic::decode::decode_admission_manifest(manifest_bytes) {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                // The walk decodes the same bytes and refuses them itself.
+                log::debug!("step prefetch: not a manifest: {e}");
+                return;
+            }
+        };
+        let mut wanted = vec![
+            (
+                TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
+                manifest.authority_evidence_addr,
+            ),
+            (
+                TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                manifest.transition_witness_addr,
+            ),
+        ];
+        if let dsm::economic::claim::AdmissionSubstrate::DsmSuccessor { evidence_addr } =
+            manifest.substrate
+        {
+            wanted.push((TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE, evidence_addr));
+        }
+        let fetched = tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(futures::future::join_all(wanted.iter().map(
+                    |(namespace, addr)| {
+                        crate::sdk::storage_io::fetch_immutable(self.set, *namespace, addr)
+                    },
+                )))
+        });
+        for (fetch, (namespace, addr)) in fetched.into_iter().zip(&wanted) {
+            if let Err(e) = fetch {
+                log::debug!(
+                    "step prefetch of {}::{}: {e}",
+                    String::from_utf8_lossy(namespace.source_bytes()),
+                    text_id::encode_base32_crockford(addr)
+                );
+            }
+        }
+    }
+
     fn reserve_release(
         &self,
         reserve_id: &[u8; 32],
@@ -201,10 +254,26 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     }
 
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
+        // A claim final at a root cell holds it for good (storage spec §9,
+        // finality 2): reads Core evaluated as showing one are kept, and a
+        // later walk through the same position evaluates them again instead
+        // of reading the route.
+        if let Some(kept) = crate::sdk::final_reads::final_cell(cell.routed()) {
+            return Ok(kept);
+        }
         let seats = NodeSeats::new(self.set).map_err(|e| incomplete("register seats", e))?;
-        Ok(tokio::task::block_in_place(|| {
-            self.runtime.block_on(read_cell(&seats, cell.routed()))
-        }))
+        let evidence =
+            tokio::task::block_in_place(|| self.runtime.block_on(read_cell(&seats, cell.routed())));
+        if matches!(
+            read_root_cell(cell, &evidence),
+            Ok(CellReading::Held {
+                state: ChainState::Final,
+                ..
+            })
+        ) {
+            crate::sdk::final_reads::keep_final_cell(cell.routed(), &evidence);
+        }
+        Ok(evidence)
     }
 
     fn native_reserve_release(
@@ -220,7 +289,13 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        self.fetch_bytes(namespace, addr)
+        let bytes = self.fetch_bytes(namespace, addr)?;
+        if namespace.source_bytes()
+            == dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST.source_bytes()
+        {
+            self.prefetch_step_objects(&bytes);
+        }
+        Ok(bytes)
     }
 
     fn anchored_policy_bytes(

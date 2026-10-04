@@ -1325,8 +1325,11 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     );
 
     // The walk at the next generation, by a verifier that has read nothing
-    // yet — this one keeps the held key's final reads — with every node's
-    // request log cleared: what the walk reads, the nodes are asked.
+    // yet — this one keeps the held key's final reads, and so does this
+    // process for every later verifier, so what it kept is forgotten — with
+    // every node's request log cleared: what the walk reads, the nodes are
+    // asked.
+    crate::sdk::final_reads::forget_everything();
     let walking = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     for node in &p.nodes.nodes {
         node.forget_requests();
@@ -1372,6 +1375,33 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     }
     assert!(cells_read.contains(&k0), "the held key was read");
     assert!(cells_read.contains(&k1), "the next key was read");
+
+    // A later verifier in this process starts from the held key's kept
+    // final reads: the walk comes out the same, the held key is not asked
+    // for again, and the open next key is, since it may have been written.
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let later = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let again = later
+        .verifier()
+        .walk_parent(&chains, &m.vault_id, &r1, 0, WALK_BUDGET)
+        .expect("the walk again");
+    assert_eq!(again.outcome, walked.outcome);
+    let asked_again: Vec<String> = p
+        .nodes
+        .nodes
+        .iter()
+        .flat_map(|node| node.requests())
+        .collect();
+    assert!(
+        !asked_again.contains(&k0),
+        "the held key was asked for again: {asked_again:?}"
+    );
+    assert!(
+        asked_again.contains(&k1),
+        "the open next key was read again"
+    );
 
     // The next trade takes the next key, and the vault prices it at the
     // reserves B's first trade left.
