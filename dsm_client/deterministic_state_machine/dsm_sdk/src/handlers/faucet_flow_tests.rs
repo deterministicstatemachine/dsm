@@ -625,13 +625,10 @@ fn admitted_at(core: &crate::sdk::core_sdk::CoreSDK, position: u64) {
 async fn a_held_first_claim_is_finished_by_resuming_it() {
     let d = Device::start(0xA9).await;
     let pending = hold_the_first_claim(&d).await;
-    let admitted = crate::sdk::economic_admission_flow::resume_pending_admission(
-        d.core(),
-        NETWORK,
-        pending,
-    )
-    .await
-    .expect("the held first claim resumes");
+    let admitted =
+        crate::sdk::economic_admission_flow::resume_pending_admission(d.core(), NETWORK, pending)
+            .await
+            .expect("the held first claim resumes");
     assert_eq!(admitted.economic_position, 1);
     admitted_at(d.core(), 1);
     assert_eq!(d.era_balance(), whole_era(100), "credited once");
@@ -651,7 +648,11 @@ async fn a_held_first_claim_is_finished_by_the_next_claim() {
     assert_eq!(next.economic_position, 2);
     admitted_at(d.core(), 2);
     assert_eq!(d.era_balance(), whole_era(200));
-    assert_eq!(reserve_head().await.generation, 2, "released twice, once each");
+    assert_eq!(
+        reserve_head().await.generation,
+        2,
+        "released twice, once each"
+    );
 }
 
 /// After a restart the sync finishes a first claim the previous run left held
@@ -675,7 +676,11 @@ async fn a_held_first_claim_is_finished_by_the_sync_after_a_restart() {
             .encode_to_vec(),
         })
         .await;
-    assert!(answered.success, "storage.sync: {:?}", answered.error_message);
+    assert!(
+        answered.success,
+        "storage.sync: {:?}",
+        answered.error_message
+    );
     let sync = match crate::handlers::response_helpers::decode_local_envelope(&answered.data)
         .expect("storage.sync answers an envelope")
         .payload
