@@ -172,6 +172,24 @@ pub fn describe_answer(response: &pb::IngressResponse) -> Result<String, String>
     let envelope = pb::Envelope::decode(body).map_err(|e| format!("the answer: {e}"))?;
     Ok(match envelope.payload {
         Some(pb::envelope::Payload::Error(e)) => return Err(e.message),
+        Some(pb::envelope::Payload::FaucetClaimResponse(r)) => r.message,
+        Some(pb::envelope::Payload::OnlineTransferResponse(r)) => r.message,
+        Some(pb::envelope::Payload::StorageSyncResponse(r)) => {
+            let mut line = format!(
+                "pulled {}, processed {}, pushed {}",
+                r.pulled, r.processed, r.pushed
+            );
+            if !r.errors.is_empty() {
+                line.push_str(&format!("; {}", r.errors.join("; ")));
+            }
+            if !r.more_pending.is_empty() {
+                line.push_str(&format!("; more waits on {}", r.more_pending.join(", ")));
+            }
+            line
+        }
+        Some(pb::envelope::Payload::SofiVaultsResponse(r)) => {
+            format!("{} vault(s) of this account", r.vaults.len())
+        }
         Some(pb::envelope::Payload::TokenCreateResponse(r)) => {
             format!("token {} anchored at {}", r.ticker, short(&r.policy_anchor))
         }
