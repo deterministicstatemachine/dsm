@@ -667,6 +667,23 @@ async fn connect(game: &Host, wallet: &Host, wild: &[u8; 32]) -> [u8; 32] {
     session
 }
 
+/// The wallet disconnects the application of `session`.
+async fn disconnect(wallet: &Host, session: &[u8; 32]) {
+    let end = pb::ConnectSessionRefV1 {
+        session_id: session.to_vec(),
+    };
+    match wallet
+        .connect(Route::Invoke, "connect.disconnect", end.encode_to_vec())
+        .await
+    {
+        Ok(Reply::Session(view)) => assert_eq!(
+            pb::ConnectSessionStatus::try_from(view.status),
+            Ok(pb::ConnectSessionStatus::Disconnected)
+        ),
+        other => panic!("connect.disconnect answered {other:?}"),
+    }
+}
+
 /// A game and a wallet, each its own process, connect over the game's relay,
 /// and the game drives the wallet within its grant:
 ///
@@ -679,8 +696,9 @@ async fn connect(game: &Host, wallet: &Host, wild: &[u8; 32]) -> [u8; 32] {
 /// - an object the game did not issue, asked for as if it had, is refused;
 /// - the wallet killed and started again picks the connection up and runs
 ///   nothing twice;
-/// - after a disconnect, nothing the game asks is carried out, and a request
-///   that was waiting for the player can no longer be approved.
+/// - after a disconnect, nothing the game asks is carried out; connected
+///   again, a request waiting for the player when the wallet disconnects can
+///   no longer be approved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_game_and_a_wallet_connect_over_the_real_relay() {
@@ -951,42 +969,10 @@ async fn a_game_and_a_wallet_connect_over_the_real_relay() {
         "no payment ran again"
     );
 
-    // A request outside the grant, waiting for the player when the wallet
-    // disconnects.
-    let waiting_then = ask(
-        &game,
-        &session,
-        Kind::Pay(pb::ConnectPayV1 {
-            policy_commit: era().to_vec(),
-            amount: 1,
-            memo: String::new(),
-        }),
-    )
-    .await;
-    let parked = answered(
-        &game,
-        &session,
-        waiting_then,
-        "the request reaches the phone",
-    )
-    .await;
-    assert_eq!(outcome(&parked), pb::ConnectOutcome::AwaitingApproval);
-
-    // Disconnected: a payment inside the old grant is never carried out, and
-    // the waiting request went with the grant.
-    let end = pb::ConnectSessionRefV1 {
-        session_id: session.to_vec(),
-    };
-    match wallet
-        .connect(Route::Invoke, "connect.disconnect", end.encode_to_vec())
-        .await
-    {
-        Ok(Reply::Session(view)) => assert_eq!(
-            pb::ConnectSessionStatus::try_from(view.status),
-            Ok(pb::ConnectSessionStatus::Disconnected)
-        ),
-        other => panic!("connect.disconnect answered {other:?}"),
-    }
+    // Disconnected: a payment inside the old grant, asked afterwards, is never
+    // carried out. A sync on the wallet reaches no session, and the listener
+    // has stopped.
+    disconnect(&wallet, &session).await;
     let after = ask(
         &game,
         &session,
@@ -997,9 +983,6 @@ async fn a_game_and_a_wallet_connect_over_the_real_relay() {
         }),
     )
     .await;
-    // A sync on the wallet carries nothing out: it reaches no session, and
-    // the listener has stopped. Then the waiting request, approved, pays
-    // nothing.
     let synced = wallet
         .connect(Route::Invoke, "connect.sync", Vec::new())
         .await;
@@ -1010,9 +993,27 @@ async fn a_game_and_a_wallet_connect_over_the_real_relay() {
         Ok(Reply::Sessions(list)) => assert!(list.sessions.is_empty(), "{:?}", list.sessions),
         other => panic!("connect.sync answered {other:?}"),
     }
+
+    // Connected again from a new code: a request outside the grant waits for
+    // the player, and goes with the grant when the wallet disconnects.
+    // Approved afterwards, it pays nothing.
+    let again = connect(&game, &wallet, &wild).await;
+    let waiting_then = ask(
+        &game,
+        &again,
+        Kind::Pay(pb::ConnectPayV1 {
+            policy_commit: era().to_vec(),
+            amount: 1,
+            memo: String::new(),
+        }),
+    )
+    .await;
+    let parked = answered(&game, &again, waiting_then, "the request reaches the phone").await;
+    assert_eq!(outcome(&parked), pb::ConnectOutcome::AwaitingApproval);
+    disconnect(&wallet, &again).await;
     let era_held = wallet.holds("ERA").await;
     let approve = pb::ConnectRespondRequestV1 {
-        session_id: session.to_vec(),
+        session_id: again.to_vec(),
         seq: waiting_then,
         decision: pb::ConnectDecision::Approve as i32,
     };
