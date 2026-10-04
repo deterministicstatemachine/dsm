@@ -2173,14 +2173,37 @@ impl AppRouterImpl {
         // Routes read to full coverage, routes read partially, and routes no
         // member answered for. Only the first kind says "nothing more there".
         let (mut routes_read, mut routes_partial, mut routes_unread) = (0usize, 0usize, 0usize);
-        for tagged in tagged_addresses {
-            let retrieved = b0x_sdk.retrieve_resuming(&tagged.address).await;
+        // Every route is read at once, each by a reader of its own: a sync
+        // costs the slowest route's reads, not the sum of every route's. What
+        // each read is then processed route by route, in the order it always
+        // was; a route's processing never depends on another route's read.
+        let mut readers = Vec::with_capacity(tagged_addresses.len());
+        for _ in &tagged_addresses {
+            match crate::sdk::b0x_sdk::B0xSDK::new(
+                device_id_b32.to_string(),
+                self.core_sdk.clone(),
+                storage_endpoints.to_vec(),
+            ) {
+                Ok(reader) => readers.push(reader),
+                Err(e) => return Err(report.stop(format!("b0x init failed: {e}"))),
+            }
+        }
+        let retrievals = futures::future::join_all(
+            readers
+                .iter_mut()
+                .zip(&tagged_addresses)
+                .map(|(reader, tagged)| reader.retrieve_resuming(&tagged.address)),
+        )
+        .await;
+        for ((tagged, mut route_sdk), retrieved) in
+            tagged_addresses.into_iter().zip(readers).zip(retrievals)
+        {
             // Replies ride the same spool as forward transfers, as distinct
             // payloads; they are drained whether or not this route yielded
             // transfers, since a reply alone can release a pending gate.
-            self.process_countersign_deltas(&mut b0x_sdk, &tagged.address, &mut report)
+            self.process_countersign_deltas(&mut route_sdk, &tagged.address, &mut report)
                 .await;
-            self.process_finality_checkpoints(&mut b0x_sdk, &tagged.address, &mut report)
+            self.process_finality_checkpoints(&mut route_sdk, &tagged.address, &mut report)
                 .await;
             // §5.2: the route fixes the tip an item was composed on — the
             // inbox address hashes the relationship's tip (storage node spec
@@ -2189,7 +2212,7 @@ impl AppRouterImpl {
             // of an object the canonical apply has decided is consumed; any
             // other is left where it is.
             let stale = tagged.freshness == RouteFreshness::PreviousTip;
-            for artifact in b0x_sdk.take_evidence_artifacts() {
+            for artifact in route_sdk.take_evidence_artifacts() {
                 let copy = if stale {
                     crate::handlers::recipient_dispatch::classify_stale_receipt_copy(
                         &artifact.evidence.full_receipt_bytes,
@@ -2212,7 +2235,7 @@ impl AppRouterImpl {
                     &mut report,
                 );
             }
-            for (method, body) in b0x_sdk.take_cert_resync_messages() {
+            for (method, body) in route_sdk.take_cert_resync_messages() {
                 let outcome = if method == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD {
                     self.handle_cert_resync_request(&body, storage_endpoints.to_vec())
                         .await
