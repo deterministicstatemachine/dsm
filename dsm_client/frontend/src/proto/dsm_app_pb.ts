@@ -1257,6 +1257,228 @@ proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
 ]);
 
 /**
+ * What a grant lets the application ask for without the player's approval.
+ *
+ * @generated from enum dsm.ConnectScopeKind
+ */
+export enum ConnectScopeKind {
+  /**
+   * @generated from enum value: CONNECT_SCOPE_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * root an object the application's account issued
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_ACCEPT_ISSUED = 1;
+   */
+  ACCEPT_ISSUED = 1,
+
+  /**
+   * pay the application's account
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_PAY = 2;
+   */
+  PAY = 2,
+
+  /**
+   * quote and trade between the two tokens of `pair`
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_SWAP = 3;
+   */
+  SWAP = 3,
+
+  /**
+   * prove holdings of the application's tokens
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_HOLDINGS = 4;
+   */
+  HOLDINGS = 4,
+}
+// Retrieve enum metadata with: proto3.getEnumType(ConnectScopeKind)
+proto3.util.setEnumType(ConnectScopeKind, "dsm.ConnectScopeKind", [
+  { no: 0, name: "CONNECT_SCOPE_KIND_UNSPECIFIED" },
+  { no: 1, name: "CONNECT_SCOPE_KIND_ACCEPT_ISSUED" },
+  { no: 2, name: "CONNECT_SCOPE_KIND_PAY" },
+  { no: 3, name: "CONNECT_SCOPE_KIND_SWAP" },
+  { no: 4, name: "CONNECT_SCOPE_KIND_HOLDINGS" },
+]);
+
+/**
+ * @generated from enum dsm.ConnectOutcome
+ */
+export enum ConnectOutcome {
+  /**
+   * @generated from enum value: CONNECT_OUTCOME_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * the wallet constructed it; a notification, never evidence
+   *
+   * @generated from enum value: CONNECT_OUTCOME_CARRIED_OUT = 1;
+   */
+  CARRIED_OUT = 1,
+
+  /**
+   * outside the grant: waits for the player on the device
+   *
+   * @generated from enum value: CONNECT_OUTCOME_AWAITING_APPROVAL = 2;
+   */
+  AWAITING_APPROVAL = 2,
+
+  /**
+   * the player declined it
+   *
+   * @generated from enum value: CONNECT_OUTCOME_DECLINED = 3;
+   */
+  DECLINED = 3,
+
+  /**
+   * the wallet could not construct it; `reason` says why
+   *
+   * @generated from enum value: CONNECT_OUTCOME_FAILED = 4;
+   */
+  FAILED = 4,
+}
+// Retrieve enum metadata with: proto3.getEnumType(ConnectOutcome)
+proto3.util.setEnumType(ConnectOutcome, "dsm.ConnectOutcome", [
+  { no: 0, name: "CONNECT_OUTCOME_UNSPECIFIED" },
+  { no: 1, name: "CONNECT_OUTCOME_CARRIED_OUT" },
+  { no: 2, name: "CONNECT_OUTCOME_AWAITING_APPROVAL" },
+  { no: 3, name: "CONNECT_OUTCOME_DECLINED" },
+  { no: 4, name: "CONNECT_OUTCOME_FAILED" },
+]);
+
+/**
+ * @generated from enum dsm.ConnectSessionStatus
+ */
+export enum ConnectSessionStatus {
+  /**
+   * @generated from enum value: CONNECT_SESSION_STATUS_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: CONNECT_SESSION_STATUS_CONNECTED = 1;
+   */
+  CONNECTED = 1,
+
+  /**
+   * @generated from enum value: CONNECT_SESSION_STATUS_DISCONNECTED = 2;
+   */
+  DISCONNECTED = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(ConnectSessionStatus)
+proto3.util.setEnumType(ConnectSessionStatus, "dsm.ConnectSessionStatus", [
+  { no: 0, name: "CONNECT_SESSION_STATUS_UNSPECIFIED" },
+  { no: 1, name: "CONNECT_SESSION_STATUS_CONNECTED" },
+  { no: 2, name: "CONNECT_SESSION_STATUS_DISCONNECTED" },
+]);
+
+/**
+ * @generated from enum dsm.ConnectDecision
+ */
+export enum ConnectDecision {
+  /**
+   * @generated from enum value: CONNECT_DECISION_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: CONNECT_DECISION_APPROVE = 1;
+   */
+  APPROVE = 1,
+
+  /**
+   * @generated from enum value: CONNECT_DECISION_DECLINE = 2;
+   */
+  DECLINE = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(ConnectDecision)
+proto3.util.setEnumType(ConnectDecision, "dsm.ConnectDecision", [
+  { no: 0, name: "CONNECT_DECISION_UNSPECIFIED" },
+  { no: 1, name: "CONNECT_DECISION_APPROVE" },
+  { no: 2, name: "CONNECT_DECISION_DECLINE" },
+]);
+
+/**
+ * What the application's own account has established about one request.
+ *
+ * @generated from enum dsm.ConnectFact
+ */
+export enum ConnectFact {
+  /**
+   * @generated from enum value: CONNECT_FACT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * nothing DSM-evidenced yet; an answer alone is never a fact
+   *
+   * @generated from enum value: CONNECT_FACT_NONE = 1;
+   */
+  NONE = 1,
+
+  /**
+   * the transfer is accepted onto the application's own relationship
+   *
+   * @generated from enum value: CONNECT_FACT_PAID = 2;
+   */
+  PAID = 2,
+
+  /**
+   * the holdings proof verified
+   *
+   * @generated from enum value: CONNECT_FACT_HOLDINGS = 3;
+   */
+  HOLDINGS = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(ConnectFact)
+proto3.util.setEnumType(ConnectFact, "dsm.ConnectFact", [
+  { no: 0, name: "CONNECT_FACT_UNSPECIFIED" },
+  { no: 1, name: "CONNECT_FACT_NONE" },
+  { no: 2, name: "CONNECT_FACT_PAID" },
+  { no: 3, name: "CONNECT_FACT_HOLDINGS" },
+]);
+
+/**
+ * ---- dsm_app_host: an application account's host process (DSM Amendment
+ * A11). What the host did, recorded as it happened, for the application to
+ * show: every route the application called through the host and every relay
+ * exchange with a wallet. A record, never evidence: each DSM fact it mentions
+ * is the account's own state, read after the call. ----
+ *
+ * @generated from enum dsm.AppHostActivityKind
+ */
+export enum AppHostActivityKind {
+  /**
+   * @generated from enum value: APP_HOST_ACTIVITY_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * the application called a route
+   *
+   * @generated from enum value: APP_HOST_ACTIVITY_KIND_ROUTE = 1;
+   */
+  ROUTE = 1,
+
+  /**
+   * a wallet reached the relay endpoint
+   *
+   * @generated from enum value: APP_HOST_ACTIVITY_KIND_RELAY = 2;
+   */
+  RELAY = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(AppHostActivityKind)
+proto3.util.setEnumType(AppHostActivityKind, "dsm.AppHostActivityKind", [
+  { no: 0, name: "APP_HOST_ACTIVITY_KIND_UNSPECIFIED" },
+  { no: 1, name: "APP_HOST_ACTIVITY_KIND_ROUTE" },
+  { no: 2, name: "APP_HOST_ACTIVITY_KIND_RELAY" },
+]);
+
+/**
  * ============================ WRAPPERS ===============================
  *
  * @generated from message dsm.Hash32
@@ -17544,6 +17766,14 @@ export class Envelope extends Message<Envelope> {
     case: "walletAmountResponse";
   } | {
     /**
+     * DSM Connect (DSM Amendment A11): every connect.* and connect.app.* reply.
+     *
+     * @generated from field: dsm.ConnectReplyV1 connect_reply = 128;
+     */
+    value: ConnectReplyV1;
+    case: "connectReply";
+  } | {
+    /**
      * Reply to `token.forget`.
      *
      * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
@@ -17665,6 +17895,7 @@ export class Envelope extends Message<Envelope> {
     { no: 125, name: "sealed", kind: "message", T: SealedEnvelopeV1, oneof: "payload" },
     { no: 126, name: "sofi_vaults_response", kind: "message", T: SofiVaultsResponse, oneof: "payload" },
     { no: 127, name: "wallet_amount_response", kind: "message", T: WalletAmountResponse, oneof: "payload" },
+    { no: 128, name: "connect_reply", kind: "message", T: ConnectReplyV1, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -26784,6 +27015,2547 @@ export class IndexPageV1 extends Message<IndexPageV1> {
 
   static equals(a: IndexPageV1 | PlainMessage<IndexPageV1> | undefined, b: IndexPageV1 | PlainMessage<IndexPageV1> | undefined): boolean {
     return proto3.util.equals(IndexPageV1, a, b);
+  }
+}
+
+/**
+ * The code an application shows: `dsm:connect/v1:` + Base32 Crockford of
+ * these bytes. A pointer only: the signed offer is fetched from `endpoint`
+ * over TLS whose leaf certificate hashes to `cert_pin`.
+ *
+ * @generated from message dsm.ConnectCodeV1
+ */
+export class ConnectCodeV1 extends Message<ConnectCodeV1> {
+  /**
+   * https://host:port
+   *
+   * @generated from field: string endpoint = 1;
+   */
+  endpoint = "";
+
+  /**
+   * H(DSM/tls-cert-hash domain ‖ leaf certificate DER): TAG_DSM_TLS_CERT_HASH
+   *
+   * @generated from field: bytes cert_pin = 2;
+   */
+  certPin = new Uint8Array(0);
+
+  /**
+   * H(DSM/connect/offer-digest ‖ AppConnectOfferV1.body)
+   *
+   * @generated from field: bytes offer_digest = 3;
+   */
+  offerDigest = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectCodeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectCodeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "endpoint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "cert_pin", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectCodeV1 {
+    return new ConnectCodeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectCodeV1 {
+    return new ConnectCodeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectCodeV1 {
+    return new ConnectCodeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectCodeV1 | PlainMessage<ConnectCodeV1> | undefined, b: ConnectCodeV1 | PlainMessage<ConnectCodeV1> | undefined): boolean {
+    return proto3.util.equals(ConnectCodeV1, a, b);
+  }
+}
+
+/**
+ * A cap on one token a scope may spend, in that token's base units.
+ *
+ * @generated from message dsm.ConnectCapV1
+ */
+export class ConnectCapV1 extends Message<ConnectCapV1> {
+  /**
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 per_request = 2;
+   */
+  perRequest = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 total = 3;
+   */
+  total = protoInt64.zero;
+
+  constructor(data?: PartialMessage<ConnectCapV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectCapV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "per_request", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "total", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectCapV1 {
+    return new ConnectCapV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectCapV1 {
+    return new ConnectCapV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectCapV1 {
+    return new ConnectCapV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectCapV1 | PlainMessage<ConnectCapV1> | undefined, b: ConnectCapV1 | PlainMessage<ConnectCapV1> | undefined): boolean {
+    return proto3.util.equals(ConnectCapV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectScopeV1
+ */
+export class ConnectScopeV1 extends Message<ConnectScopeV1> {
+  /**
+   * @generated from field: dsm.ConnectScopeKind kind = 1;
+   */
+  kind = ConnectScopeKind.UNSPECIFIED;
+
+  /**
+   * SWAP: the two tokens of the pair, in either order. HOLDINGS: the tokens
+   * the application may ask about (objects it issued are always included).
+   *
+   * @generated from field: repeated bytes policy_commits = 2;
+   */
+  policyCommits: Uint8Array[] = [];
+
+  /**
+   * PAY and SWAP: the tokens it may spend and how much.
+   *
+   * @generated from field: repeated dsm.ConnectCapV1 caps = 3;
+   */
+  caps: ConnectCapV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectScopeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectScopeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "kind", kind: "enum", T: proto3.getEnumType(ConnectScopeKind) },
+    { no: 2, name: "policy_commits", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 3, name: "caps", kind: "message", T: ConnectCapV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectScopeV1 {
+    return new ConnectScopeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectScopeV1 {
+    return new ConnectScopeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectScopeV1 {
+    return new ConnectScopeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectScopeV1 | PlainMessage<ConnectScopeV1> | undefined, b: ConnectScopeV1 | PlainMessage<ConnectScopeV1> | undefined): boolean {
+    return proto3.util.equals(ConnectScopeV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppConnectOfferBodyV1
+ */
+export class AppConnectOfferBodyV1 extends Message<AppConnectOfferBodyV1> {
+  /**
+   * @generated from field: dsm.ContactQrV3 app_card = 1;
+   */
+  appCard?: ContactQrV3;
+
+  /**
+   * with the card's AK, derives the card's device id
+   *
+   * @generated from field: bytes app_att_a = 2;
+   */
+  appAttA = new Uint8Array(0);
+
+  /**
+   * @generated from field: string display_name = 3;
+   */
+  displayName = "";
+
+  /**
+   * the code's endpoint, signed
+   *
+   * @generated from field: string endpoint = 4;
+   */
+  endpoint = "";
+
+  /**
+   * @generated from field: repeated dsm.ConnectScopeV1 scopes = 5;
+   */
+  scopes: ConnectScopeV1[] = [];
+
+  /**
+   * rooted at pairing
+   *
+   * @generated from field: repeated bytes token_anchors = 6;
+   */
+  tokenAnchors: Uint8Array[] = [];
+
+  /**
+   * @generated from field: bytes nonce = 7;
+   */
+  nonce = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AppConnectOfferBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppConnectOfferBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "app_card", kind: "message", T: ContactQrV3 },
+    { no: 2, name: "app_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "display_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "endpoint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "scopes", kind: "message", T: ConnectScopeV1, repeated: true },
+    { no: 6, name: "token_anchors", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 7, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppConnectOfferBodyV1 {
+    return new AppConnectOfferBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppConnectOfferBodyV1 {
+    return new AppConnectOfferBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppConnectOfferBodyV1 {
+    return new AppConnectOfferBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppConnectOfferBodyV1 | PlainMessage<AppConnectOfferBodyV1> | undefined, b: AppConnectOfferBodyV1 | PlainMessage<AppConnectOfferBodyV1> | undefined): boolean {
+    return proto3.util.equals(AppConnectOfferBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppConnectOfferV1
+ */
+export class AppConnectOfferV1 extends Message<AppConnectOfferV1> {
+  /**
+   * AppConnectOfferBodyV1
+   *
+   * @generated from field: bytes body = 1;
+   */
+  body = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AppConnectOfferV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppConnectOfferV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppConnectOfferV1 {
+    return new AppConnectOfferV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppConnectOfferV1 {
+    return new AppConnectOfferV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppConnectOfferV1 {
+    return new AppConnectOfferV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppConnectOfferV1 | PlainMessage<AppConnectOfferV1> | undefined, b: AppConnectOfferV1 | PlainMessage<AppConnectOfferV1> | undefined): boolean {
+    return proto3.util.equals(AppConnectOfferV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppConnectAcceptBodyV1
+ */
+export class AppConnectAcceptBodyV1 extends Message<AppConnectAcceptBodyV1> {
+  /**
+   * @generated from field: bytes offer_digest = 1;
+   */
+  offerDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.ContactQrV3 wallet_card = 2;
+   */
+  walletCard?: ContactQrV3;
+
+  /**
+   * @generated from field: bytes wallet_att_a = 3;
+   */
+  walletAttA = new Uint8Array(0);
+
+  /**
+   * never wider than the offer asked
+   *
+   * @generated from field: repeated dsm.ConnectScopeV1 granted = 4;
+   */
+  granted: ConnectScopeV1[] = [];
+
+  constructor(data?: PartialMessage<AppConnectAcceptBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppConnectAcceptBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "wallet_card", kind: "message", T: ContactQrV3 },
+    { no: 3, name: "wallet_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "granted", kind: "message", T: ConnectScopeV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppConnectAcceptBodyV1 {
+    return new AppConnectAcceptBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppConnectAcceptBodyV1 {
+    return new AppConnectAcceptBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppConnectAcceptBodyV1 {
+    return new AppConnectAcceptBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppConnectAcceptBodyV1 | PlainMessage<AppConnectAcceptBodyV1> | undefined, b: AppConnectAcceptBodyV1 | PlainMessage<AppConnectAcceptBodyV1> | undefined): boolean {
+    return proto3.util.equals(AppConnectAcceptBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppConnectAcceptV1
+ */
+export class AppConnectAcceptV1 extends Message<AppConnectAcceptV1> {
+  /**
+   * AppConnectAcceptBodyV1
+   *
+   * @generated from field: bytes body = 1;
+   */
+  body = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AppConnectAcceptV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppConnectAcceptV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppConnectAcceptV1 {
+    return new AppConnectAcceptV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppConnectAcceptV1 {
+    return new AppConnectAcceptV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppConnectAcceptV1 {
+    return new AppConnectAcceptV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppConnectAcceptV1 | PlainMessage<AppConnectAcceptV1> | undefined, b: AppConnectAcceptV1 | PlainMessage<AppConnectAcceptV1> | undefined): boolean {
+    return proto3.util.equals(AppConnectAcceptV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectAcceptIssuedV1
+ */
+export class ConnectAcceptIssuedV1 extends Message<ConnectAcceptIssuedV1> {
+  /**
+   * @generated from field: bytes anchor = 1;
+   */
+  anchor = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectAcceptIssuedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectAcceptIssuedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "anchor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAcceptIssuedV1 {
+    return new ConnectAcceptIssuedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectAcceptIssuedV1 {
+    return new ConnectAcceptIssuedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectAcceptIssuedV1 {
+    return new ConnectAcceptIssuedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectAcceptIssuedV1 | PlainMessage<ConnectAcceptIssuedV1> | undefined, b: ConnectAcceptIssuedV1 | PlainMessage<ConnectAcceptIssuedV1> | undefined): boolean {
+    return proto3.util.equals(ConnectAcceptIssuedV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectPayV1
+ */
+export class ConnectPayV1 extends Message<ConnectPayV1> {
+  /**
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * base units
+   *
+   * @generated from field: uint64 amount = 2;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: string memo = 3;
+   */
+  memo = "";
+
+  constructor(data?: PartialMessage<ConnectPayV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectPayV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectPayV1 {
+    return new ConnectPayV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectPayV1 {
+    return new ConnectPayV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectPayV1 {
+    return new ConnectPayV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectPayV1 | PlainMessage<ConnectPayV1> | undefined, b: ConnectPayV1 | PlainMessage<ConnectPayV1> | undefined): boolean {
+    return proto3.util.equals(ConnectPayV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectQuoteV1
+ */
+export class ConnectQuoteV1 extends Message<ConnectQuoteV1> {
+  /**
+   * @generated from field: bytes token_in = 1;
+   */
+  tokenIn = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_out = 2;
+   */
+  tokenOut = new Uint8Array(0);
+
+  /**
+   * base units of token_in
+   *
+   * @generated from field: uint64 amount_in = 3;
+   */
+  amountIn = protoInt64.zero;
+
+  constructor(data?: PartialMessage<ConnectQuoteV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectQuoteV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_in", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_out", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectQuoteV1 {
+    return new ConnectQuoteV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectQuoteV1 {
+    return new ConnectQuoteV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectQuoteV1 {
+    return new ConnectQuoteV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectQuoteV1 | PlainMessage<ConnectQuoteV1> | undefined, b: ConnectQuoteV1 | PlainMessage<ConnectQuoteV1> | undefined): boolean {
+    return proto3.util.equals(ConnectQuoteV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectSwapV1
+ */
+export class ConnectSwapV1 extends Message<ConnectSwapV1> {
+  /**
+   * @generated from field: bytes token_in = 1;
+   */
+  tokenIn = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_out = 2;
+   */
+  tokenOut = new Uint8Array(0);
+
+  /**
+   * base units of token_in
+   *
+   * @generated from field: uint64 amount_in = 3;
+   */
+  amountIn = protoInt64.zero;
+
+  /**
+   * base units of token_out
+   *
+   * @generated from field: uint64 min_amount_out = 4;
+   */
+  minAmountOut = protoInt64.zero;
+
+  constructor(data?: PartialMessage<ConnectSwapV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSwapV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_in", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_out", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "min_amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSwapV1 {
+    return new ConnectSwapV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSwapV1 {
+    return new ConnectSwapV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSwapV1 {
+    return new ConnectSwapV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSwapV1 | PlainMessage<ConnectSwapV1> | undefined, b: ConnectSwapV1 | PlainMessage<ConnectSwapV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSwapV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectHoldingsV1
+ */
+export class ConnectHoldingsV1 extends Message<ConnectHoldingsV1> {
+  /**
+   * @generated from field: repeated bytes policy_commits = 1;
+   */
+  policyCommits: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<ConnectHoldingsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectHoldingsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commits", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectHoldingsV1 {
+    return new ConnectHoldingsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectHoldingsV1 {
+    return new ConnectHoldingsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectHoldingsV1 {
+    return new ConnectHoldingsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectHoldingsV1 | PlainMessage<ConnectHoldingsV1> | undefined, b: ConnectHoldingsV1 | PlainMessage<ConnectHoldingsV1> | undefined): boolean {
+    return proto3.util.equals(ConnectHoldingsV1, a, b);
+  }
+}
+
+/**
+ * session_id = H(DSM/connect/session ‖ offer_digest ‖ wallet device id).
+ *
+ * @generated from message dsm.AppRequestBodyV1
+ */
+export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * > 0, strictly increasing per session
+   *
+   * @generated from field: uint64 seq = 2;
+   */
+  seq = protoInt64.zero;
+
+  /**
+   * @generated from oneof dsm.AppRequestBodyV1.kind
+   */
+  kind: {
+    /**
+     * @generated from field: dsm.ConnectAcceptIssuedV1 accept_issued = 10;
+     */
+    value: ConnectAcceptIssuedV1;
+    case: "acceptIssued";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectPayV1 pay = 11;
+     */
+    value: ConnectPayV1;
+    case: "pay";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectQuoteV1 quote = 12;
+     */
+    value: ConnectQuoteV1;
+    case: "quote";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSwapV1 swap = 13;
+     */
+    value: ConnectSwapV1;
+    case: "swap";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectHoldingsV1 holdings = 14;
+     */
+    value: ConnectHoldingsV1;
+    case: "holdings";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<AppRequestBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppRequestBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 10, name: "accept_issued", kind: "message", T: ConnectAcceptIssuedV1, oneof: "kind" },
+    { no: 11, name: "pay", kind: "message", T: ConnectPayV1, oneof: "kind" },
+    { no: 12, name: "quote", kind: "message", T: ConnectQuoteV1, oneof: "kind" },
+    { no: 13, name: "swap", kind: "message", T: ConnectSwapV1, oneof: "kind" },
+    { no: 14, name: "holdings", kind: "message", T: ConnectHoldingsV1, oneof: "kind" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestBodyV1 {
+    return new AppRequestBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppRequestBodyV1 {
+    return new AppRequestBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppRequestBodyV1 {
+    return new AppRequestBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppRequestBodyV1 | PlainMessage<AppRequestBodyV1> | undefined, b: AppRequestBodyV1 | PlainMessage<AppRequestBodyV1> | undefined): boolean {
+    return proto3.util.equals(AppRequestBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppRequestV1
+ */
+export class AppRequestV1 extends Message<AppRequestV1> {
+  /**
+   * AppRequestBodyV1
+   *
+   * @generated from field: bytes body = 1;
+   */
+  body = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AppRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestV1 {
+    return new AppRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppRequestV1 {
+    return new AppRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppRequestV1 {
+    return new AppRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppRequestV1 | PlainMessage<AppRequestV1> | undefined, b: AppRequestV1 | PlainMessage<AppRequestV1> | undefined): boolean {
+    return proto3.util.equals(AppRequestV1, a, b);
+  }
+}
+
+/**
+ * The answer to GET <endpoint>/requests/<session>/<after>: every request of
+ * the session above `after`, in sequence order.
+ *
+ * @generated from message dsm.AppRequestBatchV1
+ */
+export class AppRequestBatchV1 extends Message<AppRequestBatchV1> {
+  /**
+   * @generated from field: repeated dsm.AppRequestV1 requests = 1;
+   */
+  requests: AppRequestV1[] = [];
+
+  constructor(data?: PartialMessage<AppRequestBatchV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppRequestBatchV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "requests", kind: "message", T: AppRequestV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestBatchV1 {
+    return new AppRequestBatchV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppRequestBatchV1 {
+    return new AppRequestBatchV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppRequestBatchV1 {
+    return new AppRequestBatchV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppRequestBatchV1 | PlainMessage<AppRequestBatchV1> | undefined, b: AppRequestBatchV1 | PlainMessage<AppRequestBatchV1> | undefined): boolean {
+    return proto3.util.equals(AppRequestBatchV1, a, b);
+  }
+}
+
+/**
+ * One balance and its Sparse Merkle path to the holder's economic root, in
+ * the path's one wire form (dsm::merkle::smt_path): the heights whose
+ * sibling is not the tree's default, and those siblings, lowest first.
+ *
+ * @generated from message dsm.HoldingV1
+ */
+export class HoldingV1 extends Message<HoldingV1> {
+  /**
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount = 2;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes explicit_heights = 3;
+   */
+  explicitHeights = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes siblings = 4;
+   */
+  siblings = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<HoldingV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.HoldingV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "explicit_heights", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): HoldingV1 {
+    return new HoldingV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): HoldingV1 {
+    return new HoldingV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): HoldingV1 {
+    return new HoldingV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: HoldingV1 | PlainMessage<HoldingV1> | undefined, b: HoldingV1 | PlainMessage<HoldingV1> | undefined): boolean {
+    return proto3.util.equals(HoldingV1, a, b);
+  }
+}
+
+/**
+ * A holder's balances at its economic position `position` (A11). The
+ * verifier validates the root at that position itself and recomputes it
+ * from each path; nothing here is taken on the holder's word.
+ *
+ * @generated from message dsm.HoldingsProofV1
+ */
+export class HoldingsProofV1 extends Message<HoldingsProofV1> {
+  /**
+   * @generated from field: bytes genesis = 1;
+   */
+  genesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 position = 3;
+   */
+  position = protoInt64.zero;
+
+  /**
+   * @generated from field: repeated dsm.HoldingV1 holdings = 4;
+   */
+  holdings: HoldingV1[] = [];
+
+  constructor(data?: PartialMessage<HoldingsProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.HoldingsProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "holdings", kind: "message", T: HoldingV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): HoldingsProofV1 {
+    return new HoldingsProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): HoldingsProofV1 {
+    return new HoldingsProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): HoldingsProofV1 {
+    return new HoldingsProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: HoldingsProofV1 | PlainMessage<HoldingsProofV1> | undefined, b: HoldingsProofV1 | PlainMessage<HoldingsProofV1> | undefined): boolean {
+    return proto3.util.equals(HoldingsProofV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectQuoteResultV1
+ */
+export class ConnectQuoteResultV1 extends Message<ConnectQuoteResultV1> {
+  /**
+   * @generated from field: uint64 amount_in = 1;
+   */
+  amountIn = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 amount_out = 2;
+   */
+  amountOut = protoInt64.zero;
+
+  /**
+   * @generated from field: uint32 hops = 3;
+   */
+  hops = 0;
+
+  /**
+   * @generated from field: dsm.SofiRouteShape shape = 4;
+   */
+  shape = SofiRouteShape.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<ConnectQuoteResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectQuoteResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "hops", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 4, name: "shape", kind: "enum", T: proto3.getEnumType(SofiRouteShape) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectQuoteResultV1 {
+    return new ConnectQuoteResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectQuoteResultV1 {
+    return new ConnectQuoteResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectQuoteResultV1 {
+    return new ConnectQuoteResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectQuoteResultV1 | PlainMessage<ConnectQuoteResultV1> | undefined, b: ConnectQuoteResultV1 | PlainMessage<ConnectQuoteResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectQuoteResultV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectSwapResultV1
+ */
+export class ConnectSwapResultV1 extends Message<ConnectSwapResultV1> {
+  /**
+   * the trader's economic position the trade took
+   *
+   * @generated from field: uint64 position = 1;
+   */
+  position = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.SofiPositionState state = 2;
+   */
+  state = SofiPositionState.UNSPECIFIED;
+
+  /**
+   * @generated from field: repeated bytes vault_ids = 3;
+   */
+  vaultIds: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<ConnectSwapResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSwapResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "state", kind: "enum", T: proto3.getEnumType(SofiPositionState) },
+    { no: 3, name: "vault_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSwapResultV1 {
+    return new ConnectSwapResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSwapResultV1 {
+    return new ConnectSwapResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSwapResultV1 {
+    return new ConnectSwapResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSwapResultV1 | PlainMessage<ConnectSwapResultV1> | undefined, b: ConnectSwapResultV1 | PlainMessage<ConnectSwapResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSwapResultV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppResponseBodyV1
+ */
+export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 seq = 2;
+   */
+  seq = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.ConnectOutcome outcome = 3;
+   */
+  outcome = ConnectOutcome.UNSPECIFIED;
+
+  /**
+   * @generated from field: string reason = 4;
+   */
+  reason = "";
+
+  /**
+   * @generated from oneof dsm.AppResponseBodyV1.result
+   */
+  result: {
+    /**
+     * @generated from field: dsm.ConnectQuoteResultV1 quote = 10;
+     */
+    value: ConnectQuoteResultV1;
+    case: "quote";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSwapResultV1 swap = 11;
+     */
+    value: ConnectSwapResultV1;
+    case: "swap";
+  } | {
+    /**
+     * @generated from field: dsm.HoldingsProofV1 holdings = 12;
+     */
+    value: HoldingsProofV1;
+    case: "holdings";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<AppResponseBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppResponseBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "outcome", kind: "enum", T: proto3.getEnumType(ConnectOutcome) },
+    { no: 4, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 10, name: "quote", kind: "message", T: ConnectQuoteResultV1, oneof: "result" },
+    { no: 11, name: "swap", kind: "message", T: ConnectSwapResultV1, oneof: "result" },
+    { no: 12, name: "holdings", kind: "message", T: HoldingsProofV1, oneof: "result" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppResponseBodyV1 {
+    return new AppResponseBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppResponseBodyV1 {
+    return new AppResponseBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppResponseBodyV1 {
+    return new AppResponseBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppResponseBodyV1 | PlainMessage<AppResponseBodyV1> | undefined, b: AppResponseBodyV1 | PlainMessage<AppResponseBodyV1> | undefined): boolean {
+    return proto3.util.equals(AppResponseBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppResponseV1
+ */
+export class AppResponseV1 extends Message<AppResponseV1> {
+  /**
+   * AppResponseBodyV1
+   *
+   * @generated from field: bytes body = 1;
+   */
+  body = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AppResponseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppResponseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppResponseV1 {
+    return new AppResponseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppResponseV1 {
+    return new AppResponseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppResponseV1 {
+    return new AppResponseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppResponseV1 | PlainMessage<AppResponseV1> | undefined, b: AppResponseV1 | PlainMessage<AppResponseV1> | undefined): boolean {
+    return proto3.util.equals(AppResponseV1, a, b);
+  }
+}
+
+/**
+ * connect.preview: the offer a scanned code names, fetched and verified.
+ *
+ * @generated from message dsm.ConnectPreviewRequestV1
+ */
+export class ConnectPreviewRequestV1 extends Message<ConnectPreviewRequestV1> {
+  /**
+   * the scanned `dsm:connect/v1:` text
+   *
+   * @generated from field: string code = 1;
+   */
+  code = "";
+
+  constructor(data?: PartialMessage<ConnectPreviewRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectPreviewRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "code", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectPreviewRequestV1 {
+    return new ConnectPreviewRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectPreviewRequestV1 {
+    return new ConnectPreviewRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectPreviewRequestV1 {
+    return new ConnectPreviewRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectPreviewRequestV1 | PlainMessage<ConnectPreviewRequestV1> | undefined, b: ConnectPreviewRequestV1 | PlainMessage<ConnectPreviewRequestV1> | undefined): boolean {
+    return proto3.util.equals(ConnectPreviewRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectPreviewV1
+ */
+export class ConnectPreviewV1 extends Message<ConnectPreviewV1> {
+  /**
+   * @generated from field: bytes offer_digest = 1;
+   */
+  offerDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: string display_name = 2;
+   */
+  displayName = "";
+
+  /**
+   * @generated from field: bytes app_device_id = 3;
+   */
+  appDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: string endpoint = 4;
+   */
+  endpoint = "";
+
+  /**
+   * @generated from field: repeated dsm.ConnectScopeV1 scopes = 5;
+   */
+  scopes: ConnectScopeV1[] = [];
+
+  /**
+   * @generated from field: repeated bytes token_anchors = 6;
+   */
+  tokenAnchors: Uint8Array[] = [];
+
+  /**
+   * each scope as Rust renders it for the approval screen
+   *
+   * @generated from field: repeated string scope_lines = 7;
+   */
+  scopeLines: string[] = [];
+
+  constructor(data?: PartialMessage<ConnectPreviewV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectPreviewV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "display_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "app_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "endpoint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "scopes", kind: "message", T: ConnectScopeV1, repeated: true },
+    { no: 6, name: "token_anchors", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 7, name: "scope_lines", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectPreviewV1 {
+    return new ConnectPreviewV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectPreviewV1 {
+    return new ConnectPreviewV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectPreviewV1 {
+    return new ConnectPreviewV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectPreviewV1 | PlainMessage<ConnectPreviewV1> | undefined, b: ConnectPreviewV1 | PlainMessage<ConnectPreviewV1> | undefined): boolean {
+    return proto3.util.equals(ConnectPreviewV1, a, b);
+  }
+}
+
+/**
+ * connect.approve: the player approves the offer, possibly narrowing it.
+ *
+ * @generated from message dsm.ConnectApproveRequestV1
+ */
+export class ConnectApproveRequestV1 extends Message<ConnectApproveRequestV1> {
+  /**
+   * @generated from field: bytes offer_digest = 1;
+   */
+  offerDigest = new Uint8Array(0);
+
+  /**
+   * empty grants exactly what the offer asked
+   *
+   * @generated from field: repeated dsm.ConnectScopeV1 granted = 2;
+   */
+  granted: ConnectScopeV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectApproveRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectApproveRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "granted", kind: "message", T: ConnectScopeV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectApproveRequestV1 {
+    return new ConnectApproveRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectApproveRequestV1 {
+    return new ConnectApproveRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectApproveRequestV1 {
+    return new ConnectApproveRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectApproveRequestV1 | PlainMessage<ConnectApproveRequestV1> | undefined, b: ConnectApproveRequestV1 | PlainMessage<ConnectApproveRequestV1> | undefined): boolean {
+    return proto3.util.equals(ConnectApproveRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectSpentV1
+ */
+export class ConnectSpentV1 extends Message<ConnectSpentV1> {
+  /**
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 spent = 2;
+   */
+  spent = protoInt64.zero;
+
+  /**
+   * @generated from field: string spent_display = 3;
+   */
+  spentDisplay = "";
+
+  /**
+   * @generated from field: string total_display = 4;
+   */
+  totalDisplay = "";
+
+  /**
+   * @generated from field: string symbol = 5;
+   */
+  symbol = "";
+
+  constructor(data?: PartialMessage<ConnectSpentV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSpentV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "spent", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "spent_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "total_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "symbol", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSpentV1 {
+    return new ConnectSpentV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSpentV1 {
+    return new ConnectSpentV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSpentV1 {
+    return new ConnectSpentV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSpentV1 | PlainMessage<ConnectSpentV1> | undefined, b: ConnectSpentV1 | PlainMessage<ConnectSpentV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSpentV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectSessionV1
+ */
+export class ConnectSessionV1 extends Message<ConnectSessionV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from field: string display_name = 2;
+   */
+  displayName = "";
+
+  /**
+   * the application (wallet side) or the wallet (application side)
+   *
+   * @generated from field: bytes peer_device_id = 3;
+   */
+  peerDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: string endpoint = 4;
+   */
+  endpoint = "";
+
+  /**
+   * @generated from field: repeated dsm.ConnectScopeV1 granted = 5;
+   */
+  granted: ConnectScopeV1[] = [];
+
+  /**
+   * @generated from field: uint64 last_seq = 6;
+   */
+  lastSeq = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.ConnectSessionStatus status = 7;
+   */
+  status = ConnectSessionStatus.UNSPECIFIED;
+
+  /**
+   * @generated from field: repeated dsm.ConnectSpentV1 spent = 8;
+   */
+  spent: ConnectSpentV1[] = [];
+
+  /**
+   * @generated from field: repeated string scope_lines = 9;
+   */
+  scopeLines: string[] = [];
+
+  /**
+   * why the last sync with it did not complete; empty when it did
+   *
+   * @generated from field: string last_error = 10;
+   */
+  lastError = "";
+
+  constructor(data?: PartialMessage<ConnectSessionV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSessionV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "display_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "peer_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "endpoint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "granted", kind: "message", T: ConnectScopeV1, repeated: true },
+    { no: 6, name: "last_seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 7, name: "status", kind: "enum", T: proto3.getEnumType(ConnectSessionStatus) },
+    { no: 8, name: "spent", kind: "message", T: ConnectSpentV1, repeated: true },
+    { no: 9, name: "scope_lines", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 10, name: "last_error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSessionV1 {
+    return new ConnectSessionV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSessionV1 {
+    return new ConnectSessionV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSessionV1 {
+    return new ConnectSessionV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSessionV1 | PlainMessage<ConnectSessionV1> | undefined, b: ConnectSessionV1 | PlainMessage<ConnectSessionV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSessionV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectSessionsV1
+ */
+export class ConnectSessionsV1 extends Message<ConnectSessionsV1> {
+  /**
+   * @generated from field: repeated dsm.ConnectSessionV1 sessions = 1;
+   */
+  sessions: ConnectSessionV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectSessionsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSessionsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "sessions", kind: "message", T: ConnectSessionV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSessionsV1 {
+    return new ConnectSessionsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSessionsV1 {
+    return new ConnectSessionsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSessionsV1 {
+    return new ConnectSessionsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSessionsV1 | PlainMessage<ConnectSessionsV1> | undefined, b: ConnectSessionsV1 | PlainMessage<ConnectSessionsV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSessionsV1, a, b);
+  }
+}
+
+/**
+ * A request outside the grant, waiting for the player.
+ *
+ * @generated from message dsm.ConnectPendingV1
+ */
+export class ConnectPendingV1 extends Message<ConnectPendingV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 seq = 2;
+   */
+  seq = protoInt64.zero;
+
+  /**
+   * @generated from field: string display_name = 3;
+   */
+  displayName = "";
+
+  /**
+   * the request as Rust renders it
+   *
+   * @generated from field: string summary = 4;
+   */
+  summary = "";
+
+  /**
+   * why the grant does not cover it
+   *
+   * @generated from field: string reason = 5;
+   */
+  reason = "";
+
+  constructor(data?: PartialMessage<ConnectPendingV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectPendingV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "display_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "summary", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectPendingV1 {
+    return new ConnectPendingV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectPendingV1 {
+    return new ConnectPendingV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectPendingV1 {
+    return new ConnectPendingV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectPendingV1 | PlainMessage<ConnectPendingV1> | undefined, b: ConnectPendingV1 | PlainMessage<ConnectPendingV1> | undefined): boolean {
+    return proto3.util.equals(ConnectPendingV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectPendingListV1
+ */
+export class ConnectPendingListV1 extends Message<ConnectPendingListV1> {
+  /**
+   * @generated from field: repeated dsm.ConnectPendingV1 pending = 1;
+   */
+  pending: ConnectPendingV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectPendingListV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectPendingListV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "pending", kind: "message", T: ConnectPendingV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectPendingListV1 {
+    return new ConnectPendingListV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectPendingListV1 {
+    return new ConnectPendingListV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectPendingListV1 {
+    return new ConnectPendingListV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectPendingListV1 | PlainMessage<ConnectPendingListV1> | undefined, b: ConnectPendingListV1 | PlainMessage<ConnectPendingListV1> | undefined): boolean {
+    return proto3.util.equals(ConnectPendingListV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectRespondRequestV1
+ */
+export class ConnectRespondRequestV1 extends Message<ConnectRespondRequestV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 seq = 2;
+   */
+  seq = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.ConnectDecision decision = 3;
+   */
+  decision = ConnectDecision.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<ConnectRespondRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectRespondRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "decision", kind: "enum", T: proto3.getEnumType(ConnectDecision) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectRespondRequestV1 {
+    return new ConnectRespondRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectRespondRequestV1 {
+    return new ConnectRespondRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectRespondRequestV1 {
+    return new ConnectRespondRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectRespondRequestV1 | PlainMessage<ConnectRespondRequestV1> | undefined, b: ConnectRespondRequestV1 | PlainMessage<ConnectRespondRequestV1> | undefined): boolean {
+    return proto3.util.equals(ConnectRespondRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectSessionRefV1
+ */
+export class ConnectSessionRefV1 extends Message<ConnectSessionRefV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectSessionRefV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSessionRefV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSessionRefV1 {
+    return new ConnectSessionRefV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSessionRefV1 {
+    return new ConnectSessionRefV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSessionRefV1 {
+    return new ConnectSessionRefV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSessionRefV1 | PlainMessage<ConnectSessionRefV1> | undefined, b: ConnectSessionRefV1 | PlainMessage<ConnectSessionRefV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSessionRefV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectLogEntryV1
+ */
+export class ConnectLogEntryV1 extends Message<ConnectLogEntryV1> {
+  /**
+   * @generated from field: uint64 seq = 1;
+   */
+  seq = protoInt64.zero;
+
+  /**
+   * @generated from field: string summary = 2;
+   */
+  summary = "";
+
+  /**
+   * @generated from field: dsm.ConnectOutcome outcome = 3;
+   */
+  outcome = ConnectOutcome.UNSPECIFIED;
+
+  /**
+   * @generated from field: string detail = 4;
+   */
+  detail = "";
+
+  constructor(data?: PartialMessage<ConnectLogEntryV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectLogEntryV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "summary", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "outcome", kind: "enum", T: proto3.getEnumType(ConnectOutcome) },
+    { no: 4, name: "detail", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectLogEntryV1 {
+    return new ConnectLogEntryV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectLogEntryV1 {
+    return new ConnectLogEntryV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectLogEntryV1 {
+    return new ConnectLogEntryV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectLogEntryV1 | PlainMessage<ConnectLogEntryV1> | undefined, b: ConnectLogEntryV1 | PlainMessage<ConnectLogEntryV1> | undefined): boolean {
+    return proto3.util.equals(ConnectLogEntryV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectLogV1
+ */
+export class ConnectLogV1 extends Message<ConnectLogV1> {
+  /**
+   * @generated from field: repeated dsm.ConnectLogEntryV1 entries = 1;
+   */
+  entries: ConnectLogEntryV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectLogV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectLogV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "entries", kind: "message", T: ConnectLogEntryV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectLogV1 {
+    return new ConnectLogV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectLogV1 {
+    return new ConnectLogV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectLogV1 {
+    return new ConnectLogV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectLogV1 | PlainMessage<ConnectLogV1> | undefined, b: ConnectLogV1 | PlainMessage<ConnectLogV1> | undefined): boolean {
+    return proto3.util.equals(ConnectLogV1, a, b);
+  }
+}
+
+/**
+ * connect.app.offer: the application's account makes and signs an offer.
+ *
+ * @generated from message dsm.ConnectAppOfferRequestV1
+ */
+export class ConnectAppOfferRequestV1 extends Message<ConnectAppOfferRequestV1> {
+  /**
+   * @generated from field: string display_name = 1;
+   */
+  displayName = "";
+
+  /**
+   * @generated from field: string endpoint = 2;
+   */
+  endpoint = "";
+
+  /**
+   * @generated from field: bytes cert_pin = 3;
+   */
+  certPin = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.ConnectScopeV1 scopes = 4;
+   */
+  scopes: ConnectScopeV1[] = [];
+
+  /**
+   * @generated from field: repeated bytes token_anchors = 5;
+   */
+  tokenAnchors: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<ConnectAppOfferRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectAppOfferRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "display_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "endpoint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "cert_pin", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "scopes", kind: "message", T: ConnectScopeV1, repeated: true },
+    { no: 5, name: "token_anchors", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppOfferRequestV1 {
+    return new ConnectAppOfferRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectAppOfferRequestV1 {
+    return new ConnectAppOfferRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectAppOfferRequestV1 {
+    return new ConnectAppOfferRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectAppOfferRequestV1 | PlainMessage<ConnectAppOfferRequestV1> | undefined, b: ConnectAppOfferRequestV1 | PlainMessage<ConnectAppOfferRequestV1> | undefined): boolean {
+    return proto3.util.equals(ConnectAppOfferRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectAppOfferV1
+ */
+export class ConnectAppOfferV1 extends Message<ConnectAppOfferV1> {
+  /**
+   * the `dsm:connect/v1:` text the application shows
+   *
+   * @generated from field: string code = 1;
+   */
+  code = "";
+
+  /**
+   * @generated from field: bytes offer_digest = 2;
+   */
+  offerDigest = new Uint8Array(0);
+
+  /**
+   * AppConnectOfferV1 bytes, served at <endpoint>/connect/offer/<digest>
+   *
+   * @generated from field: bytes offer = 3;
+   */
+  offer = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectAppOfferV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectAppOfferV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "code", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "offer", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppOfferV1 {
+    return new ConnectAppOfferV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectAppOfferV1 {
+    return new ConnectAppOfferV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectAppOfferV1 {
+    return new ConnectAppOfferV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectAppOfferV1 | PlainMessage<ConnectAppOfferV1> | undefined, b: ConnectAppOfferV1 | PlainMessage<ConnectAppOfferV1> | undefined): boolean {
+    return proto3.util.equals(ConnectAppOfferV1, a, b);
+  }
+}
+
+/**
+ * connect.app.request: the application asks a connected wallet for something.
+ *
+ * @generated from message dsm.ConnectAppRequestIntentV1
+ */
+export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from oneof dsm.ConnectAppRequestIntentV1.kind
+   */
+  kind: {
+    /**
+     * @generated from field: dsm.ConnectAcceptIssuedV1 accept_issued = 10;
+     */
+    value: ConnectAcceptIssuedV1;
+    case: "acceptIssued";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectPayV1 pay = 11;
+     */
+    value: ConnectPayV1;
+    case: "pay";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectQuoteV1 quote = 12;
+     */
+    value: ConnectQuoteV1;
+    case: "quote";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSwapV1 swap = 13;
+     */
+    value: ConnectSwapV1;
+    case: "swap";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectHoldingsV1 holdings = 14;
+     */
+    value: ConnectHoldingsV1;
+    case: "holdings";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<ConnectAppRequestIntentV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectAppRequestIntentV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "accept_issued", kind: "message", T: ConnectAcceptIssuedV1, oneof: "kind" },
+    { no: 11, name: "pay", kind: "message", T: ConnectPayV1, oneof: "kind" },
+    { no: 12, name: "quote", kind: "message", T: ConnectQuoteV1, oneof: "kind" },
+    { no: 13, name: "swap", kind: "message", T: ConnectSwapV1, oneof: "kind" },
+    { no: 14, name: "holdings", kind: "message", T: ConnectHoldingsV1, oneof: "kind" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestIntentV1 {
+    return new ConnectAppRequestIntentV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectAppRequestIntentV1 {
+    return new ConnectAppRequestIntentV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectAppRequestIntentV1 {
+    return new ConnectAppRequestIntentV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectAppRequestIntentV1 | PlainMessage<ConnectAppRequestIntentV1> | undefined, b: ConnectAppRequestIntentV1 | PlainMessage<ConnectAppRequestIntentV1> | undefined): boolean {
+    return proto3.util.equals(ConnectAppRequestIntentV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectAppRequestsQueryV1
+ */
+export class ConnectAppRequestsQueryV1 extends Message<ConnectAppRequestsQueryV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 after = 2;
+   */
+  after = protoInt64.zero;
+
+  constructor(data?: PartialMessage<ConnectAppRequestsQueryV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectAppRequestsQueryV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "after", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestsQueryV1 {
+    return new ConnectAppRequestsQueryV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectAppRequestsQueryV1 {
+    return new ConnectAppRequestsQueryV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectAppRequestsQueryV1 {
+    return new ConnectAppRequestsQueryV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectAppRequestsQueryV1 | PlainMessage<ConnectAppRequestsQueryV1> | undefined, b: ConnectAppRequestsQueryV1 | PlainMessage<ConnectAppRequestsQueryV1> | undefined): boolean {
+    return proto3.util.equals(ConnectAppRequestsQueryV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectRequestRefV1
+ */
+export class ConnectRequestRefV1 extends Message<ConnectRequestRefV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 seq = 2;
+   */
+  seq = protoInt64.zero;
+
+  constructor(data?: PartialMessage<ConnectRequestRefV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectRequestRefV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectRequestRefV1 {
+    return new ConnectRequestRefV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectRequestRefV1 {
+    return new ConnectRequestRefV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectRequestRefV1 {
+    return new ConnectRequestRefV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectRequestRefV1 | PlainMessage<ConnectRequestRefV1> | undefined, b: ConnectRequestRefV1 | PlainMessage<ConnectRequestRefV1> | undefined): boolean {
+    return proto3.util.equals(ConnectRequestRefV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.VerifiedHoldingV1
+ */
+export class VerifiedHoldingV1 extends Message<VerifiedHoldingV1> {
+  /**
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount = 2;
+   */
+  amount = protoInt64.zero;
+
+  constructor(data?: PartialMessage<VerifiedHoldingV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VerifiedHoldingV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VerifiedHoldingV1 {
+    return new VerifiedHoldingV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VerifiedHoldingV1 {
+    return new VerifiedHoldingV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VerifiedHoldingV1 {
+    return new VerifiedHoldingV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VerifiedHoldingV1 | PlainMessage<VerifiedHoldingV1> | undefined, b: VerifiedHoldingV1 | PlainMessage<VerifiedHoldingV1> | undefined): boolean {
+    return proto3.util.equals(VerifiedHoldingV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectAppStatusV1
+ */
+export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 seq = 2;
+   */
+  seq = protoInt64.zero;
+
+  /**
+   * the wallet posted a signed answer
+   *
+   * @generated from field: bool answered = 3;
+   */
+  answered = false;
+
+  /**
+   * what the answer says: a notification
+   *
+   * @generated from field: dsm.ConnectOutcome outcome = 4;
+   */
+  outcome = ConnectOutcome.UNSPECIFIED;
+
+  /**
+   * @generated from field: string reason = 5;
+   */
+  reason = "";
+
+  /**
+   * @generated from field: dsm.ConnectFact fact = 6;
+   */
+  fact = ConnectFact.UNSPECIFIED;
+
+  /**
+   * why the fact holds, or why the answer established none
+   *
+   * @generated from field: string fact_detail = 7;
+   */
+  factDetail = "";
+
+  /**
+   * FACT_HOLDINGS only
+   *
+   * @generated from field: repeated dsm.VerifiedHoldingV1 holdings = 8;
+   */
+  holdings: VerifiedHoldingV1[] = [];
+
+  /**
+   * @generated from field: uint64 holdings_position = 9;
+   */
+  holdingsPosition = protoInt64.zero;
+
+  /**
+   * a quote is information, never a fact
+   *
+   * @generated from field: dsm.ConnectQuoteResultV1 quote = 10;
+   */
+  quote?: ConnectQuoteResultV1;
+
+  /**
+   * @generated from field: dsm.ConnectSwapResultV1 swap = 11;
+   */
+  swap?: ConnectSwapResultV1;
+
+  /**
+   * FACT_PAID: the accepted transfer's id
+   *
+   * @generated from field: bytes paid_tx = 12;
+   */
+  paidTx = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectAppStatusV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectAppStatusV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "answered", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "outcome", kind: "enum", T: proto3.getEnumType(ConnectOutcome) },
+    { no: 5, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "fact", kind: "enum", T: proto3.getEnumType(ConnectFact) },
+    { no: 7, name: "fact_detail", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "holdings", kind: "message", T: VerifiedHoldingV1, repeated: true },
+    { no: 9, name: "holdings_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 10, name: "quote", kind: "message", T: ConnectQuoteResultV1 },
+    { no: 11, name: "swap", kind: "message", T: ConnectSwapResultV1 },
+    { no: 12, name: "paid_tx", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppStatusV1 {
+    return new ConnectAppStatusV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectAppStatusV1 {
+    return new ConnectAppStatusV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectAppStatusV1 {
+    return new ConnectAppStatusV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectAppStatusV1 | PlainMessage<ConnectAppStatusV1> | undefined, b: ConnectAppStatusV1 | PlainMessage<ConnectAppStatusV1> | undefined): boolean {
+    return proto3.util.equals(ConnectAppStatusV1, a, b);
+  }
+}
+
+/**
+ * One envelope payload for every DSM Connect reply.
+ *
+ * @generated from message dsm.ConnectReplyV1
+ */
+export class ConnectReplyV1 extends Message<ConnectReplyV1> {
+  /**
+   * @generated from oneof dsm.ConnectReplyV1.reply
+   */
+  reply: {
+    /**
+     * @generated from field: dsm.ConnectPreviewV1 preview = 1;
+     */
+    value: ConnectPreviewV1;
+    case: "preview";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSessionsV1 sessions = 2;
+     */
+    value: ConnectSessionsV1;
+    case: "sessions";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSessionV1 session = 3;
+     */
+    value: ConnectSessionV1;
+    case: "session";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectPendingListV1 pending = 4;
+     */
+    value: ConnectPendingListV1;
+    case: "pending";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectLogV1 log = 5;
+     */
+    value: ConnectLogV1;
+    case: "log";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectAppOfferV1 offer = 6;
+     */
+    value: ConnectAppOfferV1;
+    case: "offer";
+  } | {
+    /**
+     * @generated from field: dsm.AppRequestBatchV1 requests = 7;
+     */
+    value: AppRequestBatchV1;
+    case: "requests";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectAppStatusV1 status = 8;
+     */
+    value: ConnectAppStatusV1;
+    case: "status";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectRequestRefV1 request = 9;
+     */
+    value: ConnectRequestRefV1;
+    case: "request";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<ConnectReplyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectReplyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "preview", kind: "message", T: ConnectPreviewV1, oneof: "reply" },
+    { no: 2, name: "sessions", kind: "message", T: ConnectSessionsV1, oneof: "reply" },
+    { no: 3, name: "session", kind: "message", T: ConnectSessionV1, oneof: "reply" },
+    { no: 4, name: "pending", kind: "message", T: ConnectPendingListV1, oneof: "reply" },
+    { no: 5, name: "log", kind: "message", T: ConnectLogV1, oneof: "reply" },
+    { no: 6, name: "offer", kind: "message", T: ConnectAppOfferV1, oneof: "reply" },
+    { no: 7, name: "requests", kind: "message", T: AppRequestBatchV1, oneof: "reply" },
+    { no: 8, name: "status", kind: "message", T: ConnectAppStatusV1, oneof: "reply" },
+    { no: 9, name: "request", kind: "message", T: ConnectRequestRefV1, oneof: "reply" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectReplyV1 {
+    return new ConnectReplyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectReplyV1 {
+    return new ConnectReplyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectReplyV1 {
+    return new ConnectReplyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectReplyV1 | PlainMessage<ConnectReplyV1> | undefined, b: ConnectReplyV1 | PlainMessage<ConnectReplyV1> | undefined): boolean {
+    return proto3.util.equals(ConnectReplyV1, a, b);
+  }
+}
+
+/**
+ * connect.app.offerOf: an offer this account made, by its digest, as its
+ * relay serves it.
+ *
+ * @generated from message dsm.ConnectOfferRefV1
+ */
+export class ConnectOfferRefV1 extends Message<ConnectOfferRefV1> {
+  /**
+   * @generated from field: bytes offer_digest = 1;
+   */
+  offerDigest = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectOfferRefV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectOfferRefV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectOfferRefV1 {
+    return new ConnectOfferRefV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectOfferRefV1 {
+    return new ConnectOfferRefV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectOfferRefV1 {
+    return new ConnectOfferRefV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectOfferRefV1 | PlainMessage<ConnectOfferRefV1> | undefined, b: ConnectOfferRefV1 | PlainMessage<ConnectOfferRefV1> | undefined): boolean {
+    return proto3.util.equals(ConnectOfferRefV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppHostActivityEntryV1
+ */
+export class AppHostActivityEntryV1 extends Message<AppHostActivityEntryV1> {
+  /**
+   * @generated from field: uint64 seq = 1;
+   */
+  seq = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.AppHostActivityKind kind = 2;
+   */
+  kind = AppHostActivityKind.UNSPECIFIED;
+
+  /**
+   * the route, or the relay call
+   *
+   * @generated from field: string name = 3;
+   */
+  name = "";
+
+  /**
+   * what was asked, as the host renders it
+   *
+   * @generated from field: string summary = 4;
+   */
+  summary = "";
+
+  /**
+   * what came back, as the host renders it
+   *
+   * @generated from field: string result = 5;
+   */
+  result = "";
+
+  /**
+   * why it failed; empty when it did not
+   *
+   * @generated from field: string error = 6;
+   */
+  error = "";
+
+  /**
+   * this account's admitted economic position before; unset when it could not be read
+   *
+   * @generated from field: optional uint64 position_before = 7;
+   */
+  positionBefore?: bigint;
+
+  /**
+   * and after
+   *
+   * @generated from field: optional uint64 position_after = 8;
+   */
+  positionAfter?: bigint;
+
+  /**
+   * the admitted economic root after
+   *
+   * @generated from field: bytes econ_root_after = 9;
+   */
+  econRootAfter = new Uint8Array(0);
+
+  /**
+   * this account's Device Tree commitment after
+   *
+   * @generated from field: bytes device_tree_after = 10;
+   */
+  deviceTreeAfter = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AppHostActivityEntryV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppHostActivityEntryV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "kind", kind: "enum", T: proto3.getEnumType(AppHostActivityKind) },
+    { no: 3, name: "name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "summary", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "result", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "position_before", kind: "scalar", T: 4 /* ScalarType.UINT64 */, opt: true },
+    { no: 8, name: "position_after", kind: "scalar", T: 4 /* ScalarType.UINT64 */, opt: true },
+    { no: 9, name: "econ_root_after", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "device_tree_after", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppHostActivityEntryV1 {
+    return new AppHostActivityEntryV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppHostActivityEntryV1 {
+    return new AppHostActivityEntryV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppHostActivityEntryV1 {
+    return new AppHostActivityEntryV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppHostActivityEntryV1 | PlainMessage<AppHostActivityEntryV1> | undefined, b: AppHostActivityEntryV1 | PlainMessage<AppHostActivityEntryV1> | undefined): boolean {
+    return proto3.util.equals(AppHostActivityEntryV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AppHostActivityV1
+ */
+export class AppHostActivityV1 extends Message<AppHostActivityV1> {
+  /**
+   * @generated from field: repeated dsm.AppHostActivityEntryV1 entries = 1;
+   */
+  entries: AppHostActivityEntryV1[] = [];
+
+  /**
+   * ask from here next
+   *
+   * @generated from field: uint64 next = 2;
+   */
+  next = protoInt64.zero;
+
+  /**
+   * this account
+   *
+   * @generated from field: bytes device_id = 3;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * the pinned set its writes go to
+   *
+   * @generated from field: bytes storage_set_id = 4;
+   */
+  storageSetId = new Uint8Array(0);
+
+  /**
+   * the size of one of its SPHINCS+ signatures
+   *
+   * @generated from field: uint32 signature_bytes = 5;
+   */
+  signatureBytes = 0;
+
+  constructor(data?: PartialMessage<AppHostActivityV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppHostActivityV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "entries", kind: "message", T: AppHostActivityEntryV1, repeated: true },
+    { no: 2, name: "next", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "signature_bytes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppHostActivityV1 {
+    return new AppHostActivityV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppHostActivityV1 {
+    return new AppHostActivityV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppHostActivityV1 {
+    return new AppHostActivityV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppHostActivityV1 | PlainMessage<AppHostActivityV1> | undefined, b: AppHostActivityV1 | PlainMessage<AppHostActivityV1> | undefined): boolean {
+    return proto3.util.equals(AppHostActivityV1, a, b);
   }
 }
 

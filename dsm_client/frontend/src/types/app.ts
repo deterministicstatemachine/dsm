@@ -32,6 +32,7 @@ export const SCREEN_TYPES = [
   'nfc_recovery',
   'recovery_pipeline',
   'sofi',
+  'apps',
 ] as const;
 
 export type ScreenType = (typeof SCREEN_TYPES)[number];
