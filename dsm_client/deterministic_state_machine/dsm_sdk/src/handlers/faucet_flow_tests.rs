@@ -529,3 +529,173 @@ async fn a_faucet_lineage_is_walkable_by_a_foreign_verifier() {
         dsm::types::operations::Operation::FaucetClaim { .. }
     ));
 }
+
+// ── A device's first admission, held after its advance ────────────────────
+//
+// The advance and the pending admission commit in one transaction, so a
+// first admission held at any later step leaves the device with its credit on
+// the head (fenced) and nothing admitted. Resuming it must reach the
+// activation root it was built on, whichever production path resumes it.
+
+/// The seats of this device's first root cell `K_root(1)` after its first
+/// two, in route order, and the cell's key. Refusing their writes lets the
+/// first root claim reach the leader and one more seat and no further: a chain
+/// of two links, which is never final (storage spec §9).
+fn seats_past_the_second_of_the_first_root_cell(d: &Device) -> (Vec<String>, [u8; 32]) {
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let cell = crate::sdk::economic_registers::root_cell(
+        &set,
+        NETWORK,
+        &d.identity.genesis,
+        &d.identity.device_id,
+        1,
+        &dsm::economic::tree::empty_economic_root(),
+    )
+    .expect("K_root(1)");
+    let seats = cell.routed().route().seats()[2..]
+        .iter()
+        .map(|id| String::from_utf8(id.clone()).expect("member ids are UTF-8"))
+        .collect();
+    (seats, *cell.routed().key())
+}
+
+/// Run `d`'s first claim while its root claim cannot become final, so the
+/// claim is held for resume after its advance credited the head; then let the
+/// members take writes again. Returns the held admission.
+async fn hold_the_first_claim(d: &Device) -> dsm::economic::admission::PendingEconomicAdmission {
+    let (seats, key) = seats_past_the_second_of_the_first_root_cell(d);
+    for seat in &seats {
+        d.nodes.refuse_cell_writes(seat, &[key]).await;
+    }
+    let held = match claim_era_faucet(d.core(), NETWORK).await {
+        Ok(outcome) => panic!(
+            "a root claim of two links is not final, yet the claim admitted position {}",
+            outcome.economic_position
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(held.contains("the claim is not final yet"), "{held}");
+    let head = d.core().device_head().expect("head");
+    let pending = head
+        .pending_economic_admission()
+        .cloned()
+        .expect("the first claim is held for resume");
+    assert_eq!(pending.economic_position, 1, "the first admission");
+    assert_eq!(
+        pending.pre_economic_root,
+        dsm::economic::tree::empty_economic_root(),
+        "built on the activation root"
+    );
+    assert_eq!(
+        head.balance(&era()),
+        whole_era(100),
+        "the held advance has already credited the head"
+    );
+    assert!(
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .is_none(),
+        "nothing is admitted yet"
+    );
+    for seat in &seats {
+        d.nodes.accept_cell_writes(seat).await;
+    }
+    pending
+}
+
+/// `core`'s lineage is admitted at `position` and nothing is pending.
+fn admitted_at(core: &crate::sdk::core_sdk::CoreSDK, position: u64) {
+    assert!(
+        core.device_head()
+            .expect("head")
+            .pending_economic_admission()
+            .is_none(),
+        "admitted ⇒ unfenced"
+    );
+    let (admitted, _root) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read admitted")
+        .expect("admitted recorded");
+    assert_eq!(admitted, position);
+}
+
+/// A held first claim is finished by resuming it: its predecessor is the
+/// activation root, though the head already holds the claim's own credit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_held_first_claim_is_finished_by_resuming_it() {
+    let d = Device::start(0xA9).await;
+    let pending = hold_the_first_claim(&d).await;
+    let admitted = crate::sdk::economic_admission_flow::resume_pending_admission(
+        d.core(),
+        NETWORK,
+        pending,
+    )
+    .await
+    .expect("the held first claim resumes");
+    assert_eq!(admitted.economic_position, 1);
+    admitted_at(d.core(), 1);
+    assert_eq!(d.era_balance(), whole_era(100), "credited once");
+    assert_eq!(recipient_of(&release_at(1).await), d.identity.device_id);
+}
+
+/// The next claim finishes a held first claim before it claims again: the
+/// held one lands at position 1 and the new one at position 2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_held_first_claim_is_finished_by_the_next_claim() {
+    let d = Device::start(0xAA).await;
+    hold_the_first_claim(&d).await;
+    let next = claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the next claim finishes the held one, then claims");
+    assert_eq!(next.economic_position, 2);
+    admitted_at(d.core(), 2);
+    assert_eq!(d.era_balance(), whole_era(200));
+    assert_eq!(reserve_head().await.generation, 2, "released twice, once each");
+}
+
+/// After a restart the sync finishes a first claim the previous run left held
+/// (the stranded-admission sweep).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_held_first_claim_is_finished_by_the_sync_after_a_restart() {
+    use dsm::types::proto;
+    use prost::Message;
+    let d = Device::start(0xAB).await;
+    hold_the_first_claim(&d).await;
+    let restarted = crate::economic_fixtures::restart_router(&d.fleet);
+    let answered = restarted
+        .query(AppQuery {
+            path: "storage.sync".to_string(),
+            params: proto::ArgPack {
+                codec: proto::Codec::Proto as i32,
+                body: crate::sdk::inbox_poller::poll_sync_request().encode_to_vec(),
+                schema_hash: None,
+            }
+            .encode_to_vec(),
+        })
+        .await;
+    assert!(answered.success, "storage.sync: {:?}", answered.error_message);
+    let sync = match crate::handlers::response_helpers::decode_local_envelope(&answered.data)
+        .expect("storage.sync answers an envelope")
+        .payload
+    {
+        Some(proto::envelope::Payload::StorageSyncResponse(resp)) => resp,
+        other => panic!("storage.sync answered {other:?}"),
+    };
+    assert!(
+        !sync.errors.iter().any(|e| e.contains("stranded admission")),
+        "{:?}",
+        sync.errors
+    );
+    admitted_at(&restarted.core_sdk, 1);
+    assert_eq!(
+        restarted
+            .core_sdk
+            .device_head()
+            .expect("head")
+            .balance(&era()),
+        whole_era(100),
+        "credited once"
+    );
+}
