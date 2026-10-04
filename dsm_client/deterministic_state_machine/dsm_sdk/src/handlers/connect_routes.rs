@@ -24,7 +24,7 @@
 //! notification, and `connect.app.status` reports only what this account
 //! established from DSM evidence itself.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use dsm::types::proto as generated;
 use generated::connect_reply_v1::Reply;
@@ -437,6 +437,45 @@ impl AppRouterImpl {
         }))
     }
 
+    /// The tokens whose committed policy names the application as creator:
+    /// those this device rooted, and, for a holdings request, each other
+    /// token it names whose policy, fetched and re-hashed to its anchor,
+    /// names the application. A proof of an object this device never held
+    /// proves it is not held; nothing is adopted. A policy that cannot be
+    /// read leaves the request for the next sync.
+    async fn issued_by_app(
+        &self,
+        app: &[u8; 32],
+        request: &Request,
+    ) -> Result<BTreeSet<[u8; 32]>, String> {
+        let mut issued = issued_by(app)?;
+        let Request::Holdings { policy_commits } = request else {
+            return Ok(issued);
+        };
+        for commit in policy_commits {
+            match super::wallet_routes::token_of_commit(commit) {
+                // Rooted here (or a protocol asset): `issued_by` decided it.
+                Ok(..) => continue,
+                Err(..) => {
+                    let policy = self
+                        .verified_policy(*commit)
+                        .await
+                        .map_err(|e| format!("the policy of {}: {e}", short(commit)))?;
+                    if let dsm::economic::token_policy::Release::AllAtCreation {
+                        creator_device_id,
+                        ..
+                    } = &policy.release
+                    {
+                        if creator_device_id == app {
+                            issued.insert(*commit);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(issued)
+    }
+
     /// Carry out a request the player approved. A payment waits while the
     /// relationship with the application is catching up: the approval is
     /// kept, and the next sync carries it out. Called under [`PROCESSING`].
@@ -553,7 +592,7 @@ impl AppRouterImpl {
             .map_err(|e| e.to_string())?
             .into_iter()
             .collect();
-        let issued = issued_by(&session.app_device_id)?;
+        let issued = self.issued_by_app(&session.app_device_id, &request).await?;
         let spent_of = |c: &[u8; 32]| match spent.get(c) {
             Some(v) => *v,
             None => 0,

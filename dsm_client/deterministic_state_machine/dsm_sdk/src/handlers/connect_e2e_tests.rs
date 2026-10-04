@@ -1024,6 +1024,77 @@ async fn a_disconnected_application_drives_nothing() {
     assert!(list.pending.is_empty(), "{:?}", list.pending);
 }
 
+/// A holdings request may name an object the wallet never held. The wallet
+/// roots nothing: it reads the object's policy. One the game created is
+/// inside the grant and proven not held, without asking; one another device
+/// created is outside it, and the request waits for the player.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn holdings_of_an_object_never_held_are_covered_only_if_the_game_issued_it() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    // An object the game issued and never sent this wallet.
+    let elsewhere = create_token(&p.a, "EM0009", 1).await;
+    let asked = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Holdings(generated::ConnectHoldingsV1 {
+            policy_commits: vec![wild.to_vec(), elsewhere.to_vec()],
+        }),
+    )
+    .await;
+    sync_clean(&p, &relay).await;
+    let proven = status(&p.a, &session, asked).await;
+    assert_eq!(
+        fact(&proven),
+        generated::ConnectFact::Holdings,
+        "{}",
+        proven.fact_detail
+    );
+    let held: std::collections::BTreeMap<Vec<u8>, u64> = proven
+        .holdings
+        .iter()
+        .map(|h| (h.policy_commit.clone(), h.amount))
+        .collect();
+    assert_eq!(held.get(elsewhere.as_slice()), Some(&0), "{held:?}");
+    p.b.enter();
+    assert!(
+        crate::storage::client_db::token_registry::get_token_by_policy_commit(&elsewhere)
+            .expect("the registry")
+            .is_none(),
+        "nothing is adopted"
+    );
+
+    // An object a third device created, unknown to this wallet: its policy
+    // names another creator.
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.fund_admitted(100).await;
+    let theirs = create_token(&c, "THIRD", 5).await;
+    let foreign = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Holdings(generated::ConnectHoldingsV1 {
+            policy_commits: vec![wild.to_vec(), theirs.to_vec()],
+        }),
+    )
+    .await;
+    sync_and_deliver(&p, &relay).await;
+    let waiting = status(&p.a, &session, foreign).await;
+    assert_eq!(
+        outcome(&waiting),
+        generated::ConnectOutcome::AwaitingApproval,
+        "{}",
+        waiting.reason
+    );
+    assert_eq!(fact(&waiting), generated::ConnectFact::None);
+}
+
 /// The answers the relay holds, each delivered to A once.
 async fn deliver_each_once(p: &Pair, relay: &ForwardRelay) {
     let answers: std::collections::BTreeSet<Vec<u8>> = std::mem::take(&mut relay.held().responses)
