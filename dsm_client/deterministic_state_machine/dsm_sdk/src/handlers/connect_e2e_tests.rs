@@ -439,7 +439,23 @@ async fn a_payment_under_the_grant_waits_while_the_relationship_settles() {
     )
     .await;
     let waited = sync_and_deliver(&p, &relay).await;
-    assert_eq!(waited.sessions[0].last_seq, pay - 1);
+    // The wallet answered nothing: its own log holds no entry for the payment.
+    let logged = query(
+        &p.b,
+        "connect.log",
+        args(&generated::ConnectSessionRefV1 {
+            session_id: session.to_vec(),
+        }),
+    )
+    .await;
+    let Reply::Log(log) = reply(&logged) else {
+        panic!("connect.log answered another reply");
+    };
+    assert!(
+        log.entries.iter().all(|e| e.seq != pay),
+        "{:?}",
+        log.entries
+    );
     assert!(
         waited.sessions[0]
             .last_error
@@ -493,6 +509,8 @@ async fn a_relay_replaying_every_request_runs_nothing_twice() {
     sync_clean(&p, &relay).await;
     carried_out(&p.b, &session, pay).await;
     assert_eq!(balance(&p.b, &wild), 17);
+    // Settled, so a payment run again would go through.
+    settle(&p).await;
 
     relay.held().serve = Serve::Everything;
     let replayed = sync_and_deliver(&p, &relay).await;
