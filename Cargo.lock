@@ -1179,6 +1179,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsm-app-host"
+version = "0.1.0-beta.3"
+dependencies = [
+ "axum",
+ "axum-server",
+ "dsm",
+ "dsm_sdk",
+ "env_logger",
+ "log",
+ "prost 0.14.4",
+ "rcgen",
+ "tokio",
+]
+
+[[package]]
 name = "dsm-sphincs"
 version = "0.1.0"
 dependencies = [

@@ -8,6 +8,7 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 mod addressing;
+mod connect;
 mod economic;
 mod protocol;
 mod sofi;
@@ -15,6 +16,7 @@ mod testing;
 mod token_ops;
 
 pub use addressing::*;
+pub use connect::*;
 pub use economic::*;
 pub use protocol::*;
 pub use sofi::*;
@@ -37,6 +39,12 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_BTC_DEPOSIT_ID,
     TAG_DSM_BTC_KEY_ENC,
     TAG_DSM_CANONICAL_LP,
+    TAG_DSM_CONNECT_ACCEPT,
+    TAG_DSM_CONNECT_OFFER,
+    TAG_DSM_CONNECT_OFFER_DIGEST,
+    TAG_DSM_CONNECT_REQUEST,
+    TAG_DSM_CONNECT_RESPONSE,
+    TAG_DSM_CONNECT_SESSION,
     TAG_DSM_CONTACT_ADD,
     TAG_DSM_COUNTERPARTY_ID,
     TAG_DSM_DETERMINISTIC_ID,

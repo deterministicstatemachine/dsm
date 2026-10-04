@@ -29,6 +29,7 @@ pub mod bilateral_routes;
 pub mod bitcoin_helpers;
 pub mod bitcoin_invoke_routes;
 pub mod bitcoin_query_routes;
+pub mod connect_routes;
 pub mod contacts_routes;
 #[cfg(test)]
 mod faucet_flow_tests;

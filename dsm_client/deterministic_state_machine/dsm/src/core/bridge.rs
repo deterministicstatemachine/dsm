@@ -596,7 +596,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::SofiFindRouteResponse(_)
             | gp::envelope::Payload::SofiPositionResponse(_)
             | gp::envelope::Payload::SofiRelayResponse(_)
-            | gp::envelope::Payload::SofiVaultsResponse(_),
+            | gp::envelope::Payload::SofiVaultsResponse(_)
+            | gp::envelope::Payload::ConnectReply(_),
         ) => gp::envelope::Payload::Error(gp::Error {
             code: 409,
             message: "Responses should not be sent as requests".to_string(),
