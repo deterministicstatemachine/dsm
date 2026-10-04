@@ -35,27 +35,49 @@ use serial_test::serial;
 const STEP: Duration = Duration::from_secs(240);
 
 fn era() -> [u8; 32] {
-    dsm_sdk::policy::builtin_policy_commit("ERA").expect("ERA's policy")
+    let Some(commit) = dsm_sdk::policy::builtin_policy_commit("ERA") else {
+        panic!("ERA's policy is not built in");
+    };
+    commit
 }
 
 fn era_decimals() -> u32 {
-    dsm::core::token::era_policy::era_policy()
-        .expect("ERA's policy")
-        .decimals
+    match dsm::core::token::era_policy::era_policy() {
+        Ok(era) => era.decimals,
+        Err(e) => panic!("ERA's policy: {e}"),
+    }
 }
 
 fn free_port() -> u16 {
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
-    probe.local_addr().expect("its address").port()
+    let probe = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(probe) => probe,
+        Err(e) => panic!("a free port: {e}"),
+    };
+    match probe.local_addr() {
+        Ok(address) => address.port(),
+        Err(e) => panic!("its address: {e}"),
+    }
+}
+
+/// `bytes` as the 32-byte id they must be.
+fn id32(bytes: &[u8], what: &str) -> [u8; 32] {
+    match bytes.try_into() {
+        Ok(id) => id,
+        Err(e) => panic!("{what} of {} bytes: {e}", bytes.len()),
+    }
 }
 
 /// A fresh directory for one test's processes.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("dsm-app-host-real-{}-{name}", std::process::id()));
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("clear the last run");
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            panic!("clear the last run: {e}");
+        }
     }
-    std::fs::create_dir_all(&dir).expect("the test directory");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        panic!("the test directory: {e}");
+    }
     dir
 }
 
@@ -63,15 +85,22 @@ fn scratch(name: &str) -> PathBuf {
 /// and incarnation, and the set's CA beside it, as the bundled config names
 /// the fleet's.
 fn env_config(dir: &Path, fleet: &nodes::NodeSet) -> PathBuf {
-    std::fs::write(dir.join("fleet-ca.pem"), fleet.ca_pem()).expect("the fleet's CA");
+    if let Err(e) = std::fs::write(dir.join("fleet-ca.pem"), fleet.ca_pem()) {
+        panic!("the fleet's CA: {e}");
+    }
     // The config admits loopback endpoints exactly when the fleet serves at one.
     let loopback = fleet.endpoints().iter().any(|endpoint| {
-        let url = reqwest::Url::parse(endpoint).expect("a node endpoint URL");
-        url.host_str()
-            .expect("a node endpoint names its host")
-            .parse::<std::net::IpAddr>()
-            .expect("a node endpoint is an IP address")
-            .is_loopback()
+        let url = match reqwest::Url::parse(endpoint) {
+            Ok(url) => url,
+            Err(e) => panic!("the node endpoint {endpoint}: {e}"),
+        };
+        let Some(host) = url.host_str() else {
+            panic!("the node endpoint {endpoint} names no host");
+        };
+        match host.parse::<std::net::IpAddr>() {
+            Ok(address) => address.is_loopback(),
+            Err(e) => panic!("the node endpoint {endpoint} is not at an IP address: {e}"),
+        }
     });
     let mut cfg = format!(
         "allow_localhost = {loopback}\n\
@@ -86,7 +115,9 @@ fn env_config(dir: &Path, fleet: &nodes::NodeSet) -> PathBuf {
         ));
     }
     let path = dir.join("dsm_env_config.toml");
-    std::fs::write(&path, cfg).expect("the env config");
+    if let Err(e) = std::fs::write(&path, cfg) {
+        panic!("the env config: {e}");
+    }
     path
 }
 
@@ -141,21 +172,36 @@ impl Host {
     async fn start(&mut self) {
         self.starts += 1;
         let path = self.dir.join(format!("{}-{}.log", self.name, self.starts));
-        let log = std::fs::File::create(&path).expect("the process log");
-        let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dsm-app-host"))
+        let (log, also) = match std::fs::File::create(&path) {
+            Ok(log) => match log.try_clone() {
+                Ok(also) => (log, also),
+                Err(e) => panic!("the process log: {e}"),
+            },
+            Err(e) => panic!("the process log: {e}"),
+        };
+        let child = match tokio::process::Command::new(env!("CARGO_BIN_EXE_dsm-app-host"))
             .args(&self.args)
             .env("RUST_LOG", "info")
-            .stdout(log.try_clone().expect("the process log"))
-            .stderr(log)
+            .stdout(log)
+            .stderr(also)
             .spawn()
-            .expect("start dsm-app-host");
+        {
+            Ok(child) => child,
+            Err(e) => panic!("start dsm-app-host: {e}"),
+        };
         self.child = Some(child);
         let probe = format!("{}/activity/0", self.ingress);
         let deadline = tokio::time::Instant::now() + STEP;
         loop {
-            let child = self.child.as_mut().expect("the process just started");
-            if let Some(status) = child.try_wait().expect("the process's state") {
-                panic!("{} exited ({status}): see {}", self.name, path.display());
+            let Some(child) = self.child.as_mut() else {
+                panic!("{}: no process", self.name);
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    panic!("{} exited ({status}): see {}", self.name, path.display())
+                }
+                Ok(None) => {}
+                Err(e) => panic!("{}: the process's state: {e}", self.name),
             }
             let why = match self.http.get(&probe).send().await {
                 Ok(answer) if answer.status().is_success() => return,
@@ -175,27 +221,33 @@ impl Host {
 
     /// Kill the process, as a phone kills an app: nothing is shut down for it.
     async fn stop(&mut self) {
-        let mut child = self.child.take().expect("a running process");
-        child.kill().await.expect("stop the process");
+        let Some(mut child) = self.child.take() else {
+            panic!("{}: no process to stop", self.name);
+        };
+        if let Err(e) = child.kill().await {
+            panic!("{}: stopping the process: {e}", self.name);
+        }
     }
 
     /// This account's device id, from its own record.
     async fn device_id(&self) -> [u8; 32] {
-        let bytes = self
+        let answer = match self
             .http
             .get(format!("{}/activity/0", self.ingress))
             .send()
             .await
-            .expect("the activity record")
-            .bytes()
-            .await
-            .expect("its bytes");
-        let record = pb::AppHostActivityV1::decode(bytes.as_ref()).expect("an activity record");
-        record
-            .device_id
-            .as_slice()
-            .try_into()
-            .expect("a 32-byte device id")
+        {
+            Ok(answer) => answer,
+            Err(e) => panic!("{}: the activity record: {e}", self.name),
+        };
+        let bytes = match answer.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => panic!("{}: the activity record: {e}", self.name),
+        };
+        match pb::AppHostActivityV1::decode(bytes.as_ref()) {
+            Ok(record) => id32(&record.device_id, "a device id"),
+            Err(e) => panic!("{}: the activity record: {e}", self.name),
+        }
     }
 
     /// One router call through the ingress; the envelope's payload, or the
@@ -312,7 +364,10 @@ impl Host {
     }
 
     async fn holds(&self, ticker: &str) -> u64 {
-        self.balance(ticker).await.expect("the balance")
+        match self.balance(ticker).await {
+            Ok(held) => held,
+            Err(e) => panic!("{e}"),
+        }
     }
 }
 
@@ -377,11 +432,7 @@ async fn create_token(game: &Host, ticker: &str, supply: u128, rules: &[Rule]) -
         .call(Route::Invoke, "token.create", request.encode_to_vec())
         .await
     {
-        Ok(Payload::TokenCreateResponse(r)) => r
-            .policy_anchor
-            .as_slice()
-            .try_into()
-            .expect("a 32-byte anchor"),
+        Ok(Payload::TokenCreateResponse(r)) => id32(&r.policy_anchor, "a policy anchor"),
         other => panic!("token.create {ticker} answered {other:?}"),
     }
 }
@@ -414,11 +465,7 @@ async fn create_vault(
         .call(Route::Invoke, "sofi.createVault", request.encode_to_vec())
         .await
     {
-        Ok(Payload::SofiVaultCreatedResponse(v)) => v
-            .vault_id
-            .as_slice()
-            .try_into()
-            .expect("a 32-byte vault id"),
+        Ok(Payload::SofiVaultCreatedResponse(v)) => id32(&v.vault_id, "a vault id"),
         other => panic!("sofi.createVault answered {other:?}"),
     }
 }
@@ -575,11 +622,17 @@ async fn established(
 }
 
 fn outcome(s: &pb::ConnectAppStatusV1) -> pb::ConnectOutcome {
-    pb::ConnectOutcome::try_from(s.outcome).expect("a known outcome")
+    match pb::ConnectOutcome::try_from(s.outcome) {
+        Ok(outcome) => outcome,
+        Err(e) => panic!("an outcome this test does not know: {e}"),
+    }
 }
 
 fn fact(s: &pb::ConnectAppStatusV1) -> pb::ConnectFact {
-    pb::ConnectFact::try_from(s.fact).expect("a known fact")
+    match pb::ConnectFact::try_from(s.fact) {
+        Ok(fact) => fact,
+        Err(e) => panic!("a fact this test does not know: {e}"),
+    }
 }
 
 fn held(s: &pb::ConnectAppStatusV1) -> BTreeMap<Vec<u8>, u64> {
@@ -639,7 +692,7 @@ async fn connect(game: &Host, wallet: &Host, wild: &[u8; 32]) -> [u8; 32] {
         .connect(Route::Invoke, "connect.approve", approve.encode_to_vec())
         .await
     {
-        Ok(Reply::Session(view)) => view.session_id.as_slice().try_into().expect("a session id"),
+        Ok(Reply::Session(view)) => id32(&view.session_id, "a session id"),
         other => panic!("connect.approve answered {other:?}"),
     };
     // The wallet posted its accept to the game's relay; the game's account
@@ -699,9 +752,21 @@ async fn disconnect(wallet: &Host, session: &[u8; 32]) {
 /// - after a disconnect, nothing the game asks is carried out; connected
 ///   again, a request waiting for the player when the wallet disconnects can
 ///   no longer be approved.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[serial]
-async fn a_game_and_a_wallet_connect_over_the_real_relay() {
+fn a_game_and_a_wallet_connect_over_the_real_relay() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => panic!("the test's runtime: {e}"),
+    };
+    runtime.block_on(connect_over_the_real_relay());
+}
+
+async fn connect_over_the_real_relay() {
     let fleet = nodes::NodeSet::start().await;
     let root = scratch("connect");
     let config = env_config(&root, &fleet);
@@ -758,10 +823,11 @@ async fn a_game_and_a_wallet_connect_over_the_real_relay() {
         }),
     )
     .await;
-    let (first, second) = tokio::join!(
+    let (first, second) = futures::future::join(
         wallet.connect(Route::Invoke, "connect.sync", Vec::new()),
         wallet.connect(Route::Invoke, "connect.sync", Vec::new()),
-    );
+    )
+    .await;
     for synced in [first, second] {
         match synced {
             Ok(Reply::Sessions(..)) => {}
@@ -987,7 +1053,10 @@ async fn a_game_and_a_wallet_connect_over_the_real_relay() {
         .connect(Route::Invoke, "connect.sync", Vec::new())
         .await;
     assert_eq!(wallet.holds("WILD").await, wild_held, "nothing was paid");
-    let unanswered = status(&game, &session, after).await.expect("the status");
+    let unanswered = match status(&game, &session, after).await {
+        Ok(unanswered) => unanswered,
+        Err(e) => panic!("{e}"),
+    };
     assert!(!unanswered.answered, "a disconnected wallet answered");
     match synced {
         Ok(Reply::Sessions(list)) => assert!(list.sessions.is_empty(), "{:?}", list.sessions),
@@ -1035,5 +1104,7 @@ async fn a_game_and_a_wallet_connect_over_the_real_relay() {
 
     game.stop().await;
     wallet.stop().await;
-    std::fs::remove_dir_all(&root).expect("remove the test's directory");
+    if let Err(e) = std::fs::remove_dir_all(&root) {
+        panic!("remove the test's directory: {e}");
+    }
 }

@@ -56,11 +56,14 @@ fn deployed_limits() -> AppLimits {
 
 /// The Postgres server the nodes' databases live on.
 fn server_url() -> String {
-    std::env::var("DSM_TEST_DATABASE_URL").expect(
-        "DSM_TEST_DATABASE_URL must name a Postgres database: the SDK's tests run storage nodes \
-         on the store the fleet runs, and skipping them would report a green board that never \
-         executed it",
-    )
+    match std::env::var("DSM_TEST_DATABASE_URL") {
+        Ok(url) => url,
+        Err(e) => panic!(
+            "DSM_TEST_DATABASE_URL must name a Postgres database: the SDK's tests run storage \
+             nodes on the store the fleet runs, and skipping them would report a green board \
+             that never executed it ({e})"
+        ),
+    }
 }
 
 /// `url` with its database path replaced by `database`.
@@ -69,7 +72,9 @@ fn with_database(url: &str, database: &str) -> String {
         Some((head, query)) => (head, Some(query)),
         None => (url, None),
     };
-    let slash = head.rfind('/').expect("the database URL names no database");
+    let Some(slash) = head.rfind('/') else {
+        panic!("the database URL names no database");
+    };
     match query {
         Some(query) => format!("{}/{database}?{query}", &head[..slash]),
         None => format!("{}/{database}", &head[..slash]),
@@ -87,7 +92,9 @@ fn node_database(index: usize) -> String {
         Some((head, _)) => head,
         None => server.as_str(),
     };
-    let slash = head.rfind('/').expect("the database URL names no database");
+    let Some(slash) = head.rfind('/') else {
+        panic!("the database URL names no database");
+    };
     let base = &head[slash + 1..];
     assert!(
         !base.is_empty()
@@ -104,31 +111,49 @@ fn node_database(index: usize) -> String {
 /// connection an earlier node set left) and created.
 async fn fresh_database(database: &str) -> db::DBPool {
     let server = server_url();
-    let admin = db::create_pool(&server).expect("admin pool");
-    let client = admin.get().await.expect("admin connection");
-    client
+    let admin = match db::create_pool(&server) {
+        Ok(pool) => pool,
+        Err(e) => panic!("admin pool: {e}"),
+    };
+    let client = match admin.get().await {
+        Ok(client) => client,
+        Err(e) => panic!("admin connection: {e}"),
+    };
+    if let Err(e) = client
         .batch_execute(&format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)"))
         .await
-        .expect("drop the node database");
-    client
+    {
+        panic!("drop the node database: {e}");
+    }
+    if let Err(e) = client
         .batch_execute(&format!("CREATE DATABASE {database}"))
         .await
-        .expect("create the node database");
-    db::create_pool(&with_database(&server, database)).expect("node pool")
+    {
+        panic!("create the node database: {e}");
+    }
+    match db::create_pool(&with_database(&server, database)) {
+        Ok(pool) => pool,
+        Err(e) => panic!("node pool: {e}"),
+    }
 }
 
 /// Put the member's pinned incarnation in the node's register before the node
 /// first establishes one, as a restored database holds it. A database that
 /// already holds an incarnation refuses the insert.
 async fn restore_incarnation(pool: &db::DBPool, incarnation: &[u8; 32]) {
-    let client = pool.get().await.expect("node db connection");
-    client
+    let client = match pool.get().await {
+        Ok(client) => client,
+        Err(e) => panic!("node db connection: {e}"),
+    };
+    if let Err(e) = client
         .execute(
             "INSERT INTO register_incarnation (only_row, incarnation) VALUES (1, $1)",
             &[&incarnation.to_vec()],
         )
         .await
-        .expect("restore the register incarnation");
+    {
+        panic!("restore the register incarnation: {e}");
+    }
 }
 
 /// A node's serving task and the signal that stops it.
@@ -146,9 +171,14 @@ struct TestCa {
 
 impl TestCa {
     fn new() -> Self {
-        let key = rcgen::KeyPair::generate().expect("the CA's key");
-        let mut params =
-            rcgen::CertificateParams::new(Vec::<String>::new()).expect("the CA's parameters");
+        let key = match rcgen::KeyPair::generate() {
+            Ok(key) => key,
+            Err(e) => panic!("the CA's key: {e}"),
+        };
+        let mut params = match rcgen::CertificateParams::new(Vec::<String>::new()) {
+            Ok(params) => params,
+            Err(e) => panic!("the CA's parameters: {e}"),
+        };
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         params
             .distinguished_name
@@ -157,10 +187,10 @@ impl TestCa {
             rcgen::KeyUsagePurpose::KeyCertSign,
             rcgen::KeyUsagePurpose::DigitalSignature,
         ];
-        let pem = params
-            .self_signed(&key)
-            .expect("the CA's certificate")
-            .pem();
+        let pem = match params.self_signed(&key) {
+            Ok(cert) => cert.pem(),
+            Err(e) => panic!("the CA's certificate: {e}"),
+        };
         Self {
             issuer: rcgen::Issuer::new(params, key),
             pem: pem.into_bytes(),
@@ -170,22 +200,33 @@ impl TestCa {
     /// The TLS a node serves `member_id` with: a certificate from this CA
     /// naming the member, as a DNS name, and the loopback address.
     async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
-        let key = rcgen::KeyPair::generate().expect("the node's key");
-        let mut params =
-            rcgen::CertificateParams::new(vec![member_id.to_string(), "127.0.0.1".to_string()])
-                .expect("the node's parameters");
+        let key = match rcgen::KeyPair::generate() {
+            Ok(key) => key,
+            Err(e) => panic!("the node's key: {e}"),
+        };
+        let mut params = match rcgen::CertificateParams::new(vec![
+            member_id.to_string(),
+            "127.0.0.1".to_string(),
+        ]) {
+            Ok(params) => params,
+            Err(e) => panic!("the node's parameters: {e}"),
+        };
         params
             .distinguished_name
             .push(rcgen::DnType::CommonName, member_id);
-        let cert = params
-            .signed_by(&key, &self.issuer)
-            .expect("the node's certificate");
-        axum_server::tls_rustls::RustlsConfig::from_pem(
+        let cert = match params.signed_by(&key, &self.issuer) {
+            Ok(cert) => cert,
+            Err(e) => panic!("the node's certificate: {e}"),
+        };
+        match axum_server::tls_rustls::RustlsConfig::from_pem(
             cert.pem().into_bytes(),
             key.serialize_pem().into_bytes(),
         )
         .await
-        .expect("the node's TLS")
+        {
+            Ok(tls) => tls,
+            Err(e) => panic!("the node's TLS: {e}"),
+        }
     }
 }
 
@@ -203,25 +244,29 @@ fn serve(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let requests = requests.clone();
                 async move {
-                    requests.lock().expect("request log").push(format!(
-                        "{} {}",
-                        request.method(),
-                        request.uri().path()
-                    ));
+                    match requests.lock() {
+                        Ok(mut log) => {
+                            log.push(format!("{} {}", request.method(), request.uri().path()))
+                        }
+                        Err(e) => panic!("request log: {e}"),
+                    }
                     next.run(request).await
                 }
             },
         ));
     let handle = axum_server::Handle::new();
-    let server =
-        axum_server::from_tcp_rustls(listener.into_std().expect("the node's listener"), tls)
-            .expect("the node's TLS server")
-            .handle(handle.clone());
+    let listener = match listener.into_std() {
+        Ok(listener) => listener,
+        Err(e) => panic!("the node's listener: {e}"),
+    };
+    let server = match axum_server::from_tcp_rustls(listener, tls) {
+        Ok(server) => server.handle(handle.clone()),
+        Err(e) => panic!("the node's TLS server: {e}"),
+    };
     let task = tokio::spawn(async move {
-        server
-            .serve(app.into_make_service())
-            .await
-            .expect("serve node");
+        if let Err(e) = server.serve(app.into_make_service()).await {
+            panic!("serve node: {e}");
+        }
     });
     Serving { handle, task }
 }
@@ -252,26 +297,38 @@ impl Node {
     /// Every request this node was asked since it started or was last told
     /// to forget them, in arrival order, as `METHOD /path`.
     pub fn requests(&self) -> Vec<String> {
-        self.requests.lock().expect("request log").clone()
+        match self.requests.lock() {
+            Ok(log) => log.clone(),
+            Err(e) => panic!("request log: {e}"),
+        }
     }
 
     /// Forget the requests recorded so far.
     pub fn forget_requests(&self) {
-        self.requests.lock().expect("request log").clear();
+        match self.requests.lock() {
+            Ok(mut log) => log.clear(),
+            Err(e) => panic!("request log: {e}"),
+        }
     }
 
     /// Every envelope this node holds in its spool, in arrival order, read
     /// from the node's own database: what an operator of this node can see.
     pub async fn spool(&self) -> Vec<Spooled> {
-        let client = self.state.db_pool.get().await.expect("node db connection");
-        client
+        let client = match self.state.db_pool.get().await {
+            Ok(client) => client,
+            Err(e) => panic!("node db connection: {e}"),
+        };
+        let rows = match client
             .query(
                 "SELECT device_id, envelope FROM inbox_spool ORDER BY id",
                 &[],
             )
             .await
-            .expect("query")
-            .iter()
+        {
+            Ok(rows) => rows,
+            Err(e) => panic!("the spool: {e}"),
+        };
+        rows.iter()
             .map(|row| {
                 let envelope: Vec<u8> = row.get(1);
                 Spooled {
@@ -291,29 +348,36 @@ impl Node {
     /// text Postgres renders it (`row_to_json`: byte columns as `\\x` and
     /// lowercase hex): everything an operator of this node can read.
     pub async fn stored_rows(&self) -> Vec<String> {
-        let client = self.state.db_pool.get().await.expect("node db connection");
-        let tables: Vec<String> = client
+        let client = match self.state.db_pool.get().await {
+            Ok(client) => client,
+            Err(e) => panic!("node db connection: {e}"),
+        };
+        let listed = match client
             .query(
                 "SELECT table_name::text FROM information_schema.tables
                  WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
                 &[],
             )
             .await
-            .expect("the node's tables")
-            .iter()
-            .map(|row| row.get(0))
-            .collect();
+        {
+            Ok(listed) => listed,
+            Err(e) => panic!("the node's tables: {e}"),
+        };
+        let tables: Vec<String> = listed.iter().map(|row| row.get(0)).collect();
         assert!(!tables.is_empty(), "{} holds no tables", self.member_id);
         let mut rows = Vec::new();
         for table in tables {
-            for row in client
+            let held = match client
                 .query(
                     &format!("SELECT row_to_json(t)::text FROM \"{table}\" t"),
                     &[],
                 )
                 .await
-                .expect("the table's rows")
             {
+                Ok(held) => held,
+                Err(e) => panic!("the table's rows: {e}"),
+            };
+            for row in held {
                 rows.push(format!("{table}: {}", row.get::<_, String>(0)));
             }
         }
@@ -362,15 +426,15 @@ impl NodeSet {
     /// nodes for as long as it runs.
     pub async fn start() -> Self {
         tls_provider_installed();
-        let pinned = dsm::economic::register::pinned_root_register_members(NETWORK)
-            .expect("the beta network is pinned");
+        let pinned = match dsm::economic::register::pinned_root_register_members(NETWORK) {
+            Ok(pinned) => pinned,
+            Err(e) => panic!("the beta network is pinned: {e}"),
+        };
         let members: Vec<(String, [u8; 32])> = pinned
             .iter()
-            .map(|(id, incarnation)| {
-                (
-                    String::from_utf8(id.to_vec()).expect("pinned member ids are UTF-8"),
-                    *incarnation,
-                )
+            .map(|(id, incarnation)| match String::from_utf8(id.to_vec()) {
+                Ok(id) => (id, *incarnation),
+                Err(e) => panic!("pinned member ids are UTF-8: {e}"),
             })
             .collect();
 
@@ -380,17 +444,26 @@ impl NodeSet {
         let mut prepared = Vec::with_capacity(members.len());
         for (index, (member_id, pinned_incarnation)) in members.iter().enumerate() {
             let pool = fresh_database(&node_database(index)).await;
-            db::init_db(&pool).await.expect("init node db");
+            if let Err(e) = db::init_db(&pool).await {
+                panic!("init node db: {e}");
+            }
             restore_incarnation(&pool, pinned_incarnation).await;
-            let incarnation = db::register_incarnation(&pool).await.expect("incarnation");
+            let incarnation = match db::register_incarnation(&pool).await {
+                Ok(incarnation) => incarnation,
+                Err(e) => panic!("incarnation: {e}"),
+            };
             assert_eq!(
                 &incarnation, pinned_incarnation,
                 "node {member_id} serves the incarnation its database holds"
             );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind");
-            let address = listener.local_addr().expect("addr");
+            let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                Ok(listener) => listener,
+                Err(e) => panic!("bind: {e}"),
+            };
+            let address = match listener.local_addr() {
+                Ok(address) => address,
+                Err(e) => panic!("addr: {e}"),
+            };
             prepared.push(Prepared {
                 member_id: member_id.clone(),
                 pool: Arc::new(pool),
@@ -413,19 +486,22 @@ impl NodeSet {
         let mut nodes = Vec::with_capacity(prepared.len());
         for p in prepared {
             let endpoint = endpoint_of(&p.address);
-            let set = NodeStorageSet::new(members.clone(), &p.member_id, p.incarnation)
-                .expect("set against own register")
-                .with_endpoints(&p.member_id, endpoints.clone())
-                .expect("set endpoints");
-            let state = Arc::new(
-                AppState::new(
-                    p.member_id.clone(),
-                    p.pool,
-                    set_client::pinned_set_client(&ca.pem).expect("pinned set client"),
-                )
-                .expect("app state")
-                .with_storage_set(set),
-            );
+            let own = match NodeStorageSet::new(members.clone(), &p.member_id, p.incarnation) {
+                Ok(own) => own,
+                Err(e) => panic!("set against own register: {e}"),
+            };
+            let set = match own.with_endpoints(&p.member_id, endpoints.clone()) {
+                Ok(set) => set,
+                Err(e) => panic!("set endpoints: {e}"),
+            };
+            let peers = match set_client::pinned_set_client(&ca.pem) {
+                Ok(peers) => peers,
+                Err(e) => panic!("pinned set client: {e}"),
+            };
+            let state = match AppState::new(p.member_id.clone(), p.pool, peers) {
+                Ok(state) => Arc::new(state.with_storage_set(set)),
+                Err(e) => panic!("app state: {e}"),
+            };
             let requests = Arc::new(Mutex::new(Vec::new()));
             let tls = ca.tls_for(&p.member_id).await;
             let serving = serve(p.listener, tls.clone(), state.clone(), requests.clone());
@@ -482,7 +558,9 @@ impl NodeSet {
                 .take()
                 .unwrap_or_else(|| panic!("node {member_id} is already down"));
             serving.handle.shutdown();
-            serving.task.await.expect("node task");
+            if let Err(e) = serving.task.await {
+                panic!("node task: {e}");
+            }
         }
     }
 
@@ -492,9 +570,10 @@ impl NodeSet {
         for member_id in member_ids {
             let node = self.node_mut(member_id);
             assert!(node.serving.is_none(), "node {member_id} is already up");
-            let listener = tokio::net::TcpListener::bind(node.address)
-                .await
-                .expect("rebind node address");
+            let listener = match tokio::net::TcpListener::bind(node.address).await {
+                Ok(listener) => listener,
+                Err(e) => panic!("rebind node address: {e}"),
+            };
             node.serving = Some(serve(
                 listener,
                 node.tls.clone(),
@@ -552,13 +631,10 @@ impl NodeSet {
                  FOR EACH ROW EXECUTE FUNCTION refuse_cell_write();",
         )
         .await;
-        let client = self
-            .node(member_id)
-            .state
-            .db_pool
-            .get()
-            .await
-            .expect("node db connection");
+        let client = match self.node(member_id).state.db_pool.get().await {
+            Ok(client) => client,
+            Err(e) => panic!("node db connection: {e}"),
+        };
         for key in keys {
             client
                 .execute(
@@ -581,12 +657,11 @@ impl NodeSet {
     }
 
     async fn ddl(&self, member_id: &str, statement: &str) {
-        self.node(member_id)
-            .state
-            .db_pool
-            .get()
-            .await
-            .expect("node db connection")
+        let client = match self.node(member_id).state.db_pool.get().await {
+            Ok(client) => client,
+            Err(e) => panic!("node db connection: {e}"),
+        };
+        client
             .batch_execute(statement)
             .await
             .unwrap_or_else(|e| panic!("{member_id}: {statement}: {e}"));

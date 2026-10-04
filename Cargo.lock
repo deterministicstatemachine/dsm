@@ -1188,6 +1188,7 @@ dependencies = [
  "dsm_sdk",
  "dsm_storage_node",
  "env_logger",
+ "futures",
  "log",
  "prost 0.14.4",
  "rcgen",
