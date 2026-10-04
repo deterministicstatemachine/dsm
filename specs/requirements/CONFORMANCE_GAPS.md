@@ -2725,16 +2725,30 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 
 **Open.** On BLE the terms ride beside the operation in the clear, as the prepare always has: BLE is a direct link between the two parties, and the ruling chose it. `TokenSDK`'s generic transfer and its token-creation fee transfer commit to terms that nothing carries, so a recipient could not open them. Neither is reached today: `TokenOperation::Transfer` is built nowhere outside `TokenSDK`, and the one `TokenOperation::Create` the SDK builds (dBTC registration) charges no fee.
 
+### 6.72 A Web2 application connects to a wallet (`feat/dsm-connect-wallet-apps`, DSM Amendment A11, 2026-10-04)
+
+**The direction.** Owner, 2026-10-04, for DSM Creatures, an RPGJS game kept Web2 with DSM underneath (§78's game): "it needs to be like Wallet Connect, kind of"; "It should basically just allow you to control it through the game once it's connected, so you don't have to go back and forth between the two". Owner choices the same day: the application's own endpoint is the relay; the wallet's consent is a scoped grant approved once on the device; the design is written in the Explainer's Part III before any code (DSM Amendment A11, approved as written the same day).
+
+**What it requires.** The application is a DSM account of its own and never holds a player's keys. Pairing goes through a `dsm:connect/v1:` code naming the endpoint, a pin of its certificate and an offer digest; the offer and the wallet's answer are signed under `DSM/connect/offer` and `DSM/connect/accept`, and each side adds the other as a contact before the first step. Requests and answers are signed under `DSM/connect/request` and `DSM/connect/response`. The relay is transport, never evidence: a payment is a transfer accepted onto the application's own relationship, a trade is what the SoFi predicates accept, an issued object is accepted only after its policy re-hashes to the anchor, and holdings are a Sparse Merkle proof against the holder's root validated from the application's frontier (Amendment A8), current only while the next register cell is empty at its leader. A grant counts its own spend in the wallet, its highest carried-out sequence number is its replay guard, and nothing expires by time.
+
+**Today.** None of it exists: no connect code, offer, grant, relay client or holdings proof, in Core, the SDK or the frontend, and no host-side account runtime (`dsm_sdk` builds no binary). The rows are added Missing.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0278 to MR-DSM-0294 | — | Missing | Added by Amendment A11. No connection code exists. |
+
+The verification matrix gains its A11 rows with the gates and their negative tests.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 277 | 96 | 95 | 39 | 0 | 29 | 18 |
+| DSM high-level (MR-DSM) | 294 | 96 | 95 | 56 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 362 | 237 | 86 | 18 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **943** | **407** | **200** | **114** | **4** | **64** | **154** |
+| **All** | **960** | **407** | **200** | **131** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3019,6 +3033,23 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 | MR-DSM-0275 | Met | `dsm::economic::peer_lineage::validate_peer_lineage`; `dsm_sdk::sdk::economic_registers::StoredFrontiers` | `dsm_sdk::handlers::frontier_verification_tests::a_receiver_reads_nothing_behind_its_frontier`; `dsm_sdk::handlers::frontier_verification_tests::a_sources_segment_stops_at_the_frontier_the_receiver_holds`; `dsm_sdk::handlers::frontier_verification_tests::one_walk_validates_a_sources_segment_once`; `dsm::economic::peer_lineage::tests::a_source_walk_past_the_budget_is_incomplete_and_reads_nothing`; `dsm_sdk::handlers::frontier_verification_tests::a_root_no_transition_explains_is_refused_where_it_sits` | Re-verified 2026-10-01 (§6.68). A verification starts at the receiver's frontier for each identity it walks, the payer or a source, and reads no cell at or behind it; nothing past a refused position is read. No root is taken as valid ancestry because it is admitted or signed: a source's earlier positions are validated in full. Past the walk budget the result is `Incomplete`, nothing more is read, and nothing is accepted. |
 | MR-DSM-0276 | Met | `dsm::economic::peer_lineage::ConditionalPositionResolver`; `dsm_sdk::sdk::sofi_reads::VerifierContext::peer_position_resolver` | `dsm_sdk::handlers::node_e2e_tests::a_trader_who_has_traded_can_pay`; `dsm::economic::peer_lineage::tests::a_conditional_position_right_after_the_activation_root_is_invalid` | Re-verified 2026-09-30 (§6.52). A conditional position inside a chain is resolved from SoFi's public objects for that position (S15), and the chain continues from the root it selected; a trader who has traded can pay (P15-9). A conditional position right after the activation root is Invalid: no claim was accepted there for it to name. |
 | MR-DSM-0277 | Met | `dsm::economic::claim_envelope::decode_and_verify_economic_root_claim`; `dsm::economic::claim_envelope::decode_registered_economic_claim`; `dsm::economic::register::root_claim_naming`; `dsm_sdk::sdk::economic_admission_flow` (root claim producer) | `dsm::economic::claim_envelope::tests::a_root_claim_under_a_key_that_does_not_derive_the_named_device_names_no_cell`; `dsm::economic::claim_envelope::tests::a_conditional_claim_signed_by_another_device_names_no_cell`; `dsm::economic::claim_envelope::tests::an_unsigned_conditional_claim_names_no_cell`; `dsm::economic::register::registered_root_construction_tests::a_squatters_claim_written_first_does_not_hold_the_cell` | DSM Amendment A10 (§6.65). Every occupant of a device's position cell carries its key and `AttA` and is recognized only when its signature verifies and `derive_devid(key, AttA)` is the cell's `DevID`, from the bytes in hand. Mutations: each binding check removed turns its named test red. |
+| MR-DSM-0278 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0279 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0280 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0281 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0282 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0283 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0284 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0285 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0286 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0287 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0288 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0289 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0290 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0291 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0292 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0293 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
+| MR-DSM-0294 | Missing | — | — | Added by Amendment A11 (§6.72). No connection code exists. |
 
 ### 8.2 SoFi settlement specification
 
