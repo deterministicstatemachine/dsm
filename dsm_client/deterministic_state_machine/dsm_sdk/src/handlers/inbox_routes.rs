@@ -195,6 +195,11 @@ impl AppRouterImpl {
             "inbox.startPoller" => {
                 log::info!("[DSM_SDK] inbox.startPoller called");
                 crate::sdk::inbox_poller::start_poller();
+                // A connected application's requests are fetched beside the
+                // inbox (DSM Amendment A11).
+                if let Err(e) = crate::sdk::connect::wallet::resume_listener() {
+                    return err(format!("inbox.startPoller: the connect listener: {e}"));
+                }
                 pack_bytes_ok(Vec::new())
             }
             "inbox.stopPoller" => {
