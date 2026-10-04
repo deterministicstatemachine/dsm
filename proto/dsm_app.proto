@@ -4618,6 +4618,7 @@ message ConnectSessionV1 {
   repeated ConnectSpentV1 spent         = 8;
   repeated string         scope_lines   = 9;
   string                  last_error    = 10; // why the last sync with it did not complete; empty when it did
+  bytes                   offer_digest  = 11 [(dsm_fixed_len)=32]; // the offer the session was connected from
 }
 message ConnectSessionsV1 {
   repeated ConnectSessionV1 sessions = 1;

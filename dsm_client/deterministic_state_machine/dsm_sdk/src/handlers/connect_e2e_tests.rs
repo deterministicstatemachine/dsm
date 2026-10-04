@@ -874,3 +874,101 @@ async fn a_wallet_refuses_an_offer_the_code_does_not_vouch_for() {
         encode_base32_crockford(&p.a.device_id)
     );
 }
+
+/// Disconnecting ends the grant. A request waiting on the phone goes with it
+/// and can no longer be approved, and nothing the application asks afterwards
+/// is carried out, however far inside the old grant it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_disconnected_application_drives_nothing() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+
+    // Outside the grant: it waits for the player.
+    let outside = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: era().to_vec(),
+            amount: 1,
+            memo: String::new(),
+        }),
+    )
+    .await;
+    sync_clean(&p, &relay).await;
+    assert_eq!(
+        outcome(&status(&p.a, &session, outside).await),
+        generated::ConnectOutcome::AwaitingApproval
+    );
+
+    let ended = invoke(
+        &p.b,
+        "connect.disconnect",
+        args(&generated::ConnectSessionRefV1 {
+            session_id: session.to_vec(),
+        }),
+    )
+    .await;
+    let Reply::Session(view) = reply(&ended) else {
+        panic!("connect.disconnect answered another reply");
+    };
+    assert_eq!(
+        generated::ConnectSessionStatus::try_from(view.status),
+        Ok(generated::ConnectSessionStatus::Disconnected)
+    );
+
+    // The waiting request went with the grant.
+    let pending = query(&p.b, "connect.pending", Vec::new()).await;
+    let Reply::Pending(list) = reply(&pending) else {
+        panic!("connect.pending answered another reply");
+    };
+    assert!(list.pending.is_empty(), "{:?}", list.pending);
+    let era_held = balance(&p.b, &era());
+    let approved = invoke(
+        &p.b,
+        "connect.respond",
+        args(&generated::ConnectRespondRequestV1 {
+            session_id: session.to_vec(),
+            seq: outside,
+            decision: generated::ConnectDecision::Approve as i32,
+        }),
+    )
+    .await;
+    assert!(
+        approved
+            .error_message
+            .as_deref()
+            .is_some_and(|e| e.contains("no such connected application")),
+        "{:?}",
+        approved.error_message
+    );
+    assert_eq!(balance(&p.b, &era()), era_held, "nothing was paid");
+
+    // Inside the old grant, asked after the disconnect: the wallet no longer
+    // syncs with the application, and nothing runs.
+    let wild_held = balance(&p.b, &wild);
+    let pay = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: wild.to_vec(),
+            amount: 3,
+            memo: String::new(),
+        }),
+    )
+    .await;
+    let synced = sync_and_deliver(&p, &relay).await;
+    assert!(synced.sessions.is_empty(), "{:?}", synced.sessions);
+    assert_eq!(balance(&p.b, &wild), wild_held, "nothing was paid");
+    let unanswered = status(&p.a, &session, pay).await;
+    assert_eq!(outcome(&unanswered), generated::ConnectOutcome::Unspecified);
+    assert_eq!(fact(&unanswered), generated::ConnectFact::None);
+}

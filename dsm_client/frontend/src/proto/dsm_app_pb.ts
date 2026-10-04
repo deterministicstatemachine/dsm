@@ -28447,6 +28447,13 @@ export class ConnectSessionV1 extends Message<ConnectSessionV1> {
    */
   lastError = "";
 
+  /**
+   * the offer the session was connected from
+   *
+   * @generated from field: bytes offer_digest = 11;
+   */
+  offerDigest = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectSessionV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -28465,6 +28472,7 @@ export class ConnectSessionV1 extends Message<ConnectSessionV1> {
     { no: 8, name: "spent", kind: "message", T: ConnectSpentV1, repeated: true },
     { no: 9, name: "scope_lines", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 10, name: "last_error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 11, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSessionV1 {

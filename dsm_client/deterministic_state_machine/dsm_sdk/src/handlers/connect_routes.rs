@@ -955,6 +955,7 @@ fn wallet_session_view(
         spent,
         scope_lines: granted.iter().map(describe_scope).collect(),
         last_error,
+        offer_digest: s.offer_digest.to_vec(),
     })
 }
 
@@ -1051,6 +1052,7 @@ fn app_session_view(s: &store::AppSession) -> Result<generated::ConnectSessionV1
         spent: Vec::new(),
         scope_lines: granted.iter().map(describe_scope).collect(),
         last_error: String::new(),
+        offer_digest: s.offer_digest.to_vec(),
     })
 }
 
