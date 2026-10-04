@@ -565,6 +565,26 @@ impl AppRouterImpl {
     ///
     /// The table read re-verifies that the bytes hash to the anchor; a
     /// corrupted row, or a table that cannot be read, is an error.
+    /// The policy published under `anchor`, fetched and re-hashed to it,
+    /// parsed as an adoptable token policy. Nothing is stored.
+    pub(crate) async fn verified_policy(
+        &self,
+        anchor: [u8; 32],
+    ) -> Result<ParsedTokenPolicy, String> {
+        let policy_bytes = self
+            .load_policy_bytes(anchor)
+            .await?
+            .filter(|b| !b.is_empty())
+            .ok_or_else(|| "no policy is published under that anchor".to_string())?;
+        let mut ah =
+            dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_POLICY);
+        ah.update(&policy_bytes);
+        if *ah.finalize().as_bytes() != anchor {
+            return Err("the fetched policy does not hash to its anchor".into());
+        }
+        adoptable_policy(&policy_bytes)
+    }
+
     async fn load_policy_bytes(&self, anchor: [u8; 32]) -> Result<Option<Vec<u8>>, String> {
         // ERA's policy is Core's own (SoFi Amendment S11): answered from its
         // bytes, never fetched and never stored.

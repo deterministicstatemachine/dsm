@@ -10,7 +10,7 @@
 //! and carried out by the router's own production routes, exactly as if the
 //! player had started it by hand.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use dsm::types::proto as generated;
@@ -89,20 +89,34 @@ pub fn granted_scopes(accept_body: &[u8]) -> Result<Vec<Scope>, String> {
 
 /// A token as the player reads it: its symbol and an amount in its decimals,
 /// or its anchor's first characters while this device has not rooted it.
-fn amount_of(policy_commit: &[u8; 32], amount: u64) -> String {
-    match crate::handlers::wallet_routes::token_of_commit(policy_commit) {
-        Ok((symbol, decimals)) => format!(
+fn amount_of(policy_commit: &[u8; 32], amount: u64, names: &Names) -> String {
+    match name_of(policy_commit, names) {
+        Some((symbol, decimals)) => format!(
             "{} {symbol}",
             crate::handlers::wallet_routes::format_base_units_for_display(amount, decimals)
         ),
-        Err(..) => format!("{amount} base units of {}", short(policy_commit)),
+        None => format!("{amount} base units of {}", short(policy_commit)),
     }
 }
 
-fn symbol_of(policy_commit: &[u8; 32]) -> String {
+/// Tokens the approval screen names before this device has rooted them:
+/// each one's ticker and decimals from a policy fetched and re-hashed to its
+/// anchor. For display only; nothing is adopted.
+pub type Names = BTreeMap<[u8; 32], (String, u32)>;
+
+/// A token's ticker and decimals: as this device has rooted it, or as
+/// `names` carries it.
+fn name_of(policy_commit: &[u8; 32], names: &Names) -> Option<(String, u32)> {
     match crate::handlers::wallet_routes::token_of_commit(policy_commit) {
-        Ok((symbol, _)) => symbol,
-        Err(..) => short(policy_commit),
+        Ok(named) => Some(named),
+        Err(..) => names.get(policy_commit).cloned(),
+    }
+}
+
+fn symbol_of(policy_commit: &[u8; 32], names: &Names) -> String {
+    match name_of(policy_commit, names) {
+        Some((symbol, _)) => symbol,
+        None => short(policy_commit),
     }
 }
 
@@ -112,15 +126,15 @@ pub fn short(id: &[u8; 32]) -> String {
 }
 
 /// One scope, as the approval screen lists it.
-pub fn describe_scope(scope: &Scope) -> String {
+pub fn describe_scope(scope: &Scope, names: &Names) -> String {
     let caps = |s: &Scope| {
         s.caps
             .iter()
             .map(|c| {
                 format!(
                     "up to {} a time, {} in all",
-                    amount_of(&c.policy_commit, c.per_request),
-                    amount_of(&c.policy_commit, c.total)
+                    amount_of(&c.policy_commit, c.per_request, names),
+                    amount_of(&c.policy_commit, c.total, names)
                 )
             })
             .collect::<Vec<_>>()
@@ -132,8 +146,8 @@ pub fn describe_scope(scope: &Scope) -> String {
         ScopeKind::Swap => match scope.policy_commits.as_slice() {
             [a, b] => format!(
                 "Swap {} for {} through SoFi: {}",
-                symbol_of(a),
-                symbol_of(b),
+                symbol_of(a, names),
+                symbol_of(b, names),
                 caps(scope)
             ),
             other => format!(
@@ -143,7 +157,11 @@ pub fn describe_scope(scope: &Scope) -> String {
             ),
         },
         ScopeKind::Holdings => {
-            let named: Vec<String> = scope.policy_commits.iter().map(symbol_of).collect();
+            let named: Vec<String> = scope
+                .policy_commits
+                .iter()
+                .map(|c| symbol_of(c, names))
+                .collect();
             if named.is_empty() {
                 "Prove your holdings of objects this app issued".to_string()
             } else {
@@ -158,6 +176,8 @@ pub fn describe_scope(scope: &Scope) -> String {
 
 /// One request, as the pending list and the log render it.
 pub fn describe_request(request: &Request) -> String {
+    // A request names tokens this device rooted when it approved the grant.
+    let none = Names::new();
     match request {
         Request::AcceptIssued { anchor } => format!("Receive object {}", short(anchor)),
         Request::Pay {
@@ -165,7 +185,7 @@ pub fn describe_request(request: &Request) -> String {
             amount,
             memo,
         } => {
-            let paid = amount_of(policy_commit, *amount);
+            let paid = amount_of(policy_commit, *amount, &none);
             match memo.trim() {
                 "" => format!("Pay {paid}"),
                 memo => format!("Pay {paid} for {memo}"),
@@ -177,8 +197,8 @@ pub fn describe_request(request: &Request) -> String {
             amount_in,
         } => format!(
             "Quote {} for {}",
-            amount_of(token_in, *amount_in),
-            symbol_of(token_out)
+            amount_of(token_in, *amount_in, &none),
+            symbol_of(token_out, &none)
         ),
         Request::Swap {
             token_in,
@@ -187,14 +207,14 @@ pub fn describe_request(request: &Request) -> String {
             min_amount_out,
         } => format!(
             "Swap {} for at least {}",
-            amount_of(token_in, *amount_in),
-            amount_of(token_out, *min_amount_out)
+            amount_of(token_in, *amount_in, &none),
+            amount_of(token_out, *min_amount_out, &none)
         ),
         Request::Holdings { policy_commits } => format!(
             "Prove holdings of {}",
             policy_commits
                 .iter()
-                .map(symbol_of)
+                .map(|c| symbol_of(c, &none))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),

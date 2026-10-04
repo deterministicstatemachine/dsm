@@ -41,7 +41,7 @@ use crate::sdk::connect::signed::{
     canonical, own_card, own_network, session_id, sign_own, verify, Signed,
 };
 use crate::sdk::connect::wallet::{
-    describe_request, describe_scope, granted_scopes, issued_by, payment_memo, short,
+    describe_request, describe_scope, granted_scopes, issued_by, payment_memo, short, Names,
     signed_response, verify_offer,
 };
 use crate::sdk::connect::{app, code, d32, holdings};
@@ -147,6 +147,24 @@ fn connected(sid: &[u8; 32]) -> Result<store::WalletSession, String> {
         .ok_or_else(|| "the application was disconnected".to_string())
 }
 
+/// Why `request` cannot be carried out yet, if it cannot. A payment waits
+/// while its relationship with the application catches up; a holdings proof
+/// waits while this device is still admitting its latest position. Neither
+/// is a refusal: the request stays queued, unanswered and unspent.
+fn waits(
+    core: &crate::sdk::core_sdk::CoreSDK,
+    session: &store::WalletSession,
+    request: &Request,
+) -> Result<Option<String>, String> {
+    match request {
+        Request::Pay { .. } => Ok(payment_waits(&session.app_device_id)
+            .map(|why| format!("the relationship with the application is settling: {why}"))),
+        Request::Holdings { .. } => Ok(holdings::admission_pending(core)?
+            .map(|position| format!("position {position} is still being admitted"))),
+        _ => Ok(None),
+    }
+}
+
 /// Whether a payment to `app` can be constructed now. A relationship that is
 /// catching up is not a refusal: the payment waits for it.
 fn payment_waits(app: &[u8; 32]) -> Option<String> {
@@ -222,6 +240,20 @@ impl AppRouterImpl {
             },
         )
         .map_err(|e| format!("{ROUTE}: keeping the preview: {e}"))?;
+        // The approval screen names each token the offer names, before this
+        // device roots any of them: each policy fetched and re-hashed to its
+        // anchor here, as rooting it on approval will.
+        let mut names = Names::new();
+        for anchor in &verified.anchors {
+            if let Ok(..) = super::wallet_routes::token_of_commit(anchor) {
+                continue;
+            }
+            let policy = self
+                .verified_policy(*anchor)
+                .await
+                .map_err(|e| format!("{ROUTE}: a token the offer names: {e}"))?;
+            names.insert(*anchor, (policy.ticker, policy.decimals));
+        }
         Ok(Reply::Preview(generated::ConnectPreviewV1 {
             offer_digest: verified.digest.to_vec(),
             display_name: verified.body.display_name.clone(),
@@ -229,7 +261,11 @@ impl AppRouterImpl {
             endpoint: code.endpoint,
             scopes: scopes_to_wire(&verified.scopes),
             token_anchors: verified.anchors.iter().map(|a| a.to_vec()).collect(),
-            scope_lines: verified.scopes.iter().map(describe_scope).collect(),
+            scope_lines: verified
+                .scopes
+                .iter()
+                .map(|s| describe_scope(s, &names))
+                .collect(),
         }))
     }
 
@@ -355,13 +391,14 @@ impl AppRouterImpl {
                         generated::ConnectOutcome::CarriedOut,
                         format!("{name}: {summary}, carried out."),
                     ),
-                    Approved::Done(outcome, reason) => {
-                        (outcome, format!("{name}: {summary}, not carried out: {reason}"))
-                    }
+                    Approved::Done(outcome, reason) => (
+                        outcome,
+                        format!("{name}: {summary}, not carried out: {reason}"),
+                    ),
                     Approved::Waits(why) => (
                         generated::ConnectOutcome::Unspecified,
                         format!(
-                            "{name}: {summary}, approved. It is carried out once the relationship with {name} settles: {why}"
+                            "{name}: {summary}, approved. It is carried out once this clears: {why}"
                         ),
                     ),
                 }
@@ -406,12 +443,10 @@ impl AppRouterImpl {
         held: &store::PendingRow,
     ) -> Result<Approved, String> {
         let (request_body, request) = read_request(&held.request, session)?;
-        if let Request::Pay { .. } = &request {
-            if let Some(why) = payment_waits(&session.app_device_id) {
-                store::approve_pending(&session.session_id, request_body.seq)
-                    .map_err(|e| e.to_string())?;
-                return Ok(Approved::Waits(why));
-            }
+        if let Some(why) = waits(&self.core_sdk, session, &request)? {
+            store::approve_pending(&session.session_id, request_body.seq)
+                .map_err(|e| e.to_string())?;
+            return Ok(Approved::Waits(why));
         }
         let summary = describe_request(&request);
         let executed = self.execute(session, request_body.seq, &request).await;
@@ -465,10 +500,7 @@ impl AppRouterImpl {
             let approved = self.carry_out_approved(&current, &held).await?;
             drop(one);
             if let Approved::Waits(why) = approved {
-                return Err(format!(
-                    "request {} is approved and waits for the relationship with the application to settle: {why}",
-                    held.seq
-                ));
+                return Err(format!("request {} is approved and waits: {why}", held.seq));
             }
             deliver_owed(&current).await?;
         }
@@ -525,12 +557,8 @@ impl AppRouterImpl {
         };
         match decide(&scopes, &request, &spent_of, &issued) {
             Decision::InScope { spend } => {
-                if let Request::Pay { .. } = &request {
-                    if let Some(why) = payment_waits(&session.app_device_id) {
-                        return Ok(Flow::NotYet(format!(
-                            "request {seq} waits for the relationship with the application to settle: {why}"
-                        )));
-                    }
+                if let Some(why) = waits(&self.core_sdk, session, &request)? {
+                    return Ok(Flow::NotYet(format!("request {seq} waits: {why}")));
                 }
                 let executed = self.execute(session, seq, &request).await;
                 let spend = executed.spend(spend);
@@ -1044,7 +1072,10 @@ fn wallet_session_view(
             store::SessionStatus::Disconnected => generated::ConnectSessionStatus::Disconnected,
         } as i32,
         spent,
-        scope_lines: granted.iter().map(describe_scope).collect(),
+        scope_lines: granted
+            .iter()
+            .map(|s| describe_scope(s, &Names::new()))
+            .collect(),
         last_error,
         offer_digest: s.offer_digest.to_vec(),
     })
@@ -1145,7 +1176,10 @@ fn app_session_view(s: &store::AppSession) -> Result<generated::ConnectSessionV1
         last_seq: s.next_seq.saturating_sub(1),
         status: generated::ConnectSessionStatus::Connected as i32,
         spent: Vec::new(),
-        scope_lines: granted.iter().map(describe_scope).collect(),
+        scope_lines: granted
+            .iter()
+            .map(|s| describe_scope(s, &Names::new()))
+            .collect(),
         last_error: String::new(),
         offer_digest: s.offer_digest.to_vec(),
     })
