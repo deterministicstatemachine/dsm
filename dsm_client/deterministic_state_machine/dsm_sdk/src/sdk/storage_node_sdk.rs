@@ -220,12 +220,17 @@ fn build_member_client(
             "storage member id {member_id} is not a name a certificate can carry: {e}"
         ))
     })?;
-    let config = rustls::ClientConfig::builder_with_provider(provider)
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| ca_error(format!("storage client: {e}")))?
         .dangerous()
         .with_custom_certificate_verifier(std::sync::Arc::new(NamesTheMember { chain, member }))
         .with_no_client_auth();
+    // HTTP/2 where the member offers it (the node's listener does): every
+    // request to a member rides one connection, so a sync that reads many
+    // routes at once pays one handshake per member, not one per request.
+    // HTTP/1.1 stays for a member that does not offer HTTP/2.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     reqwest::Client::builder()
         .user_agent("DSM-SDK/1.0")
         .connect_timeout(MEMBER_CONNECT_TIMEOUT)

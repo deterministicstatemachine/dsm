@@ -205,6 +205,8 @@ impl TestIdentity {
 /// Any identity this process held before is replaced: this is a new device.
 pub fn create_identity(seed: u8) -> TestIdentity {
     crate::reset_sdk_context_for_testing();
+    #[cfg(test)]
+    crate::sdk::final_reads::forget_everything();
     let mnemonic = test_mnemonic(seed);
     crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&mnemonic)
         .expect("unlock the mnemonic");

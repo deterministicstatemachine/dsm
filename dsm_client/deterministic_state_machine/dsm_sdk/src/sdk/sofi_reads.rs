@@ -328,6 +328,10 @@ impl SofiReads for LiveSofiReads<'_> {
         if let Some(kept) = kept {
             return Ok(kept);
         }
+        // An earlier verification in this process may have read it final.
+        if let Some(kept) = crate::sdk::final_reads::final_cell(cell) {
+            return Ok(kept);
+        }
         let seats = NodeSeats::new(self.set).map_err(|e| ReadFailure(format!("seats: {e}")))?;
         Ok(self.block(read_cell(&seats, cell)))
     }
@@ -525,6 +529,7 @@ impl SofiReads for LiveSofiReads<'_> {
         proof: &CompletionProof,
     ) -> Result<(), ReadFailure> {
         keep_completion(cell, proof).map_err(|e| ReadFailure(format!("keep completion: {e}")))?;
+        crate::sdk::final_reads::keep_final_cell(cell, evidence);
         self.once
             .cells
             .lock()

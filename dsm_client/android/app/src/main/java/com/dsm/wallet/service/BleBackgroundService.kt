@@ -99,13 +99,16 @@ class BleBackgroundService : Service() {
         // Create notification channel (required for Android O+)
         createNotificationChannel()
         
-        // Start foreground with notification + explicit service type (required API 34+)
+        // Start foreground with notification + explicit service type (required API 34+).
+        // connectedDevice only: it has no daily limit, and the NFC permission the
+        // manifest declares satisfies its prerequisite. dataSync is capped at six
+        // hours a day from Android 15, and a service that keeps listening for its
+        // contacts in the background would reach the cap.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
                 createNotification(),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                    or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             )
         } else {
             startForeground(NOTIFICATION_ID, createNotification())
@@ -126,6 +129,13 @@ class BleBackgroundService : Service() {
         Log.i(TAG, "BLE background service started")
         refreshAdvertising()
         return START_STICKY
+    }
+
+    // A foreground service type with a time limit reached it (Android 15). The
+    // service must stop within seconds or the system throws.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "foreground service type $fgsType reached its time limit; stopping")
+        stopSelf()
     }
 
     override fun onDestroy() {
@@ -239,8 +249,8 @@ class BleBackgroundService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("DSM Offline Mode Active")
-            .setContentText("Ready for Bluetooth transfers")
+            .setContentTitle("DSM is ready to receive")
+            .setContentText("Listening for transfers from your contacts")
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth) // Use system Bluetooth icon
             .setContentIntent(pendingIntent)
             .setOngoing(true) // Cannot be dismissed by user

@@ -286,6 +286,23 @@ enum ReadFrom {
     Resume,
 }
 
+/// How fetching one member's pages ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PagesEnded {
+    /// The member's spool ended (or a page named no position a spool can hold).
+    End,
+    /// The page cap was reached with the spool going on.
+    PageCap,
+    /// The member did not answer, or answered with what is not a page.
+    Failed,
+}
+
+/// One member's pages, fetched before any is read.
+struct MemberPages {
+    pages: Vec<dsm::types::proto::SequencedBatchEnvelope>,
+    ended: PagesEnded,
+}
+
 /// Where one member's read stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadStop {
@@ -1432,10 +1449,13 @@ impl B0xSDK {
     }
 
     /// Deliver sealed spool bytes under `routing_key` until `quorum_k`
-    /// members answered 204. Every member may be asked — those the circuit
-    /// breaker marks failed last — so the bar is the register quorum whatever
-    /// the breaker holds: a member the breaker skipped would otherwise lower
-    /// the count delivery must reach.
+    /// members answered 204. The first `quorum_k` members are asked at once —
+    /// those the circuit breaker holds healthy first — and each member that
+    /// fails is replaced by the next at once, so a delivery takes one round
+    /// of answers instead of one round per member, and lands on exactly
+    /// `quorum_k` members, never the whole fleet (#867). The bar is the
+    /// register quorum whatever the breaker holds: a member it marked failed
+    /// is still asked once the others are used up.
     async fn deliver(
         &mut self,
         routing_key: &str,
@@ -1448,7 +1468,8 @@ impl B0xSDK {
         if total < quorum {
             return Err(DsmError::network(
                 format!(
-                    "delivery needs {quorum} members and the fleet names {total};                      msg_id={message_id_b32}"
+                    "delivery needs {quorum} members and the fleet names {total}; \
+                     msg_id={message_id_b32}"
                 ),
                 None::<std::io::Error>,
             ));
@@ -1462,13 +1483,22 @@ impl B0xSDK {
                 marked_failed.push(endpoint.clone());
             }
         }
+        let this = &*self;
+        let ask = |endpoint: String| async move {
+            let answer = this
+                .submit_with_retry(&endpoint, sealed, routing_key, message_id_b32, retry_config)
+                .await;
+            (endpoint, answer)
+        };
+        let mut waiting = healthy.into_iter().chain(marked_failed);
+        let mut answers = futures::stream::FuturesUnordered::new();
+        for endpoint in waiting.by_ref().take(quorum) {
+            answers.push(ask(endpoint));
+        }
         let mut delivered = 0usize;
         let mut errors: Vec<String> = Vec::new();
-        for endpoint in healthy.into_iter().chain(marked_failed) {
-            match self
-                .submit_with_retry(&endpoint, sealed, routing_key, message_id_b32, retry_config)
-                .await
-            {
+        while let Some((endpoint, answer)) = futures::StreamExt::next(&mut answers).await {
+            match answer {
                 Ok(()) => {
                     delivered += 1;
                     if delivered >= quorum {
@@ -1483,7 +1513,12 @@ impl B0xSDK {
                         return Ok(());
                     }
                 }
-                Err(e) => errors.push(format!("{endpoint}: {e}")),
+                Err(e) => {
+                    errors.push(format!("{endpoint}: {e}"));
+                    if let Some(next) = waiting.next() {
+                        answers.push(ask(next));
+                    }
+                }
             }
         }
         Err(DsmError::network(
@@ -2078,7 +2113,7 @@ impl B0xSDK {
     /// node answers 204 once it holds them; a replay of a held message id
     /// answers the same.
     async fn submit_with_retry(
-        &mut self,
+        &self,
         endpoint: &str,
         sealed: &[u8],
         routing_key: &str,
@@ -2304,6 +2339,97 @@ impl B0xSDK {
         self.retrieve_from(b0x_address, ReadFrom::Resume).await
     }
 
+    /// The pages of `epc`'s spool at `b0x_address` from `start`, as the member
+    /// answers them, up to [`Self::MAX_RETRIEVE_PAGES_PER_NODE`]: fetched only,
+    /// nothing opened or recorded. The read stops at the spool's end, at the
+    /// page cap, at a page whose next position no spool can hold (the caller
+    /// refuses it), or at a member that does not answer. No client for the
+    /// member is this device's failure, not the member's, and is returned.
+    async fn fetch_member_pages(
+        &self,
+        epc: &str,
+        b0x_address: &str,
+        start: u64,
+    ) -> Result<MemberPages, DsmError> {
+        let mut pages = Vec::new();
+        let mut cursor = start;
+        while pages.len() < Self::MAX_RETRIEVE_PAGES_PER_NODE {
+            let client = self.client_for(epc)?;
+            let url = format!("{}/api/v2/b0x/retrieve/{}", epc, cursor);
+            let resp = client
+                .get(&url)
+                .header("Accept", "application/protobuf")
+                .header("x-dsm-b0x-address", b0x_address)
+                .send()
+                .await;
+            let batch = match resp {
+                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
+                    return Ok(MemberPages {
+                        pages,
+                        ended: PagesEnded::End,
+                    });
+                }
+                Ok(r) if r.status().is_success() => {
+                    let bytes = match r.bytes().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("b0x retrieve read failed from {}: {}", epc, e);
+                            return Ok(MemberPages {
+                                pages,
+                                ended: PagesEnded::Failed,
+                            });
+                        }
+                    };
+                    match dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_ref()) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("SequencedBatchEnvelope decode failed from {}: {}", epc, e);
+                            return Ok(MemberPages {
+                                pages,
+                                ended: PagesEnded::Failed,
+                            });
+                        }
+                    }
+                }
+                Ok(r) => {
+                    warn!("b0x retrieve from {} answered HTTP {}", epc, r.status());
+                    return Ok(MemberPages {
+                        pages,
+                        ended: PagesEnded::Failed,
+                    });
+                }
+                Err(e) => {
+                    warn!("b0x retrieve transport failure for {}: {}", epc, e);
+                    return Ok(MemberPages {
+                        pages,
+                        ended: PagesEnded::Failed,
+                    });
+                }
+            };
+            if batch.envelopes.is_empty() || batch.next_seq <= cursor {
+                return Ok(MemberPages {
+                    pages,
+                    ended: PagesEnded::End,
+                });
+            }
+            let next = batch.next_seq;
+            pages.push(batch);
+            if next > Self::MAX_SPOOL_POSITION {
+                // Not a position a spool can hold: the reader refuses this
+                // page, and nothing past it is fetched.
+                return Ok(MemberPages {
+                    pages,
+                    ended: PagesEnded::End,
+                });
+            }
+            cursor = next;
+        }
+        Ok(MemberPages {
+            pages,
+            ended: PagesEnded::PageCap,
+        })
+    }
+
     async fn retrieve_from(
         &mut self,
         b0x_address: &str,
@@ -2348,81 +2474,52 @@ impl B0xSDK {
         let mut answered = 0usize;
         // Members whose read answered and stopped at its page cap.
         let mut capped_members = 0usize;
+        // Where each member's read starts, from this device's own records.
+        let mut starts = Vec::with_capacity(endpoints.len());
         for epc in endpoints {
             // `position`: below it, everything on this node is consumed.
             // `cursor`: where the next page is read from. A message still
             // waiting (one half of a pair) stops `position`, never `cursor`,
             // so nothing behind it is held up.
-            let mut position = b0x_consumed::read_position(b0x_address, &epc).map_err(local)?;
+            let position = b0x_consumed::read_position(b0x_address, &epc).map_err(local)?;
             let resumed_at = match from {
                 ReadFrom::Position => None,
                 ReadFrom::Resume => b0x_consumed::scan_cursor(b0x_address, &epc)
                     .map_err(local)?
                     .filter(|resume| *resume > position),
             };
-            let mut cursor = match resumed_at {
+            let cursor = match resumed_at {
                 Some(resume) => resume,
                 None => position,
             };
+            starts.push((epc, position, resumed_at, cursor));
+        }
+        // Every member's pages are fetched at once: a read costs the slowest
+        // member's round trips, not the sum of every member's. What came back
+        // is then read member by member, in set order, exactly as before.
+        let fetched = futures::future::join_all(
+            starts
+                .iter()
+                .map(|(epc, _, _, cursor)| self.fetch_member_pages(epc, b0x_address, *cursor)),
+        )
+        .await;
+        for ((epc, mut position, resumed_at, mut cursor), member) in starts.into_iter().zip(fetched)
+        {
+            let member = member?;
             // Only a read that starts at the position can move it: one that
             // resumed past it has not read what lies between.
             let mut consumed_run = resumed_at.is_none();
-            let mut failed = false;
+            let failed = member.ended == PagesEnded::Failed;
             // Why this node's answer is not a spool's, when it is not:
             // nothing past it is read or advanced by it.
             let mut malformed: Option<String> = None;
             // Where the read stopped: at the page cap unless a page ends the
             // spool first.
-            let mut stop = ReadStop::PageCap;
-            let mut pages = 0;
-            'pages: while pages < Self::MAX_RETRIEVE_PAGES_PER_NODE {
-                pages += 1;
-                let url = format!("{}/api/v2/b0x/retrieve/{}", epc, cursor);
-                let resp = self
-                    .client_for(&epc)?
-                    .get(&url)
-                    .header("Accept", "application/protobuf")
-                    .header("x-dsm-b0x-address", b0x_address)
-                    .send()
-                    .await;
-                let batch = match resp {
-                    Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                        stop = ReadStop::End;
-                        break;
-                    }
-                    Ok(r) if r.status().is_success() => {
-                        let bytes = match r.bytes().await {
-                            Ok(b) => b,
-                            Err(e) => {
-                                warn!("b0x retrieve read failed from {}: {}", epc, e);
-                                failed = true;
-                                break;
-                            }
-                        };
-                        match dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_ref()) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                warn!("SequencedBatchEnvelope decode failed from {}: {}", epc, e);
-                                failed = true;
-                                break;
-                            }
-                        }
-                    }
-                    Ok(r) => {
-                        warn!("b0x retrieve from {} answered HTTP {}", epc, r.status());
-                        failed = true;
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("b0x retrieve transport failure for {}: {}", epc, e);
-                        failed = true;
-                        break;
-                    }
-                };
-                if batch.envelopes.is_empty() || batch.next_seq <= cursor {
-                    stop = ReadStop::End;
-                    break;
-                }
+            let stop = match member.ended {
+                PagesEnded::End => ReadStop::End,
+                PagesEnded::PageCap | PagesEnded::Failed => ReadStop::PageCap,
+            };
+            'pages: for batch in member.pages {
                 if batch.next_seq > Self::MAX_SPOOL_POSITION {
                     malformed = Some(format!(
                         "next position {} is not a spool position",

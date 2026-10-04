@@ -324,22 +324,44 @@ pub fn has_pending_settlement_work() -> anyhow::Result<bool> {
     Ok(!crate::storage::client_db::pending_outbound_replies()?.is_empty())
 }
 
-/// Lifecycle-driven stop (app backgrounded). `Ok(true)` when the poller was
-/// stopped; `Ok(false)` when it was not, because settlement work is
-/// outstanding (see [`has_pending_settlement_work`]); `Err` when the
-/// settlement state cannot be read — the poller is not stopped then either,
-/// because only a readable "nothing owed" may stop it. Use [`stop_poller`]
-/// for an unconditional shutdown.
-pub fn stop_poller_for_lifecycle() -> anyhow::Result<bool> {
+/// What the poller does when the app leaves the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backgrounded {
+    /// Settlement work is outstanding ([`has_pending_settlement_work`]): the
+    /// poller keeps going so the transfer completes.
+    Settling,
+    /// This device has contacts, and any of them can send to it at any time:
+    /// the poller and its waits keep going, so what they send lands without
+    /// the recipient opening the app. Nothing tells a device a transfer is
+    /// coming; listening is the only way it arrives on its own.
+    Listening,
+    /// Nothing owed and nobody to hear from: the poller was stopped.
+    Stopped,
+}
+
+/// Lifecycle-driven stop (app backgrounded): the poller stops only when
+/// nothing is settling and no contact can send to this device. `Err` when
+/// either cannot be read — the poller is not stopped then, because only a
+/// readable "nothing owed, nobody to hear from" may stop it. Use
+/// [`stop_poller`] for an unconditional shutdown.
+pub fn stop_poller_for_lifecycle() -> anyhow::Result<Backgrounded> {
     if has_pending_settlement_work()? {
         log::info!(
             "[inbox_poller] lifecycle stop DECLINED — settlement work outstanding; \
              continuing to poll in the background so the transfer can complete"
         );
-        return Ok(false);
+        return Ok(Backgrounded::Settling);
+    }
+    let contacts = crate::storage::client_db::count_contacts()?;
+    if contacts > 0 {
+        log::info!(
+            "[inbox_poller] lifecycle stop DECLINED — {contacts} contact(s) can send to this \
+             device; listening in the background"
+        );
+        return Ok(Backgrounded::Listening);
     }
     stop_poller();
-    Ok(true)
+    Ok(Backgrounded::Stopped)
 }
 
 /// Stop the inbox poller unconditionally. The task will exit on its next
@@ -538,9 +560,38 @@ mod tests {
                 "{table}: the poller was stopped"
             );
         }
-        assert!(stop_poller_for_lifecycle().expect("readable again"));
+        assert_eq!(
+            stop_poller_for_lifecycle().expect("readable again"),
+            Backgrounded::Stopped
+        );
         assert!(POLLER_STOP.load(Ordering::SeqCst));
         POLLER_STOP.store(false, Ordering::SeqCst);
+    }
+
+    /// Nothing tells a device a transfer is on its way. A device with a
+    /// contact keeps listening when the app leaves the screen, so what the
+    /// contact sends lands without the recipient opening the app; the stop
+    /// flag stays down. Without a contact there is nobody to hear from.
+    #[test]
+    #[serial_test::serial]
+    fn a_device_with_contacts_keeps_listening_in_the_background() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        let stopping_before = POLLER_STOP.load(Ordering::SeqCst);
+        crate::storage::client_db::store_contact_record_for_tests([0x5E; 32], "listener");
+        assert_eq!(
+            stop_poller_for_lifecycle().expect("a readable store"),
+            Backgrounded::Listening
+        );
+        assert_eq!(
+            POLLER_STOP.load(Ordering::SeqCst),
+            stopping_before,
+            "the poller was told to stop"
+        );
+        assert_eq!(
+            crate::storage::client_db::count_contacts().expect("count"),
+            1
+        );
     }
 
     // ── Constants ──
