@@ -189,6 +189,17 @@ pub fn get_all_contacts() -> Result<Vec<ContactRecord>> {
     Ok(contacts)
 }
 
+/// How many contacts this device holds: each one a peer that can send to it.
+pub fn count_contacts() -> Result<u64> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM contacts", [], |row| row.get(0))?;
+    Ok(u64::try_from(count)?)
+}
+
 /// Check if a contact exists for the given device_id (32 bytes).
 /// Used by BLE layer to gate binding before attempting offline operations.
 pub fn has_contact_for_device_id(device_id: &[u8]) -> Result<bool> {
@@ -745,6 +756,12 @@ pub(crate) fn store_contact_for_tests(contact: &dsm::types::contact_types::DsmVe
     .unwrap_or_else(|e| panic!("store the test contact: {e}"));
 }
 
+/// Store a contact record as the tests in this module build one.
+#[cfg(test)]
+pub(crate) fn store_contact_record_for_tests(device_id: [u8; 32], alias: &str) {
+    store_contact(&tests::make_contact(device_id, alias)).expect("store the test contact");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,7 +774,7 @@ mod tests {
         crate::storage::client_db::init_database().expect("init db");
     }
 
-    fn make_contact(device_id: [u8; 32], alias: &str) -> ContactRecord {
+    pub(super) fn make_contact(device_id: [u8; 32], alias: &str) -> ContactRecord {
         ContactRecord {
             contact_id: format!("cid-{alias}"),
             device_id: device_id.to_vec(),

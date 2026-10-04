@@ -42,7 +42,16 @@ pub(crate) async fn fetch_immutable(
     inner: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, DsmError> {
     let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
-    Ok(SetClient::new(set)?.fetch_verified(&addr).await)
+    // An object is its bytes: once a member served bytes that re-hash to the
+    // address, they are kept and never fetched again.
+    if let Some(kept) = crate::sdk::final_reads::object(&addr) {
+        return Ok(Some(kept));
+    }
+    let fetched = SetClient::new(set)?.fetch_verified(&addr).await;
+    if let Some(bytes) = &fetched {
+        crate::sdk::final_reads::keep_object(namespace, &addr, bytes);
+    }
+    Ok(fetched)
 }
 
 /// `Stored(o)` for the object whose identity is `inner` under `namespace`

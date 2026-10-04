@@ -179,6 +179,15 @@ pub fn init_database() -> Result<()> {
         let conn = Connection::open(&db_path)?;
         info!("[DSM_SDK] Database connection opened successfully");
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
+        // Write-ahead logging: a commit appends to the log and syncs it once,
+        // where the rollback journal syncs the journal and then the database.
+        // `synchronous = FULL` keeps every commit durable at return, which this
+        // store owes: a frozen envelope is retained BEFORE its first write and
+        // is never regenerated. A file system without WAL keeps the journal
+        // SQLite answers with, and the store works as before.
+        let journal: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
+        conn.execute_batch("PRAGMA synchronous = FULL;")?;
+        info!("[DSM_SDK] Database journal mode: {journal}");
         create_schema(&conn)?;
         {
             let mut guard = DB_CONNECTION
@@ -274,13 +283,27 @@ pub fn reset_database_for_tests() {
     }
 }
 
-/// The size of the device database file. A file that does not exist has no
-/// size: that is an error, never zero bytes.
+/// The size of the device database: its file, and its write-ahead log, which
+/// holds the commits not yet checkpointed into the file. A database file that
+/// does not exist has no size: that is an error, never zero bytes. A log that
+/// does not exist holds nothing.
 pub fn get_db_size() -> Result<u64> {
     let path = get_database_path()?;
     let metadata =
         std::fs::metadata(&path).map_err(|e| anyhow!("database file {}: {e}", path.display()))?;
-    Ok(metadata.len())
+    let mut log_path = path.clone().into_os_string();
+    log_path.push("-wal");
+    let log_len = match std::fs::metadata(&log_path) {
+        Ok(log) => log.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => {
+            return Err(anyhow!(
+                "database log {}: {e}",
+                std::path::Path::new(&log_path).display()
+            ))
+        }
+    };
+    Ok(metadata.len() + log_len)
 }
 
 /// The device database: a file in the storage base directory, which startup

@@ -57,6 +57,7 @@ pub mod token_sdk;
 pub mod token_state;
 // Storage-node client wrapper
 pub mod device_directory;
+pub(crate) mod final_reads;
 pub mod route_seats;
 pub mod sofi_flow;
 pub mod storage_io;

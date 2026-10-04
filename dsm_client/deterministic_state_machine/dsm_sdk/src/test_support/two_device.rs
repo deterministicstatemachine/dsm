@@ -99,6 +99,9 @@ impl TestDevice {
         .expect("AppState identity");
         AppState::set_has_identity(true).expect("AppState has_identity");
         crate::reset_sdk_context_for_testing();
+        // Each device is a process of its own: what another device read and
+        // kept was never this one's to start from.
+        crate::sdk::final_reads::forget_everything();
         crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(
             &economic_fixtures::test_mnemonic(self.seed),
         )
