@@ -147,8 +147,10 @@ impl From<SignatureError> for crate::types::error::DsmError {
     }
 }
 
-/// One verification, over exact bytes, under a declared algorithm.
-fn verify_bytes(
+/// One verification, over exact bytes, under a declared algorithm. Shared
+/// with the escrow verdict's signatures (`sofi::escrow`), so every SoFi
+/// signature is checked by this one rule.
+pub(crate) fn verify_bytes(
     what: &'static str,
     alg: u16,
     key: &[u8],

@@ -37,6 +37,7 @@
 pub mod admission;
 pub mod conformance;
 pub mod derive;
+pub mod escrow;
 pub mod exercise;
 pub mod facts;
 pub mod fisher_yates;
