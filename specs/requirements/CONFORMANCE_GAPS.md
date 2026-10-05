@@ -2725,16 +2725,30 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 
 **Open.** On BLE the terms ride beside the operation in the clear, as the prepare always has: BLE is a direct link between the two parties, and the ruling chose it. `TokenSDK`'s generic transfer and its token-creation fee transfer commit to terms that nothing carries, so a recipient could not open them. Neither is reached today: `TokenOperation::Transfer` is built nowhere outside `TokenSDK`, and the one `TokenOperation::Create` the SDK builds (dBTC registration) charges no fee.
 
+### 6.72 No vault could hold value for anyone but a market: escrow vaults specified (`feat/escrow-vaults`, SoFi Amendment S21, 2026-10-05)
+
+**The finding.** An application needed two parties to lock equal stakes against one agreed match, with the application as referee deciding who takes both. Nothing in the backend can hold value under a condition other than a SoFi market:
+- the economic tree has no encumbered leaf, and the legacy DLV claim operations are refused as value transitions (`DlvClaim { .. } | DlvInvalidate { .. } => UnsupportedValueTransition`, `dsm::economic::classifier`);
+- the legacy DLV's `FulfillmentMechanism::MultiSignature` (`dsm::vault::limbo_vault`) counts the same key's signature as often as it appears, passes with a threshold of 0, and verifies over `signed_data` the claimant's proof supplies. It is not a basis for anything that holds value.
+
+**The ruling.** Owner, 2026-10-04: compose existing primitives, add only the generic one that is missing, and put no wager or battle logic in Core: "You need to make the generic escrow vaults, and then we just use that". 2026-10-05: one external commitment has one admissible verdict, made so by the protocol, not by the referee's bookkeeping (quoted in Amendment S21).
+
+**The specification.** SoFi §19.9 (Amendment S21): an escrow vault is a SoFi vault whose three policy slots name one `EscrowTerms` object. It releases its whole amount once, by a Release position of the branch's recipient, when the canonical verdict on its external commitment names that branch's outcome. The verdict occupies `K_verdict = H(DSM/escrow/verdict-cell/v1; Y ∥ τ)` first at its leader and proves its own authority from its bytes. Every vault bound to the cell settles only on the outcome it holds: a release naming another is Void, and its key is skipped by `RouteImpossible` arm (v). An escrow vault has no market and no owner close.
+
+**Status.** Specification and rows only (MR-SOFI-0363 to MR-SOFI-0384, all Missing). The implementation follows on this branch after the owner reviews the amendment.
+
+**Open.** `FulfillmentMechanism::MultiSignature` stays in the legacy DLV as found. Escrow vaults neither use nor replace it; whether that code is reachable on a production path is a separate sweep.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
 | DSM high-level (MR-DSM) | 277 | 96 | 95 | 39 | 0 | 29 | 18 |
-| SoFi (MR-SOFI) | 362 | 237 | 86 | 18 | 4 | 17 | 0 |
+| SoFi (MR-SOFI) | 384 | 237 | 86 | 40 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **943** | **407** | **200** | **114** | **4** | **64** | **154** |
+| **All** | **965** | **407** | **200** | **136** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3386,6 +3400,28 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 | MR-SOFI-0360 | Met | `dsm::sofi::wire::objects::SignedSofiResolutionClaim`; `dsm::sofi::signature::verify_resolution_claim`; `dsm::sofi::signature::sign_resolution_claim`; `dsm::economic::register::read_root_cell` (body identity); `dsm_sdk::sdk::sofi_register` (producer); `dsm_sdk::sdk::sofi_relay::carry_pair`; `dsm::sofi::registration::RegistrationRead::standing_of`; `dsm::sofi::resolve::Verifier::peer_position` | `dsm::economic::claim_envelope::tests::a_conditional_cell_decodes_by_class`; `dsm::economic::claim_envelope::tests::an_unsigned_conditional_claim_names_no_cell`; `dsm::economic::claim_envelope::tests::a_conditional_claim_signed_by_another_device_names_no_cell`; `dsm::economic::register::registered_root_construction_tests::a_held_root_cell_carries_the_exact_bytes_that_hold_it`; `dsm::sofi::registration::tests::a_fulfillment_is_lost_to_any_other_leader_and_to_any_claim_not_its_own` | SoFi Amendment S20 (§6.65). `K_root(q)` holds the trader-signed `C_q` (`0x0062`); a bare `C_q` is refused by name, and a conditional claim is identified by its derived body. S20 extended 2026-10-01 (§6.65, §6.66 12j): registration matches the pair by `FulfillmentId(F)`; where `P` is in hand the body is compared with `derive(P, F)`. In the facts a difference loses `F` (`standing_of`); in a position's resolution it is Invalid (`peer_position`) (`51359a6b6`). Mutation: the body check skipped for a registered pair → the unit test red. The resolution check has no test of its own yet. |
 | MR-SOFI-0361 | Met | `dsm::sofi::wire::objects::TraderFulfillmentBody`; `dsm::sofi::registration::fulfillment_proves_the_device`; `dsm::sofi::registration::names_fulfillment_key`; `dsm_sdk::sdk::sofi_sdk::build_fulfillment` | `dsm::sofi::registration::tests::a_fulfillment_under_a_key_that_does_not_derive_the_trader_names_no_cell`; `dsm::sofi::registration::tests::only_a_fulfillment_of_this_trader_at_this_position_names_the_key`; `dsm_sdk::handlers::node_e2e_tests::a_position_reads_the_same_before_and_after_a_precommit_is_published` | SoFi Amendment S20 (§6.65). The binding is decided from `F`'s bytes before `P` is looked up. Mutation: the check removed → that test red. S20 extended 2026-10-01 (§6.65, §6.66 12j): `names_fulfillment_key` decides from `F`'s bytes alone and reads no `P`, so which `F` holds `K_ful(q)` is the same at every time (`51359a6b6`). |
 | MR-SOFI-0362 | Met | `dsm::sofi::exercise::recognize_exercise`; `dsm::sofi::wire::objects::SofiExercise`; `dsm_sdk::sdk::sofi_exercise::build_exercise`; `dsm_sdk::sdk::sofi_relay::relay_exercise`; `dsm_sdk::sdk::sofi_flow::walk_for_attempt` | `dsm_sdk::handlers::node_e2e_tests::an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_bytes`; `dsm_sdk::handlers::node_e2e_tests::a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair`; `dsm::sofi::exercise::tests::an_exercise_carries_the_traders_signed_claim_of_its_own_p_and_f`; `dsm::sofi::exercise::tests::an_exercise_whose_fulfillment_does_not_prove_the_traders_device_is_nothing` | §6.66 12e. The exercise carries the trader's signed `C_q`, recognized as `K_root(q)` recognizes it with the body `derive(P, F)`; the next operation at a vault registers a withheld pair from it before passing the key (owner ruling, 2026-10-01). |
+| MR-SOFI-0363 | Missing | — | — | Added by Amendment S21 (§6.72): the slot rule; `VaultTerms` does not exist yet, and terms resolve as a market only. |
+| MR-SOFI-0364 | Missing | — | — | Added by Amendment S21 (§6.72): `EscrowTerms` does not exist yet. |
+| MR-SOFI-0365 | Missing | — | — | Added by Amendment S21 (§6.72): the outcome table and `τ` do not exist yet. |
+| MR-SOFI-0366 | Missing | — | — | Added by Amendment S21 (§6.72): the verdict cell key, seed and leader do not exist yet. |
+| MR-SOFI-0367 | Missing | — | — | Added by Amendment S21 (§6.72): the escrow statement does not exist yet. |
+| MR-SOFI-0368 | Missing | — | — | Added by Amendment S21 (§6.72): recognition at the verdict cell does not exist yet. |
+| MR-SOFI-0369 | Missing | — | — | Added by Amendment S21 (§6.72): `VerdictHeld` and `VerdictFinal` do not exist yet. |
+| MR-SOFI-0370 | Missing | — | — | Added by Amendment S21 (§6.72): the statement locator and gathered verdict objects do not exist yet. |
+| MR-SOFI-0371 | Missing | — | — | Added by Amendment S21 (§6.72): operation tag 38 does not exist yet. |
+| MR-SOFI-0372 | Missing | — | — | Added by Amendment S21 (§6.72): `creation_accepted` has no escrow form. |
+| MR-SOFI-0373 | Missing | — | — | Added by Amendment S21 (§6.72): the commitment locator does not exist yet. |
+| MR-SOFI-0374 | Missing | — | — | Added by Amendment S21 (§6.72): `SettlementBody` has no Release branch. |
+| MR-SOFI-0375 | Missing | — | — | Added by Amendment S21 (§6.72): the Release write set does not exist yet. |
+| MR-SOFI-0376 | Missing | — | — | Added by Amendment S21 (§6.72): `validate_release` does not exist yet. |
+| MR-SOFI-0377 | Missing | — | — | Added by Amendment S21 (§6.72): `Policies::resolve` re-addresses each slot under its market, fee or release class, so terms at `A_T` would leave a Close or Swap waiting on a non-verifying object (`Missing::NonVerifyingObject`), not Invalid; the refusal by terms lands with `VaultTerms`, and no Release exists. |
+| MR-SOFI-0378 | Missing | — | — | Added by Amendment S21 (§6.72): `consumed_route` has no verdict conjunct. |
+| MR-SOFI-0379 | Missing | — | — | Added by Amendment S21 (§6.72): `route_impossible` has four arms. |
+| MR-SOFI-0380 | Missing | — | — | Added by Amendment S21 (§6.72): `resolve_position` has no verdict fact. |
+| MR-SOFI-0381 | Missing | — | — | Added by Amendment S21 (§6.72): no vault is bound to a verdict cell yet. |
+| MR-SOFI-0382 | Missing | — | — | Added by Amendment S21 (§6.72): S15 resolution reads no verdict cell. |
+| MR-SOFI-0383 | Missing | — | — | Added by Amendment S21 (§6.72): no escrow vault exists, so no stake is locked. |
+| MR-SOFI-0384 | Missing | — | — | Added by Amendment S21 (§6.72): the escrow routes do not exist yet. |
 
 ### 8.3 dBTC native specification
 

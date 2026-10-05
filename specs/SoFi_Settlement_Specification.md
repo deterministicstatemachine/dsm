@@ -672,6 +672,8 @@ is Unavailable, never Invalid.
 | `preimage_locator(E)` | P(E) |
 | `vault_genesis_locator(v)` | the vault genesis preimage |
 | `vault_token_locator(t)` | the genesis preimage of each vault whose market pairs token `t` (Amendment S16) |
+| `escrow_commitment_locator(Y)` | the genesis preimage of each escrow vault whose terms name `Y` (Amendment S21) |
+| `escrow_statement_locator(K, o)` | gathered signatures deciding outcome `o` at verdict cell `K` (Amendment S21) |
 | ρ | the setup body |
 | PolicyFulfillmentIdj | Gj |
 | the auxiliary reference | auxiliary evidence candidates |
@@ -781,6 +783,17 @@ TAG_DSM_ECONOMIC_LEAF_STATE                 DSM/economic-leaf-state/v1          
 Retired, never reused
 DSM/sofi/route-outcome/v2
 
+Escrow vaults (Amendment S21), constants in CORE/common/domain_tags/dsm/misc/escrow.rs
+TAG_DSM_EXTERNAL                            DSM/external/v1                           Y = H(DSM/external/v1 ∥ X) (Explainer §60)
+TAG_DSM_ESCROW_TERMS_OBJECT                 DSM/escrow/terms-object/v1                A_T, address of EscrowTerms
+TAG_DSM_ESCROW_OUTCOME_TABLE                DSM/escrow/outcome-table/v1               τ
+TAG_DSM_ESCROW_VERDICT_CELL                 DSM/escrow/verdict-cell/v1                K_verdict
+TAG_DSM_ESCROW_VERDICT_SEED                 DSM/escrow/verdict-seed/v1                s_verdict, the seed of the verdict cell
+TAG_DSM_ESCROW_STATEMENT                    DSM/escrow/statement/v1                   m(o)
+TAG_DSM_ESCROW_VERDICT_OBJECT               DSM/escrow/verdict-object/v1              address of a gathered EscrowVerdict
+TAG_DSM_ESCROW_COMMITMENT_LOCATOR           DSM/escrow/commitment-locator/v1          locator of the escrow vaults bound to Y
+TAG_DSM_ESCROW_STATEMENT_LOCATOR            DSM/escrow/statement-locator/v1           locator of gathered signatures for (K_verdict, o)
+
 
 <!-- spec-section: SOFI-014-2 -->
 #### 14.2 Object classes
@@ -822,6 +835,10 @@ pre
 0x005A           SOFI_VAULT_GENESIS_PREIMAGE                   vault genesis preimage
 0x005B           SOFI_VAULT_CREATION                           vault creation leaf
 0x0061           SOFI_TRADER_PRE_BALANCE                       a trader's balance before the trade (Amendment S12)
+0x0063           ESCROW_TERMS                                  an escrow vault's terms (Amendment S21)
+0x0064           ESCROW_VERDICT                                a verdict on an external commitment (Amendment S21)
+0x0065           SOFI_SETTLEMENT_RELEASE                       B ◦ , Release branch (Amendment S21)
+0x0066           SOFI_ROUTE_DIGEST_RELEASE                     route digest preimage, Release (Amendment S21)
 
 
 <!-- Source PDF page 19 -->
@@ -892,6 +909,9 @@ preimage locator            H(preimage-locator/v1; E)                           
 
 
 No attempt index, availability view, routing order, member identity or witness enters E.
+
+The escrow derivations (`A_T`, `τ`, `K_verdict`, `s_verdict`, `m(o)` and the two escrow locators) are defined in §19.9
+(Amendment S21). A Release's E takes the single-leg form above, and its verdict is not an input of E.
 
 <!-- spec-section: SOFI-016 -->
 ### 16 Setup
@@ -1341,6 +1361,118 @@ pcreate the inserting position; token_a < token_b; the storage set is the networ
 at p is validated. Locator writes are attributed to the owner. GenesisStored is only a storage fact.
 
 An owner MAY trade against its own vault; no special case applies, and the fee stays in the reserves.
+
+<!-- spec-section: SOFI-019-9 -->
+#### 19.9 Escrow vaults (Amendment S21)
+
+> **Amendment S21 (owner, 2026-10-04 and 2026-10-05) — escrow vaults: a vault released by the canonical verdict on an external commitment.** An application needed two parties to lock equal stakes against one agreed match, with the application as referee deciding who takes both. Owner rulings, 2026-10-04: "The wager should be expressed by composing existing DSM primitives, not by teaching Core what a “PvP wager” or “battle winner” is", "Do not add wager-specific or battle-specific logic to Core", and "You need to make the generic escrow vaults, and then we just use that, but that's one of the primitives we have. We haven't finished yet." 2026-10-05, on two vaults bound to one commitment: "make the verdict for a given external commitment Y a canonical first-commit-wins object. Both linked escrow vaults must settle against that same canonical verdict. Do not rely only on the app host's persisted compare-and-set to prevent the referee from signing conflicting outcomes. The protocol itself should make one Y have one admissible verdict."
+
+An escrow vault is Explainer §59's escrow: a DLV with precommitted branches (§58), each guarded by signatures (§59) over a statement about an external commitment (§60). It is built on the vault machinery of this specification: a vault holds the value, one exercise per generation consumes it (§23), and the payout lands in the recipient's own transition (§19.6). Nothing in it knows what an application's commitment means. No rule for a vault whose terms are a market changes.
+
+**What an escrow vault is**
+
+- An escrow vault holds one amount of one token. It releases that whole amount once, along one of its precommitted branches, to that branch's recipient, when the canonical verdict on its external commitment names that branch's outcome. It has no market, no owner close and no partial release.
+- **The slot rule.** `VaultStateLeaf` is unchanged byte for byte. In an escrow vault, `market_policy`, `fee_policy` and `release_policy` all hold `A_T`, the address of the vault's `EscrowTerms` bytes. `reserve_a` is the held amount and `reserve_b` is 0. The vault is Active while `reserve_a > 0` and `reserve_b = 0`. It is Retired when both are zero, and Retired is terminal, as for every vault. A vault's terms are resolved from the bytes its slots address: three slots naming one object of class `0x0063` make an escrow vault. Any other combination that includes such an object is neither a market nor an escrow, and its genesis is refused.
+
+**`EscrowTerms`**, class `0x0063`, schema 1. Its address is `A_T = immutable_addr(DSM/escrow/terms-object/v1, CCB bytes)`.
+
+| Field | Content |
+|---|---|
+| `token` | digest32: the policy commit of the held token |
+| `external_commitment` | digest32: `Y = H(DSM/external/v1 ∥ X)` (Explainer §60). DSM never reads `X`. |
+| `branches` | 1 to 16 branches, strictly ascending by `outcome` bytes |
+
+| Branch field | Content |
+|---|---|
+| `outcome` | 1 to 64 bytes: the label a verdict names |
+| `signers` | 1 to 4 signers, strictly ascending: the exact set whose signatures decide this outcome. A signer is `(signature_alg, public_key)`, ordered by `u16be(alg) ∥ u32be(|key|) ∥ key`. |
+| `recipient_genesis`, `recipient_device_id` | digest32 each: the identity the branch pays |
+
+- A branch is decided by all of its signers. No duplicate signer, no empty set and no threshold can be expressed. Labels are unique, so a verdict names at most one branch.
+- The amount is always the whole held amount. Nothing is chosen at release.
+- **The outcome table** `O` is the branches with their recipients removed: the list of `(outcome, signers)` in branch order. Its digest is `τ = H(DSM/escrow/outcome-table/v1; u8(|O|) ∥ ⨁ entries)`, each entry `u32be(|o|) ∥ o ∥ u8(|signers|) ∥ ⨁ (u16be(alg) ∥ u32be(|key|) ∥ key)`. Two vaults with the same `Y` and the same table are linked: they share one verdict cell. Their recipients may differ.
+
+**The verdict cell: one admissible verdict**
+
+- **The key.** Every escrow vault whose terms name `Y` and whose table hashes to `τ` is bound to one cell, `K_verdict = H(DSM/escrow/verdict-cell/v1; Y ∥ τ)`. Its leader is `FisherYates(s_verdict, S)[0]` (§7) over the network's pinned set, with `s_verdict = H(DSM/escrow/verdict-seed/v1; K_verdict)`, so a reader that knows only the key finds its leader. The cell is written by the procedure of §8 with route-chain finality (Amendment S4), and anyone may write it (§9).
+- **The statement.** A signer decides outcome `o` for the cell by signing `m(o) = H(DSM/escrow/statement/v1; K_verdict ∥ u32be(|o|) ∥ o)`. The statement names the cell, so a signature decides nothing anywhere else: not another commitment, and not another table over the same commitment. It names no vault, so one signature serves every vault bound to the cell.
+- **`EscrowVerdict`**, class `0x0064`, schema 1: `external_commitment` (`Y`), `table` (`O`, with the bounds of the terms' branches), `outcome` (1 to 64 bytes), and `signatures`: 1 to 4 entries `(signature_alg, public_key, signature)`, strictly ascending by signer. With four SPHINCS+ signatures it is within a cell's value bound (`route_chain::MAX_VALUE_LEN`).
+- **What occupies the cell.** The value that counts at `K_verdict` is the first object at its leader that is an `EscrowVerdict` recognized there. Everything else at the cell counts as nothing. A verdict is recognized at `K` when, from its own bytes alone:
+  1. `H(DSM/escrow/verdict-cell/v1; Y ∥ τ(table)) = K`;
+  2. `outcome` is a label of `table`;
+  3. its signers are exactly the signers `table` assigns to `outcome`;
+  4. every signature verifies over `m(outcome)` under its key (SPHINCS+, §14.3).
+
+  The verdict proves its own authority for the cell, as Amendment S20 requires of every occupant. No vault, member or reader's position enters the decision.
+- **The facts.** `VerdictHeld(K, o)` holds when the cell's leader link is held by a recognized verdict on `o`, in any state: leader-held, preserved or final. `VerdictFinal(K, o)` holds when that verdict is final at `K` (Amendment S4), shown by a completion proof (Amendment S10). By §8, consequences 2 and 3, the cell holds at most one outcome, ever. A second verdict, even one validly signed by the same signers for another outcome, never becomes the cell's value: conflicting adjudications contend for one deterministic key (Explainer §40, §58), and the first at the leader wins.
+- **Why the table is in the key.** If the key were `Y` alone, the first object at the cell would have to be judged against signers the cell does not know. Anyone could occupy it first with a verdict signed under keys of its own choosing, and freeze every stake bound to `Y`. With `τ` in the key, only the agreed signers can occupy it. Parties that link vaults agree on `Y` and on the table. A vault with another table is another agreement, with its own cell, and it never touches theirs.
+- **The leader.** The parties agree on `Y` and `τ`. A party that proposes `X` can influence which member leads by its choice of `X`. A member never equivocates (§5.1), so that touches liveness only (§5.3, condition 2), never which verdict is canonical.
+- **Gathering signatures.** A branch with more than one signer needs each signer's signature. A signer MAY put an `EscrowVerdict` holding the signatures it has as an object, under `immutable_addr(DSM/escrow/verdict-object/v1, CCB bytes)`, and index it under `escrow_statement_locator(K, o) = H(DSM/escrow/statement-locator/v1; K ∥ u32be(|o|) ∥ o)`. A reader keeps each signature that verifies over `m(o)` under a signer the table assigns to `o`, and nothing else. The index carries no authority (§11). Only a recognized verdict at the cell decides anything.
+
+**Creation**
+
+- `EscrowVaultCreate`, variant 38 of `Operation`, carries the vault genesis preimage, the `VaultCreation` leaf and the exact `EscrowTerms` bytes, signed by the owner, as `SofiVaultCreate` carries its market policy (§28). The owner's transition debits the held amount of `terms.token` once and inserts `VaultCreation{vault_id, genesis_root, amount_a, amount_b = 0}`, with `amount_a` the held amount. The record is insert only. The verifier admits exactly one debit and one creation record.
+- **GenesisAccepted, escrow form** (§19.8). All of the following hold:
+  - `R0` recomputes, and `V0` holds exactly the initial state: generation zero, Active, no relationship leaves;
+  - the three policy slots hold `A_T`, and the carried bytes decode as `EscrowTerms` and re-derive `A_T`;
+  - `reserve_a` equals the funded amount and the debit, and `reserve_b = 0`;
+  - `v = vault_id(Go, DevIDo, pcreate)`, with `pcreate` the inserting position;
+  - the storage set is the network's pinned set;
+  - the owner's root at `p` is validated;
+  - `terms.token` passes its token policy for a transfer (§49).
+- **Publication.** The terms are put as an object under `A_T`. The genesis preimage is indexed under `vault_genesis_locator(v)` (§28) and under `escrow_commitment_locator(Y) = H(DSM/escrow/commitment-locator/v1; Y)`, so a counterparty finds the vaults locked against `Y`. It is not indexed under `vault_token_locator` (Amendment S16), because an escrow vault is not a market. Discovery carries no authority: a candidate counts only when it is GenesisAccepted and its terms name `Y`.
+
+**Release**
+
+- **The branch.** `B°` gains a third branch: `Release{vault_id, parent_root, setup_ref, verdict_cell, outcome, amount, trader_core, dlv_core, closure}`, class `0x0065`. It has one leg, and `E` takes its single-leg form (§15). Its route digest preimage is `Release{vault_id, parent_root, setup_ref, verdict_cell, outcome, amount}`, class `0x0066`. The trader is the branch's recipient. A release is the recipient's own position, set up with the vault like any other (§16, Amendment S16), and its credit is the recipient's realized root (§19.6). No verdict enters `E` (§15): `B°` names the outcome and the cell, and the verdict is a fact resolution reads (below).
+- **Closed write set** (§19.3). `T°` credits `terms.token` by `amount`, advances the trader's relationship with the vault, and debits nothing. `V°` takes `VaultState` from Active, with exactly `reserve_a = amount` and `reserve_b = 0`, to Retired, with both reserves zero and generation plus one, and makes the matching relationship advance. No other entry is permitted.
+- **Static validity** (RouteValidation for a Release, §19.5). Each of the following must hold; a failure of any is Invalid:
+  - there is one leg;
+  - the vault's terms resolve to `EscrowTerms` by the slot rule;
+  - `verdict_cell = K_verdict(terms.external_commitment, τ(terms))`;
+  - `outcome` names a branch of the terms;
+  - `P`'s trader `(G, DevID)` is that branch's recipient;
+  - `amount = reserve_a` and `reserve_b = 0` at the parent;
+  - the write set above holds;
+  - per-token conservation holds;
+  - `terms.token` passes its token policy for a transfer.
+
+  The static budget is at most 16 label comparisons. No signature is verified here; the verdict's signatures are verified where it occupies its cell.
+- **Close and Swap need a market.** A Close needs the release policy `OWNER_LOCAL_FULL_CLOSE` (§19.5), and a Swap is priced by the market and fee policies. An escrow vault's slots hold `A_T`, which is neither. So a Close or a Swap against an escrow vault is Invalid, and so is a Release against a market vault. An escrow vault has no owner close: its owner gets the stake back only through a branch that names the owner as recipient, decided by that branch's signers.
+
+**Resolution**
+
+- **The facts** (§13): `VerdictHeld(K, o)` and `VerdictFinal(K, o)`, above.
+- **Consumed route** (§23.2): for a Release leg, `ConsumedRoute` also requires `VerdictFinal(B°.verdict_cell, B°.outcome)`.
+- **Impossibility** (§23.5): `RouteImpossible(P, E)` gains arm (v): `B°` is a Release, and `VerdictHeld(B°.verdict_cell, o)` for some `o ≠ B°.outcome`.
+  - Like arms (ii) to (iv), it needs no validation evidence: only the cell's raw read and the verdict's own bytes.
+  - It is permanent, because the cell's leader never holds another value.
+  - A release exercise that lost the verdict is skipped, and the vault's next attempt goes live for the branch that won.
+- **The ladder** (§24). Rung 7 is Realized through `ConsumedRoute` as amended. Rung 8 (Void, both predicates Valid) also holds when `B°` is a Release whose verdict cell holds another outcome. A Void release moves nothing, and the vault stays Active at its parent. Until the cell's verdict is final on the release's outcome, or held on another, a release has no result (rung 9) and the SDK waits.
+- **Linked vaults settle on one outcome.** Every vault bound to `K` settles only on the outcome the cell holds: a release naming another outcome is Void and its key is skipped, whichever vault it is in. The vaults are still independent DLVs with no shared parent (Explainer §60). Each is released by its own recipient's position, and one vault's release does not release the other. What the cell adds is that they cannot release on different outcomes. This refines Explainer §60, whose guards verify predicates bound to `Y`: the canonical verdict is one such predicate, a storage-finality fact keyed by `Y` and the agreed table.
+- **Another trader's position** (Amendment S15). The public objects that resolve a Release position include the verdict at its cell, with its finality evidence.
+
+**Liveness, with no clock**
+
+- A stake is released only by a verdict. If no recognized verdict ever reaches the cell, the stake stays locked. That is a stated boundary (§5.4), not a failure.
+- An application that wants a way out commits one as a branch: for example a cancel outcome decided by both parties together. It contends for the same cell as every other outcome, so a cancel and a result never both settle.
+- A refund after a deadline needs an iteration budget (Explainer §59) and is not part of this amendment.
+- A release written before the verdict holds its vault key until the cell holds a verdict, and is then Realized or skipped. Only a branch's recipient can write a release that is not Invalid. Any other release is Invalid, and its key is skipped once final (§23.5). So no third party holds an escrow vault's key past the verdict.
+
+**Routes** (§27). The app reaches escrow vaults only through these routes, in `SDK/handlers/escrow_routes.rs`:
+
+| Route | What it does |
+|---|---|
+| `escrow.party` | this device's genesis, device id and signing key, for naming in terms |
+| `escrow.create` | derives `Y` from `X`, puts the terms and admits `EscrowVaultCreate`. Given a counterpart vault, it locks only once that vault is accepted, Active and bound to the same `K_verdict`. |
+| `escrow.sign` | signs `m(o)` for a cell and indexes the signatures under `escrow_statement_locator(K, o)` |
+| `escrow.adjudicate` | assembles a recognized verdict from the signatures under the locator and its own, and writes it to `K_verdict` by §8. It returns the verdict the cell holds, which may be another verdict that got there first. |
+| `escrow.verdict` | reads `K_verdict` and returns the verdict it holds, or that none is held yet |
+| `escrow.release` | builds a release only once the cell's verdict is final on the outcome of a branch that pays this device. It sets up with the vault if needed (Amendment S16), walks the head (§30), drafts the Release, and runs §31 stages 2 to 10. |
+| `escrow.locked` | the vaults indexed under `escrow_commitment_locator(Y)`, each accepted and walked to its head |
+| `escrow.vaults` | the escrow vaults this device created, each walked to its head |
+
+This amends §4 (SoFi also creates and releases escrow vaults), §11 (two indexes), §13 (the verdict facts), §14.1 and §14.2 (the escrow tags and classes `0x0063` to `0x0066`), §15, §19.1 (the slot rule and escrow status), §19.3 to §19.5 (the Release branch), §19.7 (an escrow vault has no close authority), §19.8 (the escrow form of GenesisAccepted), §23.2, §23.5 (arm (v)), §24 (rungs 7 and 8), §27 (the escrow routes), §28 (`EscrowVaultCreate`, variant 38 of `Operation`), §32 (a Close against an escrow vault is Invalid) and Amendment S15 (the verdict is among a Release position's public objects).
 
 
 ## Part IV — Predicates and resolution
