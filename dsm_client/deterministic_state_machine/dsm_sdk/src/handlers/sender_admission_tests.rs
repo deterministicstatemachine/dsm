@@ -54,7 +54,7 @@ fn create_request(
         ticker: ticker.into(),
         alias: format!("{ticker} Token"),
         decimals,
-        genesis_supply_u128: genesis_supply.to_be_bytes().to_vec(),
+        genesis_supply_entered: genesis_supply.to_string(),
         burn_enabled: true,
         transferable: true,
         threshold: 1,

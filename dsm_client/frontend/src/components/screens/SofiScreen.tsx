@@ -33,14 +33,6 @@ function id32(label: string, text: string): Uint8Array {
   return bytes;
 }
 
-/** Bytewise order, as the pair is ordered (§28). */
-function bytesLess(a: Uint8Array, b: Uint8Array): boolean {
-  for (let i = 0; i < Math.min(a.length, b.length); i++) {
-    if (a[i] !== b[i]) return a[i] < b[i];
-  }
-  return a.length < b.length;
-}
-
 /** A count the user enters: a fee in basis points, a position. */
 function whole(label: string, text: string): bigint {
   const t = text.trim();
@@ -192,17 +184,13 @@ export default function SofiScreen(): React.JSX.Element {
   });
 
   const onCreate = () => run('Create liquidity vault', async () => {
-    const a = id32('token A', tokenA);
-    const b = id32('token B', tokenB);
-    // The pair is ordered bytewise (§28); order it for the user.
-    const [lo, hi, rLo, rHi] = bytesLess(a, b)
-      ? [a, b, entered('reserve A', reserveA), entered('reserve B', reserveB)]
-      : [b, a, entered('reserve B', reserveB), entered('reserve A', reserveA)];
+    // Each token with its own reserve, in the order picked: Rust orders the
+    // pair (§28).
     const r = await sofi.createVault({
-      tokenA: lo,
-      tokenB: hi,
-      reserveA: rLo,
-      reserveB: rHi,
+      tokenA: id32('token A', tokenA),
+      tokenB: id32('token B', tokenB),
+      reserveA: entered('reserve A', reserveA),
+      reserveB: entered('reserve B', reserveB),
       feeBps: Number(whole('fee', feeBps)),
     });
     const id = encodeBase32Crockford(r.vaultId);

@@ -21,6 +21,16 @@ use crate::sdk::session_manager::SESSION_MANAGER;
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{err, pack_envelope_ok};
 
+/// A PROTO ArgPack's body, decoded as `M`.
+fn decode_proto<M: Message + Default>(args: &[u8], route: &str) -> Result<M, String> {
+    let arg_pack =
+        generated::ArgPack::decode(args).map_err(|e| format!("{route}: decode ArgPack: {e}"))?;
+    if arg_pack.codec != generated::Codec::Proto as i32 {
+        return Err(format!("{route}: ArgPack.codec must be PROTO"));
+    }
+    M::decode(&*arg_pack.body).map_err(|e| format!("{route}: decode request: {e}"))
+}
+
 impl AppRouterImpl {
     /// Dispatch handler for `session.*` query routes.
     pub(crate) async fn handle_session_query(&self, q: AppQuery) -> AppResult {
@@ -53,40 +63,57 @@ impl AppRouterImpl {
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
             }
 
+            // The PIN or pattern, or the recovery phrase, checked by Rust
+            // (`app_lock`). The answer is the session snapshot: still locked
+            // after a miss, with the tries left or the phrase required.
             "session.unlock" => {
+                let req = match decode_proto::<generated::SessionUnlockRequest>(
+                    &i.args,
+                    "session.unlock",
+                ) {
+                    Ok(r) => r,
+                    Err(e) => return err(e),
+                };
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
                 if let Err(e) = mgr.sync_lock_config_from_app_state() {
                     return err(format!("session lock settings: {e}"));
                 }
-                if let Err(e) = mgr.unlock_now() {
-                    return err(format!("session.unlock: {e}"));
+                let tried = match req.key {
+                    Some(generated::session_unlock_request::Key::Secret(secret)) => {
+                        mgr.try_unlock(&secret).map(|t| format!("{t:?}"))
+                    }
+                    Some(generated::session_unlock_request::Key::RecoveryPhrase(phrase)) => mgr
+                        .try_unlock_with_phrase(&phrase)
+                        .map(|t| format!("{t:?}")),
+                    None => {
+                        return err(
+                            "session.unlock: a PIN, pattern or recovery phrase is required".into(),
+                        )
+                    }
+                };
+                match tried {
+                    Ok(answer) => log::info!("SessionRoutes: unlock tried: {answer}"),
+                    Err(e) => return err(format!("session.unlock: {e}")),
                 }
-                log::info!("SessionRoutes: session unlocked via invoke");
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
             }
 
             "session.configure_lock" => {
-                let arg_pack = match generated::ArgPack::decode(&*i.args) {
-                    Ok(p) => p,
-                    Err(e) => return err(format!("decode ArgPack failed: {e}")),
-                };
-                if arg_pack.codec != generated::Codec::Proto as i32 {
-                    return err("session.configure_lock: ArgPack.codec must be PROTO".into());
-                }
-                let req = match generated::SessionConfigureLockRequest::decode(&*arg_pack.body) {
+                let req = match decode_proto::<generated::SessionConfigureLockRequest>(
+                    &i.args,
+                    "session.configure_lock",
+                ) {
                     Ok(r) => r,
-                    Err(e) => {
-                        return err(format!(
-                            "session.configure_lock: decode SessionConfigureLockRequest failed: {e}"
-                        ))
-                    }
+                    Err(e) => return err(e),
                 };
 
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                if let Err(e) = mgr
-                    .configure_lock(req.enabled, &req.method, req.lock_on_pause)
-                    .and_then(|()| mgr.persist_lock_config_to_app_state())
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
+                if let Err(e) =
+                    mgr.configure_lock(req.enabled, &req.method, req.lock_on_pause, &req.secret)
                 {
                     return err(format!("session.configure_lock: {e}"));
                 }

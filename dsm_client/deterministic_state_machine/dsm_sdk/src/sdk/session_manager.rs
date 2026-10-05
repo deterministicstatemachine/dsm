@@ -105,6 +105,10 @@ pub struct SessionManager {
     pub lock_locked: bool,
     pub lock_method: String,
     pub lock_on_pause: bool,
+    /// Wrong tries since the last opening, as `app_lock` stores them.
+    pub lock_misses: u32,
+    /// Whether a PIN or pattern is enrolled in `app_lock`.
+    pub lock_enrolled: bool,
     pub fatal_error: Option<String>,
     /// Whether `fatal_error` is a failed startup, which a later successful
     /// startup takes back. An error anyone else reported is theirs to clear.
@@ -121,6 +125,8 @@ impl Default for SessionManager {
             lock_locked: false,
             lock_method: "none".to_string(),
             lock_on_pause: true,
+            lock_misses: 0,
+            lock_enrolled: crate::sdk::app_lock::enrolled(),
             fatal_error: None,
             fatal_is_startup_failure: false,
             wallet_refresh_hint: 0,
@@ -152,29 +158,128 @@ impl SessionManager {
         }
     }
 
-    fn sanitize_lock_method(enabled: bool, method: &str) -> String {
-        match method {
-            "pin" | "combo" | "biometric" => method.to_string(),
-            "none" if !enabled => "none".to_string(),
-            _ if enabled => "pin".to_string(),
-            _ => "none".to_string(),
-        }
-    }
-
-    pub fn configure_lock(
+    /// Take the stored lock settings in. An enabled lock names "pin" or
+    /// "combo", and a disabled one "none": anything else is an error, never a
+    /// method chosen in its place.
+    fn load_lock(
         &mut self,
         enabled: bool,
         method: &str,
         lock_on_pause: bool,
     ) -> Result<(), dsm::types::error::DsmError> {
+        let method = match (enabled, method) {
+            (_, "none") if !enabled => "none",
+            (_, named) if enabled => crate::sdk::app_lock::LockMethod::parse(named)?.name(),
+            (_, other) => {
+                return Err(dsm::types::error::DsmError::InvalidState(format!(
+                    "the lock is disabled but its method is {other:?}"
+                )))
+            }
+        };
         self.lock_enabled = enabled;
-        self.lock_method = Self::sanitize_lock_method(enabled, method);
+        self.lock_method = method.to_string();
         self.lock_on_pause = lock_on_pause;
+        self.lock_misses = crate::sdk::app_lock::misses()?;
+        self.lock_enrolled = crate::sdk::app_lock::enrolled();
         if enabled {
             Ok(())
         } else {
-            self.set_locked(false)
+            self.set_locked(enabled)
         }
+    }
+
+    /// Configure the lock as `session.configure_lock` asks: enabled, by
+    /// [`Self::enable_lock`]; disabled, by [`Self::disable_lock`].
+    pub fn configure_lock(
+        &mut self,
+        enabled: bool,
+        method: &str,
+        lock_on_pause: bool,
+        secret: &str,
+    ) -> Result<(), dsm::types::error::DsmError> {
+        if enabled {
+            self.enable_lock(method, secret, lock_on_pause)
+        } else {
+            self.disable_lock(lock_on_pause)
+        }
+    }
+
+    fn require_open(&self) -> Result<(), dsm::types::error::DsmError> {
+        if self.lock_locked {
+            return Err(dsm::types::error::DsmError::invalid_operation(
+                "the wallet is locked: open it before changing its lock",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Turn the lock on, only while the wallet is open, opened by `method`
+    /// with `secret` (the PIN, or the pattern's buttons joined by ","). An
+    /// empty `secret` keeps the one enrolled, which must be for `method`. The
+    /// settings are stored before this returns, so a restart keeps them.
+    pub fn enable_lock(
+        &mut self,
+        method: &str,
+        secret: &str,
+        lock_on_pause: bool,
+    ) -> Result<(), dsm::types::error::DsmError> {
+        self.require_open()?;
+        let named = crate::sdk::app_lock::LockMethod::parse(method)?;
+        if secret.is_empty() {
+            let same = self.lock_enrolled && self.lock_method == named.name();
+            if !same {
+                return Err(dsm::types::error::DsmError::invalid_operation(
+                    "a new lock needs its PIN or pattern",
+                ));
+            }
+        } else {
+            crate::sdk::app_lock::enroll(named, secret)?;
+        }
+        let enabled = crate::sdk::app_lock::enrolled();
+        self.load_lock(enabled, named.name(), lock_on_pause)?;
+        self.persist_lock_config_to_app_state()
+    }
+
+    /// Turn the lock off, only while the wallet is open, forgetting what was
+    /// enrolled, and store the settings.
+    pub fn disable_lock(&mut self, lock_on_pause: bool) -> Result<(), dsm::types::error::DsmError> {
+        self.require_open()?;
+        crate::sdk::app_lock::clear()?;
+        let enabled = crate::sdk::app_lock::enrolled();
+        self.load_lock(enabled, "none", lock_on_pause)?;
+        self.persist_lock_config_to_app_state()
+    }
+
+    /// Try to open the lock with its PIN or pattern. Rust checks it and counts
+    /// the miss; the session opens only on a match.
+    pub fn try_unlock(
+        &mut self,
+        secret: &str,
+    ) -> Result<crate::sdk::app_lock::Tried, dsm::types::error::DsmError> {
+        if !self.lock_enabled {
+            self.unlock_now()?;
+            return Ok(crate::sdk::app_lock::Tried::Opened);
+        }
+        let method = crate::sdk::app_lock::LockMethod::parse(&self.lock_method)?;
+        let tried = crate::sdk::app_lock::try_secret(method, secret)?;
+        self.lock_misses = crate::sdk::app_lock::misses()?;
+        if tried == crate::sdk::app_lock::Tried::Opened {
+            self.unlock_now()?;
+        }
+        Ok(tried)
+    }
+
+    /// Try to open the lock with the wallet's recovery phrase.
+    pub fn try_unlock_with_phrase(
+        &mut self,
+        phrase: &str,
+    ) -> Result<crate::sdk::app_lock::PhraseTried, dsm::types::error::DsmError> {
+        let tried = crate::sdk::app_lock::try_phrase(phrase)?;
+        self.lock_misses = crate::sdk::app_lock::misses()?;
+        if tried == crate::sdk::app_lock::PhraseTried::Opened {
+            self.unlock_now()?;
+        }
+        Ok(tried)
     }
 
     /// Lock or unlock. A lock takes effect in memory even if it cannot be
@@ -195,7 +300,10 @@ impl SessionManager {
         self.set_locked(true)
     }
 
-    pub fn unlock_now(&mut self) -> Result<(), dsm::types::error::DsmError> {
+    /// Open the session. Reached only from a check that passed
+    /// ([`Self::try_unlock`], [`Self::try_unlock_with_phrase`]) or from a lock
+    /// that is not enabled; no route opens it unchecked.
+    fn unlock_now(&mut self) -> Result<(), dsm::types::error::DsmError> {
         self.set_locked(false)
     }
 
@@ -205,7 +313,7 @@ impl SessionManager {
         let enabled = Self::pref_bool(LOCK_ENABLED_KEY, self.lock_enabled)?;
         let method = Self::read_pref(LOCK_METHOD_KEY).unwrap_or_else(|| self.lock_method.clone());
         let lock_on_pause = Self::pref_bool(LOCK_ON_PAUSE_KEY, self.lock_on_pause)?;
-        self.configure_lock(enabled, &method, lock_on_pause)?;
+        self.load_lock(enabled, &method, lock_on_pause)?;
         if !self.lock_state_initialized {
             self.lock_state_initialized = true;
             // Fresh process start: an enabled lock must come back locked instead of
@@ -393,6 +501,11 @@ impl SessionManager {
                 locked: self.lock_locked,
                 method: self.lock_method.clone(),
                 lock_on_pause: self.lock_on_pause,
+                misses_left: crate::sdk::app_lock::MISSES_BEFORE_PHRASE
+                    .saturating_sub(self.lock_misses),
+                phrase_required: self.lock_enabled
+                    && (!self.lock_enrolled
+                        || self.lock_misses >= crate::sdk::app_lock::MISSES_BEFORE_PHRASE),
             }),
             hardware_status: Some(generated::AppSessionHardwareStatusProto {
                 app_foreground: self.hardware.app_foreground,
@@ -839,5 +952,170 @@ mod tests {
         let refused = mgr.sync_lock_config_from_app_state();
         assert!(refused.is_err(), "a malformed setting is reported");
         assert!(mgr.lock_enabled, "the manager's setting is untouched");
+    }
+
+    // ── The app lock: Rust enrolls and checks the PIN or pattern ──────────
+
+    use crate::sdk::app_lock::{PhraseTried, Tried, MISSES_BEFORE_PHRASE};
+
+    /// A fresh store with this wallet's seed loaded, as an unlocked wallet
+    /// holds it, and an open session.
+    fn wallet_with_seed(phrase: &str) -> SessionManager {
+        setup_test_env();
+        crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(phrase).expect("the seed");
+        let mut mgr = SessionManager::default();
+        mgr.sync_lock_config_from_app_state()
+            .expect("lock settings");
+        mgr
+    }
+
+    fn snapshot_of(mgr: &SessionManager) -> generated::AppSessionLockStatusProto {
+        mgr.compute_snapshot().lock_status.expect("a lock status")
+    }
+
+    /// The lock opens for the PIN enrolled and for nothing else; each miss is
+    /// stored before it is answered, and the store holds a hash, never the PIN.
+    #[test]
+    #[serial_test::serial]
+    fn the_lock_opens_only_for_its_own_pin_and_counts_each_miss() {
+        let mut mgr = wallet_with_seed(&crate::economic_fixtures::test_mnemonic(0x31));
+        mgr.enable_lock("pin", "4321", mgr.lock_on_pause)
+            .expect("enabled");
+        let stored = AppState::get_pref("lock_credential").expect("a credential");
+        assert!(stored.starts_with("$argon2id$"), "{stored}");
+        assert!(!stored.contains("4321"), "the PIN itself is never stored");
+
+        mgr.lock_now().expect("locked");
+        assert_eq!(
+            mgr.try_unlock("1111").expect("tried"),
+            Tried::Wrong { left: 2 }
+        );
+        assert!(mgr.lock_locked, "a wrong PIN leaves the wallet locked");
+        assert_eq!(AppState::get_pref("lock_misses").as_deref(), Some("1"));
+        assert_eq!(snapshot_of(&mgr).misses_left, 2);
+
+        // A pattern spelling the same text is not the PIN.
+        assert_eq!(
+            crate::sdk::app_lock::try_secret(crate::sdk::app_lock::LockMethod::Combo, "4321")
+                .expect("tried"),
+            Tried::Wrong { left: 1 }
+        );
+
+        assert_eq!(mgr.try_unlock("4321").expect("tried"), Tried::Opened);
+        assert!(!mgr.lock_locked);
+        assert_eq!(snapshot_of(&mgr).misses_left, MISSES_BEFORE_PHRASE);
+    }
+
+    /// After the third miss no PIN is checked, not even the right one, and a
+    /// restart does not give the tries back; only this wallet's recovery
+    /// phrase opens the lock, and it starts the count again.
+    #[test]
+    #[serial_test::serial]
+    fn after_three_misses_only_the_recovery_phrase_opens_the_lock() {
+        let phrase = crate::economic_fixtures::test_mnemonic(0x32);
+        let mut mgr = wallet_with_seed(&phrase);
+        mgr.enable_lock("pin", "2468", mgr.lock_on_pause)
+            .expect("enabled");
+        mgr.lock_now().expect("locked");
+        assert_eq!(
+            mgr.try_unlock("0000").expect("tried"),
+            Tried::Wrong { left: 2 }
+        );
+        assert_eq!(
+            mgr.try_unlock("0001").expect("tried"),
+            Tried::Wrong { left: 1 }
+        );
+        assert_eq!(
+            mgr.try_unlock("0002").expect("tried"),
+            Tried::PhraseRequired
+        );
+        assert_eq!(
+            mgr.try_unlock("2468").expect("tried"),
+            Tried::PhraseRequired
+        );
+        assert!(mgr.lock_locked, "the right PIN no longer opens it");
+
+        let mut restarted = SessionManager::default();
+        restarted
+            .sync_lock_config_from_app_state()
+            .expect("lock settings");
+        assert!(
+            snapshot_of(&restarted).phrase_required,
+            "a restart gives no try back"
+        );
+        assert_eq!(
+            restarted.try_unlock("2468").expect("tried"),
+            Tried::PhraseRequired
+        );
+
+        let another = crate::economic_fixtures::test_mnemonic(0x33);
+        assert_eq!(
+            restarted.try_unlock_with_phrase(&another).expect("tried"),
+            PhraseTried::NotThisWallet
+        );
+        assert!(restarted.lock_locked);
+        assert_eq!(
+            restarted.try_unlock_with_phrase(&phrase).expect("tried"),
+            PhraseTried::Opened
+        );
+        assert!(!restarted.lock_locked);
+        let status = snapshot_of(&restarted);
+        assert!(!status.phrase_required);
+        assert_eq!(status.misses_left, MISSES_BEFORE_PHRASE);
+        restarted.lock_now().expect("locked");
+        assert_eq!(restarted.try_unlock("2468").expect("tried"), Tried::Opened);
+    }
+
+    /// A locked wallet cannot change or turn off its own lock: a caller that
+    /// could would not need the PIN.
+    #[test]
+    #[serial_test::serial]
+    fn a_locked_wallet_cannot_change_its_lock() {
+        let mut mgr = wallet_with_seed(&crate::economic_fixtures::test_mnemonic(0x34));
+        mgr.enable_lock("pin", "1357", mgr.lock_on_pause)
+            .expect("enabled");
+        mgr.lock_now().expect("locked");
+        let off = mgr
+            .disable_lock(mgr.lock_on_pause)
+            .expect_err("turned off while locked");
+        assert!(off.to_string().contains("the wallet is locked"), "{off}");
+        let again = mgr
+            .enable_lock("pin", "9999", mgr.lock_on_pause)
+            .expect_err("re-enrolled while locked");
+        assert!(
+            again.to_string().contains("the wallet is locked"),
+            "{again}"
+        );
+        assert!(mgr.lock_enabled && mgr.lock_locked);
+        assert_eq!(mgr.try_unlock("1357").expect("tried"), Tried::Opened);
+    }
+
+    /// A lock enabled with nothing enrolled (a device whose PIN the old
+    /// frontend kept) has no PIN Rust could check: only the phrase opens it.
+    /// An unknown method is an error, never a method chosen in its place.
+    #[test]
+    #[serial_test::serial]
+    fn a_lock_with_nothing_enrolled_needs_the_phrase_and_names_a_real_method() {
+        let mut mgr = wallet_with_seed(&crate::economic_fixtures::test_mnemonic(0x35));
+        mgr.enable_lock("pin", "1234", mgr.lock_on_pause)
+            .expect("enabled");
+        mgr.persist_lock_config_to_app_state().expect("persisted");
+        // The device the old frontend locked: enabled, but no credential Rust
+        // ever enrolled.
+        AppState::set_pref("lock_credential", "").expect("pref");
+        mgr.sync_lock_config_from_app_state()
+            .expect("lock settings");
+        assert!(snapshot_of(&mgr).phrase_required);
+        assert_eq!(
+            mgr.try_unlock("1234").expect("tried"),
+            Tried::PhraseRequired
+        );
+
+        AppState::set_pref(LOCK_METHOD_KEY, "biometric").expect("pref");
+        let mut fresh = SessionManager::default();
+        let refused = fresh
+            .sync_lock_config_from_app_state()
+            .expect_err("no method stands in");
+        assert!(refused.to_string().contains("biometric"), "{refused}");
     }
 }

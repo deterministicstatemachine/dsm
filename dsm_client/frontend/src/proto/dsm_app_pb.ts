@@ -1137,11 +1137,6 @@ export enum SdkEventKind {
   ENV_CONFIG_ERROR = 7,
 
   /**
-   * @generated from enum value: SDK_EVENT_KIND_BIOMETRIC_RESULT = 8;
-   */
-  BIOMETRIC_RESULT = 8,
-
-  /**
    * @generated from enum value: SDK_EVENT_KIND_QR_SCAN_RESULT = 9;
    */
   QR_SCAN_RESULT = 9,
@@ -1191,7 +1186,6 @@ proto3.util.setEnumType(SdkEventKind, "dsm.SdkEventKind", [
   { no: 5, name: "SDK_EVENT_KIND_WALLET_REFRESH" },
   { no: 6, name: "SDK_EVENT_KIND_IDENTITY_READY" },
   { no: 7, name: "SDK_EVENT_KIND_ENV_CONFIG_ERROR" },
-  { no: 8, name: "SDK_EVENT_KIND_BIOMETRIC_RESULT" },
   { no: 9, name: "SDK_EVENT_KIND_QR_SCAN_RESULT" },
   { no: 10, name: "SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS" },
   { no: 11, name: "SDK_EVENT_KIND_DETERMINISTIC_SAFETY" },
@@ -1246,13 +1240,6 @@ export enum NativeHostRequestKind {
   HOST_CONTROL_PERMISSIONS_REQUEST = 10,
 
   /**
-   * platform_primitive.*
-   *
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
-   */
-  PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102,
-
-  /**
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
    */
   PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105,
@@ -1271,7 +1258,6 @@ proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
   { no: 8, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START" },
   { no: 9, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP" },
   { no: 10, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST" },
-  { no: 102, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE" },
   { no: 105, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD" },
   { no: 106, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD" },
 ]);
@@ -1289,11 +1275,6 @@ export enum NativeHostEventKind {
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
    */
   QR_SCAN_RESULT = 1,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
-   */
-  BIOMETRIC_RESULT = 3,
 
   /**
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
@@ -1314,7 +1295,6 @@ export enum NativeHostEventKind {
 proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
   { no: 0, name: "NATIVE_HOST_EVENT_KIND_UNSPECIFIED" },
   { no: 1, name: "NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT" },
-  { no: 3, name: "NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT" },
   { no: 4, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ" },
   { no: 5, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE" },
   { no: 6, name: "NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT" },
@@ -7436,14 +7416,15 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
   decimals = 0;
 
   /**
-   * The whole supply that will ever exist (SoFi §47, §51). User-created
+   * The whole supply that will ever exist (SoFi §47, §51), in whole token
+   * units, as the user typed it: Rust parses and scales it. User-created
    * tokens in beta release all of it to the creator at creation.
    *
-   * big-endian u128, > 0
+   * digits, > 0
    *
-   * @generated from field: bytes genesis_supply_u128 = 4;
+   * @generated from field: string genesis_supply_entered = 14;
    */
-  genesisSupplyU128 = new Uint8Array(0);
+  genesisSupplyEntered = "";
 
   /**
    * governs burns only (§54)
@@ -7494,7 +7475,7 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
     { no: 1, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 4, name: "genesis_supply_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 14, name: "genesis_supply_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 7, name: "burn_enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 8, name: "transferable", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 10, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
@@ -9830,6 +9811,8 @@ export class AppSessionLockStatusProto extends Message<AppSessionLockStatusProto
   locked = false;
 
   /**
+   * "none", "pin" or "combo"
+   *
    * @generated from field: string method = 3;
    */
   method = "";
@@ -9838,6 +9821,19 @@ export class AppSessionLockStatusProto extends Message<AppSessionLockStatusProto
    * @generated from field: bool lock_on_pause = 4;
    */
   lockOnPause = false;
+
+  /**
+   * The wrong PINs or patterns left before only the recovery phrase opens the
+   * lock, and whether that point is reached (or no PIN or pattern is enrolled).
+   *
+   * @generated from field: uint32 misses_left = 5;
+   */
+  missesLeft = 0;
+
+  /**
+   * @generated from field: bool phrase_required = 6;
+   */
+  phraseRequired = false;
 
   constructor(data?: PartialMessage<AppSessionLockStatusProto>) {
     super();
@@ -9851,6 +9847,8 @@ export class AppSessionLockStatusProto extends Message<AppSessionLockStatusProto
     { no: 2, name: "locked", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 3, name: "method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 4, name: "lock_on_pause", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 5, name: "misses_left", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "phrase_required", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppSessionLockStatusProto {
@@ -10251,6 +10249,8 @@ export class SessionConfigureLockRequest extends Message<SessionConfigureLockReq
   enabled = false;
 
   /**
+   * "pin" or "combo" when enabled
+   *
    * @generated from field: string method = 2;
    */
   method = "";
@@ -10259,6 +10259,14 @@ export class SessionConfigureLockRequest extends Message<SessionConfigureLockReq
    * @generated from field: bool lock_on_pause = 3;
    */
   lockOnPause = false;
+
+  /**
+   * The PIN, or the pattern's buttons joined by ",", to enroll. Rust keeps only
+   * its Argon2id hash. Empty keeps the PIN or pattern already enrolled.
+   *
+   * @generated from field: string secret = 4;
+   */
+  secret = "";
 
   constructor(data?: PartialMessage<SessionConfigureLockRequest>) {
     super();
@@ -10271,6 +10279,7 @@ export class SessionConfigureLockRequest extends Message<SessionConfigureLockReq
     { no: 1, name: "enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 2, name: "method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "lock_on_pause", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "secret", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SessionConfigureLockRequest {
@@ -10287,6 +10296,59 @@ export class SessionConfigureLockRequest extends Message<SessionConfigureLockReq
 
   static equals(a: SessionConfigureLockRequest | PlainMessage<SessionConfigureLockRequest> | undefined, b: SessionConfigureLockRequest | PlainMessage<SessionConfigureLockRequest> | undefined): boolean {
     return proto3.util.equals(SessionConfigureLockRequest, a, b);
+  }
+}
+
+/**
+ * session.unlock: open the lock with its PIN or pattern, or, once the wrong
+ * tries are used up, with the wallet's recovery phrase. Rust decides.
+ *
+ * @generated from message dsm.SessionUnlockRequest
+ */
+export class SessionUnlockRequest extends Message<SessionUnlockRequest> {
+  /**
+   * @generated from oneof dsm.SessionUnlockRequest.key
+   */
+  key: {
+    /**
+     * @generated from field: string secret = 1;
+     */
+    value: string;
+    case: "secret";
+  } | {
+    /**
+     * @generated from field: string recovery_phrase = 2;
+     */
+    value: string;
+    case: "recoveryPhrase";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<SessionUnlockRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SessionUnlockRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "secret", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "key" },
+    { no: 2, name: "recovery_phrase", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "key" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SessionUnlockRequest {
+    return new SessionUnlockRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SessionUnlockRequest {
+    return new SessionUnlockRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SessionUnlockRequest {
+    return new SessionUnlockRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SessionUnlockRequest | PlainMessage<SessionUnlockRequest> | undefined, b: SessionUnlockRequest | PlainMessage<SessionUnlockRequest> | undefined): boolean {
+    return proto3.util.equals(SessionUnlockRequest, a, b);
   }
 }
 
@@ -18201,7 +18263,8 @@ export class DeviceDirectoryEntryV1 extends Message<DeviceDirectoryEntryV1> {
  */
 export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
   /**
-   * token_a < token_b, bytewise
+   * The two tokens in either order, each with its reserve below; Rust orders
+   * the pair bytewise (§28).
    *
    * @generated from field: bytes token_a_policy_commit = 1;
    */
@@ -19324,6 +19387,139 @@ export class EscrowCreateRequest extends Message<EscrowCreateRequest> {
 }
 
 /**
+ * escrow.lock: lock a stake as escrow.create does, its outcomes named by who
+ * decides each and who each pays: this device or a contact, by device id. Rust
+ * supplies every party's genesis and signing key from what it holds, and puts
+ * the outcomes and each signer set in their one canonical order: the order the
+ * user listed them in carries no meaning. A party that is neither this device
+ * nor a contact is named by its keys through escrow.create.
+ *
+ * @generated from message dsm.EscrowLockOutcomeV1
+ */
+export class EscrowLockOutcomeV1 extends Message<EscrowLockOutcomeV1> {
+  /**
+   * 1..64 bytes
+   *
+   * @generated from field: bytes outcome = 1;
+   */
+  outcome = new Uint8Array(0);
+
+  /**
+   * 1..4 device ids, 32 bytes each
+   *
+   * @generated from field: repeated bytes decided_by = 2;
+   */
+  decidedBy: Uint8Array[] = [];
+
+  /**
+   * a device id
+   *
+   * @generated from field: bytes pays = 3;
+   */
+  pays = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowLockOutcomeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowLockOutcomeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "outcome", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "decided_by", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 3, name: "pays", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowLockOutcomeV1 {
+    return new EscrowLockOutcomeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowLockOutcomeV1 {
+    return new EscrowLockOutcomeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowLockOutcomeV1 {
+    return new EscrowLockOutcomeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowLockOutcomeV1 | PlainMessage<EscrowLockOutcomeV1> | undefined, b: EscrowLockOutcomeV1 | PlainMessage<EscrowLockOutcomeV1> | undefined): boolean {
+    return proto3.util.equals(EscrowLockOutcomeV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowLockRequest
+ */
+export class EscrowLockRequest extends Message<EscrowLockRequest> {
+  /**
+   * X, the bytes the parties agreed on
+   *
+   * @generated from field: bytes external = 1;
+   */
+  external = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_policy_commit = 2;
+   */
+  tokenPolicyCommit = new Uint8Array(0);
+
+  /**
+   * token units, > 0
+   *
+   * @generated from field: string amount_entered = 3;
+   */
+  amountEntered = "";
+
+  /**
+   * 1..16, any order
+   *
+   * @generated from field: repeated dsm.EscrowLockOutcomeV1 outcomes = 4;
+   */
+  outcomes: EscrowLockOutcomeV1[] = [];
+
+  /**
+   * empty, or 32 bytes
+   *
+   * @generated from field: bytes counterpart_vault_id = 5;
+   */
+  counterpartVaultId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowLockRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowLockRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "external", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "outcomes", kind: "message", T: EscrowLockOutcomeV1, repeated: true },
+    { no: 5, name: "counterpart_vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowLockRequest {
+    return new EscrowLockRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowLockRequest {
+    return new EscrowLockRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowLockRequest {
+    return new EscrowLockRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowLockRequest | PlainMessage<EscrowLockRequest> | undefined, b: EscrowLockRequest | PlainMessage<EscrowLockRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowLockRequest, a, b);
+  }
+}
+
+/**
+ * escrow.create and escrow.lock both answer this.
+ *
  * @generated from message dsm.EscrowCreatedResponse
  */
 export class EscrowCreatedResponse extends Message<EscrowCreatedResponse> {
@@ -19687,6 +19883,80 @@ export class EscrowVaultsRequest extends Message<EscrowVaultsRequest> {
 }
 
 /**
+ * One outcome of an escrow vault's terms, in table order, and what it means
+ * for this device.
+ *
+ * @generated from message dsm.EscrowVaultOutcomeV1
+ */
+export class EscrowVaultOutcomeV1 extends Message<EscrowVaultOutcomeV1> {
+  /**
+   * @generated from field: bytes outcome = 1;
+   */
+  outcome = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.EscrowSignerV1 signers = 2;
+   */
+  signers: EscrowSignerV1[] = [];
+
+  /**
+   * @generated from field: bytes recipient_genesis = 3;
+   */
+  recipientGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_device_id = 4;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
+  /**
+   * this device's key is one of its signers
+   *
+   * @generated from field: bool decided_by_this_device = 5;
+   */
+  decidedByThisDevice = false;
+
+  /**
+   * its recipient is this device
+   *
+   * @generated from field: bool pays_this_device = 6;
+   */
+  paysThisDevice = false;
+
+  constructor(data?: PartialMessage<EscrowVaultOutcomeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowVaultOutcomeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "outcome", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signers", kind: "message", T: EscrowSignerV1, repeated: true },
+    { no: 3, name: "recipient_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "decided_by_this_device", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 6, name: "pays_this_device", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVaultOutcomeV1 {
+    return new EscrowVaultOutcomeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowVaultOutcomeV1 {
+    return new EscrowVaultOutcomeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowVaultOutcomeV1 {
+    return new EscrowVaultOutcomeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowVaultOutcomeV1 | PlainMessage<EscrowVaultOutcomeV1> | undefined, b: EscrowVaultOutcomeV1 | PlainMessage<EscrowVaultOutcomeV1> | undefined): boolean {
+    return proto3.util.equals(EscrowVaultOutcomeV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.EscrowVaultV1
  */
 export class EscrowVaultV1 extends Message<EscrowVaultV1> {
@@ -19749,6 +20019,13 @@ export class EscrowVaultV1 extends Message<EscrowVaultV1> {
    */
   status = SofiVaultStatus.UNSPECIFIED;
 
+  /**
+   * the terms' outcomes, in table order
+   *
+   * @generated from field: repeated dsm.EscrowVaultOutcomeV1 outcomes = 12;
+   */
+  outcomes: EscrowVaultOutcomeV1[] = [];
+
   constructor(data?: PartialMessage<EscrowVaultV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -19768,6 +20045,7 @@ export class EscrowVaultV1 extends Message<EscrowVaultV1> {
     { no: 9, name: "amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 10, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 11, name: "status", kind: "enum", T: proto3.getEnumType(SofiVaultStatus) },
+    { no: 12, name: "outcomes", kind: "message", T: EscrowVaultOutcomeV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVaultV1 {
@@ -26389,104 +26667,6 @@ export class HostPermissionsResult extends Message<HostPermissionsResult> {
 
   static equals(a: HostPermissionsResult | PlainMessage<HostPermissionsResult> | undefined, b: HostPermissionsResult | PlainMessage<HostPermissionsResult> | undefined): boolean {
     return proto3.util.equals(HostPermissionsResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BiometricAuthorizePayload
- */
-export class BiometricAuthorizePayload extends Message<BiometricAuthorizePayload> {
-  /**
-   * @generated from field: string prompt_title = 1;
-   */
-  promptTitle = "";
-
-  /**
-   * @generated from field: string prompt_subtitle = 2;
-   */
-  promptSubtitle = "";
-
-  /**
-   * @generated from field: string negative_text = 3;
-   */
-  negativeText = "";
-
-  constructor(data?: PartialMessage<BiometricAuthorizePayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BiometricAuthorizePayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "prompt_title", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "prompt_subtitle", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "negative_text", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BiometricAuthorizePayload {
-    return new BiometricAuthorizePayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BiometricAuthorizePayload {
-    return new BiometricAuthorizePayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BiometricAuthorizePayload {
-    return new BiometricAuthorizePayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BiometricAuthorizePayload | PlainMessage<BiometricAuthorizePayload> | undefined, b: BiometricAuthorizePayload | PlainMessage<BiometricAuthorizePayload> | undefined): boolean {
-    return proto3.util.equals(BiometricAuthorizePayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BiometricAuthorizeResult
- */
-export class BiometricAuthorizeResult extends Message<BiometricAuthorizeResult> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: uint32 error_code = 2;
-   */
-  errorCode = 0;
-
-  /**
-   * @generated from field: string error_message = 3;
-   */
-  errorMessage = "";
-
-  constructor(data?: PartialMessage<BiometricAuthorizeResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BiometricAuthorizeResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "error_code", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 3, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BiometricAuthorizeResult {
-    return new BiometricAuthorizeResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BiometricAuthorizeResult {
-    return new BiometricAuthorizeResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BiometricAuthorizeResult {
-    return new BiometricAuthorizeResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BiometricAuthorizeResult | PlainMessage<BiometricAuthorizeResult> | undefined, b: BiometricAuthorizeResult | PlainMessage<BiometricAuthorizeResult> | undefined): boolean {
-    return proto3.util.equals(BiometricAuthorizeResult, a, b);
   }
 }
 

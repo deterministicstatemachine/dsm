@@ -28,7 +28,7 @@ fn request(ticker: &str, decimals: u32, supply: u128) -> generated::TokenCreateR
         ticker: ticker.to_string(),
         alias: format!("{ticker} token"),
         decimals,
-        genesis_supply_u128: supply.to_be_bytes().to_vec(),
+        genesis_supply_entered: supply.to_string(),
         burn_enabled: true,
         transferable: true,
         threshold: 1,
@@ -238,6 +238,42 @@ async fn a_threshold_the_policy_cannot_hold_is_refused() {
         assert!(msg.contains("threshold"), "{msg}");
     }
     assert_eq!(footprint(&d), before);
+}
+
+/// The supply arrives as the user typed it, and Rust alone reads it: text
+/// that is not a whole number of token units, or that no u128 holds, is
+/// refused before anything moves; surrounding spaces are not part of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_supply_typed_as_anything_but_a_whole_number_is_refused() {
+    let d = Device::funded(0xC5).await;
+    let before = footprint(&d);
+    let too_large = format!("{}0", u128::MAX);
+    for typed in ["", "12.5", "1e3", "-4", "1,000", too_large.as_str()] {
+        let msg = refusal(
+            &create(
+                &d.router,
+                &generated::TokenCreateRequest {
+                    genesis_supply_entered: typed.to_string(),
+                    ..request("SPLY", 0, 1)
+                },
+            )
+            .await,
+        );
+        assert!(msg.contains("genesis supply"), "{typed:?}: {msg}");
+    }
+    assert_eq!(footprint(&d), before);
+    let made = created(
+        &create(
+            &d.router,
+            &generated::TokenCreateRequest {
+                genesis_supply_entered: " 250 ".to_string(),
+                ..request("SPLY", 0, 1)
+            },
+        )
+        .await,
+    );
+    assert_eq!(made.ticker, "SPLY");
 }
 
 /// A transaction in a created token shows its amount at that token's own

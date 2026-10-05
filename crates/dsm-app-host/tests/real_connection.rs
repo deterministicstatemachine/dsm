@@ -420,7 +420,7 @@ async fn create_token(game: &Host, ticker: &str, supply: u128, rules: &[Rule]) -
         ticker: ticker.to_string(),
         alias: format!("{ticker} token"),
         decimals: 0,
-        genesis_supply_u128: supply.to_be_bytes().to_vec(),
+        genesis_supply_entered: supply.to_string(),
         burn_enabled: rules.contains(&Rule::Burns),
         transferable: rules.contains(&Rule::Moves),
         threshold: 1,

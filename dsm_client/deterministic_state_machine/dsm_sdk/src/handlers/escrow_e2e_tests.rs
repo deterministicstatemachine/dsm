@@ -688,3 +688,210 @@ async fn an_escrow_vault_has_no_market_and_no_owner_close() {
     assert_eq!(balance(&p.b, &era), whole_era(100));
     assert_eq!(pending_position(&p.b), None);
 }
+
+// ── escrow.lock: parties named by device id ────────────────────────────────
+
+/// An outcome of `escrow.lock`: its label, who decides it and who it pays,
+/// each by device id.
+fn named(
+    outcome: &[u8],
+    decided_by: &[&TestDevice],
+    pays: &TestDevice,
+) -> generated::EscrowLockOutcomeV1 {
+    generated::EscrowLockOutcomeV1 {
+        outcome: outcome.to_vec(),
+        decided_by: decided_by.iter().map(|d| d.device_id.to_vec()).collect(),
+        pays: pays.device_id.to_vec(),
+    }
+}
+
+async fn lock_named(
+    d: &TestDevice,
+    external: &[u8],
+    stake: u64,
+    outcomes: Vec<generated::EscrowLockOutcomeV1>,
+) -> AppResult {
+    let era = era();
+    invoke(
+        d,
+        "escrow.lock",
+        args(&generated::EscrowLockRequest {
+            external: external.to_vec(),
+            token_policy_commit: era.to_vec(),
+            amount_entered: entered(d, &era, stake),
+            outcomes,
+            counterpart_vault_id: Vec::new(),
+        }),
+    )
+    .await
+}
+
+/// What the one vault `r` lists means for the device that listed it: its
+/// outcomes in table order, the ones this device decides, and the ones that
+/// pay it.
+struct ForMe {
+    outcomes: Vec<&'static [u8]>,
+    decides: Vec<&'static [u8]>,
+    paid_by: Vec<&'static [u8]>,
+}
+
+fn read_for_me(r: &generated::EscrowVaultsResponse) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let [vault] = r.vaults.as_slice() else {
+        panic!("one vault is listed: {:?}", r.vaults.len())
+    };
+    let labels = |keep: fn(&generated::EscrowVaultOutcomeV1) -> bool| -> Vec<Vec<u8>> {
+        vault
+            .outcomes
+            .iter()
+            .filter(|o| keep(o))
+            .map(|o| o.outcome.clone())
+            .collect()
+    };
+    (
+        vault.outcomes.iter().map(|o| o.outcome.clone()).collect(),
+        labels(|o| o.decided_by_this_device),
+        labels(|o| o.pays_this_device),
+    )
+}
+
+fn as_listed(want: ForMe) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let owned = |v: Vec<&[u8]>| v.into_iter().map(<[u8]>::to_vec).collect();
+    (
+        owned(want.outcomes),
+        owned(want.decides),
+        owned(want.paid_by),
+    )
+}
+
+/// `escrow.lock` names each outcome's signers and recipient by device id, in
+/// any order, and the stake it locks is exactly the one `escrow.create` locks
+/// with those parties' keys in the table's one order: the same terms, so the
+/// same verdict cell. A's outcomes are listed out of order, and "b-done"'s
+/// signers too (B before A); the committed terms are canonical. Each device's
+/// listing says which outcomes it decides and which pay it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_stake_locked_by_naming_its_parties_commits_the_terms_their_keys_would() {
+    let p = Pair::boot(100, 0).await;
+    let (pa, pb) = (party(&p.a).await, party(&p.b).await);
+    let stake = whole_era(10);
+    let external = b"delivery 7: B ships to A";
+    let made = created(
+        &lock_named(
+            &p.a,
+            external,
+            stake,
+            vec![
+                named(b"b-done", &[&p.b, &p.a], &p.b),
+                named(b"a-done", &[&p.a], &p.a),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(
+        balance(&p.a, &era()),
+        whole_era(100) - stake,
+        "the stake is locked"
+    );
+
+    // The terms the vault committed are the canonical ones the parties' own
+    // keys give: outcomes ascending, each signer set ascending.
+    let key = |party: &generated::EscrowPartyResponse| {
+        EscrowSigner::new(SIGNATURE_ALG, &signer_of(party).public_key).expect("a signer")
+    };
+    let mut both = vec![key(&pa), key(&pb)];
+    both.sort_by_key(EscrowSigner::canonical);
+    let expected = EscrowTerms::new(
+        era(),
+        escrow::external_commitment(external),
+        vec![
+            dsm::sofi::wire::EscrowBranch::new(
+                dsm::sofi::wire::EscrowOutcome::new(b"a-done", vec![key(&pa)]).expect("an outcome"),
+                d32(&pa.genesis),
+                d32(&pa.device_id),
+            ),
+            dsm::sofi::wire::EscrowBranch::new(
+                dsm::sofi::wire::EscrowOutcome::new(b"b-done", both).expect("an outcome"),
+                d32(&pb.genesis),
+                d32(&pb.device_id),
+            ),
+        ],
+    )
+    .expect("canonical terms");
+    let vault = d32(&made.vault_id);
+    assert_eq!(terms_of(&p.a, &vault), expected);
+    assert_eq!(d32(&made.verdict_cell), escrow::verdict_cell_of(&expected));
+
+    // A decides both outcomes and is paid by "a-done"; B, reading the same
+    // vault by its cell, decides "b-done" and is paid by it.
+    let own = vaults_of(
+        &p.a,
+        "escrow.vaults",
+        args(&generated::EscrowVaultsRequest {}),
+    )
+    .await;
+    assert_eq!(
+        read_for_me(&own),
+        as_listed(ForMe {
+            outcomes: vec![b"a-done", b"b-done"],
+            decides: vec![b"a-done", b"b-done"],
+            paid_by: vec![b"a-done"],
+        })
+    );
+    let by_cell = vaults_of(
+        &p.b,
+        "escrow.locked",
+        args(&generated::EscrowLockedRequest {
+            verdict_cell: made.verdict_cell.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        read_for_me(&by_cell),
+        as_listed(ForMe {
+            outcomes: vec![b"a-done", b"b-done"],
+            decides: vec![b"b-done"],
+            paid_by: vec![b"b-done"],
+        })
+    );
+}
+
+/// `escrow.lock` names only parties this device holds, and refuses a table
+/// it could not build before anything is locked: a device that is neither
+/// this one nor a contact, a label listed twice, a device listed twice among
+/// one outcome's signers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn escrow_lock_refuses_a_party_it_does_not_hold_and_a_repeated_name() {
+    let p = Pair::boot(100, 0).await;
+    let stranger = referee(&p).await;
+    let stake = whole_era(10);
+    let cases: [(&str, Vec<generated::EscrowLockOutcomeV1>); 3] = [
+        (
+            "is neither this device nor a contact",
+            vec![named(b"done", &[&stranger], &p.a)],
+        ),
+        (
+            "two outcomes are labelled",
+            vec![named(b"done", &[&p.a], &p.a), named(b"done", &[&p.b], &p.b)],
+        ),
+        (
+            "lists one device twice among its signers",
+            vec![named(b"done", &[&p.a, &p.b, &p.a], &p.a)],
+        ),
+    ];
+    for (reason, outcomes) in cases {
+        let refused = lock_named(&p.a, b"terms", stake, outcomes).await;
+        assert!(!refused.success, "{reason}: locked anyway");
+        let message = refused.error_message.expect("a refusal says why");
+        assert!(message.contains(reason), "{reason}: {message}");
+    }
+    assert_eq!(balance(&p.a, &era()), whole_era(100), "nothing was locked");
+    let own = vaults_of(
+        &p.a,
+        "escrow.vaults",
+        args(&generated::EscrowVaultsRequest {}),
+    )
+    .await;
+    assert!(own.vaults.is_empty(), "no vault was created");
+}

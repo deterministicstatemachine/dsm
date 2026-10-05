@@ -131,18 +131,23 @@ impl AppRouterImpl {
             Err(e) => return err(e),
         };
         let intent = match (|| -> Result<CreateVaultIntent, String> {
-            let a = d32(&req.token_a_policy_commit, "token_a_policy_commit", ROUTE)?;
-            let b = d32(&req.token_b_policy_commit, "token_b_policy_commit", ROUTE)?;
-            if a >= b {
-                return Err(format!(
-                    "{ROUTE}: the pair must be ordered, token_a < token_b"
-                ));
-            }
-            let reserve_a = entered(&req.reserve_a_entered, &a, "reserve A", ROUTE)?;
-            let reserve_b = entered(&req.reserve_b_entered, &b, "reserve B", ROUTE)?;
-            if reserve_a == 0 || reserve_b == 0 {
+            // The two tokens in the order the user named them, each reserve
+            // parsed against its own token. The pair a vault commits is ordered
+            // bytewise (§28): the order put here, never asked of the caller.
+            let first = d32(&req.token_a_policy_commit, "token_a_policy_commit", ROUTE)?;
+            let second = d32(&req.token_b_policy_commit, "token_b_policy_commit", ROUTE)?;
+            let first_reserve = entered(&req.reserve_a_entered, &first, "reserve A", ROUTE)?;
+            let second_reserve = entered(&req.reserve_b_entered, &second, "reserve B", ROUTE)?;
+            if first_reserve == 0 || second_reserve == 0 {
                 return Err(format!("{ROUTE}: both reserves must be positive"));
             }
+            let ((a, reserve_a), (b, reserve_b)) = match first.cmp(&second) {
+                std::cmp::Ordering::Less => ((first, first_reserve), (second, second_reserve)),
+                std::cmp::Ordering::Greater => ((second, second_reserve), (first, first_reserve)),
+                std::cmp::Ordering::Equal => {
+                    return Err(format!("{ROUTE}: a pair is two different tokens"))
+                }
+            };
             Ok(CreateVaultIntent {
                 token_a_policy_commit: a,
                 token_b_policy_commit: b,

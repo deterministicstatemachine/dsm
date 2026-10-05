@@ -33,7 +33,7 @@ export interface TokenCreateDetails {
   ticker: string;
   alias: string;
   decimals: number;
-  /** The whole supply, in base units. Fixed at creation. */
+  /** The whole supply, in whole token units, as typed: Rust parses and scales it. Fixed at creation. */
   genesisSupply: string;
   /** Whether holders may burn their own units. */
   burnEnabled: boolean;
@@ -47,19 +47,6 @@ export interface TokenCreateDetails {
 
 export async function createToken(details: TokenCreateDetails): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
   try {
-    const u128be = (v: string | number): Uint8Array => {
-      const text = String(v).trim();
-      if (!/^\d+$/.test(text)) throw new Error('createToken: the genesis supply must be a whole number');
-      const out = new Uint8Array(16);
-      let n = BigInt(text);
-      for (let i = 15; i >= 0; i--) {
-        out[i] = Number(n & 0xffn);
-        n >>= 8n;
-      }
-      if (n !== 0n) throw new Error('createToken: amount exceeds u128');
-      return out;
-    };
-
     const allowlist: Uint8Array[] =
       details.allowlistKind === 'INLINE'
         ? (details.allowlistData ?? '')
@@ -76,7 +63,7 @@ export async function createToken(details: TokenCreateDetails): Promise<{ succes
       ticker: details.ticker,
       alias: details.alias,
       decimals: details.decimals,
-      genesisSupplyU128: u128be(details.genesisSupply) as any,
+      genesisSupplyEntered: details.genesisSupply,
       burnEnabled: details.burnEnabled,
       transferable: details.transferable,
       threshold: details.threshold,

@@ -994,15 +994,16 @@ impl AppRouterImpl {
                 if req.decimals > 18 {
                     return err("token.create: decimals must be 0..18".into());
                 }
-                if req.genesis_supply_u128.len() != 16 {
-                    return err("token.create: genesis_supply_u128 must be 16 bytes".into());
+                // The supply as typed, in whole token units.
+                let typed = req.genesis_supply_entered.trim();
+                if typed.is_empty() || !typed.bytes().all(|b| b.is_ascii_digit()) {
+                    return err(format!(
+                        "token.create: the genesis supply must be a whole number, not {typed:?}"
+                    ));
                 }
-                let be_u128 = |b: &[u8]| -> u128 {
-                    let mut v = 0u128;
-                    for x in b {
-                        v = (v << 8) | (*x as u128);
-                    }
-                    v
+                let whole_units = match typed.parse::<u128>() {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("token.create: the genesis supply {typed}: {e}")),
                 };
                 // Canonical amounts are integer BASE UNITS; the wizard speaks
                 // display units. Conversion happens exactly once, here, before
@@ -1040,11 +1041,10 @@ impl AppRouterImpl {
                 // it to its creator in the transition that creates it
                 // (`ReleaseRule::AllAtCreation`, owner 2026-09-23). Nothing is
                 // minted afterwards, and no supply is unlimited.
-                let genesis_supply =
-                    match to_base(be_u128(&req.genesis_supply_u128), "genesis supply") {
-                        Ok(v) => v,
-                        Err(e) => return err(e),
-                    };
+                let genesis_supply = match to_base(whole_units, "genesis supply") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
                 if genesis_supply == 0 {
                     return err("token.create: the genesis supply must be positive".into());
                 }
@@ -2017,7 +2017,7 @@ mod tests {
             ticker: "ERA".into(),
             alias: "Era Token".into(),
             decimals: 8,
-            genesis_supply_u128: 1_000u128.to_be_bytes().to_vec(),
+            genesis_supply_entered: "1000".to_string(),
             burn_enabled: true,
             transferable: true,
             threshold: 1,
