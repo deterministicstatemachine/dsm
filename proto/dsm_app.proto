@@ -83,6 +83,9 @@ enum TransactionType {
   TX_TYPE_SOFI_SETUP       = 9;  // set up with a vault; no token moves
   TX_TYPE_SOFI_TRADE       = 10; // a trade or route realized
   TX_TYPE_SOFI_CLOSE       = 11; // the owner's close realized; both reserves credited
+  // Escrow vaults (SoFi Amendment S21).
+  TX_TYPE_ESCROW_LOCK      = 12; // an escrow vault created; its stake locked
+  TX_TYPE_ESCROW_RELEASE   = 13; // an escrow vault released; its stake credited to the branch's recipient
 }
 
 message EvidenceOracle {
