@@ -82,9 +82,14 @@ pub struct ClaimOutcome {
 
 /// The validated economic root this device holds, or a fresh activation.
 ///
-/// `activate` refuses a device already holding value — calling its current
-/// holdings "position 0" would be self-rooting at the base — so a legacy
-/// value-holding device surfaces `UnsupportedLegacyEconomicState` here.
+/// `activate` refuses a device that held value at its activation point —
+/// calling those holdings "position 0" would be self-rooting at the base — so
+/// a legacy value-holding device surfaces `UnsupportedLegacyEconomicState`
+/// here. The activation point is the head the first admission was built on:
+/// with nothing pending that is the head itself, and with the first admission
+/// pending it is the head less that admission's own credit, read from its
+/// frozen witness
+/// ([`EconomicActivationSnapshot::before_first_admission`]).
 pub(crate) fn validated_root_or_activate(
     core: &CoreSDK,
 ) -> Result<ValidatedEconomicRoot, DsmError> {
@@ -103,11 +108,58 @@ pub(crate) fn validated_root_or_activate(
     let head = core
         .device_head()
         .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
-    let snapshot = EconomicActivationSnapshot {
-        online_balances_empty: head.balances_snapshot().is_empty(),
-        outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+    let snapshot = match head.pending_economic_admission() {
+        None => EconomicActivationSnapshot {
+            online_balances_empty: head.balances_snapshot().is_empty(),
+            outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+        },
+        Some(first) => {
+            let (_, witness) = frozen_witness_of(first)?;
+            EconomicActivationSnapshot::before_first_admission(&head, &witness)
+                .map_err(|e| storage_err("activation point", e))?
+        }
     };
     activate(snapshot).map_err(|e| DsmError::invalid_operation(e.to_string()))
+}
+
+/// The frozen witness of `pending`: the exact bytes frozen with its advance,
+/// and their decode, bound to the admission by its operation digest and
+/// post-root. Never re-derived.
+fn frozen_witness_of(
+    pending: &PendingEconomicAdmission,
+) -> Result<(Vec<u8>, EconomicTransitionWitness), DsmError> {
+    let witness_key_prefix = format!(
+        "immutable::{}::",
+        String::from_utf8_lossy(
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ.source_bytes()
+        )
+    );
+    let witness_bytes =
+        crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix_and_purpose(
+            &witness_key_prefix,
+            "economic-transition-witness",
+        )
+        .map_err(|e| storage_err("load frozen witness", e))?
+        .ok_or_else(|| {
+            DsmError::storage(
+                "no frozen witness for the pending admission".to_string(),
+                None::<std::io::Error>,
+            )
+        })?;
+    let witness = dsm::economic::decode::decode_transition_witness(&witness_bytes)
+        .map_err(|e| storage_err("decode frozen witness", e))?;
+    let coords = pending
+        .accepted_coords()
+        .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
+    if witness.operation_digest != pending.operation_digest
+        || witness.post_economic_root != coords.post_economic_root
+    {
+        return Err(DsmError::storage(
+            "frozen witness does not match the pending admission".to_string(),
+            None::<std::io::Error>,
+        ));
+    }
+    Ok((witness_bytes, witness))
 }
 
 /// This device's admitted economic root and the tree that recomputes it, for
@@ -1077,7 +1129,8 @@ pub(crate) async fn resume_pending_admission(
     }
 
     // The validated PREDECESSOR: the admitted coordinate, or the activation
-    // root before a first admission. Its root must equal the pending
+    // root before a first admission, decided at the activation point (the
+    // head less this admission's own credit). Its root must equal the pending
     // pre-root — a mismatch means the local store is incoherent, which is a
     // stop, not a guess. An admitted position that has selected no root
     // stops here too: a device that crashed between a fulfillment's
@@ -1095,37 +1148,10 @@ pub(crate) async fn resume_pending_admission(
     }
 
     // Reconstruct the witness from the FROZEN bytes (never re-derived).
-    let witness_key_prefix = format!(
-        "immutable::{}::",
-        String::from_utf8_lossy(
-            dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ.source_bytes()
-        )
-    );
-    let witness_bytes =
-        crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix_and_purpose(
-            &witness_key_prefix,
-            "economic-transition-witness",
-        )
-        .map_err(|e| storage_err("load frozen witness", e))?
-        .ok_or_else(|| {
-            DsmError::storage(
-                "no frozen witness for the pending admission".to_string(),
-                None::<std::io::Error>,
-            )
-        })?;
-    let witness = dsm::economic::decode::decode_transition_witness(&witness_bytes)
-        .map_err(|e| storage_err("decode frozen witness", e))?;
+    let (witness_bytes, witness) = frozen_witness_of(&pending)?;
     let coords = *pending
         .accepted_coords()
         .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
-    if witness.operation_digest != pending.operation_digest
-        || witness.post_economic_root != coords.post_economic_root
-    {
-        return Err(DsmError::storage(
-            "frozen witness does not match the pending admission".to_string(),
-            None::<std::io::Error>,
-        ));
-    }
 
     // Reconstruct the manifest from FROZEN artifacts and derivation-only
     // inputs, and REQUIRE its address to equal the one the pending admission
