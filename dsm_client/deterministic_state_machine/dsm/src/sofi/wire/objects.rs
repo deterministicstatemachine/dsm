@@ -2477,3 +2477,424 @@ impl VaultCreation {
         finish(&c, v)
     }
 }
+
+// ── 0x0063 EscrowTerms · 0x0064 EscrowVerdict (SoFi Amendment S21) ─────────
+
+/// The longest outcome label an escrow branch or verdict carries.
+pub const ESCROW_MAX_OUTCOME_BYTES: usize = 64;
+/// The most branches one escrow vault's terms carry.
+pub const ESCROW_MAX_BRANCHES: usize = 16;
+/// The most signers one outcome is decided by, and one verdict carries.
+pub const ESCROW_MAX_SIGNERS: usize = 4;
+
+/// One signer of an escrow outcome: a declared algorithm and a key of its
+/// width. Signers are ordered by [`EscrowSigner::canonical`], the bytes the
+/// outcome table commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowSigner {
+    signature_alg: u16,
+    public_key: Vec<u8>,
+}
+
+impl EscrowSigner {
+    pub fn new(signature_alg: u16, public_key: &[u8]) -> Result<Self, SofiWireError> {
+        check_key(signature_alg, public_key)?;
+        Ok(Self {
+            signature_alg,
+            public_key: public_key.to_vec(),
+        })
+    }
+
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
+    }
+
+    /// `u16be(alg) ‖ u32be(|key|) ‖ key`: what a signer set is ordered by and
+    /// what the outcome table commits for it.
+    pub fn canonical(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(6 + self.public_key.len());
+        push_key(&mut out, self.signature_alg, &self.public_key);
+        out
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let (signature_alg, public_key) = read_key(c)?;
+        Ok(Self {
+            signature_alg,
+            public_key,
+        })
+    }
+}
+
+fn check_outcome(outcome: &[u8]) -> Result<(), SofiWireError> {
+    check_count("outcome bytes", 1, ESCROW_MAX_OUTCOME_BYTES, outcome.len())
+}
+
+fn check_signer_set(field: &'static str, signers: &[EscrowSigner]) -> Result<(), SofiWireError> {
+    check_count(field, 1, ESCROW_MAX_SIGNERS, signers.len())?;
+    let keys: Vec<Vec<u8>> = signers.iter().map(EscrowSigner::canonical).collect();
+    check_strictly_ascending(field, &keys)
+}
+
+fn read_signers(c: &mut Cursor<'_>, field: &'static str) -> Result<Vec<EscrowSigner>, DecodeError> {
+    let n = read_count(c, field, 1, ESCROW_MAX_SIGNERS)?;
+    let signers: Vec<EscrowSigner> = (0..n)
+        .map(|_| EscrowSigner::at(c))
+        .collect::<Result<_, _>>()?;
+    check_signer_set(field, &signers).map_err(wire_invalid)?;
+    Ok(signers)
+}
+
+/// One outcome and the exact signer set that decides it: an entry of the
+/// outcome table (SoFi §19.9). Every signer of the set must sign; there is no
+/// threshold, and a set with a duplicate or no signer has no encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowOutcome {
+    outcome: Vec<u8>,
+    signers: Vec<EscrowSigner>,
+}
+
+impl EscrowOutcome {
+    pub fn new(outcome: &[u8], signers: Vec<EscrowSigner>) -> Result<Self, SofiWireError> {
+        check_outcome(outcome)?;
+        check_signer_set("outcome signers", &signers)?;
+        Ok(Self {
+            outcome: outcome.to_vec(),
+            signers,
+        })
+    }
+
+    pub fn outcome(&self) -> &[u8] {
+        &self.outcome
+    }
+
+    pub fn signers(&self) -> &[EscrowSigner] {
+        &self.signers
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_part(out, &self.outcome);
+        push_u32(out, self.signers.len() as u32);
+        for signer in &self.signers {
+            push_key(out, signer.signature_alg, &signer.public_key);
+        }
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let outcome = read_var_bytes(c, ESCROW_MAX_OUTCOME_BYTES)?;
+        let signers = read_signers(c, "outcome signers")?;
+        Ok(Self { outcome, signers })
+    }
+}
+
+/// The outcome table `O`: an escrow vault's branches with their recipients
+/// removed, strictly ascending by outcome. It is the verdict authority, and it
+/// has exactly one encoding, so parties that agree on the same outcomes and
+/// signers derive the same `τ` (SoFi §19.9, "Linked vaults").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeTable {
+    entries: Vec<EscrowOutcome>,
+}
+
+impl OutcomeTable {
+    pub fn new(entries: Vec<EscrowOutcome>) -> Result<Self, SofiWireError> {
+        check_count("outcome table", 1, ESCROW_MAX_BRANCHES, entries.len())?;
+        let labels: Vec<&[u8]> = entries.iter().map(EscrowOutcome::outcome).collect();
+        check_strictly_ascending("outcome table", &labels)?;
+        Ok(Self { entries })
+    }
+
+    pub fn entries(&self) -> &[EscrowOutcome] {
+        &self.entries
+    }
+
+    /// The exact signer set that decides `outcome`, when the table has it.
+    pub fn signers_of(&self, outcome: &[u8]) -> Option<&[EscrowSigner]> {
+        self.entries
+            .iter()
+            .find(|entry| entry.outcome == outcome)
+            .map(EscrowOutcome::signers)
+    }
+
+    /// `u8(|O|) ‖ ⨁ (u32be(|o|) ‖ o ‖ u8(|signers|) ‖ ⨁ signer)`: what `τ`
+    /// hashes. Its own encoding, not the CCB one: the count bounds fix every
+    /// width, so a table has exactly these bytes.
+    pub fn digest_preimage(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        // At most ESCROW_MAX_BRANCHES entries and ESCROW_MAX_SIGNERS signers,
+        // so both counts fit a byte.
+        out.push(self.entries.len() as u8);
+        for entry in &self.entries {
+            push_part(&mut out, &entry.outcome);
+            out.push(entry.signers.len() as u8);
+            for signer in &entry.signers {
+                push_key(&mut out, signer.signature_alg, &signer.public_key);
+            }
+        }
+        out
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_u32(out, self.entries.len() as u32);
+        for entry in &self.entries {
+            entry.push(out);
+        }
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let n = read_count(c, "outcome table", 1, ESCROW_MAX_BRANCHES)?;
+        let entries: Vec<EscrowOutcome> = (0..n)
+            .map(|_| EscrowOutcome::at(c))
+            .collect::<Result<_, _>>()?;
+        Self::new(entries).map_err(wire_invalid)
+    }
+}
+
+/// One branch of an escrow vault's terms: an outcome, the exact signer set
+/// that decides it, and the identity it pays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowBranch {
+    decided: EscrowOutcome,
+    recipient_genesis: D32,
+    recipient_device_id: D32,
+}
+
+impl EscrowBranch {
+    pub fn new(decided: EscrowOutcome, recipient_genesis: D32, recipient_device_id: D32) -> Self {
+        Self {
+            decided,
+            recipient_genesis,
+            recipient_device_id,
+        }
+    }
+
+    pub fn outcome(&self) -> &[u8] {
+        self.decided.outcome()
+    }
+
+    pub fn signers(&self) -> &[EscrowSigner] {
+        self.decided.signers()
+    }
+
+    pub fn recipient_genesis(&self) -> &D32 {
+        &self.recipient_genesis
+    }
+
+    pub fn recipient_device_id(&self) -> &D32 {
+        &self.recipient_device_id
+    }
+}
+
+/// `0x0063 EscrowTerms` — what an escrow vault's three policy slots name (SoFi
+/// §19.9): the held token, the external commitment `Y`, and the branches,
+/// strictly ascending by outcome. The vault releases its whole amount once,
+/// along the branch whose outcome the canonical verdict names. Nothing is
+/// chosen at release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowTerms {
+    token: D32,
+    external_commitment: D32,
+    branches: Vec<EscrowBranch>,
+}
+
+impl EscrowTerms {
+    pub fn new(
+        token: D32,
+        external_commitment: D32,
+        branches: Vec<EscrowBranch>,
+    ) -> Result<Self, SofiWireError> {
+        check_count("escrow branches", 1, ESCROW_MAX_BRANCHES, branches.len())?;
+        let labels: Vec<&[u8]> = branches.iter().map(EscrowBranch::outcome).collect();
+        check_strictly_ascending("escrow branches", &labels)?;
+        Ok(Self {
+            token,
+            external_commitment,
+            branches,
+        })
+    }
+
+    /// The policy commit of the held token.
+    pub fn token(&self) -> &D32 {
+        &self.token
+    }
+
+    /// `Y = H(DSM/external/v1 ‖ X)`.
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn branches(&self) -> &[EscrowBranch] {
+        &self.branches
+    }
+
+    /// The branch whose outcome is `outcome`, when the terms have one.
+    pub fn branch(&self, outcome: &[u8]) -> Option<&EscrowBranch> {
+        self.branches.iter().find(|b| b.outcome() == outcome)
+    }
+
+    /// The outcome table: the branches with their recipients removed, in
+    /// branch order, so it is canonical whenever the terms are.
+    pub fn outcome_table(&self) -> OutcomeTable {
+        OutcomeTable {
+            entries: self.branches.iter().map(|b| b.decided.clone()).collect(),
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_TERMS);
+        push_digest32(&mut out, &self.token);
+        push_digest32(&mut out, &self.external_commitment);
+        push_u32(&mut out, self.branches.len() as u32);
+        for branch in &self.branches {
+            branch.decided.push(&mut out);
+            push_digest32(&mut out, &branch.recipient_genesis);
+            push_digest32(&mut out, &branch.recipient_device_id);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_TERMS, SCHEMA_V1)?;
+        let token = c.digest32()?;
+        let external_commitment = c.digest32()?;
+        let n = read_count(&mut c, "escrow branches", 1, ESCROW_MAX_BRANCHES)?;
+        let mut branches = Vec::with_capacity(n);
+        for _ in 0..n {
+            let decided = EscrowOutcome::at(&mut c)?;
+            branches.push(EscrowBranch {
+                decided,
+                recipient_genesis: c.digest32()?,
+                recipient_device_id: c.digest32()?,
+            });
+        }
+        let v = Self::new(token, external_commitment, branches).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// One signature of a verdict: its signer and the signature over the
+/// statement `m(o)` for the verdict cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerdictSignature {
+    signer: EscrowSigner,
+    signature: Vec<u8>,
+}
+
+impl VerdictSignature {
+    /// Refuses an empty or oversized signature. It verifies nothing.
+    pub fn new(signer: EscrowSigner, signature: &[u8]) -> Result<Self, SofiWireError> {
+        if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "verdict signature",
+                bytes: signature.len(),
+                max: MAX_SIGNATURE_BYTES,
+            });
+        }
+        Ok(Self {
+            signer,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn signer(&self) -> &EscrowSigner {
+        &self.signer
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+}
+
+/// `0x0064 EscrowVerdict` — a verdict on an external commitment (SoFi §19.9):
+/// `Y`, the outcome table, the outcome, and signatures over `m(outcome)` for
+/// the verdict cell `Y` and the table derive. It carries its table so that it
+/// proves its own authority for the cell from its own bytes; whether it does
+/// is `sofi::escrow::recognize_verdict`'s, not this type's. A verdict holding
+/// only some of an outcome's signatures has an encoding, because signatures
+/// are gathered before one is written to the cell; it occupies nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowVerdict {
+    external_commitment: D32,
+    table: OutcomeTable,
+    outcome: Vec<u8>,
+    signatures: Vec<VerdictSignature>,
+}
+
+impl EscrowVerdict {
+    pub fn new(
+        external_commitment: D32,
+        table: OutcomeTable,
+        outcome: &[u8],
+        signatures: Vec<VerdictSignature>,
+    ) -> Result<Self, SofiWireError> {
+        check_outcome(outcome)?;
+        check_count(
+            "verdict signatures",
+            1,
+            ESCROW_MAX_SIGNERS,
+            signatures.len(),
+        )?;
+        let keys: Vec<Vec<u8>> = signatures.iter().map(|s| s.signer.canonical()).collect();
+        check_strictly_ascending("verdict signatures", &keys)?;
+        Ok(Self {
+            external_commitment,
+            table,
+            outcome: outcome.to_vec(),
+            signatures,
+        })
+    }
+
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &OutcomeTable {
+        &self.table
+    }
+
+    pub fn outcome(&self) -> &[u8] {
+        &self.outcome
+    }
+
+    pub fn signatures(&self) -> &[VerdictSignature] {
+        &self.signatures
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_VERDICT);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        push_part(&mut out, &self.outcome);
+        push_u32(&mut out, self.signatures.len() as u32);
+        for s in &self.signatures {
+            push_key(&mut out, s.signer.signature_alg, &s.signer.public_key);
+            push_part(&mut out, &s.signature);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_VERDICT, SCHEMA_V1)?;
+        let external_commitment = c.digest32()?;
+        let table = OutcomeTable::at(&mut c)?;
+        let outcome = read_var_bytes(&mut c, ESCROW_MAX_OUTCOME_BYTES)?;
+        let n = read_count(&mut c, "verdict signatures", 1, ESCROW_MAX_SIGNERS)?;
+        let mut signatures = Vec::with_capacity(n);
+        for _ in 0..n {
+            let signer = EscrowSigner::at(&mut c)?;
+            let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+            signatures.push(VerdictSignature { signer, signature });
+        }
+        let v =
+            Self::new(external_commitment, table, &outcome, signatures).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}

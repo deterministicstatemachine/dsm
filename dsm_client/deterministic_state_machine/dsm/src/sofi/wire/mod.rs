@@ -174,6 +174,19 @@
 //! 3 `create_position` u64 · 4 `state` nested `0x004B`.
 //! `0x005B VaultCreation`: 1 `vault_id` · 2 `genesis_root` digest32 (`R_0`) ·
 //! 3 `amount_a` u64 · 4 `amount_b` u64.
+//!
+//! Escrow vaults (SoFi Amendment S21, §19.9):
+//! `0x0063 EscrowTerms`: 1 `token` digest32 (the held token's policy commit)
+//! · 2 `external_commitment` digest32 (`Y`) · 3 `branches` `seq<branch>`,
+//! 1..=16, strictly ascending by outcome bytes. A branch is 1 `outcome`
+//! `u32 len ‖ bytes`, 1..=64 · 2 `signers` `seq<(signature_alg u16 ‖ key
+//! u32 len ‖ bytes)>`, 1..=4, strictly ascending by those bytes · 3
+//! `recipient_genesis` · 4 `recipient_device_id`.
+//! `0x0064 EscrowVerdict`: 1 `external_commitment` · 2 `table`
+//! `seq<(outcome ‖ signers)>`, the outcome table, under the same bounds and
+//! order · 3 `outcome` · 4 `signatures` `seq<(signer ‖ signature u32 len ‖
+//! bytes)>`, 1..=4, strictly ascending by signer. A verdict holding only some
+//! of its outcome's signatures encodes; it occupies no cell.
 
 pub mod objects;
 
