@@ -76,20 +76,3 @@ impl AppRouterImpl {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::not_the_locks;
-
-    /// The app lock's settings never pass through the preferences route: not
-    /// its hash, its miss count, nor its locked flag. The frontend's own
-    /// settings do.
-    #[test]
-    fn the_preferences_route_refuses_every_setting_of_the_app_lock() {
-        for key in crate::sdk::app_lock::OWNED_KEYS {
-            let refused = not_the_locks(key, "prefs.set").expect_err(key);
-            assert!(refused.contains("belongs to the app lock"), "{refused}");
-        }
-        not_the_locks("lock_timeout_ms", "prefs.set").expect("a frontend setting");
-    }
-}

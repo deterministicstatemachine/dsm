@@ -986,6 +986,46 @@ mod tests {
         }
     }
 
+    /// The app lock's settings never pass through the preferences route, as
+    /// the WebView asks it: not the PIN's hash, the miss count, nor the locked
+    /// flag. A caller that could read the hash or write the flag would not
+    /// need the PIN. The frontend's own settings pass.
+    #[test]
+    #[serial]
+    fn the_preferences_route_refuses_the_app_locks_settings() {
+        device_with_router(0x4A);
+        let pref = |path: &str, key: &str, value: &str| {
+            dispatch_ingress(IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: path.to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::AppStateRequest {
+                            key: key.to_string(),
+                            operation: String::new(),
+                            value: value.to_string(),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                })),
+            })
+        };
+        for key in crate::sdk::app_lock::OWNED_KEYS {
+            for (path, value) in [("prefs.get", ""), ("prefs.set", "open")] {
+                let refused = expect_error(pref(path, key, value));
+                assert!(
+                    refused.message.contains("belongs to the app lock"),
+                    "{path} {key}: {}",
+                    refused.message
+                );
+            }
+        }
+        expect_ok_bytes(pref("prefs.set", "lock_prompt_dismissed", "never"));
+        expect_ok_bytes(pref("prefs.get", "lock_prompt_dismissed", ""));
+    }
+
     /// The record the frontend's lock screen tests answer `session.*` from:
     /// each try the lock screen sends, framed as the WebView frames it, and
     /// this ingress's answer. The committed record must equal the live
