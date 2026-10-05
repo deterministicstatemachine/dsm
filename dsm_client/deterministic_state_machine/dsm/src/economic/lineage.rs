@@ -34,6 +34,14 @@
 //! So a device holding value cannot activate. A migration protocol for
 //! existing holdings is future work; it must never be an implicit snapshot.
 //!
+//! What is checked is what the device held at its **activation point**: the
+//! head its first admission was built on. While that admission is pending the
+//! head already carries its credit (the advance and the pending admission
+//! commit together), so the activation point is the head less exactly that
+//! admission's own witness —
+//! [`EconomicActivationSnapshot::before_first_admission`]. Value the first
+//! admission did not credit is still value held at the activation point.
+//!
 //! ## Advancing a validated root
 //!
 //! Conjunctive, and every clause is checked:
@@ -66,16 +74,19 @@
 //! acyclicity rule structural: an external source resolves from a root this
 //! verifier has itself validated, never from the transition being validated.
 
+use crate::economic::admission::PendingAdmissionKind;
 use crate::economic::claim::{verify_manifest_provenance_index, EconomicAdmissionManifest};
 use crate::economic::provenance::{
     verify_transition_provenance, FundedCredit, ProvenanceContext, ProvenanceError,
     ProvenanceResolver,
 };
 use crate::economic::register::RegisteredEconomicRoot;
+use crate::economic::state::EconomicLeafState;
 use crate::economic::tree::empty_economic_root;
 use crate::economic::witness::{
     verify_mutation_sequence, EconomicTransitionWitness, EconomicWitnessError,
 };
+use crate::types::device_state::DeviceState;
 
 /// A root this verifier has established is the result of a valid transition
 /// from a validated predecessor.
@@ -382,7 +393,146 @@ impl EconomicActivationSnapshot {
             outstanding_offline_allocation: false,
         }
     }
+
+    /// What `head` held at its activation point while its FIRST economic
+    /// admission is pending: the head less exactly that admission's own
+    /// transition, as `first`, the admission's frozen witness, states it.
+    ///
+    /// The activation point is the head the first admission was built on, and
+    /// once the admission is locally accepted that is no longer the head: the
+    /// advance and the pending admission commit in one transaction, so an
+    /// admission held at any later step (its evidence not yet stored, its
+    /// claim not yet final) leaves its own credit on the head, fenced. Asking
+    /// whether the head as it stands holds value counts that credit as value
+    /// held before position 0, and refuses the one transition that roots the
+    /// lineage.
+    ///
+    /// From the activation root every mutation of `first` inserts a leaf, and
+    /// each balance leaf it inserts is a credit the advance applied, so taking
+    /// those credits off the head gives back the head the admission was built
+    /// on. Activation is not loosened: whatever the head holds that the first
+    /// admission did not credit was held at the activation point, and
+    /// [`activate`] refuses it. An outstanding allocation is read off the head
+    /// as it stands, because a DSM-backed admission moves none.
+    ///
+    /// `first` is taken only as the pending admission's own witness: its
+    /// operation digest and post-root are the admission's, and its mutations
+    /// verify from the activation root under this head's identity.
+    pub fn before_first_admission(
+        head: &DeviceState,
+        first: &EconomicTransitionWitness,
+    ) -> Result<Self, ActivationPointUnreadable> {
+        let pending = head
+            .pending_economic_admission()
+            .ok_or(ActivationPointUnreadable::NothingPending)?;
+        let activation_root = empty_economic_root();
+        let not_first = || ActivationPointUnreadable::NotAFirstAdmission {
+            economic_position: pending.economic_position,
+        };
+        // Only a DSM-backed admission can be a device's first: an offline load
+        // debits an online balance the activation root does not hold, an
+        // unload moves an allocation activation refuses, and a conditional
+        // position right after the activation root is Invalid.
+        if pending.kind != PendingAdmissionKind::DsmBacked
+            || pending.economic_position != 1
+            || pending.pre_economic_root != activation_root
+        {
+            return Err(not_first());
+        }
+        let coords = pending.acceptance().ok_or_else(not_first)?;
+        if first.pre_economic_root != activation_root
+            || first.operation_digest != pending.operation_digest
+            || first.post_economic_root != coords.post_economic_root
+        {
+            return Err(ActivationPointUnreadable::WitnessOfAnotherTransition);
+        }
+        verify_mutation_sequence(
+            &first.mutation_sequence(),
+            &head.genesis_digest(),
+            &head.devid(),
+        )
+        .map_err(ActivationPointUnreadable::WitnessDoesNotVerify)?;
+
+        let mut held = head.balances_snapshot().clone();
+        for mutation in &first.mutations {
+            if let Some(EconomicLeafState::Balance(credit)) = &mutation.post_state {
+                let rest = held
+                    .get(&credit.policy_commit)
+                    .and_then(|amount| amount.checked_sub(credit.amount))
+                    .ok_or(ActivationPointUnreadable::CreditNotOnHead {
+                        policy_commit: credit.policy_commit,
+                    })?;
+                // The advance removes a balance that reaches zero, so the
+                // credit that created an entry takes the entry back with it.
+                if rest == 0 {
+                    held.remove(&credit.policy_commit);
+                } else {
+                    held.insert(credit.policy_commit, rest);
+                }
+            }
+        }
+        Ok(Self {
+            online_balances_empty: held.is_empty(),
+            outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+        })
+    }
 }
+
+/// Why the activation point of a device with a pending first admission could
+/// not be read off its head and that admission's witness.
+///
+/// Each is incoherent local state, never a verdict about value: the head, the
+/// pending admission and its frozen witness are written together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivationPointUnreadable {
+    /// The head carries no pending admission: its activation point, if it has
+    /// not activated, is the head itself.
+    NothingPending,
+    /// The pending admission is not a locally accepted, DSM-backed admission
+    /// at position 1 on the activation root.
+    NotAFirstAdmission { economic_position: u64 },
+    /// The witness names another operation, another post-root, or a pre-root
+    /// that is not the activation root.
+    WitnessOfAnotherTransition,
+    /// The witness's mutations do not verify from the activation root under
+    /// the head's identity.
+    WitnessDoesNotVerify(EconomicWitnessError),
+    /// The head does not hold a credit the first admission made.
+    CreditNotOnHead { policy_commit: [u8; 32] },
+}
+
+impl core::fmt::Display for ActivationPointUnreadable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NothingPending => write!(
+                f,
+                "the head carries no pending admission: its activation point is the head itself"
+            ),
+            Self::NotAFirstAdmission { economic_position } => write!(
+                f,
+                "the pending admission at position {economic_position} is not a first admission \
+                 (a locally accepted, DSM-backed admission at position 1 on the activation root)"
+            ),
+            Self::WitnessOfAnotherTransition => write!(
+                f,
+                "the witness is not the pending first admission's: it names another operation, \
+                 another post-root, or a pre-root other than the activation root"
+            ),
+            Self::WitnessDoesNotVerify(e) => write!(
+                f,
+                "the pending first admission's witness does not verify from the activation \
+                 root: {e}"
+            ),
+            Self::CreditNotOnHead { policy_commit } => write!(
+                f,
+                "the head does not hold the credit of {} its pending first admission made",
+                crate::utils::text_id::encode_base32_crockford(policy_commit)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ActivationPointUnreadable {}
 
 /// Why a device may not activate an economic lineage at the empty root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
