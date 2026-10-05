@@ -1240,6 +1240,8 @@ export enum NativeHostRequestKind {
   HOST_CONTROL_PERMISSIONS_REQUEST = 10,
 
   /**
+   * platform_primitive.*
+   *
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
    */
   PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105,
@@ -10332,6 +10334,8 @@ export class SessionHardwareFactsProto extends Message<SessionHardwareFactsProto
  */
 export class SessionConfigureLockRequest extends Message<SessionConfigureLockRequest> {
   /**
+   * The method names whether the lock is on: "none" turns it off.
+   *
    * "pin", "combo" or "none"
    *
    * @generated from field: string method = 2;

@@ -77,8 +77,6 @@ pub fn clear_startup_failure() {
 pub static SESSION_MANAGER: Lazy<Mutex<SessionManager>> =
     Lazy::new(|| Mutex::new(SessionManager::default()));
 
-const LOCK_ENABLED_KEY: &str = "lock_enabled";
-const LOCK_METHOD_KEY: &str = "lock_method";
 const LOCK_ON_PAUSE_KEY: &str = "lock_on_pause";
 const LOCK_LOCKED_KEY: &str = "lock_locked";
 
@@ -107,8 +105,6 @@ pub struct SessionManager {
     pub lock_on_pause: bool,
     /// Wrong tries since the last opening, as `app_lock` stores them.
     pub lock_misses: u32,
-    /// Whether a PIN or pattern is enrolled in `app_lock`.
-    pub lock_enrolled: bool,
     pub fatal_error: Option<String>,
     /// Whether `fatal_error` is a failed startup, which a later successful
     /// startup takes back. An error anyone else reported is theirs to clear.
@@ -126,7 +122,6 @@ impl Default for SessionManager {
             lock_method: "none".to_string(),
             lock_on_pause: true,
             lock_misses: 0,
-            lock_enrolled: crate::sdk::app_lock::enrolled(),
             fatal_error: None,
             fatal_is_startup_failure: false,
             wallet_refresh_hint: 0,
@@ -158,29 +153,19 @@ impl SessionManager {
         }
     }
 
-    /// Take the stored lock settings in. An enabled lock names "pin" or
-    /// "combo", and a disabled one "none": anything else is an error, never a
-    /// method chosen in its place.
-    fn load_lock(
-        &mut self,
-        enabled: bool,
-        method: &str,
-        lock_on_pause: bool,
-    ) -> Result<(), dsm::types::error::DsmError> {
-        let method = match (enabled, method) {
-            (_, "none") if !enabled => "none",
-            (_, named) if enabled => crate::sdk::app_lock::LockMethod::parse(named)?.name(),
-            (_, other) => {
-                return Err(dsm::types::error::DsmError::InvalidState(format!(
-                    "the lock is disabled but its method is {other:?}"
-                )))
-            }
-        };
+    /// Take the lock in as `app_lock` holds it: on exactly while a PIN or
+    /// pattern is enrolled, by the method it was enrolled for.
+    fn load_lock(&mut self, lock_on_pause: bool) -> Result<(), dsm::types::error::DsmError> {
+        let enrolled = crate::sdk::app_lock::enrolled_method()?;
+        let enabled = enrolled.is_some();
+        self.lock_method = match enrolled {
+            Some(method) => method.name(),
+            None => "none",
+        }
+        .to_string();
         self.lock_enabled = enabled;
-        self.lock_method = method.to_string();
         self.lock_on_pause = lock_on_pause;
         self.lock_misses = crate::sdk::app_lock::misses()?;
-        self.lock_enrolled = crate::sdk::app_lock::enrolled();
         if enabled {
             Ok(())
         } else {
@@ -224,7 +209,7 @@ impl SessionManager {
         self.require_open()?;
         let named = crate::sdk::app_lock::LockMethod::parse(method)?;
         if secret.is_empty() {
-            let same = self.lock_enrolled && self.lock_method == named.name();
+            let same = self.lock_enabled && self.lock_method == named.name();
             if !same {
                 return Err(dsm::types::error::DsmError::invalid_operation(
                     "a new lock needs its PIN or pattern",
@@ -233,8 +218,7 @@ impl SessionManager {
         } else {
             crate::sdk::app_lock::enroll(named, secret)?;
         }
-        let enabled = crate::sdk::app_lock::enrolled();
-        self.load_lock(enabled, named.name(), lock_on_pause)?;
+        self.load_lock(lock_on_pause)?;
         self.persist_lock_config_to_app_state()
     }
 
@@ -243,8 +227,7 @@ impl SessionManager {
     pub fn disable_lock(&mut self, lock_on_pause: bool) -> Result<(), dsm::types::error::DsmError> {
         self.require_open()?;
         crate::sdk::app_lock::clear()?;
-        let enabled = crate::sdk::app_lock::enrolled();
-        self.load_lock(enabled, "none", lock_on_pause)?;
+        self.load_lock(lock_on_pause)?;
         self.persist_lock_config_to_app_state()
     }
 
@@ -308,10 +291,8 @@ impl SessionManager {
     /// Bring the lock configuration and state in from the stored settings. A
     /// setting never stored keeps the manager's own.
     pub fn sync_lock_config_from_app_state(&mut self) -> Result<(), dsm::types::error::DsmError> {
-        let enabled = Self::pref_bool(LOCK_ENABLED_KEY, self.lock_enabled)?;
-        let method = Self::read_pref(LOCK_METHOD_KEY).unwrap_or_else(|| self.lock_method.clone());
         let lock_on_pause = Self::pref_bool(LOCK_ON_PAUSE_KEY, self.lock_on_pause)?;
-        self.load_lock(enabled, &method, lock_on_pause)?;
+        self.load_lock(lock_on_pause)?;
         if !self.lock_state_initialized {
             self.lock_state_initialized = true;
             // Fresh process start: an enabled lock must come back locked instead of
@@ -328,11 +309,6 @@ impl SessionManager {
     }
 
     pub fn persist_lock_config_to_app_state(&self) -> Result<(), dsm::types::error::DsmError> {
-        Self::write_pref(
-            LOCK_ENABLED_KEY,
-            if self.lock_enabled { "true" } else { "false" },
-        )?;
-        Self::write_pref(LOCK_METHOD_KEY, &self.lock_method)?;
         Self::write_pref(
             LOCK_ON_PAUSE_KEY,
             if self.lock_on_pause { "true" } else { "false" },
@@ -502,8 +478,7 @@ impl SessionManager {
                 misses_left: crate::sdk::app_lock::MISSES_BEFORE_PHRASE
                     .saturating_sub(self.lock_misses),
                 phrase_required: self.lock_enabled
-                    && (!self.lock_enrolled
-                        || self.lock_misses >= crate::sdk::app_lock::MISSES_BEFORE_PHRASE),
+                    && self.lock_misses >= crate::sdk::app_lock::MISSES_BEFORE_PHRASE,
             }),
             hardware_status: Some(generated::AppSessionHardwareStatusProto {
                 app_foreground: self.hardware.app_foreground,
@@ -547,6 +522,26 @@ pub fn app_in_foreground() -> bool {
         Err(poisoned) => poisoned.into_inner(),
     };
     mgr.hardware.app_foreground
+}
+
+/// Refuse `what` while the session is locked (S-LOCK). The lock's settings
+/// are brought in first, so a process that has not read them yet reads them
+/// now, and an enabled lock starts locked. Before the store exists there is
+/// no wallet, and so no lock: nothing is set up for one to keep closed.
+pub fn refuse_while_locked(what: &str) -> Result<(), String> {
+    if crate::storage_utils::get_storage_base_dir().is_none() {
+        return Ok(());
+    }
+    let mut mgr = match SESSION_MANAGER.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    mgr.sync_lock_config_from_app_state()
+        .map_err(|e| format!("{what}: the session lock settings: {e}"))?;
+    if mgr.lock_locked {
+        return Err(format!("{what}: the wallet is locked; open it first"));
+    }
+    Ok(())
 }
 
 pub fn get_session_snapshot_bytes() -> Result<Vec<u8>, String> {
@@ -859,12 +854,17 @@ mod tests {
         }
     }
 
+    /// A pattern Rust enrolled is the lock, by its method, as the stored
+    /// settings say.
     #[test]
     #[serial_test::serial]
-    fn sync_lock_config_reads_native_prefs() {
+    fn sync_lock_config_reads_the_enrolled_lock() {
         setup_test_env();
-        AppState::set_pref(LOCK_ENABLED_KEY, "true").expect("pref");
-        AppState::set_pref(LOCK_METHOD_KEY, "combo").expect("pref");
+        crate::sdk::app_lock::enroll(
+            crate::sdk::app_lock::LockMethod::Combo,
+            "up,up,down,down,left,right,b,a",
+        )
+        .expect("enrolled");
         AppState::set_pref(LOCK_ON_PAUSE_KEY, "false").expect("pref");
 
         let mut mgr = SessionManager::default();
@@ -881,8 +881,8 @@ mod tests {
     #[serial_test::serial]
     fn cold_start_with_enabled_lock_defaults_to_locked() {
         setup_test_env();
-        AppState::set_pref(LOCK_ENABLED_KEY, "true").expect("pref");
-        AppState::set_pref(LOCK_METHOD_KEY, "pin").expect("pref");
+        crate::sdk::app_lock::enroll(crate::sdk::app_lock::LockMethod::Pin, "2468")
+            .expect("enrolled");
         AppState::set_pref(LOCK_ON_PAUSE_KEY, "true").expect("pref");
         AppState::set_pref(LOCK_LOCKED_KEY, "false").expect("pref");
 
@@ -899,8 +899,8 @@ mod tests {
     #[serial_test::serial]
     fn runtime_unlock_persists_until_next_process_start() {
         setup_test_env();
-        AppState::set_pref(LOCK_ENABLED_KEY, "true").expect("pref");
-        AppState::set_pref(LOCK_METHOD_KEY, "pin").expect("pref");
+        crate::sdk::app_lock::enroll(crate::sdk::app_lock::LockMethod::Pin, "2468")
+            .expect("enrolled");
         AppState::set_pref(LOCK_ON_PAUSE_KEY, "true").expect("pref");
 
         let mut mgr = SessionManager::default();
@@ -936,13 +936,13 @@ mod tests {
     }
 
     /// A stored lock setting that is neither `true` nor `false` is an error,
-    /// never read as the manager's own setting: a corrupted "lock enabled"
-    /// must not quietly become "disabled".
+    /// never read as the manager's own setting: a corrupted "lock on pause"
+    /// must not quietly become the manager's.
     #[test]
     #[serial_test::serial]
     fn a_malformed_lock_setting_is_an_error_not_a_default() {
         setup_test_env();
-        AppState::set_pref(LOCK_ENABLED_KEY, "yes").expect("pref");
+        AppState::set_pref(LOCK_ON_PAUSE_KEY, "yes").expect("pref");
         let mut mgr = SessionManager {
             lock_enabled: true,
             ..SessionManager::default()
@@ -1088,32 +1088,19 @@ mod tests {
         assert_eq!(mgr.try_unlock("1357").expect("tried"), Tried::Opened);
     }
 
-    /// A lock enabled with nothing enrolled (a device whose PIN the old
-    /// frontend kept) has no PIN Rust could check: only the phrase opens it.
-    /// An unknown method is an error, never a method chosen in its place.
+    /// A PIN or pattern enrolled under a method Rust does not know is an
+    /// error, never a method chosen in its place.
     #[test]
     #[serial_test::serial]
-    fn a_lock_with_nothing_enrolled_needs_the_phrase_and_names_a_real_method() {
+    fn an_enrolled_lock_under_a_method_rust_does_not_know_is_an_error() {
         let mut mgr = wallet_with_seed(&crate::economic_fixtures::test_mnemonic(0x35));
         mgr.enable_lock("pin", "1234", mgr.lock_on_pause)
             .expect("enabled");
-        // The device the old frontend locked: enabled, but no credential Rust
-        // ever enrolled.
-        AppState::set_pref("lock_credential", "").expect("pref");
-        mgr.sync_lock_config_from_app_state()
-            .expect("lock settings");
-        assert!(snapshot_of(&mgr).phrase_required);
-        assert_eq!(
-            mgr.try_unlock("1234").expect("tried"),
-            Tried::PhraseRequired
-        );
-
-        AppState::set_pref(LOCK_METHOD_KEY, "biometric").expect("pref");
-        let mut fresh = SessionManager::default();
-        let refused = fresh
+        AppState::set_pref("lock_method", "face").expect("pref");
+        let refused = SessionManager::default()
             .sync_lock_config_from_app_state()
             .expect_err("no method stands in");
-        assert!(refused.to_string().contains("biometric"), "{refused}");
+        assert!(refused.to_string().contains("face"), "{refused}");
     }
 
     /// Rust decides what a lock is: a PIN of 4 to 8 digits, or 8 presses of

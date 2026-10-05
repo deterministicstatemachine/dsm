@@ -70,8 +70,10 @@ describe('LockScreen', () => {
       expect.objectContaining({ misses_left: 3 }),
     );
 
-    // Every try reached Rust; nothing was decided here.
-    expect(carried(arrivals)).toEqual([
+    // Every try reached Rust; nothing was decided here. Opened, the wallet
+    // reads what Rust refused it while locked: its identity and its contacts.
+    await waitFor(() => expect(carried(arrivals)).toHaveLength(8));
+    expect(carried(arrivals).slice(0, 6)).toEqual([
       'session.lock',
       'session.unlock',
       'session.unlock',
@@ -79,5 +81,6 @@ describe('LockScreen', () => {
       'session.unlock',
       'session.unlock',
     ]);
+    expect(carried(arrivals).slice(6).sort()).toEqual(['contacts.list', 'getTransportHeadersV3Bin']);
   });
 });

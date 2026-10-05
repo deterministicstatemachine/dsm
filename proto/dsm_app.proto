@@ -845,8 +845,6 @@ message TokenCreateRequest {
   // units, as the user typed it: Rust parses and scales it. User-created
   // tokens in beta release all of it to the creator at creation.
   string genesis_supply_entered = 14 [(dsm_max_len)=64]; // digits, > 0
-  reserved 4, 5, 6, 9;
-  reserved "genesis_supply_u128", "policy_anchor", "initial_alloc_u128", "unlimited_supply", "max_supply_u128";
 
   bool   burn_enabled           = 7;   // governs burns only (§54)
   bool   transferable           = 8;
@@ -880,8 +878,6 @@ message TokenBurnRequest {
   // against the decimals of the token's committed policy.
   string amount_entered = 4 [(dsm_max_len)=64];
   string message   = 3 [(dsm_max_len)=1024];
-  reserved 2;
-  reserved "amount";
 }
 message TokenBurnResponse {
   bool   success   = 1;
@@ -1484,8 +1480,6 @@ message SessionHardwareFactsProto {
 // Frontend -> Rust: lock policy configuration. Secret verification remains app-local.
 message SessionConfigureLockRequest {
   // The method names whether the lock is on: "none" turns it off.
-  reserved 1;
-  reserved "enabled";
   string method = 2;          // "pin", "combo" or "none"
   bool lock_on_pause = 3;
   // The PIN, or the pattern's buttons joined by ",", to enroll. Rust keeps only
@@ -4200,9 +4194,6 @@ enum SdkEventKind {
   SDK_EVENT_KIND_WALLET_REFRESH = 5;
   SDK_EVENT_KIND_IDENTITY_READY = 6;
   SDK_EVENT_KIND_ENV_CONFIG_ERROR = 7;
-  // The wallet has no biometric unlock: the Game Boy shell offers none.
-  reserved 8;
-  reserved "SDK_EVENT_KIND_BIOMETRIC_RESULT";
   SDK_EVENT_KIND_QR_SCAN_RESULT = 9;
   SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS = 10;
   SDK_EVENT_KIND_DETERMINISTIC_SAFETY = 11;
@@ -4317,9 +4308,6 @@ enum NativeHostRequestKind {
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
 
   // platform_primitive.*
-  // No biometric prompt: the wallet has no biometric unlock.
-  reserved 102;
-  reserved "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE";
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
   // Declared host primitives no host implemented and no caller issued.
@@ -4355,8 +4343,6 @@ enum NativeHostEventKind {
   // the policy wants); the frontend had nothing listening for it.
   reserved 2;
   reserved "NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS";
-  reserved 3;
-  reserved "NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT";
   NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
   NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
   NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;

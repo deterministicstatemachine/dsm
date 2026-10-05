@@ -4,7 +4,9 @@
  * (session.unlock), which checks it and counts each miss. This screen shows
  * Rust's answer: open, wrong with the tries left, or that only the wallet's
  * recovery phrase opens it now. It checks nothing itself, and no wait or
- * restart gives a try back.
+ * restart gives a try back. While the wallet is locked Rust answers nothing
+ * the app asks but its session, so once it opens the wallet and the contacts
+ * read again.
  */
 
 import React, { useCallback, useRef, useState } from 'react';
@@ -13,6 +15,8 @@ import StateboyComboInput, { type ComboButton } from './StateboyComboInput';
 import { applySessionSnapshot, tryUnlockViaRouter, type UnlockKey } from '../../dsm/WebViewBridge';
 import { useNativeSessionStore } from '../../runtime/nativeSessionStore';
 import type { NativeSessionReport } from '../../runtime/nativeSessionTypes';
+import { walletStore } from '../../stores/walletStore';
+import { contactsStore } from '../../stores/contactsStore';
 import { Notice } from '../common/ScreenFrame';
 import './LockScreen.css';
 
@@ -63,7 +67,11 @@ export default function LockScreen() {
       } else {
         // Rust has opened the session; the wallet shows once the POW has played.
         setOpened(after);
-        setTimeout(() => applySessionSnapshot(after), POW_MS);
+        setTimeout(() => {
+          applySessionSnapshot(after);
+          walletStore.initialize();
+          contactsStore.refreshContacts();
+        }, POW_MS);
       }
     } catch (e) {
       setAnswer({ kind: 'error', text: messageOf(e) });

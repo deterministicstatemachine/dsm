@@ -478,7 +478,37 @@ fn restore_identity_context_core(
     initialize_identity_context_core(context.device_id.to_vec(), context.genesis_hash.to_vec())
 }
 
+/// What a locked wallet runs at the ingress besides its session's own routes
+/// (`session.*`: the snapshot, opening and closing the lock): the receiving
+/// loop the host keeps going in the background, so value still arrives while
+/// the wallet is locked.
+const RUNS_WHILE_LOCKED: [&str; 2] = ["inbox.resume", "inbox.startPoller"];
+
+/// Refuse what the app asks while the session is locked (S-LOCK): every
+/// route and envelope but the session's own and the receiving loop. The
+/// host's hardware facts are not a request of the wallet.
+fn refuse_while_locked(request: &IngressRequest) -> Result<(), pb::Error> {
+    let asked = match &request.operation {
+        Some(ingress_request::Operation::RouterQuery(op)) => op.method.as_str(),
+        Some(ingress_request::Operation::RouterInvoke(op)) => op.method.as_str(),
+        Some(ingress_request::Operation::Envelope(..)) => "an envelope",
+        Some(ingress_request::Operation::HardwareFacts(..))
+        | Some(ingress_request::Operation::DrainEvents(..))
+        | None => return Ok(()),
+    };
+    if asked.starts_with("session.") || RUNS_WHILE_LOCKED.contains(&asked) {
+        return Ok(());
+    }
+    crate::sdk::session_manager::refuse_while_locked(asked)
+        .map_err(|e| ingress_error(ERROR_CODE_PROCESSING_FAILED, e))
+}
+
 pub fn dispatch_ingress(request: IngressRequest) -> IngressResponse {
+    if let Err(locked) = refuse_while_locked(&request) {
+        return IngressResponse {
+            result: Some(ingress_response::Result::Error(locked)),
+        };
+    }
     let result: Result<Vec<u8>, pb::Error> = match request.operation {
         Some(ingress_request::Operation::RouterQuery(op)) => router_query_core(op.method, op.args),
         Some(ingress_request::Operation::RouterInvoke(op)) => {
@@ -1026,6 +1056,112 @@ mod tests {
         expect_ok_bytes(pref("prefs.get", "lock_prompt_dismissed", ""));
     }
 
+    /// While the session is locked the ingress runs nothing the app asks but
+    /// the session's own routes: no read, no write, no envelope. Rust opens it
+    /// only for its PIN, and then the same requests run (S-LOCK).
+    #[test]
+    #[serial]
+    fn a_locked_wallet_answers_nothing_but_its_session() {
+        economic_fixtures::use_test_storage_dir();
+        crate::sdk::app_state::AppState::reset_for_testing();
+        device_with_router(0x4B);
+        *crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .expect("the session manager") = crate::sdk::session_manager::SessionManager::default();
+        let op = |method: &str, body: Vec<u8>| pb::RouterInvokeOp {
+            method: method.to_string(),
+            args: pb::ArgPack {
+                codec: pb::Codec::Proto as i32,
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        };
+        let invoke = |method: &str, body: Vec<u8>| IngressRequest {
+            operation: Some(ingress_request::Operation::RouterInvoke(op(method, body))),
+        };
+        let query = |method: &str| IngressRequest {
+            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                method: method.to_string(),
+                args: Vec::new(),
+            })),
+        };
+        let configure = |method: &str, secret: &str| {
+            invoke(
+                "session.configure_lock",
+                pb::SessionConfigureLockRequest {
+                    method: method.to_string(),
+                    secret: secret.to_string(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+        };
+        let forget = || {
+            invoke(
+                "token.forget",
+                pb::TokenForgetRequest {
+                    token_id: "NONE".to_string(),
+                }
+                .encode_to_vec(),
+            )
+        };
+        let asked = || {
+            [
+                query("balance.list"),
+                forget(),
+                IngressRequest {
+                    operation: Some(ingress_request::Operation::Envelope(pb::EnvelopeOp {
+                        envelope_bytes: vec![0x03, 0x0a, 0x00],
+                    })),
+                },
+            ]
+        };
+
+        expect_ok_bytes(dispatch_ingress(configure("pin", "2468")));
+        expect_ok_bytes(dispatch_ingress(invoke("session.lock", Vec::new())));
+        for request in asked() {
+            let refused = expect_error(dispatch_ingress(request));
+            assert!(
+                refused.message.contains("the wallet is locked"),
+                "{}",
+                refused.message
+            );
+        }
+        // The session's own routes answer: its snapshot, and a wrong PIN,
+        // counted, opens nothing.
+        expect_ok_bytes(dispatch_ingress(query("session.status")));
+        let unlock = |secret: &str| {
+            invoke(
+                "session.unlock",
+                pb::SessionUnlockRequest {
+                    key: Some(pb::session_unlock_request::Key::Secret(secret.to_string())),
+                }
+                .encode_to_vec(),
+            )
+        };
+        expect_ok_bytes(dispatch_ingress(unlock("0000")));
+        let still = expect_error(dispatch_ingress(query("balance.list")));
+        assert!(
+            still.message.contains("the wallet is locked"),
+            "{}",
+            still.message
+        );
+
+        expect_ok_bytes(dispatch_ingress(unlock("2468")));
+        expect_ok_bytes(dispatch_ingress(query("balance.list")));
+        // The write reaches its route, which answers for itself.
+        let reached = expect_error(dispatch_ingress(forget()));
+        assert!(
+            reached.message.contains("no token named NONE"),
+            "{}",
+            reached.message
+        );
+
+        // No lock is left behind for the tests that follow in this process.
+        expect_ok_bytes(dispatch_ingress(configure("none", "")));
+    }
+
     /// The record the frontend's lock screen tests answer `session.*` from:
     /// each try the lock screen sends, framed as the WebView frames it, and
     /// this ingress's answer. The committed record must equal the live
@@ -1171,6 +1307,34 @@ mod tests {
         let (locked, misses_left, phrase) = next();
         assert!(!locked && !phrase, "this wallet's phrase opens it");
         assert_eq!(misses_left, max, "and starts the tries again");
+
+        // Opened, the wallet answers what the app asks again: the contacts
+        // the lock screen has it read once it opens.
+        let contacts = IngressRequest {
+            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                method: "contacts.list".to_string(),
+                args: Vec::new(),
+            })),
+        }
+        .encode_to_vec();
+        let listed = dispatch_ingress_bytes(&contacts);
+        for part in [&contacts, &listed] {
+            let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+            record.extend_from_slice(&len.to_be_bytes());
+            record.extend_from_slice(part);
+        }
+        expect_ok_bytes(IngressResponse::decode(listed.as_slice()).expect("an IngressResponse"));
+
+        // No lock is left behind for the tests that follow in this process.
+        let off = dispatch_ingress_bytes(&invoke(
+            "session.configure_lock",
+            pb::SessionConfigureLockRequest {
+                method: "none".to_string(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ));
+        assert!(!lock_of(&off).0, "the lock is off");
 
         match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
             Some(_) => {

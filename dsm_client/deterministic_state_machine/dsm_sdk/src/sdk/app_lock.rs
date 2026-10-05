@@ -20,8 +20,10 @@ use subtle::ConstantTimeEq;
 use crate::sdk::app_state::AppState;
 
 /// The Argon2id hash (PHC string) of the enrolled PIN or pattern; empty when
-/// none is enrolled.
+/// none is enrolled. The lock is on exactly while one is.
 const CREDENTIAL_KEY: &str = "lock_credential";
+/// The method the enrolled PIN or pattern opens by.
+const METHOD_KEY: &str = "lock_method";
 /// The wrong tries since the last opening.
 const MISSES_KEY: &str = "lock_misses";
 
@@ -37,11 +39,10 @@ const COMBO_BUTTONS: [&str; 8] = ["up", "down", "left", "right", "a", "b", "star
 
 /// Every setting the lock keeps, here and in the session manager. No one but
 /// Rust reads or writes them.
-pub const OWNED_KEYS: [&str; 6] = [
+pub const OWNED_KEYS: [&str; 5] = [
     CREDENTIAL_KEY,
+    METHOD_KEY,
     MISSES_KEY,
-    "lock_enabled",
-    "lock_method",
     "lock_on_pause",
     "lock_locked",
 ];
@@ -133,6 +134,23 @@ pub fn enrolled() -> bool {
     credential().is_some()
 }
 
+/// The method of the enrolled PIN or pattern, or none when nothing is
+/// enrolled. An enrolled one with no method, or a method Rust does not know,
+/// is an error, never a method chosen in its place.
+pub fn enrolled_method() -> Result<Option<LockMethod>, DsmError> {
+    if !enrolled() {
+        return Ok(None);
+    }
+    match AppState::get_pref(METHOD_KEY).as_deref() {
+        None | Some("") => Err(DsmError::InvalidState(
+            "a PIN or pattern is enrolled with no method".to_string(),
+        )),
+        Some(stored) => LockMethod::parse(stored)
+            .map(Some)
+            .map_err(|e| DsmError::InvalidState(format!("the enrolled lock's method: {e}"))),
+    }
+}
+
 /// The wrong tries since the last opening. A stored count that is not a
 /// number is an error, never read as none.
 pub fn misses() -> Result<u32, DsmError> {
@@ -162,12 +180,14 @@ pub fn enroll(method: LockMethod, secret: &str) -> Result<(), DsmError> {
         .map_err(|e| DsmError::crypto(format!("lock hash: {e}"), None::<std::io::Error>))?
         .to_string();
     AppState::set_pref(CREDENTIAL_KEY, &hash)?;
+    AppState::set_pref(METHOD_KEY, method.name())?;
     set_misses(0)
 }
 
-/// Forget the enrolled PIN or pattern and the miss count.
+/// Forget the enrolled PIN or pattern, its method and the miss count.
 pub fn clear() -> Result<(), DsmError> {
     AppState::set_pref(CREDENTIAL_KEY, "")?;
+    AppState::set_pref(METHOD_KEY, "")?;
     set_misses(0)
 }
 
@@ -179,8 +199,8 @@ pub enum Tried {
     Wrong {
         left: u32,
     },
-    /// No PIN or pattern is checked: the tries are used up, or none is
-    /// enrolled. Only the recovery phrase opens the lock.
+    /// The tries are used up: no PIN or pattern is checked, and only the
+    /// recovery phrase opens the lock.
     PhraseRequired,
 }
 
@@ -192,7 +212,9 @@ pub fn try_secret(method: LockMethod, secret: &str) -> Result<Tried, DsmError> {
         return Ok(Tried::PhraseRequired);
     }
     let Some(stored) = credential() else {
-        return Ok(Tried::PhraseRequired);
+        return Err(DsmError::InvalidState(
+            "no PIN or pattern is enrolled to check".to_string(),
+        ));
     };
     let enrolled = PasswordHash::new(&stored).map_err(|e| {
         DsmError::InvalidState(format!("the lock's enrolled hash does not parse: {e}"))
