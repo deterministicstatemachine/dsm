@@ -15,7 +15,7 @@ use dsm::ccb::StorageSetMembers;
 use dsm::common::domain_tags::{TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR};
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::crypto::domain::TaggedHashDomain;
-use dsm::economic::peer_lineage::{peer_root_at, PeerEvidenceFetcher};
+use dsm::economic::peer_lineage::{peer_claim_at, peer_root_at, PeerEvidenceFetcher};
 use dsm::economic::provenance::{PeerLineageFailure, ReserveReleaseWin, ValidatedPeerTransition};
 use dsm::economic::register::{read_root_cell, RootCell};
 use dsm::route_chain::{CellEvidence, CellReading, ChainState, CompletionProof, RoutedCell};
@@ -513,11 +513,26 @@ impl SofiReads for LiveSofiReads<'_> {
         if self.own != Some((*genesis, *device_id)) {
             // Another trader's position: the claim frontier-relative
             // verification of its lineage accepted there (SoFi Amendment
-            // S15, MR-SOFI-0347), or the walk's failure in the class it gave
-            // it.
-            return self
-                .peer_walk(genesis, device_id, position)
-                .map(|transition| *transition.accepted_claim());
+            // S15, MR-SOFI-0347) — a SoFi position's by its resolution, since
+            // a setup made right after one names that claim — or the walk's
+            // failure in the class it gave it.
+            let members = as_ccb_members(self.set)
+                .map_err(|e| PeerLineageFailure::Incomplete(format!("the storage set: {e}")))?;
+            let conditional = PeerPositionResolver {
+                reads: self,
+                members: &members,
+                set_id: self.set.id(),
+                network_id: &self.network,
+            };
+            return peer_claim_at(
+                &self.peer_resolver(),
+                &self.network,
+                genesis,
+                device_id,
+                position,
+                &StoredFrontiers,
+                &conditional,
+            );
         }
         let admitted = economic_lineage::get_admitted_at(position)
             .map_err(|e| PeerLineageFailure::Incomplete(format!("admitted history: {e}")))?
