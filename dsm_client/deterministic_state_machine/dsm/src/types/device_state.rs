@@ -403,6 +403,8 @@ pub struct OfflineSpend {
 /// - `CreateToken`: the ERA fee debit, if any, then the release of the whole
 ///   genesis supply.
 /// - `SofiVaultCreate`: exactly the debits of its two funded legs.
+/// - `EscrowVaultCreate`: exactly the debit of the held amount of the terms'
+///   token (SoFi Amendment S21).
 /// - Every other operation: no balance deltas, and no `offline_spend`.
 fn validate_conservation(
     local_devid: &[u8; 32],
@@ -588,6 +590,38 @@ fn validate_conservation(
                 return Err(DsmError::invalid_operation(
                     "conservation: a vault creation must apply exactly the debits of its two \
                      funded legs",
+                ));
+            }
+            Ok(())
+        }
+
+        // An escrow vault's creation (SoFi Amendment S21) debits exactly the
+        // held amount, of the one token its terms name, and nothing else.
+        // Whether those terms are the ones the genesis state commits is the
+        // economic write set's check; this arm holds the deltas to them.
+        Operation::EscrowVaultCreate {
+            creation, terms, ..
+        } => {
+            let record = crate::sofi::wire::VaultCreation::decode(creation).map_err(|e| {
+                DsmError::invalid_operation(format!(
+                    "conservation: an escrow creation record that is not canonical moves \
+                     nothing: {e}"
+                ))
+            })?;
+            let terms = crate::sofi::wire::EscrowTerms::decode(terms).map_err(|e| {
+                DsmError::invalid_operation(format!(
+                    "conservation: escrow terms that are not canonical name no token: {e}"
+                ))
+            })?;
+            let expected = [BalanceDelta {
+                policy_commit: *terms.token(),
+                direction: BalanceDirection::Debit,
+                amount: record.amount_a,
+            }];
+            if deltas != expected.as_slice() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: an escrow vault creation must apply exactly the debit of its \
+                     stake",
                 ));
             }
             Ok(())
@@ -1164,6 +1198,7 @@ impl DeviceState {
             Operation::SofiSetup { .. }
                 | Operation::SofiVaultCreate { .. }
                 | Operation::SofiFulfill { .. }
+                | Operation::EscrowVaultCreate { .. }
         ) {
             crate::sofi::signature::verify_operation(&operation, &self.public_key)?;
         }
@@ -2017,6 +2052,64 @@ mod tests {
             .commitment(),
             signature: Vec::new(),
             authority_policy: None,
+        }
+    }
+
+    /// An escrow vault's creation (SoFi Amendment S21) moves exactly its
+    /// stake out of the owner's balance: the record's amount, of the one
+    /// token its terms name. Anything more, less, or of another asset is
+    /// refused.
+    #[test]
+    fn an_escrow_creation_debits_exactly_its_stake() {
+        let me = devid(0xAA);
+        let held = pc(0x41);
+        let referee = crate::sofi::wire::EscrowSigner::new(
+            crate::ccb::sigalg::SPHINCS_PLUS_SPX256F,
+            &[0x5A; 64],
+        )
+        .expect("a declared key");
+        let terms = crate::sofi::wire::EscrowTerms::new(
+            held,
+            [0x59; 32],
+            vec![crate::sofi::wire::EscrowBranch::new(
+                crate::sofi::wire::EscrowOutcome::new(b"void", vec![referee]).expect("outcome"),
+                [0x01; 32],
+                me,
+            )],
+        )
+        .expect("terms");
+        let creation = crate::sofi::wire::VaultCreation {
+            vault_id: [0x51; 32],
+            genesis_root: [0x52; 32],
+            amount_a: 700,
+            amount_b: 0,
+        };
+        let op = Operation::EscrowVaultCreate {
+            genesis_preimage: Vec::new(),
+            creation: creation.encode(),
+            terms: terms.encode(),
+            signature: Vec::new(),
+        };
+        let debit = |amount: u64, policy_commit: [u8; 32]| BalanceDelta {
+            policy_commit,
+            direction: BalanceDirection::Debit,
+            amount,
+        };
+        assert_eq!(
+            validate_conservation(&me, &op, &[debit(700, held)], None).map_err(|e| e.to_string()),
+            Ok(())
+        );
+        for (why, deltas) in [
+            ("no deltas", Vec::new()),
+            ("an amount changed", vec![debit(699, held)]),
+            ("another asset", vec![debit(700, pc(0x43))]),
+            ("a second debit", vec![debit(700, held), debit(1, pc(0x43))]),
+        ] {
+            let refused = validate_conservation(&me, &op, &deltas, None).map_err(|e| e.to_string());
+            assert!(
+                matches!(&refused, Err(why) if why.contains("exactly the debit of its stake")),
+                "{why}: an escrow creation applies exactly its stake's debit, got {refused:?}"
+            );
         }
     }
 

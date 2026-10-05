@@ -10,6 +10,7 @@ use crate::crypto::domain::TaggedHashDomain;
 mod addressing;
 mod connect;
 mod economic;
+mod escrow;
 mod protocol;
 mod sofi;
 mod testing;
@@ -18,6 +19,7 @@ mod token_ops;
 pub use addressing::*;
 pub use connect::*;
 pub use economic::*;
+pub use escrow::*;
 pub use protocol::*;
 pub use sofi::*;
 pub use testing::*;
@@ -28,6 +30,12 @@ pub use token_ops::*;
 #[cfg(test)]
 pub(super) fn sofi_tags() -> &'static [TaggedHashDomain<'static>] {
     sofi::SOFI_TAGS
+}
+
+/// The escrow-vault tags (SoFi Amendment S21), collected the same way.
+#[cfg(test)]
+pub(super) fn escrow_tags() -> &'static [TaggedHashDomain<'static>] {
+    escrow::ESCROW_TAGS
 }
 
 #[cfg(test)]

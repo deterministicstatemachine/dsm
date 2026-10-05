@@ -2595,6 +2595,11 @@ impl AppRouter for AppRouterImpl {
             // SoFi (SoFi §27): the only way the app reaches SoFi.
             "sofi.createVault" | "sofi.findRoute" | "sofi.trade" | "sofi.route" | "sofi.close"
             | "sofi.relay" | "sofi.resolve" | "sofi.vaults" => self.handle_sofi_invoke(i).await,
+            // Escrow vaults (SoFi §19.9, Amendment S21).
+            "escrow.party" | "escrow.create" | "escrow.sign" | "escrow.adjudicate"
+            | "escrow.verdict" | "escrow.release" | "escrow.locked" | "escrow.vaults" => {
+                self.handle_escrow_invoke(i).await
+            }
             // BLE
             // Bilateral reconcile
             // Faucet
