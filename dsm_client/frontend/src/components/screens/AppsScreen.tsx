@@ -130,7 +130,7 @@ export default function AppsScreen(): React.JSX.Element {
   const refresh = useCallback(async () => {
     try {
       const [listed, held] = await Promise.all([connect.list(), connect.pending()]);
-      setSessions(listed);
+      setSessions(listed.filter(session => session.connected));
       setWaiting(held);
     } catch (e: unknown) {
       setStatus({ kind: 'error', text: `Reading connected apps failed: ${messageOf(e)}` });
@@ -231,6 +231,7 @@ export default function AppsScreen(): React.JSX.Element {
   const onDisconnect = (s: connect.Session) =>
     run('Disconnecting', async () => {
       await connect.disconnect(s.sessionId);
+      setSessions(current => current.filter(session => encodeBase32Crockford(session.sessionId) !== encodeBase32Crockford(s.sessionId)));
       return `${s.displayName} is disconnected; it can ask for nothing more.`;
     });
 
