@@ -380,7 +380,7 @@ async fn the_winner_takes_both_stakes_once() {
     let set = canonical_set(NETWORK).expect("the pinned set");
     match exercise_release(&p.b.router().core_sdk, &set, &m.a_vault, b"a-wins".to_vec()).await {
         Err(e) => assert!(e.to_string().contains("NotTheBranchRecipient"), "{e}"),
-        Ok(outcome) => panic!("B's release of A's branch was taken: {outcome:?}"),
+        Ok(..) => panic!("B's release of A's branch was taken"),
     }
     assert_eq!(pending_position(&p.b), None);
     assert_eq!(balance(&p.b, &m.era), whole_era(100) - m.stake);
