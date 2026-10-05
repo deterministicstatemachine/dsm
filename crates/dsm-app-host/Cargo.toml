@@ -1,0 +1,36 @@
+[package]
+name = "dsm-app-host"
+version = "0.1.0-beta.3"
+edition = "2021"
+description = "An application's own account on DSM: the DSM Connect relay a wallet reaches, and a local protobuf ingress for the Web2 application (DSM Amendment A11)"
+repository = "https://github.com/deterministicstatemachine/dsm"
+license = "MIT OR Apache-2.0"
+authors = ["DSM Development Team"]
+publish = false
+
+[[bin]]
+name = "dsm-app-host"
+path = "src/main.rs"
+
+[dependencies]
+dsm = { version = "0.1.0-beta.3", path = "../../dsm_client/deterministic_state_machine/dsm", default-features = false }
+dsm_sdk = { version = "0.1.0-beta.3", path = "../../dsm_client/deterministic_state_machine/dsm_sdk" }
+prost = "0.14"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time", "sync", "net"] }
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rcgen = "0.14.8"
+log = "0.4.32"
+env_logger = "0.11.10"
+
+[dev-dependencies]
+# The real connection, in tests (tests/real_connection.rs): this binary run as
+# two processes against the storage node's own code on Postgres, the harness
+# the SDK's suites run (dsm_sdk/src/test_support/nodes.rs, shared by #[path]).
+dsm_storage_node = { path = "../../dsm_storage_node" }
+futures = { version = "0.3.30", default-features = false, features = ["std"] }
+rustls = { version = "0.23.37", features = ["ring"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
+serial_test = "3.5.0"
+# The test starts, kills and restarts the host as processes.
+tokio = { version = "1.52.3", features = ["process"] }

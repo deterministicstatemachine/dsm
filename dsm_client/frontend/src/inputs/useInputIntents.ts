@@ -63,6 +63,9 @@ export function useInputIntents({
       case 'TRADE':
         navigate('sofi');
         break;
+      case 'APPS':
+        navigate('apps');
+        break;
       case 'CONTACTS':
         navigate('contacts');
         break;
