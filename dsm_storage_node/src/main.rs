@@ -222,7 +222,7 @@ async fn async_main() -> Result<()> {
     // Initialize database
     info!("Initializing database connection pool...");
     let db_pool = Arc::new(
-        db::create_pool(&server_config.database_url)
+        db::create_pool(&server_config.database_url, db::POOL_MAX_SIZE)
             .context("failed to create database connection pool")?,
     );
 

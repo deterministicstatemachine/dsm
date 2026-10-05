@@ -57,10 +57,12 @@ export const { createGenesisViaRouter, generateMnemonic } = genesis;
 
 export const { getPreference, setPreference } = preferences;
 export const {
+  applySessionSnapshot,
   configureLockViaRouter,
   lockSessionViaRouter,
-  unlockSessionViaRouter,
+  tryUnlockViaRouter,
 } = sessionLock;
+export type { UnlockKey } from "./sessionLock";
 
 export const {
   getAllBalancesStrictBridge,

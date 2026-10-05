@@ -22,8 +22,8 @@ use dsm::sofi::resolve::{AcceptedGeneses, VaultGenesis, Verifier};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{retire_vault_post, VaultTerms};
 use dsm::sofi::wire::{
-    next_position, EscrowBranch, EscrowSigner, EscrowTerms, EscrowVerdict, VaultGenesisPreimage,
-    VaultStateLeaf, VerdictSignature, VAULT_STATUS_ACTIVE,
+    next_position, EscrowBranch, EscrowOutcome, EscrowSigner, EscrowTerms, EscrowVerdict,
+    VaultGenesisPreimage, VaultStateLeaf, VerdictSignature, VAULT_STATUS_ACTIVE,
 };
 use dsm::types::device_state::{BalanceDelta, BalanceDirection};
 use dsm::types::error::DsmError;
@@ -68,6 +68,89 @@ pub fn party(core: &CoreSDK) -> Result<EscrowParty, DsmError> {
         device_id,
         signer,
     })
+}
+
+/// The escrow party `device_id` names: this device, or a contact this device
+/// holds, with the genesis and signing key it holds for that contact. A
+/// contact's signing key is its device key, the same algorithm as this
+/// device's. Any other device is refused: a party the wallet holds nothing
+/// for is named by its keys, through `escrow.create`.
+pub fn party_named(core: &CoreSDK, device_id: &D32) -> Result<EscrowParty, DsmError> {
+    let me = party(core)?;
+    if &me.device_id == device_id {
+        return Ok(me);
+    }
+    let contact = crate::storage::client_db::get_contact_by_device_id(device_id)
+        .map_err(|e| storage("contact", e))?
+        .ok_or_else(|| {
+            refuse(format!(
+                "{} is neither this device nor a contact",
+                dsm::utils::text_id::encode_base32_crockford(device_id)
+            ))
+        })?;
+    let genesis: D32 = contact
+        .genesis_hash
+        .as_slice()
+        .try_into()
+        .map_err(|e| storage("contact", format!("{}'s genesis: {e}", contact.alias)))?;
+    let signer = EscrowSigner::new(SIGNATURE_ALG, &contact.public_key).map_err(refuse)?;
+    Ok(EscrowParty {
+        genesis,
+        device_id: *device_id,
+        signer,
+    })
+}
+
+/// One outcome of `escrow.lock`: its label, the devices whose signatures
+/// decide it, and the device it pays, each this device or a contact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockOutcome {
+    pub outcome: Vec<u8>,
+    pub decided_by: Vec<D32>,
+    pub pays: D32,
+}
+
+/// The branches `escrow.lock`'s outcomes name, each party resolved by
+/// [`party_named`], each signer set in its canonical order and the branches
+/// ascending by outcome: the table has one encoding, and the order the user
+/// listed things in carries no meaning. A label listed twice, or a device
+/// listed twice for one outcome, is refused here with what it was; Core
+/// refuses both again when it builds the terms.
+pub fn branches_named(
+    core: &CoreSDK,
+    outcomes: &[LockOutcome],
+) -> Result<Vec<EscrowBranch>, DsmError> {
+    let mut branches = Vec::with_capacity(outcomes.len());
+    for named in outcomes {
+        let label = String::from_utf8_lossy(&named.outcome).into_owned();
+        let mut decided_by = named.decided_by.clone();
+        decided_by.sort_unstable();
+        if decided_by.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(refuse(format!(
+                "{label:?} lists one device twice among its signers"
+            )));
+        }
+        let mut signers = decided_by
+            .iter()
+            .map(|device_id| party_named(core, device_id).map(|p| p.signer))
+            .collect::<Result<Vec<_>, _>>()?;
+        signers.sort_by_key(EscrowSigner::canonical);
+        let decided = EscrowOutcome::new(&named.outcome, signers)
+            .map_err(|e| refuse(format!("{label:?}: {e:?}")))?;
+        let paid = party_named(core, &named.pays)?;
+        branches.push(EscrowBranch::new(decided, paid.genesis, paid.device_id));
+    }
+    branches.sort_by(|a, b| a.outcome().cmp(b.outcome()));
+    if let Some(pair) = branches
+        .windows(2)
+        .find(|pair| pair[0].outcome() == pair[1].outcome())
+    {
+        return Err(refuse(format!(
+            "two outcomes are labelled {:?}",
+            String::from_utf8_lossy(pair[0].outcome())
+        )));
+    }
+    Ok(branches)
 }
 
 // ── escrow.create ───────────────────────────────────────────────────────────
@@ -573,6 +656,8 @@ pub struct EscrowVaultView {
     pub amount: u64,
     pub generation: u64,
     pub status: u16,
+    /// The terms' branches, ascending by outcome.
+    pub branches: Vec<EscrowBranch>,
 }
 
 async fn view_of(
@@ -594,6 +679,7 @@ async fn view_of(
         amount: vault.state.reserve_a,
         generation: vault.state.generation,
         status: vault.state.status,
+        branches: terms.branches().to_vec(),
     })
 }
 

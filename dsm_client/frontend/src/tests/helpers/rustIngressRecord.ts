@@ -46,19 +46,26 @@ function carriedBy(method: string, payload: Uint8Array): string {
 
 /**
  * Installs the bridge, answering the native ingress from the record at `path`
- * and nothing else from Rust, and returns the log of what reached it.
+ * and nothing else from Rust, and returns the log of what reached it. A
+ * request Rust answered more than once (a list read again after a write) is
+ * answered as Rust answered it, in order: each recorded answer once, then the
+ * last of them again.
  */
 export function answerFromRustRecord(path: string): Arrival[] {
   const record = readRustRecord(path);
+  const given = new Set<number>();
   const arrivals: Arrival[] = [];
   window.DsmBridge = {
     sendMessageBin: async (bytes: Uint8Array): Promise<Uint8Array> => {
       const call = pb.BridgeRpcRequest.fromBinary(bytes);
       const payload = call.payload.case === 'bytes' ? call.payload.value.data : new Uint8Array(0);
       arrivals.push({ method: call.method, carried: carriedBy(call.method, payload) });
-      const answer = call.method === 'nativeBoundaryIngress'
-        ? record.find((recorded) => sameBytes(recorded.request, payload))
-        : undefined;
+      const asked = call.method === 'nativeBoundaryIngress'
+        ? record.flatMap((recorded, at) => (sameBytes(recorded.request, payload) ? [at] : []))
+        : [];
+      const at = asked.find((i) => !given.has(i)) ?? asked[asked.length - 1];
+      const answer = at === undefined ? undefined : record[at];
+      if (at !== undefined) given.add(at);
       if (!answer) {
         const message = `Rust has no recorded answer to this ${call.method} request`;
         return new pb.BridgeRpcResponse({ result: { case: 'error', value: { errorCode: 1, message } } }).toBinary();

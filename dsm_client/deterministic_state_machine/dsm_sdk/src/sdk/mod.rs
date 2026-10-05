@@ -34,6 +34,7 @@ pub use sdk_context::SdkContext;
 // Core SDK modules - fundamental building blocks
 
 pub mod anchor_enrollment_store;
+pub mod app_lock; // The app lock: Rust enrolls and checks the PIN or pattern
 pub mod app_state; // Shared application state management
 pub mod apply_outcome; // §16.6 tri-state full-state apply outcome
 pub mod b0x_sdk;

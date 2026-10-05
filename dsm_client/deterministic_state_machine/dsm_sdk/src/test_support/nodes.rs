@@ -32,6 +32,11 @@
 //! Every node set uses the same database names, recreated at start, so node
 //! sets run one at a time; the SDK suites run serially.
 //!
+//! A deployed node has a Postgres server of its own; these nodes share one.
+//! Each node's pool holds at most its share of the connections that server
+//! admits ([`pool_share`]), so no node is refused a connection the deployed
+//! node would have been granted.
+//!
 //! This file names no SDK path, so the SDK's unit tests (`test_support`) and
 //! its integration tests (by `#[path]`) run the same harness. Pointing the SDK
 //! at the nodes is `economic_fixtures::point_sdk_at`.
@@ -108,10 +113,11 @@ fn node_database(index: usize) -> String {
 }
 
 /// An empty database named `database` on the server, dropped (with any
-/// connection an earlier node set left) and created.
-async fn fresh_database(database: &str) -> db::DBPool {
+/// connection an earlier node set left) and created, and a pool of at most
+/// `connections` on it.
+async fn fresh_database(database: &str, connections: usize) -> db::DBPool {
     let server = server_url();
-    let admin = match db::create_pool(&server) {
+    let admin = match db::create_pool(&server, 1) {
         Ok(pool) => pool,
         Err(e) => panic!("admin pool: {e}"),
     };
@@ -131,10 +137,61 @@ async fn fresh_database(database: &str) -> db::DBPool {
     {
         panic!("create the node database: {e}");
     }
-    match db::create_pool(&with_database(&server, database)) {
+    match db::create_pool(&with_database(&server, database), connections) {
         Ok(pool) => pool,
         Err(e) => panic!("node pool: {e}"),
     }
+}
+
+/// The connections each node's pool may hold, when the nodes run on the
+/// databases `databases` names.
+///
+/// A deployed node runs on a Postgres server of its own (the sibling
+/// container in `dsm_storage_node/deploy/docker-compose.node.yml`), which
+/// grants every connection its pool asks for: `db::POOL_MAX_SIZE`. Here every
+/// node of a set runs on the one server `DSM_TEST_DATABASE_URL` names, and
+/// five pools of `POOL_MAX_SIZE` ask it for more than it admits — CI's
+/// Postgres admits 100. Past its limit the server refuses the connection, the
+/// node answers the request it was serving with a 500, and a reader then holds
+/// less evidence than the cell does: a claim final at every seat reads as not
+/// final yet. Each node takes an equal share of what the server admits beyond
+/// the connections other clients hold, and never more than a deployed node's
+/// pool.
+async fn pool_share(databases: &[String]) -> usize {
+    let admin = match db::create_pool(&server_url(), 1) {
+        Ok(pool) => pool,
+        Err(e) => panic!("admin pool: {e}"),
+    };
+    let client = match admin.get().await {
+        Ok(client) => client,
+        Err(e) => panic!("admin connection: {e}"),
+    };
+    let row = match client
+        .query_one(
+            "SELECT current_setting('max_connections')::bigint
+                  - (SELECT COALESCE(SUM(setting::bigint), 0)::bigint FROM pg_settings
+                      WHERE name IN ('superuser_reserved_connections', 'reserved_connections'))
+                  - (SELECT count(*) FROM pg_stat_activity
+                      WHERE backend_type = 'client backend'
+                        AND NOT datname::text = ANY($1::text[]))",
+            &[&databases],
+        )
+        .await
+    {
+        Ok(row) => row,
+        Err(e) => panic!("the connections the server admits: {e}"),
+    };
+    let admits: i64 = row.get(0);
+    let share = match usize::try_from(admits) {
+        Ok(admits) => admits / databases.len(),
+        Err(e) => panic!("the server admits {admits} more connections: {e}"),
+    };
+    assert!(
+        share > 0,
+        "the server admits {admits} more connections: not one for each of {} nodes",
+        databases.len()
+    );
+    share.min(db::POOL_MAX_SIZE)
 }
 
 /// Put the member's pinned incarnation in the node's register before the node
@@ -294,6 +351,11 @@ pub struct Spooled {
 }
 
 impl Node {
+    /// The pool the node draws its database connections from.
+    pub fn pool(&self) -> &db::DBPool {
+        &self.state.db_pool
+    }
+
     /// Every request this node was asked since it started or was last told
     /// to forget them, in arrival order, as `METHOD /path`.
     pub fn requests(&self) -> Vec<String> {
@@ -439,11 +501,14 @@ impl NodeSet {
             .collect();
 
         // Phase 1: every node's database, holding its member's incarnation,
-        // and its address. The set names every member's endpoint, so every
-        // address must be bound before any node is configured.
+        // its pool within its share of the server, and its address. The set
+        // names every member's endpoint, so every address must be bound
+        // before any node is configured.
+        let databases: Vec<String> = (0..members.len()).map(node_database).collect();
+        let share = pool_share(&databases).await;
         let mut prepared = Vec::with_capacity(members.len());
-        for (index, (member_id, pinned_incarnation)) in members.iter().enumerate() {
-            let pool = fresh_database(&node_database(index)).await;
+        for ((member_id, pinned_incarnation), database) in members.iter().zip(&databases) {
+            let pool = fresh_database(database, share).await;
             if let Err(e) = db::init_db(&pool).await {
                 panic!("init node db: {e}");
             }
