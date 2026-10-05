@@ -414,6 +414,34 @@ impl LegFacts {
     }
 }
 
+/// What a Release reads at its verdict cell (SoFi Amendment S21); every other
+/// operation reads none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictFact {
+    /// Not a Release: no verdict bears on the operation.
+    NotARelease,
+    /// A Release, and where it stands at its verdict cell.
+    Release(super::escrow::VerdictStanding),
+}
+
+impl VerdictFact {
+    /// Whether the verdict lets a consumption count: an operation that is no
+    /// release reads none, and a release counts only once the cell's verdict
+    /// is final on its outcome (`ConsumedRoute`, SoFi §19.9).
+    fn permits_consumption(self) -> bool {
+        matches!(
+            self,
+            Self::NotARelease | Self::Release(super::escrow::VerdictStanding::Final)
+        )
+    }
+
+    /// `VerdictHeld(K, o′)` for another outcome: the release can never
+    /// realize (`RouteImpossible` arm (v)).
+    fn lost(self) -> bool {
+        self == Self::Release(super::escrow::VerdictStanding::Lost)
+    }
+}
+
 /// Everything a verifier needs about one trader position `q` and the
 /// fulfillment `F` that claims it.
 ///
@@ -450,6 +478,8 @@ pub struct RouteFacts<'legs> {
     pub(crate) validation: Validation,
     /// `StorageResolved(q)`: registration and every successor key.
     pub(crate) storage_resolved: bool,
+    /// A Release's standing at its verdict cell (SoFi Amendment S21).
+    pub(crate) verdict: VerdictFact,
     /// One entry per leg of `P`, in P's leg order. A single-vault trade is the
     /// one-leg case.
     pub(crate) legs: &'legs [LegFacts],
@@ -465,6 +495,9 @@ pub struct GroundRouteFacts<'legs> {
     pub(crate) pair: PairStanding,
     pub(crate) parent: ParentPosition,
     pub(crate) parent_pre_root: [u8; 32],
+    /// A Release's standing at its verdict cell: the cell's raw read and the
+    /// verdict's own bytes, no validation evidence (SoFi §19.9, arm (v)).
+    pub(crate) verdict: VerdictFact,
     pub(crate) legs: &'legs [LegFacts],
 }
 
@@ -531,7 +564,8 @@ pub fn trader_parent_impossible(parent: &ParentPosition, parent_pre_root: &[u8; 
 /// `ConsumedRoute(F, E)` (Section 23.2): registered, conforming, statically
 /// valid, built on the branch the parent actually took, and every required
 /// leg finally consumed its exact canonical parent on this `E` at a live
-/// attempt. A single-vault trade is the one-leg case.
+/// attempt. A single-vault trade is the one-leg case. A Release also needs
+/// its verdict cell final on its outcome (SoFi Amendment S21).
 ///
 /// This is where parent canonicality lives. `RouteValidation` never looks at
 /// it, so a static verdict cannot depend on who won a race. And
@@ -541,6 +575,7 @@ pub fn consumed_route(facts: &RouteFacts<'_>) -> bool {
     facts.pair == PairStanding::Registered
         && facts.conformance == Validation::Valid
         && facts.validation == Validation::Valid
+        && facts.verdict.permits_consumption()
         && trader_parent_compatible(&facts.parent, &facts.parent_pre_root)
         && !facts.legs.is_empty()
         && facts.legs.iter().all(|l| {
@@ -566,6 +601,9 @@ pub enum ImpossibleArm {
     /// (iv) `TraderParentImpossible(P)`: the trader parent is terminal on the
     /// other branch, or on none.
     TraderParentImpossible,
+    /// (v) a Release whose verdict cell holds a verdict on another outcome
+    /// (SoFi Amendment S21). Permanent: the cell's leader keeps one value.
+    VerdictOnAnotherOutcome,
 }
 
 /// The arm of `RouteImpossible(P, E)` that holds, in arm order.
@@ -593,6 +631,9 @@ pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
     if trader_parent_impossible(&facts.parent, &facts.parent_pre_root) {
         return Some(ImpossibleArm::TraderParentImpossible);
     }
+    if facts.verdict.lost() {
+        return Some(ImpossibleArm::VerdictOnAnotherOutcome);
+    }
     None
 }
 
@@ -619,7 +660,7 @@ pub enum Incomplete {
 /// | 2 | Invalid | `FulfillmentConformance(F) = Invalid` |
 /// | 3 | Realized | `ConsumedRoute(F, E)` |
 /// | 4 | Invalid | `RouteValidation = Invalid` |
-/// | 5 | Void | storage-resolved, and a reserved key or a parent is lost |
+/// | 5 | Void | storage-resolved, and a reserved key, a parent, or a release's verdict is lost |
 /// | 6 | not yet (`Incomplete`) | otherwise: a required storage fact is not final |
 ///
 /// The predecessor's resolution is part of the complete facts: the caller
@@ -656,8 +697,11 @@ pub(crate) fn resolve_position(facts: &RouteFacts<'_>) -> Result<Resolution, Inc
     if facts.validation == Validation::Invalid {
         return Ok(Resolution::Invalid);
     }
-    // 5 — valid, storage-resolved, and lost.
-    if facts.storage_resolved && (facts.a_reserved_key_is_lost() || facts.a_parent_is_lost()) {
+    // 5 — valid, storage-resolved, and lost: a key, a parent, or, for a
+    // release, the verdict (SoFi Amendment S21).
+    if facts.storage_resolved
+        && (facts.a_reserved_key_is_lost() || facts.a_parent_is_lost() || facts.verdict.lost())
+    {
         return Ok(Resolution::Void);
     }
     // 6 — the facts are not complete yet.
@@ -823,9 +867,10 @@ pub fn skip_in_hand(
 }
 
 /// The key of a final cell classified on facts that need no validation
-/// evidence (SoFi §23.5 and MR-SOFI-0241; Amendment S14): a named parent
+/// evidence (SoFi §23.5 and MR-SOFI-0241; Amendments S14, S21): a named parent
 /// consumed by another operation (arm (iii)), a trader parent that can never
-/// be compatible (arm (iv)), or a fulfillment whose position went to another
+/// be compatible (arm (iv)), a release whose verdict cell holds another
+/// outcome (arm (v)), or a fulfillment whose position went to another
 /// claim. The verifier asks this BEFORE it acquires any validation evidence,
 /// so a cell that is dead on these facts is never held live by evidence that
 /// is not in hand. `Unresolved` here decides nothing: the complete facts may
@@ -841,6 +886,8 @@ pub fn skip_without_evidence(
         SkipReason::RejectedFinalRoute(ImpossibleArm::ParentConsumedElsewhere)
     } else if trader_parent_impossible(&ground.parent, &ground.parent_pre_root) {
         SkipReason::RejectedFinalRoute(ImpossibleArm::TraderParentImpossible)
+    } else if ground.verdict.lost() {
+        SkipReason::RejectedFinalRoute(ImpossibleArm::VerdictOnAnotherOutcome)
     } else if ground.pair.is_lost() {
         SkipReason::RejectedFinalInadmissible
     } else {
@@ -1363,6 +1410,7 @@ mod tests {
             parent_pre_root: PRE,
             validation: Valid,
             storage_resolved: true,
+            verdict: VerdictFact::NotARelease,
             legs,
         }
     }
@@ -1893,6 +1941,7 @@ mod tests {
             pair: facts.pair,
             parent: facts.parent,
             parent_pre_root: facts.parent_pre_root,
+            verdict: facts.verdict,
             legs: facts.legs,
         }
     }
@@ -2129,6 +2178,7 @@ mod tests {
                                 parent_pre_root: PRE,
                                 validation,
                                 storage_resolved,
+                                verdict: VerdictFact::NotARelease,
                                 legs: &legs,
                             };
                             let before = resolve_position(&facts);
@@ -2294,6 +2344,7 @@ mod tests {
                     parent_pre_root: PRE,
                     validation,
                     storage_resolved: true,
+                    verdict: VerdictFact::NotARelease,
                     legs,
                 },
                 leg,
@@ -2346,6 +2397,7 @@ mod tests {
                     parent_pre_root: PRE,
                     validation: Invalid,
                     storage_resolved: true,
+                    verdict: VerdictFact::NotARelease,
                     legs: &legs,
                 },
                 rejected,
@@ -2400,6 +2452,7 @@ mod tests {
                     parent_pre_root: PRE,
                     validation: Invalid,
                     storage_resolved: true,
+                    verdict: VerdictFact::NotARelease,
                     legs: &rejected_legs,
                 },
                 rejected,
@@ -2471,6 +2524,7 @@ mod tests {
                             parent_pre_root: PRE,
                             validation,
                             storage_resolved,
+                            verdict: VerdictFact::NotARelease,
                             legs,
                         });
                     }
@@ -2656,6 +2710,7 @@ mod tests {
                     parent_pre_root: PRE,
                     validation: Invalid,
                     storage_resolved: true,
+                    verdict: VerdictFact::NotARelease,
                     legs: &legs,
                 },
                 rejected,
@@ -2699,5 +2754,104 @@ mod tests {
             classify_attempt(&facts, &legs[1]).0,
             AttemptClass::Unresolved
         );
+    }
+
+    // ── a release reads its verdict cell (SoFi Amendment S21) ─────────────
+
+    fn release_facts<'l>(legs: &'l [LegFacts], standing: VerdictStanding) -> RouteFacts<'l> {
+        RouteFacts {
+            verdict: VerdictFact::Release(standing),
+            ..realized(legs)
+        }
+    }
+
+    use crate::sofi::escrow::VerdictStanding;
+
+    /// A release whose leg consumed its parent realizes only once its verdict
+    /// cell is final on its outcome; unsettled, it is no result yet; lost to
+    /// another outcome, it is Void and nothing moves.
+    #[test]
+    fn a_release_realizes_only_on_the_verdict_final_on_its_outcome() {
+        let legs = [good_leg()];
+        assert_eq!(
+            resolve_position(&release_facts(&legs, VerdictStanding::Final)),
+            Ok(Resolution::Realized)
+        );
+        assert_eq!(
+            resolve_position(&release_facts(&legs, VerdictStanding::Unsettled)),
+            Err(Incomplete::StorageNotFinal)
+        );
+        assert_eq!(
+            resolve_position(&release_facts(&legs, VerdictStanding::Lost)),
+            Ok(Resolution::Void)
+        );
+        // Another operation reads no verdict, so the arm never touches it.
+        assert_eq!(resolve_position(&realized(&legs)), Ok(Resolution::Realized));
+    }
+
+    /// Arm (v): the release can never realize once another outcome holds the
+    /// cell, and that is attributable; the key it holds is skipped, so the
+    /// vault's next attempt goes live for the branch that won.
+    #[test]
+    fn a_release_that_lost_the_verdict_frees_its_key() {
+        let legs = [good_leg()];
+        let lost = release_facts(&legs, VerdictStanding::Lost);
+        assert_eq!(
+            route_impossible(&lost),
+            Some(ImpossibleArm::VerdictOnAnotherOutcome)
+        );
+        assert_eq!(
+            classify_attempt(&lost, &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalRoute(
+                    ImpossibleArm::VerdictOnAnotherOutcome
+                ))
+            )
+        );
+        // Decided without validation evidence: the walk skips the key on the
+        // cell's read and the verdict's own bytes.
+        assert_eq!(
+            skip_without_evidence(&ground_of(&lost), &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalRoute(
+                    ImpossibleArm::VerdictOnAnotherOutcome
+                ))
+            )
+        );
+        // Unsettled holds the key; final on its outcome consumes the parent.
+        let unsettled = release_facts(&legs, VerdictStanding::Unsettled);
+        assert_eq!(route_impossible(&unsettled), None);
+        assert_eq!(
+            classify_attempt(&unsettled, &legs[0]),
+            (AttemptClass::Unresolved, None)
+        );
+        assert_eq!(
+            skip_without_evidence(&ground_of(&unsettled), &legs[0]),
+            (AttemptClass::Unresolved, None)
+        );
+        assert_eq!(
+            classify_attempt(&release_facts(&legs, VerdictStanding::Final), &legs[0]),
+            (AttemptClass::Consumed, None)
+        );
+    }
+
+    /// An invalid release is Invalid whatever its verdict: the verdict decides
+    /// between Realized and Void for a valid release only.
+    #[test]
+    fn an_invalid_release_is_invalid_whatever_the_verdict() {
+        let legs = [good_leg()];
+        for standing in [
+            VerdictStanding::Final,
+            VerdictStanding::Unsettled,
+            VerdictStanding::Lost,
+        ] {
+            let facts = RouteFacts {
+                validation: Invalid,
+                ..release_facts(&legs, standing)
+            };
+            assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
+        }
     }
 }

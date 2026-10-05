@@ -34,14 +34,15 @@ use super::conformance::{
     Validation,
 };
 use super::derive;
+use super::escrow::VerdictCellRead;
 use super::exercise::{AttemptCellRead, RecognizedExercise};
 use super::registration::{PairStanding, RegistrationRead};
 use super::resolution::{
     AttemptWalk, GroundRouteFacts, LegFacts, ParentPosition, ParentStatus, RefutedInHand,
-    RouteFacts, VaultChain,
+    RouteFacts, VaultChain, VerdictFact,
 };
 use super::validation::{route_invalid_in_hand, route_validation, vault_post_states, Evidence, Missing};
-use super::wire::{ParentClaimRef, SettlementPreimage};
+use super::wire::{ParentClaimRef, SettlementBody, SettlementPreimage};
 
 type D32 = [u8; 32];
 
@@ -115,6 +116,12 @@ pub enum NotEstablished {
     /// A leg's earlier keys were not all classified: past the walk budget or
     /// the chain depth, or a key among them is not resolved.
     AttemptLiveness { vault_id: D32, attempt: u64 },
+    /// A Release's verdict cell is not decided by its reads yet (SoFi
+    /// Amendment S21).
+    VerdictCell {
+        verdict_cell: D32,
+        missing: CellMissing,
+    },
     /// The reads handed over are not about this exercise: a registration of
     /// another position, a cell of another key, evidence of another
     /// operation. Not a network status — the caller mis-assembled them —
@@ -153,6 +160,9 @@ pub struct ExerciseReads<'a> {
     pub parent: Option<TraderAtParent>,
     /// One entry per leg of `P`, in P's leg order.
     pub legs: &'a [LegReads<'a>],
+    /// For a Release, its verdict cell as Core read it (SoFi Amendment S21);
+    /// `None` for every other operation.
+    pub verdict: Option<&'a VerdictCellRead>,
 }
 
 /// What this verifier established about the trader's lineage at `p`: the
@@ -224,6 +234,8 @@ pub struct GroundReads<'a> {
     pub registration: &'a RegistrationRead,
     pub parent: Option<TraderAtParent>,
     pub legs: &'a [LegReads<'a>],
+    /// For a Release, its verdict cell (SoFi Amendment S21).
+    pub verdict: Option<&'a VerdictCellRead>,
 }
 
 /// The facts of one exercise that stand without its validation evidence:
@@ -240,6 +252,8 @@ pub struct GroundFacts {
     pub(crate) pair: PairStanding,
     pub(crate) parent: ParentPosition,
     pub(crate) parent_pre_root: D32,
+    /// A Release's standing at its verdict cell (SoFi Amendment S21).
+    pub(crate) verdict: VerdictFact,
     /// One per leg of `P`, in P's leg order.
     pub(crate) legs: Vec<LegFacts>,
     /// The key each leg's facts are about: `(vault, parent root, attempt)`.
@@ -257,6 +271,7 @@ impl GroundFacts {
             pair: self.pair,
             parent: self.parent,
             parent_pre_root: self.parent_pre_root,
+            verdict: self.verdict,
             legs: &self.legs,
         }
     }
@@ -290,6 +305,8 @@ pub struct EstablishedFacts {
     pub(crate) parent_pre_root: D32,
     pub(crate) validation: Validation,
     pub(crate) storage_resolved: bool,
+    /// A Release's standing at its verdict cell (SoFi Amendment S21).
+    pub(crate) verdict: VerdictFact,
     /// One per leg of `P`, in P's leg order.
     pub(crate) legs: Vec<LegFacts>,
     /// The key each leg's facts are about: `(vault, parent root, attempt)`.
@@ -327,6 +344,7 @@ impl EstablishedFacts {
             parent_pre_root: self.parent_pre_root,
             validation: self.validation,
             storage_resolved: self.storage_resolved,
+            verdict: self.verdict,
             legs: &self.legs,
         }
     }
@@ -441,6 +459,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
         registration: reads.registration,
         parent: reads.parent,
         legs: reads.legs,
+        verdict: reads.verdict,
     })?;
     let e = ground.external_commitment;
 
@@ -500,6 +519,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
         parent_pre_root: ground.parent_pre_root,
         validation,
         storage_resolved,
+        verdict: ground.verdict,
         legs,
         keys: ground.keys,
         preimage: exercise.preimage().clone(),
@@ -635,11 +655,32 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
         });
         keys.push((leg.vault_id, leg.parent_root, attempt));
     }
+    // A Release stands on the verdict its cell holds (SoFi Amendment S21):
+    // the cell the release names, read by Core, and nothing else.
+    let verdict = match exercise.preimage().settlement() {
+        SettlementBody::Release {
+            verdict_cell,
+            outcome,
+            ..
+        } => {
+            let read = reads.verdict.ok_or(NotEstablished::NotThisExercise(
+                "a release is read with its verdict cell",
+            ))?;
+            if read.key() != verdict_cell {
+                return Err(NotEstablished::NotThisExercise(
+                    "the verdict cell read is not the one the release names",
+                ));
+            }
+            VerdictFact::Release(read.standing_for(outcome))
+        }
+        SettlementBody::Swap { .. } | SettlementBody::Close { .. } => VerdictFact::NotARelease,
+    };
     Ok(GroundFacts {
         external_commitment: e,
         pair,
         parent,
         parent_pre_root: *precommit.void_root(),
+        verdict,
         legs,
         keys,
     })
@@ -707,6 +748,7 @@ mod tests {
                 evidence: &self.evidence,
                 parent: self.parent,
                 legs,
+                verdict: None,
             })
         }
     }
@@ -1373,6 +1415,7 @@ mod tests {
                         parent_pre_root: root,
                         validation: Validation::Invalid,
                         storage_resolved: true,
+                        verdict: VerdictFact::NotARelease,
                         legs: &rejected_legs,
                     },
                     rejected,

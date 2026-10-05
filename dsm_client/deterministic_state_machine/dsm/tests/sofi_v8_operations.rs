@@ -34,6 +34,13 @@ fn sofi_operations() -> Vec<Operation> {
             precommit_id: vec![0x11; 32],
             signature: Vec::new(),
         },
+        // An escrow vault's creation (SoFi Amendment S21).
+        Operation::EscrowVaultCreate {
+            genesis_preimage: vec![0x5A, 0x00],
+            creation: vec![0x5B, 0x00],
+            terms: vec![0x00, 0x63, 0x00, 0x01],
+            signature: Vec::new(),
+        },
     ]
 }
 
@@ -88,8 +95,8 @@ fn sofi_operations_have_distinct_canonical_tags() {
         let bytes = op.to_bytes();
         let tag = bytes.first().copied().expect("a tagged encoding");
         assert!(
-            (34..=36).contains(&tag),
-            "{}: SoFi operations are tags 34-36, got {tag}",
+            matches!(tag, 34..=36 | 38),
+            "{}: SoFi operations are tags 34-36 and 38, got {tag}",
             op.get_operation_type()
         );
         for (name, other) in &seen {
@@ -102,7 +109,7 @@ fn sofi_operations_have_distinct_canonical_tags() {
         }
         seen.push((op.get_operation_type().to_string(), bytes));
     }
-    assert_eq!(seen.len(), 3);
+    assert_eq!(seen.len(), 4);
 }
 
 /// The economic classification of each SoFi operation, and the egress gate's
@@ -132,6 +139,7 @@ fn sofi_operations_are_classified_and_gated() {
     assert!(!ops[0].is_value_egress(), "a setup is not value egress");
     assert!(ops[1].is_value_egress(), "a funded creation is egress");
     assert!(ops[2].is_value_egress(), "a fulfillment is egress");
+    assert!(ops[3].is_value_egress(), "an escrow creation is egress");
 }
 
 /// Beta executes at most two hops, and never the reserved authority — while

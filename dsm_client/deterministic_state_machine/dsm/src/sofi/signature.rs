@@ -9,6 +9,7 @@
 //! | `SofiSetup` | `m_setup = H(setup-sign/v1 ‖ CCB(body))` | the body's committed key |
 //! | `SofiFulfill` | `m_F = H(fulfillment-sign/v1 ‖ CCB(body))` | the body's committed key |
 //! | `SofiVaultCreate` | the operation's canonical unsigned bytes | the owner's device key |
+//! | `EscrowVaultCreate` | the operation's canonical unsigned bytes | the owner's device key |
 //!
 //! A setup and a fulfillment sign their PROTOCOL OBJECT, not the operation
 //! that carries it, and they do not additionally carry a generic operation
@@ -147,8 +148,10 @@ impl From<SignatureError> for crate::types::error::DsmError {
     }
 }
 
-/// One verification, over exact bytes, under a declared algorithm.
-fn verify_bytes(
+/// One verification, over exact bytes, under a declared algorithm. Shared
+/// with the escrow verdict's signatures (`sofi::escrow`), so every SoFi
+/// signature is checked by this one rule.
+pub(crate) fn verify_bytes(
     what: &'static str,
     alg: u16,
     key: &[u8],
@@ -342,6 +345,14 @@ pub fn verify_operation(
         // operation, by the one frozen rule.
         Operation::SofiVaultCreate { signature, .. } => verify_bytes(
             "SofiVaultCreate",
+            sigalg::SPHINCS_PLUS_SPX256F,
+            device_public_key,
+            &operation.signing_bytes(),
+            signature,
+        ),
+        // The same rule for an escrow vault's creation (SoFi Amendment S21).
+        Operation::EscrowVaultCreate { signature, .. } => verify_bytes(
+            "EscrowVaultCreate",
             sigalg::SPHINCS_PLUS_SPX256F,
             device_public_key,
             &operation.signing_bytes(),

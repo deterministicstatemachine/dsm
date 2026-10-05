@@ -37,12 +37,13 @@ use crate::economic::state::{EconomicBalanceState, EconomicLeafState};
 
 use super::conformance::Validation;
 use super::derive;
+use super::escrow;
 use super::smt::{verify_batch, FoldEntry, FoldError};
 use super::wire::{
-    next_position, CoreEntry, DlvCore, OwnerAuthority, SettlementBody, SettlementPreimage, SwapHop,
-    TraderCore, TraderPreBalance, TraderPrecommitBody, TraderRelationshipLeaf, ValidationRef,
-    VaultRelationshipLeaf, VaultStateLeaf, MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE,
-    VAULT_STATUS_RETIRED,
+    next_position, CoreEntry, DlvCore, EscrowTerms, OwnerAuthority, SettlementBody,
+    SettlementPreimage, SwapHop, TraderCore, TraderPreBalance, TraderPrecommitBody,
+    TraderRelationshipLeaf, ValidationRef, VaultRelationshipLeaf, VaultStateLeaf,
+    MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
 };
 
 type D32 = [u8; 32];
@@ -151,6 +152,25 @@ pub enum Invalid {
     TraderPreBalanceDoesNotDecode(crate::ccb::decode::DecodeError),
     /// A `TraderPreBalance` names another trader than `P`'s.
     TraderPreBalanceNotThisTrader,
+    /// A Close or a Swap names a vault whose terms are not a market: an
+    /// escrow vault has no market and no owner close (SoFi Amendment S21).
+    TermsAreNotAMarket,
+    /// A Release names a vault whose terms are not escrow terms (SoFi
+    /// Amendment S21).
+    TermsAreNotEscrow,
+    /// Bytes that re-derive the address an escrow vault's slots name are not
+    /// `EscrowTerms`: the vault committed terms that have no reading.
+    EscrowTermsDoNotDecode(crate::ccb::decode::DecodeError),
+    /// A Release names a verdict cell other than the one its vault's terms
+    /// derive.
+    VerdictCellIsNotTheTerms,
+    /// A Release names an outcome no branch of its vault's terms has.
+    OutcomeHasNoBranch,
+    /// A Release's trader is not the recipient of the branch it names.
+    NotTheBranchRecipient,
+    /// A Release's amount is not the vault's whole held amount, or the vault
+    /// holds a second reserve.
+    ReleaseIsNotTheWholeAmount,
 }
 
 /// The conjunction, as an accumulator: any Invalid dominates, and only in its
@@ -345,7 +365,9 @@ impl EvidenceNeeds {
             keys.insert(derive::vault_state_key(core.vault_id()));
             keys.extend(core.entries().iter().map(CoreEntry::key));
         }
-        if let SettlementBody::Close { vault_id, .. } = preimage.settlement() {
+        if let SettlementBody::Close { vault_id, .. } | SettlementBody::Release { vault_id, .. } =
+            preimage.settlement()
+        {
             vaults
                 .entry(*vault_id)
                 .or_default()
@@ -358,15 +380,20 @@ impl EvidenceNeeds {
         }
     }
 
-    /// The three policy objects a vault state commits, by class and address.
+    /// The objects a vault state's slots name, by class and address: a
+    /// market's three policies, or an escrow vault's one terms object (SoFi
+    /// Amendment S21).
     /// The two token policies a vault's market names: what the transferable
     /// check of SoFi §49 is decided over, for both tokens of every hop.
     pub fn token_policies_of(market: &crate::ccb::state::MarketPolicy) -> [D32; 2] {
         [*market.token_a(), *market.token_b()]
     }
 
-    pub fn policies_of(state: &VaultStateLeaf) -> [(u16, D32); 3] {
-        [
+    pub fn policies_of(state: &VaultStateLeaf) -> Vec<(u16, D32)> {
+        if VaultTerms::slots_name_escrow(state) {
+            return vec![(crate::ccb::class::ESCROW_TERMS, state.market_policy)];
+        }
+        vec![
             (crate::ccb::class::MARKET_POLICY, state.market_policy),
             (crate::ccb::class::FEE_POLICY, state.fee_policy),
             (crate::ccb::class::RELEASE_POLICY, state.release_policy),
@@ -478,6 +505,23 @@ impl Evidence {
         Ok(bytes)
     }
 
+    /// The escrow terms at `addr`, AUTHENTICATED against it under the terms
+    /// namespace (SoFi Amendment S21). Bytes not in hand, or that do not
+    /// re-derive `addr`, supply nothing (note 9).
+    fn terms_bytes(&self, addr: &D32) -> Result<&[u8], Refusal> {
+        let bytes = self
+            .objects
+            .get(addr)
+            .map(Vec::as_slice)
+            .ok_or(Refusal::Incomplete(Missing::Policy { addr: *addr }))?;
+        if escrow::terms_address_of(bytes) != *addr {
+            return Err(Refusal::Incomplete(Missing::NonVerifyingObject {
+                addr: *addr,
+            }));
+        }
+        Ok(bytes)
+    }
+
     /// The `TraderPreBalance` at `addr`, AUTHENTICATED against it. Bytes not
     /// in hand, or that do not re-derive `addr`, supply nothing (note 9).
     /// Bytes that do re-derive it are the object `E` committed, so one that
@@ -570,6 +614,63 @@ impl Policies {
     }
 }
 
+/// What a vault's three policy slots name (SoFi §19.9, the slot rule): a
+/// market's three policies, or one escrow terms object, which all three slots
+/// name. The slots of a market name objects of three classes, each addressed
+/// under its own namespace, so they can never all be equal: equal slots are
+/// an escrow vault's, and the bytes they name must authenticate as its terms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VaultTerms {
+    Market(Policies),
+    Escrow(EscrowTerms),
+}
+
+impl VaultTerms {
+    /// Whether `state`'s three slots name one object: an escrow vault's.
+    pub fn slots_name_escrow(state: &VaultStateLeaf) -> bool {
+        state.market_policy == state.fee_policy && state.fee_policy == state.release_policy
+    }
+
+    /// The terms `state` commits, from the objects `evidence` holds, each
+    /// re-addressed before it is decoded.
+    pub fn resolve(evidence: &Evidence, state: &VaultStateLeaf) -> Result<Self, Refusal> {
+        if Self::slots_name_escrow(state) {
+            let bytes = evidence.terms_bytes(&state.market_policy)?;
+            let terms = EscrowTerms::decode(bytes)
+                .map_err(|why| Refusal::Invalid(Invalid::EscrowTermsDoNotDecode(why)))?;
+            return Ok(Self::Escrow(terms));
+        }
+        Ok(Self::Market(Policies::resolve(evidence, state)?))
+    }
+
+    /// A market's policies; an escrow vault has none, so a Close or a Swap
+    /// against one is Invalid.
+    pub fn market(self) -> Result<Policies, Refusal> {
+        match self {
+            Self::Market(policies) => Ok(policies),
+            Self::Escrow(..) => Err(Refusal::Invalid(Invalid::TermsAreNotAMarket)),
+        }
+    }
+
+    /// An escrow vault's terms; a market has none, so a Release against one
+    /// is Invalid.
+    pub fn escrow(self) -> Result<EscrowTerms, Refusal> {
+        match self {
+            Self::Escrow(terms) => Ok(terms),
+            Self::Market(..) => Err(Refusal::Invalid(Invalid::TermsAreNotEscrow)),
+        }
+    }
+
+    /// The tokens the vault holds: a market's pair, or an escrow vault's one
+    /// token.
+    pub fn tokens(&self) -> Vec<D32> {
+        match self {
+            Self::Market(policies) => EvidenceNeeds::token_policies_of(&policies.market).to_vec(),
+            Self::Escrow(terms) => vec![*terms.token()],
+        }
+    }
+}
+
 /// `SetupValid` for one leg of P (SoFi §16, §20.1): the setup the leg names by
 /// `ρ` is the canonical envelope whose body re-derives `ρ`, names P's trader
 /// and the leg's vault, is signed by P's trader key, and names by
@@ -648,18 +749,18 @@ fn setup_valid(
     Ok(())
 }
 
-/// Both tokens of a vault the operation touches pass their policies as market
-/// legs (SoFi §19.5, §49; MR-SOFI-0311), an intermediate token of a route
-/// included. ERA and dBTC are pre-rooted and never consult a policy. Any
-/// other token's `TokenPolicyV3` bytes are re-hashed to its commit before
-/// they establish anything.
-fn market_legs_permitted(
+/// Every token of a vault the operation touches passes its policy for a
+/// transfer (SoFi §19.5, §19.9, §49; MR-SOFI-0311): both tokens of a market,
+/// an intermediate token of a route included, and an escrow vault's one
+/// token. ERA and dBTC are pre-rooted and never consult a policy. Any other
+/// token's `TokenPolicyV3` bytes are re-hashed to its commit before they
+/// establish anything.
+fn vault_tokens_permitted(
     core: &crate::sofi::wire::DlvCore,
     evidence: &Evidence,
 ) -> Result<(), Refusal> {
     let state = evidence.vault_state(core.vault_id())?;
-    let policies = Policies::resolve(evidence, &state)?;
-    for commit in EvidenceNeeds::token_policies_of(&policies.market) {
+    for commit in VaultTerms::resolve(evidence, &state)?.tokens() {
         if crate::core::token::builtin_token_id_for_policy_commit(&commit).is_some() {
             continue;
         }
@@ -822,22 +923,11 @@ pub fn vault_post_states(
                     .enumerate()
                     .find(|(_, h)| h.vault_id == vault_id)
                     .ok_or(Refusal::Invalid(Invalid::LegsDoNotMatchPrecommit))?;
-                let policies = Policies::resolve(evidence, &pre_state)?;
+                let policies = VaultTerms::resolve(evidence, &pre_state)?.market()?;
                 swap_vault_post(&pre_state, &policies, hop, index)?
             }
-            SettlementBody::Close { .. } => {
-                let generation = pre_state.generation.checked_add(1).ok_or(Refusal::Invalid(
-                    Invalid::CheckedArithmetic {
-                        what: "vault generation",
-                    },
-                ))?;
-                VaultStateLeaf {
-                    generation,
-                    reserve_a: 0,
-                    reserve_b: 0,
-                    status: VAULT_STATUS_RETIRED,
-                    ..pre_state.clone()
-                }
+            SettlementBody::Close { .. } | SettlementBody::Release { .. } => {
+                retire_vault_post(&pre_state)?
             }
         };
         // The state the core STATES must be the state the arithmetic reaches.
@@ -899,7 +989,8 @@ pub fn vault_post_states(
 /// held by the DLVs across the hop rather than by the trader. So `B` never
 /// becomes a trader balance leaf, and no rule about the trader's tokens
 /// reaches it. A close is different: BOTH of the vault's reserve assets are
-/// credited back to the owner.
+/// credited back to the owner. A release credits an escrow vault's one token
+/// to the branch's recipient.
 pub fn trader_movements(
     preimage: &SettlementPreimage,
     evidence: &Evidence,
@@ -919,11 +1010,20 @@ pub fn trader_movements(
             ..
         } => {
             let state = evidence.vault_state(vault_id)?;
-            let policies = Policies::resolve(evidence, &state)?;
+            let policies = VaultTerms::resolve(evidence, &state)?.market()?;
             vec![
                 (*policies.market.token_a(), *reserve_a, 0),
                 (*policies.market.token_b(), *reserve_b, 0),
             ]
+        }
+        // A release pays the whole amount of the vault's one token to the
+        // branch's recipient, and debits nothing (SoFi Amendment S21).
+        SettlementBody::Release {
+            vault_id, amount, ..
+        } => {
+            let state = evidence.vault_state(vault_id)?;
+            let terms = VaultTerms::resolve(evidence, &state)?.escrow()?;
+            vec![(*terms.token(), *amount, 0)]
         }
     })
 }
@@ -1249,7 +1349,7 @@ pub fn validate(
     // included (SoFi §19.5, §49; MR-SOFI-0311): both tokens of every vault
     // the operation touches must be transferable.
     for core in preimage.dlv_cores() {
-        verdict.note(market_legs_permitted(core, evidence));
+        verdict.note(vault_tokens_permitted(core, evidence));
     }
 
     match preimage.settlement() {
@@ -1289,12 +1389,30 @@ pub fn validate(
             *reserve_a,
             *reserve_b,
         ),
+        SettlementBody::Release {
+            vault_id,
+            verdict_cell,
+            outcome,
+            amount,
+            ..
+        } => validate_release(
+            &mut verdict,
+            &ReleaseCheck {
+                precommit,
+                preimage,
+                evidence,
+                vault_id,
+                verdict_cell,
+                outcome,
+                amount: *amount,
+            },
+        ),
     }
     verdict.finish()
 }
 
 /// `B°`'s core references must be the cores `P(E)` actually carries, and a
-/// close's parent must be the leg `P` actually names.
+/// close's or a release's parent must be the leg `P` actually names.
 ///
 /// Without this the references are decoration: the body could name one core
 /// while the preimage carried another, and every later check would read the
@@ -1352,6 +1470,14 @@ fn check_settlement_core_references(
             trader_core,
             dlv_core,
             ..
+        }
+        | SettlementBody::Release {
+            vault_id,
+            parent_root,
+            setup_ref,
+            trader_core,
+            dlv_core,
+            ..
         } => {
             require(
                 *trader_core == actual_trader,
@@ -1370,7 +1496,7 @@ fn check_settlement_core_references(
                     field: "B°.dlv_core",
                 },
             )?;
-            // A close's own parent must be the leg P names, and the core's.
+            // Its own parent must be the leg P names, and the core's.
             let leg = precommit
                 .legs()
                 .iter()
@@ -1637,9 +1763,9 @@ pub fn realize_root(core: &TraderCore, external_commitment: &D32) -> Result<D32,
     fold_core(&entries, core.pre_root())
 }
 
-/// A vault's state after its owner's full close: the next generation, both
-/// reserves released, retired.
-pub fn close_vault_post(pre_state: &VaultStateLeaf) -> Result<VaultStateLeaf, Refusal> {
+/// A vault's state after its owner's full close, or an escrow vault's release
+/// (SoFi Amendment S21): the next generation, every reserve released, retired.
+pub fn retire_vault_post(pre_state: &VaultStateLeaf) -> Result<VaultStateLeaf, Refusal> {
     let generation = pre_state.generation.checked_add(1).ok_or(Refusal::Invalid(
         Invalid::CheckedArithmetic {
             what: "vault generation",
@@ -1990,9 +2116,9 @@ fn validate_swap(
                 Invalid::NetworkScopeMismatch,
             ));
         }
-        let policies = state
-            .as_ref()
-            .and_then(|state| verdict.get(Policies::resolve(evidence, state)));
+        let policies = state.as_ref().and_then(|state| {
+            verdict.get(VaultTerms::resolve(evidence, state).and_then(VaultTerms::market))
+        });
         if let (Some(state), Some(policies)) = (state.as_ref(), policies.as_ref()) {
             match swap_vault_post(state, policies, hop, i) {
                 Ok(post_state) => verdict.note(check_vault_write_set(core, &post_state, state)),
@@ -2158,7 +2284,7 @@ fn validate_close(
             preimage.dlv_cores().len() == 1 && *core.vault_id() == *vault_id,
             Invalid::LegsDoNotMatchPrecommit,
         ));
-        match close_vault_post(pre_state) {
+        match retire_vault_post(pre_state) {
             Ok(retired) => verdict.note(check_vault_write_set(core, &retired, pre_state)),
             Err(refusal) => verdict.note(Err(refusal)),
         }
@@ -2173,9 +2299,9 @@ fn validate_close(
     // The trader takes back exactly both reserves, in the pair's own tokens.
     // No debit: a close pays out, and constant-product pricing never applies.
     let trader_core = preimage.trader_core();
-    let policies = state
-        .as_ref()
-        .and_then(|state| verdict.get(Policies::resolve(evidence, state)));
+    let policies = state.as_ref().and_then(|state| {
+        verdict.get(VaultTerms::resolve(evidence, state).and_then(VaultTerms::market))
+    });
     if let Some(policies) = policies.as_ref() {
         verdict.note(
             trader_pre_balances(precommit, preimage, evidence).and_then(|pre| {
@@ -2214,6 +2340,134 @@ fn validate_close(
     verdict.note(realize_root(trader_core, &e).and_then(|post_root| {
         require(
             post_root == *precommit.realize_root(),
+            Invalid::RealizeRootIsNotTheFold,
+        )
+    }));
+}
+
+/// What a Release names, for [`validate_release`].
+struct ReleaseCheck<'a> {
+    precommit: &'a TraderPrecommitBody,
+    preimage: &'a SettlementPreimage,
+    evidence: &'a Evidence,
+    vault_id: &'a D32,
+    verdict_cell: &'a D32,
+    outcome: &'a [u8],
+    amount: u64,
+}
+
+/// RouteValidation for a Release (SoFi §19.9): one leg; the vault's terms are
+/// escrow terms, whose cell is the one the release names and whose branch for
+/// its outcome pays its trader; the whole amount of an Active escrow vault;
+/// the closed write set, with the vault retired; and the realize root the
+/// fold gives. No signature is verified here: the verdict proves its
+/// authority where it occupies its cell, and resolution reads that fact.
+fn validate_release(verdict: &mut Verdict, r: &ReleaseCheck<'_>) {
+    let e = *r.precommit.external_commitment();
+    verdict.note(require(
+        r.precommit.legs().len() == 1 && r.precommit.legs()[0].vault_id == *r.vault_id,
+        Invalid::LegsDoNotMatchPrecommit,
+    ));
+
+    let state = verdict.get(r.evidence.vault_state(r.vault_id));
+    if let Some(pre_state) = state.as_ref() {
+        // The vault id is the owner's own derivation; a release cannot name
+        // another vault's state.
+        verdict.note(require(
+            derive::vault_id(
+                &pre_state.owner_genesis,
+                &pre_state.owner_device_id,
+                pre_state.create_position,
+            ) == *r.vault_id,
+            Invalid::VaultIdIsNotTheOwnersDerivation,
+        ));
+        verdict.note(require(
+            pre_state.storage_set_id == *r.precommit.storage_set_id(),
+            Invalid::NetworkScopeMismatch,
+        ));
+        verdict.note(require(
+            pre_state.status == VAULT_STATUS_ACTIVE,
+            Invalid::VaultIsNotActive,
+        ));
+        // The whole held amount, and nothing chosen at release.
+        verdict.note(require(
+            r.amount > 0 && pre_state.reserve_a == r.amount && pre_state.reserve_b == 0,
+            Invalid::ReleaseIsNotTheWholeAmount,
+        ));
+    }
+
+    let terms = state
+        .as_ref()
+        .and_then(|s| verdict.get(VaultTerms::resolve(r.evidence, s).and_then(VaultTerms::escrow)));
+    let trader_core = r.preimage.trader_core();
+    if let Some(terms) = terms.as_ref() {
+        verdict.note(require(
+            escrow::verdict_cell_of(terms) == *r.verdict_cell,
+            Invalid::VerdictCellIsNotTheTerms,
+        ));
+        match terms.branch(r.outcome) {
+            None => verdict.note(Err(Refusal::Invalid(Invalid::OutcomeHasNoBranch))),
+            Some(branch) => verdict.note(require(
+                branch.recipient_genesis() == r.precommit.genesis()
+                    && branch.recipient_device_id() == r.precommit.device_id(),
+                Invalid::NotTheBranchRecipient,
+            )),
+        }
+        // The recipient takes exactly the whole amount, in the vault's one
+        // token, and is debited nothing.
+        verdict.note(
+            trader_pre_balances(r.precommit, r.preimage, r.evidence).and_then(|pre| {
+                check_trader_balances(
+                    r.precommit,
+                    trader_core,
+                    &pre,
+                    &[(*terms.token(), r.amount, 0)],
+                    1,
+                )
+            }),
+        );
+    }
+
+    let core = r.preimage.dlv_cores().first();
+    if let (Some(core), Some(pre_state)) = (core, state.as_ref()) {
+        verdict.note(require(
+            r.preimage.dlv_cores().len() == 1 && *core.vault_id() == *r.vault_id,
+            Invalid::LegsDoNotMatchPrecommit,
+        ));
+        match retire_vault_post(pre_state) {
+            Ok(retired) => verdict.note(check_vault_write_set(core, &retired, pre_state)),
+            Err(refusal) => verdict.note(Err(refusal)),
+        }
+    }
+    if let Some(core) = core {
+        match dlv_fold_entries(core, &e, r.evidence) {
+            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root()).and(Ok(()))),
+            Err(refusal) => verdict.note(Err(refusal)),
+        }
+    }
+
+    let bases = relationship_bases(trader_core.entries());
+    match bases.get(r.vault_id) {
+        None => verdict.note(Err(Refusal::Invalid(Invalid::WriteSetNotExact {
+            core: "T°",
+        }))),
+        Some((genesis, device_id, base)) => {
+            verdict.note(require(
+                genesis == r.precommit.genesis() && device_id == r.precommit.device_id(),
+                Invalid::CoreIdentityMismatch,
+            ));
+            if let Some(core) = core {
+                verdict.note(require(
+                    *core.relationship_base() == *base,
+                    Invalid::RelationshipBaseMismatch,
+                ));
+            }
+        }
+    }
+
+    verdict.note(realize_root(trader_core, &e).and_then(|post_root| {
+        require(
+            post_root == *r.precommit.realize_root(),
             Invalid::RealizeRootIsNotTheFold,
         )
     }));
@@ -3074,6 +3328,27 @@ mod tests {
                 owner_authority,
                 reserve_a,
                 reserve_b,
+                trader_core: reference,
+                dlv_core,
+                closure,
+            },
+            SettlementBody::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                verdict_cell,
+                outcome,
+                amount,
+                dlv_core,
+                closure,
+                ..
+            } => SettlementBody::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                verdict_cell,
+                outcome,
+                amount,
                 trader_core: reference,
                 dlv_core,
                 closure,
@@ -5177,7 +5452,9 @@ mod tests {
                 dlv_cores,
                 closure,
             },
-            SettlementBody::Close { .. } => panic!("a swap fixture"),
+            SettlementBody::Close { .. } | SettlementBody::Release { .. } => {
+                panic!("a swap fixture")
+            }
         };
         let preimage = SettlementPreimage::new(
             settlement,
@@ -5414,6 +5691,392 @@ mod tests {
         assert_eq!(
             validate(&precommit, &preimage, &f.evidence),
             Err(Refusal::Invalid(Invalid::LeafPostValueMismatch))
+        );
+    }
+
+    // ── escrow vaults (SoFi Amendment S21) ────────────────────────────────
+
+    use crate::sofi::wire::{EscrowBranch, EscrowOutcome, EscrowSigner};
+
+    /// What an escrow fixture settles.
+    enum EscrowOp {
+        Release {
+            outcome: &'static [u8],
+            amount: u64,
+            verdict_cell: Option<D32>,
+        },
+        Close,
+    }
+
+    /// The amount the fixture's escrow vault holds.
+    const STAKE: u64 = 2_500;
+    /// The escrow vault's owner when it is not the trader.
+    const OTHER_OWNER: D32 = [0x0B; 32];
+
+    /// The referee, the one signer of every fixture outcome. Static validity
+    /// verifies no signature, so its key signs nothing here.
+    fn referee() -> EscrowSigner {
+        EscrowSigner::new(SIG_ALG, &[0x5A; 64]).unwrap()
+    }
+
+    /// The fixture's terms: "a-wins" pays the trader, "b-wins" another
+    /// identity, "void" the vault's owner; the referee decides each.
+    fn escrow_terms(owner_device: D32) -> EscrowTerms {
+        let branch = |outcome: &[u8], to: (D32, D32)| {
+            EscrowBranch::new(
+                EscrowOutcome::new(outcome, vec![referee()]).unwrap(),
+                to.0,
+                to.1,
+            )
+        };
+        EscrowTerms::new(
+            tokens()[0].0,
+            escrow::external_commitment(b"fixture match"),
+            vec![
+                branch(b"a-wins", (G, dev())),
+                branch(b"b-wins", (token(0xB1), token(0xB2))),
+                branch(b"void", (G, owner_device)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// An escrow vault's state at its parent: all three slots name its terms,
+    /// the stake in `reserve_a`, nothing in `reserve_b`.
+    fn escrow_state(owner_device: D32, terms: &EscrowTerms) -> VaultStateLeaf {
+        let addr = escrow::terms_address(terms);
+        VaultStateLeaf {
+            owner_genesis: G,
+            owner_device_id: owner_device,
+            create_position: P_CREATE,
+            market_policy: addr,
+            fee_policy: addr,
+            release_policy: addr,
+            storage_set_id: token(0x77),
+            generation: 0,
+            reserve_a: STAKE,
+            reserve_b: 0,
+            status: VAULT_STATUS_ACTIVE,
+        }
+    }
+
+    /// One operation against an escrow vault of `owner_device`, by the
+    /// fixture trader, built the way a trader builds one: the vault retires,
+    /// the trader takes the stake and is debited nothing.
+    fn escrow_fixture(owner_device: D32, op: EscrowOp) -> Fixture {
+        let terms = escrow_terms(owner_device);
+        let held = *terms.token();
+        let vault_id = derive::vault_id(&G, &owner_device, P_CREATE);
+        let rel_key = derive::relationship_key(&G, &dev(), &vault_id);
+        let base =
+            derive::relationship_leaf_genesis(&derive::setup_id(&G, &dev(), P_POS, &vault_id));
+        let state = escrow_state(owner_device, &terms);
+        let state_key = derive::vault_state_key(&vault_id);
+        let relationship = VaultRelationshipLeaf {
+            trader_genesis: G,
+            trader_device_id: dev(),
+            leaf: base,
+        };
+        let mut vault_tree = EconomicSmt::new();
+        vault_tree.insert(state_key, derive::vault_state_leaf_value(&state).unwrap());
+        vault_tree.insert(
+            rel_key,
+            derive::vault_relationship_leaf_value(&relationship),
+        );
+        let retired = retire_vault_post(&state).unwrap();
+        let mut vault_entries = vec![
+            CoreEntry::Mutation {
+                key: state_key,
+                pre: derive::vault_state_leaf_value(&state).unwrap(),
+                post: derive::vault_state_leaf_value(&retired).unwrap(),
+                path: path_of(&vault_tree, &state_key),
+            },
+            CoreEntry::Relationship {
+                genesis: G,
+                device_id: dev(),
+                vault_id,
+                base,
+                path: path_of(&vault_tree, &rel_key),
+            },
+        ];
+        vault_entries.sort_by_key(|e| e.key());
+        let dlv_core =
+            DlvCore::new(vault_id, vault_tree.root(), G, dev(), base, vault_entries).unwrap();
+
+        let held_key = balance_key(&G, &dev(), &held);
+        let mut trader_tree = EconomicSmt::new();
+        trader_tree.insert(
+            rel_key,
+            derive::trader_relationship_leaf_value(&TraderRelationshipLeaf {
+                vault_id,
+                leaf: base,
+            }),
+        );
+        let mut trader_entries = vec![
+            CoreEntry::Mutation {
+                key: held_key,
+                pre: crate::economic::tree::ABSENT_LEAF,
+                post: balance_leaf_value(held, STAKE),
+                path: path_of(&trader_tree, &held_key),
+            },
+            CoreEntry::Relationship {
+                genesis: G,
+                device_id: dev(),
+                vault_id,
+                base,
+                path: path_of(&trader_tree, &rel_key),
+            },
+        ];
+        trader_entries.sort_by_key(|e| e.key());
+        let trader_core =
+            TraderCore::new(G, dev(), P_POS + 1, trader_tree.root(), trader_entries).unwrap();
+        let parent_claim = parent_claim_envelope(trader_tree.root());
+        let trader_core_ref = derive::trader_core_digest(&trader_core.encode().unwrap());
+        let dlv_core_ref = derive::dlv_core_digest(&dlv_core.encode().unwrap());
+        let closure = with_parent(PreEClosureIndex::new(Vec::new()).unwrap(), &parent_claim);
+        let settlement = match op {
+            EscrowOp::Release {
+                outcome,
+                amount,
+                verdict_cell,
+            } => SettlementBody::Release {
+                vault_id,
+                parent_root: vault_tree.root(),
+                setup_ref: setup_ref_for(vault_id),
+                verdict_cell: match verdict_cell {
+                    Some(cell) => cell,
+                    None => escrow::verdict_cell_of(&terms),
+                },
+                outcome: outcome.to_vec(),
+                amount,
+                trader_core: trader_core_ref,
+                dlv_core: dlv_core_ref,
+                closure,
+            },
+            EscrowOp::Close => SettlementBody::Close {
+                vault_id,
+                parent_root: vault_tree.root(),
+                setup_ref: setup_ref_for(vault_id),
+                owner_authority: OwnerAuthority::Origin,
+                reserve_a: STAKE,
+                reserve_b: 0,
+                trader_core: trader_core_ref,
+                dlv_core: dlv_core_ref,
+                closure,
+            },
+        };
+        let preimage =
+            SettlementPreimage::new(settlement, trader_core.clone(), vec![dlv_core]).unwrap();
+        let e = derive::recompute_e(&preimage).unwrap();
+        let evidence = Evidence {
+            objects: BTreeMap::from([(escrow::terms_address(&terms), terms.encode())]),
+            vault_leaves: BTreeMap::from([
+                ((vault_id, state_key), VaultLeafPre::State(state)),
+                (
+                    (vault_id, rel_key),
+                    VaultLeafPre::Relationship(relationship),
+                ),
+            ]),
+            setups: BTreeMap::from([(setup_ref_for(vault_id), setup_envelope_for(vault_id))]),
+            token_policies: tokens()[..1].iter().cloned().collect(),
+            setup_lineages: BTreeMap::from([(
+                SETUP_POS,
+                SetupLineage::Accepted(accepted_setup_claim()),
+            )]),
+        };
+        let realize_root = {
+            let entries = trader_fold_entries(&trader_core, &e).unwrap();
+            batch_fold(&entries).unwrap().post_root
+        };
+        let precommit = TraderPrecommitBody::new(
+            G,
+            dev(),
+            P_POS,
+            crate::sofi::wire::ParentClaimRef::SingleRoot {
+                claim_ref: derive::claim_ref(&parent_claim),
+            },
+            e,
+            vec![PrecommitLeg {
+                vault_id,
+                parent_root: vault_tree.root(),
+                setup_ref: setup_ref_for(vault_id),
+            }],
+            realize_root,
+            trader_tree.root(),
+            token(0x77),
+            SIG_ALG,
+            &trader_keys().0,
+        )
+        .unwrap();
+        Fixture {
+            precommit,
+            preimage,
+            evidence,
+            parent_claim,
+        }
+    }
+
+    fn release(outcome: &'static [u8]) -> EscrowOp {
+        EscrowOp::Release {
+            outcome,
+            amount: STAKE,
+            verdict_cell: None,
+        }
+    }
+
+    fn refusal_of(f: &Fixture) -> Result<(), Refusal> {
+        validate(&f.precommit, &f.preimage, &f.evidence)
+    }
+
+    #[test]
+    fn a_release_to_its_branchs_recipient_is_valid_and_retires_the_vault() {
+        let f = escrow_fixture(OTHER_OWNER, release(b"a-wins"));
+        assert_eq!(refusal_of(&f), Ok(()));
+        // The recipient takes the whole stake in the vault's one token, and
+        // the vault retires at the next generation with nothing left.
+        assert_eq!(
+            trader_credits(&f.preimage, &f.evidence),
+            Ok(vec![tokens()[0].0])
+        );
+        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].state().status, VAULT_STATUS_RETIRED);
+        assert_eq!(
+            (posts[0].state().reserve_a, posts[0].state().reserve_b),
+            (0, 0)
+        );
+        assert_eq!(posts[0].generation(), 1);
+    }
+
+    #[test]
+    fn a_release_of_a_branch_that_pays_someone_else_is_invalid() {
+        let f = escrow_fixture(OTHER_OWNER, release(b"b-wins"));
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::NotTheBranchRecipient))
+        );
+    }
+
+    #[test]
+    fn a_release_of_an_outcome_no_branch_has_is_invalid() {
+        let f = escrow_fixture(OTHER_OWNER, release(b"draw"));
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::OutcomeHasNoBranch))
+        );
+    }
+
+    #[test]
+    fn a_release_naming_another_verdict_cell_is_invalid() {
+        let f = escrow_fixture(
+            OTHER_OWNER,
+            EscrowOp::Release {
+                outcome: b"a-wins",
+                amount: STAKE,
+                verdict_cell: Some(token(0xCE)),
+            },
+        );
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::VerdictCellIsNotTheTerms))
+        );
+    }
+
+    #[test]
+    fn a_release_of_less_than_the_whole_stake_is_invalid() {
+        let f = escrow_fixture(
+            OTHER_OWNER,
+            EscrowOp::Release {
+                outcome: b"a-wins",
+                amount: STAKE - 1,
+                verdict_cell: None,
+            },
+        );
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::ReleaseIsNotTheWholeAmount))
+        );
+    }
+
+    /// An escrow vault has no owner close: its owner gets the stake back only
+    /// through a branch that pays it.
+    #[test]
+    fn the_owner_of_an_escrow_vault_cannot_close_it() {
+        let f = escrow_fixture(dev(), EscrowOp::Close);
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::TermsAreNotAMarket))
+        );
+        // Its own "void" branch, decided by the referee, is how it does.
+        let void = escrow_fixture(dev(), release(b"void"));
+        assert_eq!(refusal_of(&void), Ok(()));
+    }
+
+    /// A Release against a market vault: the slots name a market's three
+    /// policies, so there are no escrow terms to release by.
+    #[test]
+    fn a_release_against_a_market_vault_is_invalid() {
+        let mut f = escrow_fixture(OTHER_OWNER, release(b"a-wins"));
+        let vault_id = derive::vault_id(&G, &OTHER_OWNER, P_CREATE);
+        let state_key = derive::vault_state_key(&vault_id);
+        let market = VaultStateLeaf {
+            owner_device_id: OTHER_OWNER,
+            create_position: P_CREATE,
+            generation: 0,
+            reserve_a: STAKE,
+            reserve_b: 0,
+            ..vault_state(0, STAKE, 0, VAULT_STATUS_ACTIVE)
+        };
+        f.evidence
+            .vault_leaves
+            .insert((vault_id, state_key), VaultLeafPre::State(market));
+        f.evidence.objects.extend(policy_objects(1));
+        f.evidence.token_policies = tokens()[..=1].iter().cloned().collect();
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::TermsAreNotEscrow))
+        );
+    }
+
+    /// A Swap through an escrow vault: it has no market to price by.
+    #[test]
+    fn a_swap_through_an_escrow_vault_is_invalid() {
+        let mut f = swap_fixture();
+        let vault_id = vault_id_of(0);
+        let state_key = derive::vault_state_key(&vault_id);
+        let terms = escrow_terms(dev());
+        let addr = escrow::terms_address(&terms);
+        let VaultLeafPre::State(market) = f.evidence.vault_leaves[&(vault_id, state_key)].clone()
+        else {
+            panic!("the swap fixture's vault has a state")
+        };
+        let escrowed = VaultStateLeaf {
+            market_policy: addr,
+            fee_policy: addr,
+            release_policy: addr,
+            ..market
+        };
+        f.evidence
+            .vault_leaves
+            .insert((vault_id, state_key), VaultLeafPre::State(escrowed));
+        f.evidence.objects.insert(addr, terms.encode());
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::TermsAreNotAMarket))
+        );
+    }
+
+    /// Terms that authenticate to the address the slots name but are not
+    /// escrow terms are Invalid; bytes that do not authenticate prove nothing
+    /// and are still missing (note 9).
+    #[test]
+    fn escrow_terms_are_taken_only_from_bytes_that_authenticate() {
+        let mut f = escrow_fixture(OTHER_OWNER, release(b"a-wins"));
+        let addr = escrow::terms_address(&escrow_terms(OTHER_OWNER));
+        f.evidence.objects.insert(addr, b"not the terms".to_vec());
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Incomplete(Missing::NonVerifyingObject { addr }))
         );
     }
 }
