@@ -1113,7 +1113,7 @@ mod tests {
         assert_eq!(left, crate::sdk::app_lock::MISSES_BEFORE_PHRASE);
 
         use pb::session_unlock_request::Key;
-        let asked = vec![
+        let asked = [
             IngressRequest {
                 operation: Some(ingress_request::Operation::RouterInvoke(
                     pb::RouterInvokeOp {
