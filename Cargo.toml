@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/dsm-anchor-core",
+    "crates/dsm-app-host",
     "crates/dsm-anchor-verifier",
     "crates/dsm-sphincs",
     "dsm_client/deterministic_state_machine/dsm",

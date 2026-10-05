@@ -186,6 +186,17 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         ));
     }
 
+    //     LISTENING for the new identity, as `inbox.startPoller` starts it when the app starts
+    //     with an identity: the connect listener while an application is connected (DSM
+    //     Amendment A11), then the inbox poller. Startup starts them only when an identity
+    //     already exists, so without this a wallet created in this session took in nothing sent
+    //     to it until the app was backgrounded and reopened, and the sender's next transfer
+    //     waited on the first one to settle.
+    if let Err(e) = crate::sdk::connect::wallet::resume_listener() {
+        return fail_rolled_back(format!("system.createGenesisV2: the connect listener: {e}"));
+    }
+    crate::sdk::inbox_poller::start_poller();
+
     // 5c. IDENTITY PUBLICATION, driven in THIS session: this device's own
     //     directory entry, read back from the network's pinned set
     //     (`identity_publication`). The row FIRST, so a crash between here and
@@ -384,6 +395,75 @@ mod tests {
     use super::*;
     use crate::sdk::app_state::AppState;
 
+    /// The inbox poller wallet creation starts, for one test: none runs when
+    /// the test begins, and the one the wallet started is stopped and waited
+    /// out when it ends, however it ends, so no test leaves a poller syncing
+    /// behind it.
+    struct PollerOfThisTest;
+
+    impl PollerOfThisTest {
+        fn none_running() -> Self {
+            crate::sdk::inbox_poller::stop_poller_and_wait().expect("a poller left running");
+            Self
+        }
+    }
+
+    impl Drop for PollerOfThisTest {
+        fn drop(&mut self) {
+            if let Err(e) = crate::sdk::inbox_poller::stop_poller_and_wait() {
+                if std::thread::panicking() {
+                    eprintln!("{e}; later tests run beside it");
+                } else {
+                    panic!("{e}");
+                }
+            }
+        }
+    }
+
+    fn create_wallet(body: Vec<u8>) -> AppResult {
+        handle_create_genesis_v2_query(AppQuery {
+            path: "system.createGenesisV2".to_string(),
+            params: generated::ArgPack {
+                codec: generated::Codec::Proto as i32,
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        })
+    }
+
+    /// A wallet created in the running app listens at once: wallet creation
+    /// starts the inbox poller, as the app's start does for an identity that
+    /// already exists. Without it, an online transfer to a new wallet was
+    /// never taken in until the app was backgrounded and reopened (A16 rig,
+    /// 2026-10-04).
+    ///
+    /// MUTATION CONTROL: without the poller start in
+    /// `handle_create_genesis_v2_query` no poller runs after the wallet is
+    /// created, and this test goes red.
+    #[test]
+    #[serial_test::serial]
+    fn a_wallet_created_in_the_running_app_starts_its_inbox_poller() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        crate::reset_sdk_context_for_testing();
+        AppState::reset_for_testing();
+        let _poller = PollerOfThisTest::none_running();
+
+        let answer = create_wallet(
+            generated::WalletCreateGenesisV2Request {
+                mnemonic: crate::economic_fixtures::test_mnemonic(0x5D),
+            }
+            .encode_to_vec(),
+        );
+        assert!(answer.success, "{:?}", answer.error_message);
+        assert!(
+            crate::sdk::inbox_poller::poller_running(),
+            "no inbox poller runs after the wallet was created"
+        );
+    }
+
     /// Wallet creation through `system.createGenesisV2`, on a device with no
     /// identity: the answer names exactly the identity the wallet installed.
     #[test]
@@ -394,19 +474,14 @@ mod tests {
         crate::storage::client_db::init_database().expect("init db");
         crate::reset_sdk_context_for_testing();
         AppState::reset_for_testing();
+        let _poller = PollerOfThisTest::none_running();
 
-        let answer = handle_create_genesis_v2_query(AppQuery {
-            path: "system.createGenesisV2".to_string(),
-            params: generated::ArgPack {
-                codec: generated::Codec::Proto as i32,
-                body: generated::WalletCreateGenesisV2Request {
-                    mnemonic: crate::economic_fixtures::test_mnemonic(0x5B),
-                }
-                .encode_to_vec(),
-                ..Default::default()
+        let answer = create_wallet(
+            generated::WalletCreateGenesisV2Request {
+                mnemonic: crate::economic_fixtures::test_mnemonic(0x5B),
             }
             .encode_to_vec(),
-        });
+        );
         assert!(answer.success, "{:?}", answer.error_message);
 
         let identity = genesis_identity_from_answer(&answer.data).expect("the genesis answer");
@@ -435,6 +510,7 @@ mod tests {
         crate::storage::client_db::init_database().expect("init db");
         crate::reset_sdk_context_for_testing();
         AppState::reset_for_testing();
+        let _poller = PollerOfThisTest::none_running();
 
         let mut body = generated::WalletCreateGenesisV2Request {
             mnemonic: crate::economic_fixtures::test_mnemonic(0x5C),
@@ -444,15 +520,7 @@ mod tests {
         body.extend_from_slice(&[0x1A, 8]);
         body.extend_from_slice(b"dsm-main");
 
-        let answer = handle_create_genesis_v2_query(AppQuery {
-            path: "system.createGenesisV2".to_string(),
-            params: generated::ArgPack {
-                codec: generated::Codec::Proto as i32,
-                body,
-                ..Default::default()
-            }
-            .encode_to_vec(),
-        });
+        let answer = create_wallet(body);
         assert!(answer.success, "{:?}", answer.error_message);
 
         let env = crate::handlers::response_helpers::decode_local_envelope(&answer.data)

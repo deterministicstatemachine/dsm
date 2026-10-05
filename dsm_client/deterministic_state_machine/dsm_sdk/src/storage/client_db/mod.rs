@@ -28,6 +28,7 @@ mod canonical_rebuild;
 pub mod cert_chain;
 mod cert_resync;
 pub mod completion_proofs;
+pub mod connect;
 mod contacts;
 pub mod counterparty_canonical_heads;
 pub mod economic_admission;
@@ -479,7 +480,13 @@ fn get_database_path() -> Result<PathBuf> {
 /// salt — are kept beside its signed operation, which carries only their
 /// commitment (pre-audit item 4): `recipient_staged_transfer.terms_bytes`
 /// and `bilateral_sessions.terms_bytes`.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 28;
+///
+/// 29: DSM Connect (DSM Amendment A11) — the wallet's connected applications
+/// (`connect_sessions`, `connect_spent`, `connect_pending`, `connect_log`,
+/// `connect_previews`) and an application account's side
+/// (`connect_app_offers`, `connect_app_sessions`, `connect_app_requests`,
+/// `connect_app_facts`).
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 29;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -843,6 +850,89 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- Storage-node auth tokens are gone with writer authorization
         -- (storage spec §4); an older database drops its table here.
         DROP TABLE IF EXISTS auth_tokens;
+
+        -- DSM Connect (DSM Amendment A11), the wallet's side (connect.rs).
+        -- An offer fetched and verified for the approval screen.
+        CREATE TABLE IF NOT EXISTS connect_previews(
+            offer_digest  BLOB PRIMARY KEY,
+            endpoint      TEXT NOT NULL,
+            cert_pin      BLOB NOT NULL,
+            offer         BLOB NOT NULL
+        );
+        -- One row per application this device connected to.
+        CREATE TABLE IF NOT EXISTS connect_sessions(
+            session_id     BLOB PRIMARY KEY,
+            app_device_id  BLOB NOT NULL,
+            app_genesis    BLOB NOT NULL,
+            app_ak         BLOB NOT NULL,
+            display_name   TEXT NOT NULL,
+            endpoint       TEXT NOT NULL,
+            cert_pin       BLOB NOT NULL,
+            offer_digest   BLOB NOT NULL,
+            accept_body    BLOB NOT NULL,
+            last_seq       INTEGER NOT NULL,
+            status         TEXT NOT NULL CHECK (status IN ('connected', 'disconnected'))
+        );
+        -- What each grant has spent of each token: the wallet's own count.
+        CREATE TABLE IF NOT EXISTS connect_spent(
+            session_id     BLOB NOT NULL,
+            policy_commit  BLOB NOT NULL,
+            spent          INTEGER NOT NULL,
+            PRIMARY KEY (session_id, policy_commit)
+        );
+        -- A request outside its grant, waiting for the player, or approved by
+        -- the player and waiting for its relationship with the application.
+        CREATE TABLE IF NOT EXISTS connect_pending(
+            session_id  BLOB NOT NULL,
+            seq         INTEGER NOT NULL,
+            request     BLOB NOT NULL,
+            reason      TEXT NOT NULL,
+            state       TEXT NOT NULL CHECK (state IN ('waiting', 'approved')),
+            PRIMARY KEY (session_id, seq)
+        );
+        -- What the wallet did with each request it processed.
+        CREATE TABLE IF NOT EXISTS connect_log(
+            session_id  BLOB NOT NULL,
+            seq         INTEGER NOT NULL,
+            summary     TEXT NOT NULL,
+            outcome     INTEGER NOT NULL,
+            detail      TEXT NOT NULL,
+            response    BLOB NOT NULL,
+            delivery    TEXT NOT NULL CHECK (delivery IN ('unsent', 'sent')),
+            PRIMARY KEY (session_id, seq)
+        );
+        -- DSM Connect, an application account's side (connect.rs).
+        CREATE TABLE IF NOT EXISTS connect_app_offers(
+            offer_digest  BLOB PRIMARY KEY,
+            code          TEXT NOT NULL,
+            offer         BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS connect_app_sessions(
+            session_id        BLOB PRIMARY KEY,
+            offer_digest      BLOB NOT NULL,
+            wallet_device_id  BLOB NOT NULL,
+            wallet_genesis    BLOB NOT NULL,
+            wallet_ak         BLOB NOT NULL,
+            accept            BLOB NOT NULL,
+            next_seq          INTEGER NOT NULL
+        );
+        -- Every request the application signed, and the wallet's signed
+        -- answer once it posts one: a notification, never evidence.
+        CREATE TABLE IF NOT EXISTS connect_app_requests(
+            session_id  BLOB NOT NULL,
+            seq         INTEGER NOT NULL,
+            request     BLOB NOT NULL,
+            response    BLOB,
+            PRIMARY KEY (session_id, seq)
+        );
+        -- The DSM facts the application granted on, each once: a fact
+        -- (an accepted transfer's id) answers at most one request.
+        CREATE TABLE IF NOT EXISTS connect_app_facts(
+            fact_id     BLOB PRIMARY KEY,
+            session_id  BLOB NOT NULL,
+            seq         INTEGER NOT NULL,
+            UNIQUE (session_id, seq)
+        );
 
         -- Which b0x messages this device has consumed: the device's own
         -- state, never a node's (b0x_consumed.rs).

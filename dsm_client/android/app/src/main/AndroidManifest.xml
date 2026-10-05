@@ -113,6 +113,19 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- DSM Connect (Amendment A11; pre-audit item 16 amended by the owner
+                 2026-10-04): an app on this phone opens the wallet with a
+                 dsm:connect/v1: link, and the Apps screen shows its code for the
+                 player to read. The link carries a code only: nothing is fetched
+                 until the player reads it, nothing is trusted until the offer
+                 verifies. ci/android_exported_components.sh admits this filter
+                 and no other. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="dsm" android:sspPrefix="connect/v1:"/>
+            </intent-filter>
         </activity>
 
         <!-- Native QR Scanner Activity (ML Kit + CameraX) -->
