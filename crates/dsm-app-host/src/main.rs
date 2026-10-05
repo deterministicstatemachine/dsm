@@ -101,11 +101,11 @@ fn main() -> Result<(), String> {
     // The SDK first, on this thread: its dispatchers block on the SDK's own
     // runtime, so they never run inside the host's.
     identity::start_sdk(&args)?;
-    let account = identity::ensure_identity(&args)?;
+    let host = identity::ensure_identity(&args)?;
     let relay_tls = tls::load_or_make(&args.data_dir, &args.relay_names)?;
     log::info!(
         "[host] account {} on the pinned set; relay {} (certificate pin {})",
-        account.device_b32,
+        host.device_b32,
         args.relay_endpoint,
         dsm_sdk::util::text_id::encode_base32_crockford(&relay_tls.pin)
     );
@@ -115,17 +115,17 @@ fn main() -> Result<(), String> {
         .thread_name("dsm-app-host")
         .build()
         .map_err(|e| format!("the host runtime: {e}"))?;
-    runtime.block_on(serve(args, account, relay_tls))
+    runtime.block_on(serve(args, host, relay_tls))
 }
 
 async fn serve(
     args: Args,
-    account: identity::Account,
+    host: identity::Account,
     relay_tls: tls::RelayTls,
 ) -> Result<(), String> {
     dsm_sdk::sdk::tls_transport_sdk::ensure_rustls_crypto_provider();
     let sdk = dispatch::Sdk::start(4)?;
-    let record = Arc::new(activity::Record::new(account.clone()));
+    let record = Arc::new(activity::Record::new(host.clone()));
     sdk.record_into(record.clone())?;
     let requests_changed = Arc::new(tokio::sync::Notify::new());
 
