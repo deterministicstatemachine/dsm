@@ -163,6 +163,11 @@ pub enum VerdictRefusal {
     NotTheOutcomesSigners,
     /// A signature does not verify over the statement for this cell.
     Signature(SignatureError),
+    /// A gathered verdict for another outcome than the one being gathered.
+    AnotherOutcome,
+    /// The signatures in hand form no verdict with canonical bytes: none, or
+    /// more than an outcome's signers.
+    NoEncoding(super::wire::SofiWireError),
 }
 
 /// Whether `verdict` proves its own authority for the cell at `verdict_cell`
@@ -220,6 +225,78 @@ pub fn verdict_occupying(
 ) -> Result<EscrowVerdict, VerdictRefusal> {
     let verdict = EscrowVerdict::decode(bytes).map_err(VerdictRefusal::DoesNotDecode)?;
     verdict_authority(&verdict, verdict_cell)?;
+    Ok(verdict)
+}
+
+/// The signatures a gathered verdict holds for `outcome` at the cell at
+/// `verdict_cell`, each from a signer the table assigns to that outcome and
+/// verifying over `m(outcome)`; or why the bytes are no gathered verdict for
+/// that cell and outcome. Gathering carries no authority: only a verdict
+/// recognized at the cell decides anything ([`verdict_authority`]).
+pub fn gathered_signatures(
+    bytes: &[u8],
+    verdict_cell: &D32,
+    outcome: &[u8],
+) -> Result<Vec<VerdictSignature>, VerdictRefusal> {
+    let verdict = EscrowVerdict::decode(bytes).map_err(VerdictRefusal::DoesNotDecode)?;
+    if verdict_cell_key(
+        verdict.external_commitment(),
+        &table_digest(verdict.table()),
+    ) != *verdict_cell
+    {
+        return Err(VerdictRefusal::NotThisCell);
+    }
+    if verdict.outcome() != outcome {
+        return Err(VerdictRefusal::AnotherOutcome);
+    }
+    let decided_by = verdict
+        .table()
+        .signers_of(outcome)
+        .ok_or(VerdictRefusal::OutcomeNotInTable)?;
+    let digest = statement(verdict_cell, outcome);
+    let mut kept = Vec::with_capacity(verdict.signatures().len());
+    for s in verdict.signatures() {
+        if !decided_by.contains(s.signer()) {
+            return Err(VerdictRefusal::NotTheOutcomesSigners);
+        }
+        verify_bytes(
+            "EscrowVerdict",
+            s.signer().signature_alg(),
+            s.signer().public_key(),
+            &digest,
+            s.signature(),
+        )
+        .map_err(VerdictRefusal::Signature)?;
+        kept.push(s.clone());
+    }
+    Ok(kept)
+}
+
+/// A verdict on `outcome` from `signatures`, one per signer in canonical
+/// order, once they are exactly the signers `table` assigns to `outcome` and
+/// the verdict proves its own authority for its cell: what a producer writes
+/// to the cell. Fewer signatures than the outcome needs is
+/// `NotTheOutcomesSigners`: the gathering is not done.
+pub fn assemble_verdict(
+    external_commitment: D32,
+    table: OutcomeTable,
+    outcome: &[u8],
+    signatures: Vec<VerdictSignature>,
+) -> Result<EscrowVerdict, VerdictRefusal> {
+    let mut by_signer: std::collections::BTreeMap<Vec<u8>, VerdictSignature> =
+        std::collections::BTreeMap::new();
+    for s in signatures {
+        by_signer.entry(s.signer().canonical()).or_insert(s);
+    }
+    let cell = verdict_cell_key(&external_commitment, &table_digest(&table));
+    let verdict = EscrowVerdict::new(
+        external_commitment,
+        table,
+        outcome,
+        by_signer.into_values().collect(),
+    )
+    .map_err(VerdictRefusal::NoEncoding)?;
+    verdict_authority(&verdict, &cell)?;
     Ok(verdict)
 }
 
@@ -775,6 +852,81 @@ mod tests {
             Err(VerdictRefusal::Signature(
                 SignatureError::DoesNotVerify { .. }
             ))
+        ));
+    }
+
+    /// A joint cancel gathered one signature at a time: each signer's gathered
+    /// verdict yields only that outcome's verifying signatures, and the
+    /// verdict is assembled only once they are exactly the outcome's signers.
+    #[test]
+    fn a_verdict_is_assembled_only_from_the_outcomes_signatures() {
+        let m = the_match();
+        let t = terms(&m, ([0x01; 32], [0x02; 32]));
+        let k = verdict_cell_of(&t);
+        let from_a = verdict(&m, &t, b"cancel", &[&m.a]).encode();
+        let from_b = verdict(&m, &t, b"cancel", &[&m.b]).encode();
+
+        let mut gathered = gathered_signatures(&from_a, &k, b"cancel").expect("a's signature");
+        assert_eq!(gathered.len(), 1);
+        assert_eq!(
+            assemble_verdict(m.y, t.outcome_table(), b"cancel", gathered.clone()),
+            Err(VerdictRefusal::NotTheOutcomesSigners),
+            "one player's signature is not a cancel"
+        );
+        gathered.extend(gathered_signatures(&from_b, &k, b"cancel").expect("b's signature"));
+        // The same signature gathered twice is one signature.
+        gathered.extend(gathered_signatures(&from_a, &k, b"cancel").expect("a's again"));
+        let cancel =
+            assemble_verdict(m.y, t.outcome_table(), b"cancel", gathered).expect("both players");
+        assert_eq!(verdict_occupying(&cancel.encode(), &k), Ok(cancel.clone()));
+        assert_eq!(cancel, verdict(&m, &t, b"cancel", &[&m.a, &m.b]));
+
+        // Gathering for another outcome, at another cell, or from a signer
+        // the outcome does not name, yields nothing.
+        assert_eq!(
+            gathered_signatures(&from_a, &k, b"void"),
+            Err(VerdictRefusal::AnotherOutcome)
+        );
+        let other = Match {
+            y: external_commitment(b"match 8"),
+            ..the_match()
+        };
+        assert_eq!(
+            gathered_signatures(
+                &from_a,
+                &verdict_cell_of(&terms(&other, ([0x01; 32], [0x02; 32]))),
+                b"cancel"
+            ),
+            Err(VerdictRefusal::NotThisCell)
+        );
+        let by_referee = verdict(&m, &t, b"cancel", &[&m.referee]).encode();
+        assert_eq!(
+            gathered_signatures(&by_referee, &k, b"cancel"),
+            Err(VerdictRefusal::NotTheOutcomesSigners)
+        );
+        // A gathered signature over another statement does not verify.
+        let b_won = verdict(&m, &t, b"b-wins", &[&m.referee]);
+        let relabeled = EscrowVerdict::new(
+            m.y,
+            t.outcome_table(),
+            b"a-wins",
+            b_won.signatures().to_vec(),
+        )
+        .expect("verdict")
+        .encode();
+        assert!(matches!(
+            gathered_signatures(&relabeled, &k, b"a-wins"),
+            Err(VerdictRefusal::Signature(
+                SignatureError::DoesNotVerify { .. }
+            ))
+        ));
+        // No signatures at all have no encoding.
+        assert!(matches!(
+            assemble_verdict(m.y, t.outcome_table(), b"void", Vec::new()),
+            Err(VerdictRefusal::NoEncoding(SofiWireError::Cardinality {
+                got: 0,
+                ..
+            }))
         ));
     }
 

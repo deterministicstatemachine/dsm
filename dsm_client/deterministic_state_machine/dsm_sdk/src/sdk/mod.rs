@@ -21,6 +21,8 @@
 //!
 pub mod economic_admission_flow;
 pub mod economic_registers;
+/// Escrow vaults (SoFi §19.9): stakes released by a canonical verdict.
+pub mod escrow_flow;
 pub mod faucet_claim_flow;
 pub mod native_reserve;
 pub mod runtime_config;
