@@ -103,6 +103,11 @@ jobs:
           inputs="$(git ls-tree -r HEAD | awk -F'\t' '$2 !~ /\.md$/ && $2 != "specs/requirements/INTENT_PINS.tsv"' | sha256sum | cut -d' ' -f1)"
           echo "key=code-map-v1-${ImageOS}-${ImageVersion}-${inputs}" >> "$GITHUB_OUTPUT"
 
+      # Besides the indexes and the tables beside them, the map reads one
+      # thing from ./target: each build script's `output` (what it printed to
+      # cargo), which the indexes' cargo runs leave under target/debug/build
+      # and target/<triple>/debug/build. A shipped crate's build script that
+      # sets a cfg is refused from it, so it is kept with them.
       - name: The indexes and fixture run of a commit with the same key
         id: kept
         uses: actions/cache/restore@v4
@@ -122,6 +127,8 @@ jobs:
             target/requirement-map/node-features.txt
             target/requirement-map/node-features-indexed.txt
             target/requirement-map/fixture
+            target/debug/build/*/output
+            target/*/debug/build/*/output
 
       - name: The map reads its fixture as expected
         # Dispatch through a type argument, a qualified path and a value, and
@@ -199,6 +206,8 @@ jobs:
             target/requirement-map/node-features.txt
             target/requirement-map/node-features-indexed.txt
             target/requirement-map/fixture
+            target/debug/build/*/output
+            target/*/debug/build/*/output
 
       - name: Keep the map
         if: always()
