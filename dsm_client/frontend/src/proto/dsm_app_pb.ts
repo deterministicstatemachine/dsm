@@ -1340,6 +1340,13 @@ export enum ConnectScopeKind {
    * @generated from enum value: CONNECT_SCOPE_KIND_HOLDINGS = 4;
    */
   HOLDINGS = 4,
+
+  /**
+   * lock stakes in matches the application referees, and collect results (DSM Amendment A12)
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_ESCROW = 5;
+   */
+  ESCROW = 5,
 }
 // Retrieve enum metadata with: proto3.getEnumType(ConnectScopeKind)
 proto3.util.setEnumType(ConnectScopeKind, "dsm.ConnectScopeKind", [
@@ -1348,6 +1355,7 @@ proto3.util.setEnumType(ConnectScopeKind, "dsm.ConnectScopeKind", [
   { no: 2, name: "CONNECT_SCOPE_KIND_PAY" },
   { no: 3, name: "CONNECT_SCOPE_KIND_SWAP" },
   { no: 4, name: "CONNECT_SCOPE_KIND_HOLDINGS" },
+  { no: 5, name: "CONNECT_SCOPE_KIND_ESCROW" },
 ]);
 
 /**
@@ -1479,6 +1487,20 @@ export enum ConnectFact {
    * @generated from enum value: CONNECT_FACT_HOLDINGS = 3;
    */
   HOLDINGS = 3,
+
+  /**
+   * the wallet's Active vault holds the stake under exactly the match's template, on its verdict cell
+   *
+   * @generated from enum value: CONNECT_FACT_ESCROW_LOCKED = 4;
+   */
+  ESCROW_LOCKED = 4,
+
+  /**
+   * each named vault is Retired, and the cell's final verdict pays the wallet
+   *
+   * @generated from enum value: CONNECT_FACT_ESCROW_RELEASED = 5;
+   */
+  ESCROW_RELEASED = 5,
 }
 // Retrieve enum metadata with: proto3.getEnumType(ConnectFact)
 proto3.util.setEnumType(ConnectFact, "dsm.ConnectFact", [
@@ -1486,6 +1508,8 @@ proto3.util.setEnumType(ConnectFact, "dsm.ConnectFact", [
   { no: 1, name: "CONNECT_FACT_NONE" },
   { no: 2, name: "CONNECT_FACT_PAID" },
   { no: 3, name: "CONNECT_FACT_HOLDINGS" },
+  { no: 4, name: "CONNECT_FACT_ESCROW_LOCKED" },
+  { no: 5, name: "CONNECT_FACT_ESCROW_RELEASED" },
 ]);
 
 /**
@@ -28295,7 +28319,7 @@ export class ConnectScopeV1 extends Message<ConnectScopeV1> {
   policyCommits: Uint8Array[] = [];
 
   /**
-   * PAY and SWAP: the tokens it may spend and how much.
+   * PAY, SWAP and ESCROW: the tokens it may spend (ESCROW: lock) and how much.
    *
    * @generated from field: repeated dsm.ConnectCapV1 caps = 3;
    */
@@ -28793,6 +28817,149 @@ export class ConnectHoldingsV1 extends Message<ConnectHoldingsV1> {
 }
 
 /**
+ * Lock a stake for a match the application referees (DSM Amendment A12). The
+ * wallet builds the escrow terms itself from one fixed outcome table: a-wins
+ * and b-wins, decided by the application's key, pay A and B; cancel, decided
+ * by both players, and void, decided by the application's key, each pay the
+ * vault's own owner back. The request names no branch, signer or recipient.
+ *
+ * @generated from message dsm.ConnectEscrowLockV1
+ */
+export class ConnectEscrowLockV1 extends Message<ConnectEscrowLockV1> {
+  /**
+   * X, the match's agreed bytes: 1..256
+   *
+   * @generated from field: bytes external = 1;
+   */
+  external = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes policy_commit = 2;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * base units, > 0
+   *
+   * @generated from field: uint64 amount = 3;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * the wallet's side: 1 = A, 2 = B
+   *
+   * @generated from field: uint32 side = 4;
+   */
+  side = 0;
+
+  /**
+   * @generated from field: bytes opponent_genesis = 5;
+   */
+  opponentGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes opponent_device_id = 6;
+   */
+  opponentDeviceId = new Uint8Array(0);
+
+  /**
+   * the opponent's key as escrow.party names it
+   *
+   * @generated from field: bytes opponent_signing_key = 7;
+   */
+  opponentSigningKey = new Uint8Array(0);
+
+  /**
+   * side B: side A's vault; side A: empty
+   *
+   * @generated from field: bytes counterpart_vault_id = 8;
+   */
+  counterpartVaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: string memo = 9;
+   */
+  memo = "";
+
+  constructor(data?: PartialMessage<ConnectEscrowLockV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowLockV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "external", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "side", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "opponent_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "opponent_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "opponent_signing_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "counterpart_vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowLockV1 {
+    return new ConnectEscrowLockV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowLockV1 {
+    return new ConnectEscrowLockV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowLockV1 {
+    return new ConnectEscrowLockV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowLockV1 | PlainMessage<ConnectEscrowLockV1> | undefined, b: ConnectEscrowLockV1 | PlainMessage<ConnectEscrowLockV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowLockV1, a, b);
+  }
+}
+
+/**
+ * Collect a match result: each named vault released to this wallet, once its
+ * verdict cell's verdict is final on a branch that pays it.
+ *
+ * @generated from message dsm.ConnectEscrowReleaseV1
+ */
+export class ConnectEscrowReleaseV1 extends Message<ConnectEscrowReleaseV1> {
+  /**
+   * 1..2
+   *
+   * @generated from field: repeated bytes vault_ids = 1;
+   */
+  vaultIds: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<ConnectEscrowReleaseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowReleaseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowReleaseV1 {
+    return new ConnectEscrowReleaseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowReleaseV1 {
+    return new ConnectEscrowReleaseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowReleaseV1 {
+    return new ConnectEscrowReleaseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowReleaseV1 | PlainMessage<ConnectEscrowReleaseV1> | undefined, b: ConnectEscrowReleaseV1 | PlainMessage<ConnectEscrowReleaseV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowReleaseV1, a, b);
+  }
+}
+
+/**
  * session_id = H(DSM/connect/session ‖ offer_digest ‖ wallet device id).
  *
  * @generated from message dsm.AppRequestBodyV1
@@ -28843,6 +29010,18 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
      */
     value: ConnectHoldingsV1;
     case: "holdings";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowLockV1 escrow_lock = 15;
+     */
+    value: ConnectEscrowLockV1;
+    case: "escrowLock";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowReleaseV1 escrow_release = 16;
+     */
+    value: ConnectEscrowReleaseV1;
+    case: "escrowRelease";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppRequestBodyV1>) {
@@ -28860,6 +29039,8 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
     { no: 12, name: "quote", kind: "message", T: ConnectQuoteV1, oneof: "kind" },
     { no: 13, name: "swap", kind: "message", T: ConnectSwapV1, oneof: "kind" },
     { no: 14, name: "holdings", kind: "message", T: ConnectHoldingsV1, oneof: "kind" },
+    { no: 15, name: "escrow_lock", kind: "message", T: ConnectEscrowLockV1, oneof: "kind" },
+    { no: 16, name: "escrow_release", kind: "message", T: ConnectEscrowReleaseV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestBodyV1 {
@@ -29189,6 +29370,159 @@ export class ConnectSwapResultV1 extends Message<ConnectSwapResultV1> {
 }
 
 /**
+ * A stake the wallet locked: a notification, never evidence.
+ *
+ * @generated from message dsm.ConnectEscrowLockResultV1
+ */
+export class ConnectEscrowLockResultV1 extends Message<ConnectEscrowLockResultV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * K_verdict
+   *
+   * @generated from field: bytes verdict_cell = 2;
+   */
+  verdictCell = new Uint8Array(0);
+
+  /**
+   * Y
+   *
+   * @generated from field: bytes external_commitment = 3;
+   */
+  externalCommitment = new Uint8Array(0);
+
+  /**
+   * the wallet's economic position that carries the lock
+   *
+   * @generated from field: uint64 position = 4;
+   */
+  position = protoInt64.zero;
+
+  constructor(data?: PartialMessage<ConnectEscrowLockResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowLockResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "external_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowLockResultV1 {
+    return new ConnectEscrowLockResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowLockResultV1 {
+    return new ConnectEscrowLockResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowLockResultV1 {
+    return new ConnectEscrowLockResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowLockResultV1 | PlainMessage<ConnectEscrowLockResultV1> | undefined, b: ConnectEscrowLockResultV1 | PlainMessage<ConnectEscrowLockResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowLockResultV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectEscrowReleasedV1
+ */
+export class ConnectEscrowReleasedV1 extends Message<ConnectEscrowReleasedV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * the wallet's economic position the release took
+   *
+   * @generated from field: uint64 position = 2;
+   */
+  position = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.SofiPositionState state = 3;
+   */
+  state = SofiPositionState.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<ConnectEscrowReleasedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowReleasedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "state", kind: "enum", T: proto3.getEnumType(SofiPositionState) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowReleasedV1 {
+    return new ConnectEscrowReleasedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowReleasedV1 {
+    return new ConnectEscrowReleasedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowReleasedV1 {
+    return new ConnectEscrowReleasedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowReleasedV1 | PlainMessage<ConnectEscrowReleasedV1> | undefined, b: ConnectEscrowReleasedV1 | PlainMessage<ConnectEscrowReleasedV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowReleasedV1, a, b);
+  }
+}
+
+/**
+ * The vaults the wallet released for a collect: a notification, never evidence.
+ *
+ * @generated from message dsm.ConnectEscrowReleaseResultV1
+ */
+export class ConnectEscrowReleaseResultV1 extends Message<ConnectEscrowReleaseResultV1> {
+  /**
+   * @generated from field: repeated dsm.ConnectEscrowReleasedV1 released = 1;
+   */
+  released: ConnectEscrowReleasedV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectEscrowReleaseResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowReleaseResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "released", kind: "message", T: ConnectEscrowReleasedV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowReleaseResultV1 {
+    return new ConnectEscrowReleaseResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowReleaseResultV1 {
+    return new ConnectEscrowReleaseResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowReleaseResultV1 {
+    return new ConnectEscrowReleaseResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowReleaseResultV1 | PlainMessage<ConnectEscrowReleaseResultV1> | undefined, b: ConnectEscrowReleaseResultV1 | PlainMessage<ConnectEscrowReleaseResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowReleaseResultV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.AppResponseBodyV1
  */
 export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
@@ -29233,6 +29567,18 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
      */
     value: HoldingsProofV1;
     case: "holdings";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowLockResultV1 escrow_lock = 13;
+     */
+    value: ConnectEscrowLockResultV1;
+    case: "escrowLock";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowReleaseResultV1 escrow_release = 14;
+     */
+    value: ConnectEscrowReleaseResultV1;
+    case: "escrowRelease";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppResponseBodyV1>) {
@@ -29250,6 +29596,8 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
     { no: 10, name: "quote", kind: "message", T: ConnectQuoteResultV1, oneof: "result" },
     { no: 11, name: "swap", kind: "message", T: ConnectSwapResultV1, oneof: "result" },
     { no: 12, name: "holdings", kind: "message", T: HoldingsProofV1, oneof: "result" },
+    { no: 13, name: "escrow_lock", kind: "message", T: ConnectEscrowLockResultV1, oneof: "result" },
+    { no: 14, name: "escrow_release", kind: "message", T: ConnectEscrowReleaseResultV1, oneof: "result" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppResponseBodyV1 {
@@ -30128,6 +30476,18 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
      */
     value: ConnectHoldingsV1;
     case: "holdings";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowLockV1 escrow_lock = 15;
+     */
+    value: ConnectEscrowLockV1;
+    case: "escrowLock";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowReleaseV1 escrow_release = 16;
+     */
+    value: ConnectEscrowReleaseV1;
+    case: "escrowRelease";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectAppRequestIntentV1>) {
@@ -30144,6 +30504,8 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
     { no: 12, name: "quote", kind: "message", T: ConnectQuoteV1, oneof: "kind" },
     { no: 13, name: "swap", kind: "message", T: ConnectSwapV1, oneof: "kind" },
     { no: 14, name: "holdings", kind: "message", T: ConnectHoldingsV1, oneof: "kind" },
+    { no: 15, name: "escrow_lock", kind: "message", T: ConnectEscrowLockV1, oneof: "kind" },
+    { no: 16, name: "escrow_release", kind: "message", T: ConnectEscrowReleaseV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestIntentV1 {
@@ -30368,6 +30730,27 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
    */
   paidTx = new Uint8Array(0);
 
+  /**
+   * FACT_ESCROW_LOCKED: the wallet's vault. FACT_ESCROW_RELEASED: the vaults released.
+   *
+   * @generated from field: repeated bytes escrow_vault_ids = 13;
+   */
+  escrowVaultIds: Uint8Array[] = [];
+
+  /**
+   * the match's K_verdict; empty while no escrow fact holds
+   *
+   * @generated from field: bytes escrow_verdict_cell = 14;
+   */
+  escrowVerdictCell = new Uint8Array(0);
+
+  /**
+   * FACT_ESCROW_LOCKED: the stake, in base units
+   *
+   * @generated from field: uint64 escrow_amount = 15;
+   */
+  escrowAmount = protoInt64.zero;
+
   constructor(data?: PartialMessage<ConnectAppStatusV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -30388,6 +30771,9 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
     { no: 10, name: "quote", kind: "message", T: ConnectQuoteResultV1 },
     { no: 11, name: "swap", kind: "message", T: ConnectSwapResultV1 },
     { no: 12, name: "paid_tx", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "escrow_vault_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 14, name: "escrow_verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 15, name: "escrow_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppStatusV1 {

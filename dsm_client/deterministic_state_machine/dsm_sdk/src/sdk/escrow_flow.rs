@@ -683,6 +683,20 @@ async fn view_of(
     })
 }
 
+/// The escrow vault `vault_id` at its walked head, its genesis accepted and
+/// its terms escrow terms. Its id names it; nothing else about it is taken
+/// from whoever named it.
+pub async fn vault(
+    core: &CoreSDK,
+    set: &StorageSet,
+    vault_id: &D32,
+) -> Result<EscrowVaultView, DsmError> {
+    let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
+    let verifier = ctx.verifier();
+    escrow_terms_of(&verifier, vault_id)?;
+    view_of(set, &verifier, vault_id).await
+}
+
 /// `escrow.locked`: the escrow vaults bound to `verdict_cell`, each accepted,
 /// checked to derive the cell, and walked to its head. Discovery carries no
 /// authority; a candidate not established yet makes the search partial.

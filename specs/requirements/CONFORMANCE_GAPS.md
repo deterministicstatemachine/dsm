@@ -2902,17 +2902,43 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | Row | Was | Now | Why |
 |---|---|---|---|
 | MR-DSM-0295 to MR-DSM-0300 | — | Missing | Added by Amendment A12. No escrow scope or request kind exists in DSM Connect. |
+| MR-DSM-0295 to MR-DSM-0300 | Missing | Met | Built on this branch (below); node-backed end to end with a game's account and two wallets. |
+
+**Built (same branch).** Core is unchanged: no file under `dsm/` differs.
+- **The wire** (`proto/dsm_app.proto`): `CONNECT_SCOPE_KIND_ESCROW = 5`, capped as PAY; `ConnectEscrowLockV1` (the match bytes `X`, token, amount, side 1 or 2, the opponent's genesis, device id and signing key, side A's vault for side B, a memo) and `ConnectEscrowReleaseV1` (one or two vaults), field 15 and 16 of the request and intent oneofs; `ConnectEscrowLockResultV1` and `ConnectEscrowReleaseResultV1`, fields 13 and 14 of the answer's result; `CONNECT_FACT_ESCROW_LOCKED = 4` and `CONNECT_FACT_ESCROW_RELEASED = 5`; `ConnectAppStatusV1` fields 13 to 15 (the vaults, the verdict cell, the stake). The frontend's bindings are regenerated; the Apps screen renders the lines Rust writes and needed nothing more.
+- **The grant** (`sdk::connect::grant`): `ScopeKind::Escrow`, shaped as PAY (it caps, names no other token); `Request::EscrowLock` read with its shape checked (`X` of 1 to 256 bytes, a positive stake, side A or B, the opponent's key a device key of its width, a vault named exactly for side B) and `Request::EscrowRelease` (one or two distinct vaults); `decide` holds a lock to the escrow scope's caps and takes a collect in whenever an escrow scope stands.
+- **The template** (`sdk::connect::wager`): `branches` builds the four outcomes for a vault's owner, side and opponent, with the application's key as the only decider of `a-wins`, `b-wins` and `void`; it refuses an opponent that is the wallet or the application. `is_match_of` reads the other player from a vault's terms and rebuilds the template from it, so a vault is a match of this application with this wallet as a player only when its terms are exactly the template.
+- **The wallet** (`handlers::connect_routes`): a lock builds the terms from the template and creates the vault by `escrow_flow::create`; side B first reads side A's vault (`escrow_flow::vault`, new) and requires the named opponent as owner, Active, the same token and amount, the same `Y` and exactly the template's terms for side A with this wallet as B. A collect checks every vault with `is_match_of` before releasing any, then releases each by `escrow_flow::release`, which builds a release only once the verdict is final on a branch paying this wallet. A lock or a collect waits, unanswered, while this wallet is admitting its latest position. The scope reads "Lock stakes for matches: …", a lock "Lock 25.00 ERA for a match (memo)", a collect "Collect a match result".
+- **The application** (`connect.app.status`): a lock is counted from `escrow_flow::locked` on the verdict cell the template derives, only for the wallet's Active vault holding the asked token and amount under exactly the template's terms; a collect, only when each vault is the template's, Retired at its walked head, and its cell's final verdict names an outcome paying the wallet. `connect.app.request` checks a lock against the template before signing it.
+- **The host** (`crates/dsm-app-host`): the activity record names the two request kinds, `escrow.adjudicate` and `escrow.sign`, a verdict answer, and the two facts.
+
+**Tests.**
+- `dsm_sdk::handlers::connect_escrow_e2e_tests`, a game's account R and two wallets A and B on the pinned set's nodes, the test's relay between them:
+  - `a_match_the_game_referees_pays_the_winner_both_stakes`: A locks; B's lock is not counted from A's vault on the same cell; B locks against A's vault on the same verdict cell; R decides `a-wins`; B's wallet, asked to collect, releases nothing; A's collects both stakes and R counts it; B's failed collect is not counted from the vaults A released; A's signed "locked" for a match it never locked counts for nothing.
+  - `a_match_nobody_joined_is_voided_and_the_stake_returns`: B refuses to lock half A's stake against A's vault; R decides `void` and A collects its own stake; A's own escrow vault, decided by A, is not released for the game; a lock past the cap waits on the device and locks nothing.
+  - `side_b_locks_only_against_a_stake_that_pays_it_on_b_wins`: A's own vault on the match's cell with the game's table, every branch paying A; B locks nothing against it.
+- Unit: `dsm_sdk::sdk::connect::wager::tests` (the table, the opponent refusals, `is_match_of`) and the escrow rows of `dsm_sdk::sdk::connect::grant::tests` (the scope's shape, within and past its caps, the collect, the lock's shape).
+
+**Mutation controls** (2026-10-05, each restored; the tree's digest was the same before and after): `void` refunding the other player; the application allowed as a player; the collect's template check passed for any vault; any Active vault on the cell counted as the lock; the collection counted whoever was paid; side B's amount comparison and its terms comparison, each removed; a lock's caps skipped; a collect taken in without an escrow scope. Each turned its named test red (`VERIFICATION_MATRIX.md`, the A12 rows).
+
+**Open.**
+- The opponent's key is the application's word. A request carries no AttA for the opponent, so the wallet cannot derive the opponent's device id from its key. Side B compares side A's vault with the template built from its own key, so a wrong key makes B refuse, and side A's stake can then only be voided; a wrong key in side A's own terms only keeps a cancel from completing.
+- A grant counts what it has spent of a token across its spending scopes together, as it already did for PAY and SWAP (MR-DSM-0292 open), and a stake returned by `void`, `cancel` or a win is not credited back to the grant.
+- A lock is counted only while the vault is Active: once collected, the lock request's status reads no fact, and the collect request's status carries it.
+- If the first of two releases realizes and the second fails, the answer is FAILED and lists the first.
+- The lock fact's owner comparison is covered by its terms comparison (a template's refunds name its owner), so removing the owner comparison alone stays green; the mutation removed the vault identification as a whole.
+- No phone-rig run and no `dsm-app-host` real-connection run of a match; the in-process relay carries every step.
 
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 300 | 112 | 96 | 45 | 0 | 29 | 18 |
+| DSM high-level (MR-DSM) | 300 | 118 | 96 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 386 | 261 | 86 | 18 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **990** | **447** | **201** | **120** | **4** | **64** | **154** |
+| **All** | **990** | **453** | **201** | **114** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3214,12 +3240,12 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-DSM-0292 | Partial | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::storage::client_db::connect::record_processed`; `dsm_sdk::storage::client_db::connect::disconnect` | `dsm_sdk::handlers::connect_e2e_tests::a_relay_replaying_every_request_runs_nothing_twice`; `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | The replay guard holds (a relay replaying every request runs nothing twice) and nothing reads a clock. Open: a spent total stops every spending request but the grant's other kinds go on; whether a spent total ends the whole grant is the owner's to say. A disconnect ends the grant: nothing asked afterwards is carried out, and a waiting request can no longer be approved (§6.72). |
 | MR-DSM-0293 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::sdk::sofi_flow::trade`; `dsm_sdk::sdk::sofi_flow::find_route` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay`; `dsm_sdk::handlers::connect_e2e_tests::a_payment_under_the_grant_waits_while_the_relationship_settles` | Requests run through the same routes the player uses by hand: the online send, `tokens.addByAnchor`, SoFi findRoute and trade (§6.72). |
 | MR-DSM-0294 | Met | `dsm_sdk::sdk::sofi_flow::trade` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | Nothing in DSM Connect touches SoFi's predicates; the application's vault is one SoFi vault among any (§6.72). |
-| MR-DSM-0295 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
-| MR-DSM-0296 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
-| MR-DSM-0297 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
-| MR-DSM-0298 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
-| MR-DSM-0299 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
-| MR-DSM-0300 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
+| MR-DSM-0295 | Met | `dsm_sdk::sdk::connect::grant::request_from_wire`; `dsm_sdk::sdk::connect::grant::EscrowLock`; `dsm_sdk::handlers::connect_routes` | `dsm_sdk::sdk::connect::grant::tests::a_lock_names_its_side_and_side_as_vault_consistently`; `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_the_game_referees_pays_the_winner_both_stakes` | A lock names the match, the stake, the side and the opponent; the wallet builds the terms from `wager::terms` (§6.76). |
+| MR-DSM-0296 | Met | `dsm_sdk::sdk::connect::wager::branches`; `dsm_sdk::sdk::connect::wager::terms` | `dsm_sdk::sdk::connect::wager::tests::the_template_pays_only_the_two_players_and_refunds_only_the_owner`; `dsm_sdk::sdk::connect::wager::tests::the_application_and_the_wallet_itself_are_never_the_opponent`; `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_nobody_joined_is_voided_and_the_stake_returns` | The application's key is the key on its offer's card (`WalletSession.app_ak`); the opponent's key is the application's word (§6.76 Open). |
+| MR-DSM-0297 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::sdk::escrow_flow::vault`; `dsm_sdk::sdk::escrow_flow::create` | `dsm_sdk::handlers::connect_escrow_e2e_tests::side_b_locks_only_against_a_stake_that_pays_it_on_b_wins`; `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_nobody_joined_is_voided_and_the_stake_returns` | Side A's vault is read at its walked head; `escrow.create` checks the link (same cell, Active) again. |
+| MR-DSM-0298 | Met | `dsm_sdk::sdk::connect::grant::decide`; `dsm_sdk::sdk::connect::grant::scopes_from_wire`; `dsm_sdk::sdk::connect::wager::is_match_of` | `dsm_sdk::sdk::connect::grant::tests::an_escrow_scope_caps_what_it_may_lock_as_a_pay_scope_does`; `dsm_sdk::sdk::connect::grant::tests::a_lock_past_the_escrow_caps_waits_for_the_player`; `dsm_sdk::sdk::connect::grant::tests::a_collect_is_in_scope_whenever_an_escrow_scope_stands`; `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_nobody_joined_is_voided_and_the_stake_returns` | A grant's spend is counted per token across its spending scopes (§6.76 Open). |
+| MR-DSM-0299 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::sdk::escrow_flow::locked`; `dsm_sdk::sdk::escrow_flow::verdict` | `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_the_game_referees_pays_the_winner_both_stakes` | `connect.app.status` reads and walks the cell's vaults itself; an answer establishes nothing. |
+| MR-DSM-0300 | Met | `dsm_sdk::sdk::connect::wager`; `dsm_sdk::sdk::escrow_flow::create`; `dsm_sdk::sdk::escrow_flow::release` | `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_the_game_referees_pays_the_winner_both_stakes` | The template is the SDK's; Core is unchanged by A12, and R decides through `escrow.adjudicate`. |
 
 ### 8.2 SoFi settlement specification
 

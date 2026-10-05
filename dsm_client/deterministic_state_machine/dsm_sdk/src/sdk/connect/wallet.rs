@@ -161,6 +161,7 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
                 caps(scope)
             ),
         },
+        ScopeKind::Escrow => format!("Lock stakes for matches: {}", caps(scope)),
         ScopeKind::Holdings => {
             let named: Vec<String> = scope
                 .policy_commits
@@ -223,6 +224,17 @@ pub fn describe_request(request: &Request) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Request::EscrowLock(lock) => {
+            let staked = amount_of(&lock.policy_commit, lock.amount, &none);
+            match lock.memo.trim() {
+                "" => format!("Lock {staked} for a match"),
+                memo => format!("Lock {staked} for a match ({memo})"),
+            }
+        }
+        Request::EscrowRelease { vault_ids } => match vault_ids.len() {
+            1 => "Collect a match result".to_string(),
+            n => format!("Collect a match result ({n} stakes)"),
+        },
     }
 }
 
