@@ -100,6 +100,14 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request supersedes this run: it is cancelled
+# rather than finished for a result nobody reads. A run for anything else (a
+# push to main, the schedule, a dispatch) is its own group and is never
+# cancelled: each merge commit is checked by its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: CodeQL (${{ matrix.language }})
