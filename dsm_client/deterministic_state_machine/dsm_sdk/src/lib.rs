@@ -127,6 +127,7 @@ pub(crate) mod test_support {
     pub mod appliance;
     pub mod arrivals;
     pub mod nodes;
+    mod nodes_tests;
     pub mod one_device;
     pub mod receipts;
     pub mod two_device;

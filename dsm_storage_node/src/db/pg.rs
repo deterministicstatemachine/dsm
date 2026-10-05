@@ -667,14 +667,9 @@ pub async fn spool_ready(pool: &Pool, marks: &[(String, i64)]) -> Result<Vec<Str
 /// The node's connection pool type.
 pub type DBPool = Pool;
 
-/// A pool on the Postgres database `database_url` names. TLS is required,
-/// verified against the public web roots, unless the URL itself says
-/// `sslmode=disable` — the operator's explicit statement, never inferred
-/// from the host name. `sslmode=prefer` (the Postgres default) would fall
-/// back to plaintext when the server offers no TLS, so every other mode is
-/// held to `require`.
 /// Connections a node holds to Postgres at most. Every request that touches
-/// the store shares them.
+/// the store shares them. A deployed node runs on a server of its own, which
+/// grants them all.
 pub const POOL_MAX_SIZE: usize = 32;
 
 /// How long a request waits for one of those connections before it fails,
@@ -682,7 +677,14 @@ pub const POOL_MAX_SIZE: usize = 32;
 /// transport bound, as an unreachable node is (storage spec §1 rule 4).
 pub const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
+/// A pool of at most `max_size` connections on the Postgres database
+/// `database_url` names: no more than `max_size` are ever open at once. TLS
+/// is required, verified against the public web roots, unless the URL itself
+/// says `sslmode=disable` — the operator's explicit statement, never inferred
+/// from the host name. `sslmode=prefer` (the Postgres default) would fall
+/// back to plaintext when the server offers no TLS, so every other mode is
+/// held to `require`.
+pub fn create_pool(database_url: &str, max_size: usize) -> anyhow::Result<DBPool> {
     use tokio_postgres::config::SslMode;
 
     let mut pg: tokio_postgres::Config = database_url
@@ -699,7 +701,7 @@ pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
         Manager::from_config(pg, create_tls_connector(), manager_config)
     };
     Ok(Pool::builder(manager)
-        .max_size(POOL_MAX_SIZE)
+        .max_size(max_size)
         .wait_timeout(Some(POOL_WAIT_TIMEOUT))
         .runtime(Runtime::Tokio1)
         .build()?)

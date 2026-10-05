@@ -19,7 +19,7 @@ pub(crate) fn test_pool() -> db::DBPool {
         "DSM_TEST_DATABASE_URL must name a Postgres database: the node's store is Postgres, \
          and skipping these tests would report a green board that never executed it",
     );
-    db::create_pool(&url).expect("pool")
+    db::create_pool(&url, db::POOL_MAX_SIZE).expect("pool")
 }
 
 /// A pool on the database under test, schema initialized.

@@ -33,7 +33,10 @@ pub async fn fresh_store(name: &str) -> std::sync::Arc<dsm_storage_node::db::DBP
         )
     });
     let database = format!("dsm_test_{name}");
-    let admin = ok_or_panic(dsm_storage_node::db::create_pool(&server), "admin pool");
+    let admin = ok_or_panic(
+        dsm_storage_node::db::create_pool(&server, dsm_storage_node::db::POOL_MAX_SIZE),
+        "admin pool",
+    );
     let client = ok_or_panic(admin.get().await, "admin connection");
     ok_or_panic(
         client
@@ -49,7 +52,10 @@ pub async fn fresh_store(name: &str) -> std::sync::Arc<dsm_storage_node::db::DBP
     );
     drop(client);
     let url = with_database(&server, &database);
-    let pool = std::sync::Arc::new(ok_or_panic(dsm_storage_node::db::create_pool(&url), "pool"));
+    let pool = std::sync::Arc::new(ok_or_panic(
+        dsm_storage_node::db::create_pool(&url, dsm_storage_node::db::POOL_MAX_SIZE),
+        "pool",
+    ));
     ok_or_panic(dsm_storage_node::db::init_db(&pool).await, "init db");
     pool
 }
@@ -62,7 +68,10 @@ pub async fn reopened_store(name: &str) -> std::sync::Arc<dsm_storage_node::db::
         "DSM_TEST_DATABASE_URL must name a Postgres server",
     );
     let url = with_database(&server, &format!("dsm_test_{name}"));
-    let pool = std::sync::Arc::new(ok_or_panic(dsm_storage_node::db::create_pool(&url), "pool"));
+    let pool = std::sync::Arc::new(ok_or_panic(
+        dsm_storage_node::db::create_pool(&url, dsm_storage_node::db::POOL_MAX_SIZE),
+        "pool",
+    ));
     ok_or_panic(dsm_storage_node::db::init_db(&pool).await, "init db");
     pool
 }
