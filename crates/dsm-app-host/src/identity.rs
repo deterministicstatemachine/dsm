@@ -15,7 +15,6 @@ use crate::Args;
 #[derive(Clone)]
 pub struct Account {
     pub device_id: [u8; 32],
-    pub device_b32: String,
 }
 
 fn startup(operation: pb::startup_request::Operation) -> Result<(), String> {
@@ -95,10 +94,7 @@ fn account(device_id: &[u8]) -> Result<Account, String> {
     let device_id: [u8; 32] = device_id
         .try_into()
         .map_err(|e| format!("this account's device id: {e}"))?;
-    Ok(Account {
-        device_id,
-        device_b32: dsm_sdk::util::text_id::encode_base32_crockford(&device_id),
-    })
+    Ok(Account { device_id })
 }
 
 /// This account's identity: the one the store holds, or a new one rooted in

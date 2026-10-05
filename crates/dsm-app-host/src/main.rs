@@ -104,8 +104,7 @@ fn main() -> Result<(), String> {
     let host = identity::ensure_identity(&args)?;
     let relay_tls = tls::load_or_make(&args.data_dir, &args.relay_names)?;
     log::info!(
-        "[host] account {} on the pinned set; relay {} (certificate pin {})",
-        host.device_b32,
+        "[host] on the pinned set; relay {} (certificate pin {})",
         args.relay_endpoint,
         dsm_sdk::util::text_id::encode_base32_crockford(&relay_tls.pin)
     );
