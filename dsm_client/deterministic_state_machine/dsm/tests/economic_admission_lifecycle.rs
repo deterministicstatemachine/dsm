@@ -926,3 +926,218 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         "the derived body must pass both setup conjuncts, got {outcome:?}"
     );
 }
+
+// ── The activation point of a held first admission ─────────────────────────
+//
+// The advance and the pending admission commit together, so a first admission
+// held at any later step leaves its own credit on the head. The activation
+// point is the head less exactly that credit: the admission resumes on the
+// activation root, and anything else the head holds is still value held
+// before position 0.
+
+/// The first faucet claim's admission, locally accepted for `fx`'s witness at
+/// `position` on the activation root, naming `operation`.
+fn held_first_claim(
+    fx: &FaucetFixture,
+    kind: PendingAdmissionKind,
+    position: u64,
+    operation: &Operation,
+) -> PendingEconomicAdmission {
+    PendingEconomicAdmission::prepared(
+        kind,
+        position,
+        dsm::economic::tree::empty_economic_root(),
+        dsm::economic::admission::dsm_operation_digest(&operation.to_bytes()),
+    )
+    .into_locally_accepted(dsm::economic::admission::AcceptedAdmissionCoords {
+        post_economic_root: fx.post_root,
+        accepted_substrate_addr: SUBSTRATE_ADDR,
+        admission_manifest_addr: manifest_for(&fx.witness).addr().expect("addressable"),
+        c_dsm_plus: C_DSM_PLUS,
+        embedded_parent: EMBEDDED_PARENT,
+    })
+    .expect("prepared -> accepted")
+}
+
+/// The trader's head as it reloads: `balances`, `allocations`, and the
+/// admission in flight.
+fn head_of(
+    genesis: [u8; 32],
+    fx: &FaucetFixture,
+    balances: &[([u8; 32], u64)],
+    allocations: &[([u8; 32], u64)],
+    pending: Option<PendingEconomicAdmission>,
+) -> dsm::types::device_state::DeviceState {
+    dsm::types::device_state::DeviceState::restore(
+        genesis,
+        *dev(),
+        fx.pk.clone(),
+        None,
+        balances.iter().copied().collect(),
+        Vec::new(),
+        std::collections::BTreeMap::new(),
+        allocations
+            .iter()
+            .map(|(key, amount)| {
+                (
+                    *key,
+                    dsm::types::device_state::OfflineAllocation {
+                        amount: *amount,
+                        sequence: 1,
+                    },
+                )
+            })
+            .collect(),
+        pending,
+    )
+    .expect("the head reloads")
+}
+
+fn era_payout() -> ([u8; 32], u64) {
+    (
+        dsm::core::token::token_state_manager::era_policy_commit(),
+        dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+    )
+}
+
+/// A first claim held after its advance: the head holds the claim's own
+/// credit and nothing else. Read off the head as it stands, that credit is
+/// value held before position 0 and activation refuses; at the activation
+/// point the device held nothing, and the admission resumes on the activation
+/// root.
+#[test]
+fn a_held_first_admission_resumes_on_the_activation_root() {
+    let fx = faucet_fixture(1);
+    let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
+    let head = head_of(G, &fx, &[era_payout()], &[], Some(pending));
+
+    let as_it_stands = EconomicActivationSnapshot {
+        online_balances_empty: head.balances_snapshot().is_empty(),
+        outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+    };
+    activate(as_it_stands).expect_err("the head as it stands carries the held credit");
+
+    let snapshot = EconomicActivationSnapshot::before_first_admission(&head, &fx.witness)
+        .expect("the activation point is readable");
+    assert_eq!(snapshot, EconomicActivationSnapshot::fresh());
+    let root = activate(snapshot).expect("nothing was held at the activation point");
+    assert_eq!(root.economic_position(), 0);
+    assert_eq!(
+        root.economic_root(),
+        dsm::economic::tree::empty_economic_root()
+    );
+}
+
+/// No self-rooting through a held first admission: whatever the head holds
+/// that the first admission did not credit — more of the same asset, another
+/// asset, an outstanding allocation — was held at the activation point, and
+/// activation refuses it exactly as it refuses a device with nothing pending.
+#[test]
+fn value_the_first_admission_did_not_credit_still_blocks_activation() {
+    let fx = faucet_fixture(1);
+    let (era, payout) = era_payout();
+    type Holdings = (&'static str, Vec<([u8; 32], u64)>, Vec<([u8; 32], u64)>);
+    let cases: [Holdings; 3] = [
+        (
+            "more of the credited asset",
+            vec![(era, payout + 1)],
+            vec![],
+        ),
+        (
+            "another asset",
+            vec![(era, payout), ([0x7A; 32], 7)],
+            vec![],
+        ),
+        (
+            "an outstanding allocation",
+            vec![(era, payout)],
+            vec![([0x7B; 32], 5)],
+        ),
+    ];
+    for (name, balances, allocations) in cases {
+        let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
+        let head = head_of(G, &fx, &balances, &allocations, Some(pending));
+        let snapshot = match EconomicActivationSnapshot::before_first_admission(&head, &fx.witness)
+        {
+            Ok(snapshot) => snapshot,
+            Err(e) => panic!("{name}: the activation point is readable: {e}"),
+        };
+        assert_ne!(
+            snapshot,
+            EconomicActivationSnapshot::fresh(),
+            "{name}: held at the activation point"
+        );
+        let refused =
+            activate(snapshot).expect_err("value held at the activation point blocks activation");
+        assert_eq!(refused.snapshot, snapshot, "{name}");
+    }
+}
+
+/// The activation point is read only through the pending first admission's
+/// own witness, from the head that carries it.
+#[test]
+fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() {
+    use dsm::economic::lineage::ActivationPointUnreadable;
+    let fx = faucet_fixture(1);
+    let (era, _) = era_payout();
+    let read = |head: &dsm::types::device_state::DeviceState| {
+        EconomicActivationSnapshot::before_first_admission(head, &fx.witness)
+    };
+
+    // Nothing pending: the head is its own activation point.
+    assert_eq!(
+        read(&head_of(G, &fx, &[era_payout()], &[], None)),
+        Err(ActivationPointUnreadable::NothingPending)
+    );
+
+    // Not a first admission: a later position, or a kind no first admission has.
+    for (kind, position) in [
+        (PendingAdmissionKind::DsmBacked, 2),
+        (
+            PendingAdmissionKind::OfflineLoad {
+                asset_policy_commit: era,
+            },
+            1,
+        ),
+    ] {
+        let pending = held_first_claim(&fx, kind, position, &fx.op);
+        assert_eq!(
+            read(&head_of(G, &fx, &[era_payout()], &[], Some(pending))),
+            Err(ActivationPointUnreadable::NotAFirstAdmission {
+                economic_position: position
+            })
+        );
+    }
+
+    // The witness of another operation than the one pending.
+    let other = Operation::FaucetClaim {
+        reserve_id: reserve_genesis().reserve_id,
+        generation: 2,
+    };
+    let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &other);
+    assert_eq!(
+        read(&head_of(G, &fx, &[era_payout()], &[], Some(pending))),
+        Err(ActivationPointUnreadable::WitnessOfAnotherTransition)
+    );
+
+    // Another identity's head: the witness's leaves are keyed to this
+    // trader's genesis, so they do not verify under another's.
+    let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
+    assert!(matches!(
+        read(&head_of(
+            [0x12; 32],
+            &fx,
+            &[era_payout()],
+            &[],
+            Some(pending)
+        )),
+        Err(ActivationPointUnreadable::WitnessDoesNotVerify(..))
+    ));
+
+    // A head that does not hold the credit its pending admission made.
+    let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
+    assert_eq!(
+        read(&head_of(G, &fx, &[], &[], Some(pending))),
+        Err(ActivationPointUnreadable::CreditNotOnHead { policy_commit: era })
+    );
+}
