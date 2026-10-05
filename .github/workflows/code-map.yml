@@ -20,6 +20,14 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request supersedes this run: it is cancelled
+# rather than finished for a result nobody reads. A run for anything else (a
+# push to main, a dispatch) is its own group and is never cancelled: each
+# merge commit is checked by its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -76,14 +84,62 @@ jobs:
           test -d "$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
+      # The expensive half of this job (the fixture run, the three indexes and
+      # the mutation cases, about seventeen of its twenty minutes) reads code,
+      # configuration and this workflow: never a pin and never prose. The
+      # other half (the map's tables, its check, the intent manifest, every
+      # pin, the pins' own tests) runs on every commit. So the expensive half
+      # is kept under a key of everything it can read: every tracked file
+      # except `*.md` and specs/requirements/INTENT_PINS.tsv, and the runner
+      # image. The intent manifest stays in the key, because the mutation
+      # cases read the map its root questions shape. A commit that changes
+      # only pins or prose finds the indexes and fixture run of a commit whose
+      # every other byte is the same, verified there, and skips that half.
+      # Any other change misses and rebuilds it. The key matches exactly or
+      # not at all: there are no restore-keys, so a near match is a miss.
+      - name: The key of what the expensive half reads
+        id: key
+        run: |
+          inputs="$(git ls-tree -r HEAD | awk -F'\t' '$2 !~ /\.md$/ && $2 != "specs/requirements/INTENT_PINS.tsv"' | sha256sum | cut -d' ' -f1)"
+          echo "key=code-map-v1-${ImageOS}-${ImageVersion}-${inputs}" >> "$GITHUB_OUTPUT"
+
+      - name: The indexes and fixture run of a commit with the same key
+        id: kept
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: |
+            target/requirement-map/android.scip
+            target/requirement-map/android.log
+            target/requirement-map/node.scip
+            target/requirement-map/node.log
+            target/requirement-map/tests.scip
+            target/requirement-map/tests.log
+            target/requirement-map/android-features.txt
+            target/requirement-map/android-features-indexed.txt
+            target/requirement-map/android-packages.txt
+            target/requirement-map/node-packages.txt
+            target/requirement-map/node-features.txt
+            target/requirement-map/node-features-indexed.txt
+            target/requirement-map/fixture
+
       - name: The map reads its fixture as expected
         # Dispatch through a type argument, a qualified path and a value, and
         # a type only named: tools/requirement_map/fixture/expected.tsv.
+        id: fixture
+        if: steps.kept.outputs.cache-hit != 'true'
         run: make requirement-map-fixture MAP=target/requirement-map
 
+      - name: Index
+        id: indexes
+        if: steps.kept.outputs.cache-hit != 'true'
+        run: make requirement-map-indexes MAP=target/requirement-map
+
       - name: Map
+        # From the indexes, built above or kept; it refuses an index whose
+        # analyzer log shows a failure either way.
         id: map
-        run: make requirement-map MAP=target/requirement-map
+        run: make requirement-map-tables MAP=target/requirement-map
 
       - name: The map holds no contradiction and keeps its committed facts
         # Contradictions in its own tables; sentinels, entry points and
@@ -110,9 +166,39 @@ jobs:
       - name: Every mutation case moves what it names and nothing else
         # tools/requirement_map/fixture/mutations.toml: fixture changes, the
         # app's declarations, a real-tree re-index, and faults planted in
-        # copies of the maps, each in a temporary copy.
-        if: ${{ !cancelled() && steps.map.outcome == 'success' }}
+        # copies of the maps, each in a temporary copy. With the indexes kept,
+        # every input of every case is what it was where they passed.
+        id: mutations
+        if: ${{ !cancelled() && steps.map.outcome == 'success' && steps.kept.outputs.cache-hit != 'true' }}
         run: make requirement-map-mutations MAP=target/requirement-map
+
+      - name: Keep the indexes and fixture run for a commit with the same key
+        # Only once this run built them and every step that verifies them
+        # passed: the fixture, the map, its check and every mutation case. The
+        # intent manifest and the pins need not hold: a commit re-pinning the
+        # rows this one left stale is exactly the one that reuses them.
+        if: >-
+          ${{ !cancelled() && steps.kept.outputs.cache-hit != 'true'
+              && steps.fixture.outcome == 'success' && steps.indexes.outcome == 'success'
+              && steps.map.outcome == 'success' && steps.check.outcome == 'success'
+              && steps.mutations.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: |
+            target/requirement-map/android.scip
+            target/requirement-map/android.log
+            target/requirement-map/node.scip
+            target/requirement-map/node.log
+            target/requirement-map/tests.scip
+            target/requirement-map/tests.log
+            target/requirement-map/android-features.txt
+            target/requirement-map/android-features-indexed.txt
+            target/requirement-map/android-packages.txt
+            target/requirement-map/node-packages.txt
+            target/requirement-map/node-features.txt
+            target/requirement-map/node-features-indexed.txt
+            target/requirement-map/fixture
 
       - name: Keep the map
         if: always()
