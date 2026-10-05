@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 
+use dsm::sofi::wire::EscrowSigner;
 use dsm::types::proto as generated;
 
 use super::d32;
@@ -20,6 +21,9 @@ pub enum ScopeKind {
     Pay,
     Swap,
     Holdings,
+    /// Lock stakes in matches the application decides, and collect their
+    /// results (DSM Amendment A12). Capped as a payment scope is.
+    Escrow,
 }
 
 /// A cap on one token, in its base units.
@@ -36,7 +40,8 @@ pub struct Scope {
     /// SWAP: the pair. HOLDINGS: the tokens the application may ask about
     /// besides the objects it issued. Otherwise empty.
     pub policy_commits: Vec<[u8; 32]>,
-    /// PAY and SWAP: the tokens it may spend and how much. Otherwise empty.
+    /// PAY, SWAP and ESCROW: the tokens it may spend (ESCROW: lock) and how
+    /// much. Otherwise empty.
     pub caps: Vec<Cap>,
 }
 
@@ -56,6 +61,7 @@ fn kind_from_wire(kind: i32) -> Result<ScopeKind, String> {
         Ok(generated::ConnectScopeKind::Pay) => Ok(ScopeKind::Pay),
         Ok(generated::ConnectScopeKind::Swap) => Ok(ScopeKind::Swap),
         Ok(generated::ConnectScopeKind::Holdings) => Ok(ScopeKind::Holdings),
+        Ok(generated::ConnectScopeKind::Escrow) => Ok(ScopeKind::Escrow),
         _ => Err(format!("scope kind {kind} is not one this wallet knows")),
     }
 }
@@ -66,13 +72,14 @@ fn kind_to_wire(kind: ScopeKind) -> generated::ConnectScopeKind {
         ScopeKind::Pay => generated::ConnectScopeKind::Pay,
         ScopeKind::Swap => generated::ConnectScopeKind::Swap,
         ScopeKind::Holdings => generated::ConnectScopeKind::Holdings,
+        ScopeKind::Escrow => generated::ConnectScopeKind::Escrow,
     }
 }
 
 /// Scopes read from the wire, each checked for its shape:
 /// - a SWAP names exactly two distinct tokens and caps only those;
-/// - a PAY or SWAP caps at least one token, each once, with
-///   `0 < per_request ≤ total`;
+/// - a PAY, SWAP or ESCROW caps at least one token, each once, with
+///   `0 < per_request ≤ total`, and only a SWAP names a pair;
 /// - ACCEPT_ISSUED and HOLDINGS carry no caps, and only HOLDINGS and SWAP
 ///   name tokens;
 /// - no two scopes cover the same thing (one of each kind, one SWAP per pair).
@@ -123,6 +130,13 @@ pub fn scopes_from_wire(wire: &[generated::ConnectScopeV1]) -> Result<Vec<Scope>
                 if !scope.policy_commits.is_empty() || scope.caps.is_empty() {
                     return Err(
                         "a pay scope caps the tokens it may pay, and names no others".into(),
+                    );
+                }
+            }
+            ScopeKind::Escrow => {
+                if !scope.policy_commits.is_empty() || scope.caps.is_empty() {
+                    return Err(
+                        "an escrow scope caps the tokens it may lock, and names no others".into(),
                     );
                 }
             }
@@ -208,6 +222,53 @@ pub fn narrows(asked: &[Scope], granted: &[Scope]) -> Result<(), String> {
     Ok(())
 }
 
+/// The longest match bytes `X` a lock may name.
+pub const MAX_MATCH_BYTES: usize = 256;
+
+/// How many vaults one collect may name: a match has two stakes.
+pub const MAX_COLLECTED_VAULTS: usize = 2;
+
+/// Which side of a match a wallet plays (DSM Amendment A12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    A,
+    B,
+}
+
+impl Side {
+    pub fn other(self) -> Side {
+        match self {
+            Side::A => Side::B,
+            Side::B => Side::A,
+        }
+    }
+}
+
+/// The other player of a match, as the application names it: the identity
+/// its branch pays and the key that, with this wallet's, decides a cancel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opponent {
+    pub genesis: [u8; 32],
+    pub device_id: [u8; 32],
+    pub signer: EscrowSigner,
+}
+
+/// A stake to lock for a match (DSM Amendment A12). It names no branch,
+/// signer or recipient: the wallet builds the terms from its own template
+/// (`super::wager`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowLock {
+    /// `X`, the match's agreed bytes; the vault commits only `Y`.
+    pub external: Vec<u8>,
+    pub policy_commit: [u8; 32],
+    pub amount: u64,
+    pub side: Side,
+    pub opponent: Opponent,
+    /// Side B: side A's vault, which this lock is made against. Side A: none.
+    pub counterpart: Option<[u8; 32]>,
+    pub memo: String,
+}
+
 /// A request, read from its signed body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -233,6 +294,54 @@ pub enum Request {
     Holdings {
         policy_commits: Vec<[u8; 32]>,
     },
+    EscrowLock(EscrowLock),
+    /// Collect a match result: release each vault to this wallet.
+    EscrowRelease {
+        vault_ids: Vec<[u8; 32]>,
+    },
+}
+
+/// A lock's fields read and checked for their shape: `X` of 1 to
+/// [`MAX_MATCH_BYTES`] bytes, a positive amount, side 1 (A) or 2 (B), an
+/// opponent whose key is a declared signing key, and a counterpart vault
+/// exactly when the wallet plays side B, which locks against side A's.
+fn escrow_lock_from_wire(r: &generated::ConnectEscrowLockV1) -> Result<EscrowLock, String> {
+    if r.external.is_empty() || r.external.len() > MAX_MATCH_BYTES {
+        return Err(format!(
+            "a match's agreed bytes are 1 to {MAX_MATCH_BYTES} bytes, not {}",
+            r.external.len()
+        ));
+    }
+    if r.amount == 0 {
+        return Err("a stake must be positive".into());
+    }
+    let side = match r.side {
+        1 => Side::A,
+        2 => Side::B,
+        other => return Err(format!("side {other} is neither A (1) nor B (2)")),
+    };
+    let signer = super::wager::signer(&r.opponent_signing_key)
+        .map_err(|e| format!("the opponent's key: {e}"))?;
+    let opponent = Opponent {
+        genesis: d32(&r.opponent_genesis, "the opponent's genesis")?,
+        device_id: d32(&r.opponent_device_id, "the opponent's device id")?,
+        signer,
+    };
+    let counterpart = match (side, r.counterpart_vault_id.as_slice()) {
+        (Side::A, []) => None,
+        (Side::A, ..) => return Err("side A locks first and names no vault".into()),
+        (Side::B, []) => return Err("side B locks against side A's vault and must name it".into()),
+        (Side::B, bytes) => Some(d32(bytes, "side A's vault")?),
+    };
+    Ok(EscrowLock {
+        external: r.external.clone(),
+        policy_commit: d32(&r.policy_commit, "the stake's token")?,
+        amount: r.amount,
+        side,
+        opponent,
+        counterpart,
+        memo: r.memo.clone(),
+    })
 }
 
 pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, String> {
@@ -289,6 +398,24 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
                 return Err("a holdings request names no token".into());
             }
             Ok(Request::Holdings { policy_commits })
+        }
+        Some(Kind::EscrowLock(r)) => Ok(Request::EscrowLock(escrow_lock_from_wire(r)?)),
+        Some(Kind::EscrowRelease(r)) => {
+            let mut vault_ids = Vec::with_capacity(r.vault_ids.len());
+            for v in &r.vault_ids {
+                let v = d32(v, "a vault")?;
+                if vault_ids.contains(&v) {
+                    return Err("a collect names one vault twice".into());
+                }
+                vault_ids.push(v);
+            }
+            if vault_ids.is_empty() || vault_ids.len() > MAX_COLLECTED_VAULTS {
+                return Err(format!(
+                    "a collect names 1 to {MAX_COLLECTED_VAULTS} vaults, not {}",
+                    vault_ids.len()
+                ));
+            }
+            Ok(Request::EscrowRelease { vault_ids })
         }
         None => Err("the request asks for nothing".into()),
     }
@@ -386,6 +513,20 @@ pub fn decide(
                 }
             }
             None => Decision::Outside("the grant does not let it see holdings".into()),
+        },
+        Request::EscrowLock(lock) => match of_kind(ScopeKind::Escrow).next() {
+            Some(scope) => within(
+                scope,
+                &lock.policy_commit,
+                lock.amount,
+                spent(&lock.policy_commit),
+            ),
+            None => Decision::Outside("the grant does not let it lock stakes".into()),
+        },
+        // A collect releases only to this wallet: it spends nothing.
+        Request::EscrowRelease { .. } => match of_kind(ScopeKind::Escrow).next() {
+            Some(..) => Decision::InScope { spend: None },
+            None => Decision::Outside("the grant does not let it collect match results".into()),
         },
     }
 }
@@ -583,5 +724,191 @@ mod tests {
         let mut w = scopes_to_wire(&grant());
         w[2].caps[0].policy_commit = OTHER.to_vec();
         scopes_from_wire(&w).expect_err("a swap capping a token outside its pair");
+    }
+
+    // ── the escrow scope (DSM Amendment A12) ──────────────────────────────
+
+    fn escrow_grant() -> Vec<Scope> {
+        vec![Scope {
+            kind: ScopeKind::Escrow,
+            policy_commits: vec![],
+            caps: vec![Cap {
+                policy_commit: WILD,
+                per_request: 25,
+                total: 60,
+            }],
+        }]
+    }
+
+    /// A real SPHINCS+ public key, as `escrow.party` names a device's.
+    fn signing_key() -> Vec<u8> {
+        dsm::crypto::sphincs::generate_sphincs_keypair()
+            .expect("a SPHINCS+ key pair")
+            .0
+    }
+
+    fn lock_wire(amount: u64, side: u32, counterpart: &[u8]) -> generated::AppRequestBodyV1 {
+        generated::AppRequestBodyV1 {
+            session_id: vec![9; 32],
+            seq: 1,
+            kind: Some(generated::app_request_body_v1::Kind::EscrowLock(
+                generated::ConnectEscrowLockV1 {
+                    external: b"match 7".to_vec(),
+                    policy_commit: WILD.to_vec(),
+                    amount,
+                    side,
+                    opponent_genesis: vec![4; 32],
+                    opponent_device_id: vec![5; 32],
+                    opponent_signing_key: signing_key(),
+                    counterpart_vault_id: counterpart.to_vec(),
+                    memo: "best of three".into(),
+                },
+            )),
+        }
+    }
+
+    fn lock(amount: u64) -> Request {
+        request_from_wire(&lock_wire(amount, 1, &[])).expect("a side-A lock")
+    }
+
+    fn collect() -> Request {
+        Request::EscrowRelease {
+            vault_ids: vec![[6; 32], [7; 32]],
+        }
+    }
+
+    #[test]
+    fn an_escrow_scope_caps_what_it_may_lock_as_a_pay_scope_does() -> Result<(), String> {
+        assert_eq!(
+            scopes_from_wire(&scopes_to_wire(&escrow_grant()))?,
+            escrow_grant()
+        );
+        let mut w = scopes_to_wire(&escrow_grant());
+        w[0].caps.clear();
+        scopes_from_wire(&w).expect_err("an escrow scope that caps nothing");
+        let mut w = scopes_to_wire(&escrow_grant());
+        w[0].policy_commits.push(ERA.to_vec());
+        scopes_from_wire(&w).expect_err("an escrow scope naming a token it does not cap");
+        let mut w = scopes_to_wire(&escrow_grant());
+        w[0].caps[0].per_request = 61;
+        scopes_from_wire(&w).expect_err("per request above total");
+        let mut w = scopes_to_wire(&escrow_grant());
+        w.push(w[0].clone());
+        scopes_from_wire(&w).expect_err("two escrow scopes");
+        let mut wider = escrow_grant();
+        wider[0].caps[0].total = 61;
+        narrows(&escrow_grant(), &wider).expect_err("a grant wider than the offer");
+        narrows(&grant(), &escrow_grant()).expect_err("an escrow scope the offer never asked for");
+        Ok(())
+    }
+
+    #[test]
+    fn a_lock_within_the_escrow_caps_runs_and_counts_its_stake() {
+        assert_eq!(
+            decide(&escrow_grant(), &lock(25), &nothing_spent, &BTreeSet::new()),
+            Decision::InScope {
+                spend: Some((WILD, 25))
+            }
+        );
+        let spent_35 = |c: &[u8; 32]| if *c == WILD { 35 } else { 0 };
+        assert_eq!(
+            decide(&escrow_grant(), &lock(25), &spent_35, &BTreeSet::new()),
+            Decision::InScope {
+                spend: Some((WILD, 25))
+            },
+            "35 spent and 25 more is the total exactly"
+        );
+    }
+
+    #[test]
+    fn a_lock_past_the_escrow_caps_waits_for_the_player() {
+        assert!(matches!(
+            decide(&escrow_grant(), &lock(26), &nothing_spent, &BTreeSet::new()),
+            Decision::Outside(..)
+        ));
+        let spent_36 = |c: &[u8; 32]| if *c == WILD { 36 } else { 0 };
+        assert!(matches!(
+            decide(&escrow_grant(), &lock(25), &spent_36, &BTreeSet::new()),
+            Decision::Outside(..)
+        ));
+        let mut era_stake = lock_wire(1, 1, &[]);
+        if let Some(generated::app_request_body_v1::Kind::EscrowLock(l)) = era_stake.kind.as_mut() {
+            l.policy_commit = ERA.to_vec();
+        }
+        let era_stake = request_from_wire(&era_stake).expect("a lock of ERA");
+        assert!(
+            matches!(
+                decide(
+                    &escrow_grant(),
+                    &era_stake,
+                    &nothing_spent,
+                    &BTreeSet::new()
+                ),
+                Decision::Outside(..)
+            ),
+            "the escrow scope caps only WILD"
+        );
+        assert!(
+            matches!(
+                decide(&grant(), &lock(1), &nothing_spent, &BTreeSet::new()),
+                Decision::Outside(..)
+            ),
+            "a payment scope capping WILD lets nothing be locked"
+        );
+    }
+
+    #[test]
+    fn a_collect_is_in_scope_whenever_an_escrow_scope_stands() {
+        let spent_all = |_: &[u8; 32]| 60;
+        assert_eq!(
+            decide(&escrow_grant(), &collect(), &spent_all, &BTreeSet::new()),
+            Decision::InScope { spend: None },
+            "a collect pays this wallet and spends nothing, even from a spent grant"
+        );
+        assert!(matches!(
+            decide(&grant(), &collect(), &nothing_spent, &BTreeSet::new()),
+            Decision::Outside(..)
+        ));
+    }
+
+    #[test]
+    fn a_lock_names_its_side_and_side_as_vault_consistently() {
+        let b = request_from_wire(&lock_wire(5, 2, &[8; 32])).expect("a side-B lock");
+        let Request::EscrowLock(b) = b else {
+            panic!("a lock read as another request");
+        };
+        assert_eq!((b.side, b.counterpart), (Side::B, Some([8; 32])));
+        request_from_wire(&lock_wire(5, 1, &[8; 32])).expect_err("side A naming a vault");
+        request_from_wire(&lock_wire(5, 2, &[])).expect_err("side B naming none");
+        request_from_wire(&lock_wire(5, 0, &[])).expect_err("side 0");
+        request_from_wire(&lock_wire(5, 3, &[])).expect_err("side 3");
+        request_from_wire(&lock_wire(0, 1, &[])).expect_err("no stake");
+        for external in [Vec::new(), vec![1; MAX_MATCH_BYTES + 1]] {
+            let mut w = lock_wire(5, 1, &[]);
+            if let Some(generated::app_request_body_v1::Kind::EscrowLock(l)) = w.kind.as_mut() {
+                l.external = external;
+            }
+            request_from_wire(&w).expect_err("match bytes outside 1..=256");
+        }
+        let mut w = lock_wire(5, 1, &[]);
+        if let Some(generated::app_request_body_v1::Kind::EscrowLock(l)) = w.kind.as_mut() {
+            l.opponent_signing_key.pop();
+        }
+        request_from_wire(&w).expect_err("an opponent key of the wrong width");
+        let release = |vault_ids: Vec<Vec<u8>>| generated::AppRequestBodyV1 {
+            session_id: vec![9; 32],
+            seq: 1,
+            kind: Some(generated::app_request_body_v1::Kind::EscrowRelease(
+                generated::ConnectEscrowReleaseV1 { vault_ids },
+            )),
+        };
+        request_from_wire(&release(vec![])).expect_err("a collect of nothing");
+        request_from_wire(&release(vec![vec![6; 32]; 2])).expect_err("one vault twice");
+        request_from_wire(&release(vec![vec![6; 32], vec![7; 32], vec![8; 32]]))
+            .expect_err("three vaults");
+        assert_eq!(
+            request_from_wire(&release(vec![vec![6; 32], vec![7; 32]])),
+            Ok(collect())
+        );
     }
 }

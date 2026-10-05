@@ -4599,6 +4599,7 @@ enum ConnectScopeKind {
   CONNECT_SCOPE_KIND_PAY           = 2; // pay the application's account
   CONNECT_SCOPE_KIND_SWAP          = 3; // quote and trade between the two tokens of `pair`
   CONNECT_SCOPE_KIND_HOLDINGS      = 4; // prove holdings of the application's tokens
+  CONNECT_SCOPE_KIND_ESCROW        = 5; // lock stakes in matches the application referees, and collect results (DSM Amendment A12)
 }
 
 // A cap on one token a scope may spend, in that token's base units.
@@ -4613,7 +4614,7 @@ message ConnectScopeV1 {
   // SWAP: the two tokens of the pair, in either order. HOLDINGS: the tokens
   // the application may ask about (objects it issued are always included).
   repeated bytes        policy_commits = 2 [(dsm_fixed_len)=32];
-  // PAY and SWAP: the tokens it may spend and how much.
+  // PAY, SWAP and ESCROW: the tokens it may spend (ESCROW: lock) and how much.
   repeated ConnectCapV1 caps = 3;
 }
 
@@ -4664,6 +4665,27 @@ message ConnectSwapV1 {
 message ConnectHoldingsV1 {
   repeated bytes policy_commits = 1 [(dsm_fixed_len)=32];
 }
+// Lock a stake for a match the application referees (DSM Amendment A12). The
+// wallet builds the escrow terms itself from one fixed outcome table: a-wins
+// and b-wins, decided by the application's key, pay A and B; cancel, decided
+// by both players, and void, decided by the application's key, each pay the
+// vault's own owner back. The request names no branch, signer or recipient.
+message ConnectEscrowLockV1 {
+  bytes  external             = 1 [(dsm_max_len)=256]; // X, the match's agreed bytes: 1..256
+  bytes  policy_commit        = 2 [(dsm_fixed_len)=32];
+  uint64 amount               = 3;                     // base units, > 0
+  uint32 side                 = 4;                     // the wallet's side: 1 = A, 2 = B
+  bytes  opponent_genesis     = 5 [(dsm_fixed_len)=32];
+  bytes  opponent_device_id   = 6 [(dsm_fixed_len)=32];
+  bytes  opponent_signing_key = 7 [(dsm_max_len)=64];  // the opponent's key as escrow.party names it
+  bytes  counterpart_vault_id = 8 [(dsm_max_len)=32];  // side B: side A's vault; side A: empty
+  string memo                 = 9 [(dsm_max_len)=256];
+}
+// Collect a match result: each named vault released to this wallet, once its
+// verdict cell's verdict is final on a branch that pays it.
+message ConnectEscrowReleaseV1 {
+  repeated bytes vault_ids = 1 [(dsm_fixed_len)=32]; // 1..2
+}
 
 // session_id = H(DSM/connect/session ‖ offer_digest ‖ wallet device id).
 message AppRequestBodyV1 {
@@ -4675,6 +4697,8 @@ message AppRequestBodyV1 {
     ConnectQuoteV1        quote         = 12;
     ConnectSwapV1         swap          = 13;
     ConnectHoldingsV1     holdings      = 14;
+    ConnectEscrowLockV1    escrow_lock    = 15;
+    ConnectEscrowReleaseV1 escrow_release = 16;
   }
 }
 message AppRequestV1 {
@@ -4725,6 +4749,22 @@ message ConnectSwapResultV1 {
   SofiPositionState state    = 2;
   repeated bytes    vault_ids = 3 [(dsm_fixed_len)=32];
 }
+// A stake the wallet locked: a notification, never evidence.
+message ConnectEscrowLockResultV1 {
+  bytes  vault_id            = 1 [(dsm_fixed_len)=32];
+  bytes  verdict_cell        = 2 [(dsm_fixed_len)=32]; // K_verdict
+  bytes  external_commitment = 3 [(dsm_fixed_len)=32]; // Y
+  uint64 position            = 4; // the wallet's economic position that carries the lock
+}
+message ConnectEscrowReleasedV1 {
+  bytes             vault_id = 1 [(dsm_fixed_len)=32];
+  uint64            position = 2; // the wallet's economic position the release took
+  SofiPositionState state    = 3;
+}
+// The vaults the wallet released for a collect: a notification, never evidence.
+message ConnectEscrowReleaseResultV1 {
+  repeated ConnectEscrowReleasedV1 released = 1;
+}
 
 message AppResponseBodyV1 {
   bytes          session_id = 1 [(dsm_fixed_len)=32];
@@ -4735,6 +4775,8 @@ message AppResponseBodyV1 {
     ConnectQuoteResultV1 quote    = 10;
     ConnectSwapResultV1  swap     = 11;
     HoldingsProofV1      holdings = 12;
+    ConnectEscrowLockResultV1    escrow_lock    = 13;
+    ConnectEscrowReleaseResultV1 escrow_release = 14;
   }
 }
 message AppResponseV1 {
@@ -4848,6 +4890,8 @@ message ConnectAppRequestIntentV1 {
     ConnectQuoteV1        quote         = 12;
     ConnectSwapV1         swap          = 13;
     ConnectHoldingsV1     holdings      = 14;
+    ConnectEscrowLockV1    escrow_lock    = 15;
+    ConnectEscrowReleaseV1 escrow_release = 16;
   }
 }
 message ConnectAppRequestsQueryV1 {
@@ -4864,6 +4908,8 @@ enum ConnectFact {
   CONNECT_FACT_NONE        = 1; // nothing DSM-evidenced yet; an answer alone is never a fact
   CONNECT_FACT_PAID        = 2; // the transfer is accepted onto the application's own relationship
   CONNECT_FACT_HOLDINGS    = 3; // the holdings proof verified
+  CONNECT_FACT_ESCROW_LOCKED   = 4; // the wallet's Active vault holds the stake under exactly the match's template, on its verdict cell
+  CONNECT_FACT_ESCROW_RELEASED = 5; // each named vault is Retired, and the cell's final verdict pays the wallet
 }
 message VerifiedHoldingV1 {
   bytes  policy_commit = 1 [(dsm_fixed_len)=32];
@@ -4882,6 +4928,10 @@ message ConnectAppStatusV1 {
   ConnectQuoteResultV1       quote       = 10; // a quote is information, never a fact
   ConnectSwapResultV1        swap        = 11;
   bytes                      paid_tx     = 12; // FACT_PAID: the accepted transfer's id
+  // FACT_ESCROW_LOCKED: the wallet's vault. FACT_ESCROW_RELEASED: the vaults released.
+  repeated bytes             escrow_vault_ids    = 13 [(dsm_fixed_len)=32];
+  bytes                      escrow_verdict_cell = 14 [(dsm_max_len)=32]; // the match's K_verdict; empty while no escrow fact holds
+  uint64                     escrow_amount       = 15; // FACT_ESCROW_LOCKED: the stake, in base units
 }
 
 // One envelope payload for every DSM Connect reply.

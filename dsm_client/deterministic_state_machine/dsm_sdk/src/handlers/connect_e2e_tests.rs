@@ -45,20 +45,20 @@ enum Serve {
     Everything,
 }
 
-struct Held {
-    offer: Option<([u8; 32], Vec<u8>)>,
-    accepts: Vec<Vec<u8>>,
-    requests: Vec<Vec<u8>>,
-    responses: Vec<Vec<u8>>,
+pub(super) struct Held {
+    pub(super) offer: Option<([u8; 32], Vec<u8>)>,
+    pub(super) accepts: Vec<Vec<u8>>,
+    pub(super) requests: Vec<Vec<u8>>,
+    pub(super) responses: Vec<Vec<u8>>,
     serve: Serve,
 }
 
 type Shared = Arc<Mutex<Held>>;
 
 /// A store-and-forward relay on a self-signed certificate.
-struct ForwardRelay {
-    endpoint: String,
-    pin: [u8; 32],
+pub(super) struct ForwardRelay {
+    pub(super) endpoint: String,
+    pub(super) pin: [u8; 32],
     held: Shared,
     _handle: axum_server::Handle<std::net::SocketAddr>,
 }
@@ -109,7 +109,7 @@ async fn keep_response(State(held): State<Shared>, body: Bytes) -> StatusCode {
 }
 
 impl ForwardRelay {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
         crate::sdk::tls_transport_sdk::ensure_rustls_crypto_provider();
         let made = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into(), "localhost".into()])
             .expect("the relay's certificate");
@@ -147,19 +147,19 @@ impl ForwardRelay {
         }
     }
 
-    fn held(&self) -> std::sync::MutexGuard<'_, Held> {
+    pub(super) fn held(&self) -> std::sync::MutexGuard<'_, Held> {
         self.held.lock().expect("the relay")
     }
 }
 
-fn reply(r: &crate::bridge::AppResult) -> Reply {
+pub(super) fn reply(r: &crate::bridge::AppResult) -> Reply {
     match payload(r) {
         Payload::ConnectReply(generated::ConnectReplyV1 { reply: Some(reply) }) => reply,
         other => panic!("a connect route answered {other:?}"),
     }
 }
 
-async fn query(d: &TestDevice, path: &str, params: Vec<u8>) -> crate::bridge::AppResult {
+pub(super) async fn query(d: &TestDevice, path: &str, params: Vec<u8>) -> crate::bridge::AppResult {
     d.enter();
     d.router()
         .query(AppQuery {
@@ -284,7 +284,7 @@ async fn connect(p: &Pair, relay: &ForwardRelay, code: &str) -> [u8; 32] {
 }
 
 /// An `ArgPack` around bytes already encoded.
-fn args_raw(body: Vec<u8>) -> Vec<u8> {
+pub(super) fn args_raw(body: Vec<u8>) -> Vec<u8> {
     generated::ArgPack {
         codec: generated::Codec::Proto as i32,
         body,
@@ -294,7 +294,7 @@ fn args_raw(body: Vec<u8>) -> Vec<u8> {
 }
 
 /// A signs a request, and the relay serves it. Its sequence number.
-async fn request(
+pub(super) async fn request(
     a: &TestDevice,
     relay: &ForwardRelay,
     session: &[u8; 32],
@@ -356,7 +356,11 @@ async fn sync_clean(p: &Pair, relay: &ForwardRelay) {
 }
 
 /// The wallet's own log of what it did with request `seq`.
-async fn wallet_log(b: &TestDevice, session: &[u8; 32], seq: u64) -> generated::ConnectLogEntryV1 {
+pub(super) async fn wallet_log(
+    b: &TestDevice,
+    session: &[u8; 32],
+    seq: u64,
+) -> generated::ConnectLogEntryV1 {
     let logged = query(
         b,
         "connect.log",
@@ -375,7 +379,7 @@ async fn wallet_log(b: &TestDevice, session: &[u8; 32], seq: u64) -> generated::
 }
 
 /// The wallet carried out request `seq`, by its own log.
-async fn carried_out(b: &TestDevice, session: &[u8; 32], seq: u64) {
+pub(super) async fn carried_out(b: &TestDevice, session: &[u8; 32], seq: u64) {
     let entry = wallet_log(b, session, seq).await;
     assert_eq!(
         generated::ConnectOutcome::try_from(entry.outcome),
@@ -386,7 +390,11 @@ async fn carried_out(b: &TestDevice, session: &[u8; 32], seq: u64) {
     );
 }
 
-async fn status(a: &TestDevice, session: &[u8; 32], seq: u64) -> generated::ConnectAppStatusV1 {
+pub(super) async fn status(
+    a: &TestDevice,
+    session: &[u8; 32],
+    seq: u64,
+) -> generated::ConnectAppStatusV1 {
     let checked = invoke(
         a,
         "connect.app.status",
@@ -402,11 +410,11 @@ async fn status(a: &TestDevice, session: &[u8; 32], seq: u64) -> generated::Conn
     status
 }
 
-fn fact(s: &generated::ConnectAppStatusV1) -> generated::ConnectFact {
+pub(super) fn fact(s: &generated::ConnectAppStatusV1) -> generated::ConnectFact {
     generated::ConnectFact::try_from(s.fact).expect("a known fact")
 }
 
-fn outcome(s: &generated::ConnectAppStatusV1) -> generated::ConnectOutcome {
+pub(super) fn outcome(s: &generated::ConnectAppStatusV1) -> generated::ConnectOutcome {
     generated::ConnectOutcome::try_from(s.outcome).expect("a known outcome")
 }
 
