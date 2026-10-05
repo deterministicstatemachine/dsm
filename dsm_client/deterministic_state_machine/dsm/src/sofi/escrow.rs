@@ -20,13 +20,13 @@
 use crate::common::domain_tags::{
     TAG_DSM_ESCROW_CELL_LOCATOR, TAG_DSM_ESCROW_OUTCOME_TABLE, TAG_DSM_ESCROW_STATEMENT,
     TAG_DSM_ESCROW_STATEMENT_LOCATOR, TAG_DSM_ESCROW_TERMS_OBJECT, TAG_DSM_ESCROW_VERDICT_CELL,
-    TAG_DSM_ESCROW_VERDICT_OBJECT, TAG_DSM_ESCROW_VERDICT_SEED, TAG_DSM_EXTERNAL,
+    TAG_DSM_ESCROW_VERDICT_SEED, TAG_DSM_EXTERNAL,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 use crate::route_chain::{
-    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
-    CellReading, ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
+    completion_proof, evaluate, CellError, CellEvidence, CellFact, CellReading, ChainState,
+    CompletionProof, Missing, RoutedCell,
 };
 use crate::storage_object::immutable_addr;
 
@@ -98,12 +98,6 @@ pub fn statement(verdict_cell: &D32, outcome: &[u8]) -> D32 {
     // An outcome is at most ESCROW_MAX_OUTCOME_BYTES long.
     let len = (outcome.len() as u32).to_be_bytes();
     h(TAG_DSM_ESCROW_STATEMENT, &[verdict_cell, &len, outcome])
-}
-
-/// `immutable_addr(DSM/escrow/verdict-object/v1, CCB(EscrowVerdict))`: where a
-/// gathered verdict is put while its signatures are collected.
-pub fn verdict_object_address(verdict: &EscrowVerdict) -> D32 {
-    immutable_addr(TAG_DSM_ESCROW_VERDICT_OBJECT, &verdict.encode())
 }
 
 /// `H(DSM/escrow/cell-locator/v1 ‖ K_verdict)`: where the genesis of every
@@ -473,18 +467,6 @@ pub fn verdict_completion(
     evidence: &CellEvidence,
 ) -> Result<Option<(EscrowVerdict, CompletionProof)>, Missing> {
     completion_proof(&cell.cell, evidence, held_verdict(read))
-}
-
-/// Check a kept completion proof of a verdict cell against the reads in
-/// `evidence`: the verdict it proves final, which must be the one `read`
-/// found holding the cell.
-pub fn check_verdict_completion(
-    cell: &VerdictCell,
-    read: &VerdictCellRead,
-    evidence: &CellEvidence,
-    proof: &CompletionProof,
-) -> Result<EscrowVerdict, ProofRefusal> {
-    check_completion_proof(&cell.cell, evidence, proof, held_verdict(read))
 }
 
 #[cfg(test)]
