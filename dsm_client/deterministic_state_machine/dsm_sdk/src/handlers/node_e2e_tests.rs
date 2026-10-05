@@ -2862,7 +2862,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
         &set,
         &Publication::VaultGenesis {
             preimage: &forged,
-            market: real.market(),
+            market: real.market().expect("a market vault"),
         },
     )
     .await
@@ -2872,7 +2872,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
     let other = accepted(&second);
     let other_addr = Publication::VaultGenesis {
         preimage: other.preimage(),
-        market: other.market(),
+        market: other.market().expect("a market vault"),
     }
     .address()
     .expect("an address");
@@ -2909,7 +2909,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
         &set,
         &Publication::VaultGenesis {
             preimage: &ahead,
-            market: real.market(),
+            market: real.market().expect("a market vault"),
         },
     )
     .await
@@ -3474,6 +3474,12 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         token: &[u8; 32],
     ) -> Result<dsm::sofi::storage::Discovered<[u8; 32]>, dsm::sofi::resolve::ReadFailure> {
         self.live.vault_token_candidates(token)
+    }
+    fn escrow_cell_candidates(
+        &self,
+        verdict_cell: &[u8; 32],
+    ) -> Result<dsm::sofi::storage::Discovered<[u8; 32]>, dsm::sofi::resolve::ReadFailure> {
+        self.live.escrow_cell_candidates(verdict_cell)
     }
     fn vault_owner(
         &self,

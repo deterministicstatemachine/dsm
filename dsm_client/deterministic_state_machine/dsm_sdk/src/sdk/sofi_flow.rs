@@ -27,7 +27,7 @@ use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::resolve::{AcceptedGeneses, Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{
-    close_vault_post, movement_shape, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds,
+    movement_shape, retire_vault_post, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds,
     HopMovement, Policies, RouteShape,
 };
 use dsm::sofi::wire::{
@@ -1828,7 +1828,7 @@ pub async fn close(
     .await?;
     let base = relationship_base(&standing, &intent.vault_id)?;
     let retired =
-        close_vault_post(&vault.state).map_err(|refusal| refuse(format!("{refusal:?}")))?;
+        retire_vault_post(&vault.state).map_err(|refusal| refuse(format!("{refusal:?}")))?;
     let dlv = vault_core(&standing, &vault, &retired, base)?;
     let (token_a, token_b) = (
         *vault.policies.market.token_a(),

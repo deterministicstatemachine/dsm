@@ -1197,6 +1197,7 @@ pub const CLOSURE_FORBIDDEN_CONTENT_CLASSES: &[u16] = &[
     // the closure E itself commits.
     class::SOFI_SETTLEMENT_SWAP,
     class::SOFI_SETTLEMENT_CLOSE,
+    class::SOFI_SETTLEMENT_RELEASE,
     class::SOFI_TRADER_CORE,
     class::SOFI_DLV_CORE,
     class::SOFI_SETTLEMENT_PREIMAGE,
@@ -2080,6 +2081,15 @@ pub enum RouteDigestPreimage {
         reserve_a: u64,
         reserve_b: u64,
     },
+    /// An escrow vault's release (SoFi Amendment S21).
+    Release {
+        vault_id: D32,
+        parent_root: D32,
+        setup_ref: D32,
+        verdict_cell: D32,
+        outcome: Vec<u8>,
+        amount: u64,
+    },
 }
 
 impl RouteDigestPreimage {
@@ -2105,6 +2115,23 @@ impl RouteDigestPreimage {
                 push_u64(&mut out, *reserve_a);
                 push_u64(&mut out, *reserve_b);
             }
+            Self::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                verdict_cell,
+                outcome,
+                amount,
+            } => {
+                check_outcome(outcome)?;
+                push_env(&mut out, class::SOFI_ROUTE_DIGEST_RELEASE);
+                push_digest32(&mut out, vault_id);
+                push_digest32(&mut out, parent_root);
+                push_digest32(&mut out, setup_ref);
+                push_digest32(&mut out, verdict_cell);
+                push_part(&mut out, outcome);
+                push_u64(&mut out, *amount);
+            }
         }
         Ok(out)
     }
@@ -2126,6 +2153,17 @@ impl RouteDigestPreimage {
                     setup_ref: c.digest32()?,
                     reserve_a: c.u64()?,
                     reserve_b: c.u64()?,
+                }
+            }
+            class::SOFI_ROUTE_DIGEST_RELEASE => {
+                c.envelope(class::SOFI_ROUTE_DIGEST_RELEASE, SCHEMA_V1)?;
+                Self::Release {
+                    vault_id: c.digest32()?,
+                    parent_root: c.digest32()?,
+                    setup_ref: c.digest32()?,
+                    verdict_cell: c.digest32()?,
+                    outcome: read_var_bytes(&mut c, ESCROW_MAX_OUTCOME_BYTES)?,
+                    amount: c.u64()?,
                 }
             }
             got => return Err(DecodeError::WrongClass { got }),
@@ -2161,6 +2199,21 @@ pub enum SettlementBody {
         dlv_core: D32,
         closure: PreEClosureIndex,
     },
+    /// An escrow vault's whole amount to the recipient of the branch whose
+    /// outcome the verdict at `verdict_cell` names (SoFi Amendment S21). It
+    /// names the outcome and the cell; the verdict is a fact resolution
+    /// reads, never an input of `E`.
+    Release {
+        vault_id: D32,
+        parent_root: D32,
+        setup_ref: D32,
+        verdict_cell: D32,
+        outcome: Vec<u8>,
+        amount: u64,
+        trader_core: D32,
+        dlv_core: D32,
+        closure: PreEClosureIndex,
+    },
 }
 
 impl SettlementBody {
@@ -2169,7 +2222,7 @@ impl SettlementBody {
     pub fn leg_count(&self) -> usize {
         match self {
             Self::Swap { hops, .. } => hops.len(),
-            Self::Close { .. } => 1,
+            Self::Close { .. } | Self::Release { .. } => 1,
         }
     }
 
@@ -2177,7 +2230,9 @@ impl SettlementBody {
     /// commits, whatever the branch.
     pub fn closure(&self) -> &PreEClosureIndex {
         match self {
-            Self::Swap { closure, .. } | Self::Close { closure, .. } => closure,
+            Self::Swap { closure, .. }
+            | Self::Close { closure, .. }
+            | Self::Release { closure, .. } => closure,
         }
     }
 
@@ -2199,6 +2254,22 @@ impl SettlementBody {
                 setup_ref: *setup_ref,
                 reserve_a: *reserve_a,
                 reserve_b: *reserve_b,
+            },
+            Self::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                verdict_cell,
+                outcome,
+                amount,
+                ..
+            } => RouteDigestPreimage::Release {
+                vault_id: *vault_id,
+                parent_root: *parent_root,
+                setup_ref: *setup_ref,
+                verdict_cell: *verdict_cell,
+                outcome: outcome.clone(),
+                amount: *amount,
             },
         }
     }
@@ -2258,6 +2329,29 @@ impl SettlementBody {
                 push_digest32(&mut out, dlv_core);
                 out.extend_from_slice(&closure.encode());
             }
+            Self::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                verdict_cell,
+                outcome,
+                amount,
+                trader_core,
+                dlv_core,
+                closure,
+            } => {
+                check_outcome(outcome)?;
+                push_env(&mut out, class::SOFI_SETTLEMENT_RELEASE);
+                push_digest32(&mut out, vault_id);
+                push_digest32(&mut out, parent_root);
+                push_digest32(&mut out, setup_ref);
+                push_digest32(&mut out, verdict_cell);
+                push_part(&mut out, outcome);
+                push_u64(&mut out, *amount);
+                push_digest32(&mut out, trader_core);
+                push_digest32(&mut out, dlv_core);
+                out.extend_from_slice(&closure.encode());
+            }
         }
         Ok(out)
     }
@@ -2295,6 +2389,20 @@ impl SettlementBody {
                     owner_authority: OwnerAuthority::at(c)?,
                     reserve_a: c.u64()?,
                     reserve_b: c.u64()?,
+                    trader_core: c.digest32()?,
+                    dlv_core: c.digest32()?,
+                    closure: PreEClosureIndex::at(c)?,
+                })
+            }
+            class::SOFI_SETTLEMENT_RELEASE => {
+                c.envelope(class::SOFI_SETTLEMENT_RELEASE, SCHEMA_V1)?;
+                Ok(Self::Release {
+                    vault_id: c.digest32()?,
+                    parent_root: c.digest32()?,
+                    setup_ref: c.digest32()?,
+                    verdict_cell: c.digest32()?,
+                    outcome: read_var_bytes(c, ESCROW_MAX_OUTCOME_BYTES)?,
+                    amount: c.u64()?,
                     trader_core: c.digest32()?,
                     dlv_core: c.digest32()?,
                     closure: PreEClosureIndex::at(c)?,

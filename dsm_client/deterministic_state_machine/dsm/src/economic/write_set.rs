@@ -107,6 +107,12 @@ pub enum WriteSetError {
     /// non-canonical or duplicate legs, a zero leg, a vault id that is not
     /// 32 bytes, or a generation step that is not exactly one.
     MalformedVaultOperation { detail: &'static str },
+    /// An escrow vault creation carries an object that does not decode: the
+    /// object, and why (SoFi Amendment S21).
+    MalformedEscrowObject {
+        object: &'static str,
+        reason: String,
+    },
     /// A mutation or state constructor refused (zero-amount leaf, sibling
     /// arity, ...) — carried through from the CCB layer.
     Ccb(String),
@@ -157,6 +163,10 @@ impl core::fmt::Display for WriteSetError {
             Self::MalformedVaultOperation { detail } => {
                 write!(f, "the DLV operation cannot state a write set: {detail}")
             }
+            Self::MalformedEscrowObject { object, reason } => write!(
+                f,
+                "the escrow vault creation's {object} is not canonical: {reason}"
+            ),
             Self::Ccb(e) => write!(f, "write set: {e}"),
         }
     }
@@ -268,6 +278,14 @@ enum SemanticWriteSet {
         vault_id: [u8; 32],
         leg_a: ([u8; 32], u64),
         leg_b: ([u8; 32], u64),
+        creation: crate::sofi::wire::VaultCreation,
+    },
+    /// `EscrowVaultCreate` (SoFi Amendment S21): one balance debit, the
+    /// stake of the one token the terms name, and the creation record
+    /// inserted FROM ZERO, as ONE write set.
+    EscrowVaultCreate {
+        vault_id: [u8; 32],
+        stake: ([u8; 32], u64),
         creation: crate::sofi::wire::VaultCreation,
     },
     /// `CreateToken` (SoFi §51, Amendment S8): the ERA fee debit, the
@@ -565,6 +583,21 @@ fn semantic_write_set(
                 creation: record,
             })
         }
+        // An ESCROW creation (SoFi Amendment S21): the same bindings as a
+        // market's, its stake the one debit, and the terms the ones all three
+        // of the genesis state's slots name.
+        Operation::EscrowVaultCreate {
+            genesis_preimage,
+            creation,
+            terms,
+            ..
+        } => escrow_creation_write_set(
+            genesis_preimage,
+            creation,
+            terms,
+            (local_genesis, local_devid),
+            economic_position,
+        ),
         other => match crate::economic::classifier::classify(other) {
             crate::economic::classifier::EconomicEffect::UnsupportedValueTransition => {
                 Err(WriteSetError::UnsupportedValueTransition)
@@ -572,6 +605,99 @@ fn semantic_write_set(
             _ => Err(WriteSetError::NoEconomicWriteSet),
         },
     }
+}
+
+/// The write set of an escrow vault's creation (SoFi Amendment S21), every
+/// conjunct a separate reason to refuse: the preimage is the owner's own and
+/// agrees with itself, `p_create` is the position the operation lands at,
+/// `R_0` is derived, the record names the vault the preimage derives and funds
+/// exactly its stake, and the carried terms are the object all three of the
+/// genesis state's slots name, whose token is the one debited.
+fn escrow_creation_write_set(
+    genesis_preimage: &[u8],
+    creation: &[u8],
+    terms: &[u8],
+    (local_genesis, local_devid): (&[u8; 32], &[u8; 32]),
+    economic_position: u64,
+) -> Result<SemanticWriteSet, WriteSetError> {
+    let malformed = |detail| WriteSetError::MalformedVaultOperation { detail };
+    let preimage =
+        crate::sofi::wire::VaultGenesisPreimage::decode(genesis_preimage).map_err(|e| {
+            WriteSetError::MalformedEscrowObject {
+                object: "genesis preimage",
+                reason: e.to_string(),
+            }
+        })?;
+    let record = crate::sofi::wire::VaultCreation::decode(creation).map_err(|e| {
+        WriteSetError::MalformedEscrowObject {
+            object: "creation record",
+            reason: e.to_string(),
+        }
+    })?;
+    let parsed = crate::sofi::wire::EscrowTerms::decode(terms).map_err(|e| {
+        WriteSetError::MalformedEscrowObject {
+            object: "terms",
+            reason: e.to_string(),
+        }
+    })?;
+    if preimage.owner_genesis != *local_genesis || preimage.owner_device_id != *local_devid {
+        return Err(malformed("a creation debits its own owner's balances"));
+    }
+    let state = &preimage.state;
+    if state.owner_genesis != preimage.owner_genesis
+        || state.owner_device_id != preimage.owner_device_id
+        || state.create_position != preimage.create_position
+    {
+        return Err(malformed(
+            "the genesis state names different owner coordinates than the preimage it sits in",
+        ));
+    }
+    if preimage.create_position != economic_position {
+        return Err(malformed(
+            "the creation names a position other than the one it lands at",
+        ));
+    }
+    let vault_id = preimage.vault_id();
+    if record.vault_id != vault_id {
+        return Err(malformed(
+            "the creation record names another vault than the preimage derives",
+        ));
+    }
+    // The stake IS the genesis reserve, held in `reserve_a`; an escrow vault
+    // holds nothing else.
+    if record.amount_a == 0
+        || record.amount_a != state.reserve_a
+        || record.amount_b != 0
+        || state.reserve_b != 0
+    {
+        return Err(malformed(
+            "an escrow creation funds a non-zero stake in reserve_a and nothing else",
+        ));
+    }
+    let derived_root = crate::sofi::lineage::genesis_root(&vault_id, state).map_err(|e| {
+        WriteSetError::MalformedEscrowObject {
+            object: "genesis state",
+            reason: e.to_string(),
+        }
+    })?;
+    if record.genesis_root != derived_root {
+        return Err(malformed(
+            "the creation record states a genesis root the state does not derive",
+        ));
+    }
+    // THE TERMS ARE THE ONES ALL THREE SLOTS NAME, re-addressed before
+    // anything is read out of them.
+    let addr = crate::sofi::escrow::terms_address_of(terms);
+    if state.market_policy != addr || state.fee_policy != addr || state.release_policy != addr {
+        return Err(malformed(
+            "the carried terms are not the object all three of the genesis state's slots name",
+        ));
+    }
+    Ok(SemanticWriteSet::EscrowVaultCreate {
+        vault_id,
+        stake: (*parsed.token(), record.amount_a),
+        creation: record,
+    })
 }
 
 fn balance_state(
@@ -791,6 +917,43 @@ pub fn build_write_set(
                 source: None,
             });
         }
+        // SoFi Amendment S21: the stake's debit and the record, as one write
+        // set.
+        SemanticWriteSet::EscrowVaultCreate {
+            vault_id,
+            stake,
+            creation,
+        } => {
+            if *facts != CreditSourceFacts::None {
+                return Err(WriteSetError::FactsDoNotMatchOperation);
+            }
+            planned.push(plan_balance_debit(
+                genesis,
+                device_id,
+                pre_balances,
+                stake.0,
+                stake.1,
+            )?);
+            if creation.vault_id != vault_id {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the creation record names another vault than the operation",
+                });
+            }
+            let state = EconomicLeafState::VaultCreation(creation);
+            let key = state.leaf_key(genesis, device_id);
+            // Insert-only: a vault id is created once (P15-12).
+            if tree.get(&key).is_some() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a creation record for this vault already exists",
+                });
+            }
+            planned.push(PlannedLeaf {
+                key,
+                pre: None,
+                post: Some(state),
+                source: None,
+            });
+        }
         // SoFi §51: the ERA fee debit and the whole genesis supply credited
         // to the creator, as one write set.
         SemanticWriteSet::CreateTokenRelease { fee, release } => {
@@ -961,7 +1124,10 @@ pub fn verify_operation_write_set(
     // a creation record, or a creation carrying a relationship leaf, is
     // refused here by class.
     let relationships_legal = matches!(semantic, SemanticWriteSet::SofiSetup { .. });
-    let creations_legal = matches!(semantic, SemanticWriteSet::SofiVaultCreate { .. });
+    let creations_legal = matches!(
+        semantic,
+        SemanticWriteSet::SofiVaultCreate { .. } | SemanticWriteSet::EscrowVaultCreate { .. }
+    );
     let token_creations_legal = matches!(semantic, SemanticWriteSet::CreateTokenRelease { .. });
     let mut balances: Vec<ObservedBalance> = Vec::new();
     let mut consumed: Vec<(u32, EconomicConsumedSourceState)> = Vec::new();
@@ -1225,6 +1391,46 @@ pub fn verify_operation_write_set(
                         detail: "a creation debit is not the funded amount",
                     });
                 }
+            }
+            let (_, c) = &creations[0];
+            if *c != creation || c.vault_id != vault_id {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the creation record is not the one the operation carries",
+                });
+            }
+            Ok(())
+        }
+        // SoFi Amendment S21: the stake's debit and the record, and nothing
+        // else.
+        SemanticWriteSet::EscrowVaultCreate {
+            vault_id,
+            stake,
+            creation,
+        } => {
+            if !consumed.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a creation consumes no external source: it is funded from the \
+                             owner's own balances",
+                });
+            }
+            if balances.len() != 1 || creations.len() != 1 || witness.mutations.len() != 2 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "an escrow creation is exactly one balance debit and one creation \
+                             record",
+                });
+            }
+            let observed = expect_one_balance(&balances, stake.0)?;
+            let expected =
+                observed
+                    .pre_amount
+                    .checked_sub(stake.1)
+                    .ok_or(WriteSetError::WrongWriteSet {
+                        detail: "the stake's debit underflows the owner's balance",
+                    })?;
+            if observed.post_amount != expected {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the debit is not the stake",
+                });
             }
             let (_, c) = &creations[0];
             if *c != creation || c.vault_id != vault_id {
@@ -1703,5 +1909,222 @@ mod vault_create_binding_tests {
             refusal(&op),
             "the funded assets are not the pair the market policy authorizes"
         );
+    }
+}
+
+#[cfg(test)]
+mod escrow_create_binding_tests {
+    //! An escrow vault's creation (SoFi Amendment S21): each test breaks
+    //! exactly one binding of a valid creation and names the rule that
+    //! refuses it.
+    use super::*;
+    use crate::economic::tree::EconomicSmt;
+    use crate::sofi::wire::{
+        EscrowBranch, EscrowOutcome, EscrowSigner, EscrowTerms, VaultCreation,
+        VaultGenesisPreimage, VaultStateLeaf, VAULT_STATUS_ACTIVE,
+    };
+
+    const G: [u8; 32] = [0x11; 32];
+    const DEV: [u8; 32] = [0x22; 32];
+    const POS: u64 = 7;
+    const STAKE: u64 = 2_500;
+    const TOKEN: [u8; 32] = [0x40; 32];
+
+    fn terms() -> EscrowTerms {
+        let referee = EscrowSigner::new(crate::ccb::sigalg::SPHINCS_PLUS_SPX256F, &[0x5A; 64])
+            .expect("a declared key");
+        EscrowTerms::new(
+            TOKEN,
+            crate::sofi::escrow::external_commitment(b"a match"),
+            vec![EscrowBranch::new(
+                EscrowOutcome::new(b"void", vec![referee]).expect("an outcome"),
+                G,
+                DEV,
+            )],
+        )
+        .expect("terms")
+    }
+
+    /// The genesis state of an escrow vault whose slots all name `addr`.
+    fn state(addr: [u8; 32]) -> VaultStateLeaf {
+        VaultStateLeaf {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: POS,
+            market_policy: addr,
+            fee_policy: addr,
+            release_policy: addr,
+            storage_set_id: [0x77; 32],
+            generation: 0,
+            reserve_a: STAKE,
+            reserve_b: 0,
+            status: VAULT_STATUS_ACTIVE,
+        }
+    }
+
+    /// The creation from its parts, with the record funding `amounts` and the
+    /// record's root and vault the ones the preimage derives.
+    fn op_from(state: &VaultStateLeaf, terms_bytes: &[u8], amounts: (u64, u64)) -> Operation {
+        let preimage = VaultGenesisPreimage {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: POS,
+            state: state.clone(),
+        };
+        let vault_id = preimage.vault_id();
+        let creation = VaultCreation {
+            vault_id,
+            genesis_root: crate::sofi::lineage::genesis_root(&vault_id, state).expect("a root"),
+            amount_a: amounts.0,
+            amount_b: amounts.1,
+        };
+        Operation::EscrowVaultCreate {
+            genesis_preimage: preimage.encode().expect("a preimage"),
+            creation: creation.encode(),
+            terms: terms_bytes.to_vec(),
+            signature: vec![0xA1; 8],
+        }
+    }
+
+    fn good() -> Operation {
+        let t = terms();
+        op_from(
+            &state(crate::sofi::escrow::terms_address(&t)),
+            &t.encode(),
+            (STAKE, 0),
+        )
+    }
+
+    fn refusal(op: &Operation) -> String {
+        match semantic_write_set(op, &G, &DEV, POS) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected a refusal, got a write set"),
+        }
+    }
+
+    #[test]
+    fn an_escrow_creation_debits_its_stake_and_inserts_its_record() {
+        let op = good();
+        assert_eq!(
+            crate::economic::classifier::classify(&op),
+            crate::economic::classifier::EconomicEffect::ClosedWriteSet
+        );
+        let Ok(SemanticWriteSet::EscrowVaultCreate {
+            stake, creation, ..
+        }) = semantic_write_set(&op, &G, &DEV, POS)
+        else {
+            panic!("a valid escrow creation has a write set")
+        };
+        assert_eq!(
+            stake,
+            (TOKEN, STAKE),
+            "the one debit is the stake of the terms' token"
+        );
+        assert_eq!((creation.amount_a, creation.amount_b), (STAKE, 0));
+
+        // The witness the producer builds: the stake leaves the owner's
+        // balance and the record is inserted from nothing, and that is all.
+        let balances = BTreeMap::from([(TOKEN, STAKE + 40)]);
+        let mut tree = EconomicSmt::new();
+        tree.insert(
+            crate::economic::keys::balance_key(&G, &DEV, &TOKEN),
+            EconomicLeafState::Balance(crate::economic::state::EconomicBalanceState {
+                policy_commit: TOKEN,
+                amount: STAKE + 40,
+            })
+            .leaf_value()
+            .expect("a leaf"),
+        );
+        let built = build_write_set(
+            &op,
+            &G,
+            &DEV,
+            &[0x0E; 32],
+            &EconomicPreState::new(&balances, POS),
+            &mut tree,
+            &CreditSourceFacts::None,
+        )
+        .expect("a write set");
+        assert_eq!(built.mutations.len(), 2);
+        let posts: Vec<&Option<EconomicLeafState>> =
+            built.mutations.iter().map(|m| &m.post_state).collect();
+        assert!(posts.iter().any(|p| matches!(
+            p,
+            Some(EconomicLeafState::Balance(b)) if b.policy_commit == TOKEN && b.amount == 40
+        )));
+        assert!(posts.iter().any(
+            |p| matches!(p, Some(EconomicLeafState::VaultCreation(c)) if c.amount_a == STAKE)
+        ));
+    }
+
+    #[test]
+    fn terms_other_than_the_ones_all_three_slots_name_are_refused() {
+        let t = terms();
+        let addr = crate::sofi::escrow::terms_address(&t);
+        // Carried terms that are another object than the slots name.
+        let other = EscrowTerms::new([0x41; 32], *t.external_commitment(), t.branches().to_vec())
+            .expect("terms");
+        let op = op_from(&state(addr), &other.encode(), (STAKE, 0));
+        assert!(refusal(&op).contains("all three of the genesis state's slots"));
+        // One slot naming something else is not an escrow vault.
+        let one_off = VaultStateLeaf {
+            fee_policy: [0x0F; 32],
+            ..state(addr)
+        };
+        let op = op_from(&one_off, &t.encode(), (STAKE, 0));
+        assert!(refusal(&op).contains("all three of the genesis state's slots"));
+    }
+
+    #[test]
+    fn terms_that_do_not_decode_are_refused_by_name() {
+        let garbage = b"not escrow terms".to_vec();
+        let op = op_from(
+            &state(crate::sofi::escrow::terms_address_of(&garbage)),
+            &garbage,
+            (STAKE, 0),
+        );
+        assert!(matches!(
+            semantic_write_set(&op, &G, &DEV, POS),
+            Err(WriteSetError::MalformedEscrowObject {
+                object: "terms",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_creation_funding_anything_but_its_stake_is_refused() {
+        let t = terms();
+        let addr = crate::sofi::escrow::terms_address(&t);
+        let rule = "funds a non-zero stake in reserve_a and nothing else";
+        // A record that funds less than the reserve.
+        assert!(refusal(&op_from(&state(addr), &t.encode(), (STAKE - 1, 0))).contains(rule));
+        // A second reserve.
+        let two = VaultStateLeaf {
+            reserve_b: 5,
+            ..state(addr)
+        };
+        assert!(refusal(&op_from(&two, &t.encode(), (STAKE, 5))).contains(rule));
+        // No stake at all.
+        let empty = VaultStateLeaf {
+            reserve_a: 0,
+            ..state(addr)
+        };
+        assert!(refusal(&op_from(&empty, &t.encode(), (0, 0))).contains(rule));
+    }
+
+    #[test]
+    fn a_creation_at_another_position_or_by_another_owner_is_refused() {
+        let op = good();
+        assert!(matches!(
+            semantic_write_set(&op, &G, &DEV, POS + 1),
+            Err(WriteSetError::MalformedVaultOperation { detail })
+                if detail.contains("position other than the one it lands at")
+        ));
+        assert!(matches!(
+            semantic_write_set(&op, &G, &[0x23; 32], POS),
+            Err(WriteSetError::MalformedVaultOperation { detail })
+                if detail.contains("its own owner's balances")
+        ));
     }
 }

@@ -38,6 +38,7 @@ use super::conformance::{
     Validation,
 };
 use super::derive;
+use super::escrow::{verdict_completion, verdict_resolution, VerdictCell, VerdictCellRead};
 use super::exercise::{
     attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
 };
@@ -64,7 +65,7 @@ use super::validation::{
     SetupLineage, VaultLeafPre, VaultPostState,
 };
 use super::wire::{
-    CoreEntry, ParentClaimRef, SettlementPreimage, SofiResolutionClaim, TraderCore,
+    CoreEntry, ParentClaimRef, SettlementBody, SettlementPreimage, SofiResolutionClaim, TraderCore,
     TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, ValidationRef,
     VaultGenesisPreimage, VaultStateLeaf,
 };
@@ -186,6 +187,12 @@ pub trait SofiReads {
     /// accepts each genesis and checks its market before it is a vault of
     /// `t`.
     fn vault_token_candidates(&self, token: &D32) -> Result<Discovered<D32>, ReadFailure>;
+    /// The vault named by every preimage published under verdict cell
+    /// `verdict_cell`'s cell locator that decodes as a vault genesis
+    /// preimage, in append order (SoFi Amendment S21). Candidates only:
+    /// [`Verifier::vaults_of_cell`] accepts each genesis and checks its terms
+    /// derive the cell before it is a vault bound to it.
+    fn escrow_cell_candidates(&self, verdict_cell: &D32) -> Result<Discovered<D32>, ReadFailure>;
     /// The owner's transition at its creation position, validated by the
     /// peer lineage walk.
     fn vault_owner(
@@ -561,6 +568,8 @@ struct LegsRead {
     registration: RegistrationRead,
     cells: Vec<AttemptCellRead>,
     walks: Vec<Option<AttemptWalk>>,
+    /// For a Release, its verdict cell (SoFi Amendment S21).
+    verdict: Option<VerdictCellRead>,
 }
 
 impl LegsRead {
@@ -629,7 +638,49 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         .map_err(|e| VerifierFailure::Refused(format!("position cells: {e:?}")))
     }
 
+    /// The verdict cell at `verdict_cell`, routed over the set (SoFi
+    /// Amendment S21).
+    pub fn verdict_cell(&self, verdict_cell: &D32) -> Result<VerdictCell, VerifierFailure> {
+        VerdictCell::new(verdict_cell, self.members, &self.set_id)
+            .map_err(|e| VerifierFailure::Refused(format!("verdict cell: {e:?}")))
+    }
+
     // ── reads ───────────────────────────────────────────────────────────
+
+    /// The verdict cell at `verdict_cell` as a Release reads it (SoFi
+    /// Amendment S21): its route chains evaluated from every seat's reads into
+    /// a read bound to the key. A verdict final at the cell has its
+    /// completion proof kept (Amendment S10). Reads that do not decide the
+    /// cell yet are the inner `Err`: a network status, never an open cell.
+    pub fn read_verdict_cell(
+        &self,
+        verdict_cell: &D32,
+    ) -> Result<Result<VerdictCellRead, CellMissing>, VerifierFailure> {
+        let cell = self.verdict_cell(verdict_cell)?;
+        let evidence = self.reads.cell(cell.routed())?;
+        let read = match verdict_resolution(&cell, &evidence) {
+            Ok(read) => read,
+            Err(missing) => return Ok(Err(missing)),
+        };
+        if let CellFact::Held {
+            state: ChainState::Final,
+            ..
+        } = read.fact()
+        {
+            let (.., proof) = verdict_completion(&cell, &read, &evidence)
+                .map_err(|missing| {
+                    VerifierFailure::Read(format!("verdict completion: {missing:?}"))
+                })?
+                .ok_or_else(|| {
+                    VerifierFailure::Read(
+                        "verdict completion: a final verdict has no completion proof".to_string(),
+                    )
+                })?;
+            self.reads
+                .keep_completion(cell.routed(), &evidence, &proof)?;
+        }
+        Ok(Ok(read))
+    }
 
     /// `SuccessorResolution(K^(attempt))` of `vault_id` at `parent_root`, as
     /// the ladder reads it (Section 23.1): the cell's route chains evaluated
@@ -869,8 +920,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     ) -> Result<Acquired<Evidence, Missing>, VerifierFailure> {
         let needs = EvidenceNeeds::of(precommit, preimage);
         let mut missing = Vec::new();
+        // Token policies the predicate named as missing in an earlier round:
+        // an escrow vault's token is named by its terms, which the round
+        // before fetched (SoFi Amendment S21).
+        let mut named_tokens: BTreeSet<D32> = BTreeSet::new();
         for round in 1..=ACQUIRE_ROUNDS {
-            let evidence = self.gather(precommit, preimage, &needs, carried)?;
+            let evidence = self.gather(precommit, preimage, &needs, carried, &named_tokens)?;
             match route_validation(precommit, preimage, &evidence) {
                 Ok(Validation::Valid | Validation::Invalid) => {
                     return Ok(Acquired::Complete(evidence))
@@ -879,6 +934,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     log::info!(
                         "[sofi verifier] evidence round {round}/{ACQUIRE_ROUNDS}: not in hand: {what:?}"
                     );
+                    if let Missing::TokenPolicy { commit } = &what {
+                        named_tokens.insert(*commit);
+                    }
                     missing = vec![what];
                 }
             }
@@ -900,6 +958,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         preimage: &SettlementPreimage,
         needs: &EvidenceNeeds,
         carried: &BTreeMap<ValidationRef, Vec<u8>>,
+        named_tokens: &BTreeSet<D32>,
     ) -> Result<Evidence, VerifierFailure> {
         let mut objects: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
         for addr in &needs.trader_pre_balances {
@@ -951,6 +1010,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     }
                 }
                 objects.insert(addr, bytes);
+            }
+        }
+        // The token policies the predicate named in an earlier round. A read
+        // that cannot be made is a network status for the whole acquisition.
+        for commit in named_tokens {
+            if !token_policies.contains_key(commit) {
+                token_policies.insert(*commit, self.reads.token_policy_bytes(commit)?);
             }
         }
 
@@ -1135,10 +1201,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 continue;
             }
             match self.vault_genesis(&vault_id) {
+                // A market that pairs `token`. An escrow vault has no market
+                // and is never a vault of a token (SoFi Amendment S21).
                 Ok(VaultGenesis::Accepted(accepted)) => {
-                    let market = accepted.market();
-                    if market.token_a() == token || market.token_b() == token {
-                        vaults.push(*accepted);
+                    if let Some(market) = accepted.market() {
+                        if market.token_a() == token || market.token_b() == token {
+                            vaults.push(*accepted);
+                        }
                     }
                 }
                 // Not a vault anyone created, or a genesis refused: not a
@@ -1146,6 +1215,57 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 Ok(VaultGenesis::NotPublished | VaultGenesis::Refused(_))
                 | Err(VerifierFailure::Refused(_)) => {}
                 // Not established yet: it may be a vault of `token`.
+                Ok(VaultGenesis::OwnerUnresolved(_)) | Err(VerifierFailure::Read(_)) => {
+                    scan = ScanExtent::Short
+                }
+            }
+        }
+        Ok(match scan {
+            ScanExtent::Whole => Discovered::Complete(vaults),
+            ScanExtent::Short => Discovered::Partial(vaults),
+        })
+    }
+
+    /// SoFi Amendment S21: the escrow vaults bound to `verdict_cell`, found
+    /// under its cell locator, in the order the index names them.
+    ///
+    /// Discovery carries no authority. A candidate is kept only when its
+    /// genesis is accepted — bound to the owner's validated creation — and the
+    /// escrow terms that acceptance resolves derive `verdict_cell`; anything
+    /// else appended under the locator is passed over, so a vault bound to
+    /// another cell is never found among the linked ones. A candidate the
+    /// reads cannot establish yet, or a scan that stopped short, makes the
+    /// discovery `Partial`; an index read that could not be made is a
+    /// `VerifierFailure::Read`.
+    pub fn vaults_of_cell(
+        &self,
+        verdict_cell: &D32,
+    ) -> Result<Discovered<AcceptedVaultGenesis>, VerifierFailure> {
+        // An index read that could not be made is the caller's network status:
+        // nothing is established and nothing refuted (storage §4).
+        let (candidates, mut scan) = match self.reads.escrow_cell_candidates(verdict_cell)? {
+            Discovered::Complete(candidates) => (candidates, ScanExtent::Whole),
+            Discovered::Partial(candidates) => (candidates, ScanExtent::Short),
+        };
+        let mut examined = BTreeSet::new();
+        let mut vaults = Vec::new();
+        for vault_id in candidates {
+            if !examined.insert(vault_id) {
+                continue;
+            }
+            match self.vault_genesis(&vault_id) {
+                Ok(VaultGenesis::Accepted(accepted)) => {
+                    if let Some(terms) = accepted.escrow() {
+                        if super::escrow::verdict_cell_of(terms) == *verdict_cell {
+                            vaults.push(*accepted);
+                        }
+                    }
+                }
+                // Not a vault anyone created, or a genesis refused: not a
+                // vault bound to the cell.
+                Ok(VaultGenesis::NotPublished | VaultGenesis::Refused(_))
+                | Err(VerifierFailure::Refused(_)) => {}
+                // Not established yet: it may be one.
                 Ok(VaultGenesis::OwnerUnresolved(_)) | Err(VerifierFailure::Read(_)) => {
                     scan = ScanExtent::Short
                 }
@@ -1614,6 +1734,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             registration: &read.registration,
             parent: self.parent_for(exercise),
             legs: &legs,
+            verdict: read.verdict.as_ref(),
         }) {
             Ok(ground) => ground,
             Err(why) => return Ok(Err(why)),
@@ -1766,10 +1887,28 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             cells.push(cell);
             walks.push(walk);
         }
+        // A Release stands on the verdict its cell holds (SoFi Amendment S21):
+        // the cell is read like any other, and nothing is read for any other
+        // operation.
+        let verdict = match exercise.preimage().settlement() {
+            SettlementBody::Release { verdict_cell, .. } => {
+                match self.read_verdict_cell(verdict_cell)? {
+                    Ok(read) => Some(read),
+                    Err(missing) => {
+                        return Ok(Err(NotEstablished::VerdictCell {
+                            verdict_cell: *verdict_cell,
+                            missing,
+                        }))
+                    }
+                }
+            }
+            SettlementBody::Swap { .. } | SettlementBody::Close { .. } => None,
+        };
         Ok(Ok(LegsRead {
             registration,
             cells,
             walks,
+            verdict,
         }))
     }
 
@@ -1816,6 +1955,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             evidence: &evidence,
             parent: self.parent_for(exercise),
             legs,
+            verdict: read.verdict.as_ref(),
         };
         Ok(establish(&reads))
     }
@@ -2062,7 +2202,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 NotEstablished::Registration(..)
                 | NotEstablished::ConformanceEvidence(..)
                 | NotEstablished::RouteEvidence(..)
-                | NotEstablished::AttemptCell { .. } => {
+                | NotEstablished::AttemptCell { .. }
+                | NotEstablished::VerdictCell { .. } => {
                     Incomplete(format!("position {q}: the facts: {why:?}"))
                 }
                 NotEstablished::ParentUnresolved { .. }

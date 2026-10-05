@@ -429,6 +429,25 @@ impl SofiReads for LiveSofiReads<'_> {
         )
     }
 
+    fn escrow_cell_candidates(&self, verdict_cell: &D32) -> Result<Discovered<D32>, ReadFailure> {
+        let locator = dsm::sofi::escrow::cell_locator(verdict_cell);
+        self.read(
+            "escrow cell candidates",
+            resolve_locator_all(
+                self.set,
+                dsm::common::domain_tags::TAG_DSM_ESCROW_CELL_LOCATOR.source_bytes(),
+                &locator,
+                LOCATOR_BUDGET,
+                // Every genesis preimage under the locator is a candidate;
+                // Core accepts it and checks its terms derive the cell (SoFi
+                // Amendment S21).
+                |bytes| {
+                    recognize_genesis(bytes).map(|(preimage, ..)| (locator, preimage.vault_id()))
+                },
+            ),
+        )
+    }
+
     fn vault_owner(
         &self,
         genesis: &D32,

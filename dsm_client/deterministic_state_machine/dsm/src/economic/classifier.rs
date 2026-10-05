@@ -118,7 +118,7 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         // Creation debits the funding into a vault's reserves, and a
         // fulfillment commits the trader's position: both move value under a
         // write set fixed by the operation's own preimage.
-        SofiVaultCreate { .. } | SofiFulfill { .. } => ClosedWriteSet,
+        SofiVaultCreate { .. } | SofiFulfill { .. } | EscrowVaultCreate { .. } => ClosedWriteSet,
     }
 }
 

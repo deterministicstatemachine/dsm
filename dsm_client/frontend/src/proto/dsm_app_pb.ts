@@ -158,6 +158,22 @@ export enum TransactionType {
    * @generated from enum value: TX_TYPE_SOFI_CLOSE = 11;
    */
   TX_TYPE_SOFI_CLOSE = 11,
+
+  /**
+   * Escrow vaults (SoFi Amendment S21).
+   *
+   * an escrow vault created; its stake locked
+   *
+   * @generated from enum value: TX_TYPE_ESCROW_LOCK = 12;
+   */
+  TX_TYPE_ESCROW_LOCK = 12,
+
+  /**
+   * an escrow vault released; its stake credited to the branch's recipient
+   *
+   * @generated from enum value: TX_TYPE_ESCROW_RELEASE = 13;
+   */
+  TX_TYPE_ESCROW_RELEASE = 13,
 }
 // Retrieve enum metadata with: proto3.getEnumType(TransactionType)
 proto3.util.setEnumType(TransactionType, "dsm.TransactionType", [
@@ -172,6 +188,8 @@ proto3.util.setEnumType(TransactionType, "dsm.TransactionType", [
   { no: 9, name: "TX_TYPE_SOFI_SETUP" },
   { no: 10, name: "TX_TYPE_SOFI_TRADE" },
   { no: 11, name: "TX_TYPE_SOFI_CLOSE" },
+  { no: 12, name: "TX_TYPE_ESCROW_LOCK" },
+  { no: 13, name: "TX_TYPE_ESCROW_RELEASE" },
 ]);
 
 /**
