@@ -2719,6 +2719,12 @@ message Envelope {
     WalletAmountResponse              wallet_amount_response           = 127;
     // DSM Connect (DSM Amendment A11): every connect.* and connect.app.* reply.
     ConnectReplyV1                    connect_reply                    = 128;
+    // Escrow vaults (SoFi §19.9, Amendment S21), local-only like SoFi's.
+    EscrowPartyResponse               escrow_party_response            = 129;
+    EscrowCreatedResponse             escrow_created_response          = 130;
+    EscrowSignedResponse              escrow_signed_response           = 131;
+    EscrowVerdictResponse             escrow_verdict_response          = 132;
+    EscrowVaultsResponse              escrow_vaults_response           = 133;
 
 
     // Reply to `token.forget`.
@@ -2943,6 +2949,116 @@ message SofiRelayRequest {
 }
 message SofiRelayResponse {
   uint32 cells_written = 1;
+}
+
+// ===================== Escrow vaults (SoFi §19.9, Amendment S21) =====================
+// A stake of one token held in a vault and released whole, once, to the
+// recipient of the branch whose outcome the canonical verdict on the vault's
+// external commitment names (handlers/escrow_routes.rs). Every vault whose
+// terms carry the same commitment and outcome table shares one verdict cell,
+// K_verdict; the first verdict at its leader that proves its own authority is
+// the only one any of them settles against. An escrow vault has no market and
+// no owner close.
+
+// A signing key an outcome is decided by.
+message EscrowSignerV1 {
+  uint32 signature_alg = 1; // a declared signature algorithm (ccb::genesis::sigalg)
+  bytes  public_key    = 2 [(dsm_max_len)=64];
+}
+// One branch: an outcome, the keys whose signatures decide it, and the
+// identity its release pays.
+message EscrowBranchV1 {
+  bytes                   outcome             = 1 [(dsm_max_len)=64];  // 1..64 bytes
+  repeated EscrowSignerV1 signers             = 2;                     // 1..4, ascending by alg ‖ |key| ‖ key
+  bytes                   recipient_genesis   = 3 [(dsm_fixed_len)=32];
+  bytes                   recipient_device_id = 4 [(dsm_fixed_len)=32];
+}
+
+// escrow.party: this device as an escrow party, for naming in terms.
+message EscrowPartyRequest {}
+message EscrowPartyResponse {
+  bytes          genesis   = 1 [(dsm_fixed_len)=32];
+  bytes          device_id = 2 [(dsm_fixed_len)=32];
+  EscrowSignerV1 signer    = 3;
+}
+
+// escrow.create: lock a stake. The vault commits Y = H(DSM/external/v1 ‖ X);
+// DSM never reads X. With a counterpart vault, the stake is locked only once
+// that vault is accepted, Active and bound to the same verdict cell.
+message EscrowCreateRequest {
+  bytes                   external             = 1; // X, the bytes the parties agreed on
+  bytes                   token_policy_commit  = 2 [(dsm_fixed_len)=32];
+  string                  amount_entered       = 3; // token units, > 0
+  repeated EscrowBranchV1 branches             = 4; // 1..16, ascending by outcome
+  bytes                   counterpart_vault_id = 5; // empty, or 32 bytes
+}
+message EscrowCreatedResponse {
+  bytes  vault_id            = 1 [(dsm_fixed_len)=32];
+  bytes  verdict_cell        = 2 [(dsm_fixed_len)=32]; // K_verdict
+  bytes  external_commitment = 3 [(dsm_fixed_len)=32]; // Y
+  uint64 position            = 4; // the owner's economic position that carries the creation
+}
+
+// escrow.sign and escrow.adjudicate: an outcome of an escrow vault's terms.
+// escrow.sign puts this device's signature for it where the outcome's other
+// signers find it; escrow.adjudicate assembles the verdict, writes it to the
+// verdict cell and answers what the cell holds.
+message EscrowOutcomeRequest {
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
+  bytes outcome  = 2 [(dsm_max_len)=64];
+}
+message EscrowSignedResponse {
+  bytes verdict_cell = 1 [(dsm_fixed_len)=32];
+  bytes gathered     = 2 [(dsm_fixed_len)=32]; // the address of the object holding the signature
+}
+
+// escrow.verdict: what the verdict cell of an escrow vault holds.
+message EscrowVerdictRequest {
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
+}
+enum EscrowVerdictState {
+  ESCROW_VERDICT_STATE_UNSPECIFIED = 0;
+  ESCROW_VERDICT_STATE_NONE        = 1; // no verdict holds the cell yet
+  ESCROW_VERDICT_STATE_LEADER_HELD = 2; // the leader holds it; not final yet
+  ESCROW_VERDICT_STATE_PRESERVED   = 3; // the next seat holds it too; not final yet
+  ESCROW_VERDICT_STATE_FINAL       = 4; // it is the cell's verdict
+}
+message EscrowVerdictResponse {
+  bytes              verdict_cell = 1 [(dsm_fixed_len)=32];
+  EscrowVerdictState state        = 2;
+  bytes              outcome      = 3 [(dsm_max_len)=64]; // empty with no verdict
+  // Why each value the leader holds ahead of the verdict counts as nothing.
+  repeated string    passed_over  = 4;
+}
+
+// escrow.release: the whole stake to this device, once the cell's verdict is
+// final on a branch that pays it. Answered by SofiPositionResponse.
+message EscrowReleaseRequest {
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
+}
+
+// escrow.locked: the escrow vaults bound to a verdict cell. escrow.vaults: the
+// escrow vaults this device created. Each at its walked head.
+message EscrowLockedRequest {
+  bytes verdict_cell = 1 [(dsm_fixed_len)=32];
+}
+message EscrowVaultsRequest {}
+message EscrowVaultV1 {
+  bytes           vault_id            = 1 [(dsm_fixed_len)=32];
+  bytes           owner_genesis       = 2 [(dsm_fixed_len)=32];
+  bytes           owner_device_id     = 3 [(dsm_fixed_len)=32];
+  bytes           verdict_cell        = 4 [(dsm_fixed_len)=32];
+  bytes           external_commitment = 5 [(dsm_fixed_len)=32];
+  bytes           token_policy_commit = 6 [(dsm_fixed_len)=32];
+  string          token_symbol        = 7;
+  uint64          amount              = 8; // base units: the stake while Active, 0 once released
+  string          amount_display      = 9;
+  uint64          generation          = 10;
+  SofiVaultStatus status              = 11; // RETIRED once released
+}
+message EscrowVaultsResponse {
+  repeated EscrowVaultV1 vaults = 1;
+  SofiSearch             search = 2; // escrow.vaults is always COMPLETE
 }
 
 // ===================== §16.6 REPLY WINDOW =====================

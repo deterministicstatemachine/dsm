@@ -953,6 +953,52 @@ proto3.util.setEnumType(SofiPositionState, "dsm.SofiPositionState", [
 ]);
 
 /**
+ * @generated from enum dsm.EscrowVerdictState
+ */
+export enum EscrowVerdictState {
+  /**
+   * @generated from enum value: ESCROW_VERDICT_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * no verdict holds the cell yet
+   *
+   * @generated from enum value: ESCROW_VERDICT_STATE_NONE = 1;
+   */
+  NONE = 1,
+
+  /**
+   * the leader holds it; not final yet
+   *
+   * @generated from enum value: ESCROW_VERDICT_STATE_LEADER_HELD = 2;
+   */
+  LEADER_HELD = 2,
+
+  /**
+   * the next seat holds it too; not final yet
+   *
+   * @generated from enum value: ESCROW_VERDICT_STATE_PRESERVED = 3;
+   */
+  PRESERVED = 3,
+
+  /**
+   * it is the cell's verdict
+   *
+   * @generated from enum value: ESCROW_VERDICT_STATE_FINAL = 4;
+   */
+  FINAL = 4,
+}
+// Retrieve enum metadata with: proto3.getEnumType(EscrowVerdictState)
+proto3.util.setEnumType(EscrowVerdictState, "dsm.EscrowVerdictState", [
+  { no: 0, name: "ESCROW_VERDICT_STATE_UNSPECIFIED" },
+  { no: 1, name: "ESCROW_VERDICT_STATE_NONE" },
+  { no: 2, name: "ESCROW_VERDICT_STATE_LEADER_HELD" },
+  { no: 3, name: "ESCROW_VERDICT_STATE_PRESERVED" },
+  { no: 4, name: "ESCROW_VERDICT_STATE_FINAL" },
+]);
+
+/**
  * Canonical value-capability (R4 anti-shrink) — the ONLY representation; there is no
  * legacy bool. UNSPECIFIED(0) is invalid and MUST be rejected on decode (never read as
  * NO). YES/UNKNOWN include in the recovery gate; only proven NO excludes.
@@ -17792,6 +17838,38 @@ export class Envelope extends Message<Envelope> {
     case: "connectReply";
   } | {
     /**
+     * Escrow vaults (SoFi §19.9, Amendment S21), local-only like SoFi's.
+     *
+     * @generated from field: dsm.EscrowPartyResponse escrow_party_response = 129;
+     */
+    value: EscrowPartyResponse;
+    case: "escrowPartyResponse";
+  } | {
+    /**
+     * @generated from field: dsm.EscrowCreatedResponse escrow_created_response = 130;
+     */
+    value: EscrowCreatedResponse;
+    case: "escrowCreatedResponse";
+  } | {
+    /**
+     * @generated from field: dsm.EscrowSignedResponse escrow_signed_response = 131;
+     */
+    value: EscrowSignedResponse;
+    case: "escrowSignedResponse";
+  } | {
+    /**
+     * @generated from field: dsm.EscrowVerdictResponse escrow_verdict_response = 132;
+     */
+    value: EscrowVerdictResponse;
+    case: "escrowVerdictResponse";
+  } | {
+    /**
+     * @generated from field: dsm.EscrowVaultsResponse escrow_vaults_response = 133;
+     */
+    value: EscrowVaultsResponse;
+    case: "escrowVaultsResponse";
+  } | {
+    /**
      * Reply to `token.forget`.
      *
      * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
@@ -17914,6 +17992,11 @@ export class Envelope extends Message<Envelope> {
     { no: 126, name: "sofi_vaults_response", kind: "message", T: SofiVaultsResponse, oneof: "payload" },
     { no: 127, name: "wallet_amount_response", kind: "message", T: WalletAmountResponse, oneof: "payload" },
     { no: 128, name: "connect_reply", kind: "message", T: ConnectReplyV1, oneof: "payload" },
+    { no: 129, name: "escrow_party_response", kind: "message", T: EscrowPartyResponse, oneof: "payload" },
+    { no: 130, name: "escrow_created_response", kind: "message", T: EscrowCreatedResponse, oneof: "payload" },
+    { no: 131, name: "escrow_signed_response", kind: "message", T: EscrowSignedResponse, oneof: "payload" },
+    { no: 132, name: "escrow_verdict_response", kind: "message", T: EscrowVerdictResponse, oneof: "payload" },
+    { no: 133, name: "escrow_vaults_response", kind: "message", T: EscrowVaultsResponse, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -18973,6 +19056,779 @@ export class SofiRelayResponse extends Message<SofiRelayResponse> {
 
   static equals(a: SofiRelayResponse | PlainMessage<SofiRelayResponse> | undefined, b: SofiRelayResponse | PlainMessage<SofiRelayResponse> | undefined): boolean {
     return proto3.util.equals(SofiRelayResponse, a, b);
+  }
+}
+
+/**
+ * A signing key an outcome is decided by.
+ *
+ * @generated from message dsm.EscrowSignerV1
+ */
+export class EscrowSignerV1 extends Message<EscrowSignerV1> {
+  /**
+   * a declared signature algorithm (ccb::genesis::sigalg)
+   *
+   * @generated from field: uint32 signature_alg = 1;
+   */
+  signatureAlg = 0;
+
+  /**
+   * @generated from field: bytes public_key = 2;
+   */
+  publicKey = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowSignerV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowSignerV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "signature_alg", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowSignerV1 {
+    return new EscrowSignerV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowSignerV1 {
+    return new EscrowSignerV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowSignerV1 {
+    return new EscrowSignerV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowSignerV1 | PlainMessage<EscrowSignerV1> | undefined, b: EscrowSignerV1 | PlainMessage<EscrowSignerV1> | undefined): boolean {
+    return proto3.util.equals(EscrowSignerV1, a, b);
+  }
+}
+
+/**
+ * One branch: an outcome, the keys whose signatures decide it, and the
+ * identity its release pays.
+ *
+ * @generated from message dsm.EscrowBranchV1
+ */
+export class EscrowBranchV1 extends Message<EscrowBranchV1> {
+  /**
+   * 1..64 bytes
+   *
+   * @generated from field: bytes outcome = 1;
+   */
+  outcome = new Uint8Array(0);
+
+  /**
+   * 1..4, ascending by alg ‖ |key| ‖ key
+   *
+   * @generated from field: repeated dsm.EscrowSignerV1 signers = 2;
+   */
+  signers: EscrowSignerV1[] = [];
+
+  /**
+   * @generated from field: bytes recipient_genesis = 3;
+   */
+  recipientGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_device_id = 4;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowBranchV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowBranchV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "outcome", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signers", kind: "message", T: EscrowSignerV1, repeated: true },
+    { no: 3, name: "recipient_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowBranchV1 {
+    return new EscrowBranchV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowBranchV1 {
+    return new EscrowBranchV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowBranchV1 {
+    return new EscrowBranchV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowBranchV1 | PlainMessage<EscrowBranchV1> | undefined, b: EscrowBranchV1 | PlainMessage<EscrowBranchV1> | undefined): boolean {
+    return proto3.util.equals(EscrowBranchV1, a, b);
+  }
+}
+
+/**
+ * escrow.party: this device as an escrow party, for naming in terms.
+ *
+ * @generated from message dsm.EscrowPartyRequest
+ */
+export class EscrowPartyRequest extends Message<EscrowPartyRequest> {
+  constructor(data?: PartialMessage<EscrowPartyRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowPartyRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowPartyRequest {
+    return new EscrowPartyRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowPartyRequest {
+    return new EscrowPartyRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowPartyRequest {
+    return new EscrowPartyRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowPartyRequest | PlainMessage<EscrowPartyRequest> | undefined, b: EscrowPartyRequest | PlainMessage<EscrowPartyRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowPartyRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowPartyResponse
+ */
+export class EscrowPartyResponse extends Message<EscrowPartyResponse> {
+  /**
+   * @generated from field: bytes genesis = 1;
+   */
+  genesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.EscrowSignerV1 signer = 3;
+   */
+  signer?: EscrowSignerV1;
+
+  constructor(data?: PartialMessage<EscrowPartyResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowPartyResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "signer", kind: "message", T: EscrowSignerV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowPartyResponse {
+    return new EscrowPartyResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowPartyResponse {
+    return new EscrowPartyResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowPartyResponse {
+    return new EscrowPartyResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowPartyResponse | PlainMessage<EscrowPartyResponse> | undefined, b: EscrowPartyResponse | PlainMessage<EscrowPartyResponse> | undefined): boolean {
+    return proto3.util.equals(EscrowPartyResponse, a, b);
+  }
+}
+
+/**
+ * escrow.create: lock a stake. The vault commits Y = H(DSM/external/v1 ‖ X);
+ * DSM never reads X. With a counterpart vault, the stake is locked only once
+ * that vault is accepted, Active and bound to the same verdict cell.
+ *
+ * @generated from message dsm.EscrowCreateRequest
+ */
+export class EscrowCreateRequest extends Message<EscrowCreateRequest> {
+  /**
+   * X, the bytes the parties agreed on
+   *
+   * @generated from field: bytes external = 1;
+   */
+  external = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_policy_commit = 2;
+   */
+  tokenPolicyCommit = new Uint8Array(0);
+
+  /**
+   * token units, > 0
+   *
+   * @generated from field: string amount_entered = 3;
+   */
+  amountEntered = "";
+
+  /**
+   * 1..16, ascending by outcome
+   *
+   * @generated from field: repeated dsm.EscrowBranchV1 branches = 4;
+   */
+  branches: EscrowBranchV1[] = [];
+
+  /**
+   * empty, or 32 bytes
+   *
+   * @generated from field: bytes counterpart_vault_id = 5;
+   */
+  counterpartVaultId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowCreateRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowCreateRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "external", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "branches", kind: "message", T: EscrowBranchV1, repeated: true },
+    { no: 5, name: "counterpart_vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowCreateRequest {
+    return new EscrowCreateRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowCreateRequest {
+    return new EscrowCreateRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowCreateRequest {
+    return new EscrowCreateRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowCreateRequest | PlainMessage<EscrowCreateRequest> | undefined, b: EscrowCreateRequest | PlainMessage<EscrowCreateRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowCreateRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowCreatedResponse
+ */
+export class EscrowCreatedResponse extends Message<EscrowCreatedResponse> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * K_verdict
+   *
+   * @generated from field: bytes verdict_cell = 2;
+   */
+  verdictCell = new Uint8Array(0);
+
+  /**
+   * Y
+   *
+   * @generated from field: bytes external_commitment = 3;
+   */
+  externalCommitment = new Uint8Array(0);
+
+  /**
+   * the owner's economic position that carries the creation
+   *
+   * @generated from field: uint64 position = 4;
+   */
+  position = protoInt64.zero;
+
+  constructor(data?: PartialMessage<EscrowCreatedResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowCreatedResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "external_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowCreatedResponse {
+    return new EscrowCreatedResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowCreatedResponse {
+    return new EscrowCreatedResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowCreatedResponse {
+    return new EscrowCreatedResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowCreatedResponse | PlainMessage<EscrowCreatedResponse> | undefined, b: EscrowCreatedResponse | PlainMessage<EscrowCreatedResponse> | undefined): boolean {
+    return proto3.util.equals(EscrowCreatedResponse, a, b);
+  }
+}
+
+/**
+ * escrow.sign and escrow.adjudicate: an outcome of an escrow vault's terms.
+ * escrow.sign puts this device's signature for it where the outcome's other
+ * signers find it; escrow.adjudicate assembles the verdict, writes it to the
+ * verdict cell and answers what the cell holds.
+ *
+ * @generated from message dsm.EscrowOutcomeRequest
+ */
+export class EscrowOutcomeRequest extends Message<EscrowOutcomeRequest> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes outcome = 2;
+   */
+  outcome = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowOutcomeRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowOutcomeRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "outcome", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowOutcomeRequest {
+    return new EscrowOutcomeRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowOutcomeRequest {
+    return new EscrowOutcomeRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowOutcomeRequest {
+    return new EscrowOutcomeRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowOutcomeRequest | PlainMessage<EscrowOutcomeRequest> | undefined, b: EscrowOutcomeRequest | PlainMessage<EscrowOutcomeRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowOutcomeRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowSignedResponse
+ */
+export class EscrowSignedResponse extends Message<EscrowSignedResponse> {
+  /**
+   * @generated from field: bytes verdict_cell = 1;
+   */
+  verdictCell = new Uint8Array(0);
+
+  /**
+   * the address of the object holding the signature
+   *
+   * @generated from field: bytes gathered = 2;
+   */
+  gathered = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowSignedResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowSignedResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "gathered", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowSignedResponse {
+    return new EscrowSignedResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowSignedResponse {
+    return new EscrowSignedResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowSignedResponse {
+    return new EscrowSignedResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowSignedResponse | PlainMessage<EscrowSignedResponse> | undefined, b: EscrowSignedResponse | PlainMessage<EscrowSignedResponse> | undefined): boolean {
+    return proto3.util.equals(EscrowSignedResponse, a, b);
+  }
+}
+
+/**
+ * escrow.verdict: what the verdict cell of an escrow vault holds.
+ *
+ * @generated from message dsm.EscrowVerdictRequest
+ */
+export class EscrowVerdictRequest extends Message<EscrowVerdictRequest> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowVerdictRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowVerdictRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVerdictRequest {
+    return new EscrowVerdictRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowVerdictRequest {
+    return new EscrowVerdictRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowVerdictRequest {
+    return new EscrowVerdictRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowVerdictRequest | PlainMessage<EscrowVerdictRequest> | undefined, b: EscrowVerdictRequest | PlainMessage<EscrowVerdictRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowVerdictRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowVerdictResponse
+ */
+export class EscrowVerdictResponse extends Message<EscrowVerdictResponse> {
+  /**
+   * @generated from field: bytes verdict_cell = 1;
+   */
+  verdictCell = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.EscrowVerdictState state = 2;
+   */
+  state = EscrowVerdictState.UNSPECIFIED;
+
+  /**
+   * empty with no verdict
+   *
+   * @generated from field: bytes outcome = 3;
+   */
+  outcome = new Uint8Array(0);
+
+  /**
+   * Why each value the leader holds ahead of the verdict counts as nothing.
+   *
+   * @generated from field: repeated string passed_over = 4;
+   */
+  passedOver: string[] = [];
+
+  constructor(data?: PartialMessage<EscrowVerdictResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowVerdictResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "state", kind: "enum", T: proto3.getEnumType(EscrowVerdictState) },
+    { no: 3, name: "outcome", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "passed_over", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVerdictResponse {
+    return new EscrowVerdictResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowVerdictResponse {
+    return new EscrowVerdictResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowVerdictResponse {
+    return new EscrowVerdictResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowVerdictResponse | PlainMessage<EscrowVerdictResponse> | undefined, b: EscrowVerdictResponse | PlainMessage<EscrowVerdictResponse> | undefined): boolean {
+    return proto3.util.equals(EscrowVerdictResponse, a, b);
+  }
+}
+
+/**
+ * escrow.release: the whole stake to this device, once the cell's verdict is
+ * final on a branch that pays it. Answered by SofiPositionResponse.
+ *
+ * @generated from message dsm.EscrowReleaseRequest
+ */
+export class EscrowReleaseRequest extends Message<EscrowReleaseRequest> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowReleaseRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowReleaseRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowReleaseRequest {
+    return new EscrowReleaseRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowReleaseRequest {
+    return new EscrowReleaseRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowReleaseRequest {
+    return new EscrowReleaseRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowReleaseRequest | PlainMessage<EscrowReleaseRequest> | undefined, b: EscrowReleaseRequest | PlainMessage<EscrowReleaseRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowReleaseRequest, a, b);
+  }
+}
+
+/**
+ * escrow.locked: the escrow vaults bound to a verdict cell. escrow.vaults: the
+ * escrow vaults this device created. Each at its walked head.
+ *
+ * @generated from message dsm.EscrowLockedRequest
+ */
+export class EscrowLockedRequest extends Message<EscrowLockedRequest> {
+  /**
+   * @generated from field: bytes verdict_cell = 1;
+   */
+  verdictCell = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowLockedRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowLockedRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowLockedRequest {
+    return new EscrowLockedRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowLockedRequest {
+    return new EscrowLockedRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowLockedRequest {
+    return new EscrowLockedRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowLockedRequest | PlainMessage<EscrowLockedRequest> | undefined, b: EscrowLockedRequest | PlainMessage<EscrowLockedRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowLockedRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowVaultsRequest
+ */
+export class EscrowVaultsRequest extends Message<EscrowVaultsRequest> {
+  constructor(data?: PartialMessage<EscrowVaultsRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowVaultsRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVaultsRequest {
+    return new EscrowVaultsRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowVaultsRequest {
+    return new EscrowVaultsRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowVaultsRequest {
+    return new EscrowVaultsRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowVaultsRequest | PlainMessage<EscrowVaultsRequest> | undefined, b: EscrowVaultsRequest | PlainMessage<EscrowVaultsRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowVaultsRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowVaultV1
+ */
+export class EscrowVaultV1 extends Message<EscrowVaultV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_genesis = 2;
+   */
+  ownerGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_device_id = 3;
+   */
+  ownerDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes verdict_cell = 4;
+   */
+  verdictCell = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes external_commitment = 5;
+   */
+  externalCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_policy_commit = 6;
+   */
+  tokenPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: string token_symbol = 7;
+   */
+  tokenSymbol = "";
+
+  /**
+   * base units: the stake while Active, 0 once released
+   *
+   * @generated from field: uint64 amount = 8;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: string amount_display = 9;
+   */
+  amountDisplay = "";
+
+  /**
+   * @generated from field: uint64 generation = 10;
+   */
+  generation = protoInt64.zero;
+
+  /**
+   * RETIRED once released
+   *
+   * @generated from field: dsm.SofiVaultStatus status = 11;
+   */
+  status = SofiVaultStatus.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<EscrowVaultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowVaultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "owner_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "owner_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "external_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "token_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "token_symbol", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 9, name: "amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 10, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 11, name: "status", kind: "enum", T: proto3.getEnumType(SofiVaultStatus) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVaultV1 {
+    return new EscrowVaultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowVaultV1 {
+    return new EscrowVaultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowVaultV1 {
+    return new EscrowVaultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowVaultV1 | PlainMessage<EscrowVaultV1> | undefined, b: EscrowVaultV1 | PlainMessage<EscrowVaultV1> | undefined): boolean {
+    return proto3.util.equals(EscrowVaultV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowVaultsResponse
+ */
+export class EscrowVaultsResponse extends Message<EscrowVaultsResponse> {
+  /**
+   * @generated from field: repeated dsm.EscrowVaultV1 vaults = 1;
+   */
+  vaults: EscrowVaultV1[] = [];
+
+  /**
+   * escrow.vaults is always COMPLETE
+   *
+   * @generated from field: dsm.SofiSearch search = 2;
+   */
+  search = SofiSearch.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<EscrowVaultsResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowVaultsResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vaults", kind: "message", T: EscrowVaultV1, repeated: true },
+    { no: 2, name: "search", kind: "enum", T: proto3.getEnumType(SofiSearch) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVaultsResponse {
+    return new EscrowVaultsResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowVaultsResponse {
+    return new EscrowVaultsResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowVaultsResponse {
+    return new EscrowVaultsResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowVaultsResponse | PlainMessage<EscrowVaultsResponse> | undefined, b: EscrowVaultsResponse | PlainMessage<EscrowVaultsResponse> | undefined): boolean {
+    return proto3.util.equals(EscrowVaultsResponse, a, b);
   }
 }
 

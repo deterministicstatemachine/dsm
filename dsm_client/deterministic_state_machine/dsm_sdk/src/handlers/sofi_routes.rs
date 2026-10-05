@@ -23,31 +23,36 @@ use dsm::sofi::validation::RouteShape;
 /// The most hops a route may have (`ROUTE_MAX_LEGS`, SoFi §31).
 const ROUTE_MAX_LEGS: usize = dsm::sofi::wire::ROUTE_MAX_LEGS;
 
-fn d32(bytes: &[u8], what: &str, route: &str) -> Result<[u8; 32], String> {
+pub(super) fn d32(bytes: &[u8], what: &str, route: &str) -> Result<[u8; 32], String> {
     <[u8; 32]>::try_from(bytes).map_err(|_| format!("{route}: {what} must be 32 bytes"))
 }
 
 /// An amount the user entered for `token`, in token units, as base units: the
 /// one parser, against the decimals of the token's committed policy.
-fn entered(text: &str, token: &[u8; 32], what: &str, route: &str) -> Result<u64, String> {
+pub(super) fn entered(
+    text: &str,
+    token: &[u8; 32],
+    what: &str,
+    route: &str,
+) -> Result<u64, String> {
     let (ticker, decimals) = token_of_commit(token).map_err(|e| format!("{route}: {what}: {e}"))?;
     parse_display_amount_to_base_units(text, decimals)
         .map_err(|e| format!("{route}: {what} {text:?} in {ticker}: {e}"))
 }
 
 /// Base units of `token`, rendered for display.
-fn shown(amount: u64, token: &[u8; 32], route: &str) -> Result<String, String> {
+pub(super) fn shown(amount: u64, token: &[u8; 32], route: &str) -> Result<String, String> {
     let (.., decimals) = token_of_commit(token).map_err(|e| format!("{route}: {e}"))?;
     Ok(format_base_units_for_display(amount, decimals))
 }
 
-fn request<T: Message + Default>(i: &AppInvoke) -> Result<T, String> {
+pub(super) fn request<T: Message + Default>(i: &AppInvoke) -> Result<T, String> {
     let arg_pack = generated::ArgPack::decode(&*i.args)
         .map_err(|e| format!("{}: decode ArgPack failed: {e}", i.method))?;
     T::decode(&*arg_pack.body).map_err(|e| format!("{}: decode request failed: {e}", i.method))
 }
 
-fn position_response(outcome: PositionOutcome) -> AppResult {
+pub(super) fn position_response(outcome: PositionOutcome) -> AppResult {
     let state = match outcome.state {
         PositionState::Realized => generated::SofiPositionState::Realized,
         PositionState::Void => generated::SofiPositionState::Void,

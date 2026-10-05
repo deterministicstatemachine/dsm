@@ -132,7 +132,7 @@ async fn history(d: &TestDevice) -> Vec<u8> {
 }
 
 /// The rows of `d`'s `wallet.history`, decoded.
-async fn history_rows(d: &TestDevice) -> Vec<generated::TransactionInfo> {
+pub(super) async fn history_rows(d: &TestDevice) -> Vec<generated::TransactionInfo> {
     let data = history(d).await;
     match generated::Envelope::decode(&data[1..])
         .expect("framed envelope")
@@ -761,7 +761,7 @@ pub(super) async fn create_vault(
 
 /// `d` adds `token` by its anchor. Adoption precedes receipt (owner ruling
 /// 2026-09-13): a trader adds a token before it can receive any.
-async fn adopt(d: &TestDevice, token: &[u8; 32]) {
+pub(super) async fn adopt(d: &TestDevice, token: &[u8; 32]) {
     d.enter();
     let adopted = d
         .router()
@@ -822,7 +822,7 @@ fn trade_request(p: &Pair, m: &Market, amount_in: u64) -> generated::SofiTradeRe
 }
 
 /// The position and its state, as a route reports them.
-fn position_of(r: &AppResult, route: &str) -> (u64, i32) {
+pub(super) fn position_of(r: &AppResult, route: &str) -> (u64, i32) {
     match payload(r) {
         Payload::SofiPositionResponse(r) => (r.position, r.state),
         other => panic!("{route} answered {other:?}"),
@@ -844,7 +844,7 @@ async fn resolve(p: &Pair) -> (u64, i32) {
 
 /// `d` takes a position through `route` and it resolves Realized, through
 /// `sofi.resolve` if the route's own rounds did not get there. The position.
-async fn realized_through(d: &TestDevice, route: &str, request: Vec<u8>) -> u64 {
+pub(super) async fn realized_through(d: &TestDevice, route: &str, request: Vec<u8>) -> u64 {
     let realized = generated::SofiPositionState::Realized as i32;
     let (position, state) = position_of(&invoke(d, route, request).await, route);
     if state == realized {
@@ -879,7 +879,7 @@ fn standing_of(d: &TestDevice) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomic
     ((d.genesis, d.device_id), parent)
 }
 
-fn pending_position(d: &TestDevice) -> Option<u64> {
+pub(super) fn pending_position(d: &TestDevice) -> Option<u64> {
     d.enter();
     d.router()
         .core_sdk
@@ -889,7 +889,7 @@ fn pending_position(d: &TestDevice) -> Option<u64> {
         .map(|pending| pending.economic_position)
 }
 
-fn admitted_position(d: &TestDevice) -> u64 {
+pub(super) fn admitted_position(d: &TestDevice) -> u64 {
     d.enter();
     economic_lineage::get_admitted_coordinate()
         .expect("read admitted")
@@ -903,7 +903,7 @@ fn member_name(member: &[u8]) -> String {
 
 /// The head and the admitted economic root of `d` agree about what it holds
 /// of each token.
-fn head_agrees_with_admitted_root(d: &TestDevice, tokens: &[[u8; 32]]) {
+pub(super) fn head_agrees_with_admitted_root(d: &TestDevice, tokens: &[[u8; 32]]) {
     d.enter();
     let head = d.router().core_sdk.device_head().expect("a head");
     let leaves =

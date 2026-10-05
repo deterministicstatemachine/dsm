@@ -722,6 +722,8 @@ fn quote(
     amount_in: u64,
     index: usize,
 ) -> Result<(D32, u64), DsmError> {
+    // A vault without a market prices nothing, whatever token is offered.
+    let fee_bps = vault.market()?.fee.fee_bps();
     let (token_out, in_is_a) = other_token(&vault.terms, token_in)
         .ok_or_else(|| refuse(format!("hop {index}: the vault does not trade that token")))?;
     let (reserve_in, reserve_out) = if in_is_a {
@@ -729,13 +731,9 @@ fn quote(
     } else {
         (vault.state.reserve_b, vault.state.reserve_a)
     };
-    let amount_out = constant_product_output_classified(
-        amount_in,
-        reserve_in,
-        reserve_out,
-        vault.market()?.fee.fee_bps(),
-    )
-    .map_err(|e| refuse(format!("hop {index}: {e:?}")))?;
+    let amount_out =
+        constant_product_output_classified(amount_in, reserve_in, reserve_out, fee_bps)
+            .map_err(|e| refuse(format!("hop {index}: {e:?}")))?;
     Ok((token_out, amount_out))
 }
 
@@ -786,6 +784,7 @@ impl Planned {
 /// What `vault` gives for `amount_in` of `token_in` at its head: `None` for
 /// an amount too small to move it. Any other refusal is an error.
 fn leg_out(vault: &VaultAtHead, token_in: &D32, amount_in: u64) -> Result<Option<u64>, DsmError> {
+    let fee_bps = vault.market()?.fee.fee_bps();
     let (_, in_is_a) = other_token(&vault.terms, token_in)
         .ok_or_else(|| refuse("the vault does not trade that token"))?;
     let (reserve_in, reserve_out) = if in_is_a {
@@ -793,12 +792,7 @@ fn leg_out(vault: &VaultAtHead, token_in: &D32, amount_in: u64) -> Result<Option
     } else {
         (vault.state.reserve_b, vault.state.reserve_a)
     };
-    match constant_product_output_classified(
-        amount_in,
-        reserve_in,
-        reserve_out,
-        vault.market()?.fee.fee_bps(),
-    ) {
+    match constant_product_output_classified(amount_in, reserve_in, reserve_out, fee_bps) {
         Ok(out) => Ok(Some(out)),
         Err(ConstantProductRefusal::OutputZero) => Ok(None),
         Err(other) => Err(refuse(other.as_str())),

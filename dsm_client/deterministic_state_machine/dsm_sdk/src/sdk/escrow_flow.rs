@@ -356,27 +356,31 @@ async fn gathered_signatures(
     outcome: &[u8],
 ) -> Result<(Vec<VerdictSignature>, Vec<VerdictRefusal>), DsmError> {
     let locator = escrow::statement_locator(verdict_cell, outcome);
-    let refused = std::cell::RefCell::new(Vec::new());
+    // Every candidate the index names is answered for under the locator, so
+    // a refused one is kept with its refusal rather than dropped unseen.
     let found = resolve_locator_all(
         set,
         TAG_DSM_ESCROW_STATEMENT_LOCATOR.source_bytes(),
         &locator,
         LOCATOR_BUDGET,
-        |bytes| match escrow::gathered_signatures(bytes, verdict_cell, outcome) {
-            Ok(signatures) => Some((locator, signatures)),
-            Err(refusal) => {
-                refused.borrow_mut().push(refusal);
-                None
-            }
+        |bytes| {
+            Some((
+                locator,
+                escrow::gathered_signatures(bytes, verdict_cell, outcome),
+            ))
         },
     )
     .await?;
-    let signatures = match found {
-        Discovered::Complete(found) | Discovered::Partial(found) => {
-            found.into_iter().flatten().collect()
+    let (Discovered::Complete(found) | Discovered::Partial(found)) = found;
+    let mut signatures = Vec::new();
+    let mut refused = Vec::new();
+    for candidate in found {
+        match candidate {
+            Ok(gathered) => signatures.extend(gathered),
+            Err(refusal) => refused.push(refusal),
         }
-    };
-    Ok((signatures, refused.into_inner()))
+    }
+    Ok((signatures, refused))
 }
 
 /// `escrow.adjudicate` (§19.9): assemble the verdict on `outcome` from the
@@ -453,7 +457,7 @@ pub async fn release(
     vault_id: &D32,
 ) -> Result<PositionOutcome, DsmError> {
     let accepted = &AcceptedGeneses::default();
-    let (terms, outcome) = {
+    let outcome = {
         let standing = standing(core)?;
         let ctx = standing.context(set, accepted)?;
         let verifier = ctx.verifier();
@@ -489,8 +493,22 @@ pub async fn release(
                 "the escrow token is not adopted: adopt it before receiving it",
             ));
         }
-        (terms, outcome)
+        outcome
     };
+    exercise_release(core, set, vault_id, outcome).await
+}
+
+/// The release of `vault_id` on `outcome`, drafted at the vault's walked head
+/// and exercised through Core: set up with the vault first if this device
+/// has no setup (Amendment S16), retire it, credit its whole stake. Core
+/// settles it against the verdict its cell holds; this producer reads none.
+pub(crate) async fn exercise_release(
+    core: &CoreSDK,
+    set: &StorageSet,
+    vault_id: &D32,
+    outcome: Vec<u8>,
+) -> Result<PositionOutcome, DsmError> {
+    let accepted = &AcceptedGeneses::default();
     set_up_with(core, set, &[*vault_id], accepted).await?;
     let standing = standing(core)?;
     let ctx = standing.context(set, accepted)?;
@@ -503,9 +521,9 @@ pub async fn release(
     )
     .await?;
     let (vault, ..) = head_of(set, &verifier, vault_id, chain).await?;
-    if !matches!(vault.terms, VaultTerms::Escrow(..)) {
+    let VaultTerms::Escrow(terms) = &vault.terms else {
         return Err(refuse("the vault is not an escrow vault"));
-    }
+    };
     if vault.state.status != VAULT_STATUS_ACTIVE {
         return Err(refuse("the escrow vault is already released"));
     }
@@ -526,7 +544,7 @@ pub async fn release(
             vault_id: *vault_id,
             parent_root: vault.root,
             setup_ref,
-            verdict_cell: escrow::verdict_cell_of(&terms),
+            verdict_cell: escrow::verdict_cell_of(terms),
             outcome,
             amount: vault.state.reserve_a,
         },
