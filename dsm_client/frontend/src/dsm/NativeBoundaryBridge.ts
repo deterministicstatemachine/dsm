@@ -46,6 +46,13 @@ function encodeIngressRequest(request: IngressRequest | Uint8Array): Uint8Array 
   return request instanceof Uint8Array ? new Uint8Array(request) : request.toBinary();
 }
 
+/**
+ * Rust's refusal of a request: the request reached Rust and Rust answered no.
+ * Every other failure of a call (a dropped bridge, a timeout, a malformed
+ * reply) is not an answer, and a caller that must tell the two apart can.
+ */
+export class RustRefusal extends Error {}
+
 function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
   const response = IngressResponse.fromBinary(responseBytes);
   if (response.result.case === 'okBytes') {
@@ -54,7 +61,7 @@ function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
   if (response.result.case === 'error') {
     // A refusal Rust tagged as deterministic safety is announced by its tag.
     emitDeterministicSafetyForError(response.result.value);
-    throw new Error(response.result.value?.message || 'ingress boundary error');
+    throw new RustRefusal(response.result.value?.message || 'ingress boundary error');
   }
   throw new Error('ingress boundary returned no result');
 }

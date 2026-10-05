@@ -1198,7 +1198,8 @@ mod tests {
     /// wizard's defaults complete (two decimals, a supply of 1,000,000, burn
     /// off, transferable, this device alone), which Rust refuses nothing of,
     /// and the same with a one-letter ticker, which Rust refuses naming the
-    /// ticker.
+    /// ticker; and `token.create` of that one, which Rust refuses as an error
+    /// carrying the same reason.
     #[test]
     #[serial]
     fn token_check_answers_through_the_ingress_as_the_wizard_records_it() {
@@ -1223,14 +1224,17 @@ mod tests {
             .encode_to_vec()
         });
         let mut record = Vec::new();
-        let mut answers = Vec::new();
-        for request in &asked {
-            let response = dispatch_ingress_bytes(request);
-            for part in [request, &response] {
+        let mut keep = |request: &[u8], response: &[u8]| {
+            for part in [request, response] {
                 let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
                 record.extend_from_slice(&len.to_be_bytes());
                 record.extend_from_slice(part);
             }
+        };
+        let mut answers = Vec::new();
+        for request in &asked {
+            let response = dispatch_ingress_bytes(request);
+            keep(request, &response);
             let answer = expect_ok_bytes(
                 IngressResponse::decode(response.as_slice()).expect("an IngressResponse"),
             );
@@ -1254,6 +1258,31 @@ mod tests {
                 "ticker".to_string(),
                 "a ticker is 2 to 8 characters, not 1".to_string()
             )]
+        );
+        let create = IngressRequest {
+            operation: Some(ingress_request::Operation::RouterInvoke(
+                pb::RouterInvokeOp {
+                    method: "token.create".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: wizard("X").encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                },
+            )),
+        }
+        .encode_to_vec();
+        let response = dispatch_ingress_bytes(&create);
+        keep(&create, &response);
+        let refused =
+            expect_error(IngressResponse::decode(response.as_slice()).expect("an IngressResponse"));
+        assert!(
+            refused
+                .message
+                .contains("ticker: a ticker is 2 to 8 characters, not 1"),
+            "{}",
+            refused.message
         );
 
         match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {

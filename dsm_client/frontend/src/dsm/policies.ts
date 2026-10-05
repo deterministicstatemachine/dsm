@@ -11,6 +11,7 @@ import {
 import { encodeBase32Crockford, decodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { emitWalletRefresh } from './events';
+import { RustRefusal } from './NativeBoundaryBridge';
 
 /**
  * Create a native DSM token.
@@ -98,6 +99,19 @@ export async function checkToken(details: TokenCreateDetails): Promise<TokenFiel
   return env.payload.value.refusals.map((r) => ({ field: r.field, reason: r.reason }));
 }
 
+/** A call Rust never answered, as distinct from Rust's refusal. */
+class Unanswered extends Error {
+  constructor(readonly lost: unknown) {
+    super(lost instanceof Error ? lost.message : String(lost));
+  }
+}
+
+/**
+ * Create a token. Rust's refusal comes back as a result that did not succeed,
+ * with Rust's reason. A call that does not come back throws: the creation may
+ * have committed while it ran, so the caller asks again with the identical
+ * request, which Rust answers from canonical state.
+ */
 export async function createToken(details: TokenCreateDetails): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
   try {
     const argPack = new pb.ArgPack({
@@ -105,7 +119,9 @@ export async function createToken(details: TokenCreateDetails): Promise<{ succes
       body: new Uint8Array(createRequest(details).toBinary()),
     });
 
-    const resBytes = await routerInvokeBin('token.create', new Uint8Array(argPack.toBinary()));
+    const resBytes = await routerInvokeBin('token.create', new Uint8Array(argPack.toBinary())).catch((e: unknown) => {
+      throw e instanceof RustRefusal ? e : new Unanswered(e);
+    });
     const env = decodeFramedEnvelopeV3(resBytes);
 
     if (env.payload.case === 'error') {
@@ -137,6 +153,7 @@ export async function createToken(details: TokenCreateDetails): Promise<{ succes
 
     return { success: true, tokenId: resp.tokenId, anchorBase32, message: resp.message };
   } catch (e) {
+    if (e instanceof Unanswered) throw e.lost;
     console.warn('createToken failed:', e);
     return { success: false, message: e instanceof Error ? e.message : String(e) };
   }
