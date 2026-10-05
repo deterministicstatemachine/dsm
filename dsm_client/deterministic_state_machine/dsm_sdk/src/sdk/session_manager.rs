@@ -1131,16 +1131,17 @@ mod tests {
                 "\"jump\" is not one of the shell's buttons",
             ),
         ] {
+            // The secret itself is never printed, only what was expected of it.
             let refused = mgr
                 .enable_lock(method, secret, mgr.lock_on_pause)
-                .expect_err(secret);
+                .expect_err(refusal);
             assert!(
                 refused.to_string().contains(refusal),
-                "{secret:?}: {refused}"
+                "{method}, expecting {refusal:?}: {refused}"
             );
             assert!(
                 !crate::sdk::app_lock::enrolled(),
-                "{secret:?} enrolled nothing"
+                "{method}, expecting {refusal:?}: enrolled nothing"
             );
         }
         mgr.enable_lock("combo", "up,up,down,down,left,right,b,a", mgr.lock_on_pause)
