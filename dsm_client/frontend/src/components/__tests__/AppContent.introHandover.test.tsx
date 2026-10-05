@@ -32,7 +32,6 @@ function Boot({ appState }: { appState: AppState }) {
       handleGenerateGenesis={() => {}}
       cancelPhraseBackup={() => {}}
       answerPhraseCheck={() => Promise.resolve()}
-      unlockToWallet={() => {}}
       menuItems={[]}
       currentMenuIndex={0}
       setCurrentMenuIndex={() => {}}

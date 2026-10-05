@@ -188,19 +188,17 @@ impl SessionManager {
         }
     }
 
-    /// Configure the lock as `session.configure_lock` asks: enabled, by
-    /// [`Self::enable_lock`]; disabled, by [`Self::disable_lock`].
+    /// Configure the lock as `session.configure_lock` asks: by "pin" or
+    /// "combo", [`Self::enable_lock`]; by "none", [`Self::disable_lock`].
     pub fn configure_lock(
         &mut self,
-        enabled: bool,
         method: &str,
         lock_on_pause: bool,
         secret: &str,
     ) -> Result<(), dsm::types::error::DsmError> {
-        if enabled {
-            self.enable_lock(method, secret, lock_on_pause)
-        } else {
-            self.disable_lock(lock_on_pause)
+        match method {
+            "none" => self.disable_lock(lock_on_pause),
+            named => self.enable_lock(named, secret, lock_on_pause),
         }
     }
 
@@ -1099,7 +1097,6 @@ mod tests {
         let mut mgr = wallet_with_seed(&crate::economic_fixtures::test_mnemonic(0x35));
         mgr.enable_lock("pin", "1234", mgr.lock_on_pause)
             .expect("enabled");
-        mgr.persist_lock_config_to_app_state().expect("persisted");
         // The device the old frontend locked: enabled, but no credential Rust
         // ever enrolled.
         AppState::set_pref("lock_credential", "").expect("pref");
@@ -1117,5 +1114,60 @@ mod tests {
             .sync_lock_config_from_app_state()
             .expect_err("no method stands in");
         assert!(refused.to_string().contains("biometric"), "{refused}");
+    }
+
+    /// Rust decides what a lock is: a PIN of 4 to 8 digits, or 8 presses of
+    /// the shell's buttons. Anything else is refused and enrolls nothing.
+    #[test]
+    #[serial_test::serial]
+    fn a_lock_enrolls_only_a_pin_of_four_to_eight_digits_or_eight_shell_buttons() {
+        let mut mgr = wallet_with_seed(&crate::economic_fixtures::test_mnemonic(0x36));
+        for (method, secret, refusal) in [
+            ("pin", "", "a new lock needs its PIN or pattern"),
+            ("pin", "123", "4 to 8 digits"),
+            ("pin", "123456789", "4 to 8 digits"),
+            ("pin", "12a4", "4 to 8 digits"),
+            ("pin", "１２３４", "4 to 8 digits"),
+            (
+                "combo",
+                "up,up,down,down,left,right,left",
+                "8 presses, not 7",
+            ),
+            (
+                "combo",
+                "up,up,down,down,left,right,left,right,a",
+                "8 presses, not 9",
+            ),
+            (
+                "combo",
+                "up,up,down,down,left,right,left,jump",
+                "\"jump\" is not one of the shell's buttons",
+            ),
+        ] {
+            let refused = mgr
+                .enable_lock(method, secret, mgr.lock_on_pause)
+                .expect_err(secret);
+            assert!(
+                refused.to_string().contains(refusal),
+                "{secret:?}: {refused}"
+            );
+            assert!(
+                !crate::sdk::app_lock::enrolled(),
+                "{secret:?} enrolled nothing"
+            );
+        }
+        mgr.enable_lock("combo", "up,up,down,down,left,right,b,a", mgr.lock_on_pause)
+            .expect("a pattern of the shell's buttons");
+        mgr.lock_now().expect("locked");
+        assert_eq!(
+            mgr.try_unlock("up,up,down,down,left,right,a,b")
+                .expect("tried"),
+            Tried::Wrong { left: 2 }
+        );
+        assert_eq!(
+            mgr.try_unlock("up,up,down,down,left,right,b,a")
+                .expect("tried"),
+            Tried::Opened
+        );
     }
 }

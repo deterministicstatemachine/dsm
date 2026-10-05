@@ -986,6 +986,165 @@ mod tests {
         }
     }
 
+    /// The record the frontend's lock screen tests answer `session.*` from:
+    /// each try the lock screen sends, framed as the WebView frames it, and
+    /// this ingress's answer. The committed record must equal the live
+    /// answers; DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const SESSION_LOCK_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/lock/__tests__/fixtures/session_lock.ingress.bin"
+    );
+
+    /// The BIP39 vectors the lock screen's tests type: this wallet's phrase,
+    /// and another wallet's.
+    const LOCK_RECORD_PHRASE: &str = "abandon abandon abandon abandon abandon abandon \
+                                      abandon abandon abandon abandon abandon about";
+    const LOCK_RECORD_OTHER_PHRASE: &str = "legal winner thank year wave sausage worth useful \
+                                            legal winner thank yellow";
+
+    /// The app lock through the ingress, as the lock screen meets it: a PIN
+    /// lock on, the session locked, three wrong PINs answered with the tries
+    /// left and then the phrase required, the right PIN no longer opening it,
+    /// another wallet's phrase refused, and this wallet's phrase opening it.
+    /// Each answer is Rust's session snapshot; the frontend's record of them
+    /// is this process's own.
+    #[test]
+    #[serial]
+    fn the_lock_answers_through_the_ingress_as_the_frontend_records_it() {
+        // A fresh store: no lock settings left by an earlier test.
+        economic_fixtures::use_test_storage_dir();
+        crate::sdk::app_state::AppState::reset_for_testing();
+        device_with_router(0x47);
+        crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(LOCK_RECORD_PHRASE)
+            .expect("this wallet's seed");
+        *crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .expect("the session manager") = crate::sdk::session_manager::SessionManager::default();
+
+        let invoke = |method: &str, body: Vec<u8>| {
+            IngressRequest {
+                operation: Some(ingress_request::Operation::RouterInvoke(
+                    pb::RouterInvokeOp {
+                        method: method.to_string(),
+                        args: pb::ArgPack {
+                            codec: pb::Codec::Proto as i32,
+                            body,
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    },
+                )),
+            }
+            .encode_to_vec()
+        };
+        let unlock = |key: pb::session_unlock_request::Key| {
+            invoke(
+                "session.unlock",
+                pb::SessionUnlockRequest { key: Some(key) }.encode_to_vec(),
+            )
+        };
+        let lock_of = |response: &[u8]| {
+            let answer =
+                expect_ok_bytes(IngressResponse::decode(response).expect("an IngressResponse"));
+            match crate::handlers::response_helpers::decode_local_envelope(&answer)
+                .expect("the router's local answer")
+                .payload
+            {
+                Some(dsm::types::proto::envelope::Payload::SessionStateResponse(s)) => {
+                    let lock = s.lock_status.expect("a lock status");
+                    (lock.locked, lock.misses_left, lock.phrase_required)
+                }
+                other => panic!("the session route answered {other:?}"),
+            }
+        };
+
+        // The lock the user set up: a PIN. Not part of the record.
+        let on = dispatch_ingress_bytes(&invoke(
+            "session.configure_lock",
+            pb::SessionConfigureLockRequest {
+                method: "pin".to_string(),
+                secret: "2468".to_string(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ));
+        let (locked, left, phrase) = lock_of(&on);
+        assert!(!locked && !phrase, "a new lock leaves the wallet open");
+        assert_eq!(left, crate::sdk::app_lock::MISSES_BEFORE_PHRASE);
+
+        use pb::session_unlock_request::Key;
+        let asked = vec![
+            IngressRequest {
+                operation: Some(ingress_request::Operation::RouterInvoke(
+                    pb::RouterInvokeOp {
+                        method: "session.lock".to_string(),
+                        args: Vec::new(),
+                    },
+                )),
+            }
+            .encode_to_vec(),
+            unlock(Key::Secret("0000".to_string())),
+            unlock(Key::Secret("0001".to_string())),
+            unlock(Key::Secret("0002".to_string())),
+            unlock(Key::RecoveryPhrase(LOCK_RECORD_OTHER_PHRASE.to_string())),
+            unlock(Key::RecoveryPhrase(LOCK_RECORD_PHRASE.to_string())),
+        ];
+        let mut record = Vec::new();
+        let mut answers = Vec::new();
+        for (at, request) in asked.iter().enumerate() {
+            let response = dispatch_ingress_bytes(request);
+            for part in [request, &response] {
+                let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+                record.extend_from_slice(&len.to_be_bytes());
+                record.extend_from_slice(part);
+            }
+            answers.push(lock_of(&response));
+            // Once the tries are used up, the right PIN opens nothing either.
+            // The lock screen no longer offers the PIN, so this is not recorded.
+            if at == 3 {
+                let right = dispatch_ingress_bytes(&unlock(Key::Secret("2468".to_string())));
+                let (locked, _, phrase) = lock_of(&right);
+                assert!(
+                    locked && phrase,
+                    "the right PIN opened a lock past its tries"
+                );
+            }
+        }
+        // Locked with `left` tries, the phrase required exactly when none are.
+        let locked_with = |(locked, misses_left, phrase): (bool, u32, bool), left: u32| {
+            assert!(locked, "the wallet stays locked");
+            assert_eq!(misses_left, left);
+            assert_eq!(
+                phrase,
+                left == 0,
+                "the phrase is required once no tries are left"
+            );
+        };
+        let max = crate::sdk::app_lock::MISSES_BEFORE_PHRASE;
+        let mut answers = answers.into_iter();
+        let mut next = || answers.next().expect("an answer to every request");
+        locked_with(next(), max);
+        locked_with(next(), max - 1);
+        locked_with(next(), max - 2);
+        locked_with(next(), 0);
+        locked_with(next(), 0);
+        let (locked, misses_left, phrase) = next();
+        assert!(!locked && !phrase, "this wallet's phrase opens it");
+        assert_eq!(misses_left, max, "and starts the tries again");
+
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => {
+                std::fs::write(SESSION_LOCK_RECORD, &record).expect("write the frontend's record")
+            }
+            None => assert_eq!(
+                std::fs::read(SESSION_LOCK_RECORD).expect("the frontend's committed record"),
+                record,
+                "the frontend's session lock record differs from this ingress's answers; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+    }
+
     /// A router refusal reaches the caller as an error carrying the router's
     /// own reason: an invoke for a token this device does not hold.
     #[test]

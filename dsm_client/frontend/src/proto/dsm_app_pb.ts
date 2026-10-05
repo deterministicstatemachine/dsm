@@ -10244,12 +10244,7 @@ export class SessionHardwareFactsProto extends Message<SessionHardwareFactsProto
  */
 export class SessionConfigureLockRequest extends Message<SessionConfigureLockRequest> {
   /**
-   * @generated from field: bool enabled = 1;
-   */
-  enabled = false;
-
-  /**
-   * "pin" or "combo" when enabled
+   * "pin", "combo" or "none"
    *
    * @generated from field: string method = 2;
    */
@@ -10276,7 +10271,6 @@ export class SessionConfigureLockRequest extends Message<SessionConfigureLockReq
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.SessionConfigureLockRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 2, name: "method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "lock_on_pause", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 4, name: "secret", kind: "scalar", T: 9 /* ScalarType.STRING */ },

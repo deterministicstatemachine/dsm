@@ -28,6 +28,13 @@ const MISSES_KEY: &str = "lock_misses";
 /// Wrong tries before only the recovery phrase opens the lock.
 pub const MISSES_BEFORE_PHRASE: u32 = 3;
 
+/// A PIN's length, in digits.
+const PIN_DIGITS_MIN: usize = 4;
+const PIN_DIGITS_MAX: usize = 8;
+/// A button pattern's presses, and the shell's buttons that make it.
+const COMBO_PRESSES: usize = 8;
+const COMBO_BUTTONS: [&str; 8] = ["up", "down", "left", "right", "a", "b", "start", "select"];
+
 /// Every setting the lock keeps, here and in the session manager. No one but
 /// Rust reads or writes them.
 pub const OWNED_KEYS: [&str; 6] = [
@@ -66,6 +73,39 @@ impl LockMethod {
             Self::Pin => "pin",
             Self::Combo => "combo",
         }
+    }
+
+    /// Whether `secret` is one this method enrolls: a PIN is 4 to 8 digits; a
+    /// pattern is 8 presses of the shell's buttons, named and joined by ",".
+    fn check_shape(self, secret: &str) -> Result<(), DsmError> {
+        match self {
+            Self::Pin => {
+                let digits = secret.chars().filter(char::is_ascii_digit).count();
+                if digits != secret.chars().count()
+                    || !(PIN_DIGITS_MIN..=PIN_DIGITS_MAX).contains(&digits)
+                {
+                    return Err(refuse(format!(
+                        "a PIN is {PIN_DIGITS_MIN} to {PIN_DIGITS_MAX} digits"
+                    )));
+                }
+            }
+            Self::Combo => {
+                let presses: Vec<&str> = secret.split(',').collect();
+                if let Some(other) = presses.iter().find(|p| !COMBO_BUTTONS.contains(p)) {
+                    return Err(refuse(format!(
+                        "{other:?} is not one of the shell's buttons ({})",
+                        COMBO_BUTTONS.join(", ")
+                    )));
+                }
+                if presses.len() != COMBO_PRESSES {
+                    return Err(refuse(format!(
+                        "a button pattern is {COMBO_PRESSES} presses, not {}",
+                        presses.len()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// What is hashed: the method's domain, then the secret, so a PIN never
@@ -111,9 +151,7 @@ fn set_misses(count: u32) -> Result<(), DsmError> {
 /// Enroll `secret` as what opens the lock by `method`: its Argon2id hash under
 /// a fresh salt replaces any earlier one, and the miss count starts again.
 pub fn enroll(method: LockMethod, secret: &str) -> Result<(), DsmError> {
-    if secret.is_empty() {
-        return Err(refuse("a lock needs its PIN or pattern"));
-    }
+    method.check_shape(secret)?;
     let mut salt = [0u8; 16];
     rand::TryRngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut salt)
         .map_err(|e| DsmError::crypto(format!("lock salt: {e}"), None::<std::io::Error>))?;

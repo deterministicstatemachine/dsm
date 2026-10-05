@@ -112,9 +112,7 @@ impl AppRouterImpl {
                 if let Err(e) = mgr.sync_lock_config_from_app_state() {
                     return err(format!("session lock settings: {e}"));
                 }
-                if let Err(e) =
-                    mgr.configure_lock(req.enabled, &req.method, req.lock_on_pause, &req.secret)
-                {
+                if let Err(e) = mgr.configure_lock(&req.method, req.lock_on_pause, &req.secret) {
                     return err(format!("session.configure_lock: {e}"));
                 }
                 log::info!(
