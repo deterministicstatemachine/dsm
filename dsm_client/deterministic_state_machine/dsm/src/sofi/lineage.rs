@@ -554,16 +554,25 @@ impl core::fmt::Display for GenesisError {
 
 impl std::error::Error for GenesisError {}
 
+/// What an accepted genesis commits its vault to: a market, or escrow terms
+/// (SoFi Amendment S21).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenesisTerms {
+    Market(crate::ccb::state::MarketPolicy),
+    Escrow(super::wire::EscrowTerms),
+}
+
 /// A vault genesis a verifier accepted (SoFi §19.8 `GenesisAccepted`): the
 /// genesis preimage that the owner's validated transition at `p_create`
-/// carried, with the market it commits. Only [`genesis_accepted`] constructs
-/// it, and a walk of a vault starts from nothing else (§30 step 1).
+/// carried, with the market or the escrow terms it commits. Only
+/// [`genesis_accepted`] constructs it, and a walk of a vault starts from
+/// nothing else (§30 step 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedVaultGenesis {
     vault_id: D32,
     preimage: VaultGenesisPreimage,
     genesis_root: D32,
-    market: crate::ccb::state::MarketPolicy,
+    terms: GenesisTerms,
 }
 
 impl AcceptedVaultGenesis {
@@ -587,9 +596,25 @@ impl AcceptedVaultGenesis {
         &self.genesis_root
     }
 
-    /// The market policy `V_0` commits.
-    pub fn market(&self) -> &crate::ccb::state::MarketPolicy {
-        &self.market
+    /// What `V_0` commits the vault to.
+    pub fn terms(&self) -> &GenesisTerms {
+        &self.terms
+    }
+
+    /// The market policy `V_0` commits; an escrow vault has none.
+    pub fn market(&self) -> Option<&crate::ccb::state::MarketPolicy> {
+        match &self.terms {
+            GenesisTerms::Market(market) => Some(market),
+            GenesisTerms::Escrow(..) => None,
+        }
+    }
+
+    /// The escrow terms `V_0` commits; a market vault has none.
+    pub fn escrow(&self) -> Option<&super::wire::EscrowTerms> {
+        match &self.terms {
+            GenesisTerms::Escrow(terms) => Some(terms),
+            GenesisTerms::Market(..) => None,
+        }
     }
 }
 
@@ -630,6 +655,13 @@ pub enum GenesisInvalid {
     /// A token's policy refuses it as a market leg (§49: `transferable`
     /// binds vault creation).
     TokenNotTransferable { token: D32 },
+    /// The carried escrow terms are not the object all three of `V_0`'s
+    /// slots name (SoFi Amendment S21).
+    EscrowTermsNotCommitted,
+    /// The carried escrow terms do not decode.
+    EscrowTermsDoNotDecode(crate::ccb::decode::DecodeError),
+    /// An escrow vault's `V_0` holds no stake, or holds a second reserve.
+    NotAnEscrowStake { reserve_a: u64, reserve_b: u64 },
 }
 
 /// Why genesis acceptance has no answer yet, or its answer is no.
@@ -681,6 +713,12 @@ struct OwnerCreation<'a> {
     operation: &'a crate::types::operations::Operation,
 }
 
+/// The terms object the owner's creation carried beside its genesis.
+enum Carried<'a> {
+    Market(&'a [u8]),
+    Escrow(&'a [u8]),
+}
+
 fn creation_accepted(
     network_id: &[u8],
     preimage_bytes: &[u8],
@@ -696,13 +734,20 @@ fn creation_accepted(
     {
         return Err(invalid(GenesisInvalid::NotTheOwnersCreationPosition));
     }
-    let crate::types::operations::Operation::SofiVaultCreate {
-        genesis_preimage,
-        market_policy_preimage,
-        ..
-    } = owner.operation
-    else {
-        return Err(invalid(GenesisInvalid::NotTheCreationTheOwnerMade));
+    // The creation the owner made: a market's, carrying its market policy,
+    // or an escrow vault's, carrying its terms (SoFi Amendment S21).
+    let (genesis_preimage, carried) = match owner.operation {
+        crate::types::operations::Operation::SofiVaultCreate {
+            genesis_preimage,
+            market_policy_preimage,
+            ..
+        } => (genesis_preimage, Carried::Market(market_policy_preimage)),
+        crate::types::operations::Operation::EscrowVaultCreate {
+            genesis_preimage,
+            terms,
+            ..
+        } => (genesis_preimage, Carried::Escrow(terms)),
+        _ => return Err(invalid(GenesisInvalid::NotTheCreationTheOwnerMade)),
     };
     if genesis_preimage.as_slice() != preimage_bytes {
         return Err(invalid(GenesisInvalid::NotTheCreationTheOwnerMade));
@@ -730,31 +775,58 @@ fn creation_accepted(
     let vault_id = preimage.vault_id();
     let genesis_root =
         genesis_root(&vault_id, state).map_err(|_| invalid(GenesisInvalid::StateDoesNotEncode))?;
-    let committed = crate::ccb::decode::policy_object_address(
-        crate::ccb::class::MARKET_POLICY,
-        market_policy_preimage,
-    );
-    if committed != Some(state.market_policy) {
-        return Err(invalid(GenesisInvalid::Market(
-            GenesisError::MarketPolicyIsNotTheCommittedOne,
-        )));
-    }
-    // `token_a < token_b`: a `MarketPolicy` with an unordered pair does not
-    // decode.
-    let market =
-        crate::ccb::decode::decode_market_policy(market_policy_preimage).map_err(|_| {
-            invalid(GenesisInvalid::Market(
-                GenesisError::MarketPolicyDoesNotDecode,
-            ))
-        })?;
-    for token in [*market.token_a(), *market.token_b()] {
-        token_is_a_market_leg(&token, token_policies)?;
-    }
+    let terms = match carried {
+        Carried::Market(market_policy_preimage) => {
+            let committed = crate::ccb::decode::policy_object_address(
+                crate::ccb::class::MARKET_POLICY,
+                market_policy_preimage,
+            );
+            if committed != Some(state.market_policy) {
+                return Err(invalid(GenesisInvalid::Market(
+                    GenesisError::MarketPolicyIsNotTheCommittedOne,
+                )));
+            }
+            // `token_a < token_b`: a `MarketPolicy` with an unordered pair does not
+            // decode.
+            let market =
+                crate::ccb::decode::decode_market_policy(market_policy_preimage).map_err(|_| {
+                    invalid(GenesisInvalid::Market(
+                        GenesisError::MarketPolicyDoesNotDecode,
+                    ))
+                })?;
+            for token in [*market.token_a(), *market.token_b()] {
+                token_is_a_market_leg(&token, token_policies)?;
+            }
+            GenesisTerms::Market(market)
+        }
+        // An escrow vault (SoFi Amendment S21): its three slots name the
+        // carried terms, it holds a stake and nothing else, and the token
+        // its terms name passes its policy for a transfer (§49).
+        Carried::Escrow(terms_bytes) => {
+            let addr = super::escrow::terms_address_of(terms_bytes);
+            if state.market_policy != addr
+                || state.fee_policy != addr
+                || state.release_policy != addr
+            {
+                return Err(invalid(GenesisInvalid::EscrowTermsNotCommitted));
+            }
+            let terms = super::wire::EscrowTerms::decode(terms_bytes)
+                .map_err(|e| invalid(GenesisInvalid::EscrowTermsDoNotDecode(e)))?;
+            if state.reserve_a == 0 || state.reserve_b != 0 {
+                return Err(invalid(GenesisInvalid::NotAnEscrowStake {
+                    reserve_a: state.reserve_a,
+                    reserve_b: state.reserve_b,
+                }));
+            }
+            token_is_a_market_leg(terms.token(), token_policies)?;
+            GenesisTerms::Escrow(terms)
+        }
+    };
     Ok(AcceptedVaultGenesis {
         vault_id,
         preimage,
         genesis_root,
-        market,
+        terms,
     })
 }
 
@@ -955,6 +1027,7 @@ mod tests {
                 Shape::Realized | Shape::Void => Validation::Valid,
             },
             storage_resolved: true,
+            verdict: crate::sofi::resolution::VerdictFact::NotARelease,
             legs,
             keys,
             preimage: preimage.clone(),
@@ -1175,7 +1248,8 @@ mod tests {
                 exact_out,
                 ..
             } => (*token_in, *token_out, *exact_out),
-            crate::sofi::wire::SettlementBody::Close { .. } => {
+            crate::sofi::wire::SettlementBody::Close { .. }
+            | crate::sofi::wire::SettlementBody::Release { .. } => {
                 panic!("the realized rig is a swap")
             }
         }
@@ -1844,7 +1918,8 @@ mod tests {
         let f = fulfillment(&p);
         let hops = match fx.preimage.settlement() {
             crate::sofi::wire::SettlementBody::Swap { hops, .. } => hops.clone(),
-            crate::sofi::wire::SettlementBody::Close { .. } => unreachable!("a swap fixture"),
+            crate::sofi::wire::SettlementBody::Close { .. }
+            | crate::sofi::wire::SettlementBody::Release { .. } => unreachable!("a swap fixture"),
         };
         assert_eq!(hops.len(), 2);
         let intermediate = hops[0].token_out;
@@ -2052,7 +2127,10 @@ pub(crate) mod genesis_acceptance {
             &genesis_root(&preimage.vault_id(), &preimage.state).unwrap()
         );
         assert_eq!(accepted.state(), &preimage.state);
-        assert_eq!(accepted.market().token_a(), &tokens()[0].0);
+        assert_eq!(
+            accepted.market().expect("a market vault").token_a(),
+            &tokens()[0].0
+        );
     }
 
     /// Fetched bytes are accepted only as the bytes the owner's creation
@@ -2203,5 +2281,169 @@ pub(crate) mod genesis_acceptance {
         c.token_policies
             .retain(|commit, _| *commit == tokens()[0].0);
         assert!(accept(&c).is_ok());
+    }
+    // ── escrow vaults (SoFi Amendment S21) ────────────────────────────────
+
+    /// Terms over `token`: one "void" branch the referee decides, paying the
+    /// owner.
+    fn escrow_terms_over(token: D32) -> crate::sofi::wire::EscrowTerms {
+        let referee = crate::sofi::wire::EscrowSigner::new(
+            crate::ccb::sigalg::SPHINCS_PLUS_SPX256F,
+            &[0x5A; 64],
+        )
+        .unwrap();
+        crate::sofi::wire::EscrowTerms::new(
+            token,
+            crate::sofi::escrow::external_commitment(b"a match"),
+            vec![crate::sofi::wire::EscrowBranch::new(
+                crate::sofi::wire::EscrowOutcome::new(b"void", vec![referee]).unwrap(),
+                G,
+                dev(),
+            )],
+        )
+        .unwrap()
+    }
+
+    /// `V_0` of an escrow vault whose three slots name `addr`.
+    fn escrow_state(addr: D32, reserve_a: u64, reserve_b: u64) -> VaultStateLeaf {
+        VaultStateLeaf {
+            owner_genesis: G,
+            owner_device_id: dev(),
+            create_position: P_CREATE,
+            market_policy: addr,
+            fee_policy: addr,
+            release_policy: addr,
+            storage_set_id: pinned_set(),
+            generation: 0,
+            reserve_a,
+            reserve_b,
+            status: VAULT_STATUS_ACTIVE,
+        }
+    }
+
+    /// The escrow creation of `state`, carrying `terms_bytes`, as the owner
+    /// signs it.
+    fn escrow_creation_of(state: VaultStateLeaf, terms_bytes: Vec<u8>) -> Creation {
+        let preimage = VaultGenesisPreimage {
+            owner_genesis: G,
+            owner_device_id: dev(),
+            create_position: P_CREATE,
+            state,
+        };
+        let vault_id = preimage.vault_id();
+        let record = VaultCreation {
+            vault_id,
+            genesis_root: genesis_root(&vault_id, &preimage.state).unwrap(),
+            amount_a: preimage.state.reserve_a,
+            amount_b: preimage.state.reserve_b,
+        };
+        let preimage_bytes = preimage.encode().unwrap();
+        let build = |signature: Vec<u8>| Operation::EscrowVaultCreate {
+            genesis_preimage: preimage_bytes.clone(),
+            creation: record.encode(),
+            terms: terms_bytes.clone(),
+            signature,
+        };
+        let signing = build(Vec::new()).signing_bytes();
+        let operation =
+            build(crate::crypto::sphincs::sphincs_sign(&trader_keys().1, &signing).unwrap());
+        Creation {
+            preimage_bytes,
+            operation,
+            token_policies: tokens().iter().cloned().collect(),
+        }
+    }
+
+    fn escrow_valid() -> (Creation, crate::sofi::wire::EscrowTerms) {
+        let terms = escrow_terms_over(tokens()[0].0);
+        let state = escrow_state(crate::sofi::escrow::terms_address(&terms), 2_500, 0);
+        (escrow_creation_of(state, terms.encode()), terms)
+    }
+
+    #[test]
+    fn an_escrow_genesis_the_owner_created_is_accepted_with_its_terms() {
+        let (c, terms) = escrow_valid();
+        assert_eq!(
+            crate::sofi::signature::verify_operation(&c.operation, &trader_keys().0),
+            Ok(()),
+            "the escrow creation is signed under the owner's key"
+        );
+        let accepted = accept(&c).expect("accepted");
+        assert_eq!(accepted.escrow(), Some(&terms));
+        assert_eq!(accepted.market(), None, "an escrow vault has no market");
+        assert_eq!(accepted.state().reserve_a, 2_500);
+    }
+
+    #[test]
+    fn an_escrow_genesis_is_refused_for_terms_its_slots_do_not_name() {
+        let terms = escrow_terms_over(tokens()[0].0);
+        let addr = crate::sofi::escrow::terms_address(&terms);
+        // The slots name one object and the creation carried another.
+        let other = escrow_terms_over(tokens()[1].0);
+        let c = escrow_creation_of(escrow_state(addr, 2_500, 0), other.encode());
+        assert_eq!(
+            accept(&c),
+            Err(GenesisRefusal::Invalid(
+                GenesisInvalid::EscrowTermsNotCommitted
+            ))
+        );
+        // One slot naming something else is no escrow vault.
+        let one_off = VaultStateLeaf {
+            release_policy: [0x0F; 32],
+            ..escrow_state(addr, 2_500, 0)
+        };
+        let c = escrow_creation_of(one_off, terms.encode());
+        assert_eq!(
+            accept(&c),
+            Err(GenesisRefusal::Invalid(
+                GenesisInvalid::EscrowTermsNotCommitted
+            ))
+        );
+        // Bytes the slots name that are not escrow terms.
+        let garbage = b"no terms".to_vec();
+        let c = escrow_creation_of(
+            escrow_state(crate::sofi::escrow::terms_address_of(&garbage), 2_500, 0),
+            garbage,
+        );
+        assert!(matches!(
+            accept(&c),
+            Err(GenesisRefusal::Invalid(
+                GenesisInvalid::EscrowTermsDoNotDecode(..)
+            ))
+        ));
+    }
+
+    #[test]
+    fn an_escrow_genesis_holding_a_second_reserve_or_no_stake_is_refused() {
+        let terms = escrow_terms_over(tokens()[0].0);
+        let addr = crate::sofi::escrow::terms_address(&terms);
+        for (a, b) in [(2_500, 7), (0, 0)] {
+            let c = escrow_creation_of(escrow_state(addr, a, b), terms.encode());
+            assert_eq!(
+                accept(&c),
+                Err(GenesisRefusal::Invalid(GenesisInvalid::NotAnEscrowStake {
+                    reserve_a: a,
+                    reserve_b: b
+                }))
+            );
+        }
+    }
+
+    /// §49: the held token passes its policy for a transfer.
+    #[test]
+    fn an_escrow_vault_over_a_token_that_forbids_transfer_is_refused() {
+        let locked = committed(token_policy_bytes_with(9, 0));
+        let terms = escrow_terms_over(locked.0);
+        let mut c = escrow_creation_of(
+            escrow_state(crate::sofi::escrow::terms_address(&terms), 2_500, 0),
+            terms.encode(),
+        );
+        c.token_policies.insert(locked.0, locked.1);
+        assert_eq!(
+            accept(&c),
+            Err(GenesisRefusal::Invalid(
+                GenesisInvalid::TokenNotTransferable { token: locked.0 }
+            ))
+        );
     }
 }
