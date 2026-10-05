@@ -32,7 +32,7 @@ export interface PositionResult {
   state: PositionState;
 }
 
-function positionResult(payload: any): PositionResult {
+export function positionResult(payload: any): PositionResult {
   if (payload.case !== 'sofiPositionResponse') {
     throw new Error(`Expected sofiPositionResponse, got ${payload.case}`);
   }

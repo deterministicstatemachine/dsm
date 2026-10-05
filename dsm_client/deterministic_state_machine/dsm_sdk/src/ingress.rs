@@ -1145,6 +1145,235 @@ mod tests {
         }
     }
 
+    /// The record the token wizard's tests answer `token.check` from: the
+    /// requests the wizard sends as it moves through its steps, framed as the
+    /// WebView frames them, and this ingress's answers. The committed record
+    /// must equal the live answers; DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const TOKEN_CHECK_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/__tests__/fixtures/token_check.ingress.bin"
+    );
+
+    /// `token.check` through the ingress, as the wizard asks it: a token the
+    /// wizard's defaults complete (two decimals, a supply of 1,000,000, burn
+    /// off, transferable, this device alone), which Rust refuses nothing of,
+    /// and the same with a one-letter ticker, which Rust refuses naming the
+    /// ticker.
+    #[test]
+    #[serial]
+    fn token_check_answers_through_the_ingress_as_the_wizard_records_it() {
+        device_with_router(0x48);
+        let wizard = |ticker: &str| dsm::types::proto::TokenCreateRequest {
+            alias: "Artwork".to_string(),
+            burn_enabled: dsm::types::proto::TokenCreateRequest::default().burn_enabled,
+            ..crate::handlers::token_create_tests::request(ticker, 2, 1_000_000)
+        };
+        let asked = ["ART", "X"].map(|ticker| {
+            IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: "token.check".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: wizard(ticker).encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                })),
+            }
+            .encode_to_vec()
+        });
+        let mut record = Vec::new();
+        let mut answers = Vec::new();
+        for request in &asked {
+            let response = dispatch_ingress_bytes(request);
+            for part in [request, &response] {
+                let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+                record.extend_from_slice(&len.to_be_bytes());
+                record.extend_from_slice(part);
+            }
+            let answer = expect_ok_bytes(
+                IngressResponse::decode(response.as_slice()).expect("an IngressResponse"),
+            );
+            match crate::handlers::response_helpers::decode_local_envelope(&answer)
+                .expect("the router's local answer")
+                .payload
+            {
+                Some(dsm::types::proto::envelope::Payload::TokenCheckResponse(r)) => answers.push(
+                    r.refusals
+                        .into_iter()
+                        .map(|r| (r.field, r.reason))
+                        .collect::<Vec<_>>(),
+                ),
+                other => panic!("token.check answered {other:?}"),
+            }
+        }
+        assert_eq!(answers[0], Vec::new(), "the wizard's defaults are a token");
+        assert_eq!(
+            answers[1],
+            vec![(
+                "ticker".to_string(),
+                "a ticker is 2 to 8 characters, not 1".to_string()
+            )]
+        );
+
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => {
+                std::fs::write(TOKEN_CHECK_RECORD, &record).expect("write the frontend's record")
+            }
+            None => assert_eq!(
+                std::fs::read(TOKEN_CHECK_RECORD).expect("the frontend's committed record"),
+                record,
+                "the wizard's token.check record differs from this ingress's answers; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+    }
+
+    /// The record the wallet's escrow tab tests answer `escrow.*` from: the
+    /// requests the tab sends, framed as the WebView frames them, in the order
+    /// it sends them, and this device's answers on running nodes. The
+    /// committed record must equal the live answers;
+    /// DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const ESCROW_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/screens/__tests__/fixtures/escrow.ingress.bin"
+    );
+
+    /// The agreement and the one outcome the escrow tab's tests enter.
+    const ESCROW_RECORD_AGREEMENT: &str = "terms v1: order 1042";
+    const ESCROW_RECORD_OUTCOME: &str = "delivered";
+
+    /// The escrow tab's routes through the ingress, as a funded device meets
+    /// them on the network's nodes: this device as a party, its escrow vaults
+    /// (none), a stake of 5 ERA locked on one outcome this device decides and
+    /// is paid by, the vaults again, the outcome decided, the vaults again,
+    /// the stake released, and the vaults a last time.
+    #[test]
+    #[serial]
+    fn escrow_answers_through_the_ingress_as_the_wallet_records_it() {
+        fresh_process();
+        let fleet = fleet();
+        let router = crate::runtime::get_runtime()
+            .block_on(economic_fixtures::funded_router(fleet.config(), 0x49));
+        install_app_router(Arc::new(router)).expect("install router");
+
+        let invoke = |method: &str, body: Vec<u8>| {
+            IngressRequest {
+                operation: Some(ingress_request::Operation::RouterInvoke(
+                    pb::RouterInvokeOp {
+                        method: method.to_string(),
+                        args: pb::ArgPack {
+                            codec: pb::Codec::Proto as i32,
+                            body,
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    },
+                )),
+            }
+            .encode_to_vec()
+        };
+        let mut record = Vec::new();
+        let mut ask = |request: Vec<u8>| {
+            let response = dispatch_ingress_bytes(&request);
+            for part in [&request, &response] {
+                let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+                record.extend_from_slice(&len.to_be_bytes());
+                record.extend_from_slice(part);
+            }
+            let answer = expect_ok_bytes(
+                IngressResponse::decode(response.as_slice()).expect("an IngressResponse"),
+            );
+            crate::handlers::response_helpers::decode_local_envelope(&answer)
+                .expect("the router's local answer")
+                .payload
+                .expect("a payload")
+        };
+        use dsm::types::proto::envelope::Payload;
+        let vaults = |payload: Payload| match payload {
+            Payload::EscrowVaultsResponse(r) => r.vaults,
+            other => panic!("escrow.vaults answered {other:?}"),
+        };
+
+        let me = match ask(invoke(
+            "escrow.party",
+            pb::EscrowPartyRequest {}.encode_to_vec(),
+        )) {
+            Payload::EscrowPartyResponse(r) => r,
+            other => panic!("escrow.party answered {other:?}"),
+        };
+        let listed = || invoke("escrow.vaults", pb::EscrowVaultsRequest {}.encode_to_vec());
+        assert_eq!(vaults(ask(listed())).len(), 0, "no escrow yet");
+
+        let era = dsm::core::token::token_state_manager::era_policy_commit();
+        let created = match ask(invoke(
+            "escrow.lock",
+            pb::EscrowLockRequest {
+                external: ESCROW_RECORD_AGREEMENT.as_bytes().to_vec(),
+                token_policy_commit: era.to_vec(),
+                amount_entered: "5".to_string(),
+                outcomes: vec![pb::EscrowLockOutcomeV1 {
+                    outcome: ESCROW_RECORD_OUTCOME.as_bytes().to_vec(),
+                    decided_by: vec![me.device_id.clone()],
+                    pays: me.device_id.clone(),
+                }],
+                counterpart_vault_id: Vec::new(),
+            }
+            .encode_to_vec(),
+        )) {
+            Payload::EscrowCreatedResponse(r) => r,
+            other => panic!("escrow.lock answered {other:?}"),
+        };
+        let locked = vaults(ask(listed()));
+        assert_eq!(locked.len(), 1);
+        assert_eq!(locked[0].vault_id, created.vault_id);
+        assert_eq!(locked[0].status, pb::SofiVaultStatus::Active as i32);
+        let outcome = &locked[0].outcomes[0];
+        assert!(outcome.decided_by_this_device && outcome.pays_this_device);
+
+        let decided = match ask(invoke(
+            "escrow.adjudicate",
+            pb::EscrowOutcomeRequest {
+                vault_id: created.vault_id.clone(),
+                outcome: ESCROW_RECORD_OUTCOME.as_bytes().to_vec(),
+            }
+            .encode_to_vec(),
+        )) {
+            Payload::EscrowVerdictResponse(r) => r,
+            other => panic!("escrow.adjudicate answered {other:?}"),
+        };
+        assert_eq!(decided.state, pb::EscrowVerdictState::Final as i32);
+        assert_eq!(decided.outcome, ESCROW_RECORD_OUTCOME.as_bytes());
+        assert_eq!(vaults(ask(listed())).len(), 1);
+
+        match ask(invoke(
+            "escrow.release",
+            pb::EscrowReleaseRequest {
+                vault_id: created.vault_id.clone(),
+            }
+            .encode_to_vec(),
+        )) {
+            Payload::SofiPositionResponse(r) => {
+                assert_eq!(r.state, pb::SofiPositionState::Realized as i32, "{r:?}")
+            }
+            other => panic!("escrow.release answered {other:?}"),
+        }
+        let released = vaults(ask(listed()));
+        assert_eq!(released[0].status, pb::SofiVaultStatus::Retired as i32);
+        assert_eq!(released[0].amount, 0);
+
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => std::fs::write(ESCROW_RECORD, &record).expect("write the frontend's record"),
+            None => assert_eq!(
+                std::fs::read(ESCROW_RECORD).expect("the frontend's committed record"),
+                record,
+                "the escrow tab's record differs from this ingress's answers; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+        drop(fleet);
+    }
+
     /// A router refusal reaches the caller as an error carrying the router's
     /// own reason: an invoke for a token this device does not hold.
     #[test]

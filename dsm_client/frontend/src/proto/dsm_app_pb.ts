@@ -7606,9 +7606,12 @@ export class TokenBurnRequest extends Message<TokenBurnRequest> {
   tokenId = "";
 
   /**
-   * @generated from field: uint64 amount = 2;
+   * The amount as the user typed it, in token units ("12.50"): Rust parses it
+   * against the decimals of the token's committed policy.
+   *
+   * @generated from field: string amount_entered = 4;
    */
-  amount = protoInt64.zero;
+  amountEntered = "";
 
   /**
    * @generated from field: string message = 3;
@@ -7624,7 +7627,7 @@ export class TokenBurnRequest extends Message<TokenBurnRequest> {
   static readonly typeName = "dsm.TokenBurnRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "amount_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
@@ -7894,6 +7897,91 @@ export class TokenAdoptionQrResponse extends Message<TokenAdoptionQrResponse> {
 
   static equals(a: TokenAdoptionQrResponse | PlainMessage<TokenAdoptionQrResponse> | undefined, b: TokenAdoptionQrResponse | PlainMessage<TokenAdoptionQrResponse> | undefined): boolean {
     return proto3.util.equals(TokenAdoptionQrResponse, a, b);
+  }
+}
+
+/**
+ * token.check: a token.create request's fields checked as token.create checks
+ * them, creating nothing. One refusal for each field that fails, naming the
+ * TokenCreateRequest field ("ticker", "alias", "decimals",
+ * "genesis_supply_entered") and why, so a form shows it beside that field.
+ *
+ * @generated from message dsm.TokenFieldRefusal
+ */
+export class TokenFieldRefusal extends Message<TokenFieldRefusal> {
+  /**
+   * @generated from field: string field = 1;
+   */
+  field = "";
+
+  /**
+   * @generated from field: string reason = 2;
+   */
+  reason = "";
+
+  constructor(data?: PartialMessage<TokenFieldRefusal>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenFieldRefusal";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "field", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenFieldRefusal {
+    return new TokenFieldRefusal().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenFieldRefusal {
+    return new TokenFieldRefusal().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenFieldRefusal {
+    return new TokenFieldRefusal().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenFieldRefusal | PlainMessage<TokenFieldRefusal> | undefined, b: TokenFieldRefusal | PlainMessage<TokenFieldRefusal> | undefined): boolean {
+    return proto3.util.equals(TokenFieldRefusal, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.TokenCheckResponse
+ */
+export class TokenCheckResponse extends Message<TokenCheckResponse> {
+  /**
+   * @generated from field: repeated dsm.TokenFieldRefusal refusals = 1;
+   */
+  refusals: TokenFieldRefusal[] = [];
+
+  constructor(data?: PartialMessage<TokenCheckResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenCheckResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "refusals", kind: "message", T: TokenFieldRefusal, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenCheckResponse {
+    return new TokenCheckResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenCheckResponse {
+    return new TokenCheckResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenCheckResponse {
+    return new TokenCheckResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenCheckResponse | PlainMessage<TokenCheckResponse> | undefined, b: TokenCheckResponse | PlainMessage<TokenCheckResponse> | undefined): boolean {
+    return proto3.util.equals(TokenCheckResponse, a, b);
   }
 }
 
@@ -17926,6 +18014,14 @@ export class Envelope extends Message<Envelope> {
     case: "escrowVaultsResponse";
   } | {
     /**
+     * Reply to `token.check`.
+     *
+     * @generated from field: dsm.TokenCheckResponse token_check_response = 134;
+     */
+    value: TokenCheckResponse;
+    case: "tokenCheckResponse";
+  } | {
+    /**
      * Reply to `token.forget`.
      *
      * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
@@ -18053,6 +18149,7 @@ export class Envelope extends Message<Envelope> {
     { no: 131, name: "escrow_signed_response", kind: "message", T: EscrowSignedResponse, oneof: "payload" },
     { no: 132, name: "escrow_verdict_response", kind: "message", T: EscrowVerdictResponse, oneof: "payload" },
     { no: 133, name: "escrow_vaults_response", kind: "message", T: EscrowVaultsResponse, oneof: "payload" },
+    { no: 134, name: "token_check_response", kind: "message", T: TokenCheckResponse, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);

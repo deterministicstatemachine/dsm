@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // path: src/components/screens/SofiScreen.tsx
 // SoFi (SoFi §27) on the StateBoy frame: swap one token for another through
-// sovereign liquidity, create and close liquidity of your own, resolve a
-// pending position. A token is named by its policy commit, the CPTA anchor the
+// sovereign liquidity, create and close liquidity of your own, lock a stake in
+// an escrow vault (§19.9), resolve a pending position. A token is named by its policy commit, the CPTA anchor the
 // wallet's balances carry (the SDK renders policy_anchor_b32 from those same
 // 32 bytes); the app sends intent only and Core decides. Amounts are entered
 // in token units and Rust parses and renders them; the first trade through a
@@ -17,12 +17,14 @@ import { InfoTip } from '../common/InfoTip';
 import { TokenSelect, type TokenOption } from '../common/TokenSelect';
 import { useFx } from '../fx/FxProvider';
 import { copyText } from '../../utils/anchorDisplay';
+import EscrowTab from './sofi/EscrowTab';
 
-type SofiTab = 'swap' | 'liquidity';
+type SofiTab = 'swap' | 'liquidity' | 'escrow';
 
 const TABS: ReadonlyArray<{ id: SofiTab; label: string }> = [
   { id: 'swap', label: 'Swap' },
   { id: 'liquidity', label: 'Liquidity' },
+  { id: 'escrow', label: 'Escrow' },
 ];
 
 type Status = { kind: 'info' | 'success' | 'error'; text: string };
@@ -230,6 +232,7 @@ export default function SofiScreen(): React.JSX.Element {
           <p>Your fee can increase if the trade needs a hop through a second vault to be secured: each vault takes its own fee. The quote shows it before you confirm.</p>
           <p>The first trade through a vault sets you up with it first, as a step of its own. Later trades reuse it.</p>
           <p><b>Liquidity</b> puts two of your tokens into a liquidity vault of your own: sovereign liquidity. Every trade against it pays the fee you set, and you can close it and take the reserves back.</p>
+          <p><b>Escrow</b> locks a stake of one of your tokens in a vault whose terms list outcomes, each naming who decides it and who it pays. Once an outcome is decided, the party it pays releases the whole stake, once. An app that uses escrow tells you what to enter.</p>
           <p><b>Resolve</b> advances a position this device still has pending, after a trade that did not finish.</p>
         </InfoTip>
       )}
@@ -476,6 +479,8 @@ export default function SofiScreen(): React.JSX.Element {
           </Disclosure>
         </div>
       )}
+
+      {tab === 'escrow' && <EscrowTab tokenOptions={tokenOptions} onMoved={refreshBalances} />}
     </ScreenFrame>
   );
 }

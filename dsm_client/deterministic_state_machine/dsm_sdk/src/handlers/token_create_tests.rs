@@ -23,7 +23,9 @@ use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::storage::client_db::token_registry;
 use crate::test_support::one_device::Device;
 
-fn request(ticker: &str, decimals: u32, supply: u128) -> generated::TokenCreateRequest {
+/// The token suite's create request: a burnable, transferable token of this
+/// device alone. The frontend's wizard records reuse it.
+pub(crate) fn request(ticker: &str, decimals: u32, supply: u128) -> generated::TokenCreateRequest {
     generated::TokenCreateRequest {
         ticker: ticker.to_string(),
         alias: format!("{ticker} token"),
@@ -274,6 +276,97 @@ async fn a_supply_typed_as_anything_but_a_whole_number_is_refused() {
         .await,
     );
     assert_eq!(made.ticker, "SPLY");
+}
+
+async fn check(
+    router: &AppRouterImpl,
+    req: &generated::TokenCreateRequest,
+) -> Vec<(String, String)> {
+    let result = router
+        .query(AppQuery {
+            path: "token.check".to_string(),
+            params: generated::ArgPack {
+                schema_hash: None,
+                codec: generated::Codec::Proto as i32,
+                body: req.encode_to_vec(),
+            }
+            .encode_to_vec(),
+        })
+        .await;
+    assert!(result.success, "token.check: {:?}", result.error_message);
+    match crate::handlers::response_helpers::decode_local_envelope(&result.data)
+        .expect("a local answer")
+        .payload
+    {
+        Some(generated::envelope::Payload::TokenCheckResponse(r)) => r
+            .refusals
+            .into_iter()
+            .map(|r| (r.field, r.reason))
+            .collect(),
+        other => panic!("token.check answered {other:?}"),
+    }
+}
+
+/// `token.check` answers what `token.create` would refuse, field by field,
+/// and creates nothing: the wizard shows Rust's reasons beside the fields and
+/// keeps no rules of its own. A ticker is counted in characters, as the spec
+/// counts it, not in bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn token_check_names_each_field_token_create_would_refuse_and_creates_nothing() {
+    let d = Device::funded(0xC6).await;
+    let before = footprint(&d);
+
+    assert_eq!(
+        check(&d.router, &request("SOUND", 2, 1_000)).await,
+        Vec::new()
+    );
+    // Five characters, ten bytes: a ticker by the spec's count.
+    assert_eq!(check(&d.router, &request("ÅÄÖÜÉ", 0, 1)).await, Vec::new());
+
+    let wrong = generated::TokenCreateRequest {
+        ticker: "x".to_string(),
+        alias: "   ".to_string(),
+        decimals: 19,
+        genesis_supply_entered: "12.5".to_string(),
+        ..request("SOUND", 0, 1)
+    };
+    let refused = check(&d.router, &wrong).await;
+    let fields: Vec<&str> = refused.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(
+        fields,
+        ["ticker", "alias", "decimals", "genesis_supply_entered"]
+    );
+    assert!(
+        refused[0].1.contains("2 to 8 characters, not 1"),
+        "{refused:?}"
+    );
+
+    let nine = check(&d.router, &request("ÅÄÖÜÉÅÄÖÜ", 0, 1)).await;
+    assert_eq!(nine.len(), 1, "{nine:?}");
+    assert_eq!(nine[0].0, "ticker");
+    let overflow = check(
+        &d.router,
+        &generated::TokenCreateRequest {
+            genesis_supply_entered: (u128::MAX / 10).to_string(),
+            ..request("WIDE", 18, 1)
+        },
+    )
+    .await;
+    assert_eq!(overflow.len(), 1, "{overflow:?}");
+    assert!(
+        overflow[0].1.contains("overflows at 18 decimals"),
+        "{overflow:?}"
+    );
+    let nothing = check(&d.router, &request("NONE", 0, 0)).await;
+    assert!(nothing[0].1.contains("must be positive"), "{nothing:?}");
+
+    // token.create refuses for the same reasons, each after its field.
+    let msg = refusal(&create(&d.router, &wrong).await);
+    for (field, reason) in &refused {
+        assert!(msg.contains(&format!("{field}: {reason}")), "{msg}");
+    }
+    assert_eq!(footprint(&d), before, "a check creates nothing");
 }
 
 /// A transaction in a created token shows its amount at that token's own

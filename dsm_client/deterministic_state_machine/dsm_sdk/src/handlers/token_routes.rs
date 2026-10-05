@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Token route handlers for AppRouterImpl.
 //!
-//! Handles: `token.create`, `tokens.publishPolicy`, `tokens.getPolicy`, `tokens.listCachedPolicies`
+//! Handles: `token.create`, `token.check`, `tokens.publishPolicy`, `tokens.getPolicy`, `tokens.listCachedPolicies`
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -25,6 +25,135 @@ use dsm::economic::token_policy::{
 
 /// A committed token policy, as Core parses it.
 pub(crate) type ParsedTokenPolicy = dsm::economic::token_policy::TokenPolicy;
+
+/// A ticker's length, in characters.
+const TICKER_CHARS: std::ops::RangeInclusive<usize> = 2..=8;
+/// The most decimals a token may carry.
+const DECIMALS_MAX: u32 = 18;
+
+/// The fields `token.create` checks before it builds a policy.
+struct TokenFields {
+    /// Trimmed and in capitals, as the policy names it.
+    ticker: String,
+    alias: String,
+    /// The whole supply in base units.
+    genesis_supply: u128,
+}
+
+fn refusal(field: &str, reason: String) -> generated::TokenFieldRefusal {
+    generated::TokenFieldRefusal {
+        field: field.to_string(),
+        reason,
+    }
+}
+
+/// The refusals in one line, each after its field.
+fn reasons(refusals: &[generated::TokenFieldRefusal]) -> String {
+    refusals
+        .iter()
+        .map(|r| format!("{}: {}", r.field, r.reason))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Check a create request's fields, as `token.create` and `token.check` both
+/// do: every refusal, each naming its field, or the fields as the policy will
+/// carry them.
+fn token_fields(
+    req: &generated::TokenCreateRequest,
+) -> Result<TokenFields, Vec<generated::TokenFieldRefusal>> {
+    let mut refusals = Vec::new();
+    let ticker = req.ticker.trim().to_uppercase();
+    let chars = ticker.chars().count();
+    if !TICKER_CHARS.contains(&chars) {
+        refusals.push(refusal(
+            "ticker",
+            format!(
+                "a ticker is {} to {} characters, not {chars}",
+                TICKER_CHARS.start(),
+                TICKER_CHARS.end()
+            ),
+        ));
+    }
+    let alias = req.alias.trim().to_string();
+    if alias.is_empty() {
+        refusals.push(refusal("alias", "a token needs a display name".to_string()));
+    }
+    if req.decimals > DECIMALS_MAX {
+        refusals.push(refusal(
+            "decimals",
+            format!("decimals are 0 to {DECIMALS_MAX}, not {}", req.decimals),
+        ));
+    }
+    // The supply as typed, in whole token units. Canonical amounts are
+    // integer BASE UNITS; the wizard speaks display units. Conversion happens
+    // exactly once, here, before anything commits to a number: policy
+    // serialization and anchor derivation, CreateToken, conservation
+    // validation, registry persistence, and the supply cap all take the
+    // converted value.
+    //
+    // Creation used to skip this while the send path applied it, so a token
+    // created with "1,000" at decimals=2 held 1_000 base units (10.00) while a
+    // send of "250" correctly debited 25_000 — and the transfer failed with a
+    // balance underflow on a balance the UI displayed as 1000. The two sides
+    // disagreed about what a unit was.
+    //
+    // The CPTA anchor therefore commits the base-unit cap. A policy that
+    // committed a display number would mean the cap enforced depends on how a
+    // UI chose to render it.
+    //
+    // The genesis supply is the whole supply that will ever exist (SoFi §47,
+    // §51). In beta a user-created token releases all of it to its creator in
+    // the transition that creates it (`ReleaseRule::AllAtCreation`, owner
+    // 2026-09-23). Nothing is minted afterwards, and no supply is unlimited.
+    let typed = req.genesis_supply_entered.trim();
+    let supply = "genesis_supply_entered";
+    let genesis_supply = if typed.is_empty() || !typed.bytes().all(|b| b.is_ascii_digit()) {
+        refusals.push(refusal(
+            supply,
+            format!("the genesis supply must be a whole number, not {typed:?}"),
+        ));
+        None
+    } else {
+        match typed.parse::<u128>() {
+            Err(e) => {
+                refusals.push(refusal(supply, format!("the genesis supply {typed}: {e}")));
+                None
+            }
+            Ok(units) => match 10u128
+                .checked_pow(req.decimals)
+                .and_then(|s| units.checked_mul(s))
+            {
+                None => {
+                    refusals.push(refusal(
+                        supply,
+                        format!(
+                            "the genesis supply {typed} overflows at {} decimals",
+                            req.decimals
+                        ),
+                    ));
+                    None
+                }
+                Some(0) => {
+                    refusals.push(refusal(
+                        supply,
+                        "the genesis supply must be positive".to_string(),
+                    ));
+                    None
+                }
+                Some(base) => Some(base),
+            },
+        }
+    };
+    match genesis_supply {
+        Some(genesis_supply) if refusals.is_empty() => Ok(TokenFields {
+            ticker,
+            alias,
+            genesis_supply,
+        }),
+        Some(..) | None => Err(refusals),
+    }
+}
 
 /// The ERA `head` holds against the token-creation fee: the balance
 /// `token.create` debits the fee from.
@@ -616,6 +745,33 @@ impl AppRouterImpl {
     // ── Token Queries ────────────────────────────────────────────────────────
     pub(crate) async fn handle_token_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
+            // A create request's fields, checked as `token.create` checks
+            // them, creating nothing: the wizard shows each refusal beside
+            // its field.
+            "token.check" => {
+                let arg_pack = match generated::ArgPack::decode(&*q.params) {
+                    Ok(p) => p,
+                    Err(e) => return err(format!("token.check: decode ArgPack failed: {e}")),
+                };
+                if arg_pack.codec != generated::Codec::Proto as i32 {
+                    return err("token.check: ArgPack.codec must be PROTO".into());
+                }
+                let req = match generated::TokenCreateRequest::decode(&*arg_pack.body) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return err(format!(
+                            "token.check: decode TokenCreateRequest failed: {e}"
+                        ))
+                    }
+                };
+                let refusals = match token_fields(&req) {
+                    Ok(..) => Vec::new(),
+                    Err(refusals) => refusals,
+                };
+                pack_envelope_ok(generated::envelope::Payload::TokenCheckResponse(
+                    generated::TokenCheckResponse { refusals },
+                ))
+            }
             // The anchor a creator hands to a peer, as a scannable payload.
             //
             // Params are the ticker or token id, UTF-8. The reply carries the
@@ -984,70 +1140,14 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("decode TokenCreateRequest failed: {e}")),
                 };
 
-                let ticker = req.ticker.trim().to_uppercase();
-                if ticker.len() < 2 || ticker.len() > 8 {
-                    return err("token.create: ticker must be 2-8 chars".into());
-                }
-                if req.alias.trim().is_empty() {
-                    return err("token.create: alias required".into());
-                }
-                if req.decimals > 18 {
-                    return err("token.create: decimals must be 0..18".into());
-                }
-                // The supply as typed, in whole token units.
-                let typed = req.genesis_supply_entered.trim();
-                if typed.is_empty() || !typed.bytes().all(|b| b.is_ascii_digit()) {
-                    return err(format!(
-                        "token.create: the genesis supply must be a whole number, not {typed:?}"
-                    ));
-                }
-                let whole_units = match typed.parse::<u128>() {
-                    Ok(v) => v,
-                    Err(e) => return err(format!("token.create: the genesis supply {typed}: {e}")),
+                let TokenFields {
+                    ticker,
+                    alias,
+                    genesis_supply,
+                } = match token_fields(&req) {
+                    Ok(fields) => fields,
+                    Err(refusals) => return err(format!("token.create: {}", reasons(&refusals))),
                 };
-                // Canonical amounts are integer BASE UNITS; the wizard speaks
-                // display units. Conversion happens exactly once, here, before
-                // anything commits to a number: policy serialization and anchor
-                // derivation, CreateToken, conservation validation, registry
-                // persistence, and the supply cap all take the converted value.
-                //
-                // Creation used to skip this while the send path applied it, so
-                // a token created with "1,000" at decimals=2 held 1_000 base
-                // units (10.00) while a send of "250" correctly debited 25_000
-                // — and the transfer failed with a balance underflow on a
-                // balance the UI displayed as 1000. The two sides disagreed
-                // about what a unit was.
-                //
-                // The CPTA anchor therefore commits the base-unit cap. A policy
-                // that committed a display number would mean the cap enforced
-                // depends on how a UI chose to render it.
-                let scale = 10u128
-                    .checked_pow(req.decimals)
-                    .ok_or_else(|| "token.create: decimals too large to scale".to_string());
-                let scale = match scale {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-                let to_base = |display: u128, what: &str| -> Result<u128, String> {
-                    display.checked_mul(scale).ok_or_else(|| {
-                        format!(
-                            "token.create: {what} overflows at {} decimals",
-                            req.decimals
-                        )
-                    })
-                };
-                // The genesis supply: the whole supply that will ever exist
-                // (SoFi §47, §51). In beta a user-created token releases all of
-                // it to its creator in the transition that creates it
-                // (`ReleaseRule::AllAtCreation`, owner 2026-09-23). Nothing is
-                // minted afterwards, and no supply is unlimited.
-                let genesis_supply = match to_base(whole_units, "genesis supply") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-                if genesis_supply == 0 {
-                    return err("token.create: the genesis supply must be positive".into());
-                }
 
                 let mut allowlist_device_ids: Vec<[u8; 32]> = Vec::new();
                 for id in &req.allowlist_device_ids {
@@ -1095,7 +1195,7 @@ impl AppRouterImpl {
                 let (creator_genesis, creator_device_id) = (head.genesis_digest(), head.devid());
                 let parsed = ParsedTokenPolicy {
                     ticker: ticker.clone(),
-                    alias: req.alias.trim().to_string(),
+                    alias: alias.clone(),
                     decimals: req.decimals,
                     genesis_supply,
                     release: Release::AllAtCreation {
@@ -1586,7 +1686,8 @@ impl AppRouterImpl {
     }
 
     /// The burn `req` asks for, as this device signs it: the operation and its
-    /// one debit of the token's committed policy.
+    /// one debit of the token's committed policy. The amount is the one the
+    /// user typed, in token units, parsed against that policy's decimals.
     pub(crate) fn burn_operation(
         &self,
         req: &generated::TokenBurnRequest,
@@ -1597,12 +1698,18 @@ impl AppRouterImpl {
         ),
         String,
     > {
-        if req.amount == 0 {
+        let policy_commit = self.resolve_token_for_value_op(&req.token_id)?;
+        let (ticker, decimals) = crate::handlers::wallet_routes::token_of_commit(&policy_commit)?;
+        let amount = crate::handlers::wallet_routes::parse_display_amount_to_base_units(
+            &req.amount_entered,
+            decimals,
+        )
+        .map_err(|e| format!("the amount {:?} in {ticker}: {e}", req.amount_entered))?;
+        if amount == 0 {
             return Err("amount must be > 0".into());
         }
-        let policy_commit = self.resolve_token_for_value_op(&req.token_id)?;
         let op = dsm::types::operations::Operation::Burn {
-            amount: dsm::types::token_types::Balance::amount(req.amount),
+            amount: dsm::types::token_types::Balance::amount(amount),
             token_id: req.token_id.as_bytes().to_vec(),
             policy_commit,
             message: req.message.clone(),
@@ -1610,7 +1717,7 @@ impl AppRouterImpl {
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit,
             direction: dsm::types::device_state::BalanceDirection::Debit,
-            amount: req.amount,
+            amount,
         }];
         Ok((op, deltas))
     }

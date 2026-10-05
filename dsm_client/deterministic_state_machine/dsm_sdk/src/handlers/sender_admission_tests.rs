@@ -37,10 +37,18 @@ async fn invoke<M: Message>(router: &AppRouterImpl, method: &str, body: &M) -> A
         .await
 }
 
+/// A burn of `amount` base units of `token_id` (a token id, a ticker, or
+/// ERA), entered as the wallet shows it: in token units at its decimals.
 fn burn_request(token_id: &str, amount: u64) -> dsm::types::proto::TokenBurnRequest {
+    let decimals = match client_db::token_registry::get_token(token_id).expect("registry read") {
+        Some(row) => row.decimals,
+        None => crate::handlers::wallet_routes::token_decimals(token_id).expect("its decimals"),
+    };
     dsm::types::proto::TokenBurnRequest {
         token_id: token_id.into(),
-        amount,
+        amount_entered: crate::handlers::wallet_routes::format_base_units_for_display(
+            amount, decimals,
+        ),
         message: format!("burn {amount} {token_id}"),
     }
 }
@@ -365,6 +373,42 @@ async fn online_transfer_request_locators_round_trip_on_the_wire() {
         bytes,
         "re-encode must be byte-identical"
     );
+}
+
+/// A burn is entered as the wallet shows the token, in token units: "2.50"
+/// of a two-decimal token debits 250 base units. An amount finer than the
+/// token counts is refused before anything moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_burn_is_entered_in_token_units_and_debits_its_base_units() {
+    let d = Device::funded(0xC8).await;
+    let created = invoke(&d.router, "token.create", &create_request("UNIT", 2, 1_000)).await;
+    assert!(created.success, "{:?}", created.error_message);
+    let row = client_db::token_registry::get_token_by_ticker("UNIT")
+        .expect("registry read")
+        .expect("UNIT registered");
+    let held = || {
+        d.core()
+            .device_head()
+            .expect("head")
+            .balance(&row.policy_commit)
+    };
+    assert_eq!(held(), 1_000 * 100, "1,000 at two decimals");
+    let entered = |text: &str| dsm::types::proto::TokenBurnRequest {
+        token_id: "UNIT".into(),
+        amount_entered: text.into(),
+        message: String::new(),
+    };
+
+    let finer = invoke(&d.router, "token.burn", &entered("1.234")).await;
+    assert!(!finer.success, "a burn finer than the token counts");
+    let reason = finer.error_message.expect("a reason");
+    assert!(reason.contains("exceeds 2 fractional digits"), "{reason}");
+    assert_eq!(held(), 1_000 * 100, "a refused burn moves nothing");
+
+    let burned = invoke(&d.router, "token.burn", &entered("2.50")).await;
+    assert!(burned.success, "{:?}", burned.error_message);
+    assert_eq!(held(), 1_000 * 100 - 250, "2.50 is 250 base units");
 }
 
 /// SoFi §54: the burn flag governs burns, and nothing else does. A token

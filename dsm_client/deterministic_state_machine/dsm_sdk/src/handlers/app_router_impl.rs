@@ -2545,6 +2545,7 @@ impl AppRouter for AppRouterImpl {
             // Diagnostics routes
             // Token query routes
             "tokens.getPolicy"
+            | "token.check"
             | "tokens.listCachedPolicies"
             | "tokens.getFeeSchedule"
             | "tokens.addByAnchor"

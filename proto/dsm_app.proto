@@ -876,8 +876,12 @@ message TokenForgetResponse {
 // guard's checked_sub on every advance.
 message TokenBurnRequest {
   string token_id  = 1;
-  uint64 amount    = 2;
+  // The amount as the user typed it, in token units ("12.50"): Rust parses it
+  // against the decimals of the token's committed policy.
+  string amount_entered = 4 [(dsm_max_len)=64];
   string message   = 3 [(dsm_max_len)=1024];
+  reserved 2;
+  reserved "amount";
 }
 message TokenBurnResponse {
   bool   success   = 1;
@@ -924,6 +928,19 @@ message TokenAdoptionQrResponse {
   string token_id           = 3;
   string policy_anchor_b32  = 4;
   string anchor_fingerprint = 5;
+}
+
+// token.check: a token.create request's fields checked as token.create checks
+// them, creating nothing. One refusal for each field that fails, naming the
+// TokenCreateRequest field ("ticker", "alias", "decimals",
+// "genesis_supply_entered") and why, so a form shows it beside that field.
+message TokenFieldRefusal {
+  string field  = 1;
+  string reason = 2;
+}
+
+message TokenCheckResponse {
+  repeated TokenFieldRefusal refusals = 1;
 }
 
 message TokenCreateResponse {
@@ -2744,6 +2761,8 @@ message Envelope {
     EscrowSignedResponse              escrow_signed_response           = 131;
     EscrowVerdictResponse             escrow_verdict_response          = 132;
     EscrowVaultsResponse              escrow_vaults_response           = 133;
+    // Reply to `token.check`.
+    TokenCheckResponse                token_check_response             = 134;
 
 
     // Reply to `token.forget`.

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import React from 'react';
+import { join } from 'path';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { TokenCreationDialog } from '../TokenCreationDialog';
+import { answerFromRustRecord } from '../../tests/helpers/rustIngressRecord';
 
 jest.mock('@/services/dsmClient', () => ({
   dsmClient: {
@@ -28,6 +30,14 @@ jest.mock('@/dsm/policies', () => ({
 import { readImageRgba } from '../../utils/imageRgba';
 import { createToken, getTokenCreationFee } from '@/dsm/policies';
 
+// Each step moves on once Rust refuses none of its fields (token.check). The
+// bridge answers from Rust's own record of the wizard's checks (ingress.rs,
+// token_check_answers_through_the_ingress_as_the_wizard_records_it).
+const TOKEN_CHECK_RECORD = join(__dirname, 'fixtures/token_check.ingress.bin');
+beforeEach(() => {
+  answerFromRustRecord(TOKEN_CHECK_RECORD);
+});
+
 describe('TokenCreationDialog token kind selector', () => {
   // Fungible is the only kind the protocol enforces. NFT and SBT are not
   // hidden behind a disabled control — they are deleted, because offering a
@@ -43,15 +53,31 @@ describe('TokenCreationDialog token kind selector', () => {
     expect(screen.queryByRole('button', { name: /^SBT$/i })).toBeNull();
   });
 
-  it('does not show a transferable toggle on the rules step', () => {
+  it('does not show a transferable toggle on the rules step', async () => {
     render(<TokenCreationDialog onClose={jest.fn()} />);
 
     fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'ART' } });
     fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
     fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
 
+    expect(await screen.findByLabelText('Total Supply')).toBeInTheDocument();
     expect(screen.queryByText(/^Transferable$/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/tcd-transferable/i)).not.toBeInTheDocument();
+  });
+
+  // The wizard keeps no rules of its own: a ticker Rust refuses is refused in
+  // Rust's words, and the step stays.
+  it("shows Rust's reason beside a refused field and stays on the step", async () => {
+    // Nothing here closes the dialog.
+    render(<TokenCreationDialog onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'X' } });
+    fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('a ticker is 2 to 8 characters, not 1');
+    expect(screen.getByLabelText(/Ticker/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Total Supply')).not.toBeInTheDocument();
   });
 });
 
@@ -115,6 +141,7 @@ describe('TokenCreationDialog creation fee', () => {
     fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'ART' } });
     fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
     fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    await screen.findByLabelText('Total Supply');
     fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
     await screen.findByText('10.00 ERA (burned)');
   }
