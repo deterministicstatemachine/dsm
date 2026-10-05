@@ -34,6 +34,9 @@ mod connect_e2e_tests;
 pub mod connect_routes;
 pub mod contacts_routes;
 #[cfg(test)]
+mod escrow_e2e_tests;
+pub mod escrow_routes;
+#[cfg(test)]
 mod faucet_flow_tests;
 pub mod faucet_routes;
 #[cfg(test)]
