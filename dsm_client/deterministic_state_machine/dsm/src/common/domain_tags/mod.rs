@@ -173,9 +173,12 @@ mod tests {
     // +1 with the vault token locator (SoFi Amendment S16).
     // +1 with the signed resolution claim's digest (SoFi Amendment S20), and
     // +1 with the relationship-scoped transfer nonce (pre-audit item 5).
+    // +6 with a Web2 application connected to a wallet (DSM Amendment A11):
+    // the offer, its digest, the accept, the session id, the request and the
+    // response. The endpoint's certificate pin is the TLS certificate hash.
     // +9 with escrow vaults (SoFi Amendment S21): `DSM/external/v1` and the
     // eight `DSM/escrow/*` domains.
-    const EXPECTED_TAG_COUNT: usize = 362;
+    const EXPECTED_TAG_COUNT: usize = 368;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

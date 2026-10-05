@@ -2526,6 +2526,14 @@ impl AppRouter for AppRouterImpl {
             }
             // Contacts routes
             "contacts.list" | "contacts.readContactCode" => self.handle_contacts_query(q).await,
+            // DSM Connect (DSM Amendment A11)
+            "connect.preview"
+            | "connect.list"
+            | "connect.pending"
+            | "connect.log"
+            | "connect.app.requests"
+            | "connect.app.sessions"
+            | "connect.app.offerOf" => self.handle_connect_query(q).await,
             // Prefs routes
             "prefs.get" | "prefs.set" => self.handle_prefs_query(q).await,
             // Inbox routes
@@ -2570,6 +2578,16 @@ impl AppRouter for AppRouterImpl {
             }
             // Contacts invoke routes
             "contacts.addManual" => self.handle_contacts_invoke(i).await,
+            // DSM Connect (DSM Amendment A11)
+            "connect.approve"
+            | "connect.respond"
+            | "connect.disconnect"
+            | "connect.sync"
+            | "connect.app.offer"
+            | "connect.app.accept"
+            | "connect.app.request"
+            | "connect.app.respond"
+            | "connect.app.status" => self.handle_connect_invoke(i).await,
             // Token
             "token.create" | "token.forget" | "token.burn" | "tokens.publishPolicy" => {
                 self.handle_token_invoke(i).await

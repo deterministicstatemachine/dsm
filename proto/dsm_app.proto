@@ -2717,6 +2717,8 @@ message Envelope {
     SofiVaultsResponse                sofi_vaults_response             = 126;
     // wallet.amount: an amount in both its forms, local-only.
     WalletAmountResponse              wallet_amount_response           = 127;
+    // DSM Connect (DSM Amendment A11): every connect.* and connect.app.* reply.
+    ConnectReplyV1                    connect_reply                    = 128;
 
 
     // Reply to `token.forget`.
@@ -4405,4 +4407,373 @@ message IndexEntryV1 {
 // order. Page from the last `seq`.
 message IndexPageV1 {
   repeated IndexEntryV1 entries = 1;
+}
+
+// ===================== DSM CONNECT (DSM Amendment A11) =====================
+// A Web2 application connects to a wallet. The application is a DSM account
+// of its own; the relay between the two is the application's own endpoint and
+// carries transport only, never evidence (A11).
+//
+// Signed objects carry their canonical body bytes and a SPHINCS+ signature by
+// the signer's AK over H(<domain tag> ‖ body): DSM/connect/offer,
+// DSM/connect/accept, DSM/connect/request, DSM/connect/response.
+
+// The code an application shows: `dsm:connect/v1:` + Base32 Crockford of
+// these bytes. A pointer only: the signed offer is fetched from `endpoint`
+// over TLS whose leaf certificate hashes to `cert_pin`.
+message ConnectCodeV1 {
+  string endpoint     = 1 [(dsm_max_len)=512];  // https://host:port
+  bytes  cert_pin     = 2 [(dsm_fixed_len)=32]; // H(DSM/tls-cert-hash domain ‖ leaf certificate DER): TAG_DSM_TLS_CERT_HASH
+  bytes  offer_digest = 3 [(dsm_fixed_len)=32]; // H(DSM/connect/offer-digest ‖ AppConnectOfferV1.body)
+}
+
+// What a grant lets the application ask for without the player's approval.
+enum ConnectScopeKind {
+  CONNECT_SCOPE_KIND_UNSPECIFIED = 0;
+  CONNECT_SCOPE_KIND_ACCEPT_ISSUED = 1; // root an object the application's account issued
+  CONNECT_SCOPE_KIND_PAY           = 2; // pay the application's account
+  CONNECT_SCOPE_KIND_SWAP          = 3; // quote and trade between the two tokens of `pair`
+  CONNECT_SCOPE_KIND_HOLDINGS      = 4; // prove holdings of the application's tokens
+}
+
+// A cap on one token a scope may spend, in that token's base units.
+message ConnectCapV1 {
+  bytes  policy_commit = 1 [(dsm_fixed_len)=32];
+  uint64 per_request   = 2;
+  uint64 total         = 3;
+}
+
+message ConnectScopeV1 {
+  ConnectScopeKind      kind = 1;
+  // SWAP: the two tokens of the pair, in either order. HOLDINGS: the tokens
+  // the application may ask about (objects it issued are always included).
+  repeated bytes        policy_commits = 2 [(dsm_fixed_len)=32];
+  // PAY and SWAP: the tokens it may spend and how much.
+  repeated ConnectCapV1 caps = 3;
+}
+
+message AppConnectOfferBodyV1 {
+  ContactQrV3             app_card      = 1;
+  bytes                   app_att_a     = 2 [(dsm_fixed_len)=32]; // with the card's AK, derives the card's device id
+  string                  display_name  = 3 [(dsm_max_len)=64];
+  string                  endpoint      = 4 [(dsm_max_len)=512]; // the code's endpoint, signed
+  repeated ConnectScopeV1 scopes        = 5;
+  repeated bytes          token_anchors = 6 [(dsm_fixed_len)=32]; // rooted at pairing
+  bytes                   nonce         = 7 [(dsm_fixed_len)=32];
+}
+message AppConnectOfferV1 {
+  bytes body      = 1 [(dsm_max_len)=65535]; // AppConnectOfferBodyV1
+  bytes signature = 2 [(dsm_max_len)=65535];
+}
+
+message AppConnectAcceptBodyV1 {
+  bytes                   offer_digest = 1 [(dsm_fixed_len)=32];
+  ContactQrV3             wallet_card  = 2;
+  bytes                   wallet_att_a = 3 [(dsm_fixed_len)=32];
+  repeated ConnectScopeV1 granted      = 4; // never wider than the offer asked
+}
+message AppConnectAcceptV1 {
+  bytes body      = 1 [(dsm_max_len)=65535]; // AppConnectAcceptBodyV1
+  bytes signature = 2 [(dsm_max_len)=65535];
+}
+
+message ConnectAcceptIssuedV1 {
+  bytes anchor = 1 [(dsm_fixed_len)=32];
+}
+message ConnectPayV1 {
+  bytes  policy_commit = 1 [(dsm_fixed_len)=32];
+  uint64 amount        = 2; // base units
+  string memo          = 3 [(dsm_max_len)=256];
+}
+message ConnectQuoteV1 {
+  bytes  token_in  = 1 [(dsm_fixed_len)=32];
+  bytes  token_out = 2 [(dsm_fixed_len)=32];
+  uint64 amount_in = 3; // base units of token_in
+}
+message ConnectSwapV1 {
+  bytes  token_in       = 1 [(dsm_fixed_len)=32];
+  bytes  token_out      = 2 [(dsm_fixed_len)=32];
+  uint64 amount_in      = 3; // base units of token_in
+  uint64 min_amount_out = 4; // base units of token_out
+}
+message ConnectHoldingsV1 {
+  repeated bytes policy_commits = 1 [(dsm_fixed_len)=32];
+}
+
+// session_id = H(DSM/connect/session ‖ offer_digest ‖ wallet device id).
+message AppRequestBodyV1 {
+  bytes  session_id = 1 [(dsm_fixed_len)=32];
+  uint64 seq        = 2; // > 0, strictly increasing per session
+  oneof kind {
+    ConnectAcceptIssuedV1 accept_issued = 10;
+    ConnectPayV1          pay           = 11;
+    ConnectQuoteV1        quote         = 12;
+    ConnectSwapV1         swap          = 13;
+    ConnectHoldingsV1     holdings      = 14;
+  }
+}
+message AppRequestV1 {
+  bytes body      = 1 [(dsm_max_len)=65535]; // AppRequestBodyV1
+  bytes signature = 2 [(dsm_max_len)=65535];
+}
+// The answer to GET <endpoint>/requests/<session>/<after>: every request of
+// the session above `after`, in sequence order.
+message AppRequestBatchV1 {
+  repeated AppRequestV1 requests = 1;
+}
+
+enum ConnectOutcome {
+  CONNECT_OUTCOME_UNSPECIFIED       = 0;
+  CONNECT_OUTCOME_CARRIED_OUT       = 1; // the wallet constructed it; a notification, never evidence
+  CONNECT_OUTCOME_AWAITING_APPROVAL = 2; // outside the grant: waits for the player on the device
+  CONNECT_OUTCOME_DECLINED          = 3; // the player declined it
+  CONNECT_OUTCOME_FAILED            = 4; // the wallet could not construct it; `reason` says why
+}
+
+// One balance and its Sparse Merkle path to the holder's economic root, in
+// the path's one wire form (dsm::merkle::smt_path): the heights whose
+// sibling is not the tree's default, and those siblings, lowest first.
+message HoldingV1 {
+  bytes  policy_commit    = 1 [(dsm_fixed_len)=32];
+  uint64 amount           = 2;
+  bytes  explicit_heights = 3 [(dsm_fixed_len)=32];
+  bytes  siblings         = 4 [(dsm_max_len)=8192];
+}
+// A holder's balances at its economic position `position` (A11). The
+// verifier validates the root at that position itself and recomputes it
+// from each path; nothing here is taken on the holder's word.
+message HoldingsProofV1 {
+  bytes              genesis   = 1 [(dsm_fixed_len)=32];
+  bytes              device_id = 2 [(dsm_fixed_len)=32];
+  uint64             position  = 3;
+  repeated HoldingV1 holdings  = 4;
+}
+
+message ConnectQuoteResultV1 {
+  uint64 amount_in  = 1;
+  uint64 amount_out = 2;
+  uint32 hops       = 3;
+  SofiRouteShape shape = 4;
+}
+message ConnectSwapResultV1 {
+  uint64            position = 1; // the trader's economic position the trade took
+  SofiPositionState state    = 2;
+  repeated bytes    vault_ids = 3 [(dsm_fixed_len)=32];
+}
+
+message AppResponseBodyV1 {
+  bytes          session_id = 1 [(dsm_fixed_len)=32];
+  uint64         seq        = 2;
+  ConnectOutcome outcome    = 3;
+  string         reason     = 4 [(dsm_max_len)=1024];
+  oneof result {
+    ConnectQuoteResultV1 quote    = 10;
+    ConnectSwapResultV1  swap     = 11;
+    HoldingsProofV1      holdings = 12;
+  }
+}
+message AppResponseV1 {
+  bytes body      = 1 [(dsm_max_len)=1048576]; // AppResponseBodyV1
+  bytes signature = 2 [(dsm_max_len)=65535];
+}
+
+// ---- DSM Connect routes (connect.* on the wallet, connect.app.* on the
+// application's own account). Rust decides everything; a screen renders. ----
+
+// connect.preview: the offer a scanned code names, fetched and verified.
+message ConnectPreviewRequestV1 {
+  string code = 1 [(dsm_max_len)=2048]; // the scanned `dsm:connect/v1:` text
+}
+message ConnectPreviewV1 {
+  bytes                   offer_digest    = 1 [(dsm_fixed_len)=32];
+  string                  display_name    = 2;
+  bytes                   app_device_id   = 3 [(dsm_fixed_len)=32];
+  string                  endpoint        = 4;
+  repeated ConnectScopeV1 scopes          = 5;
+  repeated bytes          token_anchors   = 6 [(dsm_fixed_len)=32];
+  repeated string         scope_lines     = 7; // each scope as Rust renders it for the approval screen
+}
+// connect.approve: the player approves the offer, possibly narrowing it.
+message ConnectApproveRequestV1 {
+  bytes                   offer_digest = 1 [(dsm_fixed_len)=32];
+  repeated ConnectScopeV1 granted      = 2; // empty grants exactly what the offer asked
+}
+enum ConnectSessionStatus {
+  CONNECT_SESSION_STATUS_UNSPECIFIED  = 0;
+  CONNECT_SESSION_STATUS_CONNECTED    = 1;
+  CONNECT_SESSION_STATUS_DISCONNECTED = 2;
+}
+message ConnectSpentV1 {
+  bytes  policy_commit = 1 [(dsm_fixed_len)=32];
+  uint64 spent         = 2;
+  string spent_display = 3;
+  string total_display = 4;
+  string symbol        = 5;
+}
+message ConnectSessionV1 {
+  bytes                   session_id    = 1 [(dsm_fixed_len)=32];
+  string                  display_name  = 2;
+  bytes                   peer_device_id = 3 [(dsm_fixed_len)=32]; // the application (wallet side) or the wallet (application side)
+  string                  endpoint      = 4;
+  repeated ConnectScopeV1 granted       = 5;
+  uint64                  last_seq      = 6;
+  ConnectSessionStatus    status        = 7;
+  repeated ConnectSpentV1 spent         = 8;
+  repeated string         scope_lines   = 9;
+  string                  last_error    = 10; // why the last sync with it did not complete; empty when it did
+  bytes                   offer_digest  = 11 [(dsm_fixed_len)=32]; // the offer the session was connected from
+}
+message ConnectSessionsV1 {
+  repeated ConnectSessionV1 sessions = 1;
+}
+// A request outside the grant, waiting for the player.
+message ConnectPendingV1 {
+  bytes  session_id   = 1 [(dsm_fixed_len)=32];
+  uint64 seq          = 2;
+  string display_name = 3;
+  string summary      = 4; // the request as Rust renders it
+  string reason       = 5; // why the grant does not cover it
+  bool   approved     = 6; // the player approved it: a payment waiting for its relationship with the application to settle, carried out by the next sync
+}
+message ConnectPendingListV1 {
+  repeated ConnectPendingV1 pending = 1;
+}
+enum ConnectDecision {
+  CONNECT_DECISION_UNSPECIFIED = 0;
+  CONNECT_DECISION_APPROVE     = 1;
+  CONNECT_DECISION_DECLINE     = 2;
+}
+message ConnectRespondRequestV1 {
+  bytes           session_id = 1 [(dsm_fixed_len)=32];
+  uint64          seq        = 2;
+  ConnectDecision decision   = 3;
+}
+message ConnectSessionRefV1 {
+  bytes session_id = 1 [(dsm_fixed_len)=32];
+}
+message ConnectLogEntryV1 {
+  uint64         seq     = 1;
+  string         summary = 2;
+  ConnectOutcome outcome = 3;
+  string         detail  = 4;
+}
+message ConnectLogV1 {
+  repeated ConnectLogEntryV1 entries = 1;
+}
+
+// connect.app.offer: the application's account makes and signs an offer.
+message ConnectAppOfferRequestV1 {
+  string                  display_name  = 1 [(dsm_max_len)=64];
+  string                  endpoint      = 2 [(dsm_max_len)=512];
+  bytes                   cert_pin      = 3 [(dsm_fixed_len)=32];
+  repeated ConnectScopeV1 scopes        = 4;
+  repeated bytes          token_anchors = 5 [(dsm_fixed_len)=32];
+}
+message ConnectAppOfferV1 {
+  string code         = 1; // the `dsm:connect/v1:` text the application shows
+  bytes  offer_digest = 2 [(dsm_fixed_len)=32];
+  bytes  offer        = 3; // AppConnectOfferV1 bytes, served at <endpoint>/connect/offer/<digest>
+}
+// connect.app.request: the application asks a connected wallet for something.
+message ConnectAppRequestIntentV1 {
+  bytes session_id = 1 [(dsm_fixed_len)=32];
+  oneof kind {
+    ConnectAcceptIssuedV1 accept_issued = 10;
+    ConnectPayV1          pay           = 11;
+    ConnectQuoteV1        quote         = 12;
+    ConnectSwapV1         swap          = 13;
+    ConnectHoldingsV1     holdings      = 14;
+  }
+}
+message ConnectAppRequestsQueryV1 {
+  bytes  session_id = 1 [(dsm_fixed_len)=32];
+  uint64 after      = 2;
+}
+message ConnectRequestRefV1 {
+  bytes  session_id = 1 [(dsm_fixed_len)=32];
+  uint64 seq        = 2;
+}
+// What the application's own account has established about one request.
+enum ConnectFact {
+  CONNECT_FACT_UNSPECIFIED = 0;
+  CONNECT_FACT_NONE        = 1; // nothing DSM-evidenced yet; an answer alone is never a fact
+  CONNECT_FACT_PAID        = 2; // the transfer is accepted onto the application's own relationship
+  CONNECT_FACT_HOLDINGS    = 3; // the holdings proof verified
+}
+message VerifiedHoldingV1 {
+  bytes  policy_commit = 1 [(dsm_fixed_len)=32];
+  uint64 amount        = 2;
+}
+message ConnectAppStatusV1 {
+  bytes                      session_id  = 1 [(dsm_fixed_len)=32];
+  uint64                     seq         = 2;
+  bool                       answered    = 3; // the wallet posted a signed answer
+  ConnectOutcome             outcome     = 4; // what the answer says: a notification
+  string                     reason      = 5;
+  ConnectFact                fact        = 6;
+  string                     fact_detail = 7; // why the fact holds, or why the answer established none
+  repeated VerifiedHoldingV1 holdings    = 8; // FACT_HOLDINGS only
+  uint64                     holdings_position = 9;
+  ConnectQuoteResultV1       quote       = 10; // a quote is information, never a fact
+  ConnectSwapResultV1        swap        = 11;
+  bytes                      paid_tx     = 12; // FACT_PAID: the accepted transfer's id
+}
+
+// One envelope payload for every DSM Connect reply.
+message ConnectReplyV1 {
+  oneof reply {
+    ConnectPreviewV1     preview  = 1;
+    ConnectSessionsV1    sessions = 2;
+    ConnectSessionV1     session  = 3;
+    ConnectPendingListV1 pending  = 4;
+    ConnectLogV1         log      = 5;
+    ConnectAppOfferV1    offer    = 6;
+    AppRequestBatchV1    requests = 7;
+    ConnectAppStatusV1   status   = 8;
+    ConnectRequestRefV1  request  = 9;
+    ConnectDecidedV1     decided  = 10;
+  }
+}
+
+// connect.respond: what became of the player's decision, as Rust renders it.
+message ConnectDecidedV1 {
+  ConnectSessionV1 session = 1;
+  ConnectOutcome   outcome = 2; // UNSPECIFIED while an approved payment waits for its relationship with the application to settle
+  string           line    = 3; // what happened, for the screen to show as it is
+}
+
+// connect.app.offerOf: an offer this account made, by its digest, as its
+// relay serves it.
+message ConnectOfferRefV1 {
+  bytes offer_digest = 1 [(dsm_fixed_len)=32];
+}
+
+// ---- dsm_app_host: an application account's host process (DSM Amendment
+// A11). What the host did, recorded as it happened, for the application to
+// show: every route the application called through the host and every relay
+// exchange with a wallet. A record, never evidence: each DSM fact it mentions
+// is the account's own state, read after the call. ----
+enum AppHostActivityKind {
+  APP_HOST_ACTIVITY_KIND_UNSPECIFIED = 0;
+  APP_HOST_ACTIVITY_KIND_ROUTE       = 1; // the application called a route
+  APP_HOST_ACTIVITY_KIND_RELAY       = 2; // a wallet reached the relay endpoint
+}
+message AppHostActivityEntryV1 {
+  uint64              seq             = 1;
+  AppHostActivityKind kind            = 2;
+  string              name            = 3; // the route, or the relay call
+  string              summary         = 4; // what was asked, as the host renders it
+  string              result          = 5; // what came back, as the host renders it
+  string              error           = 6; // why it failed; empty when it did not
+  optional uint64     position_before = 7; // this account's admitted economic position before; unset when it could not be read
+  optional uint64     position_after  = 8; // and after
+  bytes               econ_root_after = 9; // the admitted economic root after
+  bytes               device_tree_after = 10; // this account's Device Tree commitment after
+}
+message AppHostActivityV1 {
+  repeated AppHostActivityEntryV1 entries = 1;
+  uint64                          next    = 2; // ask from here next
+  bytes                           device_id = 3; // this account
+  bytes                           storage_set_id = 4; // the pinned set its writes go to
+  uint32                          signature_bytes = 5; // the size of one of its SPHINCS+ signatures
 }

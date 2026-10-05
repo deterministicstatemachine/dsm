@@ -43,7 +43,7 @@ use crate::sdk::storage_set::canonical_set;
 use crate::storage::client_db::economic_lineage;
 use crate::test_support::two_device::{Pair, TestDevice};
 
-fn args<M: Message>(m: &M) -> Vec<u8> {
+pub(super) fn args<M: Message>(m: &M) -> Vec<u8> {
     generated::ArgPack {
         codec: generated::Codec::Proto as i32,
         body: m.encode_to_vec(),
@@ -52,7 +52,7 @@ fn args<M: Message>(m: &M) -> Vec<u8> {
     .encode_to_vec()
 }
 
-async fn invoke(d: &TestDevice, method: &str, args: Vec<u8>) -> AppResult {
+pub(super) async fn invoke(d: &TestDevice, method: &str, args: Vec<u8>) -> AppResult {
     d.enter();
     d.router()
         .invoke(AppInvoke {
@@ -63,13 +63,13 @@ async fn invoke(d: &TestDevice, method: &str, args: Vec<u8>) -> AppResult {
 }
 
 /// The payload of a successful route answer (framing byte, then an Envelope).
-fn payload(r: &AppResult) -> Payload {
+pub(super) fn payload(r: &AppResult) -> Payload {
     assert!(r.success, "route failed: {:?}", r.error_message);
     let env = generated::Envelope::decode(&r.data[1..]).expect("framed envelope");
     env.payload.expect("payload")
 }
 
-fn balance(d: &TestDevice, policy_commit: &[u8; 32]) -> u64 {
+pub(super) fn balance(d: &TestDevice, policy_commit: &[u8; 32]) -> u64 {
     d.enter();
     d.router()
         .core_sdk
@@ -78,12 +78,12 @@ fn balance(d: &TestDevice, policy_commit: &[u8; 32]) -> u64 {
         .balance(policy_commit)
 }
 
-fn era() -> [u8; 32] {
+pub(super) fn era() -> [u8; 32] {
     crate::policy::builtin_policy_commit("ERA").expect("ERA policy")
 }
 
 /// Create a token on `d` and return its policy commit.
-async fn create_token(d: &TestDevice, ticker: &str, supply: u128) -> [u8; 32] {
+pub(super) async fn create_token(d: &TestDevice, ticker: &str, supply: u128) -> [u8; 32] {
     let r = invoke(
         d,
         "token.create",
@@ -728,7 +728,7 @@ struct Market {
 
 /// `base` units of `token` as the user enters them on `d`: token units, with
 /// the decimals of the token's committed policy.
-fn entered(d: &TestDevice, token: &[u8; 32], base: u64) -> String {
+pub(super) fn entered(d: &TestDevice, token: &[u8; 32], base: u64) -> String {
     d.enter();
     let (.., decimals) = super::wallet_routes::token_of_commit(token).expect("a known token");
     super::wallet_routes::format_base_units_for_display(base, decimals)
@@ -736,7 +736,11 @@ fn entered(d: &TestDevice, token: &[u8; 32], base: u64) -> String {
 
 /// `d`'s `sofi.createVault` on two tokens at their reserves, at 30 bps, the
 /// pair in the order §28 requires (`token_a < token_b`). The vault id.
-async fn create_vault(d: &TestDevice, x: ([u8; 32], u64), y: ([u8; 32], u64)) -> [u8; 32] {
+pub(super) async fn create_vault(
+    d: &TestDevice,
+    x: ([u8; 32], u64),
+    y: ([u8; 32], u64),
+) -> [u8; 32] {
     let ((token_a, reserve_a), (token_b, reserve_b)) = if x.0 < y.0 { (x, y) } else { (y, x) };
     let request = generated::SofiCreateVaultRequest {
         token_a_policy_commit: token_a.to_vec(),

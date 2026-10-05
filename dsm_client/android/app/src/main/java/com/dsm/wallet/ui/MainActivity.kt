@@ -132,6 +132,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private lateinit var bridge: SinglePathWebViewBridge
     private lateinit var assetLoader: WebViewAssetLoader
     @Volatile private var dsmPort: WebMessagePortCompat? = null
+    /** A connect code a link handed over (DSM Amendment A11), held until the page can take it. */
+    @Volatile private var pendingConnectLink: String? = null
     @Volatile private var pendingJsPort: WebMessagePortCompat? = null
     @Volatile private var bleBackgroundService: BleBackgroundService? = null
     private val batteryChangedReceiver = object : BroadcastReceiver() {
@@ -1087,6 +1089,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         @Suppress("DEPRECATION")
         overridePendingTransition(com.dsm.wallet.R.anim.splash_fade_in, com.dsm.wallet.R.anim.splash_fade_out)
         NativeFirstCutoverReset.resetIfNeeded(this)
+        takeConnectLink(intent)
         // The storage base dir is set BEFORE anything on this thread can ask Rust for identity:
         // onStart/onResume and the WebView bridge do, and AppState cannot be read until it is
         // set. It is a path and a mkdir; the rest of native init stays on its own thread.
@@ -1556,10 +1559,39 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         return name.filter { it.isLetterOrDigit() || it == '-' || it == '.' || it == '_' }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        takeConnectLink(intent)
+    }
+
+    /**
+     * A `dsm:connect/v1:` link opened the wallet (the manifest admits no other
+     * link): hold its text for the page. Routing only: Rust reads the code when
+     * the player asks it to.
+     */
+    private fun takeConnectLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (intent.action != Intent.ACTION_VIEW || data.scheme != "dsm") return
+        val ssp = data.schemeSpecificPart ?: return
+        if (!ssp.startsWith("connect/v1:")) return
+        pendingConnectLink = intent.dataString
+        deliverConnectLink()
+    }
+
+    /** Hand a held connect link to the page once its message port exists. */
+    private fun deliverConnectLink() {
+        val link = pendingConnectLink ?: return
+        if (dsmPort == null) return
+        pendingConnectLink = null
+        dispatchDsmEventOnUi("connect.link", link.toByteArray(Charsets.UTF_8))
+    }
+
     private fun signalBridgeReady() {
         Log.i(tag, "signalBridgeReady: Dispatching events to JS...")
         BleEventRelay.markBridgeReady(this)
         dispatchDsmEventOnUi("dsm-bridge-ready", ByteArray(0))
+        deliverConnectLink()
         // Publish session state at 100 ms, 500 ms, and 1500 ms.
         // Redundant deliveries are harmless — the snapshot is idempotent.
         // This covers any JS-side port-setup race without a frontend retry timer;
