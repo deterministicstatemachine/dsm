@@ -15,6 +15,7 @@ import RecoveryScreen from './screens/RecoveryScreen';
 import NfcRecoveryScreen from './screens/NfcRecoveryScreen';
 import RecoveryPipelineScreen from './screens/RecoveryPipelineScreen';
 import SofiScreen from './screens/SofiScreen';
+import AppsScreen from './screens/AppsScreen';
 
 const MemoWallet = React.memo(EnhancedWalletScreen);
 const MemoContacts = React.memo(ContactsScreen);
@@ -29,6 +30,7 @@ const MemoRecovery = React.memo(RecoveryScreen);
 const MemoNfcRecovery = React.memo(NfcRecoveryScreen);
 const MemoRecoveryPipeline = React.memo(RecoveryPipelineScreen);
 const MemoSofi = React.memo(SofiScreen);
+const MemoApps = React.memo(AppsScreen);
 
 type Props = {
   currentScreen: ScreenType;
@@ -84,6 +86,8 @@ export default function AppScreenRouter({
       return <MemoRecoveryPipeline onNavigate={onNavigate} />;
     case 'sofi':
       return <MemoSofi />;
+    case 'apps':
+      return <MemoApps />;
     default:
       return null;
   }

@@ -64,6 +64,44 @@ pub(crate) fn root_cell(
     .map_err(|e| storage_err("root cell", format!("{e:?}")))
 }
 
+/// What the root cell after a validated position holds, read at its leader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NextRootCell {
+    /// The leader holds no claim for the next position: the identity has not
+    /// moved past the validated one.
+    Open,
+    /// A claim holds the next position, in any chain state: the identity has
+    /// moved on (or is moving), so the validated position is not its latest.
+    Held,
+    /// The evidence in hand does not decide the cell (an unread leader, an
+    /// uncommitted link). Asked again, never read as either answer.
+    Undecided(String),
+}
+
+/// Read `K_root(position + 1)` of `(genesis, devid)`, whose route is seeded
+/// by `root`, the root validated at `position` (DSM §9: "what root does the
+/// device hold at the next position?").
+pub(crate) async fn next_root_cell(
+    set: &StorageSet,
+    network_id: &[u8],
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+    position: u64,
+    root: &[u8; 32],
+) -> Result<NextRootCell, DsmError> {
+    let next = position.checked_add(1).ok_or_else(|| {
+        DsmError::invalid_operation(format!("position {position} has no successor"))
+    })?;
+    let cell = root_cell(set, network_id, genesis, devid, next, root)?;
+    let seats = NodeSeats::new(set)?;
+    let evidence = read_cell(&seats, cell.routed()).await;
+    Ok(match read_root_cell(&cell, &evidence) {
+        Ok(CellReading::Open) => NextRootCell::Open,
+        Ok(CellReading::Held { .. }) => NextRootCell::Held,
+        Err(missing) => NextRootCell::Undecided(missing_text(missing)),
+    })
+}
+
 /// Write this device's frozen root claim at its root cell, along the cell's
 /// route (storage spec §9), continuing an earlier write of the same claim.
 /// Which claim holds the cell is read back ([`root_claim_settlement`]),
