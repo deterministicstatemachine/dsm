@@ -100,32 +100,36 @@ function VaultCard({ vault, verdict, busy, onVerdict, onSign, onDecide, onReleas
       {vault.outcomes.map((o) => {
         const text = outcomeText(o.outcome);
         return (
-          <div key={text} className="sb-kv">
-            <span className="sb-kv__k">
-              {text}
-              {o.decidedByThisDevice && <span className="sb-tag" style={{ marginLeft: 6 }}>you decide</span>}
-              {o.paysThisDevice && <span className="sb-tag" style={{ marginLeft: 6 }}>pays you</span>}
-            </span>
+          <React.Fragment key={text}>
+            <div className="sb-kv">
+              <span className="sb-kv__k">
+                {text}
+                {o.decidedByThisDevice && <span className="sb-tag" style={{ marginLeft: 6 }}>you decide</span>}
+                {o.paysThisDevice && <span className="sb-tag" style={{ marginLeft: 6 }}>pays you</span>}
+              </span>
+            </div>
             {active && o.decidedByThisDevice && (
-              <span className="sb-kv__v">
+              <div className="sb-actions" style={{ margin: '4px 0 8px' }}>
                 <button type="button" className="sb-btn sb-btn--small" aria-label={`Sign ${text}`} onClick={() => onSign(o.outcome)} disabled={busy}>
                   Sign
                 </button>
                 <button type="button" className="sb-btn sb-btn--small sb-btn--primary" aria-label={`Decide ${text}`} onClick={() => onDecide(o.outcome)} disabled={busy}>
                   Decide
                 </button>
-              </span>
+              </div>
             )}
-          </div>
+          </React.Fragment>
         );
       })}
       {verdict !== undefined && <p className="sb-hint">{verdictWords(verdict)}</p>}
+      {active && paysThisDevice && (
+        <button type="button" className="sb-btn sb-btn--primary sb-btn--block" style={{ marginTop: 8 }} onClick={onRelease} disabled={busy}>
+          Release
+        </button>
+      )}
       <div className="sb-actions" style={{ margin: '8px 0 0' }}>
         <button type="button" className="sb-btn" onClick={() => onCopy('Verdict cell', cell)}>Copy cell</button>
         <button type="button" className="sb-btn" onClick={onVerdict} disabled={busy}>Check outcome</button>
-        {active && paysThisDevice && (
-          <button type="button" className="sb-btn sb-btn--primary" onClick={onRelease} disabled={busy}>Release</button>
-        )}
       </div>
     </section>
   );
