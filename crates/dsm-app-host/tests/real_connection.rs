@@ -834,7 +834,7 @@ async fn connect_over_the_real_relay() {
             other => panic!("connect.sync answered {other:?}"),
         }
     }
-    let paid = established(
+    established(
         &game,
         &session,
         pay,
@@ -842,6 +842,11 @@ async fn connect_over_the_real_relay() {
         "the payment lands",
     )
     .await;
+    // The game's account holds the payment from the transfer it accepted; the
+    // wallet's answer reaches it separately over the relay, and either may
+    // arrive first. The outcome is the answer's, so it is read once that has.
+    let paid = answered(&game, &session, pay, "the wallet answers the payment").await;
+    assert_eq!(fact(&paid), pb::ConnectFact::Paid);
     assert_eq!(outcome(&paid), pb::ConnectOutcome::CarriedOut);
     assert_eq!(wallet.holds("WILD").await, 17, "the payment ran once");
 
