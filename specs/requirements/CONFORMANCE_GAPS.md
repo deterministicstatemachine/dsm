@@ -2890,7 +2890,9 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 
 **Open.**
 - The SoFi screen still turns a fee in basis points and a relay position from text into the wire's integers; Rust checks their ranges.
-- Not yet run on the phones.
+- An escrow between two phones (one locks, another decides or is paid) is not yet run on the rig: the other two phones were behind their system lock screens.
+
+**On the rig (2026-10-05).** Proven on a real Android device, a Samsung A16 on the GCP beta fleet, freshly onboarded: the PIN lock set from the wallet's prompt; a router read answered while open and refused while locked ("the wallet is locked"); three wrong PINs answered 2, 1, then no tries left with only the phrase field offered; a restart offered the phrase alone; another wallet's phrase refused; this wallet's phrase opened it and the reads answered again; a cold start came up locked and the PIN opened it. On the same phone: the faucet's 100.00 ERA; 5 ERA locked on one outcome this device decides and is paid by; the cell read empty and a release refused ("no verdict holds the cell yet"); the outcome decided (final); the stake released, the vault shown released and the balance back at 100.00 ERA.
 
 ## 7 Totals
 

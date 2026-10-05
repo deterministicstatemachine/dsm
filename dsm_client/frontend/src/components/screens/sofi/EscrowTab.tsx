@@ -103,8 +103,8 @@ function VaultCard({ vault, verdict, busy, onVerdict, onSign, onDecide, onReleas
           <div key={text} className="sb-kv">
             <span className="sb-kv__k">
               {text}
-              {o.decidedByThisDevice && <span className="sb-tag">you decide</span>}
-              {o.paysThisDevice && <span className="sb-tag">pays you</span>}
+              {o.decidedByThisDevice && <span className="sb-tag" style={{ marginLeft: 6 }}>you decide</span>}
+              {o.paysThisDevice && <span className="sb-tag" style={{ marginLeft: 6 }}>pays you</span>}
             </span>
             {active && o.decidedByThisDevice && (
               <span className="sb-kv__v">
