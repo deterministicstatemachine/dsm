@@ -2617,6 +2617,8 @@ Mutation controls (item 13, restored byte for byte): the policy re-admitting `'u
 
 Mutation control (item 16): the gate run on the previous manifest fails, "activity com.dsm.wallet.debug.PicoSelfTestActivity is exported".
 
+
+**Amended (owner, 2026-10-04, DSM Amendment A11):** the launcher also answers one VIEW filter, `dsm:` links whose scheme-specific part starts `connect/v1:`, so a game on the same phone can open the wallet's Apps screen with a connect code filled in. `ci/android_exported_components.sh` admits exactly that filter and still fails any other. The link carries a code only; the wallet reads it when the player asks.
 ### 6.70 SPHINCS+ construction version 2: the FIPS 205 structure, BLAKE3 kept (`security/sphincs-structure-repair`, pre-audit item 17, 2026-10-01)
 
 **The finding.** The pre-audit map of SPHINCS+ found that version 1 did not have the properties a SPHINCS+-style proof assumes. Both copies had them alike: the host's `dsm/src/crypto/sphincs.rs` and the firmware's `crates/dsm-sphincs`.
@@ -2725,6 +2727,86 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 
 **Open.** On BLE the terms ride beside the operation in the clear, as the prepare always has: BLE is a direct link between the two parties, and the ruling chose it. `TokenSDK`'s generic transfer and its token-creation fee transfer commit to terms that nothing carries, so a recipient could not open them. Neither is reached today: `TokenOperation::Transfer` is built nowhere outside `TokenSDK`, and the one `TokenOperation::Create` the SDK builds (dBTC registration) charges no fee.
 
+### 6.72 A Web2 application connects to a wallet (`feat/dsm-connect-wallet-apps`, DSM Amendment A11, 2026-10-04)
+
+**The direction.** Owner, 2026-10-04, for DSM Creatures, an RPGJS game kept Web2 with DSM underneath (§78's game): "it needs to be like Wallet Connect, kind of"; "It should basically just allow you to control it through the game once it's connected, so you don't have to go back and forth between the two". Owner choices the same day: the application's own endpoint is the relay; the wallet's consent is a scoped grant approved once on the device; the design is written in the Explainer's Part III before any code (DSM Amendment A11, approved as written the same day).
+
+**Ruling (owner, 2026-10-04, in chat):** the game also runs on the player's phone, and a wallet on the same phone connects by "Deep link (amend item 16)": the release manifest's launcher may answer a `dsm:connect/v1:` link, and nothing else beyond MAIN (§6.69 amended accordingly).
+
+**What it requires.** The application is a DSM account of its own and never holds a player's keys. Pairing goes through a `dsm:connect/v1:` code naming the endpoint, a pin of its certificate and an offer digest; the offer and the wallet's answer are signed under `DSM/connect/offer` and `DSM/connect/accept`, and each side adds the other as a contact before the first step. Requests and answers are signed under `DSM/connect/request` and `DSM/connect/response`. The relay is transport, never evidence: a payment is a transfer accepted onto the application's own relationship, a trade is what the SoFi predicates accept, an issued object is accepted only after its policy re-hashes to the anchor, and holdings are a Sparse Merkle proof against the holder's root validated from the application's frontier (Amendment A8), current only while the next register cell is empty at its leader. A grant counts its own spend in the wallet, its highest carried-out sequence number is its replay guard, and nothing expires by time.
+
+**Today.** None of it exists: no connect code, offer, grant, relay client or holdings proof, in Core, the SDK or the frontend, and no host-side account runtime (`dsm_sdk` builds no binary). The rows are added Missing.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0278 to MR-DSM-0294 | — | Missing | Added by Amendment A11. No connection code exists. |
+| MR-DSM-0278 to MR-DSM-0291, MR-DSM-0293, MR-DSM-0294 | Missing | Met | Built on this branch: the SDK's connect module and routes, the application host and the wallet's Apps screen; node-backed end to end (below). |
+| MR-DSM-0292 | Missing | Partial | The replay guard holds and nothing expires by time; whether a spent total ends the whole grant is open. |
+
+**Built (same branch).**
+- **The SDK** (`dsm_sdk::sdk::connect`, `handlers::connect_routes`, client schema 29):
+  - the connect code, parsed in Rust only;
+  - the four signed objects under `DSM/connect/{offer,accept,request,response}`, with the offer digest under `DSM/connect/offer-digest` and the session id under `DSM/connect/session`; the certificate pin is the TLS certificate hash;
+  - a card is taken only when its AK and AttA derive its device id on this device's network;
+  - the grant as pure scope checks, never wider than the offer;
+  - a listener that fetches each connected application's requests beside the inbox, started by approving an application and resumed when the wallet starts;
+  - a wallet that processes requests strictly in order. Its highest processed sequence number is the replay guard, and each answer is kept until it is delivered, so it is re-sent, never re-run;
+  - holdings proofs at the latest admitted position with compact SMT paths, verified by `peer_root_at` from the verifier's frontier, recomputed per path, and current only while the next root cell is open;
+  - an HTTPS relay client bound to the pin (no CA, no validity period read).
+- **The wallet**: an Apps screen renders the routes and decides nothing.
+- **The application's account**: `crates/dsm-app-host`, one account on the SDK's ingress. It gives the application a local ingress and a record of what each call did, and gives wallets the relay endpoints. It decides nothing.
+- **The proving application**: the DSM Creatures game, outside this repository.
+
+**Found while building.**
+- A payment whose relationship with the application was catching up (a transfer the wallet received awaits the application's finality) was answered FAILED and lost. A catching-up relationship is not a refusal: the request now stays queued, unanswered and unspent, and the next sync carries it out.
+- The same held for a payment the player approved by hand: the approval was spent and the request answered FAILED. The approval is now kept on the waiting request, and the first sync after the relationship settles carries it out.
+- Nothing serialized processing. The listener's sync, a sync the player starts, the player's decision and a disconnect could each read the replay guard before another recorded the request it was carrying out. One processing lock now spans reading the guard and carrying the request out, and a disconnect waits for the request in flight.
+- The Apps screen reported "carried out" after an approval whatever happened. `connect.respond` now answers with the outcome and a line Rust renders, and the screen shows that line.
+- Outside A11, found by the real-connection test and filed separately: a device whose first economic admission is held cannot resume it. A held faucet claim has already credited the head (fenced). Resuming takes its predecessor from `validated_root_or_activate`, which before a first admission activates against that head and refuses it as already holding value ("cannot activate an economic lineage on a device that already holds value"). The SDK suites' funding fixture meets the same refusal intermittently under load. Fixed in §6.73.
+
+**Found on the phones** (three A16s on the beta fleet, the game's account on `dsm-app-host`, 2026-10-04):
+- A holdings request that arrived while the wallet was still admitting its latest position was answered FAILED. Like a payment on a settling relationship, it now waits unanswered, and the next sync proves it.
+- Before approval, the consent screen named the game's coin as "base units of R0MGXNJR": the wallet had not rooted it yet. The preview now names each offered token from its policy, fetched and re-hashed to its anchor (display only), and fails if a policy cannot be had, as approving would.
+- A request past a cap explained itself in base units. It now says "25.00 ERA is above the 20.00 ERA the grant allows per request".
+- With a second phone, every proof waited for the player: the game asks each wallet about every creature it issued, and a wallet that never rooted another player's creature could not tell it was the game's. For a holdings request, a token the wallet has not rooted is now read from its policy and is inside the grant only if that policy names the game as creator; nothing is adopted.
+- `dsm-app-host` could not restart: the SDK defers an existing identity's context until its wallet seed is cached, and nothing cached it. The host now unlocks from the operator's mnemonic file, and its directory is the operator's alone. Off Android the SDK's at-rest seal uses a constant key, so it is not what unlocks the host (filed separately).
+- A wallet created on a phone took in nothing sent to it. The app starts the inbox poller at launch only for an identity that already exists, so the transfer the game sent to a wallet created in the running app was never pulled until the app was backgrounded and reopened, and the game's next transfer waited on the first to settle. `system.createGenesisV2` now starts the poller, and the connect listener as the app's launch does, once the new identity's router is up. Test: `dsm_sdk::handlers::system_routes::tests::a_wallet_created_in_the_running_app_starts_its_inbox_poller`; mutation: the poller start removed → red. The listener's resume there has no red test: a wallet just created has no connected application, so it starts nothing.
+
+What ran on the phones: connect by code with pinned TLS; the starter issued as a supply-1 object, rooted under the grant and delivered; the welcome coin; a capsule bought under the grant, granted only once the game's account accepted the transfer; verified holdings at each step; a SoFi quote and swap through the game's vault with no tap; a swap past the per-request cap waiting on the phone until approved, then carried out. The relay first ran over `adb reverse`, while the computer's firewall held incoming connections to the host, then over Wi-Fi at the host's LAN address. With the game in the phone's own browser, OPEN DSM WALLET opened the wallet's Apps screen with the code filled in through the `dsm:connect/v1:` link; the player read and approved it, and the game resumed connected.
+
+**Tests.**
+- The real connection, `a_game_and_a_wallet_connect_over_the_real_relay` (`crates/dsm-app-host/tests/real_connection.rs`). The `dsm-app-host` binary runs as two processes, a game's account and a player's wallet, on the pinned set's nodes on Postgres. The test speaks to each only through its ingress. The wallet reaches the game's relay over TLS bound to the code's pin, and the wallet's listener and both inbox pollers carry everything; nothing is carried by hand. It covers:
+  - connect (the consent names the game's coin before the wallet roots it);
+  - a creature rooted under the grant and delivered;
+  - a payment counted PAID only from the transfer the game's account accepted, carried out once with two syncs racing the listener;
+  - holdings proven (WILD 17, creature 1);
+  - a SoFi swap through the game's vault (its generation moves);
+  - a request outside the grant that waits on the phone and is declined;
+  - an object another device created, asked for as the game's, refused;
+  - the wallet killed and started again: it resumes listening and runs nothing twice;
+  - a disconnect: a payment asked afterwards is never carried out, and a request waiting on the phone goes with the grant and can no longer be approved.
+- In process (`dsm_sdk::handlers::connect_e2e_tests`): two devices on the pinned set's nodes, and the test's own store-and-forward TLS relay between them, which carries only signed bytes and delivers when the test decides. These hold what the real connection cannot hold still, an ordering the test forces or a relay that misbehaves:
+  - `a_payment_under_the_grant_waits_while_the_relationship_settles`: asked while the game has not taken the countersign, the payment waits unanswered and unspent, then counts as PAID from the accepted transfer;
+  - `a_relay_replaying_every_request_runs_nothing_twice`;
+  - `a_wallets_answer_alone_establishes_nothing`:
+    - a signed "paid" with no transfer grants nothing;
+    - a forged proof proves no balance;
+    - an honest proof the wallet has since moved past is not current;
+  - `a_wallet_refuses_an_offer_the_code_does_not_vouch_for`: another offer under the code's digest, an offer signed by a key not its card's, and a relay on another certificate are each refused;
+  - `holdings_of_an_object_never_held_are_covered_only_if_the_game_issued_it`: the game's object is proven not held without asking, and a third device's object waits for the player;
+  - `a_payment_approved_by_hand_waits_while_the_relationship_settles`: the approval is kept while the relationship catches up, then carried out and counted PAID by the application;
+  - `two_syncs_at_once_carry_a_request_out_once`: two syncs at once pay once.
+
+Unit tests cover the code, the signing domains, card identity, the grant, the memo reference and the holdings paths.
+
+Every gate above has a mutation control: each was removed or weakened in turn and its named test went red (`VERIFICATION_MATRIX.md`, the A11 rows).
+
+**Open.**
+- MR-DSM-0292: whether a spent total ends the whole grant, or only its spending kinds (today: only the spending kinds).
+- A holdings request waiting on a pending admission has no automated test: the harness admits each position within the transition that makes it, so no request can arrive between the two. It was observed on the phones.
+- The per-request re-read of a session is reached alone only by a disconnect that lands while a sync is between requests. No test drives that interleaving; with the sync's own filter in place the re-read's mutation stays green.
+- A holdings proof walks the wallet's lineage from the application's frontier. Until the application has accepted a step from the wallet it has none, so the walk starts at the wallet's activation, within the walk budget.
+
 ### 6.73 A device's first admission, held after its advance, resumes on its activation root (`fix/resume-first-held-admission`, 2026-10-04)
 
 **The finding.** Found 2026-10-04 while building the DSM Connect real-connection test (`feat/dsm-connect-wallet-apps`). The advance and the pending admission commit in one transaction. So an admission held at any later step (its evidence not yet `Stored`, its root claim not yet final) leaves its own credit on the head, fenced. Every resume path took its predecessor from `validated_root_or_activate`: `resume_pending_admission`, reached from the next faucet claim, from `stage_admission`, from `wallet.send`, and from `storage.sync` (Step 0 and the stranded-admission sweep). With nothing admitted yet, that function activated against the head as it stood. The head holds the held claim's own credit, so `activate` refused: "cannot activate an economic lineage on a device that already holds value". A fresh wallet whose first claim was held could never register it (MR-DSM-0030), and every economic operation after it stayed fenced. The SDK suites' funding fixture met the same refusal whenever a node write lagged under load (`test_support/two_device.rs`, "funding claim 0: …").
@@ -2775,12 +2857,12 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 277 | 96 | 95 | 39 | 0 | 29 | 18 |
+| DSM high-level (MR-DSM) | 294 | 112 | 96 | 39 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 362 | 237 | 86 | 18 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **943** | **407** | **200** | **114** | **4** | **64** | **154** |
+| **All** | **960** | **423** | **201** | **114** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3065,6 +3147,23 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 | MR-DSM-0275 | Met | `dsm::economic::peer_lineage::validate_peer_lineage`; `dsm_sdk::sdk::economic_registers::StoredFrontiers` | `dsm_sdk::handlers::frontier_verification_tests::a_receiver_reads_nothing_behind_its_frontier`; `dsm_sdk::handlers::frontier_verification_tests::a_sources_segment_stops_at_the_frontier_the_receiver_holds`; `dsm_sdk::handlers::frontier_verification_tests::one_walk_validates_a_sources_segment_once`; `dsm::economic::peer_lineage::tests::a_source_walk_past_the_budget_is_incomplete_and_reads_nothing`; `dsm_sdk::handlers::frontier_verification_tests::a_root_no_transition_explains_is_refused_where_it_sits` | Re-verified 2026-10-01 (§6.68). A verification starts at the receiver's frontier for each identity it walks, the payer or a source, and reads no cell at or behind it; nothing past a refused position is read. No root is taken as valid ancestry because it is admitted or signed: a source's earlier positions are validated in full. Past the walk budget the result is `Incomplete`, nothing more is read, and nothing is accepted. |
 | MR-DSM-0276 | Met | `dsm::economic::peer_lineage::ConditionalPositionResolver`; `dsm_sdk::sdk::sofi_reads::VerifierContext::peer_position_resolver` | `dsm_sdk::handlers::node_e2e_tests::a_trader_who_has_traded_can_pay`; `dsm::economic::peer_lineage::tests::a_conditional_position_right_after_the_activation_root_is_invalid` | Re-verified 2026-09-30 (§6.52). A conditional position inside a chain is resolved from SoFi's public objects for that position (S15), and the chain continues from the root it selected; a trader who has traded can pay (P15-9). A conditional position right after the activation root is Invalid: no claim was accepted there for it to name. |
 | MR-DSM-0277 | Met | `dsm::economic::claim_envelope::decode_and_verify_economic_root_claim`; `dsm::economic::claim_envelope::decode_registered_economic_claim`; `dsm::economic::register::root_claim_naming`; `dsm_sdk::sdk::economic_admission_flow` (root claim producer) | `dsm::economic::claim_envelope::tests::a_root_claim_under_a_key_that_does_not_derive_the_named_device_names_no_cell`; `dsm::economic::claim_envelope::tests::a_conditional_claim_signed_by_another_device_names_no_cell`; `dsm::economic::claim_envelope::tests::an_unsigned_conditional_claim_names_no_cell`; `dsm::economic::register::registered_root_construction_tests::a_squatters_claim_written_first_does_not_hold_the_cell` | DSM Amendment A10 (§6.65). Every occupant of a device's position cell carries its key and `AttA` and is recognized only when its signature verifies and `derive_devid(key, AttA)` is the cell's `DevID`, from the bytes in hand. Mutations: each binding check removed turns its named test red. |
+| MR-DSM-0278 | Met | `dsm_sdk::sdk::connect::app::make_offer`; `dsm_sdk::sdk::connect::signed::sign_own`; `dsm_sdk::handlers::connect_routes` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | The application's account is an ordinary SDK identity; every transfer, trade and rooting the wallet makes for it is the wallet's own route on the wallet's own device (§6.72). |
+| MR-DSM-0279 | Met | `dsm_sdk::sdk::connect::app::landed_payment`; `dsm_sdk::handlers::connect_routes` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | The coin and each creature are CPTA assets in the wallet's state; the application pays by transfer and grants only on DSM facts (§6.72). |
+| MR-DSM-0280 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::storage::client_db::token_registry::get_token_by_policy_commit` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | An issued object is a token of supply one whose committed policy names its creating device; the wallet takes it only when that creator is the application, and refuses another creator (§6.72). |
+| MR-DSM-0281 | Met | `dsm_sdk::sdk::connect::wallet::verify_offer`; `dsm_sdk::sdk::connect::pinned_tls::Relay`; `dsm_sdk::sdk::connect::signed::card_identity` | `dsm_sdk::handlers::connect_e2e_tests::a_wallet_refuses_an_offer_the_code_does_not_vouch_for`; `dsm_sdk::sdk::connect::signed::tests::a_card_names_its_device_only_through_its_own_key` | Digest, pinned TLS, card identity (AK and AttA derive the device) and the offer signature, each refused on its own (§6.72). The link clause: the launcher answers `dsm:connect/v1:` links and nothing else beyond MAIN (`ci/android_exported_components.sh`, mutation-checked); Kotlin only routes the link as a `connect.link` event, and the Apps screen fills in the code and reads it only when the player asks (`dsm_client/frontend/src/dsm/__tests__/connectLink.test.ts`, a Jest test, not cargo evidence) (§6.69 amended). |
+| MR-DSM-0282 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::sdk::connect::app::verify_accept`; `dsm_sdk::handlers::contacts_routes` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | Approve adds the application through the directory-resolved contact path, roots its anchors, records and signs the grant; the application adds the wallet the same way (§6.72). |
+| MR-DSM-0283 | Met | `dsm_sdk::sdk::connect::signed::verify`; `dsm_sdk::sdk::connect::app::signed_request`; `dsm_sdk::sdk::connect::wallet::signed_response` | `dsm_sdk::sdk::connect::signed::tests::a_signature_verifies_only_as_its_own_kind_and_body`; `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | Each object signs under its own domain tag; a body is accepted only in its canonical encoding (§6.72). |
+| MR-DSM-0284 | Met | `dsm_sdk::handlers::connect_routes` | `dsm_sdk::handlers::connect_e2e_tests::a_wallets_answer_alone_establishes_nothing` | `connect.app.status` reports a fact only from the account's own evidence; an answer alone reports none (§6.72). |
+| MR-DSM-0285 | Met | `dsm_sdk::sdk::connect::app::landed_payment`; `dsm_sdk::sdk::connect::app::memo_answers` | `dsm_sdk::handlers::connect_e2e_tests::a_wallets_answer_alone_establishes_nothing`; `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | PAID only for a transfer the account accepted whose signed terms carry the request's reference, each transfer answering one request (§6.72). |
+| MR-DSM-0286 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::sdk::sofi_flow::owned_vaults` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | A swap answer establishes nothing; the trade shows in the application's own vault generation and in later holdings (§6.72). |
+| MR-DSM-0287 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::handlers::token_routes` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | Accept-issued roots through `tokens.addByAnchor`, which fetches the policy and re-hashes it to the anchor (§6.72). |
+| MR-DSM-0288 | Met | `dsm_sdk::sdk::connect::holdings::verify`; `dsm_sdk::sdk::connect::holdings::check_paths`; `dsm_sdk::sdk::connect::holdings::prove` | `dsm_sdk::handlers::connect_e2e_tests::a_wallets_answer_alone_establishes_nothing`; `dsm_sdk::sdk::connect::holdings::tests::a_forged_amount_proves_nothing`; `dsm_sdk::sdk::connect::holdings::tests::another_tokens_path_proves_nothing` | The root at the proven position comes from the peer lineage walk (`peer_root_at`); every path must recompute it (§6.72). |
+| MR-DSM-0289 | Met | `dsm_sdk::sdk::economic_registers::next_root_cell`; `dsm_sdk::sdk::connect::holdings::verify` | `dsm_sdk::handlers::connect_e2e_tests::a_wallets_answer_alone_establishes_nothing` | The register cell of the next position is read at its leader; held is NotCurrent, undecided is Incomplete (§6.72). |
+| MR-DSM-0290 | Met | `dsm_sdk::sdk::connect::pinned_tls::Relay` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | The relay is the application's own endpoint, served by its host; nothing of DSM Connect is written to a storage node (§6.72). |
+| MR-DSM-0291 | Met | `dsm_sdk::sdk::connect::grant::decide`; `dsm_sdk::storage::client_db::connect::record_processed`; `dsm_sdk::storage::client_db::connect::put_pending` | `dsm_sdk::sdk::connect::grant::tests::a_request_past_a_cap_waits_for_the_player`; `dsm_sdk::sdk::connect::grant::tests::a_request_the_grant_does_not_name_waits_for_the_player`; `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | Caps per request and in total, counted in the wallet's store; outside the grant a request waits for the player and is approved or declined there (§6.72). |
+| MR-DSM-0292 | Partial | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::storage::client_db::connect::record_processed`; `dsm_sdk::storage::client_db::connect::disconnect` | `dsm_sdk::handlers::connect_e2e_tests::a_relay_replaying_every_request_runs_nothing_twice`; `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | The replay guard holds (a relay replaying every request runs nothing twice) and nothing reads a clock. Open: a spent total stops every spending request but the grant's other kinds go on; whether a spent total ends the whole grant is the owner's to say. A disconnect ends the grant: nothing asked afterwards is carried out, and a waiting request can no longer be approved (§6.72). |
+| MR-DSM-0293 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::sdk::sofi_flow::trade`; `dsm_sdk::sdk::sofi_flow::find_route` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay`; `dsm_sdk::handlers::connect_e2e_tests::a_payment_under_the_grant_waits_while_the_relationship_settles` | Requests run through the same routes the player uses by hand: the online send, `tokens.addByAnchor`, SoFi findRoute and trade (§6.72). |
+| MR-DSM-0294 | Met | `dsm_sdk::sdk::sofi_flow::trade` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | Nothing in DSM Connect touches SoFi's predicates; the application's vault is one SoFi vault among any (§6.72). |
 
 ### 8.2 SoFi settlement specification
 

@@ -109,6 +109,11 @@ impl Drop for FleetGuard {
 /// `NodeSet::members` reports. The config lives at one path for the process;
 /// the loader reads it on every load, so each test's nodes replace the last.
 pub fn point_sdk_at(members: &[(String, String, [u8; 32])], ca_pem: &[u8]) -> FleetGuard {
+    // A new fleet: nothing read final from the last one carries over. The
+    // unit tests' devices share one process across fleets; the integration
+    // tests point no device at a node set.
+    #[cfg(test)]
+    crate::sdk::final_reads::forget_everything();
     let config_path =
         std::env::temp_dir().join(format!("dsm_sdk_fleet_{}.toml", std::process::id()));
     // The fleet's CA beside the config, named relative to it, as the bundled

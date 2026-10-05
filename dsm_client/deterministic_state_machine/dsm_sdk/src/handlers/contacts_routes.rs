@@ -20,6 +20,24 @@ impl AppRouterImpl {
         preferred_alias: &str,
         resolved: ResolvedCounterparty,
     ) -> AppResult {
+        match self
+            .add_contact_from_resolved(preferred_alias, resolved)
+            .await
+        {
+            Ok(added) => pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(added)),
+            Err(e) => err(e),
+        }
+    }
+
+    /// Add the counterparty a directory read proved, and establish the
+    /// relationship before any step on it (§26). The one path a contact is
+    /// added by: `contacts.addManual`, and a connected application or wallet
+    /// (DSM Amendment A11).
+    pub(crate) async fn add_contact_from_resolved(
+        &self,
+        preferred_alias: &str,
+        resolved: ResolvedCounterparty,
+    ) -> Result<generated::ContactAddResponse, String> {
         let device_id = resolved.entry.body.device_id;
         if let Some(existing) = self.contact_manager.get_verified_contact(device_id).await {
             if existing.genesis_hash == resolved.entry.body.genesis
@@ -28,11 +46,9 @@ impl AppRouterImpl {
                 // A contact whose relationship an earlier attempt did not
                 // establish is established now.
                 if let Err(e) = self.core_sdk.establish_relationship(device_id) {
-                    return err(format!("contacts.add: establishing the relationship: {e}"));
+                    return Err(format!("contacts.add: establishing the relationship: {e}"));
                 }
-                return pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(
-                    contact_add_response(&existing),
-                ));
+                return Ok(contact_add_response(&existing));
             }
             log::warn!(
                 "[contacts.add] the scanned identity replaces the contact device={}",
@@ -57,18 +73,18 @@ impl AppRouterImpl {
             .await
         {
             Ok(added) => added,
-            Err(e) => return err(format!("Add contact failed: {e}")),
+            Err(e) => return Err(format!("Add contact failed: {e}")),
         };
         // The relationship exists from here: its leaf enters this device's
         // tree at h_0, before any step on it (§26).
         if let Err(e) = self.core_sdk.establish_relationship(device_id) {
-            return err(format!("contacts.add: establishing the relationship: {e}"));
+            return Err(format!("contacts.add: establishing the relationship: {e}"));
         }
 
         #[cfg(all(target_os = "android", feature = "bluetooth"))]
         {
             let Some(stored) = cm.get_verified_contact(device_id).await else {
-                return err("contact added, but it is not held in memory".into());
+                return Err("contact added, but it is not held in memory".into());
             };
             match crate::bluetooth::sync_contact_to_bluetooth_manager(stored).await {
                 Ok(true) => log::info!(
@@ -79,7 +95,7 @@ impl AppRouterImpl {
                     "[contacts.add] no BLE stack yet: init loads the contact when it builds one"
                 ),
                 Err(e) => {
-                    return err(format!(
+                    return Err(format!(
                         "contact added, but syncing it to the BluetoothManager failed: {e}"
                     ))
                 }
@@ -87,7 +103,7 @@ impl AppRouterImpl {
         }
         // Pairing takes the new contact up now, if the session lets it run.
         crate::bluetooth::contact_added();
-        pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(added))
+        Ok(added)
     }
 
     pub(crate) async fn handle_contacts_query(&self, q: AppQuery) -> AppResult {
