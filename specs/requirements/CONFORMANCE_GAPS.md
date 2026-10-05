@@ -2893,16 +2893,26 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 
 **On the rig (2026-10-05).** Proven on a real Android device, a Samsung A16 on the GCP beta fleet, freshly onboarded: the PIN lock set from the wallet's prompt; a router read answered while open and refused while locked ("the wallet is locked"); three wrong PINs answered 2, 1, then no tries left with only the phrase field offered; a restart offered the phrase alone; another wallet's phrase refused; this wallet's phrase opened it and the reads answered again; a cold start came up locked and the PIN opened it. On the same phone: the faucet's 100.00 ERA; 5 ERA locked on one outcome this device decides and is paid by; the cell read empty and a release refused ("no verdict holds the cell yet"); the outcome decided (final); the stake released, the vault shown released and the balance back at 100.00 ERA. Between two A16s with each other as contacts: the first locked 5 ERA on two outcomes, "delivered" decided by and paying the second and "returned" decided by the second and paying the first; each phone showed the outcomes from its own side (the first: no tags on "delivered", "pays you" on "returned", no Sign or Decide; the second: "you decide" on both, "pays you" on "delivered"); the second found the vault by its verdict cell and decided "delivered"; the first's release was refused ("the verdict "delivered" pays another identity"); the second released, and the balances moved 5 ERA from the first to the second.
 
+### 6.76 A match stake under a grant: the wallet builds the wager (`feat/connect-escrow-wagers`, DSM Amendment A12, 2026-10-05)
+
+**The ruling.** Owner, 2026-10-05 (quoted in Amendment A12): the wallet builds the wager template itself from the fixed outcomes `a-wins`, `b-wins`, `void` and `cancel`; the game requests the stake and identifies the two players, picks the match and referees it, and never invents an escrow branch or a payout recipient. The owner chose the same day: an escrow scope capped per request and in total as a payment scope is, and two request kinds, lock a stake and collect a result. It extends A11 and composes with S21; the template lives in the SDK's Connect layer, never in Core (S21's ruling).
+
+**Today.** A connected application can ask for an accepted object, a payment, a quote, a swap and a holdings proof (§6.72). It cannot ask a wallet to lock a stake or to collect a result, no grant can scope either, and `connect.app.status` establishes no escrow fact. The rows are added Missing.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0295 to MR-DSM-0300 | — | Missing | Added by Amendment A12. No escrow scope or request kind exists in DSM Connect. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 294 | 112 | 96 | 39 | 0 | 29 | 18 |
+| DSM high-level (MR-DSM) | 300 | 112 | 96 | 45 | 0 | 29 | 18 |
 | SoFi (MR-SOFI) | 386 | 261 | 86 | 18 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **984** | **447** | **201** | **114** | **4** | **64** | **154** |
+| **All** | **990** | **447** | **201** | **120** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3204,6 +3214,12 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-DSM-0292 | Partial | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::storage::client_db::connect::record_processed`; `dsm_sdk::storage::client_db::connect::disconnect` | `dsm_sdk::handlers::connect_e2e_tests::a_relay_replaying_every_request_runs_nothing_twice`; `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | The replay guard holds (a relay replaying every request runs nothing twice) and nothing reads a clock. Open: a spent total stops every spending request but the grant's other kinds go on; whether a spent total ends the whole grant is the owner's to say. A disconnect ends the grant: nothing asked afterwards is carried out, and a waiting request can no longer be approved (§6.72). |
 | MR-DSM-0293 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::sdk::sofi_flow::trade`; `dsm_sdk::sdk::sofi_flow::find_route` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay`; `dsm_sdk::handlers::connect_e2e_tests::a_payment_under_the_grant_waits_while_the_relationship_settles` | Requests run through the same routes the player uses by hand: the online send, `tokens.addByAnchor`, SoFi findRoute and trade (§6.72). |
 | MR-DSM-0294 | Met | `dsm_sdk::sdk::sofi_flow::trade` | `dsm_app_host::real_connection::a_game_and_a_wallet_connect_over_the_real_relay` | Nothing in DSM Connect touches SoFi's predicates; the application's vault is one SoFi vault among any (§6.72). |
+| MR-DSM-0295 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
+| MR-DSM-0296 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
+| MR-DSM-0297 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
+| MR-DSM-0298 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
+| MR-DSM-0299 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
+| MR-DSM-0300 | Missing | — | — | Added by Amendment A12; no escrow scope or request kind exists in DSM Connect (§6.76). |
 
 ### 8.2 SoFi settlement specification
 
