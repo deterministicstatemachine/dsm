@@ -27,7 +27,6 @@ type Props = {
   handleGenerateGenesis: () => Promise<void> | void;
   cancelPhraseBackup: () => void;
   answerPhraseCheck: (word: string) => Promise<void>;
-  unlockToWallet: () => void;
   menuItems: string[];
   currentMenuIndex: number;
   setCurrentMenuIndex: (next: number) => void;
@@ -169,7 +168,6 @@ export default function AppContent({
   handleGenerateGenesis,
   cancelPhraseBackup,
   answerPhraseCheck,
-  unlockToWallet,
   menuItems,
   currentMenuIndex,
   setCurrentMenuIndex,
@@ -348,7 +346,7 @@ export default function AppContent({
       );
 
     case 'locked':
-      return <LockScreen onUnlock={unlockToWallet} />;
+      return <LockScreen />;
 
     case 'error':
       return (

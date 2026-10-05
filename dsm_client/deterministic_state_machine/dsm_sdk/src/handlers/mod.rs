@@ -66,7 +66,7 @@ pub mod system_routes;
 #[cfg(test)]
 mod token_adoption_tests;
 #[cfg(test)]
-mod token_create_tests;
+pub(crate) mod token_create_tests;
 pub mod token_routes;
 pub mod transfer_helpers;
 pub mod wallet_routes;

@@ -45,6 +45,10 @@ function SessionCard({
   busy: boolean;
   onDisconnect: (s: connect.Session) => void;
 }): React.JSX.Element {
+  // The card shows the app, that it is connected, and Disconnect. What it was
+  // granted, and what this wallet did for it, open from the header: they are
+  // read in full on the approval screen.
+  const [shown, setShown] = useState<'summary' | 'details'>('summary');
   const [entries, setEntries] = useState<connect.LogEntry[] | null>(null);
   const [logError, setLogError] = useState<string | null>(null);
   const loadLog = useCallback(async () => {
@@ -57,10 +61,24 @@ function SessionCard({
   }, [session.sessionId]);
   return (
     <section className="sb-card" data-testid="connected-app">
-      <div className="sb-row sb-row--between">
-        <b>{session.displayName}</b>
-        <span className="sb-hint">{session.connected ? 'connected' : 'disconnected'}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <b style={{ flex: 1, minWidth: 0 }}>{session.displayName}</b>
+        <span className="sb-hint" style={{ margin: 0 }}>{session.connected ? 'connected' : 'disconnected'}</span>
+        <button
+          type="button"
+          className="sb-btn sb-btn--small"
+          aria-expanded={shown === 'details'}
+          aria-label={shown === 'details' ? `Hide ${session.displayName}'s details` : `Show ${session.displayName}'s details`}
+          onClick={() => setShown(shown === 'details' ? 'summary' : 'details')}
+        >
+          {shown === 'details' ? '▴' : '▾'}
+        </button>
       </div>
+      {session.lastError !== '' && (
+        <Notice kind="info">{session.lastError}</Notice>
+      )}
+      {shown === 'details' && (
+      <>
       <div className="sb-hint sb-hint--tight">
         Account {short(session.peerDeviceId)} · {session.endpoint}
       </div>
@@ -76,9 +94,6 @@ function SessionCard({
         </div>
       )}
       <div className="sb-hint">Requests handled: {session.lastSeq.toString()}</div>
-      {session.lastError !== '' && (
-        <Notice kind="info">{session.lastError}</Notice>
-      )}
       <Disclosure summary="What this wallet did for it">
         {logError !== null && <Notice kind="error">{logError}</Notice>}
         {entries === null ? (
@@ -98,6 +113,8 @@ function SessionCard({
           </ul>
         )}
       </Disclosure>
+      </>
+      )}
       {session.connected && (
         <button
           type="button"

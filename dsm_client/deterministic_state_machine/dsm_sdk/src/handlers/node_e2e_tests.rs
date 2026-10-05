@@ -91,7 +91,7 @@ pub(super) async fn create_token(d: &TestDevice, ticker: &str, supply: u128) -> 
             ticker: ticker.to_string(),
             alias: format!("{ticker} token"),
             decimals: 0,
-            genesis_supply_u128: supply.to_be_bytes().to_vec(),
+            genesis_supply_entered: supply.to_string(),
             burn_enabled: true,
             transferable: true,
             threshold: 1,
@@ -735,13 +735,13 @@ pub(super) fn entered(d: &TestDevice, token: &[u8; 32], base: u64) -> String {
 }
 
 /// `d`'s `sofi.createVault` on two tokens at their reserves, at 30 bps, the
-/// pair in the order §28 requires (`token_a < token_b`). The vault id.
+/// pair in the order the caller names it: Rust orders it (§28). The vault id.
 pub(super) async fn create_vault(
     d: &TestDevice,
     x: ([u8; 32], u64),
     y: ([u8; 32], u64),
 ) -> [u8; 32] {
-    let ((token_a, reserve_a), (token_b, reserve_b)) = if x.0 < y.0 { (x, y) } else { (y, x) };
+    let ((token_a, reserve_a), (token_b, reserve_b)) = (x, y);
     let request = generated::SofiCreateVaultRequest {
         token_a_policy_commit: token_a.to_vec(),
         token_b_policy_commit: token_b.to_vec(),
@@ -3820,4 +3820,56 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
             "{member} was asked again for what the resolution had read: {again:?}"
         );
     }
+}
+
+/// The pair a vault commits is ordered bytewise (§28), and Rust orders it: a
+/// pair named in either order makes the same vault shape, each reserve held
+/// against its own token. A pair of one token twice is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_pair_named_in_either_order_holds_each_reserve_against_its_own_token() {
+    let p = Pair::boot(500, 0).await;
+    let era = era();
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let (low, high) = if era < tkn { (era, tkn) } else { (tkn, era) };
+    // Named high first, with reserves that tell the two tokens apart.
+    let vault = create_vault(&p.a, (high, 700), (low, 300)).await;
+    let listed =
+        match payload(&invoke(&p.a, "sofi.vaults", args(&generated::SofiVaultsRequest {})).await) {
+            Payload::SofiVaultsResponse(r) => r,
+            other => panic!("sofi.vaults answered {other:?}"),
+        };
+    let held = listed
+        .vaults
+        .iter()
+        .find(|v| v.vault_id == vault.to_vec())
+        .expect("the vault is listed");
+    assert_eq!(
+        (
+            held.token_a_policy_commit.clone(),
+            held.reserve_a,
+            held.token_b_policy_commit.clone(),
+            held.reserve_b
+        ),
+        (low.to_vec(), 300, high.to_vec(), 700)
+    );
+
+    let same = invoke(
+        &p.a,
+        "sofi.createVault",
+        args(&generated::SofiCreateVaultRequest {
+            token_a_policy_commit: era.to_vec(),
+            token_b_policy_commit: era.to_vec(),
+            reserve_a_entered: entered(&p.a, &era, 100),
+            reserve_b_entered: entered(&p.a, &era, 100),
+            fee_bps: 30,
+        }),
+    )
+    .await;
+    assert!(!same.success, "a pair of one token was made");
+    let message = same.error_message.expect("a refusal says why");
+    assert!(
+        message.contains("a pair is two different tokens"),
+        "{message}"
+    );
 }

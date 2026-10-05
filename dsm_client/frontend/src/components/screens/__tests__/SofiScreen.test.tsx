@@ -112,12 +112,12 @@ describe('SofiScreen', () => {
     expect(findRoute).toHaveBeenCalledWith({ tokenIn: ERA_BYTES, tokenOut: PLAY_BYTES, amountIn: '2.5' });
   });
 
-  it('creates liquidity with the pair ordered bytewise and the reserves following their tokens', async () => {
+  it('creates liquidity with each token and its reserve as picked, for Rust to order', async () => {
     createVault.mockResolvedValueOnce({ vaultId: VAULT_1, position: 3n });
     render(<SofiScreen />);
     fireEvent.click(screen.getByRole('button', { name: 'Liquidity' }));
 
-    // PLAY (0x22…) is picked as A, ERA (0x11…) as B: ERA sorts first.
+    // PLAY (0x22…) is picked as A and ERA (0x11…) as B; the request names them so.
     fireEvent.change(screen.getByLabelText('Token A and its reserve'), { target: { value: '500' } });
     await pickToken('Token A', 'PLAY');
     fireEvent.change(screen.getByLabelText('Token B and its reserve'), { target: { value: '100' } });
@@ -126,7 +126,7 @@ describe('SofiScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create Liquidity Vault' }));
 
     await waitFor(() => expect(createVault).toHaveBeenCalledTimes(1));
-    expect(createVault).toHaveBeenCalledWith({ tokenA: ERA_BYTES, tokenB: PLAY_BYTES, reserveA: '100', reserveB: '500', feeBps: 25 });
+    expect(createVault).toHaveBeenCalledWith({ tokenA: PLAY_BYTES, tokenB: ERA_BYTES, reserveA: '500', reserveB: '100', feeBps: 25 });
     const created = await screen.findByRole('status', { name: 'Liquidity vault created' });
     expect(within(created).getByText(encodeBase32Crockford(VAULT_1))).toBeInTheDocument();
     expect(screen.getByLabelText('Vault id')).toHaveValue(encodeBase32Crockford(VAULT_1));

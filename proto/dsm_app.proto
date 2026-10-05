@@ -841,11 +841,10 @@ message TokenCreateRequest {
   string ticker = 1; // 2-8 uppercase
   string alias = 2; // display name
   uint32 decimals = 3; // 0..18
-  // The whole supply that will ever exist (SoFi §47, §51). User-created
+  // The whole supply that will ever exist (SoFi §47, §51), in whole token
+  // units, as the user typed it: Rust parses and scales it. User-created
   // tokens in beta release all of it to the creator at creation.
-  bytes genesis_supply_u128 = 4 [(dsm_fixed_len)=16]; // big-endian u128, > 0
-  reserved 5, 6, 9;
-  reserved "policy_anchor", "initial_alloc_u128", "unlimited_supply", "max_supply_u128";
+  string genesis_supply_entered = 14 [(dsm_max_len)=64]; // digits, > 0
 
   bool   burn_enabled           = 7;   // governs burns only (§54)
   bool   transferable           = 8;
@@ -875,7 +874,9 @@ message TokenForgetResponse {
 // guard's checked_sub on every advance.
 message TokenBurnRequest {
   string token_id  = 1;
-  uint64 amount    = 2;
+  // The amount as the user typed it, in token units ("12.50"): Rust parses it
+  // against the decimals of the token's committed policy.
+  string amount_entered = 4 [(dsm_max_len)=64];
   string message   = 3 [(dsm_max_len)=1024];
 }
 message TokenBurnResponse {
@@ -923,6 +924,19 @@ message TokenAdoptionQrResponse {
   string token_id           = 3;
   string policy_anchor_b32  = 4;
   string anchor_fingerprint = 5;
+}
+
+// token.check: a token.create request's fields checked as token.create checks
+// them, creating nothing. One refusal for each field that fails, naming the
+// TokenCreateRequest field ("ticker", "alias", "decimals",
+// "genesis_supply_entered") and why, so a form shows it beside that field.
+message TokenFieldRefusal {
+  string field  = 1;
+  string reason = 2;
+}
+
+message TokenCheckResponse {
+  repeated TokenFieldRefusal refusals = 1;
 }
 
 message TokenCreateResponse {
@@ -1405,8 +1419,12 @@ message AppStateResponse { string key = 1; optional string value = 2; }
 message AppSessionLockStatusProto {
   bool enabled = 1;
   bool locked = 2;
-  string method = 3;
+  string method = 3;          // "none", "pin" or "combo"
   bool lock_on_pause = 4;
+  // The wrong PINs or patterns left before only the recovery phrase opens the
+  // lock, and whether that point is reached (or no PIN or pattern is enrolled).
+  uint32 misses_left = 5;
+  bool phrase_required = 6;
 }
 
 message AppSessionBleHardwareStatusProto {
@@ -1461,9 +1479,21 @@ message SessionHardwareFactsProto {
 
 // Frontend -> Rust: lock policy configuration. Secret verification remains app-local.
 message SessionConfigureLockRequest {
-  bool enabled = 1;
-  string method = 2;
+  // The method names whether the lock is on: "none" turns it off.
+  string method = 2;          // "pin", "combo" or "none"
   bool lock_on_pause = 3;
+  // The PIN, or the pattern's buttons joined by ",", to enroll. Rust keeps only
+  // its Argon2id hash. Empty keeps the PIN or pattern already enrolled.
+  string secret = 4 [(dsm_max_len)=256];
+}
+
+// session.unlock: open the lock with its PIN or pattern, or, once the wrong
+// tries are used up, with the wallet's recovery phrase. Rust decides.
+message SessionUnlockRequest {
+  oneof key {
+    string secret          = 1 [(dsm_max_len)=256];
+    string recovery_phrase = 2 [(dsm_max_len)=1024];
+  }
 }
 
 // State introspection summary (QueryOp: state.info)
@@ -2725,6 +2755,8 @@ message Envelope {
     EscrowSignedResponse              escrow_signed_response           = 131;
     EscrowVerdictResponse             escrow_verdict_response          = 132;
     EscrowVaultsResponse              escrow_vaults_response           = 133;
+    // Reply to `token.check`.
+    TokenCheckResponse                token_check_response             = 134;
 
 
     // Reply to `token.forget`.
@@ -2803,7 +2835,9 @@ message DeviceDirectoryEntryV1 {
 // owner chooses the pair, the reserves and the fee. The storage set is the
 // network's pinned set, never chosen (DSM Amendment A5).
 message SofiCreateVaultRequest {
-  bytes  token_a_policy_commit = 1 [(dsm_fixed_len)=32]; // token_a < token_b, bytewise
+  // The two tokens in either order, each with its reserve below; Rust orders
+  // the pair bytewise (§28).
+  bytes  token_a_policy_commit = 1 [(dsm_fixed_len)=32];
   bytes  token_b_policy_commit = 2 [(dsm_fixed_len)=32];
   // 3 and 4 were reserve_a and reserve_b in base units.
   reserved 3, 4;
@@ -2992,6 +3026,25 @@ message EscrowCreateRequest {
   repeated EscrowBranchV1 branches             = 4; // 1..16, ascending by outcome
   bytes                   counterpart_vault_id = 5; // empty, or 32 bytes
 }
+// escrow.lock: lock a stake as escrow.create does, its outcomes named by who
+// decides each and who each pays: this device or a contact, by device id. Rust
+// supplies every party's genesis and signing key from what it holds, and puts
+// the outcomes and each signer set in their one canonical order: the order the
+// user listed them in carries no meaning. A party that is neither this device
+// nor a contact is named by its keys through escrow.create.
+message EscrowLockOutcomeV1 {
+  bytes          outcome    = 1 [(dsm_max_len)=64];   // 1..64 bytes
+  repeated bytes decided_by = 2;                       // 1..4 device ids, 32 bytes each
+  bytes          pays       = 3 [(dsm_fixed_len)=32]; // a device id
+}
+message EscrowLockRequest {
+  bytes                        external             = 1; // X, the bytes the parties agreed on
+  bytes                        token_policy_commit  = 2 [(dsm_fixed_len)=32];
+  string                       amount_entered       = 3; // token units, > 0
+  repeated EscrowLockOutcomeV1 outcomes             = 4; // 1..16, any order
+  bytes                        counterpart_vault_id = 5; // empty, or 32 bytes
+}
+// escrow.create and escrow.lock both answer this.
 message EscrowCreatedResponse {
   bytes  vault_id            = 1 [(dsm_fixed_len)=32];
   bytes  verdict_cell        = 2 [(dsm_fixed_len)=32]; // K_verdict
@@ -3043,6 +3096,16 @@ message EscrowLockedRequest {
   bytes verdict_cell = 1 [(dsm_fixed_len)=32];
 }
 message EscrowVaultsRequest {}
+// One outcome of an escrow vault's terms, in table order, and what it means
+// for this device.
+message EscrowVaultOutcomeV1 {
+  bytes                   outcome             = 1 [(dsm_max_len)=64];
+  repeated EscrowSignerV1 signers             = 2;
+  bytes                   recipient_genesis   = 3 [(dsm_fixed_len)=32];
+  bytes                   recipient_device_id = 4 [(dsm_fixed_len)=32];
+  bool                    decided_by_this_device = 5; // this device's key is one of its signers
+  bool                    pays_this_device       = 6; // its recipient is this device
+}
 message EscrowVaultV1 {
   bytes           vault_id            = 1 [(dsm_fixed_len)=32];
   bytes           owner_genesis       = 2 [(dsm_fixed_len)=32];
@@ -3055,6 +3118,7 @@ message EscrowVaultV1 {
   string          amount_display      = 9;
   uint64          generation          = 10;
   SofiVaultStatus status              = 11; // RETIRED once released
+  repeated EscrowVaultOutcomeV1 outcomes = 12; // the terms' outcomes, in table order
 }
 message EscrowVaultsResponse {
   repeated EscrowVaultV1 vaults = 1;
@@ -4130,7 +4194,6 @@ enum SdkEventKind {
   SDK_EVENT_KIND_WALLET_REFRESH = 5;
   SDK_EVENT_KIND_IDENTITY_READY = 6;
   SDK_EVENT_KIND_ENV_CONFIG_ERROR = 7;
-  SDK_EVENT_KIND_BIOMETRIC_RESULT = 8;
   SDK_EVENT_KIND_QR_SCAN_RESULT = 9;
   SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS = 10;
   SDK_EVENT_KIND_DETERMINISTIC_SAFETY = 11;
@@ -4245,7 +4308,6 @@ enum NativeHostRequestKind {
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
 
   // platform_primitive.*
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
   // Declared host primitives no host implemented and no caller issued.
@@ -4281,7 +4343,6 @@ enum NativeHostEventKind {
   // the policy wants); the frontend had nothing listening for it.
   reserved 2;
   reserved "NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS";
-  NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
   NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
   NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
   NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
@@ -4303,18 +4364,6 @@ message HostPermissionsRequestPayload {
 message HostPermissionsResult {
   repeated string granted_permissions = 1;
   bool all_granted = 2;
-}
-
-message BiometricAuthorizePayload {
-  string prompt_title = 1 [(dsm_max_len)=128];
-  string prompt_subtitle = 2 [(dsm_max_len)=256];
-  string negative_text = 3 [(dsm_max_len)=64];
-}
-
-message BiometricAuthorizeResult {
-  bool success = 1;
-  uint32 error_code = 2;
-  string error_message = 3 [(dsm_max_len)=256];
 }
 
 message NfcTagReadPayload {

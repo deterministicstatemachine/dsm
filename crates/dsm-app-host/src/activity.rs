@@ -88,16 +88,10 @@ fn args_body<M: Message + Default>(args: &[u8]) -> Result<M, prost::DecodeError>
 pub fn describe_call(method: &str, args: &[u8]) -> String {
     match method {
         "token.create" => match args_body::<pb::TokenCreateRequest>(args) {
-            Ok(r) => {
-                let supply = match <[u8; 16]>::try_from(r.genesis_supply_u128.as_slice()) {
-                    Ok(be) => u128::from_be_bytes(be).to_string(),
-                    Err(e) => format!("unreadable ({e})"),
-                };
-                format!(
-                    "create token {} \u{201c}{}\u{201d}: supply {supply}, {} decimals",
-                    r.ticker, r.alias, r.decimals
-                )
-            }
+            Ok(r) => format!(
+                "create token {} \u{201c}{}\u{201d}: supply {}, {} decimals",
+                r.ticker, r.alias, r.genesis_supply_entered, r.decimals
+            ),
             Err(e) => format!("create a token: unreadable arguments ({e})"),
         },
         "faucet.claim" => "claim ERA from the network's faucet".into(),

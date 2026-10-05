@@ -16,7 +16,7 @@ async fn isolated_schema(tag: u8) -> (db::DBPool, db::DBPool, String) {
         "DSM_TEST_DATABASE_URL must name a Postgres database: the node's store is Postgres",
     );
     let schema = format!("schema_{}", unique_name(tag).to_lowercase());
-    let admin = db::create_pool(&url).expect("pool");
+    let admin = db::create_pool(&url, db::POOL_MAX_SIZE).expect("pool");
     admin
         .get()
         .await
@@ -25,8 +25,11 @@ async fn isolated_schema(tag: u8) -> (db::DBPool, db::DBPool, String) {
         .await
         .expect("create the schema");
     let sep = if url.contains('?') { '&' } else { '?' };
-    let scoped =
-        db::create_pool(&format!("{url}{sep}options=-c%20search_path%3D{schema}")).expect("pool");
+    let scoped = db::create_pool(
+        &format!("{url}{sep}options=-c%20search_path%3D{schema}"),
+        db::POOL_MAX_SIZE,
+    )
+    .expect("pool");
     (scoped, admin, schema)
 }
 
