@@ -48,6 +48,8 @@ fn event_type(stored: &str) -> Option<generated::TransactionType> {
         Realized::Setup,
         Realized::Trade,
         Realized::Close,
+        Realized::EscrowLock,
+        Realized::EscrowRelease,
     ]
     .into_iter()
     .find(|kind| kind.tx_type() == stored)
@@ -57,6 +59,8 @@ fn event_type(stored: &str) -> Option<generated::TransactionType> {
         Realized::Setup => generated::TransactionType::TxTypeSofiSetup,
         Realized::Trade => generated::TransactionType::TxTypeSofiTrade,
         Realized::Close => generated::TransactionType::TxTypeSofiClose,
+        Realized::EscrowLock => generated::TransactionType::TxTypeEscrowLock,
+        Realized::EscrowRelease => generated::TransactionType::TxTypeEscrowRelease,
     })
 }
 
@@ -70,6 +74,8 @@ fn event_type_name(kind: generated::TransactionType) -> Option<&'static str> {
         generated::TransactionType::TxTypeSofiSetup => Some(Realized::Setup.tx_type()),
         generated::TransactionType::TxTypeSofiTrade => Some(Realized::Trade.tx_type()),
         generated::TransactionType::TxTypeSofiClose => Some(Realized::Close.tx_type()),
+        generated::TransactionType::TxTypeEscrowLock => Some(Realized::EscrowLock.tx_type()),
+        generated::TransactionType::TxTypeEscrowRelease => Some(Realized::EscrowRelease.tx_type()),
         generated::TransactionType::TxTypeUnspecified
         | generated::TransactionType::TxTypeFaucet
         | generated::TransactionType::TxTypeBilateralOffline

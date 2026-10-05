@@ -27,8 +27,8 @@ use dsm::sofi::resolution::{VaultChain, WalkOutcome};
 use dsm::sofi::resolve::{AcceptedGeneses, Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{
-    close_vault_post, movement_shape, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds,
-    HopMovement, Policies, RouteShape,
+    movement_shape, retire_vault_post, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds,
+    HopMovement, Policies, RouteShape, VaultTerms,
 };
 use dsm::sofi::wire::{
     next_attempt, next_position, CoreEntry, DlvCore, SwapHop, TraderCore, VaultGenesisPreimage,
@@ -63,7 +63,7 @@ use crate::storage::client_db::{economic_lineage, sofi_vault_head};
 type D32 = [u8; 32];
 
 /// The signature algorithm of every SoFi object this device signs: its AK.
-const SIGNATURE_ALG: u16 = dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F;
+pub(crate) const SIGNATURE_ALG: u16 = dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F;
 
 /// How many times one route reads its position's resolution before it
 /// reports `RetriesExhausted`: the network status, not a verdict.
@@ -208,23 +208,23 @@ pub struct PositionOutcome {
     pub state: PositionState,
 }
 
-fn refuse(what: impl std::fmt::Display) -> DsmError {
+pub(crate) fn refuse(what: impl std::fmt::Display) -> DsmError {
     DsmError::invalid_operation(format!("sofi: {what}"))
 }
 
-fn storage(what: &str, e: impl std::fmt::Display) -> DsmError {
+pub(crate) fn storage(what: &str, e: impl std::fmt::Display) -> DsmError {
     DsmError::storage(format!("sofi: {what}: {e}"), None::<std::io::Error>)
 }
 
 /// Sign `message` with this device's AK.
-fn sign(message: &[u8]) -> Result<Vec<u8>, DsmError> {
+pub(crate) fn sign(message: &[u8]) -> Result<Vec<u8>, DsmError> {
     let secret_key = crate::sdk::signing_authority::current_secret_key()?;
     dsm::crypto::sphincs::sphincs_sign(&secret_key, message)
 }
 
 /// The published object must be `Stored`, read back from the members, before
 /// anything is built on it.
-fn require_stored(what: &str, published: &Published) -> Result<(), DsmError> {
+pub(crate) fn require_stored(what: &str, published: &Published) -> Result<(), DsmError> {
     if published.stored {
         Ok(())
     } else {
@@ -236,7 +236,7 @@ fn require_stored(what: &str, published: &Published) -> Result<(), DsmError> {
 }
 
 /// This device's identity.
-fn identity(core: &CoreSDK) -> Result<(D32, D32), DsmError> {
+pub(crate) fn identity(core: &CoreSDK) -> Result<(D32, D32), DsmError> {
     let head = core
         .device_head()
         .ok_or_else(|| storage("device head", "none"))?;
@@ -489,29 +489,40 @@ async fn setup(
 // ── §30 Finding the head of a vault ────────────────────────────────────────
 
 /// A vault at its walked head: the root the next hop is built on, the whole
-/// tree there, its state, and its policies.
-struct VaultAtHead {
-    vault_id: D32,
-    root: D32,
-    state: VaultStateLeaf,
-    tree: EconomicSmt,
-    policies: Policies,
+/// tree there, its state, and its terms: a market's policies, or an escrow
+/// vault's terms (SoFi Amendment S21).
+pub(crate) struct VaultAtHead {
+    pub(crate) vault_id: D32,
+    pub(crate) root: D32,
+    pub(crate) state: VaultStateLeaf,
+    pub(crate) tree: EconomicSmt,
+    pub(crate) terms: VaultTerms,
+}
+
+impl VaultAtHead {
+    /// The market's policies; an escrow vault has no market to price by.
+    fn market(&self) -> Result<&Policies, DsmError> {
+        match &self.terms {
+            VaultTerms::Market(policies) => Ok(policies),
+            VaultTerms::Escrow(..) => Err(refuse("an escrow vault has no market")),
+        }
+    }
 }
 
 /// What this device stands on: its identity, its validated predecessor and
 /// the leaves that form it, and the conditional positions it resolved.
-struct Standing {
-    genesis: D32,
-    device_id: D32,
-    validated: ValidatedEconomicRoot,
-    admitted: AdmittedEconomicPosition,
-    local: LocalLeaves,
-    tree: EconomicSmt,
-    balances: BTreeMap<D32, u64>,
+pub(crate) struct Standing {
+    pub(crate) genesis: D32,
+    pub(crate) device_id: D32,
+    pub(crate) validated: ValidatedEconomicRoot,
+    pub(crate) admitted: AdmittedEconomicPosition,
+    pub(crate) local: LocalLeaves,
+    pub(crate) tree: EconomicSmt,
+    pub(crate) balances: BTreeMap<D32, u64>,
 }
 
 /// Stage 0 of §31: no pending position, and a resolved predecessor.
-fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
+pub(crate) fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
     let head = core
         .device_head()
         .ok_or_else(|| storage("device head", "none"))?;
@@ -539,9 +550,10 @@ fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
     })
 }
 
-/// The policies `state` commits, fetched by the addresses it names and
-/// decoded by Core, which re-addresses each first.
-async fn vault_policies(set: &StorageSet, state: &VaultStateLeaf) -> Result<Policies, DsmError> {
+/// The terms `state` commits — a market's three policies, or an escrow
+/// vault's terms — fetched by the addresses it names and decoded by Core,
+/// which re-addresses each first.
+async fn vault_terms(set: &StorageSet, state: &VaultStateLeaf) -> Result<VaultTerms, DsmError> {
     let mut objects = BTreeMap::new();
     for (class, addr) in EvidenceNeeds::policies_of(state) {
         let bytes = crate::sdk::storage_io::read_stored_bytes(set, &addr)
@@ -549,7 +561,7 @@ async fn vault_policies(set: &StorageSet, state: &VaultStateLeaf) -> Result<Poli
             .ok_or_else(|| {
                 storage(
                     "vault policy",
-                    format!("the class {class:#06x} policy the vault commits is not Stored"),
+                    format!("the class {class:#06x} object the vault commits is not Stored"),
                 )
             })?;
         objects.insert(addr, bytes);
@@ -561,13 +573,13 @@ async fn vault_policies(set: &StorageSet, state: &VaultStateLeaf) -> Result<Poli
         BTreeMap::new(),
         BTreeMap::new(),
     );
-    Policies::resolve(&evidence, state).map_err(|refusal| refuse(format!("{refusal:?}")))
+    VaultTerms::resolve(&evidence, state).map_err(|refusal| refuse(format!("{refusal:?}")))
 }
 
 /// §30: walk `vault_id` from its accepted genesis to its head. At generation
 /// zero the tree is the genesis state leaf alone; past it, the head store the
 /// walk wrote must reproduce the head's root.
-async fn vault_at_head(
+pub(crate) async fn vault_at_head(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
@@ -606,7 +618,7 @@ fn chains_at_once(
 }
 
 /// `vault_id` at the head of its walked `chain`.
-async fn head_of(
+pub(crate) async fn head_of(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
@@ -656,14 +668,14 @@ async fn head_of(
             "the vault's leaves do not recompute its walked head",
         ));
     }
-    let policies = vault_policies(set, &state).await?;
+    let terms = vault_terms(set, &state).await?;
     Ok((
         VaultAtHead {
             vault_id: *vault_id,
             root,
             state,
             tree,
-            policies,
+            terms,
         },
         chain,
     ))
@@ -672,7 +684,7 @@ async fn head_of(
 impl Standing {
     /// This device as the verifier: its identity and the position it
     /// resolved itself, over the pinned set.
-    fn context<'a>(
+    pub(crate) fn context<'a>(
         &'a self,
         set: &'a StorageSet,
         accepted: &AcceptedGeneses,
@@ -686,8 +698,12 @@ impl Standing {
     }
 }
 
-/// The other token of a vault's pair, and whether `token_in` is its `a`.
-fn other_token(policies: &Policies, token_in: &D32) -> Option<(D32, bool)> {
+/// The other token of a vault's pair, and whether `token_in` is its `a`. An
+/// escrow vault has no pair, and trades nothing.
+fn other_token(terms: &VaultTerms, token_in: &D32) -> Option<(D32, bool)> {
+    let VaultTerms::Market(policies) = terms else {
+        return None;
+    };
     let (a, b) = (*policies.market.token_a(), *policies.market.token_b());
     if *token_in == a {
         Some((b, true))
@@ -706,20 +722,18 @@ fn quote(
     amount_in: u64,
     index: usize,
 ) -> Result<(D32, u64), DsmError> {
-    let (token_out, in_is_a) = other_token(&vault.policies, token_in)
+    // A vault without a market prices nothing, whatever token is offered.
+    let fee_bps = vault.market()?.fee.fee_bps();
+    let (token_out, in_is_a) = other_token(&vault.terms, token_in)
         .ok_or_else(|| refuse(format!("hop {index}: the vault does not trade that token")))?;
     let (reserve_in, reserve_out) = if in_is_a {
         (vault.state.reserve_a, vault.state.reserve_b)
     } else {
         (vault.state.reserve_b, vault.state.reserve_a)
     };
-    let amount_out = constant_product_output_classified(
-        amount_in,
-        reserve_in,
-        reserve_out,
-        vault.policies.fee.fee_bps(),
-    )
-    .map_err(|e| refuse(format!("hop {index}: {e:?}")))?;
+    let amount_out =
+        constant_product_output_classified(amount_in, reserve_in, reserve_out, fee_bps)
+            .map_err(|e| refuse(format!("hop {index}: {e:?}")))?;
     Ok((token_out, amount_out))
 }
 
@@ -742,7 +756,7 @@ fn price_hop(
         token_out,
         amount_out,
     };
-    let post = swap_vault_post(&vault.state, &vault.policies, &hop, index)
+    let post = swap_vault_post(&vault.state, vault.market()?, &hop, index)
         .map_err(|refusal| refuse(format!("hop {index}: {refusal:?}")))?;
     Ok((hop, post))
 }
@@ -770,19 +784,15 @@ impl Planned {
 /// What `vault` gives for `amount_in` of `token_in` at its head: `None` for
 /// an amount too small to move it. Any other refusal is an error.
 fn leg_out(vault: &VaultAtHead, token_in: &D32, amount_in: u64) -> Result<Option<u64>, DsmError> {
-    let (_, in_is_a) = other_token(&vault.policies, token_in)
+    let fee_bps = vault.market()?.fee.fee_bps();
+    let (_, in_is_a) = other_token(&vault.terms, token_in)
         .ok_or_else(|| refuse("the vault does not trade that token"))?;
     let (reserve_in, reserve_out) = if in_is_a {
         (vault.state.reserve_a, vault.state.reserve_b)
     } else {
         (vault.state.reserve_b, vault.state.reserve_a)
     };
-    match constant_product_output_classified(
-        amount_in,
-        reserve_in,
-        reserve_out,
-        vault.policies.fee.fee_bps(),
-    ) {
+    match constant_product_output_classified(amount_in, reserve_in, reserve_out, fee_bps) {
         Ok(out) => Ok(Some(out)),
         Err(ConstantProductRefusal::OutputZero) => Ok(None),
         Err(other) => Err(refuse(other.as_str())),
@@ -907,8 +917,8 @@ fn plan_chain(
 fn plan(vaults: &[&VaultAtHead], token_in: D32, amount_in: u64) -> Result<Vec<Planned>, DsmError> {
     if let [one, two] = vaults {
         if let (Some((a, ..)), Some((b, ..))) = (
-            other_token(&one.policies, &token_in),
-            other_token(&two.policies, &token_in),
+            other_token(&one.terms, &token_in),
+            other_token(&two.terms, &token_in),
         ) {
             if a == b {
                 return plan_split(one, two, token_in, a, amount_in)?
@@ -1020,7 +1030,9 @@ pub async fn find_route(
     let direct: Vec<&VaultAtHead> = firsts
         .iter()
         .filter_map(|id| heads.get(id))
-        .filter(|vault| matches!(other_token(&vault.policies, &token_in), Some((t, ..)) if t == token_out))
+        .filter(
+            |vault| matches!(other_token(&vault.terms, &token_in), Some((t, ..)) if t == token_out),
+        )
         .collect();
     for (i, one) in direct.iter().enumerate() {
         candidates.push(vec![one]);
@@ -1029,7 +1041,7 @@ pub async fn find_route(
         }
     }
     for first in firsts.iter().filter_map(|id| heads.get(id)) {
-        let Some((middle, ..)) = other_token(&first.policies, &token_in) else {
+        let Some((middle, ..)) = other_token(&first.terms, &token_in) else {
             continue;
         };
         if middle == token_out {
@@ -1037,7 +1049,7 @@ pub async fn find_route(
         }
         for second in seconds.iter().filter_map(|id| heads.get(id)) {
             if second.vault_id != first.vault_id
-                && matches!(other_token(&second.policies, &middle), Some((t, ..)) if t == token_out)
+                && matches!(other_token(&second.terms, &middle), Some((t, ..)) if t == token_out)
             {
                 candidates.push(vec![first, second]);
             }
@@ -1105,13 +1117,17 @@ pub async fn owned_vaults(core: &CoreSDK, set: &StorageSet) -> Result<Vec<OwnedV
     let mut out = Vec::new();
     for creation in standing.local.vault_creations() {
         let (vault, ..) = vault_at_head(set, &verifier, &creation.vault_id).await?;
+        // An escrow vault is listed by `escrow.vaults` (SoFi Amendment S21).
+        let VaultTerms::Market(policies) = &vault.terms else {
+            continue;
+        };
         out.push(OwnedVault {
             vault_id: vault.vault_id,
-            token_a_policy_commit: *vault.policies.market.token_a(),
-            token_b_policy_commit: *vault.policies.market.token_b(),
+            token_a_policy_commit: *policies.market.token_a(),
+            token_b_policy_commit: *policies.market.token_b(),
             reserve_a: vault.state.reserve_a,
             reserve_b: vault.state.reserve_b,
-            fee_bps: vault.policies.fee.fee_bps(),
+            fee_bps: policies.fee.fee_bps(),
             generation: vault.state.generation,
             status: vault.state.status,
         });
@@ -1124,7 +1140,7 @@ pub async fn owned_vaults(core: &CoreSDK, set: &StorageSet) -> Result<Vec<OwnedV
 /// The setup this device admitted with `vault_id`, by its reference: of the
 /// setups published under the relationship index, the one whose `R_T^setup`
 /// is the root this device admitted right after the setup's position.
-async fn own_setup_ref(
+pub(crate) async fn own_setup_ref(
     set: &StorageSet,
     genesis: &D32,
     device_id: &D32,
@@ -1316,7 +1332,7 @@ async fn live_attempt(
 /// again, so a trade or a close is drafted at the head those registrations
 /// leave (owner ruling, 2026-10-01: "After successful pair registration, the
 /// relayer retries progression").
-async fn chain_past_withheld_pairs(
+pub(crate) async fn chain_past_withheld_pairs(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
@@ -1346,7 +1362,7 @@ async fn chain_past_withheld_pairs(
 
 /// `V°` of one vault: its state mutation to `post_state`, and this trader's
 /// relationship advancement from `base`, against the vault's tree at its head.
-fn vault_core(
+pub(crate) fn vault_core(
     standing: &Standing,
     vault: &VaultAtHead,
     post_state: &VaultStateLeaf,
@@ -1397,7 +1413,7 @@ fn balance_value(policy_commit: &D32, amount: u64) -> Result<D32, DsmError> {
 
 /// `T°`: each named balance movement `(token, credit, debit)` and one
 /// relationship advancement per vault, against this device's own tree.
-fn trader_core(
+pub(crate) fn trader_core(
     standing: &Standing,
     movements: &[(D32, u64, u64)],
     vaults: &[(D32, D32)],
@@ -1444,7 +1460,7 @@ fn trader_core(
 
 /// The relationship leaf this device holds with `vault_id`: the base its
 /// advancement starts from.
-fn relationship_base(standing: &Standing, vault_id: &D32) -> Result<D32, DsmError> {
+pub(crate) fn relationship_base(standing: &Standing, vault_id: &D32) -> Result<D32, DsmError> {
     standing
         .local
         .relationship(vault_id)
@@ -1453,7 +1469,7 @@ fn relationship_base(standing: &Standing, vault_id: &D32) -> Result<D32, DsmErro
 }
 
 /// The context a draft takes.
-fn context<'a>(
+pub(crate) fn context<'a>(
     standing: &Standing,
     set: &StorageSet,
     public_key: &'a [u8],
@@ -1520,7 +1536,7 @@ async fn settle(
 
 /// Stages 3 to 10 of §31 for a draft: validate over acquired evidence, sign
 /// and publish, fulfill through the Core transition, complete, resolve.
-async fn exercise_draft(
+pub(crate) async fn exercise_draft(
     core: &CoreSDK,
     set: &StorageSet,
     standing: &Standing,
@@ -1828,12 +1844,10 @@ pub async fn close(
     .await?;
     let base = relationship_base(&standing, &intent.vault_id)?;
     let retired =
-        close_vault_post(&vault.state).map_err(|refusal| refuse(format!("{refusal:?}")))?;
+        retire_vault_post(&vault.state).map_err(|refusal| refuse(format!("{refusal:?}")))?;
     let dlv = vault_core(&standing, &vault, &retired, base)?;
-    let (token_a, token_b) = (
-        *vault.policies.market.token_a(),
-        *vault.policies.market.token_b(),
-    );
+    let policies = vault.market()?;
+    let (token_a, token_b) = (*policies.market.token_a(), *policies.market.token_b());
     let head = core
         .device_head()
         .ok_or_else(|| storage("device head", "none"))?;
