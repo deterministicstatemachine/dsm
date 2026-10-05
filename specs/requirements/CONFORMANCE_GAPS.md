@@ -2733,9 +2733,9 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 
 **The ruling.** Owner, 2026-10-04: compose existing primitives, add only the generic one that is missing, and put no wager or battle logic in Core: "You need to make the generic escrow vaults, and then we just use that". 2026-10-05: one external commitment has one admissible verdict, made so by the protocol, not by the referee's bookkeeping (quoted in Amendment S21).
 
-**The specification.** SoFi §19.9 (Amendment S21): an escrow vault is a SoFi vault whose three policy slots name one `EscrowTerms` object. It releases its whole amount once, by a Release position of the branch's recipient, when the canonical verdict on its external commitment names that branch's outcome. The verdict occupies `K_verdict = H(DSM/escrow/verdict-cell/v1; Y ∥ τ)` first at its leader and proves its own authority from its bytes. Every vault bound to the cell settles only on the outcome it holds: a release naming another is Void, and its key is skipped by `RouteImpossible` arm (v). An escrow vault has no market and no owner close.
+**The specification.** SoFi §19.9 (Amendment S21): an escrow vault is a SoFi vault whose three policy slots name one `EscrowTerms` object. It releases its whole amount once, by a Release position of the branch's recipient, when the canonical verdict on its external commitment names that branch's outcome. The verdict occupies `K_verdict = H(DSM/escrow/verdict-cell/v1; Y ∥ τ)` first at its leader and proves its own authority from its bytes. Every vault bound to the cell settles only on the outcome it holds: a release naming another is Void, and its key is skipped by `RouteImpossible` arm (v). An escrow vault has no market and no owner close. Vaults are linked exactly when they name the same `Y` and byte-identical outcome tables (the table is the authority). The link is derived from each vault's accepted terms and checked by whoever relies on it, and discovery is by cell, so a vault bound to another cell is never found among the linked ones.
 
-**Status.** Specification and rows only (MR-SOFI-0363 to MR-SOFI-0384, all Missing). The implementation follows on this branch after the owner reviews the amendment.
+**Status.** Specification and rows only (MR-SOFI-0363 to MR-SOFI-0386, all Missing). The implementation follows on this branch after the owner reviews the amendment.
 
 **Open.** `FulfillmentMechanism::MultiSignature` stays in the legacy DLV as found. Escrow vaults neither use nor replace it; whether that code is reachable on a production path is a separate sweep.
 
@@ -2744,11 +2744,11 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
 | DSM high-level (MR-DSM) | 277 | 96 | 95 | 39 | 0 | 29 | 18 |
-| SoFi (MR-SOFI) | 384 | 237 | 86 | 40 | 4 | 17 | 0 |
+| SoFi (MR-SOFI) | 386 | 237 | 86 | 42 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **965** | **407** | **200** | **136** | **4** | **64** | **154** |
+| **All** | **967** | **407** | **200** | **138** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3402,7 +3402,7 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 | MR-SOFI-0362 | Met | `dsm::sofi::exercise::recognize_exercise`; `dsm::sofi::wire::objects::SofiExercise`; `dsm_sdk::sdk::sofi_exercise::build_exercise`; `dsm_sdk::sdk::sofi_relay::relay_exercise`; `dsm_sdk::sdk::sofi_flow::walk_for_attempt` | `dsm_sdk::handlers::node_e2e_tests::an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_bytes`; `dsm_sdk::handlers::node_e2e_tests::a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair`; `dsm::sofi::exercise::tests::an_exercise_carries_the_traders_signed_claim_of_its_own_p_and_f`; `dsm::sofi::exercise::tests::an_exercise_whose_fulfillment_does_not_prove_the_traders_device_is_nothing` | §6.66 12e. The exercise carries the trader's signed `C_q`, recognized as `K_root(q)` recognizes it with the body `derive(P, F)`; the next operation at a vault registers a withheld pair from it before passing the key (owner ruling, 2026-10-01). |
 | MR-SOFI-0363 | Missing | — | — | Added by Amendment S21 (§6.73): the slot rule; `VaultTerms` does not exist yet, and terms resolve as a market only. |
 | MR-SOFI-0364 | Missing | — | — | Added by Amendment S21 (§6.73): `EscrowTerms` does not exist yet. |
-| MR-SOFI-0365 | Missing | — | — | Added by Amendment S21 (§6.73): the outcome table and `τ` do not exist yet. |
+| MR-SOFI-0365 | Missing | — | — | Added by Amendment S21 (§6.73): the outcome table, its one encoding and `τ` do not exist yet. |
 | MR-SOFI-0366 | Missing | — | — | Added by Amendment S21 (§6.73): the verdict cell key, seed and leader do not exist yet. |
 | MR-SOFI-0367 | Missing | — | — | Added by Amendment S21 (§6.73): the escrow statement does not exist yet. |
 | MR-SOFI-0368 | Missing | — | — | Added by Amendment S21 (§6.73): recognition at the verdict cell does not exist yet. |
@@ -3410,7 +3410,7 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 | MR-SOFI-0370 | Missing | — | — | Added by Amendment S21 (§6.73): the statement locator and gathered verdict objects do not exist yet. |
 | MR-SOFI-0371 | Missing | — | — | Added by Amendment S21 (§6.73): operation tag 38 does not exist yet. |
 | MR-SOFI-0372 | Missing | — | — | Added by Amendment S21 (§6.73): `creation_accepted` has no escrow form. |
-| MR-SOFI-0373 | Missing | — | — | Added by Amendment S21 (§6.73): the commitment locator does not exist yet. |
+| MR-SOFI-0373 | Missing | — | — | Added by Amendment S21 (§6.73): the cell locator does not exist yet. |
 | MR-SOFI-0374 | Missing | — | — | Added by Amendment S21 (§6.73): `SettlementBody` has no Release branch. |
 | MR-SOFI-0375 | Missing | — | — | Added by Amendment S21 (§6.73): the Release write set does not exist yet. |
 | MR-SOFI-0376 | Missing | — | — | Added by Amendment S21 (§6.73): `validate_release` does not exist yet. |
@@ -3422,6 +3422,8 @@ Outside this round: the anchor firmware's signing call sites turn an error into 
 | MR-SOFI-0382 | Missing | — | — | Added by Amendment S21 (§6.73): S15 resolution reads no verdict cell. |
 | MR-SOFI-0383 | Missing | — | — | Added by Amendment S21 (§6.73): no escrow vault exists, so no stake is locked. |
 | MR-SOFI-0384 | Missing | — | — | Added by Amendment S21 (§6.73): the escrow routes do not exist yet. |
+| MR-SOFI-0385 | Missing | — | — | Added by Amendment S21 (§6.73): no escrow vault is bound to a verdict cell yet, so nothing derives a link. |
+| MR-SOFI-0386 | Missing | — | — | Added by Amendment S21 (§6.73): `escrow.create` and the escrow genesis acceptance do not exist yet. |
 
 ### 8.3 dBTC native specification
 
