@@ -440,6 +440,43 @@ pub fn build_vault_create(
     })
 }
 
+/// An escrow vault's creation (SoFi Amendment S21): the stake of the terms'
+/// token, the creation record, and the exact terms bytes all three of the
+/// genesis state's slots name, carried so Core re-addresses and decodes them
+/// itself. Terms the slots do not name are refused before the owner signs.
+pub fn build_escrow_vault_create(
+    preimage: &VaultGenesisPreimage,
+    terms: &dsm::sofi::wire::EscrowTerms,
+) -> Result<Produced, BuildError> {
+    let addr = dsm::sofi::escrow::terms_address(terms);
+    let state = &preimage.state;
+    if state.market_policy != addr || state.fee_policy != addr || state.release_policy != addr {
+        return Err(BuildError::Wire(SofiWireError::EscrowTermsNotCommitted));
+    }
+    let vault_id = preimage.vault_id();
+    // The stake is the genesis reserve, not a second argument that could
+    // disagree with it.
+    let creation = VaultCreation {
+        vault_id,
+        genesis_root: dsm::sofi::lineage::genesis_root(&vault_id, state)?,
+        amount_a: state.reserve_a,
+        amount_b: state.reserve_b,
+    };
+    let operation = Operation::EscrowVaultCreate {
+        genesis_preimage: preimage.encode()?,
+        creation: creation.encode(),
+        terms: terms.encode(),
+        signature: Vec::new(),
+    };
+    Ok(Produced {
+        // Like a market's creation, it has no object digest of its own and
+        // signs the operation.
+        signs: SigningPayload::OperationBytes(operation.signing_bytes()),
+        operation,
+        publish: Vec::new(),
+    })
+}
+
 /// Everything a draft needs that is not the settlement itself.
 #[derive(Debug, Clone)]
 pub struct TraderContext<'a> {
@@ -619,6 +656,49 @@ pub fn draft_close(
         }],
         pre_balances,
     )
+}
+
+/// What a release names (SoFi Amendment S21): the escrow vault at its head,
+/// this device's setup with it, the verdict cell its terms derive, the
+/// outcome the cell's verdict names, and the whole stake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseNames {
+    pub vault_id: D32,
+    pub parent_root: D32,
+    pub setup_ref: D32,
+    pub verdict_cell: D32,
+    pub outcome: Vec<u8>,
+    pub amount: u64,
+}
+
+/// A release of an escrow vault's whole stake to the branch's recipient, this
+/// device (SoFi Amendment S21): a one-hop route whose `V°` retires the vault.
+pub fn draft_release(
+    names: ReleaseNames,
+    core: DlvCore,
+    ctx: &TraderContext<'_>,
+    local: &LocalLeaves,
+) -> Result<UncheckedDraft, BuildError> {
+    let pre_balances = local
+        .pre_balances(&ctx.trader_core)
+        .map_err(|why| BuildError::LocalLeaves(why.to_string()))?;
+    let leg = PrecommitLeg {
+        vault_id: names.vault_id,
+        parent_root: names.parent_root,
+        setup_ref: names.setup_ref,
+    };
+    let settlement = SettlementBody::Release {
+        vault_id: names.vault_id,
+        parent_root: names.parent_root,
+        setup_ref: names.setup_ref,
+        verdict_cell: names.verdict_cell,
+        outcome: names.outcome,
+        amount: names.amount,
+        trader_core: derive::trader_core_digest(&ctx.trader_core.encode()?),
+        dlv_core: derive::dlv_core_digest(&core.encode()?),
+        closure: pre_e_closure(ctx, &pre_balances)?,
+    };
+    draft(settlement, ctx, vec![core], vec![leg], pre_balances)
 }
 
 /// Stage two: the exercise, against a `P` the trader has already signed.
