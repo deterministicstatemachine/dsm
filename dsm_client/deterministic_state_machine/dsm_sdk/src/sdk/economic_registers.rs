@@ -347,6 +347,14 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
 /// This receiver's frontiers, as its store records them (DSM Amendment A8).
 pub struct StoredFrontiers;
 
+/// Whether `(genesis, device_id)` is this device's own identity.
+fn is_this_device(genesis: &[u8; 32], device_id: &[u8; 32]) -> bool {
+    let own_genesis = crate::sdk::app_state::AppState::get_genesis_hash();
+    let own_device = crate::sdk::app_state::AppState::get_device_id();
+    own_genesis.as_deref() == Some(genesis.as_slice())
+        && own_device.as_deref() == Some(device_id.as_slice())
+}
+
 impl PeerFrontiers for StoredFrontiers {
     fn frontier_below(
         &self,
@@ -354,17 +362,34 @@ impl PeerFrontiers for StoredFrontiers {
         device_id: &[u8; 32],
         position: u64,
     ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
-        let frontier = crate::storage::client_db::economic_lineage::frontier_below(
+        let unreadable = |e: anyhow::Error| {
+            PeerLineageFailure::Incomplete(format!("the frontier store is unreadable: {e}"))
+        };
+        let recorded = crate::storage::client_db::economic_lineage::frontier_below(
             genesis, device_id, position,
         )
-        .map_err(|e| {
-            PeerLineageFailure::Incomplete(format!("the frontier store is unreadable: {e}"))
-        })?;
+        .map_err(unreadable)?;
+        // This device's own lineage is never walked: every credit a wallet
+        // holds from this device names it as a source, and the walk went
+        // back through this device's whole history, position by position.
+        let own = if is_this_device(genesis, device_id) {
+            crate::storage::client_db::economic_lineage::own_frontier_below(
+                genesis, device_id, position,
+            )
+            .map_err(unreadable)?
+        } else {
+            None
+        };
+        let frontier = match (recorded, own) {
+            (Some(r), Some(o)) if o.economic_position() > r.economic_position() => Some(o),
+            (None, Some(o)) => Some(o),
+            (r, _) => r,
+        };
         log::info!(
             "[A8] peer {} below position {position}: walk starts at {}",
             text_id::encode_base32_crockford(device_id),
             match &frontier {
-                Some(f) => format!("the recorded frontier at {}", f.economic_position()),
+                Some(f) => format!("the frontier at {}", f.economic_position()),
                 None => "the activation root".to_string(),
             }
         );
@@ -384,8 +409,16 @@ impl PeerFrontiers for StoredFrontiers {
 /// at the same positions generation after generation, and walking each from
 /// its activation root again re-verified every signature on the way. Only a
 /// validation is kept: a refusal or an incomplete walk is walked again. It is
-/// memory, never a recorded frontier (A8 records one only on acceptance), and
-/// it is never consulted for any other position.
+/// memory, never a recorded frontier (A8 records one only on acceptance).
+///
+/// A walk for another position of the same peer starts from the highest
+/// coordinate this process validated below it ([`RememberedFrontiers`]), when
+/// that is above the receiver's recorded frontier: the coordinate a walk
+/// reached ([`PeerFrontier::reached_by`]) and every credit source's frontier
+/// it validated on the way stand at the end of a complete validated segment
+/// (owner ruling 2026-10-01), so only the suffix past them is walked. A
+/// vault's chain names its traders at a new position every generation, and
+/// each was walked from the recorded frontier again.
 pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -404,23 +437,70 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
         return Ok(known);
     }
     validated_peers().walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let validated = resolve_peer_lineage(
+    let (validated, sources) = validate_peer_lineage(
         fetcher,
         expected_network_id,
         peer_genesis,
         peer_devid,
         peer_economic_position,
+        &RememberedFrontiers {
+            network: expected_network_id,
+        },
         conditional,
-    )
-    .map(|lineage| lineage.into_parts().0)?;
+    )?
+    .into_parts();
+    log::info!(
+        "[A8] peer {} validated at position {peer_economic_position}",
+        text_id::encode_base32_crockford(peer_devid)
+    );
+    for reached in PeerFrontier::reached_by(&validated).into_iter().chain(sources) {
+        validated_peers().reach(expected_network_id, reached);
+    }
     validated_peers().keep(key, validated.clone());
     Ok(validated)
 }
 
+/// The frontiers a walk for [`resolve_peer`] starts from: the receiver's
+/// recorded frontier below the position, or the highest coordinate this
+/// process validated below it on `network`, whichever is higher.
+pub(crate) struct RememberedFrontiers<'a> {
+    pub(crate) network: &'a [u8],
+}
+
+impl PeerFrontiers for RememberedFrontiers<'_> {
+    fn frontier_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
+        let recorded = StoredFrontiers.frontier_below(genesis, device_id, position)?;
+        let floor = recorded.as_ref().map_or(0, PeerFrontier::economic_position);
+        match validated_peers().reached_below(self.network, genesis, device_id, position) {
+            Some(remembered) if remembered.economic_position() > floor => {
+                log::info!(
+                    "[A8] peer {} below position {position}: walk starts at {}, which this \
+                     process validated",
+                    text_id::encode_base32_crockford(device_id),
+                    remembered.economic_position()
+                );
+                Ok(Some(remembered))
+            }
+            Some(_) | None => Ok(recorded),
+        }
+    }
+}
+
 /// The peer positions this process validated (see [`resolve_peer`]).
 type PeerKey = (Vec<u8>, [u8; 32], [u8; 32], u64);
+/// A peer on a network: whose validated coordinates [`ValidatedPeers`] keeps.
+type PeerOn = (Vec<u8>, [u8; 32], [u8; 32]);
 pub(crate) struct ValidatedPeers {
     kept: std::sync::Mutex<std::collections::HashMap<PeerKey, ValidatedPeerTransition>>,
+    /// The coordinates walks validated, by peer and position.
+    reached: std::sync::Mutex<
+        std::collections::HashMap<PeerOn, std::collections::BTreeMap<u64, PeerFrontier>>,
+    >,
     /// The walks [`resolve_peer`] made: each question the memory did not answer.
     walks: std::sync::atomic::AtomicU64,
 }
@@ -442,6 +522,48 @@ impl ValidatedPeers {
     fn get(&self, key: &PeerKey) -> Option<ValidatedPeerTransition> {
         self.kept().get(key).cloned()
     }
+    /// The validated coordinates. As [`Self::kept`]: each is inserted in one
+    /// step, so a panic leaves whole entries.
+    fn reached(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        std::collections::HashMap<PeerOn, std::collections::BTreeMap<u64, PeerFrontier>>,
+    > {
+        match self.reached.lock() {
+            Ok(reached) => reached,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+    /// Keep a coordinate a complete walk validated on `network`.
+    fn reach(&self, network: &[u8], frontier: PeerFrontier) {
+        let mut reached = self.reached();
+        if reached.len() >= VALIDATED_PEERS_MAX {
+            reached.clear();
+        }
+        let positions = reached
+            .entry((network.to_vec(), *frontier.genesis(), *frontier.device_id()))
+            .or_default();
+        if positions.len() >= VALIDATED_PEERS_MAX {
+            positions.clear();
+        }
+        positions.insert(frontier.economic_position(), frontier);
+    }
+    /// The highest coordinate validated for the peer on `network` strictly
+    /// below `position`.
+    fn reached_below(
+        &self,
+        network: &[u8],
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Option<PeerFrontier> {
+        self.reached()
+            .get(&(network.to_vec(), *genesis, *device_id))?
+            .range(..position)
+            .next_back()
+            .map(|(_, frontier)| frontier.clone())
+    }
     fn keep(&self, key: PeerKey, validated: ValidatedPeerTransition) {
         let mut kept = self.kept();
         if kept.len() >= VALIDATED_PEERS_MAX {
@@ -456,12 +578,14 @@ impl ValidatedPeers {
     #[cfg(test)]
     pub(crate) fn forget(&self) {
         self.kept().clear();
+        self.reached().clear();
     }
 }
 
 pub(crate) fn validated_peers() -> &'static ValidatedPeers {
     static PEERS: once_cell::sync::Lazy<ValidatedPeers> = once_cell::sync::Lazy::new(|| ValidatedPeers {
         kept: std::sync::Mutex::new(std::collections::HashMap::new()),
+        reached: std::sync::Mutex::new(std::collections::HashMap::new()),
         walks: std::sync::atomic::AtomicU64::new(0),
     });
     &PEERS

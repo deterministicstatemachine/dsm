@@ -117,13 +117,19 @@ fn main() -> Result<(), String> {
     runtime.block_on(serve(args, host, relay_tls))
 }
 
+/// Worker threads in front of the SDK's ingress.
+const SDK_WORKERS: usize = 16;
+
 async fn serve(
     args: Args,
     host: identity::Account,
     relay_tls: tls::RelayTls,
 ) -> Result<(), String> {
     dsm_sdk::sdk::tls_transport_sdk::ensure_rustls_crypto_provider();
-    let sdk = dispatch::Sdk::start(4)?;
+    // A call that walks a lineage waits on storage-node reads for seconds; the
+    // cheap calls (a status not answered yet, the session listing) must not
+    // queue behind a few of those.
+    let sdk = dispatch::Sdk::start(SDK_WORKERS)?;
     let record = Arc::new(activity::Record::new(host.clone()));
     sdk.record_into(record.clone())?;
     let requests_changed = Arc::new(tokio::sync::Notify::new());

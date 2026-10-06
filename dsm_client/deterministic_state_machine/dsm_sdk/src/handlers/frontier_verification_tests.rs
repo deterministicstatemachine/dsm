@@ -557,3 +557,95 @@ async fn a_validated_position_is_not_walked_again_by_the_same_process() {
     assert_eq!(validated_root(&walked), validated_root(&first));
     assert_eq!(peers.walks(), before + 2, "with nothing remembered, the question walks");
 }
+
+/// A walk starts where this process already validated the peer. A pays B and
+/// then C, and neither takes the payment in, so no device here recorded a
+/// frontier for A. B validates A at the first payment; the walk to the
+/// second starts there, not at A's activation root, and validates the same
+/// root a walk from the activation root does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_walk_starts_at_the_position_the_process_validated_below_it() {
+    use dsm::economic::peer_lineage::PeerFrontiers;
+    let (p, c) = three_devices().await;
+    let paid = |p: &Pair| {
+        p.a.enter();
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .expect("A admitted its debit")
+            .0
+    };
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let first = paid(&p);
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let second = paid(&p);
+    assert!(second > first);
+    p.b.enter();
+    let peers = crate::sdk::economic_registers::validated_peers();
+    peers.forget();
+    let start = || {
+        crate::sdk::economic_registers::RememberedFrontiers { network: NETWORK }
+            .frontier_below(&p.a.genesis, &p.a.device_id, second)
+            .expect("the frontiers")
+            .map(|f| f.economic_position())
+    };
+    assert_eq!(start(), None, "B holds no frontier for A: a walk starts at its activation root");
+    verify(p.a.genesis, p.a.device_id, first)
+        .await
+        .expect("A's lineage validates at its first payment");
+    assert_eq!(start(), Some(first), "the walk to the second payment starts at the first");
+    let from_memory = verify(p.a.genesis, p.a.device_id, second)
+        .await
+        .expect("A's lineage validates at its second payment");
+
+    peers.forget();
+    let from_activation = verify(p.a.genesis, p.a.device_id, second)
+        .await
+        .expect("A's lineage validates from its activation root");
+    assert_eq!(
+        from_memory.validated_root().economic_root(),
+        from_activation.validated_root().economic_root(),
+        "the walk from what the process validated reaches the same root"
+    );
+}
+
+/// A device's own lineage is never walked: its admitted history is its
+/// frontier for itself. A pays B and then C; from A, the frontier for A below
+/// its second payment is its first, and A's lineage validates there to the
+/// root A admitted. From B, which accepted nothing of A's, there is none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_devices_own_lineage_starts_at_its_own_admitted_history() {
+    use dsm::economic::peer_lineage::PeerFrontiers;
+    let (p, c) = three_devices().await;
+    let paid = |p: &Pair| {
+        p.a.enter();
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .expect("A admitted its debit")
+    };
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let (first, _) = paid(&p);
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let (second, second_root) = paid(&p);
+    assert!(second > first);
+    crate::sdk::economic_registers::validated_peers().forget();
+    let start = || {
+        crate::sdk::economic_registers::StoredFrontiers
+            .frontier_below(&p.a.genesis, &p.a.device_id, second)
+            .expect("the frontiers")
+            .map(|f| f.economic_position())
+    };
+    p.a.enter();
+    assert_eq!(start(), Some(first), "A's own lineage starts at its own first payment");
+    let own = verify(p.a.genesis, p.a.device_id, second)
+        .await
+        .expect("A's own lineage validates");
+    assert_eq!(own.validated_root().economic_root(), second_root);
+    p.b.enter();
+    assert_eq!(start(), None, "B holds no frontier for A");
+}
