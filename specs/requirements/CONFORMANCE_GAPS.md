@@ -2964,16 +2964,31 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 - The lock fact's owner comparison is covered by its terms comparison (a template's refunds name its owner), so removing the owner comparison alone stays green; the mutation removed the vault identification as a whole.
 - No phone-rig run and no `dsm-app-host` real-connection run of a match; the in-process relay carries every step.
 
+### 6.77 A referee decided staked matches: computed escrow vaults specified (`feat/computed-escrow-core`, DSM Amendment A13, SoFi Amendment S22, 2026-10-06)
+
+**The finding.** A staked match under A12 is released by a verdict the application's key signs as an S21 escrow signer. The application is the referee: if it lies, is compromised or stops answering, the wrong player is paid or both stakes stay locked. Nothing in Core can release a stake on anything but signatures over an outcome label.
+
+**The ruling.** Owner, 2026-10-06 (quoted in Amendments A13 and S22): "the outcome is computed, not decided". A computed outcome is a generic primitive with no game logic in Core; no clock and no deadline; the application relays the moves, an accepted residual trust; whether a match can end level is the program's concern.
+
+**The specification.** SoFi §19.10 (Amendment S22). An escrow vault's kind is the class of its terms: `0x0063` signed, unchanged; `0x0067` computed. Computed terms pin a program `P` and a setup digest and commit one session key per side, and derive a match cell `K_match` and a start cell `K_start`. The match transcript is canonical entries (`0x0068`) under a head chain, each side's entries covered by its session key. A `TranscriptOutcome` (`0x0069`) occupies the match cell when its entries round-trip, its chain recomputes, its signatures verify and the registered `P` computes a branch label at its last entry and not before. An `EquivocationProof` (`0x006A`), two heads one key signed at one index, occupies it for the other side. A Start (side B) or a Withdraw (side A), `0x006B`, races at the start cell: Withdraw voids the match, and the match cell counts only once Start holds. An unregistered `P` establishes nothing. The Release, its write set and its resolution are §19.9's, with `verdict_cell = K_match`.
+
+**Status.** Specified; rows MR-DSM-0301 to MR-DSM-0303 and MR-SOFI-0387 to MR-SOFI-0396 added Missing.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0301 to MR-DSM-0303 | — | Missing | Added by Amendment A13. No escrow outcome is computed. |
+| MR-SOFI-0387 to MR-SOFI-0396 | — | Missing | Added by Amendment S22. No computed escrow terms, transcript or occupant exists. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 300 | 118 | 96 | 39 | 0 | 29 | 18 |
-| SoFi (MR-SOFI) | 386 | 261 | 86 | 18 | 4 | 17 | 0 |
+| DSM high-level (MR-DSM) | 303 | 118 | 96 | 42 | 0 | 29 | 18 |
+| SoFi (MR-SOFI) | 396 | 261 | 86 | 28 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **990** | **453** | **201** | **114** | **4** | **64** | **154** |
+| **All** | **1003** | **453** | **201** | **127** | **4** | **64** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3281,6 +3296,9 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-DSM-0298 | Met | `dsm_sdk::sdk::connect::grant::decide`; `dsm_sdk::sdk::connect::grant::scopes_from_wire`; `dsm_sdk::sdk::connect::wager::is_match_of` | `dsm_sdk::sdk::connect::grant::tests::an_escrow_scope_caps_what_it_may_lock_as_a_pay_scope_does`; `dsm_sdk::sdk::connect::grant::tests::a_lock_past_the_escrow_caps_waits_for_the_player`; `dsm_sdk::sdk::connect::grant::tests::a_collect_is_in_scope_whenever_an_escrow_scope_stands`; `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_nobody_joined_is_voided_and_the_stake_returns` | A grant's spend is counted per token across its spending scopes (§6.76 Open). |
 | MR-DSM-0299 | Met | `dsm_sdk::handlers::connect_routes`; `dsm_sdk::sdk::escrow_flow::locked`; `dsm_sdk::sdk::escrow_flow::verdict` | `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_the_game_referees_pays_the_winner_both_stakes` | `connect.app.status` reads and walks the cell's vaults itself; an answer establishes nothing. |
 | MR-DSM-0300 | Met | `dsm_sdk::sdk::connect::wager`; `dsm_sdk::sdk::escrow_flow::create`; `dsm_sdk::sdk::escrow_flow::release` | `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_the_game_referees_pays_the_winner_both_stakes` | The template is the SDK's; Core is unchanged by A12, and R decides through `escrow.adjudicate`. |
+| MR-DSM-0301 | Missing | — | — | Amendment A13 (§6.77). No computed outcome exists in Core. |
+| MR-DSM-0302 | Missing | — | — | Amendment A13 (§6.77). No computed outcome exists in Core. |
+| MR-DSM-0303 | Missing | — | — | Amendment A13 (§6.77). No computed outcome exists in Core. |
 
 ### 8.2 SoFi settlement specification
 
@@ -3672,6 +3690,16 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-SOFI-0384 | Met | `dsm_sdk::handlers::escrow_routes`; `dsm_sdk::sdk::escrow_flow::party`; `dsm_sdk::sdk::escrow_flow::create`; `dsm_sdk::sdk::escrow_flow::sign_outcome`; `dsm_sdk::sdk::escrow_flow::adjudicate`; `dsm_sdk::sdk::escrow_flow::verdict`; `dsm_sdk::sdk::escrow_flow::release`; `dsm_sdk::sdk::escrow_flow::locked`; `dsm_sdk::sdk::escrow_flow::own_vaults` | `dsm_sdk::handlers::escrow_e2e_tests::the_winner_takes_both_stakes_once`; `dsm_sdk::handlers::escrow_e2e_tests::a_referee_who_signs_both_outcomes_settles_both_vaults_on_the_first`; `dsm_sdk::handlers::escrow_e2e_tests::a_verdict_outside_the_authority_cannot_occupy_the_cell`; `dsm_sdk::handlers::escrow_e2e_tests::a_joint_cancel_and_a_referee_result_cannot_both_settle`; `dsm_sdk::handlers::escrow_e2e_tests::an_escrow_vault_has_no_market_and_no_owner_close` | SoFi Amendment S21 (§6.74). All eight routes run on the nodes through the router; an `escrow.` method it does not declare is refused. |
 | MR-SOFI-0385 | Met | `dsm::sofi::escrow::verdict_cell_of` | `dsm::sofi::escrow::tests::vaults_share_a_cell_exactly_when_they_share_y_and_the_table`; `dsm_sdk::handlers::escrow_e2e_tests::an_escrow_vault_has_no_market_and_no_owner_close` | SoFi Amendment S21 (§6.74). |
 | MR-SOFI-0386 | Met | `dsm_sdk::sdk::escrow_flow::create`; `dsm_sdk::sdk::escrow_flow::counterpart_linked` | `dsm_sdk::handlers::escrow_e2e_tests::an_escrow_vault_has_no_market_and_no_owner_close`; `dsm_sdk::handlers::escrow_e2e_tests::the_winner_takes_both_stakes_once` | SoFi Amendment S21 (§6.74). A stake locked against a vault bound to another verdict cell is refused before anything is published or debited. |
+| MR-SOFI-0387 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0388 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0389 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0390 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0391 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0392 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0393 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0394 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0395 | Missing | — | — | Amendment S22 (§6.77). Not built. |
+| MR-SOFI-0396 | Missing | — | — | Amendment S22 (§6.77). Not built. |
 
 ### 8.3 dBTC native specification
 

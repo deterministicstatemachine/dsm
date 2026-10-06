@@ -794,6 +794,21 @@ TAG_DSM_ESCROW_VERDICT_OBJECT               DSM/escrow/verdict-object/v1        
 TAG_DSM_ESCROW_CELL_LOCATOR                 DSM/escrow/cell-locator/v1                locator of the escrow vaults bound to K_verdict
 TAG_DSM_ESCROW_STATEMENT_LOCATOR            DSM/escrow/statement-locator/v1           locator of gathered signatures for (K_verdict, o)
 
+Computed escrow vaults (Amendment S22), constants in CORE/common/domain_tags/dsm/misc/escrow.rs.
+TAG_DSM_ESCROW_TERMS_OBJECT also addresses ComputedEscrowTerms, and TAG_DSM_ESCROW_CELL_LOCATOR also locates the vaults bound to K_match.
+TAG_DSM_ESCROW_COMPUTED_TABLE               DSM/escrow/computed-table/v1              τ_c
+TAG_DSM_ESCROW_COMPUTED_MATCH               DSM/escrow/computed-match/v1              K_match
+TAG_DSM_ESCROW_COMPUTED_MATCH_SEED          DSM/escrow/computed-match-seed/v1         s_match, the seed of the match cell
+TAG_DSM_ESCROW_COMPUTED_START               DSM/escrow/computed-start/v1              K_start
+TAG_DSM_ESCROW_COMPUTED_START_SEED          DSM/escrow/computed-start-seed/v1         s_start, the seed of the start cell
+TAG_DSM_ESCROW_COMPUTED_START_STATEMENT     DSM/escrow/computed-start-statement/v1    m_start
+TAG_DSM_ESCROW_COMPUTED_SETUP               DSM/escrow/computed-setup/v1              the setup digest
+TAG_DSM_ESCROW_COMPUTED_OCCUPANT            DSM/escrow/computed-occupant/v1           a reader's name for the occupant of K_match or K_start
+TAG_DSM_ESCROW_TRANSCRIPT                   DSM/escrow/transcript/v1                  h_0
+TAG_DSM_ESCROW_TRANSCRIPT_STEP              DSM/escrow/transcript-step/v1             h_i
+TAG_DSM_ESCROW_TRANSCRIPT_HEAD              DSM/escrow/transcript-head/v1             m_head(i, h_i)
+TAG_DSM_ESCROW_MOVE_COMMIT                  DSM/escrow/move-commit/v1                 a Commit's commitment
+
 
 <!-- spec-section: SOFI-014-2 -->
 #### 14.2 Object classes
@@ -839,6 +854,11 @@ pre
 0x0064           ESCROW_VERDICT                                a verdict on an external commitment (Amendment S21)
 0x0065           SOFI_SETTLEMENT_RELEASE                       B ◦ , Release branch (Amendment S21)
 0x0066           SOFI_ROUTE_DIGEST_RELEASE                     route digest preimage, Release (Amendment S21)
+0x0067           ESCROW_COMPUTED_TERMS                         a computed escrow vault's terms (Amendment S22)
+0x0068           ESCROW_TRANSCRIPT_ENTRY                       one entry of a match transcript (Amendment S22)
+0x0069           ESCROW_TRANSCRIPT_OUTCOME                     a transcript occupying a match cell (Amendment S22)
+0x006A           ESCROW_EQUIVOCATION_PROOF                     two heads one session key signed at one index (Amendment S22)
+0x006B           ESCROW_MATCH_START                            Start or Withdraw at a start cell (Amendment S22)
 
 
 <!-- Source PDF page 19 -->
@@ -1484,6 +1504,116 @@ An escrow vault is Explainer §59's escrow: a DLV with precommitted branches (§
 | `escrow.vaults` | the escrow vaults this device created, each walked to its head |
 
 This amends §4 (SoFi also creates and releases escrow vaults), §11 (two indexes), §13 (the verdict facts), §14.1 and §14.2 (the escrow tags and classes `0x0063` to `0x0066`), §15, §19.1 (the slot rule and escrow status), §19.3 to §19.5 (the Release branch), §19.7 (an escrow vault has no close authority), §19.8 (the escrow form of GenesisAccepted), §23.2, §23.5 (arm (v)), §24 (rungs 7 and 8), §27 (the escrow routes), §28 (`EscrowVaultCreate`, variant 38 of `Operation`), §32 (a Close against an escrow vault is Invalid) and Amendment S15 (the verdict is among a Release position's public objects).
+
+<!-- spec-section: SOFI-019-10 -->
+#### 19.10 Computed escrow vaults (Amendment S22)
+
+> **Amendment S22 (owner, 2026-10-06) — computed escrow vaults: a vault released by what a pinned program computes from a committed transcript.** This applies DSM Amendment A13 to S21's escrow vaults. Under S21 a match's stakes were released by a verdict its referee signed, so the referee decided who was paid. The owner's ruling, 2026-10-06: "the outcome is computed, not decided." The owner ruled the same day: a computed outcome is a generic primitive and no game logic enters Core (S21's ruling stands in spirit); no clock and no deadline enters it; the application relays the players' moves, a residual trust the owner accepted; and whether a match can end level is the program's concern.
+
+A computed escrow vault is an S21 escrow vault whose outcome is computed. Everything §19.9 says of an escrow vault holds for it: one held amount of one token, released whole and once along a precommitted branch by the recipient's own Release position, with no market, no owner close and no partial release. The slot rule, the Release branch, its closed write set and its static budget are §19.9's. Two things differ. The authority is a program and two session keys, not a signer set per outcome. And the release stands on what a match cell computes, not on a verdict cell.
+
+**The kind is the class**
+
+- The three slots of an escrow vault name `A_T = immutable_addr(DSM/escrow/terms-object/v1, CCB bytes)` (§19.9). The class of those bytes decides the kind: `0x0063 EscrowTerms` is a signed escrow vault and `0x0067 ComputedEscrowTerms` a computed one. Bytes of any other class are no escrow terms, and the genesis is refused.
+- The signed kind is unchanged byte for byte: its terms, verdict, cell, statement and release are §19.9's.
+
+**`ComputedEscrowTerms`**, class `0x0067`, schema 1.
+
+| Field | Content |
+|---|---|
+| `token` | digest32: the policy commit of the held token |
+| `external_commitment` | digest32: `Y = H(DSM/external/v1 ∥ X)` (Explainer §60). DSM never reads `X`. |
+| `table` | the computed table `T_c`, below |
+| `branches` | exactly three, in this order: `a-wins`, `b-wins`, `void`. Each is the label (`u32be(|o|) ∥ o`), `recipient_genesis` and `recipient_device_id`. |
+
+| Table field | Content |
+|---|---|
+| `program` | digest32: `P`, the hash that pins the outcome program |
+| `setup_digest` | digest32: `H(DSM/escrow/computed-setup/v1; setup)`, the program's input fixed at lock. DSM never interprets `setup`. |
+| `session_a`, `session_b` | `(signature_alg, public_key)` each: side A's and side B's session keys (SPHINCS+, §14.3). The two keys differ. |
+
+- `a-wins` is side A's win, `b-wins` side B's, and `void` is the outcome a Withdraw gives (below). A program may also compute `void`.
+- The table's bytes are `P ∥ setup_digest ∥ u16be(alg_a) ∥ u32be(|key_a|) ∥ key_a ∥ u16be(alg_b) ∥ u32be(|key_b|) ∥ key_b`. Its digest is `τ_c = H(DSM/escrow/computed-table/v1; table bytes)`.
+
+**The cells**
+
+- **The match cell.** `K_match = H(DSM/escrow/computed-match/v1; Y ∥ τ_c)`, with seed `s_match = H(DSM/escrow/computed-match-seed/v1; K_match)`. It holds the outcome.
+- **The start cell.** `K_start = H(DSM/escrow/computed-start/v1; K_match)`, with seed `s_start = H(DSM/escrow/computed-start-seed/v1; K_start)`. It holds whether the match started.
+- Each cell's leader is `FisherYates(s, S)[0]` (§7) over the network's pinned set, and each is written by the procedure of §8 with route-chain finality (Amendment S4). Anyone may write either (§9). A reader names the occupant of either cell by `H(DSM/escrow/computed-occupant/v1; K ∥ u32be(|o|) ∥ o)`, where `o` is the occupant's label (`start` and `withdraw` at the start cell).
+- **Linked vaults.** Two computed escrow vaults are linked exactly when their terms name the same `Y` and byte-identical tables; they then have the same `K_match` and `K_start`. The two players' terms differ only in their recipients, which the table does not contain. Linking is derived from each vault's accepted terms, as in §19.9.
+
+**The transcript**
+
+- **An entry.** `TranscriptEntry`, class `0x0068`, schema 1: `index` (`u32be`, from 1), `side` (`u8`: 1 is A, 2 is B) and `kind`, one of:
+  - `Commit` (`u8` 1): `commitment`, digest32, `H(DSM/escrow/move-commit/v1; salt ∥ u32be(|move|) ∥ move)`;
+  - `Reveal` (`u8` 2): `salt`, digest32, and `move`, 1 to 64 bytes;
+  - `Resign` (`u8` 3): nothing.
+
+  An entry carries no signature; the signature over it travels beside it.
+- **The head chain.** `h_0 = H(DSM/escrow/transcript/v1; K_match ∥ setup_digest)`, and `h_i = H(DSM/escrow/transcript-step/v1; h_{i−1} ∥ CCB(entry_i))`.
+- **The head statement.** A side signs the head of its own entry `i` as `m_head(i, h_i) = H(DSM/escrow/transcript-head/v1; K_match ∥ u32be(i) ∥ h_i)`, under its session key. Since `h_i` commits every entry before it, that signature covers the whole transcript up to `i`.
+- **Commit, then reveal.** A move is committed first and revealed later, so a side that moves second in a turn learns nothing of the first move until both are committed.
+- **The canonical transcript.** Entries `entry_1 … entry_n` are a canonical transcript for a table and a setup exactly when:
+  1. every entry's bytes decode as a `TranscriptEntry` and re-encode to exactly those bytes. An entry that does not round-trip is no entry, and nothing after it counts;
+  2. `entry_i` names index `i`, and side 1 or 2;
+  3. a `Commit` is made only by a side with no unopened commitment; a `Reveal` opens its side's unopened commitment, and only when it hashes to it; a `Resign` is the last entry;
+  4. `H(DSM/escrow/computed-setup/v1; setup)` is the table's `setup_digest`, and `h_0 … h_n` recompute.
+
+  The order of the checks is fixed: decode, re-encode, require byte equality, recompute the chain, then verify signatures.
+- **What the program sees.** The opened entries, in order: each `Reveal`, with its side, its own index, the index of the `Commit` it opened and its move; and a `Resign`, with its side and index. An unopened commitment is not shown.
+
+**The program**
+
+- `P(setup, opened)` returns `Done(o)`, `Incomplete`, or a fault. It is deterministic and total over the bounds above. It keeps no state, calls nothing, reads no clock and fetches nothing (Explainer Amendment A13).
+- A verifier evaluates `P` only when `P` is registered with it under the hash the table pins. An unregistered `P` leaves every fact of the match cell not established. It is never Invalid, and no other program is tried in its place.
+- Core does the canonical, chain and signature checks before `P` sees anything. `P`'s answer counts only when `o` is a label of the branches.
+
+**What occupies the match cell**
+
+The value that counts at `K_match` is the first object at its leader that is recognized there. Everything else at the cell counts as nothing. Two kinds of object are recognized, each from its own bytes alone (Amendment S20).
+
+- **`TranscriptOutcome`**, class `0x0069`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `setup` (1 to 16384 bytes), `entries` (1 to 1024, each `u32be(|entry|) ∥ entry`), and `signatures`: 1 or 2 entries `(side, signature)`, strictly ascending by side. It is recognized at `K` when:
+  1. `H(DSM/escrow/computed-match/v1; Y ∥ τ_c(table)) = K`;
+  2. the entries are a canonical transcript for the table and the setup;
+  3. the sides holding a signature are exactly the sides that made an entry. Each side's signature verifies, under that side's session key, over `m_head(i, h_i)` for the last entry `i` that side made;
+  4. the last entry is a `Reveal` or a `Resign`;
+  5. `P` is registered, `P(setup, opened)` is `Done(o)` with `o` a label of the branches, and `P` over the opened entries without the last is `Incomplete`.
+
+  Its outcome is `o`. A truncated transcript is never recognized: `P` gives it `Incomplete`. Condition 5 makes the occupant exactly the transcript at the entry that ended the match.
+- **`EquivocationProof`**, class `0x006A`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `side`, `index`, and two `(head, signature)` pairs with the heads strictly ascending. It is recognized at `K` when `Y` and the table derive `K`, and both signatures verify, under the session key of `side`, over `m_head(index, head)` for their own heads. Its outcome is the other side's win: `b-wins` when side A equivocated, `a-wins` when side B did.
+  - A side signs one head per index of its own entries, ever. Two different heads signed at one index are proof that the key's holder cheated.
+- The first recognized occupant holds the cell for good (§8, consequences 2 and 3), whatever arrives after it.
+
+**The start cell: Start or Withdraw**
+
+- **`MatchStart`**, class `0x006B`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `kind` (`u8`: 1 Start, 2 Withdraw) and a `signature` over `m_start = H(DSM/escrow/computed-start-statement/v1; K_start ∥ u8(kind))`. It is recognized at `K` when `Y` and the table derive `K_start = K`; a Start's signature verifies under side B's session key, and a Withdraw's under side A's.
+- Side B writes Start when it locks. Side A may write Withdraw while its vault is the only one bound to the cell. Whichever is first at the start cell's leader holds it for good. No clock is involved.
+
+**The facts** (§13), for a computed escrow vault:
+
+- `VerdictHeld(K_match, void)` holds when a Withdraw holds `K_start`, in any state. `VerdictFinal(K_match, void)` holds when that Withdraw is final there.
+- `VerdictHeld(K_match, o)` holds when a Start holds `K_start` and a recognized occupant on `o` holds `K_match`, each in any state. `VerdictFinal(K_match, o)` holds when both are final, each shown by a completion proof (Amendment S10).
+- Nothing else holds. Until a Start holds `K_start`, the match cell is not read and counts for nothing. Once a Withdraw holds `K_start`, the match cell never counts.
+
+With these facts, the resolution of §19.9 is unchanged: `ConsumedRoute` (§23.2), arm (v) of `RouteImpossible` (§23.5), and rungs 7 and 8 (§24) read `VerdictHeld` and `VerdictFinal` at `B°.verdict_cell` as they do for a signed escrow vault. Every vault bound to `K_match` settles only on the one outcome those facts give.
+
+**Creation and release**
+
+- **Creation.** `EscrowVaultCreate` (§19.9) carries the exact `ComputedEscrowTerms` bytes in place of `EscrowTerms`. Its debit, record and write set are §19.9's, with `terms.token` the held token.
+- **GenesisAccepted** takes §19.9's escrow form, except that the carried bytes decode as `ComputedEscrowTerms` and re-derive `A_T`.
+- **Publication.** The genesis preimage is indexed under `vault_genesis_locator(v)` and under `escrow_cell_locator(K_match)`. Discovery by cell finds exactly the vaults linked to it, and carries no authority.
+- **Static validity of a Release** against a computed vault is §19.9's, with `verdict_cell = K_match(terms.external_commitment, τ_c(terms.table))` in place of `K_verdict`. The outcome names one of the three branches, and the trader is its recipient.
+
+**Liveness, with no clock**
+
+- A match that is not finished waits. A side that stops playing holds both stakes until it returns. It cannot gain by stopping: a transcript with no end computes no outcome, and the other side's stake stays locked with its own.
+- `Resign` is always open to a side that wants out, and its outcome is the program's.
+- Before Start holds, Withdraw voids the match and each stake returns to its owner. A wallet signs no entry until Start is final at `K_start`, so no move is ever made in a match that can still be withdrawn.
+- **Residual trust (owner, 2026-10-06).** The application relays the moves between the players' wallets. It can delay or withhold a move, which only stalls the match. It cannot forge a move, because every entry is covered by its side's session key.
+
+**Bounds.** At most 1024 entries, a move of at most 64 bytes, a setup of at most 16384 bytes, and two SPHINCS+ signatures. With these bounds, the largest `TranscriptOutcome` fits within a cell's value bound (`route_chain::MAX_VALUE_LEN`), and so does an `EquivocationProof`.
+
+This amends §13 (the verdict facts of a computed vault), §14.1 and §14.2 (the computed escrow tags and classes `0x0067` to `0x006B`), §19.8 (the computed form of GenesisAccepted), and §19.9 (an escrow vault's kind is the class of its terms; a Release against a computed vault names `K_match`).
 
 
 ## Part IV — Predicates and resolution
