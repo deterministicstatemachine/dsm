@@ -40,8 +40,17 @@ use std::sync::Arc;
 /// normally follows this device's acceptance within seconds.
 const SEND_CERT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// The pause between those syncs.
+/// The longest pause between those syncs.
 const SEND_CERT_POLL: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// The pause before `wallet.send` syncs again for the recipient's finality
+/// certificate: until the background poller completes a cycle after the
+/// `before`-th — an arrival the inbox waiter sees starts one at once, and its
+/// sync takes the certificate — and [`SEND_CERT_POLL`] at most, so a send
+/// with no poller running still syncs on its own.
+async fn certificate_pause(before: u64) {
+    crate::sdk::inbox_poller::cycle_after(before, SEND_CERT_POLL).await;
+}
 use tokio::sync::Mutex;
 
 use super::response_helpers::{pack_envelope_ok, err};
@@ -578,6 +587,7 @@ impl AppRouterImpl {
         // send-ready authority below still decides.
         let cert_wait_started = std::time::Instant::now();
         loop {
+            let cycles_before = crate::sdk::inbox_poller::cycles_completed();
             match crate::storage::client_db::counterparty_awaits_peer_finalization(&to_device_id) {
                 Ok(awaiting) if awaiting => {}
                 Ok(_) => break,
@@ -599,7 +609,17 @@ impl AppRouterImpl {
                 "[wallet.send] waiting for the recipient's finality certificate ({} ms so far)",
                 waited.as_millis()
             );
-            tokio::time::sleep(SEND_CERT_POLL).await;
+            certificate_pause(cycles_before).await;
+            // The poller's cycle may have taken the certificate already.
+            match crate::storage::client_db::counterparty_awaits_peer_finalization(&to_device_id) {
+                Ok(awaiting) if awaiting => {}
+                Ok(_) => break,
+                Err(e) => {
+                    return err(format!(
+                        "wallet.send: the acceptance finality state is unreadable: {e}"
+                    ))
+                }
+            }
             match self
                 .run_storage_sync_request(crate::sdk::inbox_poller::poll_sync_request())
                 .await
@@ -2712,6 +2732,32 @@ fn decide_counterparty(
             .map(dsm::types::identifiers::NodeId::new)
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod certificate_pause_tests {
+    use super::{certificate_pause, SEND_CERT_POLL};
+
+    /// A send waiting for the recipient's certificate syncs again when the
+    /// poller's next cycle completes, not after a fixed pause: a cycle
+    /// completed 20 ms in ends the pause long before its bound.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_send_waiting_for_a_certificate_wakes_with_the_pollers_cycle() {
+        let before = crate::sdk::inbox_poller::cycles_completed();
+        let started = std::time::Instant::now();
+        let cycle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            crate::sdk::inbox_poller::complete_cycle_for_test();
+        });
+        certificate_pause(before).await;
+        let paused = started.elapsed();
+        cycle.await.expect("the cycle");
+        assert!(
+            paused < SEND_CERT_POLL / 3,
+            "the pause ran {paused:?}, past the cycle that ended it"
+        );
+    }
 }
 
 #[cfg(test)]
