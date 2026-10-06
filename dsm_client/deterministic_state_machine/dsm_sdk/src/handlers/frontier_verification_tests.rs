@@ -523,3 +523,37 @@ async fn one_walk_validates_a_sources_segment_once() {
         );
     }
 }
+
+/// A position once validated is validated: its lineage is fixed by the steps
+/// that committed to it. A pays B; a verifier asked again for A's lineage at
+/// the same position answers from what this process already validated, with
+/// the same validated root and no second walk (a walk re-verifies every
+/// step's signatures, from the activation root for a peer met only by
+/// verification). Once that memory is gone, the next question walks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_validated_position_is_not_walked_again_by_the_same_process() {
+    let p = Pair::boot(100, 0).await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.a.enter();
+    let (paid_at, _) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("A admitted its debit");
+    let validated_root = |v: &ValidatedPeerTransition| v.validated_root().economic_root();
+    let peers = crate::sdk::economic_registers::validated_peers();
+    p.b.enter();
+    peers.forget();
+    let before = peers.walks();
+    let first = verify(p.a.genesis, p.a.device_id, paid_at).await.expect("A's lineage validates");
+    assert_eq!(peers.walks(), before + 1, "the first question walks");
+
+    let again = verify(p.a.genesis, p.a.device_id, paid_at).await.expect("validated again");
+    assert_eq!(validated_root(&again), validated_root(&first));
+    assert_eq!(peers.walks(), before + 1, "a validated position is not walked again");
+
+    peers.forget();
+    let walked = verify(p.a.genesis, p.a.device_id, paid_at).await.expect("walked again");
+    assert_eq!(validated_root(&walked), validated_root(&first));
+    assert_eq!(peers.walks(), before + 2, "with nothing remembered, the question walks");
+}
