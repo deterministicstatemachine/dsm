@@ -15,7 +15,7 @@ use dsm::ccb::StorageSetMembers;
 use dsm::common::domain_tags::{TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR};
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::crypto::domain::TaggedHashDomain;
-use dsm::economic::peer_lineage::{peer_claim_at, PeerEvidenceFetcher};
+use dsm::economic::peer_lineage::PeerEvidenceFetcher;
 use dsm::economic::provenance::{PeerLineageFailure, ReserveReleaseWin, ValidatedPeerTransition};
 use dsm::economic::register::{read_root_cell, RootCell};
 use dsm::route_chain::{CellEvidence, CellReading, ChainState, CompletionProof, RoutedCell};
@@ -35,7 +35,8 @@ use dsm::types::error::DsmError;
 
 use crate::sdk::economic_admission_flow::committed_network_id;
 use crate::sdk::economic_registers::{
-    anchored_policy_bytes, resolve_peer, resolve_peer_root, LiveRegisterResolver, StoredFrontiers,
+    anchored_policy_bytes, resolve_peer, resolve_peer_claim, resolve_peer_root,
+    LiveRegisterResolver,
 };
 use crate::sdk::route_seats::{keep_completion, read_cell, NodeSeats};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes, LOCATOR_BUDGET};
@@ -499,7 +500,8 @@ impl SofiReads for LiveSofiReads<'_> {
             // verification of its lineage accepted there (SoFi Amendment
             // S15, MR-SOFI-0347) — a SoFi position's by its resolution, since
             // a setup made right after one names that claim — or the walk's
-            // failure in the class it gave it.
+            // failure in the class it gave it. The process keeps each claim a
+            // complete walk established.
             let members = as_ccb_members(self.set)
                 .map_err(|e| PeerLineageFailure::Incomplete(format!("the storage set: {e}")))?;
             let conditional = PeerPositionResolver {
@@ -508,13 +510,12 @@ impl SofiReads for LiveSofiReads<'_> {
                 set_id: self.set.id(),
                 network_id: &self.network,
             };
-            return peer_claim_at(
+            return resolve_peer_claim(
                 &self.peer_resolver(),
                 &self.network,
                 genesis,
                 device_id,
                 position,
-                &StoredFrontiers,
                 &conditional,
             );
         }
