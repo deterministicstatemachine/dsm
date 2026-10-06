@@ -349,6 +349,65 @@ pub fn peer_root_at(
     frontiers: &dyn PeerFrontiers,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure> {
+    peer_root_reached(
+        fetcher,
+        expected_network_id,
+        peer_genesis,
+        peer_devid,
+        position,
+        frontiers,
+        conditional,
+    )
+    .map(WalkedTo::into_answer)
+}
+
+/// What a complete walk to one position answered, with the coordinates it
+/// validated on the way: the position itself when its claim is an ordinary
+/// one (the rule of [`PeerFrontier::reached_by`]: a conditional position is
+/// never a frontier), and every credit source's frontier. Each stands at the
+/// end of a segment that passed validation from a frontier the receiver held
+/// (owner ruling 2026-10-01: "A frontier becomes trusted only after the
+/// complete segment to it has passed validation"), so a later walk of the
+/// same peer, or of a source, can start there. None is recorded here.
+#[derive(Debug)]
+pub struct WalkedTo<T> {
+    answer: T,
+    reached: Vec<PeerFrontier>,
+}
+
+impl<T> WalkedTo<T> {
+    /// What the walk answered at the position.
+    pub fn answer(&self) -> &T {
+        &self.answer
+    }
+
+    /// The coordinates the walk validated: the position's own, when it is an
+    /// ordinary one, and the credit sources' frontiers.
+    pub fn reached(&self) -> &[PeerFrontier] {
+        &self.reached
+    }
+
+    /// The answer, without the coordinates.
+    pub fn into_answer(self) -> T {
+        self.answer
+    }
+
+    /// The answer and the coordinates.
+    pub fn into_parts(self) -> (T, Vec<PeerFrontier>) {
+        (self.answer, self.reached)
+    }
+}
+
+/// [`peer_root_at`], with the coordinates the walk validated ([`WalkedTo`]).
+pub fn peer_root_reached(
+    fetcher: &dyn PeerEvidenceFetcher,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    position: u64,
+    frontiers: &dyn PeerFrontiers,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<WalkedTo<(ValidatedEconomicRoot, ParentClaimRef)>, PeerLineageFailure> {
     let verifier = Verifier {
         fetcher,
         expected_network_id,
@@ -371,7 +430,27 @@ pub fn peer_root_at(
              to name as its parent"
         ))
     })?;
-    Ok((point.root, accepted))
+    // The whole segment to `position` passed. An ordinary claim there is the
+    // coordinate `reached_by` makes of a step: the position, the root the
+    // walk validated there and the claim it accepted there.
+    let own = match accepted {
+        ParentClaimRef::SingleRoot { .. } => Some(PeerFrontier {
+            genesis: *peer_genesis,
+            device_id: *peer_devid,
+            at: FrontierAt::Recorded {
+                economic_position: point.root.economic_position(),
+                economic_root: point.root.economic_root(),
+                accepted,
+            },
+        }),
+        ParentClaimRef::Conditional { .. } => None,
+    };
+    let mut reached = verifier.sources_reached.into_inner();
+    reached.extend(own);
+    Ok(WalkedTo {
+        answer: (point.root, accepted),
+        reached,
+    })
 }
 
 /// The claim a peer's lineage accepted AT `position` (SoFi Amendment S15,
@@ -391,6 +470,28 @@ pub fn peer_claim_at(
     frontiers: &dyn PeerFrontiers,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<AcceptedClaim, PeerLineageFailure> {
+    peer_claim_reached(
+        fetcher,
+        expected_network_id,
+        peer_genesis,
+        peer_devid,
+        position,
+        frontiers,
+        conditional,
+    )
+    .map(WalkedTo::into_answer)
+}
+
+/// [`peer_claim_at`], with the coordinates the walk validated ([`WalkedTo`]).
+pub fn peer_claim_reached(
+    fetcher: &dyn PeerEvidenceFetcher,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    position: u64,
+    frontiers: &dyn PeerFrontiers,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<WalkedTo<AcceptedClaim>, PeerLineageFailure> {
     if position == 0 {
         return Err(invalid(
             "position 0 is the activation root: no claim was accepted there",
@@ -408,21 +509,33 @@ pub fn peer_claim_at(
     let frontier = verifier.frontier_below(peer_genesis, peer_devid, position)?;
     let point = verifier.chain_through(peer_genesis, peer_devid, &frontier, position - 1)?;
     verifier.spend_step()?;
-    match verifier.final_claim(peer_genesis, peer_devid, position, &point.root)? {
-        RegisteredEconomicClaim::SingleRoot(claim) => Ok(*verifier
-            .full_step(
-                peer_genesis,
-                peer_devid,
-                position,
-                &point,
-                &claim,
-                StepRole::Segment,
-            )?
-            .accepted_claim()),
-        RegisteredEconomicClaim::ConditionalSofi(held) => verifier
-            .resolve_conditional(peer_genesis, peer_devid, position, &point, &held)
-            .map(|(_, accepted)| accepted),
-    }
+    let (answer, own) =
+        match verifier.final_claim(peer_genesis, peer_devid, position, &point.root)? {
+            RegisteredEconomicClaim::SingleRoot(claim) => {
+                let step = verifier.full_step(
+                    peer_genesis,
+                    peer_devid,
+                    position,
+                    &point,
+                    &claim,
+                    StepRole::Segment,
+                )?;
+                (*step.accepted_claim(), PeerFrontier::reached_by(&step))
+            }
+            RegisteredEconomicClaim::ConditionalSofi(held) => {
+                let (.., accepted) = verifier.resolve_conditional(
+                    peer_genesis,
+                    peer_devid,
+                    position,
+                    &point,
+                    &held,
+                )?;
+                (accepted, None)
+            }
+        };
+    let mut reached = verifier.sources_reached.into_inner();
+    reached.extend(own);
+    Ok(WalkedTo { answer, reached })
 }
 
 /// A failure met inside a step, kept in its own class and located at the

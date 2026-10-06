@@ -15,7 +15,7 @@ use dsm::ccb::StorageSetMembers;
 use dsm::common::domain_tags::{TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR};
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::crypto::domain::TaggedHashDomain;
-use dsm::economic::peer_lineage::{peer_claim_at, peer_root_at, PeerEvidenceFetcher};
+use dsm::economic::peer_lineage::{peer_claim_at, PeerEvidenceFetcher};
 use dsm::economic::provenance::{PeerLineageFailure, ReserveReleaseWin, ValidatedPeerTransition};
 use dsm::economic::register::{read_root_cell, RootCell};
 use dsm::route_chain::{CellEvidence, CellReading, ChainState, CompletionProof, RoutedCell};
@@ -35,7 +35,7 @@ use dsm::types::error::DsmError;
 
 use crate::sdk::economic_admission_flow::committed_network_id;
 use crate::sdk::economic_registers::{
-    anchored_policy_bytes, resolve_peer, LiveRegisterResolver, StoredFrontiers,
+    anchored_policy_bytes, resolve_peer, resolve_peer_root, LiveRegisterResolver, StoredFrontiers,
 };
 use crate::sdk::route_seats::{keep_completion, read_cell, NodeSeats};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes, LOCATOR_BUDGET};
@@ -94,11 +94,6 @@ pub struct LiveSofiReads<'a> {
     /// This device's `(genesis, device_id)` when it verifies as a trader:
     /// the one identity its own admitted store answers for.
     own: Option<(D32, D32)>,
-    /// The roots frontier-relative verification established for other
-    /// traders' positions, by `(genesis, device_id, position)`, kept for this
-    /// context's life: they are verified, so a walk that meets one trader's
-    /// exercises again does not walk that lineage again.
-    roots: std::sync::Mutex<BTreeMap<(D32, D32, u64), (ValidatedEconomicRoot, ParentClaimRef)>>,
     /// What this context read and keeps for its life — one resolution, one
     /// quote, one walk — so the verifier's passes over the same cells and
     /// objects read each once ([`ReadOnce`]).
@@ -245,7 +240,6 @@ impl<'a> LiveSofiReads<'a> {
             runtime: tokio::runtime::Handle::current(),
             network: committed_network_id()?,
             own,
-            roots: std::sync::Mutex::new(BTreeMap::new()),
             once: ReadOnce::default(),
         })
     }
@@ -474,15 +468,8 @@ impl SofiReads for LiveSofiReads<'_> {
         device_id: &D32,
         position: u64,
     ) -> Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure> {
-        let key = (*genesis, *device_id, position);
-        let cache = || {
-            self.roots
-                .lock()
-                .map_err(|e| PeerLineageFailure::Incomplete(format!("the root cache: {e}")))
-        };
-        if let Some(known) = cache()?.get(&key) {
-            return Ok(*known);
-        }
+        // Verified roots are kept by the process, not by this context: a
+        // holdings status builds a context for every poll.
         let members = as_ccb_members(self.set)
             .map_err(|e| PeerLineageFailure::Incomplete(format!("the storage set: {e}")))?;
         let conditional = PeerPositionResolver {
@@ -491,17 +478,14 @@ impl SofiReads for LiveSofiReads<'_> {
             set_id: self.set.id(),
             network_id: &self.network,
         };
-        let known = peer_root_at(
+        resolve_peer_root(
             &self.peer_resolver(),
             &self.network,
             genesis,
             device_id,
             position,
-            &StoredFrontiers,
             &conditional,
-        )?;
-        cache()?.insert(key, known);
-        Ok(known)
+        )
     }
 
     fn accepted_claim_at(

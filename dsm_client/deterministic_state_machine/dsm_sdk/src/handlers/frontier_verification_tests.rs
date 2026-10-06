@@ -649,3 +649,111 @@ async fn a_devices_own_lineage_starts_at_its_own_admitted_history() {
     p.b.enter();
     assert_eq!(start(), None, "B holds no frontier for A");
 }
+
+/// The root a trader's lineage selected at `position`, as a SoFi verifier of
+/// the entered device asks for it: through a context of its own, as every
+/// holdings status and every chain walk builds one.
+fn root_at(
+    genesis: [u8; 32],
+    devid: [u8; 32],
+    position: u64,
+) -> Result<
+    (
+        dsm::economic::lineage::ValidatedEconomicRoot,
+        dsm::sofi::wire::ParentClaimRef,
+    ),
+    PeerLineageFailure,
+> {
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    tokio::task::block_in_place(|| {
+        let reads = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("the reads");
+        dsm::sofi::resolve::SofiReads::trader_root_at(&reads, &genesis, &devid, position)
+    })
+}
+
+/// A trader's root, once its lineage was walked to it, is not walked again
+/// by the process: a holdings status builds a fresh context every poll, and
+/// each walked the wallet's lineage again. A pays B and then C, and no device
+/// here takes either payment in. B asks for A's root at the first payment
+/// twice, each time through a context of its own; the second answer is the
+/// first, and asks the members for nothing. The walk to the second payment
+/// starts at the first, which the root walk validated, and a fresh walk with
+/// nothing remembered reaches the same roots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_traders_root_is_not_walked_again_by_the_same_process() {
+    use dsm::economic::peer_lineage::PeerFrontiers;
+    let (p, c) = three_devices().await;
+    let paid = |p: &Pair| {
+        p.a.enter();
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .expect("A admitted its debit")
+    };
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let (first, first_root) = paid(&p);
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let (second, second_root) = paid(&p);
+    assert!(second > first);
+    p.b.enter();
+    let peers = crate::sdk::economic_registers::validated_peers();
+    peers.forget();
+    let start = || {
+        crate::sdk::economic_registers::RememberedFrontiers { network: NETWORK }
+            .frontier_below(&p.a.genesis, &p.a.device_id, second)
+            .expect("the frontiers")
+            .map(|f| f.economic_position())
+    };
+    assert_eq!(start(), None, "B holds no frontier for A");
+    let before = peers.root_walks();
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let walked = root_at(p.a.genesis, p.a.device_id, first).expect("A's root at its first payment");
+    assert_eq!(walked.0.economic_root(), first_root);
+    assert_eq!(peers.root_walks(), before + 1, "the first question walks");
+    let walk_requests = requests(&p.nodes).len();
+    assert!(walk_requests > 0, "the walk read A's lineage");
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let again = root_at(p.a.genesis, p.a.device_id, first).expect("A's root again");
+    assert_eq!(again, walked, "the kept root is the walked one");
+    assert_eq!(
+        requests(&p.nodes).len(),
+        0,
+        "the second question asks the members for nothing (the walk asked {walk_requests} times)"
+    );
+    assert_eq!(
+        peers.root_walks(),
+        before + 1,
+        "a verified root is not walked again"
+    );
+
+    assert_eq!(
+        start(),
+        Some(first),
+        "the root walk's coordinate starts the next walk"
+    );
+    let onward =
+        root_at(p.a.genesis, p.a.device_id, second).expect("A's root at its second payment");
+    assert_eq!(onward.0.economic_root(), second_root);
+
+    peers.forget();
+    let fresh = root_at(p.a.genesis, p.a.device_id, first).expect("walked again");
+    assert_eq!(
+        fresh, walked,
+        "with nothing remembered, the walk reaches the same root"
+    );
+    peers.forget();
+    let fresh =
+        root_at(p.a.genesis, p.a.device_id, second).expect("walked from the activation root");
+    assert_eq!(
+        fresh, onward,
+        "a walk from the remembered coordinate reaches the same root"
+    );
+    assert_eq!(peers.root_walks(), before + 4);
+}
