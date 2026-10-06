@@ -603,7 +603,9 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::EscrowCreatedResponse(_)
             | gp::envelope::Payload::EscrowSignedResponse(_)
             | gp::envelope::Payload::EscrowVerdictResponse(_)
-            | gp::envelope::Payload::EscrowVaultsResponse(_),
+            | gp::envelope::Payload::EscrowVaultsResponse(_)
+            | gp::envelope::Payload::AuthoredPublishedResponse(_)
+            | gp::envelope::Payload::AuthoredObjectsResponse(_),
         ) => gp::envelope::Payload::Error(gp::Error {
             code: 409,
             message: "Responses should not be sent as requests".to_string(),

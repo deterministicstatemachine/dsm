@@ -18128,6 +18128,20 @@ export class Envelope extends Message<Envelope> {
     case: "tokenCheckResponse";
   } | {
     /**
+     * Replies to `authored.publish` and `authored.read`.
+     *
+     * @generated from field: dsm.AuthoredPublishedResponse authored_published_response = 135;
+     */
+    value: AuthoredPublishedResponse;
+    case: "authoredPublishedResponse";
+  } | {
+    /**
+     * @generated from field: dsm.AuthoredObjectsResponse authored_objects_response = 136;
+     */
+    value: AuthoredObjectsResponse;
+    case: "authoredObjectsResponse";
+  } | {
+    /**
      * Reply to `token.forget`.
      *
      * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
@@ -18256,6 +18270,8 @@ export class Envelope extends Message<Envelope> {
     { no: 132, name: "escrow_verdict_response", kind: "message", T: EscrowVerdictResponse, oneof: "payload" },
     { no: 133, name: "escrow_vaults_response", kind: "message", T: EscrowVaultsResponse, oneof: "payload" },
     { no: 134, name: "token_check_response", kind: "message", T: TokenCheckResponse, oneof: "payload" },
+    { no: 135, name: "authored_published_response", kind: "message", T: AuthoredPublishedResponse, oneof: "payload" },
+    { no: 136, name: "authored_objects_response", kind: "message", T: AuthoredObjectsResponse, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -29464,6 +29480,368 @@ export class ConnectDuelCollectV1 extends Message<ConnectDuelCollectV1> {
 
   static equals(a: ConnectDuelCollectV1 | PlainMessage<ConnectDuelCollectV1> | undefined, b: ConnectDuelCollectV1 | PlainMessage<ConnectDuelCollectV1> | undefined): boolean {
     return proto3.util.equals(ConnectDuelCollectV1, a, b);
+  }
+}
+
+/**
+ * The signed part of an authored object.
+ *
+ * @generated from message dsm.AuthoredObjectBodyV1
+ */
+export class AuthoredObjectBodyV1 extends Message<AuthoredObjectBodyV1> {
+  /**
+   * @generated from field: bytes author_genesis = 1;
+   */
+  authorGenesis = new Uint8Array(0);
+
+  /**
+   * H(DSM/devid ‖ AK ‖ AttA)
+   *
+   * @generated from field: bytes author_device_id = 2;
+   */
+  authorDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes author_ak = 3;
+   */
+  authorAk = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes author_att_a = 4;
+   */
+  authorAttA = new Uint8Array(0);
+
+  /**
+   * the author's own name for what the objects are about
+   *
+   * @generated from field: bytes topic = 5;
+   */
+  topic = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes payload = 6;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredObjectBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredObjectBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "author_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "author_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "author_ak", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "author_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "topic", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredObjectBodyV1 {
+    return new AuthoredObjectBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredObjectBodyV1 {
+    return new AuthoredObjectBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredObjectBodyV1 {
+    return new AuthoredObjectBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredObjectBodyV1 | PlainMessage<AuthoredObjectBodyV1> | undefined, b: AuthoredObjectBodyV1 | PlainMessage<AuthoredObjectBodyV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredObjectBodyV1, a, b);
+  }
+}
+
+/**
+ * An authored object as storage holds it: the body and the author's
+ * signature over H(DSM/object/authored-statement/v1 ‖ body).
+ *
+ * @generated from message dsm.AuthoredObjectV1
+ */
+export class AuthoredObjectV1 extends Message<AuthoredObjectV1> {
+  /**
+   * AuthoredObjectBodyV1
+   *
+   * @generated from field: bytes body = 1;
+   */
+  body = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredObjectV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredObjectV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredObjectV1 {
+    return new AuthoredObjectV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredObjectV1 {
+    return new AuthoredObjectV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredObjectV1 {
+    return new AuthoredObjectV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredObjectV1 | PlainMessage<AuthoredObjectV1> | undefined, b: AuthoredObjectV1 | PlainMessage<AuthoredObjectV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredObjectV1, a, b);
+  }
+}
+
+/**
+ * authored.publish: this account publishes `payload` under `topic`.
+ *
+ * @generated from message dsm.AuthoredPublishRequestV1
+ */
+export class AuthoredPublishRequestV1 extends Message<AuthoredPublishRequestV1> {
+  /**
+   * @generated from field: bytes topic = 1;
+   */
+  topic = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes payload = 2;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredPublishRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredPublishRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "topic", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredPublishRequestV1 {
+    return new AuthoredPublishRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredPublishRequestV1 {
+    return new AuthoredPublishRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredPublishRequestV1 {
+    return new AuthoredPublishRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredPublishRequestV1 | PlainMessage<AuthoredPublishRequestV1> | undefined, b: AuthoredPublishRequestV1 | PlainMessage<AuthoredPublishRequestV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredPublishRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AuthoredPublishedResponse
+ */
+export class AuthoredPublishedResponse extends Message<AuthoredPublishedResponse> {
+  /**
+   * the object's immutable address
+   *
+   * @generated from field: bytes address = 1;
+   */
+  address = new Uint8Array(0);
+
+  /**
+   * H(DSM/object/authored-locator/v1 ‖ author device id ‖ topic)
+   *
+   * @generated from field: bytes locator = 2;
+   */
+  locator = new Uint8Array(0);
+
+  /**
+   * Stored, read back from the members
+   *
+   * @generated from field: bool stored = 3;
+   */
+  stored = false;
+
+  constructor(data?: PartialMessage<AuthoredPublishedResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredPublishedResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "address", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "locator", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "stored", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredPublishedResponse {
+    return new AuthoredPublishedResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredPublishedResponse {
+    return new AuthoredPublishedResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredPublishedResponse {
+    return new AuthoredPublishedResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredPublishedResponse | PlainMessage<AuthoredPublishedResponse> | undefined, b: AuthoredPublishedResponse | PlainMessage<AuthoredPublishedResponse> | undefined): boolean {
+    return proto3.util.equals(AuthoredPublishedResponse, a, b);
+  }
+}
+
+/**
+ * authored.read: every object `author_device_id` published under `topic`.
+ *
+ * @generated from message dsm.AuthoredReadRequestV1
+ */
+export class AuthoredReadRequestV1 extends Message<AuthoredReadRequestV1> {
+  /**
+   * @generated from field: bytes author_device_id = 1;
+   */
+  authorDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes topic = 2;
+   */
+  topic = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredReadRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredReadRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "author_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "topic", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredReadRequestV1 {
+    return new AuthoredReadRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredReadRequestV1 {
+    return new AuthoredReadRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredReadRequestV1 {
+    return new AuthoredReadRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredReadRequestV1 | PlainMessage<AuthoredReadRequestV1> | undefined, b: AuthoredReadRequestV1 | PlainMessage<AuthoredReadRequestV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredReadRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AuthoredObjectReadV1
+ */
+export class AuthoredObjectReadV1 extends Message<AuthoredObjectReadV1> {
+  /**
+   * @generated from field: bytes address = 1;
+   */
+  address = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes author_genesis = 2;
+   */
+  authorGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes payload = 3;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredObjectReadV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredObjectReadV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "address", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "author_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredObjectReadV1 {
+    return new AuthoredObjectReadV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredObjectReadV1 {
+    return new AuthoredObjectReadV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredObjectReadV1 {
+    return new AuthoredObjectReadV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredObjectReadV1 | PlainMessage<AuthoredObjectReadV1> | undefined, b: AuthoredObjectReadV1 | PlainMessage<AuthoredObjectReadV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredObjectReadV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AuthoredObjectsResponse
+ */
+export class AuthoredObjectsResponse extends Message<AuthoredObjectsResponse> {
+  /**
+   * in append order, each verified from its own bytes
+   *
+   * @generated from field: repeated dsm.AuthoredObjectReadV1 objects = 1;
+   */
+  objects: AuthoredObjectReadV1[] = [];
+
+  /**
+   * every candidate under the locator was read
+   *
+   * @generated from field: bool complete = 2;
+   */
+  complete = false;
+
+  constructor(data?: PartialMessage<AuthoredObjectsResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredObjectsResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "objects", kind: "message", T: AuthoredObjectReadV1, repeated: true },
+    { no: 2, name: "complete", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredObjectsResponse {
+    return new AuthoredObjectsResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredObjectsResponse {
+    return new AuthoredObjectsResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredObjectsResponse {
+    return new AuthoredObjectsResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredObjectsResponse | PlainMessage<AuthoredObjectsResponse> | undefined, b: AuthoredObjectsResponse | PlainMessage<AuthoredObjectsResponse> | undefined): boolean {
+    return proto3.util.equals(AuthoredObjectsResponse, a, b);
   }
 }
 
