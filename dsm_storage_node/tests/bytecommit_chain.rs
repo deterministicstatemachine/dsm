@@ -469,3 +469,84 @@ async fn an_unreachable_set_mate_fails_the_sync() {
     .await);
     assert_eq!(sync(&b).await, StatusCode::BAD_GATEWAY);
 }
+
+/// A set-mate many cycles ahead is mirrored cycle by cycle, byte for byte
+/// what it serves, with its cycles fetched several at a time; a cycle it
+/// fails to answer ends the sync with every cycle before it kept and none
+/// after it, exactly as fetching one cycle after another did, and the next
+/// sync continues from there.
+#[tokio::test]
+async fn a_sync_keeps_cycles_in_order_and_stops_at_the_first_it_cannot_fetch() {
+    use axum::extract::Path;
+    use axum::response::IntoResponse;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    const CYCLES: u64 = 40;
+    const UNANSWERED: u64 = 23;
+
+    let (lr, ur) = listener().await;
+    let a = app(node_state("bc_many_a", "dsm-node-a", &["dsm-node-a"], &[]).await);
+    // A as B reaches it, except that while `failing` names a cycle, A's
+    // answer for that cycle is a server error, at once.
+    let failing = Arc::new(AtomicU64::new(UNANSWERED));
+    let relay = {
+        let (a, rest_of_a, failing) = (a.clone(), a.clone(), failing.clone());
+        Router::new()
+            .route(
+                "/api/v2/bytecommit/cycle/{cycle}",
+                axum::routing::get(move |Path(cycle): Path<u64>| {
+                    let (a, failing) = (a.clone(), failing.clone());
+                    async move {
+                        if cycle == failing.load(Ordering::SeqCst) {
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        } else {
+                            // Earlier cycles answer later, so answers come
+                            // back out of cycle order.
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                3 * (CYCLES - cycle),
+                            ))
+                            .await;
+                            let req = Request::get(format!("/api/v2/bytecommit/cycle/{cycle}"))
+                                .body(Body::empty())
+                                .unwrap();
+                            a.oneshot(req).await.into_response()
+                        }
+                    }
+                }),
+            )
+            .fallback_service(rest_of_a)
+    };
+    tokio::spawn(axum::serve(lr, relay).into_future());
+    let b = app(node_state(
+        "bc_many_b",
+        "dsm-node-b",
+        &["dsm-node-a", "dsm-node-b"],
+        &[("dsm-node-a", &ur)],
+    )
+    .await);
+
+    let mut commits = Vec::new();
+    for t in 1..=CYCLES {
+        put(&a, [t as u8; 32], format!("cycle {t}").as_bytes()).await;
+        commits.push(close(&a).await.expect("A closes a cycle"));
+    }
+
+    assert_eq!(sync(&b).await, StatusCode::BAD_GATEWAY);
+    for (t, commit) in (1..=CYCLES).zip(&commits) {
+        let held = mirrored(&b, b"dsm-node-a", t).await;
+        if t < UNANSWERED {
+            assert_eq!(held, vec![commit.clone()], "cycle {t} is kept");
+        } else {
+            assert!(held.is_empty(), "nothing from cycle {UNANSWERED} on: {t}");
+        }
+    }
+
+    failing.store(0, Ordering::SeqCst);
+    assert_eq!(sync(&b).await, StatusCode::NO_CONTENT);
+    for (t, commit) in (1..=CYCLES).zip(&commits) {
+        assert_eq!(
+            mirrored(&b, b"dsm-node-a", t).await,
+            vec![commit.clone()],
+            "cycle {t}"
+        );
+    }
+}
