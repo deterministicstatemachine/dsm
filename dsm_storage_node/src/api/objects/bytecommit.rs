@@ -93,7 +93,7 @@ fn commit_or_absent(commit: Option<ByteCommit>) -> Response {
 async fn close(Extension(state): Extension<Arc<AppState>>) -> Result<Response, StatusCode> {
     let commit = db::close_cycle(
         &state.db_pool,
-        &state.closing,
+        &state.committed,
         state.configured_member_id.as_bytes(),
     )
     .await
@@ -138,7 +138,7 @@ async fn proof(
     let key: [u8; 32] = digest32(&key)?
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    match db::cell_commit_proof(&state.db_pool, &namespace, &key, cycle)
+    match db::cell_commit_proof(&state.db_pool, &state.committed, &namespace, &key, cycle)
         .await
         .map_err(internal("proof"))?
     {
