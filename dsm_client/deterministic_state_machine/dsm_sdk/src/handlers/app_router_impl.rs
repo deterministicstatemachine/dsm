@@ -469,6 +469,7 @@ impl AppRouterImpl {
         &self,
         intent: OnlineSendIntent,
     ) -> AppResult {
+        let mut timing = crate::util::phase_timing::PhaseTimer::start("wallet.send");
         let from_device_id = self.device_id_bytes;
         let to_device_id = intent.to_device_id;
         let to_device_id_str = crate::util::text_id::encode_base32_crockford(&to_device_id);
@@ -640,6 +641,7 @@ impl AppRouterImpl {
                 }
             }
         }
+        timing.phase("preflight");
         let contact_record =
             match crate::storage::client_db::get_contact_by_device_id(&to_device_id) {
                 Ok(Some(contact)) => contact,
@@ -960,6 +962,7 @@ impl AppRouterImpl {
         // Build the final signed Operation from the SAME signing_op that was used for
         // canonical signature generation, so every verifier reads identical bytes.
         let signed_op = signing_op.with_signature(canonical_signature.clone());
+        timing.phase("sign");
 
         // The pre-send head snapshot is gone: it existed ONLY to let the rollback
         // path revert `bcr_device_heads`, and the advance transaction now unwinds
@@ -1817,6 +1820,7 @@ impl AppRouterImpl {
             Some(p) => p,
             None => return err("wallet.send: admission parts missing".to_string()),
         };
+        timing.phase("advance");
         if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
             &self.core_sdk,
             &econ_network,
@@ -1836,6 +1840,7 @@ impl AppRouterImpl {
             ));
         }
 
+        timing.phase("admission");
         let mut b0x_succeeded = false;
         let mut b0x_message_id: Option<String> = None;
 
@@ -1886,10 +1891,11 @@ impl AppRouterImpl {
                 // was how a still-viable quorum attempt got reported as
                 // uncertain.
                 let retry = crate::sdk::b0x_sdk::B0xRetryConfig::default();
-                match b0x_sdk
+                let delivery = b0x_sdk
                     .deliver_frozen_logical_send(&outbox_record, &extra_artifacts, &retry)
-                    .await
-                {
+                    .await;
+                timing.phase("delivery");
+                match delivery {
                     Ok(delivered) => {
                         log::info!(
                             "[wallet.send] ✅ Delivered frozen send to b0x: transfer={} artifacts={}",
