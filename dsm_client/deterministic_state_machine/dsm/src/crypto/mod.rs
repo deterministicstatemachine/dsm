@@ -173,3 +173,6 @@ pub fn generate_deterministic_nonce_32(context: &[u8], counter: u64) -> Vec<u8> 
     let hash = hasher.finalize();
     hash.as_bytes()[..32].to_vec()
 }
+
+#[cfg(test)]
+mod sphincs_refinement_tests;

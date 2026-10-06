@@ -239,6 +239,16 @@ impl Adrs {
     }
 }
 
+#[cfg(test)]
+mod refinement_vectors;
+
+fn derive_key(context: &str, input: &[u8]) -> [u8; 32] {
+    let output = blake3::derive_key(context, input);
+    #[cfg(test)]
+    refinement_vectors::record(0, context, &[], input, &output);
+    output
+}
+
 // =============================== Hash/PRF ===================================
 
 /// BLAKE3 KDF contexts, one per role. Each is fixed and unique to that role.
@@ -260,7 +270,7 @@ impl PublicCtx {
         Self {
             n,
             pk_seed: pk_seed.to_vec(),
-            thash_key: blake3::derive_key(CONTEXT_THASH, pk_seed),
+            thash_key: derive_key(CONTEXT_THASH, pk_seed),
         }
     }
 }
@@ -273,7 +283,7 @@ struct SecretCtx {
 impl SecretCtx {
     fn new(sk_seed: &[u8]) -> Self {
         Self {
-            prf_key: Zeroizing::new(blake3::derive_key(CONTEXT_PRF, sk_seed)),
+            prf_key: Zeroizing::new(derive_key(CONTEXT_PRF, sk_seed)),
         }
     }
 }
@@ -285,6 +295,8 @@ fn keyed(n: usize, key: &[u8; 32], inputs: &[&[u8]]) -> Vec<u8> {
     }
     let mut out = vec![0u8; n];
     out.copy_from_slice(&h.finalize().as_bytes()[..n]);
+    #[cfg(test)]
+    refinement_vectors::record(1, "", key, &inputs.concat(), &out);
     out
 }
 
@@ -309,7 +321,7 @@ fn prf(pc: &PublicCtx, sc: &SecretCtx, adrs: &Adrs) -> Zeroizing<Vec<u8>> {
 
 /// `PRF_msg(SK.prf, opt_rand, M)`: the randomizer `R`.
 fn prf_msg(n: usize, sk_prf: &[u8], opt_rand: &[u8], m: &[u8]) -> Vec<u8> {
-    let key = Zeroizing::new(blake3::derive_key(CONTEXT_PRF_MSG, sk_prf));
+    let key = Zeroizing::new(derive_key(CONTEXT_PRF_MSG, sk_prf));
     keyed(n, &key, &[opt_rand, m])
 }
 
@@ -322,6 +334,14 @@ fn h_msg(p: &Params, r: &[u8], pk_seed: &[u8], pk_root: &[u8], m: &[u8]) -> Vec<
     h.update(m);
     let mut out = vec![0u8; p.m];
     h.finalize_xof().fill(&mut out);
+    #[cfg(test)]
+    refinement_vectors::record(
+        2,
+        CONTEXT_H_MSG,
+        &[],
+        &[r, pk_seed, pk_root, m].concat(),
+        &out,
+    );
     out
 }
 
@@ -712,6 +732,8 @@ pub fn generate_keypair_from_seed(
     let mut sk = vec![0u8; p.sk_bytes];
     let mut rng = ChaCha20Rng::from_seed(*seed32);
     rng.fill_bytes(&mut sk[..3 * p.n]);
+    #[cfg(test)]
+    refinement_vectors::record(3, "ChaCha20Rng", &[], seed32, &sk[..3 * p.n]);
     let (sk_seed, rest) = sk.split_at(p.n);
     let pk_seed = &rest[p.n..2 * p.n];
     let pc = PublicCtx::new(p.n, pk_seed);
