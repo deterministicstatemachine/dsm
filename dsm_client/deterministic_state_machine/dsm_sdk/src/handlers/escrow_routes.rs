@@ -70,11 +70,7 @@ fn verdict_response(view: VerdictView) -> AppResult {
             verdict_cell: view.verdict_cell.to_vec(),
             state: state as i32,
             outcome,
-            passed_over: view
-                .passed_over
-                .iter()
-                .map(|refusal| format!("{refusal:?}"))
-                .collect(),
+            passed_over: view.passed_over.clone(),
         },
     ))
 }
@@ -92,6 +88,22 @@ fn outcome_v1(
         decided_by_this_device: b.signers().contains(&me.signer),
         pays_this_device: b.recipient_genesis() == &me.genesis
             && b.recipient_device_id() == &me.device_id,
+    }
+}
+
+/// A computed vault's branch (SoFi Amendment S22): no device decides it,
+/// the program computes it.
+fn computed_outcome_v1(
+    b: &dsm::sofi::wire::ComputedBranch,
+    me: &EscrowParty,
+) -> generated::EscrowVaultOutcomeV1 {
+    generated::EscrowVaultOutcomeV1 {
+        outcome: b.label().to_vec(),
+        recipient_genesis: b.recipient_genesis().to_vec(),
+        recipient_device_id: b.recipient_device_id().to_vec(),
+        pays_this_device: b.recipient_genesis() == &me.genesis
+            && b.recipient_device_id() == &me.device_id,
+        ..Default::default()
     }
 }
 
@@ -122,7 +134,23 @@ fn vault_v1(
         amount_display: shown(v.amount, &v.token, route)?,
         generation: v.generation,
         status: status as i32,
-        outcomes: v.branches.iter().map(|b| outcome_v1(b, me)).collect(),
+        outcomes: match v.program {
+            None => v.branches.iter().map(|b| outcome_v1(b, me)).collect(),
+            Some(..) => v
+                .computed
+                .iter()
+                .map(|b| computed_outcome_v1(b, me))
+                .collect(),
+        },
+        // Empty for a signed vault: no program decides it.
+        program: match &v.program {
+            Some(p) => p.to_vec(),
+            None => Vec::new(),
+        },
+        program_name: match &v.program {
+            Some(p) => crate::sdk::outcome_programs::program_text(p),
+            None => String::new(),
+        },
     })
 }
 

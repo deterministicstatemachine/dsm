@@ -126,6 +126,17 @@ async fn serve(
     relay_tls: tls::RelayTls,
 ) -> Result<(), String> {
     dsm_sdk::sdk::tls_transport_sdk::ensure_rustls_crypto_provider();
+    // The outcome programs this account's verifiers run (SoFi Amendment
+    // S22), registered once each reproduces its conformance vectors: it reads
+    // a computed match's cells itself, never on a wallet's word.
+    let refused = dsm_sdk::sdk::outcome_programs::init();
+    if !refused.is_empty() {
+        return Err(format!(
+            "{} outcome program(s) failed their conformance vectors; this host would establish \
+             no computed match",
+            refused.len()
+        ));
+    }
     // A call that walks a lineage waits on storage-node reads for seconds; the
     // cheap calls (a status not answered yet, the session listing) must not
     // queue behind a few of those.

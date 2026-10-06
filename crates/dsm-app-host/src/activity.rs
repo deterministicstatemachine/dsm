@@ -161,6 +161,45 @@ pub fn describe_call(method: &str, args: &[u8]) -> String {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelSessionKey(k)) => format!(
+                    "ask the wallet for its session key for match nonce {}",
+                    short(&k.match_nonce)
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelLock(k)) => format!(
+                    "ask the wallet to stake {} of {} as side {} in a computed match against {} \
+                     ({})",
+                    k.amount,
+                    short(&k.policy_commit),
+                    match k.side {
+                        1 => "A",
+                        2 => "B",
+                        _ => "?",
+                    },
+                    short(&k.opponent_device_id),
+                    k.memo
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelReady(k)) => {
+                    format!("ask the wallet to ready for match {}", short(&k.match_cell))
+                }
+                Some(pb::connect_app_request_intent_v1::Kind::DuelWithdraw(k)) => format!(
+                    "ask the wallet to withdraw from match {}",
+                    short(&k.match_cell)
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelSign(k)) => format!(
+                    "ask the wallet to sign its next entry of match {}",
+                    short(&k.match_cell)
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelSettle(k)) => {
+                    format!("ask the wallet to settle match {}", short(&k.match_cell))
+                }
+                Some(pb::connect_app_request_intent_v1::Kind::DuelCollect(k)) => format!(
+                    "ask the wallet to collect a computed match result from {}",
+                    k.vault_ids
+                        .iter()
+                        .map(|v| short(v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 None => "an empty request".into(),
             },
             Err(e) => format!("make a request: unreadable arguments ({e})"),

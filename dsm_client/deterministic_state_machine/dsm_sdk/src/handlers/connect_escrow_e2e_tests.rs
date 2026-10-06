@@ -52,6 +52,7 @@ async fn offer(r: &TestDevice, relay: &ForwardRelay) -> String {
                     per_request: whole_era(30),
                     total: whole_era(60),
                 }],
+                programs: Vec::new(),
             }],
             token_anchors: Vec::new(),
         }),

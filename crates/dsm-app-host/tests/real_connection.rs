@@ -539,6 +539,7 @@ fn game_scopes(wild: &[u8; 32]) -> Vec<pb::ConnectScopeV1> {
             kind: pb::ConnectScopeKind::Swap as i32,
             policy_commits: vec![wild.to_vec(), era().to_vec()],
             caps: vec![cap(&era(), 1_000, 2_000)],
+            programs: Vec::new(),
         },
         pb::ConnectScopeV1 {
             kind: pb::ConnectScopeKind::Holdings as i32,
