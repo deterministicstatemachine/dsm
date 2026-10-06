@@ -154,41 +154,63 @@ an unconditional globally injective finite-output hash. The existing
 `DSMCryptoBinding.lean` and `DSMCertChain.lean` have stronger global assumptions;
 this work neither depends on them nor presents their assumptions as discharged.
 
-**Universal signer correctness is not yet proved.** The general inductive
-authentication-path theorem is proved under explicit parent-recurrence and sibling
-node premises, including FORS orientation arithmetic. The parent recurrences are
-now discharged against `xmssNode` and `forsNode` in `xmss_signer_tree_path` and
-`fors_signer_tree_path`. The complete serialized sibling/leaf correspondence and
-whole WOTS/FORS/hypertree signer composition still remain to be discharged. The executable FORS/XMSS/hypertree
-algorithms and acceptance equation are present; their agreement with Rust is
-currently established on the generated cases below, not for every possible input.
-The complete CCB/operation/JNI wrapper refinement also remains open.
+### Complete model signer correctness
 
-### Additional signer obligations discharged
+`lean4/Sphincs/Signer.lean` now proves `wots_sign_correct`,
+`xmss_sign_correct`, `fors_sign_correct`, `supported_ht_sign_correct`,
+`signer_correct`, `generated_key_valid`, and `keygen_sign_verify`.
+For every implemented parameter variant, every 32-byte seed and every nonempty
+message, key generation followed by signing produces an exactly sized signature
+accepted by verification. These are universal theorems about the concrete model,
+including the actual serialized sibling blocks and nested FORS/WOTS/XMSS loops.
+The sole primitive premise is `OutputWidths` for a deterministic `Oracle Id`;
+no cryptographic hardness premise is required for functional correctness.
+For caller-supplied secret keys, `signer_correct` explicitly requires the stored
+root to agree with the seed-derived root. This is not an unforgeability theorem.
+The recursive hypertree model preserves Rust's primitive call order, including
+skipping final-layer public-key reconstruction until the signer's self-check.
 
-`base2b_digit_bound` proves every generated digit is below `2^b` for all inputs;
-`wots_digit_bound` specializes this to 0–15, including the checksum digits.
-`wots_generated_digit_recovers` therefore discharges the digit-range premise of
-WOTS chain recovery for the actual `wotsDigits` function.
-`xor_one_is_sibling` proves the signer's XOR sibling selection equals the path
-verifier's parity selection for every natural index. `fixed_block_slice` proves
-an exact-width concatenated block is recovered at its serialized offset.
-`thash_width`, `prf_width`, `chain_width`, `wots_pkgen_width`,
-`xmss_node_width`, and `fors_node_width` explicitly require
-`OutputWidths`: primitives return the requested byte count. This is an interface
-contract, not collision resistance or PRF security. Parent recurrence theorems and
-signer tree path theorems require no hash-security assumption. The path theorems
-still require sibling-byte correspondence; they are not complete signer proofs.
+### Actual Rust extraction and source proof
 
-For source refinement, [Aeneas](https://github.com/AeneasVerif/aeneas) supplies a
-Rust-to-Lean translation pipeline for a supported safe-Rust subset. Its
-[cryptographic verification documentation](https://github.com/AeneasVerif/aeneas/blob/main/documentation/crypto-verification.md)
-describes proving translated implementations against mathematical specifications.
-Neither `aeneas` nor `charon` is installed in this environment. No extracted DSM
-crate, translated semantics, or extraction compatibility result has been produced.
-Installing a translator alone would not discharge the simulation theorem, BLAKE3
-primitive contracts, or compiled-binary/JNI refinement. These are still explicit
-open obligations, not claims made on the strength of the manual source map.
+Aeneas `aa66752b15d02335f936f607b5ad5b9fecb65b13` and Charon
+`c8f15d7d658c86a95658f71ad99cddd4be002e04`, using Rust
+`nightly-2026-09-17`, extracted the actual crate's MIR. The complete signer
+translation fails on nested borrows in `keyed`'s `&[&[u8]]` argument and
+unsupported bottom values in signing/verification. Partial output with unresolved
+external axioms is excluded from the checked artifacts.
+
+The actual `next_layer` function translates without external axioms. Generated
+`Types.lean` and `Funs.lean` and its total correctness/refinement theorem are in
+`lean4/Sphincs/RustExtraction/`. `next_layer_refines` connects the extracted
+64-bit Rust computation to `DSM.Sphincs.nextLayer`, for every tree and every
+height at most nine (covering all six implemented variants), including shift,
+subtraction and narrowing-cast behavior. Its toolchain is Lean 4.31.0; the main
+model/proof gate remains Lean 4.23.0. Regenerate and check with
+`DSM_AENEAS_REPO=... DSM_CHARON_REPO=... bash scripts/check_sphincs_source_refinement.sh`.
+The script checks translator revision pins and exact generated-source agreement,
+then kernel-checks the proof. Build the pinned translators and Aeneas Lean backend
+first. This additional extraction gate is local, not installed in CI.
+Charon/MIR extraction and Aeneas translation remain trusted for this source proof;
+Rust compiler, LLVM, linked libraries and machine execution are not covered.
+
+### Memory, timing and JNI follow-up
+
+BLAKE3's zeroization feature is enabled. Keyed hash state and final digest,
+chain working buffers (including replaced buffers), and the key-generation
+working allocation now use `Zeroizing`. The returned secret key retains the
+existing `ZeroizeOnDrop` ownership. Rust/Lean transcripts are unchanged.
+This does not prove erasure of compiler/register/allocator copies. ChaCha RNG
+state, dependency internals, caller-owned seeds and abort behavior remain open.
+
+Miri passes the actual address layout and address-type clearing tests. This is
+memory/undefined-behavior checking for those executions only. It does not cover
+all signer executions, Android, or foreign JNI handles.
+The actual `processEnvelopeV3` JNI entry point converts JVM byte arrays, dispatches
+and converts responses under an unwind boundary. Valid raw JNI environment,
+thread attachment, reference lifetime and JVM exception semantics remain external
+obligations; catching panics does not prove those unsafe contracts.
+No timing theorem is claimed: index/chain schedules and root comparison alone do
+not establish constant-time BLAKE3, generated machine code, caches or CPU behavior.
 
 ## Executable evidence and reproducibility
 
@@ -231,8 +253,8 @@ not independently test BLAKE3 compression, ChaCha, or their security.
    No security reduction or numerical forgery bound is proved here.
 3. ChaCha expansion and seed entropy/uniqueness; OS RNG, wallet entropy
    normalization, KDF inputs, master/AK/EK ownership, secret storage and erasure.
-4. Rust-to-Lean correspondence is a manually reviewed map plus tested transcripts,
-   not a universal simulation theorem or a validated source translator. Unsupported
+4. Rust-to-Lean correspondence outside the extracted `next_layer` proof is a
+   manually reviewed map plus tested transcripts, not a universal simulation theorem. Unsupported
    shape/content combinations and the four undeployed variants' full sign/verify
    executions have no transcript coverage in this program.
 5. Constant-time behavior, branches on public indices, allocation, cache/CPU side
@@ -242,7 +264,7 @@ not independently test BLAKE3 compression, ChaCha, or their security.
    overflow behavior, no_std/firmware target behavior, ABI, JNI, Kotlin, WebView,
    transport framing, platform byte arrays and error handling. Host test transcripts
    do not certify Android or firmware binaries.
-7. Full Rust array/slice safety, universal WOTS/FORS/XMSS/HT signer correctness,
+7. Full Rust array/slice safety and Rust WOTS/FORS/XMSS/HT source correctness,
    all operation/receipt/SoFi/CCB codecs, replay/frontier checks and device authority
    admission need their own refinement proofs and negative tests.
 8. Deterministic signing is not proof that only one signature can verify for a
@@ -268,6 +290,9 @@ Also run and inspected in this isolated checkout:
 * `cargo test --offline --locked -p dsm --lib crypto::`: 131 tests passed.
 * Both `dsm-sphincs --all-targets` and `dsm --lib --tests` Clippy checks with
   `-D warnings`: passed after fixing harness lint errors without suppressions.
+* Complete `Signer.lean` model proofs and regenerated extracted Rust `next_layer`
+  proof: passed; only Lean logical axioms in the reported dependencies.
+* Two focused Miri address tests: passed. These do not certify full signer memory safety.
 * All 18 existing Lean modules and the new model, proofs and checker with
   `-DwarningAsError=true`: passed; printed dependencies contain no proof holes.
 * Real-code guard for touched Rust scopes, `scripts/ci_scan.sh`,
@@ -283,7 +308,7 @@ remaining failures in the checks above.
 **Unrun checks:** full workspace/SDK/storage integration suites; Android/Gradle
 and device deployment; frontend canonical tests and protobuf regeneration;
 Go/Swift suites; release-target/firmware binaries; hosted GitHub CI. The source
-changes introduce verification/test artifacts rather than new protocol codecs or
+changes add verification artifacts and explicit working-buffer cleanup rather than new protocol codecs or
 bridge behavior; these wider checks are still required before a release or audit
 claim extending to those platforms. Local CI wiring has been inspected and its
 refinement command run, but no hosted job is claimed to have executed.

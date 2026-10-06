@@ -3788,7 +3788,9 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 The model, structural proofs and executable refinement program are recorded in
 [SPHINCS_REFINEMENT.md](SPHINCS_REFINEMENT.md). They preserve the current
 construction and add source-drift checking, rather than replacing the primitive.
-Universal Rust/source/binary simulation, universal signer correctness, custom BLAKE3 security reductions, side-channel/secret-memory review
+Complete model signer correctness is proved under the primitive-width contract.
+Actual Rust `next_layer` source refinement is proved with pinned extraction tools.
+Universal Rust/source/binary simulation, custom BLAKE3 security reductions, side-channel/secret-memory review
 and complete DSM canonical wrapper refinement remain unproved. These additions
 supply evidence for MR-DSM-0259; they do not change it to unconditional proof of
 post-quantum security. Deterministic R does not establish MR-SOFI-0111's assertion
