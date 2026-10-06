@@ -5,6 +5,8 @@ members = [
     "crates/dsm-app-host",
     "crates/dsm-anchor-verifier",
     "crates/dsm-sphincs",
+    "crates/wildstate-duel",
+    "crates/wildstate-duel-wasm",
     "dsm_client/deterministic_state_machine/dsm",
     "dsm_client/deterministic_state_machine/dsm_sdk",
     "dsm_storage_node",
