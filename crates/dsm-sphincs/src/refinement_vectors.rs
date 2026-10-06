@@ -125,7 +125,7 @@ fn export_refinement_vectors() -> Result<(), Box<dyn std::error::Error>> {
             match result {
                 Err(Error::Crypto(why)) => {
                     assert_eq!(expected, 0);
-                    assert_eq!(why, "Cannot verify empty message");
+                    assert_eq!(why, CryptoFailure::EmptyVerificationMessage);
                 }
                 Ok(valid) => {
                     assert_eq!(expected, 1);
