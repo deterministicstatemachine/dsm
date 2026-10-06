@@ -73,6 +73,12 @@ type AdmittedRow = (
 const SELECT_ADMITTED: &str = "SELECT economic_position, claim_kind, economic_root, \
      fulfillment_id, realize_root, void_root, claim_ref FROM economic_admitted_v2 WHERE id = 1";
 
+/// The highest ordinary (claim kind 0) position admitted below `?1`.
+const SELECT_ADMITTED_SINGLE_ROOT_BELOW: &str = "SELECT economic_position, claim_kind, \
+     economic_root, fulfillment_id, realize_root, void_root, claim_ref FROM \
+     economic_admitted_history WHERE economic_position < ?1 AND claim_kind = 0 \
+     ORDER BY economic_position DESC LIMIT 1";
+
 const SELECT_ADMITTED_AT: &str = "SELECT economic_position, claim_kind, economic_root, \
      fulfillment_id, realize_root, void_root, claim_ref FROM economic_admitted_history \
      WHERE economic_position = ?1";
@@ -361,6 +367,50 @@ pub fn load_leaf_cache() -> Result<Vec<([u8; 32], [u8; 32], Vec<u8>)>> {
         out.push((digest32(k, "leaf_key")?, digest32(v, "leaf_value")?, ccb));
     }
     Ok(out)
+}
+
+/// This device's own frontier strictly below `position`: the highest
+/// ordinary position its own lineage admitted there, with the root and the
+/// claim it admitted. A device authenticated every step of its own lineage
+/// when it admitted it, so its admitted history is its frontier for itself; a
+/// conditional SoFi position is never one (as [`PeerFrontier::reached_by`]
+/// holds), so the search passes over those. `None` when nothing below
+/// `position` was admitted as an ordinary position.
+///
+/// The caller passes this device's own identity; the frontier carries it.
+pub fn own_frontier_below(
+    own_genesis: &[u8; 32],
+    own_devid: &[u8; 32],
+    position: u64,
+) -> Result<Option<dsm::economic::peer_lineage::PeerFrontier>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let row = conn
+        .query_row(
+            SELECT_ADMITTED_SINGLE_ROOT_BELOW,
+            params![i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?],
+            read_admitted_row,
+        )
+        .optional()?;
+    match row.map(admitted_from_row).transpose()? {
+        Some(AdmittedEconomicPosition::SingleRoot {
+            economic_position,
+            economic_root,
+            claim_ref,
+        }) => Ok(Some(
+            dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
+                *own_genesis,
+                *own_devid,
+                economic_position,
+                economic_root,
+                dsm::sofi::wire::ParentClaimRef::SingleRoot { claim_ref },
+            ),
+        )),
+        Some(other) => Err(anyhow!(
+            "the ordinary position admitted below {position} reads back as {other:?}"
+        )),
+        None => Ok(None),
+    }
 }
 
 /// This receiver's latest frontier for a peer strictly below `position`
