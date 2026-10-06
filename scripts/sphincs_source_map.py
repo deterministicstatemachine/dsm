@@ -10,6 +10,8 @@ core = 'dsm_client/deterministic_state_machine/dsm/src/'
 sdk = 'dsm_client/deterministic_state_machine/dsm_sdk/src/'
 model = {
 'SphincsVariant':'Variant', 'Params':'Params', 'param_set':'params',
+'Error':'typed failure result; model None', 'CryptoFailure':'four source failure reasons',
+'message':'fixed diagnostic reporting text (not wire authority)',
 'compute_wots_len2':'Params.len (finite six-variant specialization)',
 'sizes':'params / signature_sizes', 'Adrs':'Adrs / be_roundtrip / type_clears',
 'set_layer':'Adrs.layer', 'set_tree':'Adrs.tree / be8 / RustExtraction.tree_set_correct',
@@ -20,7 +22,7 @@ model = {
 'PublicCtx':'deriveKey(thash)', 'SecretCtx':'deriveKey(prf)',
 'derive_key':'deriveKey', 'keyed':'keyed', 'thash':'thash', 'prf':'prf',
 'prf_msg':'sign (deriveKey(prf-msg) then keyed)', 'h_msg':'hmsg',
-'base_2b':'base2b / base2b_digit_bound', 'to_int':'toInt', 'to_byte':'be / be_roundtrip',
+'base_2b':'base2b / base2b_digit_bound / RustExtraction.refill_complete / refill_read_count_noninterference', 'to_int':'toInt', 'to_byte':'be / be_roundtrip',
 'wots_digits':'wotsDigits / wots_digit_count / wots_digit_bound / checksum_width_three',
 'chain':'chain / chain_composes / chain_width / wots_generated_digit_recovers',
 'wots_sk_adrs':'wotsSign / wotsPkgen', 'wots_compress':'wotsCompress',

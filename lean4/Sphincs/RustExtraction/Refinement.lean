@@ -52,6 +52,123 @@ namespace DSMSphincsRust
   · simpa [Nat.shiftRight_eq_div_pow] using i_post
   · simp_all
 
+ theorem byte_refill_body (x : Slice U8) (input b : Usize)
+    (width : 0 < b.val ∧ b.val ≤ 8)
+    (bound : input.val < x.val.length) :
+    base_2b_loop0_loop0.body x b input 0#usize 0#u64 ⦃ result =>
+      ∃ next : Usize, ∃ total : U64,
+        result = .cont (next,8#usize,total) ∧ next.val = input.val+1 ∧
+        total.val = x.val[input.val].val ⦄ := by
+  unfold base_2b_loop0_loop0.body
+  simp only [lift, bind_ok]
+  step*
+  all_goals simp_all
+  all_goals scalar_tac
+
+
+ theorem refill_step (x : Slice U8) (input b bits : Usize) (total : U64)
+    (need : bits.val < b.val) (bitsBound : bits.val ≤ 15)
+    (bound : input.val < x.val.length) :
+    base_2b_loop0_loop0.body x b input bits total ⦃ result =>
+      ∃ next : Usize, ∃ nextBits : Usize, ∃ nextTotal : U64,
+        result = .cont (next,nextBits,nextTotal) ∧
+        next.val = input.val+1 ∧ nextBits.val = bits.val+8 ∧
+        nextTotal.bv = (total.bv <<< 8) |||
+          (core.convert.num.FromU64U8.from x.val[input.val]).bv ⦄ := by
+  unfold base_2b_loop0_loop0.body
+  simp only [lift, bind_ok]
+  step*
+  all_goals simp_all
+ theorem refill_ready (x : Slice U8) (b input bits : Usize) (total : U64)
+    (ready : b.val ≤ bits.val) :
+    base_2b_loop0_loop0 x b input bits total = Result.ok (input,bits,total) := by
+  have notNeeded : ¬bits < b := by scalar_tac
+  unfold base_2b_loop0_loop0
+  rw [loop]
+  simp [base_2b_loop0_loop0.body, notNeeded, bind_ok]
+
+ theorem byte_refill_complete (x : Slice U8) (input b : Usize)
+    (width : 0 < b.val ∧ b.val ≤ 8) (bound : input.val < x.val.length) :
+    base_2b_loop0_loop0 x b input 0#usize 0#u64 ⦃ result =>
+      result.1.val = input.val+1 ∧ result.2.1.val = 8 ∧
+      result.2.2.val = x.val[input.val].val ⦄ := by
+  unfold base_2b_loop0_loop0
+  rw [loop]
+  apply WP.spec_bind (byte_refill_body x input b width bound)
+  intro result matched
+  obtain ⟨next,total,equal,nextVal,totalVal⟩ := matched
+  subst result
+  change loop _ (next,8#usize,total) ⦃ _ ⦄
+  change base_2b_loop0_loop0 x b next 8#usize total ⦃ _ ⦄
+  rw [refill_ready x b next 8#usize total (by simpa using width.2)]
+  simp [nextVal,totalVal]
+
+
+def refillReads (b bits : Nat) : Nat :=
+  if b ≤ bits then 0 else if b ≤ bits+8 then 1 else 2
+
+ theorem refill_complete (x : Slice U8) (input b bits : Usize) (total : U64)
+    (width : 0 < b.val ∧ b.val ≤ 14) (residual : bits.val ≤ 7)
+    (buffered : input.val + refillReads b.val bits.val ≤ x.val.length) :
+    base_2b_loop0_loop0 x b input bits total ⦃ result =>
+      result.1.val = input.val + refillReads b.val bits.val ∧
+      result.2.1.val = bits.val + 8 * refillReads b.val bits.val ∧
+      b.val ≤ result.2.1.val ∧ result.2.1.val < b.val+8 ⦄ := by
+  by_cases ready : b.val ≤ bits.val
+  · rw [refill_ready x b input bits total ready]
+    simp [refillReads,ready]
+    omega
+  by_cases one : b.val ≤ bits.val+8
+  · have reads : refillReads b.val bits.val = 1 := by simp [refillReads,ready,one]
+    unfold base_2b_loop0_loop0
+    rw [loop]
+    apply WP.spec_bind (refill_step x input b bits total (by omega) (by omega) (by omega))
+    intro result matched
+    obtain ⟨next,nextBits,nextTotal,equal,nextVal,nextBitsVal,_⟩ := matched
+    subst result
+    change base_2b_loop0_loop0 x b next nextBits nextTotal ⦃ _ ⦄
+    rw [refill_ready x b next nextBits nextTotal (by omega)]
+    simp [nextVal,nextBitsVal,reads]
+    omega
+  · have reads : refillReads b.val bits.val = 2 := by simp [refillReads,ready,one]
+    unfold base_2b_loop0_loop0
+    rw [loop]
+    apply WP.spec_bind (refill_step x input b bits total (by omega) (by omega) (by omega))
+    intro result matched
+    obtain ⟨next,nextBits,nextTotal,equal,nextVal,nextBitsVal,_⟩ := matched
+    subst result
+    change base_2b_loop0_loop0 x b next nextBits nextTotal ⦃ _ ⦄
+    unfold base_2b_loop0_loop0
+    rw [loop]
+    apply WP.spec_bind (refill_step x next b nextBits nextTotal (by omega) (by omega) (by omega))
+    intro second matchedSecond
+    obtain ⟨last,lastBits,lastTotal,equal,lastVal,lastBitsVal,_⟩ := matchedSecond
+    subst second
+    change base_2b_loop0_loop0 x b last lastBits lastTotal ⦃ _ ⦄
+    rw [refill_ready x b last lastBits lastTotal (by omega)]
+    simp [lastVal,lastBitsVal,nextVal,nextBitsVal,reads]
+    omega
+
+
+ theorem refill_read_count_noninterference (x y : Slice U8)
+    (input b bits : Usize) (totalX totalY : U64)
+    (width : 0 < b.val ∧ b.val ≤ 14) (residual : bits.val ≤ 7)
+    (bufferX : input.val + refillReads b.val bits.val ≤ x.val.length)
+    (bufferY : input.val + refillReads b.val bits.val ≤ y.val.length) :
+    base_2b_loop0_loop0 x b input bits totalX ⦃ left =>
+      base_2b_loop0_loop0 y b input bits totalY ⦃ right =>
+        left.1.val = right.1.val ∧ left.2.1.val = right.2.1.val ⦄ ⦄ := by
+  apply WP.spec_mono (refill_complete x input b bits totalX width residual bufferX)
+  intro left leftPost
+  apply WP.spec_mono (refill_complete y input b bits totalY width residual bufferY)
+  intro right rightPost
+  exact ⟨leftPost.1.trans rightPost.1.symm, leftPost.2.1.trans rightPost.2.1.symm⟩
+
+#print axioms refill_read_count_noninterference
+#print axioms refill_complete
+#print axioms byte_refill_complete
+#print axioms refill_ready
+
 #print axioms type_clear_correct
 #print axioms tree_set_correct
 #print axioms next_layer_success

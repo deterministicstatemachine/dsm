@@ -17,7 +17,8 @@ MR-DSM-0259 and the canonical-encoding/binding obligations; it does not upgrade
 those requirements to an unconditional cryptographic security claim.
 
 Production algorithms, message bytes, key sizes and acceptance rules are preserved.
-The only production refactor is a forwarding helper around the same BLAKE3 KDF.
+Production changes add typed failure reasons, guarded KDF/signing working buffers,
+seed diagnostic redaction and the documented JNI boundary hardening.
 Recording, export and wrapper comparison code is compiled only under `cfg(test)`.
 No existing path is replaced, so no legacy path is removed. The original checkout's
 unrelated `crates/dsm-android-anchor/Cargo.lock` change is outside this branch.
@@ -174,10 +175,12 @@ skipping final-layer public-key reconstruction until the signer's self-check.
 
 Aeneas `aa66752b15d02335f936f607b5ad5b9fecb65b13` and Charon
 `c8f15d7d658c86a95658f71ad99cddd4be002e04`, using Rust
-`nightly-2026-09-17`, extracted the actual crate's MIR. The complete signer
-translation fails on nested borrows in `keyed`'s `&[&[u8]]` argument and
-unsupported bottom values in signing/verification. Partial output with unresolved
-external axioms is excluded from the checked artifacts.
+`nightly-2026-09-17`, extracted the actual crate's MIR. The signing and verification return types now contain typed failure reasons,
+with diagnostic strings generated at the reporting boundary. This removes their
+borrowed-string translation failures. The public call graph translates with
+`keyed` treated as an explicit BLAKE3 primitive boundary; its nested-slice body
+remains unsupported. Standard-library and dependency models still require work.
+External axiom templates are excluded from the checked proof graph.
 
 The actual `next_layer` function translates without external axioms. Generated
 `Types.lean` and `Funs.lean` and its total correctness/refinement theorem are in
@@ -246,13 +249,16 @@ provided with the review outputs. Build success and ABI inspection do not prove
 compiler preservation, ARM instruction semantics, side-channel noninterference
 or any whole-binary equivalence theorem. No device execution is claimed.
 
-Full verifier extraction was rerun with current source. Even when cryptographic
-subroutines are treated as opaque for diagnosis, the verifier translation fails
-on its returned borrowed error string. Constant-value extraction crashes the
-translator; built-MIR/string lowering instead encounters unsupported raw-memory
-interpretation. These failed runs are retained as evidence, not included in the
-checked proof graph. Full signer equivalence still requires a supported,
-validated extraction for the whole crate and proofs for its remaining functions.
+The current `scripts/extract_sphincs_rust.sh` translates the actual public
+key-generation/signing/verification call graph successfully at the explicit
+`keyed`/BLAKE3, ChaCha, zeroization and constant-time comparison boundaries.
+It produces an inventory of **40 unproved external declarations** (34 functions,
+six types), including iterator/Vec helpers and scalar operations missing from
+the translator library, not just cryptographic assumptions. The script is an
+extractor, not a proof gate, and does not compile or accept external axiom templates.
+Full functional source refinement requires concrete models for those interfaces,
+proofs that the models agree with their implementations, and simulation theorems
+for the generated functions. No universal signer source theorem is claimed.
 
 The next binary/timing theorem must fix the exact executable, compiler/linker,
 ARM machine model, linked primitive/JVM contracts and leakage model. It must
@@ -270,6 +276,53 @@ invariant scan, codegen guard, SPDX and formatting pass. Android SDK Clippy with
 `-D warnings` fails: 190 errors versus 191 on the unchanged JNI baseline, with no
 added diagnostic categories. The SDK lint gate, on-device exception/lifetime
 checks, full source/binary simulation and timing/memory guarantees remain open.
+
+### Parser refill source proof and extraction progress
+
+The checked Rust graph now also includes the actual `base_2b` implementation
+and both of its loops. `refill_complete` proves total execution of its inner
+refill loop for any width from 1 to 14, any residual bit count at most seven,
+any accumulator value and any byte buffer satisfying the exact required-read
+bound. This covers all implemented WOTS/FORS widths. The proof gives the exact
+zero/one/two-byte read count and a final bit count between `b` and `b+7`.
+`refill_read_count_noninterference` proves two executions with arbitrary different
+bytes and accumulator values advance their read index and bit count identically,
+when their width, initial counters and sufficient-buffer premises agree.
+`refill_step` additionally identifies the precise shift/OR accumulator update;
+`byte_refill_complete` identifies the loaded byte value for the zero-accumulator
+one-byte case. No hash or PRF assumption appears in these source proofs.
+
+This is a memory-bound/termination and read-count theorem for the extracted
+inner loop. It is not a full `base_2b` bitstream-equivalence theorem, an outer-loop
+buffer-invariant proof, a signer-wide noninterference theorem, a hardware timing
+bound or compiled-binary memory proof. Remaining parser obligations are explicit.
+
+The crate's Rust `Error::Crypto` payload is now `CryptoFailure`, with four typed
+reasons. This is a Rust source API change; repository callers and transcript tests
+were updated. The rejection conditions and existing diagnostic strings are
+unchanged; Core uses `why.message()` at its reporting boundary. No signature,
+key layout, domain tag, wire error encoding or construction version changed.
+The guarded KDF now uses `Zeroizing<blake3::Hasher>` and a guarded digest during
+the material phase, addressing another private working-state cleanup gap.
+The signer now also guards the randomizer, FORS and hypertree signature components
+and its assembled signature until the existing self-check succeeds. Working
+copies are cleared on both success and self-check failure; the returned signature
+is copied only after acceptance. This adds a successful-path allocation/copy.
+Caller-owned material, returned-key copies, RNG state, dependency internals and
+machine register/stack erasure remain outside the proved guarantees.
+
+Current validation passes: 18 crate tests, 1,382 Core tests, all 114 transcript
+cases and five mutation controls, the expanded pinned Rust proof gate with
+warnings as errors, crate/Core Clippy, firmware `thumbv8m.main-none-eabihf`
+checking, and a fresh Android arm64 release build. The public graph extraction
+succeeds with the declared primitive boundary and lists its unproved externals.
+The focused guarded-KDF comparison also passes under Miri; this checks the
+executed cases for interpreter-detected undefined behavior, not universal memory
+safety or erasure.
+A custom Miri sysroot experiment failed to link native build scripts; it is not
+used by either checked gate. Android SDK Clippy's existing failure remains open;
+on-device exception handling, whole signer/binary equivalence and general
+constant-time/memory/JNI guarantees are still not certified.
 
 ## Executable evidence and reproducibility
 
@@ -312,7 +365,7 @@ not independently test BLAKE3 compression, ChaCha, or their security.
    No security reduction or numerical forgery bound is proved here.
 3. ChaCha expansion and seed entropy/uniqueness; OS RNG, wallet entropy
    normalization, KDF inputs, master/AK/EK ownership, secret storage and erasure.
-4. Rust-to-Lean correspondence outside the extracted `next_layer` proof is a
+4. Rust-to-Lean correspondence outside the extracted layer/address/refill proofs is a
    manually reviewed map plus tested transcripts, not a universal simulation theorem. Unsupported
    shape/content combinations and the four undeployed variants' full sign/verify
    executions have no transcript coverage in this program.

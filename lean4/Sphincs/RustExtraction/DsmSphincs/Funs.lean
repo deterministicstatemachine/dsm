@@ -19,7 +19,7 @@ set_option maxRecDepth 2048
 namespace DSMSphincsRust
 
 /-- [dsm_sphincs::{dsm_sphincs::Adrs}::set_tree]:
-    Source: 'crates/dsm-sphincs/src/lib.rs', lines 200:4-204:5 -/
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 222:4-226:5 -/
 def Adrs.set_tree (self : Adrs) (tree : Std.U64) : Result Adrs := do
   let a ← Array.update self.w 1#usize 0#u32
   let i ← tree >>> 32#i32
@@ -30,7 +30,7 @@ def Adrs.set_tree (self : Adrs) (tree : Std.U64) : Result Adrs := do
   ok { w := a2 }
 
 /-- [dsm_sphincs::{dsm_sphincs::Adrs}::set_type_and_clear]:
-    Source: 'crates/dsm-sphincs/src/lib.rs', lines 206:4-211:5 -/
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 228:4-233:5 -/
 def Adrs.set_type_and_clear (self : Adrs) (t : Std.U32) : Result Adrs := do
   let a ← Array.update self.w 4#usize t
   let a1 ← Array.update a 5#usize 0#u32
@@ -38,8 +38,93 @@ def Adrs.set_type_and_clear (self : Adrs) (t : Std.U32) : Result Adrs := do
   let a3 ← Array.update a2 7#usize 0#u32
   ok { w := a3 }
 
+/-- [dsm_sphincs::base_2b]: loop body 1:
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 387:8-391:9 -/
+@[rust_loop_body]
+def base_2b_loop0_loop0.body
+  (x : Slice Std.U8) (b : Std.Usize) (input : Std.Usize) (bits : Std.Usize)
+  (total : Std.U64) :
+  Result (ControlFlow (Std.Usize × Std.Usize × Std.U64) (Std.Usize ×
+    Std.Usize × Std.U64))
+  := do
+  if bits < b
+  then
+    let i ← total <<< 8#i32
+    let i1 ← Slice.index_usize x input
+    let i2 ← lift (core.convert.num.FromU64U8.from i1)
+    let total1 ← lift (i ||| i2)
+    let input1 ← input + 1#usize
+    let bits1 ← bits + 8#usize
+    ok (cont (input1, bits1, total1))
+  else ok (done (input, bits, total))
+
+/-- [dsm_sphincs::base_2b]: loop 1:
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 387:8-391:9 -/
+@[rust_loop]
+def base_2b_loop0_loop0
+  (x : Slice Std.U8) (b : Std.Usize) (input : Std.Usize) (bits : Std.Usize)
+  (total : Std.U64) :
+  Result (Std.Usize × Std.Usize × Std.U64)
+  := do
+  loop
+    (fun (input1, bits1, total1) => base_2b_loop0_loop0.body x b input1 bits1
+      total1)
+    (input, bits, total)
+
+/-- [dsm_sphincs::base_2b]: loop body 0:
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 386:4-395:5 -/
+@[rust_loop_body]
+def base_2b_loop0.body
+  (x : Slice Std.U8) (b : Std.Usize) (mask : Std.U64)
+  (iter : core.ops.range.Range Std.Usize) (input : Std.Usize)
+  (bits : Std.Usize) (total : Std.U64) (out : alloc.vec.Vec Std.U32) :
+  Result (ControlFlow ((core.ops.range.Range Std.Usize) × Std.Usize ×
+    Std.Usize × Std.U64 × (alloc.vec.Vec Std.U32)) (alloc.vec.Vec Std.U32))
+  := do
+  let (o, iter1) ←
+    core.iter.range.IteratorRange.next core.iter.range.StepUsize iter
+  match o with
+  | none => ok (done out)
+  | some _ =>
+    let (input1, bits1, total1) ← base_2b_loop0_loop0 x b input bits total
+    let bits2 ← bits1 - b
+    let i ← total1 >>> bits2
+    let i1 ← lift (i &&& mask)
+    let i2 ← lift (UScalar.cast .U32 i1)
+    let out1 ← alloc.vec.Vec.push out i2
+    let i3 ← 1#u64 <<< bits2
+    let i4 ← i3 - 1#u64
+    let total2 ← lift (total1 &&& i4)
+    ok (cont (iter1, input1, bits2, total2, out1))
+
+/-- [dsm_sphincs::base_2b]: loop 0:
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 386:4-395:5 -/
+@[rust_loop]
+def base_2b_loop0
+  (iter : core.ops.range.Range Std.Usize) (x : Slice Std.U8) (b : Std.Usize)
+  (input : Std.Usize) (bits : Std.Usize) (total : Std.U64) (mask : Std.U64)
+  (out : alloc.vec.Vec Std.U32) :
+  Result (alloc.vec.Vec Std.U32)
+  := do
+  loop
+    (fun (iter1, input1, bits1, total1, out1) => base_2b_loop0.body x b mask
+      iter1 input1 bits1 total1 out1)
+    (iter, input, bits, total, out)
+
+/-- [dsm_sphincs::base_2b]:
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 380:0-397:1 -/
+def base_2b
+  (x : Slice Std.U8) (b : Std.Usize) (out_len : Std.Usize) :
+  Result (alloc.vec.Vec Std.U32)
+  := do
+  let i ← 1#u64 <<< b
+  let mask ← i - 1#u64
+  let out := alloc.vec.Vec.with_capacity Std.U32 out_len
+  base_2b_loop0 { start := 0#usize, «end» := out_len } x b 0#usize 0#usize
+    0#u64 mask out
+
 /-- [dsm_sphincs::next_layer]:
-    Source: 'crates/dsm-sphincs/src/lib.rs', lines 547:0-549:1 -/
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 574:0-576:1 -/
 def next_layer
   (p : Params) (tree : Std.U64) : Result (Std.U32 × Std.U64) := do
   let i ← 1#u64 <<< p.hp

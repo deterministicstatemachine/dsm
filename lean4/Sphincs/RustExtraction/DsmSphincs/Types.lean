@@ -18,7 +18,7 @@ set_option maxRecDepth 2048
 namespace DSMSphincsRust
 
 /-- [dsm_sphincs::Params]
-    Source: 'crates/dsm-sphincs/src/lib.rs', lines 98:0-120:1 -/
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 120:0-142:1 -/
 structure Params where
   n : Std.Usize
   h : Std.Usize
@@ -38,7 +38,7 @@ structure Params where
   sig_bytes : Std.Usize
 
 /-- [dsm_sphincs::Adrs]
-    Source: 'crates/dsm-sphincs/src/lib.rs', lines 189:0-191:1 -/
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 211:0-213:1 -/
 structure Adrs where
   w : Array Std.U32 8#usize
 

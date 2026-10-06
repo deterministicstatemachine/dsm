@@ -3795,3 +3795,10 @@ and complete DSM canonical wrapper refinement remain unproved. These additions
 supply evidence for MR-DSM-0259; they do not change it to unconditional proof of
 post-quantum security. Deterministic R does not establish MR-SOFI-0111's assertion
 that at most one envelope can verify for a body.
+
+The SPHINCS source proof now includes total parser refill and read-count
+noninterference for widths 1–14 under explicit buffer bounds. Typed error data
+removed the signer/verifier borrowed-string extraction failures. Whole public
+Rust translation succeeds at the keyed-hash primitive boundary, but 40 external
+interfaces and whole-function simulation theorems remain open. These facts do
+not establish machine timing, erasure, JVM validity or universal binary behavior.
