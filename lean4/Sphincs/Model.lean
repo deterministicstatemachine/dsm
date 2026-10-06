@@ -137,17 +137,20 @@ def xmssPkFromSig [Monad m] (o : Oracle m) (p : Params) (tk : Bytes)
   let node ← wotsPkFromSig o p tk wa (sig.take (p.len*p.n)) msg
   authRoot o p tk (a.setType 2) idx idx node (sig.drop (p.len*p.n)) p.hp
 
+def htRootTail [Monad m] (o : Oracle m) (p : Params) (tk : Bytes)
+    (layer tree : Nat) (node sig : Bytes) : Nat → m Bytes
+  | 0 => pure node
+  | remaining+1 => do
+      let (leaf,next) := nextLayer p tree
+      let a : Adrs := {layer := layer,tree := next}
+      let root ← xmssPkFromSig o p tk a leaf (sig.take p.layerBytes) node
+      htRootTail o p tk (layer+1) next root (sig.drop p.layerBytes) remaining
+
 def htRoot [Monad m] (o : Oracle m) (p : Params) (tk : Bytes)
     (sig msg : Bytes) (idxTree idxLeaf : Nat) : m Bytes := do
-  let mut tree := idxTree
-  let mut node ← xmssPkFromSig o p tk {tree := tree} idxLeaf
+  let node ← xmssPkFromSig o p tk {tree := idxTree} idxLeaf
     (sig.take p.layerBytes) msg
-  for layer in (List.range (p.d-1)).map (·+1) do
-    let (leaf,next) := nextLayer p tree
-    tree := next
-    node ← xmssPkFromSig o p tk {layer := layer, tree := tree} leaf
-      (slice sig (layer*p.layerBytes) p.layerBytes) node
-  return node
+  htRootTail o p tk 1 idxTree node (sig.drop p.layerBytes) (p.d-1)
 
 def forsPkFromSig [Monad m] (o : Oracle m) (p : Params) (tk : Bytes)
     (a : Adrs) (sig md : Bytes) : m Bytes := do
@@ -233,21 +236,25 @@ def xmssSign [Monad m] (o : Oracle m) (p : Params) (tk prfKey seed : Bytes)
   let sig ← wotsSign o p tk prfKey seed {a.setType 0 with keypair := idx} msg
   return sig++auth
 
+def htSignTail [Monad m] (o : Oracle m) (p : Params) (tk prfKey seed : Bytes)
+    (layer tree : Nat) (node : Bytes) : Nat → m Bytes
+  | 0 => pure []
+  | remaining+1 => do
+      let (leaf,next) := nextLayer p tree
+      let a : Adrs := {layer := layer,tree := next}
+      let part ← xmssSign o p tk prfKey seed a leaf node
+      if remaining = 0 then return part
+      let root ← xmssPkFromSig o p tk a leaf part node
+      let tail ← htSignTail o p tk prfKey seed (layer+1) next root remaining
+      return part++tail
+
 def htSign [Monad m] (o : Oracle m) (p : Params) (tk prfKey seed : Bytes)
     (msg : Bytes) (idxTree idxLeaf : Nat) : m Bytes := do
   let a : Adrs := {tree := idxTree}
   let first ← xmssSign o p tk prfKey seed a idxLeaf msg
-  let mut root ← xmssPkFromSig o p tk a idxLeaf first msg
-  let mut sig := first
-  let mut tree := idxTree
-  for layer in (List.range (p.d-1)).map (·+1) do
-    let (leaf,next) := nextLayer p tree
-    tree := next
-    let a : Adrs := {layer := layer, tree := tree}
-    let part ← xmssSign o p tk prfKey seed a leaf root
-    if layer < p.d-1 then root ← xmssPkFromSig o p tk a leaf part root
-    sig := sig++part
-  return sig
+  let root ← xmssPkFromSig o p tk a idxLeaf first msg
+  let tail ← htSignTail o p tk prfKey seed 1 idxTree root (p.d-1)
+  return first++tail
 
 def forsSecret [Monad m] (o : Oracle m) (p : Params) (prfKey seed : Bytes)
     (a : Adrs) (idx : Nat) : m Bytes :=
