@@ -93,6 +93,7 @@ pub const TAG_STATE: &str = "DSM/wildstate-duel/state/v1";
 pub const TAG_CREATURE_STATE: &str = "DSM/wildstate-duel/creature-state/v1";
 pub const TAG_FIRST_ACTOR: &str = "DSM/wildstate-duel/first-actor/v1";
 pub const TAG_VECTOR_TRACE: &str = "DSM/wildstate-duel/vector-trace/v1";
+pub const TAG_TIEBREAK: &str = "DSM/wildstate-duel/tiebreak/v1";
 
 pub const PROGRAM_NAME: &str = "wildstate-duel";
 pub const RULES_VERSION: u32 = 1;
@@ -166,6 +167,25 @@ pub fn program_hash_for(tables: &Tables, vectors: &[u8]) -> [u8; 32] {
 /// `P`, this program's hash.
 pub fn program_hash() -> [u8; 32] {
     program_hash_for(&TABLES, VECTORS_V1)
+}
+
+/// The tiebreak seed a staked match commits: `H(DSM/wildstate-duel/tiebreak/v1
+/// ‖ 0x00 ‖ match_nonce ‖ u32be(|key_a|) ‖ key_a ‖ u32be(|key_b|) ‖ key_b)`
+/// over both sides' session public keys. Each key is fixed by its own wallet
+/// at lock, so neither side alone can grind the seed. Rules never read how
+/// a seed was made; a wallet locking a stake checks the setup's seed is this.
+pub fn tiebreak_seed(match_nonce: &[u8; 32], session_a: &[u8], session_b: &[u8]) -> [u8; 32] {
+    let len = |key: &[u8]| (key.len() as u32).to_be_bytes();
+    tagged_hash(
+        TAG_TIEBREAK,
+        &[
+            match_nonce,
+            &len(session_a),
+            session_a,
+            &len(session_b),
+            session_b,
+        ],
+    )
 }
 
 /// Runs every frozen vector; the count on success.

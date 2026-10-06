@@ -243,6 +243,22 @@ pub fn program_hash() -> Uint8Array {
     u8a(&wildstate_duel::program_hash())
 }
 
+/// The tiebreak seed a staked match's setup commits, from its nonce and both
+/// sides' session public keys (`wildstate_duel::tiebreak_seed`).
+#[wasm_bindgen(js_name = tiebreakSeed)]
+pub fn tiebreak_seed(
+    match_nonce: &[u8],
+    session_a: &[u8],
+    session_b: &[u8],
+) -> Result<Uint8Array, JsError> {
+    let nonce: [u8; 32] = match_nonce
+        .try_into()
+        .map_err(|e| JsError::new(&format!("a match nonce is 32 bytes: {e}")))?;
+    Ok(u8a(&wildstate_duel::tiebreak_seed(
+        &nonce, session_a, session_b,
+    )))
+}
+
 #[wasm_bindgen(js_name = tablesDigest)]
 pub fn tables_digest() -> Uint8Array {
     u8a(&wildstate_duel::tables_digest())

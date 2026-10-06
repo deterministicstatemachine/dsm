@@ -712,6 +712,7 @@ impl<'a> VerifierContext<'a> {
             self.parent,
             self.accepted.clone(),
         )
+        .with_programs(crate::sdk::outcome_programs::registry().clone())
     }
 }
 
