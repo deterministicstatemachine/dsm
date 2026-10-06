@@ -608,7 +608,7 @@ fn validate_conservation(
                      nothing: {e}"
                 ))
             })?;
-            let terms = crate::sofi::wire::EscrowTerms::decode(terms).map_err(|e| {
+            let terms = crate::sofi::wire::EscrowKind::decode(terms).map_err(|e| {
                 DsmError::invalid_operation(format!(
                     "conservation: escrow terms that are not canonical name no token: {e}"
                 ))

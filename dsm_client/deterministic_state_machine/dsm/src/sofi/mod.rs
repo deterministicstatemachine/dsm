@@ -35,6 +35,7 @@
 //! economics; this layer gives them exact bytes and exact keys, nothing more.
 
 pub mod admission;
+pub mod computed;
 pub mod conformance;
 pub mod derive;
 pub mod escrow;

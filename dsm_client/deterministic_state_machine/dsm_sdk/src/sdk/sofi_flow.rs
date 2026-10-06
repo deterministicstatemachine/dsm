@@ -533,7 +533,9 @@ impl VaultAtHead {
     fn market(&self) -> Result<&Policies, DsmError> {
         match &self.terms {
             VaultTerms::Market(policies) => Ok(policies),
-            VaultTerms::Escrow(..) => Err(refuse("an escrow vault has no market")),
+            VaultTerms::Escrow(..) | VaultTerms::Computed(..) => {
+                Err(refuse("an escrow vault has no market"))
+            }
         }
     }
 }
