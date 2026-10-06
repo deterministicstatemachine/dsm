@@ -705,6 +705,29 @@ pub async fn locked(
     set: &StorageSet,
     verdict_cell: &D32,
 ) -> Result<(Vec<EscrowVaultView>, Search), DsmError> {
+    locked_of(core, set, verdict_cell, None).await
+}
+
+/// [`locked`], for the vaults `owner` created only: what a stake of
+/// `owner`'s on the cell can be. The owner is read from each vault's
+/// accepted genesis, and only those vaults are walked to their heads; the
+/// others on the cell, an opponent's among them, are neither shown nor
+/// walked, so none of them makes the search partial.
+pub async fn locked_by(
+    core: &CoreSDK,
+    set: &StorageSet,
+    verdict_cell: &D32,
+    owner: &(D32, D32),
+) -> Result<(Vec<EscrowVaultView>, Search), DsmError> {
+    locked_of(core, set, verdict_cell, Some(owner)).await
+}
+
+async fn locked_of(
+    core: &CoreSDK,
+    set: &StorageSet,
+    verdict_cell: &D32,
+    owner: Option<&(D32, D32)>,
+) -> Result<(Vec<EscrowVaultView>, Search), DsmError> {
     let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
     let verifier = ctx.verifier();
     let (vaults, mut search) = match verifier
@@ -713,6 +736,16 @@ pub async fn locked(
     {
         Discovered::Complete(vaults) => (vaults, Search::Complete),
         Discovered::Partial(vaults) => (vaults, Search::Partial),
+    };
+    let vaults: Vec<_> = match owner {
+        Some(owner) => vaults
+            .into_iter()
+            .filter(|accepted| {
+                let preimage = accepted.preimage();
+                (preimage.owner_genesis, preimage.owner_device_id) == *owner
+            })
+            .collect(),
+        None => vaults,
     };
     let mut out = Vec::with_capacity(vaults.len());
     for accepted in vaults {
