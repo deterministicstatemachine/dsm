@@ -1488,7 +1488,7 @@ impl B0xSDK {
     /// register quorum whatever the breaker holds: a member it marked failed
     /// is still asked once the others are used up.
     async fn deliver(
-        &mut self,
+        &self,
         routing_key: &str,
         message_id_b32: &str,
         sealed: &[u8],
@@ -2108,9 +2108,14 @@ impl B0xSDK {
     ///  - **The transport owns its deadline.** No outer timeout is imposed;
     ///    the retry schedule bounds each submission (`stored_envelope_deadline`).
     ///
-    /// Order is transfer first, then artifacts in role order. Correctness does
-    /// not depend on it — the recipient stages whichever half lands first — but
-    /// determinism makes logs and tests legible.
+    /// Every half is delivered at once, and the send is delivered when every
+    /// half has reached quorum. Correctness does not depend on which lands
+    /// first: the recipient stages whichever half lands first and binds the
+    /// pair when the other does (`recipient_dispatch`'s
+    /// `evidence_first_binds_when_the_transfer_lands`). Every artifact's role
+    /// is checked before anything is sent, and the outcome is reported in the
+    /// order the halves are named: the transfer, then the artifacts in role
+    /// order.
     pub async fn deliver_frozen_logical_send(
         &mut self,
         outbox: &crate::storage::client_db::SenderOutboxRecord,
@@ -2118,25 +2123,11 @@ impl B0xSDK {
         retry: &B0xRetryConfig,
     ) -> Result<FrozenSendDelivery, DsmError> {
         let route = outbox.routing_address.as_str();
-
-        self.submit_stored_envelope_with_retry(route, &outbox.submission_id, retry)
-            .await
-            .map_err(|e| {
-                DsmError::internal(
-                    format!(
-                        "frozen send {}: transfer half not delivered: {e}",
-                        outbox.submission_id
-                    ),
-                    None::<std::io::Error>,
-                )
-            })?;
-
-        let mut artifact_ids = Vec::with_capacity(artifacts.len());
+        // Only initial-send artifacts ride the transfer's route. A received
+        // countersign delta or the finality certificate (own route, own
+        // sweep) reaching this primitive is a caller bug — refuse, never
+        // relocate it under a route the node would silently dedup.
         for artifact in artifacts {
-            // Only initial-send artifacts ride the transfer's route. A received
-            // countersign delta or the finality certificate (own route, own
-            // sweep) reaching this primitive is a caller bug — refuse, never
-            // relocate it under a route the node would silently dedup.
             if !artifact.role.is_initial_send_artifact() {
                 return Err(DsmError::internal(
                     format!(
@@ -2147,19 +2138,43 @@ impl B0xSDK {
                     None::<std::io::Error>,
                 ));
             }
-            self.submit_stored_envelope_with_retry(route, &artifact.submission_id, retry)
-                .await
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!(
-                            "frozen send {}: {} artifact {} not delivered: {e}",
-                            outbox.submission_id,
-                            artifact.role.as_str(),
-                            artifact.submission_id
-                        ),
-                        None::<std::io::Error>,
-                    )
-                })?;
+        }
+        let this = &*self;
+        let deliver = |id: String| async move {
+            let sealed = kept_seal(&id)?;
+            this.deliver(route, &id, &sealed, retry).await
+        };
+        let (transfer, delivered) = futures::future::join(
+            deliver(outbox.submission_id.clone()),
+            futures::future::join_all(
+                artifacts
+                    .iter()
+                    .map(|artifact| deliver(artifact.submission_id.clone())),
+            ),
+        )
+        .await;
+        transfer.map_err(|e| {
+            DsmError::internal(
+                format!(
+                    "frozen send {}: transfer half not delivered: {e}",
+                    outbox.submission_id
+                ),
+                None::<std::io::Error>,
+            )
+        })?;
+        let mut artifact_ids = Vec::with_capacity(artifacts.len());
+        for (artifact, answer) in artifacts.iter().zip(delivered) {
+            answer.map_err(|e| {
+                DsmError::internal(
+                    format!(
+                        "frozen send {}: {} artifact {} not delivered: {e}",
+                        outbox.submission_id,
+                        artifact.role.as_str(),
+                        artifact.submission_id
+                    ),
+                    None::<std::io::Error>,
+                )
+            })?;
             artifact_ids.push(artifact.submission_id.clone());
         }
 
