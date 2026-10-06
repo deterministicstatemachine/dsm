@@ -801,7 +801,8 @@ TAG_DSM_ESCROW_COMPUTED_MATCH               DSM/escrow/computed-match/v1        
 TAG_DSM_ESCROW_COMPUTED_MATCH_SEED          DSM/escrow/computed-match-seed/v1         s_match, the seed of the match cell
 TAG_DSM_ESCROW_COMPUTED_START               DSM/escrow/computed-start/v1              K_start
 TAG_DSM_ESCROW_COMPUTED_START_SEED          DSM/escrow/computed-start-seed/v1         s_start, the seed of the start cell
-TAG_DSM_ESCROW_COMPUTED_START_STATEMENT     DSM/escrow/computed-start-statement/v1    m_start
+TAG_DSM_ESCROW_COMPUTED_START_STATEMENT     DSM/escrow/computed-start-statement/v1    m_withdraw
+TAG_DSM_ESCROW_COMPUTED_READY               DSM/escrow/computed-ready/v1              m_ready, a side's ready statement
 TAG_DSM_ESCROW_COMPUTED_SETUP               DSM/escrow/computed-setup/v1              the setup digest
 TAG_DSM_ESCROW_COMPUTED_OCCUPANT            DSM/escrow/computed-occupant/v1           a reader's name for the occupant of K_match or K_start
 TAG_DSM_ESCROW_TRANSCRIPT                   DSM/escrow/transcript/v1                  h_0
@@ -858,7 +859,7 @@ pre
 0x0068           ESCROW_TRANSCRIPT_ENTRY                       one entry of a match transcript (Amendment S22)
 0x0069           ESCROW_TRANSCRIPT_OUTCOME                     a transcript occupying a match cell (Amendment S22)
 0x006A           ESCROW_EQUIVOCATION_PROOF                     two heads one session key signed at one index (Amendment S22)
-0x006B           ESCROW_MATCH_START                            Start or Withdraw at a start cell (Amendment S22)
+0x006B           ESCROW_MATCH_START                            Start (both readies) or Withdraw at a start cell (Amendment S22)
 
 
 <!-- Source PDF page 19 -->
@@ -1566,6 +1567,7 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
 
 - `P(setup, opened)` returns `Done(o)`, `Incomplete`, or a fault. It is deterministic and total over the bounds above. It keeps no state, calls nothing, reads no clock and fetches nothing (Explainer Amendment A13).
 - A verifier evaluates `P` only when `P` is registered with it under the hash the table pins. An unregistered `P` leaves every fact of the match cell not established. It is never Invalid, and no other program is tried in its place.
+- Core keys its registry by the hash a registered program reports. The binding of code to that hash is the registrar's (owner, 2026-10-06): the SDK registers a program only after the program passes its own frozen conformance vectors, and refuses one that fails them.
 - Core does the canonical, chain and signature checks before `P` sees anything. `P`'s answer counts only when `o` is a label of the branches.
 
 **What occupies the match cell**
@@ -1584,10 +1586,18 @@ The value that counts at `K_match` is the first object at its leader that is rec
   - A side signs one head per index of its own entries, ever. Two different heads signed at one index are proof that the key's holder cheated.
 - The first recognized occupant holds the cell for good (§8, consequences 2 and 3), whatever arrives after it.
 
-**The start cell: Start or Withdraw**
+**The start cell: a ready handshake, or a Withdraw** (owner ruling, 2026-10-06)
 
-- **`MatchStart`**, class `0x006B`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `kind` (`u8`: 1 Start, 2 Withdraw) and a `signature` over `m_start = H(DSM/escrow/computed-start-statement/v1; K_start ∥ u8(kind))`. It is recognized at `K` when `Y` and the table derive `K_start = K`; a Start's signature verifies under side B's session key, and a Withdraw's under side A's.
-- Side B writes Start when it locks. Side A may write Withdraw while its vault is the only one bound to the cell. Whichever is first at the start cell's leader holds it for good. No clock is involved.
+- **Ready.** A side is ready when its session key signs `m_ready = H(DSM/escrow/computed-ready/v1; K_match)`. Both sides sign the same statement; the key tells them apart.
+- **What a wallet checks before it signs its ready.** Its own vault and the opponent's vault are both GenesisAccepted and Active, and both bind to this `K_match`. They hold the same token and the same amount. Each is owned by the side its terms say: the recipient of `a-wins` owns side A's vault, the recipient of `b-wins` owns side B's. The branches mirror: `a-wins` and `b-wins` pay the same identities in both vaults, and each vault's `void` pays its own owner. This is the check side B makes against side A's vault under DSM Amendment A12, made by both sides.
+- **`MatchStart`**, class `0x006B`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `kind` (`u8`) and a body:
+  - **Start** (`kind` 1): `ready_a` and `ready_b`, each `u32be(|sig|) ∥ sig`: side A's and side B's signatures over `m_ready`. Whichever side readies second assembles the Start from both signatures and writes it.
+  - **Withdraw** (`kind` 2): `side` (`u8`, 1 or 2) and a `signature`, `u32be(|sig|) ∥ sig`, by that side's session key over `m_withdraw = H(DSM/escrow/computed-start-statement/v1; K_start ∥ u8(2))`. Either side may withdraw.
+- **Recognition**, from the object's own bytes (Amendment S20). A `MatchStart` is recognized at `K` when `Y` and the table derive `K_start = K` and:
+  - for a Start, `ready_a` verifies under `session_a` and `ready_b` under `session_b`, both over `m_ready` for the `K_match` the object derives. A Start holding one side's ready is not a Start;
+  - for a Withdraw, its signature verifies under the session key of the side it names, over `m_withdraw`.
+- Whichever is first at the start cell's leader holds it for good. The match begins at once and for both sides when a Start holds the start cell. A Withdraw counts only if it reaches the leader before any Start, and a Withdraw that arrives after a Start counts for nothing. No clock is involved.
+- **The ready timeout is the application's, outside DSM.** DSM has no clock and no deadline. An application that wants a real-world limit on how long a ready may wait asks the waiting wallet to Withdraw. Nothing in DSM reads the time, and nothing in DSM withdraws on its own.
 
 **The facts** (§13), for a computed escrow vault:
 
@@ -1608,7 +1618,7 @@ With these facts, the resolution of §19.9 is unchanged: `ConsumedRoute` (§23.2
 
 - A match that is not finished waits. A side that stops playing holds both stakes until it returns. It cannot gain by stopping: a transcript with no end computes no outcome, and the other side's stake stays locked with its own.
 - `Resign` is always open to a side that wants out, and its outcome is the program's.
-- Before Start holds, Withdraw voids the match and each stake returns to its owner. A wallet signs no entry until Start is final at `K_start`, so no move is ever made in a match that can still be withdrawn.
+- Before Start holds, either side's Withdraw voids the match and each stake returns to its owner. A side whose opponent never locks, or never readies, withdraws, so neither stake can be held by the other side's silence before the match begins. A wallet signs its ready only after the check above, and signs no entry until Start is final at `K_start`, so no move is ever made in a match that can still be withdrawn.
 - **Residual trust (owner, 2026-10-06).** The application relays the moves between the players' wallets. It can delay or withhold a move, which only stalls the match. It cannot forge a move, because every entry is covered by its side's session key.
 
 **Bounds.** At most 1024 entries, a move of at most 64 bytes, a setup of at most 16384 bytes, and two SPHINCS+ signatures. With these bounds, the largest `TranscriptOutcome` fits within a cell's value bound (`route_chain::MAX_VALUE_LEN`), and so does an `EquivocationProof`.

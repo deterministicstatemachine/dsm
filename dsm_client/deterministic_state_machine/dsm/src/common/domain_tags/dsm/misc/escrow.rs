@@ -62,10 +62,15 @@ pub const TAG_DSM_ESCROW_COMPUTED_START: TaggedHashDomain<'static> =
 /// `s_start = H(tag ‖ K_start)` — the seed of the start cell's route.
 pub const TAG_DSM_ESCROW_COMPUTED_START_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/escrow/computed-start-seed/v1");
-/// `m_start = H(tag ‖ K_start ‖ u8(kind))` — what a side signs to Start or to
-/// Withdraw a match.
+/// `m_withdraw = H(tag ‖ K_start ‖ u8(2))` — what a side signs to Withdraw a
+/// match before it starts.
 pub const TAG_DSM_ESCROW_COMPUTED_START_STATEMENT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/escrow/computed-start-statement/v1");
+/// `m_ready = H(tag ‖ K_match)` — what each side's session key signs once
+/// its wallet has checked both vaults; a Start holds both (the ready
+/// handshake, owner ruling 2026-10-06).
+pub const TAG_DSM_ESCROW_COMPUTED_READY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/escrow/computed-ready/v1");
 /// `H(tag ‖ setup)` — the digest of the program's input fixed at lock.
 pub const TAG_DSM_ESCROW_COMPUTED_SETUP: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/escrow/computed-setup/v1");
@@ -104,6 +109,7 @@ pub(crate) const ESCROW_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_ESCROW_COMPUTED_START,
     TAG_DSM_ESCROW_COMPUTED_START_SEED,
     TAG_DSM_ESCROW_COMPUTED_START_STATEMENT,
+    TAG_DSM_ESCROW_COMPUTED_READY,
     TAG_DSM_ESCROW_COMPUTED_SETUP,
     TAG_DSM_ESCROW_COMPUTED_OCCUPANT,
     TAG_DSM_ESCROW_TRANSCRIPT,
