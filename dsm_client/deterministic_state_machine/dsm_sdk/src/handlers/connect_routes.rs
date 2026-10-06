@@ -1290,9 +1290,16 @@ impl AppRouterImpl {
         )?;
         let cell = dsm::sofi::escrow::verdict_cell_of(&terms);
         let set = own_set()?;
-        let (vaults, search) = crate::sdk::escrow_flow::locked(&self.core_sdk, &set, &cell)
-            .await
-            .map_err(|e| format!("the vaults of the match's verdict cell: {e}"))?;
+        // Only the wallet's own vaults on the cell are walked to their heads:
+        // another vault there, the opponent's included, is not its stake.
+        let (vaults, search) = crate::sdk::escrow_flow::locked_by(
+            &self.core_sdk,
+            &set,
+            &cell,
+            &(wallet.genesis, wallet.device_id),
+        )
+        .await
+        .map_err(|e| format!("the wallet's vaults on the match's verdict cell: {e}"))?;
         let held = vaults.iter().find(|v| {
             (v.owner_genesis, v.owner_device_id) == (wallet.genesis, wallet.device_id)
                 && v.status == dsm::sofi::wire::VAULT_STATUS_ACTIVE
