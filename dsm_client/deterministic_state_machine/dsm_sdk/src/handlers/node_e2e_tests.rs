@@ -3229,6 +3229,16 @@ async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
         "a seat was asked for the head {per_seat} times ({} requests in all)",
         asked.iter().filter(|r| **r == head).count()
     );
+
+    // A second trade through the same vault stands on the setup the first
+    // admitted: no second setup, and no check before one.
+    assert_eq!(
+        setups(&p.b).await,
+        1,
+        "the first trade set up with the vault"
+    );
+    realized_trade(&p, &m, 10).await;
+    assert_eq!(setups(&p.b).await, 1, "the second trade reused the setup");
 }
 
 /// SoFi §27 (MR-SOFI-0255) as Amendment S16 leaves it: the app reaches SoFi
