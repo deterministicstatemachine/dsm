@@ -15,7 +15,7 @@ Every extraction in this round is taken against exactly these bytes:
 | File | `git hash-object` | Lines |
 |---|---|---|
 | `specs/DSM_High_Level_Explainer.md` | `577fd72382733c4bf3aa8ecd9bdd5de3ecd41df4` | 4374 |
-| `specs/SoFi_Settlement_Specification.md` | `692b7084018b8d5f5ab2562a006e894cc8645858` | 2967 |
+| `specs/SoFi_Settlement_Specification.md` | `b222e92cb5708e18f339c5ebebce2ee54492b5d5` | 2968 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
 | `specs/DSM_Storage_Node_Specification.md` | `415a9b9c67c7a2b4b6df78b0af85fb3bc7282ae8` | 636 |
 
