@@ -35,9 +35,9 @@ use crate::sdk::economic_admission_flow::{
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
 use crate::sdk::route_seats::write_recorded;
 use crate::sdk::sofi_flow::{
-    chain_past_withheld_pairs, context, exercise_draft, head_of, identity, own_setup_ref, refuse,
-    relationship_base, require_stored, set_up_with, sign, standing, storage, trader_core,
-    vault_at_head, vault_core, PositionOutcome, Search, SIGNATURE_ALG,
+    chain_past_withheld_pairs, context, exercise_draft, head_of, identity, own_setup_ref,
+    publication_addr, refuse, relationship_base, require_stored, set_up_with, sign, standing,
+    storage, trader_core, vault_at_head, vault_core, PositionOutcome, Search, SIGNATURE_ALG,
 };
 use crate::sdk::sofi_publish::{publish, LOCATOR_BUDGET};
 use crate::sdk::sofi_reads::{verifier_error, LiveSofiReads, VerifierContext};
@@ -237,6 +237,7 @@ pub async fn create(
     if intent.amount == 0 {
         return Err(refuse("an escrow vault holds a non-zero stake"));
     }
+    let mut timing = crate::util::phase_timing::PhaseTimer::start("escrow.create");
     let (genesis, device_id) = identity(core)?;
     let validated = validated_root_or_activate(core)?;
     let create_position = next_position(validated.economic_position()).map_err(refuse)?;
@@ -248,10 +249,15 @@ pub async fn create(
         let ctx = VerifierContext::new(set, Some((genesis, device_id)), None)?;
         counterpart_linked(set, &ctx.verifier(), &counterpart, &verdict_cell).await?;
     }
+    timing.phase("counterpart");
 
-    let published = publish(set, &Publication::EscrowTerms(&terms)).await?;
-    require_stored("escrow terms", &published)?;
-    let addr = published.addr;
+    // `A_T` is the terms' address, which their bytes fix: the genesis names
+    // it as derived here, and the terms and the genesis are published
+    // together below, both read back Stored before the admission (§19.9:
+    // the terms are put under `A_T`, the genesis indexed; the admission
+    // stands on both).
+    let terms_object = Publication::EscrowTerms(&terms);
+    let addr = publication_addr(&terms_object)?;
     let preimage = VaultGenesisPreimage {
         owner_genesis: genesis,
         owner_device_id: device_id,
@@ -271,15 +277,19 @@ pub async fn create(
         },
     };
     let produced = build_escrow_vault_create(&preimage, &terms).map_err(refuse)?;
-    let published = publish(
-        set,
-        &Publication::EscrowVaultGenesis {
-            preimage: &preimage,
-            terms: &terms,
-        },
-    )
-    .await?;
-    require_stored("escrow vault genesis", &published)?;
+    let genesis_object = Publication::EscrowVaultGenesis {
+        preimage: &preimage,
+        terms: &terms,
+    };
+    let (terms_published, genesis_published) =
+        futures::future::try_join(publish(set, &terms_object), publish(set, &genesis_object))
+            .await?;
+    require_stored("escrow terms", &terms_published)?;
+    if terms_published.addr != addr {
+        return Err(refuse("the escrow terms were stored at another address"));
+    }
+    require_stored("escrow vault genesis", &genesis_published)?;
+    timing.phase("publish");
 
     let operation = produced
         .operation
@@ -300,6 +310,7 @@ pub async fn create(
         Some(BuiltOn::of(&validated)),
     )
     .await?;
+    timing.phase("admission");
     let vault_id = preimage.vault_id();
     record_realized(
         &outcome.new_device_state,

@@ -96,9 +96,10 @@ pub async fn publish_produced(
     produced: &Produced,
     operation_signature: &[u8],
 ) -> Result<Vec<Published>, DsmError> {
-    let mut out = Vec::with_capacity(produced.publish.len());
-    for item in &produced.publish {
-        let publication = match item {
+    let publications: Vec<Publication<'_>> = produced
+        .publish
+        .iter()
+        .map(|item| match item {
             ToPublish::Setup(body) => Publication::Setup {
                 body,
                 signature: operation_signature,
@@ -114,10 +115,13 @@ pub async fn publish_produced(
                 signature: operation_signature,
             },
             ToPublish::PreBalance(balance) => Publication::TraderPreBalance(balance),
-        };
-        out.push(publish(set, &publication).await?);
-    }
-    Ok(out)
+        })
+        .collect();
+    // Every object is built and signed before any is put, and none waits on
+    // another's answer: they are published at once, each put before its
+    // locators are appended ([`publish`]), and reported in the order
+    // produced. The caller reads each back Stored before going on.
+    futures::future::try_join_all(publications.iter().map(|object| publish(set, object))).await
 }
 
 async fn fetch<T>(
