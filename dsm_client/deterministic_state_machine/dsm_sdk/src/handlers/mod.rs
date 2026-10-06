@@ -32,6 +32,8 @@ pub mod bitcoin_query_routes;
 #[cfg(test)]
 mod computed_escrow_e2e_tests;
 #[cfg(test)]
+mod connect_duel_e2e_tests;
+#[cfg(test)]
 mod connect_e2e_tests;
 #[cfg(test)]
 mod connect_escrow_e2e_tests;

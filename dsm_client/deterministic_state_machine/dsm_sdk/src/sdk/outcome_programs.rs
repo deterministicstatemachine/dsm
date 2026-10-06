@@ -538,6 +538,31 @@ pub fn init() -> &'static [Refused] {
     refused()
 }
 
+/// The name and rules version of `program`, when it is one this process
+/// registered: what a screen shows a program by, beside its hash.
+pub fn program_name(program: &D32) -> Option<String> {
+    (*program == WildstateDuel.id() && is_registered(program)).then(|| {
+        format!(
+            "{} v{}",
+            wildstate_duel::PROGRAM_NAME,
+            wildstate_duel::RULES_VERSION
+        )
+    })
+}
+
+/// `program` as a screen names it: its registered name, then the first
+/// Base32 characters of its hash.
+pub fn program_text(program: &D32) -> String {
+    let short: String = dsm::utils::text_id::encode_base32_crockford(program)
+        .chars()
+        .take(8)
+        .collect();
+    match program_name(program) {
+        Some(name) => format!("{name} ({short}…)"),
+        None => format!("an unregistered program ({short}…)"),
+    }
+}
+
 /// Whether `program` is registered with this process's verifiers.
 pub fn is_registered(program: &D32) -> bool {
     registry().get(program).is_some()

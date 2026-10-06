@@ -34,7 +34,7 @@ fn set() -> crate::sdk::storage_set::StorageSet {
 
 /// A frozen match of several turns: its teams, and the moves it was played
 /// with.
-fn frozen() -> (DuelMatchV1, Vec<DuelTurnV1>) {
+pub(super) fn frozen() -> (DuelMatchV1, Vec<DuelTurnV1>) {
     let vectors = DuelVectorSetV1::decode(wildstate_duel::VECTORS_V1).expect("the vectors");
     let long = vectors
         .vectors
@@ -49,27 +49,37 @@ fn session_key(d: &TestDevice, nonce: &D32) -> Vec<u8> {
     computed_flow::session_public_key(nonce).expect("a session key")
 }
 
-/// The setup of a match between A and B on the frozen teams, each side
-/// naming its wallet's identity and its session key for `nonce`, and the
-/// tiebreak seed both keys and the nonce derive.
-fn setup(p: &Pair, nonce: D32) -> Vec<u8> {
+/// The setup of a match between `a` and `b` on the frozen teams, each side
+/// naming its wallet's identity and its session key, and the tiebreak seed
+/// both keys and the nonce derive.
+pub(super) fn setup_with_keys(
+    a: &TestDevice,
+    b: &TestDevice,
+    nonce: D32,
+    key_a: &[u8],
+    key_b: &[u8],
+) -> Vec<u8> {
     let (body, _) = frozen();
-    let (key_a, key_b) = (session_key(&p.a, &nonce), session_key(&p.b, &nonce));
     let side = |of: &DuelSide, d: &TestDevice, key: &[u8]| DuelSide {
         genesis: d.genesis,
         device_id: d.device_id,
         session_public_key: key.to_vec(),
         ..of.clone()
     };
-    let a = side(body.a(), &p.a, &key_a);
-    let b = side(body.b(), &p.b, &key_b);
-    let seed = wildstate_duel::tiebreak_seed(&nonce, &key_a, &key_b);
-    let body = DuelMatchV1::new(nonce, body.turn_cap(), seed, a, b).expect("a match");
+    let side_a = side(body.a(), a, key_a);
+    let side_b = side(body.b(), b, key_b);
+    let seed = wildstate_duel::tiebreak_seed(&nonce, key_a, key_b);
+    let body = DuelMatchV1::new(nonce, body.turn_cap(), seed, side_a, side_b).expect("a match");
     DuelSetupV1 {
         program: wildstate_duel::program_hash(),
         body,
     }
     .encode()
+}
+
+fn setup(p: &Pair, nonce: D32) -> Vec<u8> {
+    let (key_a, key_b) = (session_key(&p.a, &nonce), session_key(&p.b, &nonce));
+    setup_with_keys(&p.a, &p.b, nonce, &key_a, &key_b)
 }
 
 async fn lock(
@@ -219,7 +229,7 @@ impl Relay {
     }
 }
 
-fn salt(index: u32, side: MatchSide) -> D32 {
+pub(super) fn salt(index: u32, side: MatchSide) -> D32 {
     [index as u8 ^ side.byte().wrapping_mul(0x40); 32]
 }
 

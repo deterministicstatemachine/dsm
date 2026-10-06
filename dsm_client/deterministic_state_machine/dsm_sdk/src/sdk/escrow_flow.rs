@@ -22,8 +22,8 @@ use dsm::sofi::resolve::{AcceptedGeneses, VaultGenesis, Verifier};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{retire_vault_post, VaultTerms};
 use dsm::sofi::wire::{
-    next_position, EscrowBranch, EscrowOutcome, EscrowSigner, EscrowTerms, EscrowVerdict,
-    VaultGenesisPreimage, VaultStateLeaf, VerdictSignature, VAULT_STATUS_ACTIVE,
+    next_position, StartKind, EscrowBranch, EscrowOutcome, EscrowSigner, EscrowTerms,
+    EscrowVerdict, VaultGenesisPreimage, VaultStateLeaf, VerdictSignature, VAULT_STATUS_ACTIVE,
 };
 use dsm::types::device_state::{BalanceDelta, BalanceDirection};
 use dsm::types::error::DsmError;
@@ -412,7 +412,7 @@ pub struct VerdictView {
     pub held: Option<(Vec<u8>, ChainState)>,
     /// Why each value the leader holds ahead of the deciding one counts as
     /// nothing there.
-    pub passed_over: Vec<VerdictRefusal>,
+    pub passed_over: Vec<String>,
 }
 
 impl VerdictView {
@@ -426,7 +426,11 @@ impl VerdictView {
         Self {
             verdict_cell: *read.key(),
             held,
-            passed_over: read.passed_over().to_vec(),
+            passed_over: read
+                .passed_over()
+                .iter()
+                .map(|refusal| format!("{refusal:?}"))
+                .collect(),
         }
     }
 }
@@ -553,19 +557,74 @@ impl<'a> EscrowReads<'a> {
     /// taken from whoever named it.
     pub async fn vault(&self, vault_id: &D32) -> Result<EscrowVaultView, DsmError> {
         let verifier = self.ctx.verifier();
-        escrow_terms_of(&verifier, vault_id)?;
         view_of(self.set, &verifier, vault_id).await
     }
 
-    /// What the verdict cell of `vault_id` holds.
+    /// What the verdict cell of `vault_id` holds; for a computed vault (SoFi
+    /// Amendment S22), the outcome its match and start cells give: `void`
+    /// once a Withdraw holds the start cell, or the label of the occupant
+    /// holding the match cell once a Start does.
     pub fn verdict(&self, vault_id: &D32) -> Result<VerdictView, DsmError> {
         let verifier = self.ctx.verifier();
+        if let VaultGenesis::Accepted(accepted) =
+            verifier.vault_genesis(vault_id).map_err(verifier_error)?
+        {
+            if let Some(terms) = accepted.computed() {
+                return computed_verdict(&verifier, terms);
+            }
+        }
         let terms = escrow_terms_of(&verifier, vault_id)?;
         Ok(VerdictView::of(&read_cell(
             &verifier,
             &escrow::verdict_cell_of(&terms),
         )?))
     }
+}
+
+/// A computed vault's cells as a verdict view: the cell a release names is
+/// `K_match`, and the outcome held is the Withdraw's `void` or the match
+/// occupant's label once a Start holds, with that value's chain state.
+fn computed_verdict(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    terms: &dsm::sofi::wire::ComputedEscrowTerms,
+) -> Result<VerdictView, DsmError> {
+    let read = verifier
+        .read_computed_cells(terms)
+        .map_err(verifier_error)?
+        .map_err(|missing| {
+            storage(
+                "computed cells",
+                format!("not established yet: {missing:?}"),
+            )
+        })?;
+    let start = read.start();
+    let held = match (start.held(), start.fact(), read.matched()) {
+        (Some(StartKind::Withdraw), CellFact::Held { state, .. }, _) => {
+            Some((dsm::sofi::wire::COMPUTED_LABEL_VOID.to_vec(), state))
+        }
+        (Some(StartKind::Start), CellFact::Held { .. }, Some(matched)) => {
+            match (matched.occupant(), matched.fact()) {
+                (Some(occupant), CellFact::Held { state, .. }) => {
+                    Some((occupant.label().to_vec(), state))
+                }
+                (None, _) | (Some(..), CellFact::Open) => None,
+            }
+        }
+        _ => None,
+    };
+    let mut passed_over: Vec<String> = start
+        .passed_over()
+        .iter()
+        .map(|refusal| format!("{refusal:?}"))
+        .collect();
+    if let Some(matched) = read.matched() {
+        passed_over.extend(matched.passed_over().iter().map(|r| format!("{r:?}")));
+    }
+    Ok(VerdictView {
+        verdict_cell: read.key(),
+        held,
+        passed_over,
+    })
 }
 
 // ── escrow.release ──────────────────────────────────────────────────────────
@@ -581,6 +640,20 @@ pub async fn release(
     set: &StorageSet,
     vault_id: &D32,
 ) -> Result<PositionOutcome, DsmError> {
+    // A computed vault's release stands on its match and start cells (SoFi
+    // Amendment S22).
+    {
+        let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
+        if let VaultGenesis::Accepted(accepted) = ctx
+            .verifier()
+            .vault_genesis(vault_id)
+            .map_err(verifier_error)?
+        {
+            if accepted.computed().is_some() {
+                return crate::sdk::computed_flow::release(core, set, vault_id).await;
+            }
+        }
+    }
     let accepted = &AcceptedGeneses::default();
     let outcome = {
         let standing = standing(core)?;
@@ -701,8 +774,14 @@ pub struct EscrowVaultView {
     pub amount: u64,
     pub generation: u64,
     pub status: u16,
-    /// The terms' branches, ascending by outcome.
+    /// The terms' branches, ascending by outcome; none for a computed vault.
     pub branches: Vec<EscrowBranch>,
+    /// A computed vault (SoFi Amendment S22): the program `P` its outcome is
+    /// computed by.
+    pub program: Option<D32>,
+    /// A computed vault's branches: `a-wins`, `b-wins`, `void` and whom each
+    /// pays.
+    pub computed: Vec<dsm::sofi::wire::ComputedBranch>,
 }
 
 async fn view_of(
@@ -711,20 +790,39 @@ async fn view_of(
     vault_id: &D32,
 ) -> Result<EscrowVaultView, DsmError> {
     let (vault, ..) = vault_at_head(set, verifier, vault_id).await?;
-    let VaultTerms::Escrow(terms) = &vault.terms else {
-        return Err(refuse("the vault is not an escrow vault"));
+    let (verdict_cell, external_commitment, token, branches, program, computed) = match &vault.terms
+    {
+        VaultTerms::Escrow(terms) => (
+            escrow::verdict_cell_of(terms),
+            *terms.external_commitment(),
+            *terms.token(),
+            terms.branches().to_vec(),
+            None,
+            Vec::new(),
+        ),
+        VaultTerms::Computed(terms) => (
+            dsm::sofi::computed::match_cell_of(terms),
+            *terms.external_commitment(),
+            *terms.token(),
+            Vec::new(),
+            Some(*terms.table().program()),
+            terms.branches().to_vec(),
+        ),
+        VaultTerms::Market(..) => return Err(refuse("the vault is not an escrow vault")),
     };
     Ok(EscrowVaultView {
         vault_id: *vault_id,
         owner_genesis: vault.state.owner_genesis,
         owner_device_id: vault.state.owner_device_id,
-        verdict_cell: escrow::verdict_cell_of(terms),
-        external_commitment: *terms.external_commitment(),
-        token: *terms.token(),
+        verdict_cell,
+        external_commitment,
+        token,
         amount: vault.state.reserve_a,
         generation: vault.state.generation,
         status: vault.state.status,
-        branches: terms.branches().to_vec(),
+        branches,
+        program,
+        computed,
     })
 }
 
@@ -828,7 +926,9 @@ pub async fn own_vaults(
             .vault_genesis(&creation.vault_id)
             .map_err(verifier_error)?
         {
-            VaultGenesis::Accepted(genesis) if genesis.escrow().is_some() => {
+            VaultGenesis::Accepted(genesis)
+                if genesis.escrow().is_some() || genesis.computed().is_some() =>
+            {
                 out.push(view_of(set, &verifier, &creation.vault_id).await?);
             }
             // A market vault is `sofi.vaults`'.

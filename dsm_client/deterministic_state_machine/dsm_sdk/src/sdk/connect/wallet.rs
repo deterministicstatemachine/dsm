@@ -162,6 +162,18 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
             ),
         },
         ScopeKind::Escrow => format!("Lock stakes for matches: {}", caps(scope)),
+        ScopeKind::Duel => {
+            let programs: Vec<String> = scope
+                .programs
+                .iter()
+                .map(crate::sdk::outcome_programs::program_text)
+                .collect();
+            format!(
+                "Stake {}, in battles decided by program {}, and play your moves",
+                caps(scope),
+                programs.join(" or ")
+            )
+        }
         ScopeKind::Holdings => {
             let named: Vec<String> = scope
                 .policy_commits
@@ -234,6 +246,31 @@ pub fn describe_request(request: &Request) -> String {
         Request::EscrowRelease { vault_ids } => match vault_ids.len() {
             1 => "Collect a match result".to_string(),
             n => format!("Collect a match result ({n} stakes)"),
+        },
+        Request::DuelSessionKey { .. } => "Name your key for a battle".to_string(),
+        Request::DuelLock(lock) => {
+            let staked = amount_of(&lock.policy_commit, lock.amount, &none);
+            let by = crate::sdk::outcome_programs::program_text(&lock.program);
+            match lock.memo.trim() {
+                "" => format!("Stake {staked} in a battle decided by program {by}"),
+                memo => format!("Stake {staked} in a battle decided by program {by} ({memo})"),
+            }
+        }
+        Request::DuelReady { match_cell, .. } => {
+            format!("Ready for battle {}", short(match_cell))
+        }
+        Request::DuelWithdraw { match_cell } => {
+            format!("Withdraw from battle {}", short(match_cell))
+        }
+        Request::DuelSign { match_cell, .. } => {
+            format!("Play a move in battle {}", short(match_cell))
+        }
+        Request::DuelSettle { match_cell, .. } => {
+            format!("Settle battle {}", short(match_cell))
+        }
+        Request::DuelCollect { vault_ids } => match vault_ids.len() {
+            1 => "Collect a battle result".to_string(),
+            n => format!("Collect a battle result ({n} stakes)"),
         },
     }
 }
