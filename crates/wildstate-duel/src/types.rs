@@ -17,6 +17,9 @@ pub const MAX_SESSION_KEY_BYTES: usize = 4096;
 /// · 4 `hp` u16, at most the level's maximum · 5 `charges` `u32 count ‖ u8 …`,
 /// exactly one per move of the species in table order; a move without
 /// charges holds 0 and a charged move at most its maximum for the level.
+/// The XP a creature is born with.
+pub const BIRTH_XP: u32 = 0;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatureStateV1 {
     anchor: [u8; 32],
@@ -31,6 +34,29 @@ impl CreatureStateV1 {
 
     /// Validates against the tables: a known species, HP within the level's
     /// maximum, one charge count per move, none above its maximum.
+    /// The state every creature is born in, whatever brought it into a
+    /// player's possession through its issuer (a catch, a starter): level 1,
+    /// no XP, the level's whole HP and every move's whole charge. A creature
+    /// keeps a later state only by playing on from this one, or by changing
+    /// hands between players, which moves ownership and leaves its state
+    /// chain as it was (owner ruling 2026-10-06).
+    pub fn birth(anchor: [u8; 32], species: u8) -> Result<Self, DecodeError> {
+        let def = TABLES
+            .species_def(species)
+            .ok_or(DecodeError::UnknownValue {
+                field: "creature.species",
+                value: u32::from(species),
+            })?;
+        let xp = BIRTH_XP;
+        let level = TABLES.level(xp);
+        let charges = def
+            .moves
+            .iter()
+            .map(|m| TABLES.max_charges(m, level))
+            .collect();
+        Self::new(anchor, species, xp, TABLES.max_hp(xp), charges)
+    }
+
     pub fn new(
         anchor: [u8; 32],
         species: u8,

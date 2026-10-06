@@ -9,6 +9,15 @@ use wildstate_duel::CreatureStateV1;
 
 const ANCHOR: [u8; 32] = [7; 32];
 
+/// The record a creature is issued with: its birth state at level 1.
+fn born() -> R<CreatureRecordV1> {
+    let later = creature(7, 2, 3, None)?;
+    Ok(CreatureRecordV1 {
+        parent: None,
+        state: CreatureStateV1::birth(*later.anchor(), later.species())?,
+    })
+}
+
 fn record(parent: Option<[u8; 32]>, hp: u16) -> R<CreatureRecordV1> {
     Ok(CreatureRecordV1 {
         parent,
@@ -34,14 +43,14 @@ fn a_record_round_trips_and_names_its_parent_by_digest() -> R {
 
 #[test]
 fn the_latest_state_is_the_tip_of_the_chain_from_issuance() -> R {
-    let issued = record(None, 30)?;
+    let issued = born()?;
     let second = record(Some(issued.digest()), 22)?;
     let third = record(Some(second.digest()), 25)?;
     // Published in any order, one of them twice, with bytes that are no
     // record and a record of another creature beside them.
     let other = CreatureRecordV1 {
         parent: None,
-        state: creature(8, 2, 3, None)?,
+        state: CreatureStateV1::birth([8; 32], 2)?,
     };
     let published = vec![
         third.encode(),
@@ -66,7 +75,7 @@ fn the_latest_state_is_the_tip_of_the_chain_from_issuance() -> R {
 
 #[test]
 fn two_histories_of_one_creature_give_no_latest_state() -> R {
-    let issued = record(None, 30)?;
+    let issued = born()?;
     assert_eq!(latest(&ANCHOR, &[]), Err(ChainRefusal::NoIssuance));
     assert_eq!(
         latest(&ANCHOR, &[record(Some(issued.digest()), 9)?.encode()]),
@@ -94,7 +103,7 @@ fn two_histories_of_one_creature_give_no_latest_state() -> R {
 /// is another state, which the chain does not end in.
 #[test]
 fn a_modded_state_is_not_the_latest() -> R {
-    let issued = record(None, 30)?;
+    let issued = born()?;
     let (tip, _) = latest(&ANCHOR, &[issued.encode()])?;
     let modded = CreatureStateV1::new(
         *tip.anchor(),
@@ -105,5 +114,22 @@ fn a_modded_state_is_not_the_latest() -> R {
     )?;
     assert_ne!(modded, tip);
     assert_ne!(modded.commitment(), tip.commitment());
+    Ok(())
+}
+
+/// Whatever its issuer hands over is born at level 1 (owner ruling
+/// 2026-10-06): a creature issued at any later state has no latest state,
+/// and one issued at birth carries on to whatever level it played to.
+#[test]
+fn a_creature_is_issued_only_at_its_birth_state() -> R {
+    let grown = record(None, 30)?;
+    assert_ne!(grown.state, born()?.state, "level 3 is not the birth state");
+    assert_eq!(latest(&ANCHOR, &[grown.encode()]), Err(ChainRefusal::NotBorn));
+    let issued = born()?;
+    let played = record(Some(issued.digest()), 30)?;
+    assert_eq!(latest(&ANCHOR, &[issued.encode(), played.encode()])?.0, played.state);
+    let birth = CreatureStateV1::birth(ANCHOR, 2)?;
+    assert_eq!(birth.xp(), 0);
+    assert_eq!(birth.hp(), wildstate_duel::TABLES.max_hp(0));
     Ok(())
 }

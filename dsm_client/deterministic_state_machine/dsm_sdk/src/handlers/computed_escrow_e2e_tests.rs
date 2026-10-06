@@ -97,14 +97,26 @@ pub(super) async fn issue_team(
             frozen.charges().to_vec(),
         )
         .expect("the frozen state under the new anchor");
-        let record = CreatureRecordV1 {
+        // Issued at its birth state (owner ruling 2026-10-06), then played on
+        // to the frozen match's state as a successor naming it.
+        let birth = CreatureRecordV1 {
             parent: None,
-            state: state.clone(),
+            state: CreatureStateV1::birth(anchor, state.species()).expect("the birth state"),
         };
-        let published = crate::sdk::authored_objects::publish(&set(), &anchor, &record.encode())
-            .await
-            .expect("the record the creature was issued with");
-        assert!(published.stored, "the record is Stored");
+        let mut records = vec![birth.clone()];
+        if birth.state != state {
+            records.push(CreatureRecordV1 {
+                parent: Some(birth.digest()),
+                state: state.clone(),
+            });
+        }
+        for record in records {
+            let published =
+                crate::sdk::authored_objects::publish(&set(), &anchor, &record.encode())
+                    .await
+                    .expect("a record of the creature");
+            assert!(published.stored, "the record is Stored");
+        }
         team.push(state);
     }
     team
