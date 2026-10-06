@@ -259,6 +259,28 @@ pub mod class {
     pub const SOFI_SETTLEMENT_RELEASE: u16 = 0x0065;
     /// `X_route` preimage branch: a release.
     pub const SOFI_ROUTE_DIGEST_RELEASE: u16 = 0x0066;
+    /// `0x0067` — a computed escrow vault's terms (SoFi Amendment S22): the
+    /// held token, `Y`, the computed table (the program hash, the setup
+    /// digest and one session key per side) and the three branches
+    /// `a-wins`, `b-wins`, `void` with their recipients. The class of the
+    /// object an escrow vault's slots name decides its kind.
+    pub const ESCROW_COMPUTED_TERMS: u16 = 0x0067;
+    /// `0x0068` — one entry of a match transcript (SoFi Amendment S22): its
+    /// index, its side, and a Commit, a Reveal or a Resign. Its canonical
+    /// bytes are what the head chain hashes; it carries no signature.
+    pub const ESCROW_TRANSCRIPT_ENTRY: u16 = 0x0068;
+    /// `0x0069` — a transcript occupying a match cell (SoFi Amendment S22):
+    /// `Y`, the table, the setup, the entries and each side's signature over
+    /// the head of its last entry. It occupies the cell only when it proves
+    /// the outcome from these bytes.
+    pub const ESCROW_TRANSCRIPT_OUTCOME: u16 = 0x0069;
+    /// `0x006A` — two different heads one session key signed at one index
+    /// (SoFi Amendment S22): an occupant of the match cell for the other
+    /// side.
+    pub const ESCROW_EQUIVOCATION_PROOF: u16 = 0x006A;
+    /// `0x006B` — a Start (side B) or a Withdraw (side A) at a match's start
+    /// cell (SoFi Amendment S22).
+    pub const ESCROW_MATCH_START: u16 = 0x006B;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

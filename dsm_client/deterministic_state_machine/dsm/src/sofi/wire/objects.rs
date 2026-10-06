@@ -3006,3 +3006,820 @@ impl EscrowVerdict {
         finish(&c, v)
     }
 }
+
+// ── 0x0067..=0x006B computed escrow vaults (SoFi Amendment S22) ────────────
+
+/// The label of side A's win.
+pub const COMPUTED_LABEL_A_WINS: &[u8] = b"a-wins";
+/// The label of side B's win.
+pub const COMPUTED_LABEL_B_WINS: &[u8] = b"b-wins";
+/// The label of a voided match: what a Withdraw holding the start cell gives.
+pub const COMPUTED_LABEL_VOID: &[u8] = b"void";
+/// A computed escrow vault's three branch labels, in their canonical order.
+pub const COMPUTED_LABELS: [&[u8]; 3] = [
+    COMPUTED_LABEL_A_WINS,
+    COMPUTED_LABEL_B_WINS,
+    COMPUTED_LABEL_VOID,
+];
+/// The most entries one transcript holds.
+pub const TRANSCRIPT_MAX_ENTRIES: usize = 1024;
+/// The longest move a Reveal opens.
+pub const TRANSCRIPT_MAX_MOVE_BYTES: usize = 64;
+/// The longest setup a computed table's digest commits.
+pub const COMPUTED_MAX_SETUP_BYTES: usize = 16 * 1024;
+/// The longest canonical entry: a Reveal of the longest move.
+pub const TRANSCRIPT_MAX_ENTRY_BYTES: usize = 4 + 4 + 1 + 1 + 32 + 4 + TRANSCRIPT_MAX_MOVE_BYTES;
+
+/// A side of a computed match: A (1) or B (2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MatchSide {
+    A,
+    B,
+}
+
+impl MatchSide {
+    /// Its byte on the wire.
+    pub fn byte(self) -> u8 {
+        match self {
+            Self::A => 1,
+            Self::B => 2,
+        }
+    }
+
+    /// The side `byte` names, or why it names none.
+    pub fn from_byte(byte: u8) -> Result<Self, SofiWireError> {
+        match byte {
+            1 => Ok(Self::A),
+            2 => Ok(Self::B),
+            value => Err(SofiWireError::UndeclaredValue {
+                field: "match side",
+                value: u32::from(value),
+            }),
+        }
+    }
+
+    /// The other side.
+    pub fn other(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
+
+    /// The label of this side's win.
+    pub fn win_label(self) -> &'static [u8] {
+        match self {
+            Self::A => COMPUTED_LABEL_A_WINS,
+            Self::B => COMPUTED_LABEL_B_WINS,
+        }
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Self::from_byte(c.u8()?).map_err(wire_invalid)
+    }
+}
+
+fn check_signature_bytes(field: &'static str, signature: &[u8]) -> Result<(), SofiWireError> {
+    if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+        return Err(SofiWireError::ObjectTooLarge {
+            field,
+            bytes: signature.len(),
+            max: MAX_SIGNATURE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// The computed table `T_c` (SoFi §19.10): the program hash `P`, the digest
+/// of the setup it runs on, and each side's session key. It is the authority
+/// of a computed escrow vault, and it has exactly one encoding, so parties
+/// that agree on it derive the same `τ_c` and the same match cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputedTable {
+    program: D32,
+    setup_digest: D32,
+    session_a: EscrowSigner,
+    session_b: EscrowSigner,
+}
+
+impl ComputedTable {
+    /// Refuses one key for both sides: an equivocation could not say which
+    /// side cheated.
+    pub fn new(
+        program: D32,
+        setup_digest: D32,
+        session_a: EscrowSigner,
+        session_b: EscrowSigner,
+    ) -> Result<Self, SofiWireError> {
+        if session_a == session_b {
+            return Err(SofiWireError::SessionKeysNotDistinct);
+        }
+        Ok(Self {
+            program,
+            setup_digest,
+            session_a,
+            session_b,
+        })
+    }
+
+    /// `P`, the hash that pins the outcome program.
+    pub fn program(&self) -> &D32 {
+        &self.program
+    }
+
+    /// `H(DSM/escrow/computed-setup/v1 ‖ setup)`.
+    pub fn setup_digest(&self) -> &D32 {
+        &self.setup_digest
+    }
+
+    /// The session key `side` committed at lock.
+    pub fn session(&self, side: MatchSide) -> &EscrowSigner {
+        match side {
+            MatchSide::A => &self.session_a,
+            MatchSide::B => &self.session_b,
+        }
+    }
+
+    /// `P ‖ setup_digest ‖ key_a ‖ key_b`, each key `u16be(alg) ‖
+    /// u32be(|key|) ‖ key`: what `τ_c` hashes, and how the table nests.
+    pub fn canonical(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.push(&mut out);
+        out
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_digest32(out, &self.program);
+        push_digest32(out, &self.setup_digest);
+        push_key(
+            out,
+            self.session_a.signature_alg,
+            &self.session_a.public_key,
+        );
+        push_key(
+            out,
+            self.session_b.signature_alg,
+            &self.session_b.public_key,
+        );
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let program = c.digest32()?;
+        let setup_digest = c.digest32()?;
+        let session_a = EscrowSigner::at(c)?;
+        let session_b = EscrowSigner::at(c)?;
+        Self::new(program, setup_digest, session_a, session_b).map_err(wire_invalid)
+    }
+}
+
+/// One branch of a computed escrow vault: its label and the identity it
+/// pays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputedBranch {
+    label: Vec<u8>,
+    recipient_genesis: D32,
+    recipient_device_id: D32,
+}
+
+impl ComputedBranch {
+    pub fn new(label: &[u8], recipient_genesis: D32, recipient_device_id: D32) -> Self {
+        Self {
+            label: label.to_vec(),
+            recipient_genesis,
+            recipient_device_id,
+        }
+    }
+
+    pub fn label(&self) -> &[u8] {
+        &self.label
+    }
+
+    pub fn recipient_genesis(&self) -> &D32 {
+        &self.recipient_genesis
+    }
+
+    pub fn recipient_device_id(&self) -> &D32 {
+        &self.recipient_device_id
+    }
+}
+
+/// `0x0067 ComputedEscrowTerms` — what a computed escrow vault's three policy
+/// slots name (SoFi §19.10): the held token, `Y`, the computed table, and the
+/// branches `a-wins`, `b-wins` and `void`, in that order, with their
+/// recipients. What the registered program computes from the match
+/// transcript decides which branch the vault releases along.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputedEscrowTerms {
+    token: D32,
+    external_commitment: D32,
+    table: ComputedTable,
+    branches: Vec<ComputedBranch>,
+}
+
+impl ComputedEscrowTerms {
+    pub fn new(
+        token: D32,
+        external_commitment: D32,
+        table: ComputedTable,
+        branches: Vec<ComputedBranch>,
+    ) -> Result<Self, SofiWireError> {
+        let labels: Vec<&[u8]> = branches.iter().map(ComputedBranch::label).collect();
+        if labels != COMPUTED_LABELS {
+            return Err(SofiWireError::ComputedBranchesNotTheThreeLabels);
+        }
+        Ok(Self {
+            token,
+            external_commitment,
+            table,
+            branches,
+        })
+    }
+
+    /// The policy commit of the held token.
+    pub fn token(&self) -> &D32 {
+        &self.token
+    }
+
+    /// `Y = H(DSM/external/v1 ‖ X)`.
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &ComputedTable {
+        &self.table
+    }
+
+    pub fn branches(&self) -> &[ComputedBranch] {
+        &self.branches
+    }
+
+    /// The branch labelled `label`, when the terms have one.
+    pub fn branch(&self, label: &[u8]) -> Option<&ComputedBranch> {
+        self.branches.iter().find(|b| b.label == label)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_COMPUTED_TERMS);
+        push_digest32(&mut out, &self.token);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        push_u32(&mut out, self.branches.len() as u32);
+        for branch in &self.branches {
+            push_part(&mut out, &branch.label);
+            push_digest32(&mut out, &branch.recipient_genesis);
+            push_digest32(&mut out, &branch.recipient_device_id);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_COMPUTED_TERMS, SCHEMA_V1)?;
+        let token = c.digest32()?;
+        let external_commitment = c.digest32()?;
+        let table = ComputedTable::at(&mut c)?;
+        let n = read_count(
+            &mut c,
+            "computed branches",
+            COMPUTED_LABELS.len(),
+            COMPUTED_LABELS.len(),
+        )?;
+        let mut branches = Vec::with_capacity(n);
+        for _ in 0..n {
+            let label = read_var_bytes(&mut c, ESCROW_MAX_OUTCOME_BYTES)?;
+            branches.push(ComputedBranch {
+                label,
+                recipient_genesis: c.digest32()?,
+                recipient_device_id: c.digest32()?,
+            });
+        }
+        let v = Self::new(token, external_commitment, table, branches).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// What an entry of a transcript does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A move committed and not yet shown:
+    /// `H(DSM/escrow/move-commit/v1 ‖ salt ‖ u32be(|move|) ‖ move)`.
+    Commit { commitment: D32 },
+    /// The opening of the side's one unopened commitment.
+    Reveal { salt: D32, played: Vec<u8> },
+    /// The side gives the match up. Nothing follows it.
+    Resign,
+}
+
+impl EntryKind {
+    fn byte(&self) -> u8 {
+        match self {
+            Self::Commit { .. } => 1,
+            Self::Reveal { .. } => 2,
+            Self::Resign => 3,
+        }
+    }
+}
+
+/// `0x0068 TranscriptEntry` — one entry of a match transcript (SoFi §19.10):
+/// its index, from 1, its side, and what it does. It carries no signature:
+/// its canonical bytes are what the head chain hashes, and the signature over
+/// the head travels beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptEntry {
+    index: u32,
+    side: MatchSide,
+    kind: EntryKind,
+}
+
+impl TranscriptEntry {
+    /// Refuses index 0 and a move outside 1..=64 bytes.
+    pub fn new(index: u32, side: MatchSide, kind: EntryKind) -> Result<Self, SofiWireError> {
+        if index == 0 {
+            return Err(SofiWireError::UndeclaredValue {
+                field: "entry index",
+                value: index,
+            });
+        }
+        if let EntryKind::Reveal { played, .. } = &kind {
+            check_count("revealed move", 1, TRANSCRIPT_MAX_MOVE_BYTES, played.len())?;
+        }
+        Ok(Self { index, side, kind })
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    pub fn side(&self) -> MatchSide {
+        self.side
+    }
+
+    pub fn kind(&self) -> &EntryKind {
+        &self.kind
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_TRANSCRIPT_ENTRY);
+        push_u32(&mut out, self.index);
+        out.push(self.side.byte());
+        out.push(self.kind.byte());
+        match &self.kind {
+            EntryKind::Commit { commitment } => push_digest32(&mut out, commitment),
+            EntryKind::Reveal { salt, played } => {
+                push_digest32(&mut out, salt);
+                push_part(&mut out, played);
+            }
+            EntryKind::Resign => {}
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_TRANSCRIPT_ENTRY, SCHEMA_V1)?;
+        let index = c.u32()?;
+        let side = MatchSide::at(&mut c)?;
+        let kind = match c.u8()? {
+            1 => EntryKind::Commit {
+                commitment: c.digest32()?,
+            },
+            2 => EntryKind::Reveal {
+                salt: c.digest32()?,
+                played: read_var_bytes(&mut c, TRANSCRIPT_MAX_MOVE_BYTES)?,
+            },
+            3 => EntryKind::Resign,
+            value => {
+                return Err(wire_invalid(SofiWireError::UndeclaredValue {
+                    field: "entry kind",
+                    value: u32::from(value),
+                }))
+            }
+        };
+        let v = Self::new(index, side, kind).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// One side's signature in a transcript outcome: over the head of the last
+/// entry that side made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideSignature {
+    side: MatchSide,
+    signature: Vec<u8>,
+}
+
+impl SideSignature {
+    /// Refuses an empty or oversized signature. It verifies nothing.
+    pub fn new(side: MatchSide, signature: &[u8]) -> Result<Self, SofiWireError> {
+        check_signature_bytes("side signature", signature)?;
+        Ok(Self {
+            side,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn side(&self) -> MatchSide {
+        self.side
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+}
+
+/// `0x0069 TranscriptOutcome` — a match transcript as it occupies the match
+/// cell (SoFi §19.10): `Y`, the table, the setup, the entries exactly as
+/// they were made, and each side's signature over the head of its last
+/// entry. The entries are carried as bytes so that a reader decodes,
+/// re-encodes and compares each one itself; whether the whole proves an
+/// outcome is `sofi::computed::match_occupant`'s, not this type's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptOutcome {
+    external_commitment: D32,
+    table: ComputedTable,
+    setup: Vec<u8>,
+    entries: Vec<Vec<u8>>,
+    signatures: Vec<SideSignature>,
+}
+
+impl TranscriptOutcome {
+    pub fn new(
+        external_commitment: D32,
+        table: ComputedTable,
+        setup: &[u8],
+        entries: Vec<Vec<u8>>,
+        signatures: Vec<SideSignature>,
+    ) -> Result<Self, SofiWireError> {
+        check_count("setup bytes", 1, COMPUTED_MAX_SETUP_BYTES, setup.len())?;
+        check_count(
+            "transcript entries",
+            1,
+            TRANSCRIPT_MAX_ENTRIES,
+            entries.len(),
+        )?;
+        for entry in &entries {
+            check_count("entry bytes", 1, TRANSCRIPT_MAX_ENTRY_BYTES, entry.len())?;
+        }
+        check_count("side signatures", 1, 2, signatures.len())?;
+        let sides: Vec<MatchSide> = signatures.iter().map(SideSignature::side).collect();
+        check_strictly_ascending("side signatures", &sides)?;
+        Ok(Self {
+            external_commitment,
+            table,
+            setup: setup.to_vec(),
+            entries,
+            signatures,
+        })
+    }
+
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &ComputedTable {
+        &self.table
+    }
+
+    pub fn setup(&self) -> &[u8] {
+        &self.setup
+    }
+
+    /// The entries' bytes, in order, exactly as carried.
+    pub fn entries(&self) -> &[Vec<u8>] {
+        &self.entries
+    }
+
+    pub fn signatures(&self) -> &[SideSignature] {
+        &self.signatures
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_TRANSCRIPT_OUTCOME);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        push_part(&mut out, &self.setup);
+        push_u32(&mut out, self.entries.len() as u32);
+        for entry in &self.entries {
+            push_part(&mut out, entry);
+        }
+        push_u32(&mut out, self.signatures.len() as u32);
+        for s in &self.signatures {
+            out.push(s.side.byte());
+            push_part(&mut out, &s.signature);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_TRANSCRIPT_OUTCOME, SCHEMA_V1)?;
+        let external_commitment = c.digest32()?;
+        let table = ComputedTable::at(&mut c)?;
+        let setup = read_var_bytes(&mut c, COMPUTED_MAX_SETUP_BYTES)?;
+        let n = read_count(&mut c, "transcript entries", 1, TRANSCRIPT_MAX_ENTRIES)?;
+        let mut entries = Vec::with_capacity(n);
+        for _ in 0..n {
+            entries.push(read_var_bytes(&mut c, TRANSCRIPT_MAX_ENTRY_BYTES)?);
+        }
+        let m = read_count(&mut c, "side signatures", 1, 2)?;
+        let mut signatures = Vec::with_capacity(m);
+        for _ in 0..m {
+            let side = MatchSide::at(&mut c)?;
+            let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+            signatures.push(SideSignature { side, signature });
+        }
+        let v = Self::new(external_commitment, table, &setup, entries, signatures)
+            .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// A head one side's session key signed: the head and the signature over
+/// its head statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedHead {
+    head: D32,
+    signature: Vec<u8>,
+}
+
+impl SignedHead {
+    /// Refuses an empty or oversized signature. It verifies nothing.
+    pub fn new(head: D32, signature: &[u8]) -> Result<Self, SofiWireError> {
+        check_signature_bytes("head signature", signature)?;
+        Ok(Self {
+            head,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn head(&self) -> &D32 {
+        &self.head
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_digest32(out, &self.head);
+        push_part(out, &self.signature);
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let head = c.digest32()?;
+        let signature = read_var_bytes(c, MAX_SIGNATURE_BYTES)?;
+        Ok(Self { head, signature })
+    }
+}
+
+/// `0x006A EquivocationProof` — two different heads one side's session key
+/// signed at one index (SoFi §19.10): proof that the key's holder cheated,
+/// and an occupant of the match cell for the other side. The heads are
+/// strictly ascending, so two equal heads have no encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquivocationProof {
+    external_commitment: D32,
+    table: ComputedTable,
+    side: MatchSide,
+    index: u32,
+    first: SignedHead,
+    second: SignedHead,
+}
+
+impl EquivocationProof {
+    pub fn new(
+        external_commitment: D32,
+        table: ComputedTable,
+        side: MatchSide,
+        index: u32,
+        first: SignedHead,
+        second: SignedHead,
+    ) -> Result<Self, SofiWireError> {
+        if index == 0 {
+            return Err(SofiWireError::UndeclaredValue {
+                field: "entry index",
+                value: index,
+            });
+        }
+        check_strictly_ascending("equivocated heads", &[first.head, second.head])?;
+        Ok(Self {
+            external_commitment,
+            table,
+            side,
+            index,
+            first,
+            second,
+        })
+    }
+
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &ComputedTable {
+        &self.table
+    }
+
+    /// The side whose key signed both heads.
+    pub fn side(&self) -> MatchSide {
+        self.side
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The two signed heads, in ascending order of head.
+    pub fn heads(&self) -> [&SignedHead; 2] {
+        [&self.first, &self.second]
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_EQUIVOCATION_PROOF);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        out.push(self.side.byte());
+        push_u32(&mut out, self.index);
+        self.first.push(&mut out);
+        self.second.push(&mut out);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_EQUIVOCATION_PROOF, SCHEMA_V1)?;
+        let external_commitment = c.digest32()?;
+        let table = ComputedTable::at(&mut c)?;
+        let side = MatchSide::at(&mut c)?;
+        let index = c.u32()?;
+        let first = SignedHead::at(&mut c)?;
+        let second = SignedHead::at(&mut c)?;
+        let v = Self::new(external_commitment, table, side, index, first, second)
+            .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// What a `MatchStart` says: the match started (side B, when it locks), or
+/// it is withdrawn (side A, while its vault is the only one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartKind {
+    Start,
+    Withdraw,
+}
+
+impl StartKind {
+    pub fn byte(self) -> u8 {
+        match self {
+            Self::Start => 1,
+            Self::Withdraw => 2,
+        }
+    }
+
+    /// The side whose session key signs this kind: B starts, A withdraws.
+    pub fn signer(self) -> MatchSide {
+        match self {
+            Self::Start => MatchSide::B,
+            Self::Withdraw => MatchSide::A,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Result<Self, SofiWireError> {
+        match byte {
+            1 => Ok(Self::Start),
+            2 => Ok(Self::Withdraw),
+            value => Err(SofiWireError::UndeclaredValue {
+                field: "start kind",
+                value: u32::from(value),
+            }),
+        }
+    }
+}
+
+/// `0x006B MatchStart` — a Start or a Withdraw at a match's start cell (SoFi
+/// §19.10), with its signer's signature over `m_start`. Whichever is first
+/// at the cell's leader holds it for good.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchStart {
+    external_commitment: D32,
+    table: ComputedTable,
+    kind: StartKind,
+    signature: Vec<u8>,
+}
+
+impl MatchStart {
+    /// Refuses an empty or oversized signature. It verifies nothing.
+    pub fn new(
+        external_commitment: D32,
+        table: ComputedTable,
+        kind: StartKind,
+        signature: &[u8],
+    ) -> Result<Self, SofiWireError> {
+        check_signature_bytes("start signature", signature)?;
+        Ok(Self {
+            external_commitment,
+            table,
+            kind,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &ComputedTable {
+        &self.table
+    }
+
+    pub fn kind(&self) -> StartKind {
+        self.kind
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_MATCH_START);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        out.push(self.kind.byte());
+        push_part(&mut out, &self.signature);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_MATCH_START, SCHEMA_V1)?;
+        let external_commitment = c.digest32()?;
+        let table = ComputedTable::at(&mut c)?;
+        let kind = StartKind::from_byte(c.u8()?).map_err(wire_invalid)?;
+        let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+        let v = Self::new(external_commitment, table, kind, &signature).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// What an escrow vault's slots name, decided by the class of the bytes
+/// (SoFi §19.10, "The kind is the class"): signed terms (`0x0063`), whose
+/// outcome a verdict decides, or computed terms (`0x0067`), whose outcome
+/// the registered program computes. Bytes of any other class are no escrow
+/// terms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EscrowKind {
+    Signed(EscrowTerms),
+    Computed(ComputedEscrowTerms),
+}
+
+impl EscrowKind {
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let c = Cursor { b: bytes, i: 0 };
+        match c.peek_class()? {
+            class::ESCROW_TERMS => Ok(Self::Signed(EscrowTerms::decode(bytes)?)),
+            class::ESCROW_COMPUTED_TERMS => Ok(Self::Computed(ComputedEscrowTerms::decode(bytes)?)),
+            got => Err(DecodeError::WrongClass { got }),
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Signed(terms) => terms.encode(),
+            Self::Computed(terms) => terms.encode(),
+        }
+    }
+
+    /// The policy commit of the held token.
+    pub fn token(&self) -> &D32 {
+        match self {
+            Self::Signed(terms) => terms.token(),
+            Self::Computed(terms) => terms.token(),
+        }
+    }
+
+    /// `Y`.
+    pub fn external_commitment(&self) -> &D32 {
+        match self {
+            Self::Signed(terms) => terms.external_commitment(),
+            Self::Computed(terms) => terms.external_commitment(),
+        }
+    }
+
+    /// The identity the branch labelled `outcome` pays, when the terms have
+    /// that branch.
+    pub fn recipient(&self, outcome: &[u8]) -> Option<(&D32, &D32)> {
+        match self {
+            Self::Signed(terms) => terms
+                .branch(outcome)
+                .map(|b| (b.recipient_genesis(), b.recipient_device_id())),
+            Self::Computed(terms) => terms
+                .branch(outcome)
+                .map(|b| (b.recipient_genesis(), b.recipient_device_id())),
+        }
+    }
+}
