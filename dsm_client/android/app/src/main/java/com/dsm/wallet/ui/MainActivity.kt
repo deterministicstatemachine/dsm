@@ -134,6 +134,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     @Volatile private var dsmPort: WebMessagePortCompat? = null
     /** A connect code a link handed over (DSM Amendment A11), held until the page can take it. */
     @Volatile private var pendingConnectLink: String? = null
+    /** The connect link that opened the wallet from another app, until the player answers it. */
+    @Volatile private var connectLinkOpened: String? = null
     @Volatile private var pendingJsPort: WebMessagePortCompat? = null
     @Volatile private var bleBackgroundService: BleBackgroundService? = null
     private val batteryChangedReceiver = object : BroadcastReceiver() {
@@ -1576,7 +1578,21 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         val ssp = data.schemeSpecificPart ?: return
         if (!ssp.startsWith("connect/v1:")) return
         pendingConnectLink = intent.dataString
+        connectLinkOpened = intent.dataString
         deliverConnectLink()
+    }
+
+    /**
+     * After the player approves a connect code a link brought, step back to the
+     * app that sent it, so the player lands in that app again rather than in the
+     * wallet. Answers whether the wallet stepped back: only once per link, and
+     * only when a link opened it. The wallet's main activity is its task's root,
+     * and a task it is not the root of is not the wallet's to send back.
+     */
+    fun returnToConnectCaller(): Boolean {
+        val opened = connectLinkOpened
+        connectLinkOpened = null
+        return opened != null && moveTaskToBack(isTaskRoot)
     }
 
     /** Hand a held connect link to the page once its message port exists. */

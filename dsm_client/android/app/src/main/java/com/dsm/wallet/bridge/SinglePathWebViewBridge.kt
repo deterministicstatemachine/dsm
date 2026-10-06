@@ -232,6 +232,16 @@ class SinglePathWebViewBridge(private val context: Context) {
                 // Diagnostics: write the debug report (the summary in the payload, the
                 // app log, the bridge log) and open the share sheet with it. Answers the
                 // report's size in bytes, as decimal UTF-8.
+                // After an approved connect that a link brought: back to the app that
+                // sent it. One byte: 1 when the wallet stepped back, 0 when no link
+                // opened it.
+                "returnToConnectCaller" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("returnToConnectCaller: no active activity")
+                    val stepped = act.returnToConnectCaller()
+                    byteArrayOf(if (stepped) 1 else 0)
+                }
+
                 "shareDiagnosticsReport" -> {
                     val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
                         ?: throw IllegalStateException("shareDiagnosticsReport: no active activity")
