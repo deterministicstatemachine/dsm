@@ -226,6 +226,98 @@ fn wallet_player(session: &store::AppSession) -> Result<Player, String> {
     })
 }
 
+/// The prefix of a recorded FACT_ESCROW_RELEASED in this account's facts.
+const RELEASED_FACT: &[u8] = b"DSM/connect/escrow-released/v1";
+
+/// A collect this account established (FACT_ESCROW_RELEASED): each vault the
+/// request named, in its order, with its verdict cell and the final outcome
+/// that paid the wallet. Recorded under the request once established, and
+/// unique to those vaults: a vault is released once.
+struct Released {
+    vaults: Vec<([u8; 32], [u8; 32], Vec<u8>)>,
+}
+
+impl Released {
+    fn vault_ids(&self) -> Vec<[u8; 32]> {
+        self.vaults.iter().map(|(vault, ..)| *vault).collect()
+    }
+
+    /// The status this fact gives a request.
+    fn show(&self, status: &mut generated::ConnectAppStatusV1) {
+        status.fact = generated::ConnectFact::EscrowReleased as i32;
+        status.escrow_vault_ids = self.vaults.iter().map(|(v, ..)| v.to_vec()).collect();
+        if let Some((_, cell, _)) = self.vaults.first() {
+            status.escrow_verdict_cell = cell.to_vec();
+        }
+        let outcomes: Vec<String> = self
+            .vaults
+            .iter()
+            .map(|(.., outcome)| String::from_utf8_lossy(outcome).into_owned())
+            .collect();
+        status.fact_detail = format!(
+            "each vault is Retired and its cell's final verdict ({}) pays the wallet",
+            outcomes.join(", ")
+        );
+    }
+
+    /// The prefix, the vault count, then each vault, its cell, its outcome's
+    /// length and the outcome; big-endian lengths.
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        let count = |n: usize| {
+            u32::try_from(n)
+                .map(u32::to_be_bytes)
+                .map_err(|e| format!("a released fact's length: {e}"))
+        };
+        let mut out = RELEASED_FACT.to_vec();
+        out.extend(count(self.vaults.len())?);
+        for (vault, cell, outcome) in &self.vaults {
+            out.extend(vault);
+            out.extend(cell);
+            out.extend(count(outcome.len())?);
+            out.extend(outcome);
+        }
+        Ok(out)
+    }
+
+    /// Exactly what [`Self::encode`] wrote, and nothing else.
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        fn take<'b>(bytes: &mut &'b [u8], n: usize) -> Result<&'b [u8], String> {
+            let (head, rest) = bytes
+                .split_at_checked(n)
+                .ok_or_else(|| "a recorded release is cut short".to_string())?;
+            *bytes = rest;
+            Ok(head)
+        }
+        fn take_len(bytes: &mut &[u8]) -> Result<usize, String> {
+            let raw: [u8; 4] = take(bytes, 4)?
+                .try_into()
+                .map_err(|e| format!("a recorded release's length: {e}"))?;
+            usize::try_from(u32::from_be_bytes(raw))
+                .map_err(|e| format!("a recorded release's length: {e}"))
+        }
+        fn take_id(bytes: &mut &[u8]) -> Result<[u8; 32], String> {
+            take(bytes, 32)?
+                .try_into()
+                .map_err(|e| format!("a recorded release's id: {e}"))
+        }
+        let mut rest = bytes
+            .strip_prefix(RELEASED_FACT)
+            .ok_or_else(|| "the request's recorded fact is not a release".to_string())?;
+        let count = take_len(&mut rest)?;
+        let mut vaults = Vec::new();
+        for _ in 0..count {
+            let vault = take_id(&mut rest)?;
+            let cell = take_id(&mut rest)?;
+            let len = take_len(&mut rest)?;
+            vaults.push((vault, cell, take(&mut rest, len)?.to_vec()));
+        }
+        if !rest.is_empty() {
+            return Err("a recorded release has bytes past its last vault".into());
+        }
+        Ok(Self { vaults })
+    }
+}
+
 fn position_state(state: crate::sdk::sofi_flow::PositionState) -> generated::SofiPositionState {
     match state {
         crate::sdk::sofi_flow::PositionState::Realized => generated::SofiPositionState::Realized,
@@ -1261,7 +1353,8 @@ impl AppRouterImpl {
             }
             Request::EscrowLock(lock) => self.lock_fact(&session, lock, &mut status).await?,
             Request::EscrowRelease { vault_ids } => {
-                self.release_fact(&session, vault_ids, &mut status).await?
+                self.release_fact(&session, req.seq, vault_ids, &mut status)
+                    .await?
             }
         }
         Ok(Reply::Status(status))
@@ -1290,9 +1383,16 @@ impl AppRouterImpl {
         )?;
         let cell = dsm::sofi::escrow::verdict_cell_of(&terms);
         let set = own_set()?;
-        let (vaults, search) = crate::sdk::escrow_flow::locked(&self.core_sdk, &set, &cell)
-            .await
-            .map_err(|e| format!("the vaults of the match's verdict cell: {e}"))?;
+        // Only the wallet's own vaults on the cell are walked to their heads:
+        // another vault there, the opponent's included, is not its stake.
+        let (vaults, search) = crate::sdk::escrow_flow::locked_by(
+            &self.core_sdk,
+            &set,
+            &cell,
+            &(wallet.genesis, wallet.device_id),
+        )
+        .await
+        .map_err(|e| format!("the wallet's vaults on the match's verdict cell: {e}"))?;
         let held = vaults.iter().find(|v| {
             (v.owner_genesis, v.owner_device_id) == (wallet.genesis, wallet.device_id)
                 && v.status == dsm::sofi::wire::VAULT_STATUS_ACTIVE
@@ -1331,19 +1431,41 @@ impl AppRouterImpl {
     /// player, Retired at its walked head, and its cell's final verdict names
     /// an outcome whose branch pays the wallet. Only that branch's recipient
     /// can have released it (SoFi §19.9).
+    ///
+    /// Once established, the fact is recorded for the request and answered
+    /// from that record after: a Retired vault stays Retired and a final
+    /// verdict stays final, so nothing a later poll could read changes it.
+    /// Each vault and its verdict are read through one context. Anything
+    /// short of the fact is read again on every poll.
     async fn release_fact(
         &self,
         session: &store::AppSession,
+        seq: u64,
         vault_ids: &[[u8; 32]],
         status: &mut generated::ConnectAppStatusV1,
     ) -> Result<(), String> {
+        if let Some(recorded) =
+            store::app_fact_of(&session.session_id, seq).map_err(|e| e.to_string())?
+        {
+            let released = Released::decode(&recorded)?;
+            if released.vault_ids() != vault_ids {
+                return Err(format!(
+                    "request {seq}'s recorded release names other vaults than it asks about"
+                ));
+            }
+            released.show(status);
+            return Ok(());
+        }
         let wallet = wallet_player(session)?;
         let referee = own_referee(&self.core_sdk)?;
         let set = own_set()?;
-        let mut cells = Vec::with_capacity(vault_ids.len());
-        let mut outcomes = Vec::with_capacity(vault_ids.len());
+        let reads = crate::sdk::escrow_flow::EscrowReads::new(&self.core_sdk, &set)
+            .map_err(|e| format!("the escrow reads: {e}"))?;
+        let mut released = Released {
+            vaults: Vec::with_capacity(vault_ids.len()),
+        };
         for vault_id in vault_ids {
-            let held = match crate::sdk::escrow_flow::vault(&self.core_sdk, &set, vault_id).await {
+            let held = match reads.vault(vault_id).await {
                 Ok(held) => held,
                 Err(e) => {
                     status.fact_detail = format!("vault {}: {e}", short(vault_id));
@@ -1371,8 +1493,8 @@ impl AppRouterImpl {
                 );
                 return Ok(());
             }
-            let verdict = crate::sdk::escrow_flow::verdict(&self.core_sdk, &set, vault_id)
-                .await
+            let verdict = reads
+                .verdict(vault_id)
                 .map_err(|e| format!("the verdict of vault {}: {e}", short(vault_id)))?;
             let outcome = match verdict.held {
                 Some((outcome, dsm::route_chain::ChainState::Final)) => outcome,
@@ -1397,18 +1519,23 @@ impl AppRouterImpl {
                 );
                 return Ok(());
             }
-            cells.push(held.verdict_cell);
-            outcomes.push(String::from_utf8_lossy(&outcome).into_owned());
+            released
+                .vaults
+                .push((*vault_id, held.verdict_cell, outcome));
         }
-        status.fact = generated::ConnectFact::EscrowReleased as i32;
-        status.escrow_vault_ids = vault_ids.iter().map(|v| v.to_vec()).collect();
-        if let Some(cell) = cells.first() {
-            status.escrow_verdict_cell = cell.to_vec();
+        released.show(status);
+        // One release answers one request, as one transfer does: a second
+        // request naming the same vaults is answered by reading them again.
+        let record = released.encode()?;
+        let used = || store::app_fact_used(&record).map_err(|e| e.to_string());
+        if used()?.is_none() {
+            if let Err(e) = store::app_record_fact(&record, &session.session_id, seq) {
+                // A poll of the same request may have recorded it first.
+                if used()?.is_none() {
+                    return Err(e.to_string());
+                }
+            }
         }
-        status.fact_detail = format!(
-            "each vault is Retired and its cell's final verdict ({}) pays the wallet",
-            outcomes.join(", ")
-        );
         Ok(())
     }
 

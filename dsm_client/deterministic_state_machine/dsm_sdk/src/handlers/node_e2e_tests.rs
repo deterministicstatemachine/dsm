@@ -969,51 +969,7 @@ async fn a_key_whose_fulfillment_can_never_register_is_skipped_without_its_evide
     let p = Pair::boot(500, 200).await;
     let m = open_market(&p).await;
     let set = canonical_set(NETWORK).expect("the pinned set");
-
-    // B's own claim of another fulfillment takes B's next position before B
-    // trades. Only B can sign a claim that occupies its cell (DSM Amendment
-    // A10, SoFi Amendment S20).
-    let q = admitted_position(&p.b) + 1;
-    let (.., root) = {
-        p.b.enter();
-        economic_lineage::get_admitted_coordinate()
-            .expect("read admitted")
-            .expect("an admitted position")
-    };
-    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
-        .expect("B's next position pair");
-    let rival = {
-        p.b.enter();
-        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
-        let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
-        dsm::sofi::signature::sign_resolution_claim(
-            dsm::sofi::wire::SofiResolutionClaim {
-                genesis: p.b.genesis,
-                device_id: p.b.device_id,
-                position: q,
-                fulfillment_id: [0x77; 32],
-                realize_root: [0x78; 32],
-                void_root: root,
-            },
-            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-            &pk,
-            att_a,
-            &sk,
-        )
-        .expect("B signs its own claim")
-        .encode()
-    };
-    let taken = crate::sdk::route_seats::write_recorded(&set, pair.root().routed(), &rival)
-        .await
-        .expect("the claim is written along its route");
-    assert!(
-        taken.reached_leader(),
-        "the rival claim holds B's root cell"
-    );
-
-    // B trades: its fulfillment lands, its claim arrives after the rival's,
-    // and its exercise holds the vault's first key.
-    invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    let (q, root, pair) = trade_whose_position_is_taken(&p, &m, &set).await;
 
     // A, the vault's owner, walks the vault's first parent.
     let (own, parents) = standing_of(&p.a);
@@ -1049,6 +1005,9 @@ async fn a_key_whose_fulfillment_can_never_register_is_skipped_without_its_evide
         registration.registration()
     );
 
+    // The walk below judges the key afresh: nothing an earlier walk of this
+    // process judged stands in for it.
+    crate::sdk::sofi_reads::forget_judgements();
     for node in &p.nodes.nodes {
         node.forget_requests();
     }
@@ -1101,6 +1060,184 @@ async fn a_key_whose_fulfillment_can_never_register_is_skipped_without_its_evide
         }
     }
     assert!(indexes.len() <= 1, "one index read, P's: {indexes:?}");
+}
+
+/// A key a walk skipped is not judged again by the process. B's trade holds
+/// the vault's first key finally, and its fulfillment can never register.
+/// A's first walk of the vault judges that key Skipped and keeps the
+/// judgement; a later walk, through a context of its own as every quote and
+/// every `sofi.vaults` builds one, reads the key's cell and stands on the
+/// judgement: it reads nothing about B's exercise, and reaches the same
+/// chain and the same walk as one that judges the key afresh. The next key,
+/// open, is read live every time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_skipped_key_is_judged_once_by_the_process() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    trade_whose_position_is_taken(&p, &m, &set).await;
+    let (own, parents) = standing_of(&p.a);
+    let walk_head = || {
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        let verifier = ctx.verifier();
+        let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
+        let r0 = chain.roots()[0];
+        let roots = chain.roots().to_vec();
+        let chains = BTreeMap::from([(m.vault_id, chain)]);
+        let walked = verifier
+            .walk_parent(&chains, &m.vault_id, &r0, 0, WALK_BUDGET)
+            .expect("the walk");
+        (roots, walked.outcome, walked.walk, walked.not_established)
+    };
+    let open_key = |r0: &[u8; 32]| {
+        format!(
+            "GET /api/v2/cell/{}",
+            crate::util::text_id::encode_base32_crockford(
+                attempt_cell(&set, &m.vault_id, r0, 1)
+                    .expect("the next key")
+                    .routed()
+                    .key()
+            )
+        )
+    };
+    let genesis_scan = format!(
+        "GET /api/v2/index/{}",
+        crate::util::text_id::encode_base32_crockford(&dsm::sofi::derive::vault_genesis_locator(
+            &m.vault_id
+        ))
+    );
+
+    crate::sdk::sofi_reads::forget_judgements();
+    let judged = walk_head();
+    assert_eq!(judged.1, WalkOutcome::Unresolved { attempt: 1 });
+    assert_eq!(
+        crate::sdk::sofi_reads::judgements_kept(),
+        1,
+        "the skipped key's judgement is kept, and nothing else"
+    );
+
+    // A walk, and every request it made: of the head through a context of
+    // its own, as the next quote makes it.
+    let walk_asking = || {
+        for node in &p.nodes.nodes {
+            node.forget_requests();
+        }
+        let walked = walk_head();
+        let asked: Vec<String> = p.nodes.nodes.iter().flat_map(|n| n.requests()).collect();
+        (walked, asked)
+    };
+    let (again, kept) = walk_asking();
+    assert_eq!(
+        again, judged,
+        "the kept judgement walks as the fresh one did"
+    );
+    assert!(
+        kept.contains(&open_key(&judged.0[0])),
+        "the open key is read again"
+    );
+    assert!(
+        kept.iter().any(|r| r.starts_with(&genesis_scan)),
+        "the vault's genesis is scanned, as every context scans it"
+    );
+
+    crate::sdk::sofi_reads::forget_judgements();
+    let (fresh, judging) = walk_asking();
+    assert_eq!(
+        fresh, judged,
+        "a walk that judges the key afresh reaches the same"
+    );
+    assert!(
+        kept.len() < judging.len(),
+        "standing on the judgement reads less than judging the key afresh ({} requests; afresh, \
+         {})",
+        kept.len(),
+        judging.len()
+    );
+}
+
+/// Only a skip is kept. B's trade realized and consumed the vault's first
+/// key; a walk of the vault's first parent classifies that key Consumed, and
+/// keeps no judgement of it: every walk judges a consumption again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_consumed_key_is_judged_again_by_every_walk() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (own, parents) = standing_of(&p.a);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
+    let r0 = chain.roots()[0];
+    let chains = BTreeMap::from([(m.vault_id, chain)]);
+    crate::sdk::sofi_reads::forget_judgements();
+    let walked = verifier
+        .walk_parent(&chains, &m.vault_id, &r0, 0, WALK_BUDGET)
+        .expect("the walk");
+    assert_eq!(walked.outcome, WalkOutcome::Consumed { attempt: 0 });
+    assert_eq!(
+        crate::sdk::sofi_reads::judgements_kept(),
+        0,
+        "a consumption is not kept"
+    );
+}
+
+/// B trades in `m` after its own claim of another fulfillment took its next
+/// position: B's exercise holds the vault's first key finally, and its
+/// fulfillment can never register. The position, the root B admitted below
+/// it, and its position pair.
+async fn trade_whose_position_is_taken(
+    p: &Pair,
+    m: &Market,
+    set: &crate::sdk::storage_set::StorageSet,
+) -> (u64, [u8; 32], dsm::sofi::registration::PositionCells) {
+    // B's own claim of another fulfillment takes B's next position before B
+    // trades. Only B can sign a claim that occupies its cell (DSM Amendment
+    // A10, SoFi Amendment S20).
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let rival = {
+        p.b.enter();
+        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
+        let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+        dsm::sofi::signature::sign_resolution_claim(
+            dsm::sofi::wire::SofiResolutionClaim {
+                genesis: p.b.genesis,
+                device_id: p.b.device_id,
+                position: q,
+                fulfillment_id: [0x77; 32],
+                realize_root: [0x78; 32],
+                void_root: root,
+            },
+            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &pk,
+            att_a,
+            &sk,
+        )
+        .expect("B signs its own claim")
+        .encode()
+    };
+    let taken = crate::sdk::route_seats::write_recorded(set, pair.root().routed(), &rival)
+        .await
+        .expect("the claim is written along its route");
+    assert!(
+        taken.reached_leader(),
+        "the rival claim holds B's root cell"
+    );
+
+    // B trades: its fulfillment lands, its claim arrives after the rival's,
+    // and its exercise holds the vault's first key.
+    invoke(&p.b, "sofi.trade", args(&trade_request(p, m, 10))).await;
+    (q, root, pair)
 }
 
 /// A trader who has traded can still pay (P15-9). B's history holds a SoFi
@@ -3628,6 +3765,19 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         proof: &dsm::route_chain::CompletionProof,
     ) -> Result<(), dsm::sofi::resolve::ReadFailure> {
         self.live.keep_completion(cell, evidence, proof)
+    }
+    fn kept_judgement(
+        &self,
+        key: &dsm::sofi::resolve::JudgedKey,
+    ) -> Result<Option<dsm::sofi::resolve::KeptJudgement>, dsm::sofi::resolve::ReadFailure> {
+        self.live.kept_judgement(key)
+    }
+    fn keep_judgement(
+        &self,
+        key: dsm::sofi::resolve::JudgedKey,
+        judgement: dsm::sofi::resolve::KeptJudgement,
+    ) -> Result<(), dsm::sofi::resolve::ReadFailure> {
+        self.live.keep_judgement(key, judgement)
     }
 }
 
