@@ -19,10 +19,10 @@
 //! one downstream, so the safe design is for regeneration to be impossible.
 
 use dsm::economic::claim_envelope::RegisteredEconomicClaim;
-use dsm::economic::lineage::ValidatedEconomicRoot;
+use dsm::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use dsm::economic::peer_lineage::{
-    peer_root_reached, validate_peer_lineage, ConditionalPositionResolver, PeerEvidenceFetcher,
-    PeerFrontier, PeerFrontiers, ValidatedPeerLineage,
+    peer_claim_reached, peer_root_reached, validate_peer_lineage, ConditionalPositionResolver,
+    PeerEvidenceFetcher, PeerFrontier, PeerFrontiers, ValidatedPeerLineage,
 };
 use dsm::sofi::wire::ParentClaimRef;
 use dsm::economic::provenance::{
@@ -545,6 +545,55 @@ pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
     Ok(known)
 }
 
+/// The claim a trader's lineage accepted at a position
+/// (`SofiReads::accepted_claim_at` for another trader): what a setup naming
+/// that position is checked against, by the frontier-relative walk of the
+/// lineage to it (SoFi Amendment S15, MR-SOFI-0347).
+///
+/// Kept as [`resolve_peer_root`] keeps a root, and for the same reason: the
+/// claim accepted at a position is fixed once the walk reached it. Route
+/// evidence asked it once per setup in every acquisition round, and a vault
+/// walk asked it again for every exercise of the same trader. Only a
+/// complete walk is kept; the walk starts from [`RememberedFrontiers`] and
+/// the coordinates it validated are kept. Nothing is recorded as a frontier.
+pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
+    fetcher: &F,
+    expected_network_id: &[u8],
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    position: u64,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<AcceptedClaim, PeerLineageFailure> {
+    let key = (expected_network_id.to_vec(), *genesis, *device_id, position);
+    if let Some(known) = validated_peers().claims.get(&key) {
+        return Ok(known);
+    }
+    validated_peers()
+        .claim_walks
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (accepted, reached) = peer_claim_reached(
+        fetcher,
+        expected_network_id,
+        genesis,
+        device_id,
+        position,
+        &RememberedFrontiers {
+            network: expected_network_id,
+        },
+        conditional,
+    )?
+    .into_parts();
+    log::info!(
+        "[A8] trader {} claim validated at position {position}",
+        text_id::encode_base32_crockford(device_id)
+    );
+    for frontier in reached {
+        validated_peers().reach(expected_network_id, frontier);
+    }
+    validated_peers().claims.keep(key, accepted);
+    Ok(accepted)
+}
+
 /// The peer positions this process validated (see [`resolve_peer`]).
 type PeerKey = (Vec<u8>, [u8; 32], [u8; 32], u64);
 /// A peer on a network: whose validated coordinates [`ValidatedPeers`] keeps.
@@ -586,6 +635,8 @@ pub(crate) struct ValidatedPeers {
     kept: Kept<ValidatedPeerTransition>,
     /// The roots [`resolve_peer_root`] established.
     roots: Kept<(ValidatedEconomicRoot, ParentClaimRef)>,
+    /// The claims [`resolve_peer_claim`] established.
+    claims: Kept<AcceptedClaim>,
     /// The coordinates walks validated, by peer and position.
     reached: std::sync::Mutex<
         std::collections::HashMap<PeerOn, std::collections::BTreeMap<u64, PeerFrontier>>,
@@ -594,6 +645,8 @@ pub(crate) struct ValidatedPeers {
     walks: std::sync::atomic::AtomicU64,
     /// The walks [`resolve_peer_root`] made.
     root_walks: std::sync::atomic::AtomicU64,
+    /// The walks [`resolve_peer_claim`] made.
+    claim_walks: std::sync::atomic::AtomicU64,
 }
 
 /// More than a phone's traders: past it the memory starts over, and the next
@@ -658,9 +711,14 @@ impl ValidatedPeers {
         self.root_walks.load(std::sync::atomic::Ordering::Relaxed)
     }
     #[cfg(test)]
+    pub(crate) fn claim_walks(&self) -> u64 {
+        self.claim_walks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(test)]
     pub(crate) fn forget(&self) {
         self.kept.entries().clear();
         self.roots.entries().clear();
+        self.claims.entries().clear();
         self.reached().clear();
     }
 }
@@ -669,9 +727,11 @@ pub(crate) fn validated_peers() -> &'static ValidatedPeers {
     static PEERS: once_cell::sync::Lazy<ValidatedPeers> = once_cell::sync::Lazy::new(|| ValidatedPeers {
         kept: Kept::new(),
         roots: Kept::new(),
+        claims: Kept::new(),
         reached: std::sync::Mutex::new(std::collections::HashMap::new()),
         walks: std::sync::atomic::AtomicU64::new(0),
         root_walks: std::sync::atomic::AtomicU64::new(0),
+        claim_walks: std::sync::atomic::AtomicU64::new(0),
     });
     &PEERS
 }

@@ -757,3 +757,84 @@ async fn a_traders_root_is_not_walked_again_by_the_same_process() {
     );
     assert_eq!(peers.root_walks(), before + 4);
 }
+
+/// The claim a trader's lineage accepted at `position`, as a SoFi verifier of
+/// the entered device reads it for a setup: through a context of its own.
+fn claim_at(
+    genesis: [u8; 32],
+    devid: [u8; 32],
+    position: u64,
+) -> Result<dsm::economic::lineage::AcceptedClaim, PeerLineageFailure> {
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    tokio::task::block_in_place(|| {
+        let reads = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("the reads");
+        dsm::sofi::resolve::SofiReads::accepted_claim_at(&reads, &genesis, &devid, position)
+    })
+}
+
+/// The claim a trader's lineage accepted at a position, once walked to, is
+/// not walked again by the process: route evidence reads it once per setup
+/// in every acquisition round, and every context walked it again. A pays B
+/// and then C, and no device here takes either in. B reads the claim A's
+/// lineage accepted at the first payment twice, each through a context of
+/// its own: one walk, the same claim, the claim the peer walk's validated
+/// transition accepted there. The walk's coordinate starts the next walk,
+/// and a walk with nothing remembered reads the same claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_traders_accepted_claim_is_not_walked_again_by_the_same_process() {
+    use dsm::economic::peer_lineage::PeerFrontiers;
+    let (p, c) = three_devices().await;
+    let paid = |p: &Pair| {
+        p.a.enter();
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .expect("A admitted its debit")
+            .0
+    };
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let first = paid(&p);
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let second = paid(&p);
+    p.b.enter();
+    let peers = crate::sdk::economic_registers::validated_peers();
+    peers.forget();
+    let start = || {
+        crate::sdk::economic_registers::RememberedFrontiers { network: NETWORK }
+            .frontier_below(&p.a.genesis, &p.a.device_id, second)
+            .expect("the frontiers")
+            .map(|f| f.economic_position())
+    };
+    assert_eq!(start(), None, "B holds no frontier for A");
+    let before = peers.claim_walks();
+    let walked = claim_at(p.a.genesis, p.a.device_id, first).expect("A's claim at its first payment");
+    assert_eq!(walked.economic_position(), first);
+    assert_eq!(peers.claim_walks(), before + 1, "the first question walks");
+
+    let again = claim_at(p.a.genesis, p.a.device_id, first).expect("A's claim again");
+    assert_eq!(again, walked, "the kept claim is the walked one");
+    assert_eq!(
+        peers.claim_walks(),
+        before + 1,
+        "an accepted claim is not walked again"
+    );
+    assert_eq!(
+        start(),
+        Some(first),
+        "the claim walk's coordinate starts the next walk"
+    );
+
+    peers.forget();
+    let fresh = claim_at(p.a.genesis, p.a.device_id, first).expect("walked again");
+    assert_eq!(
+        fresh, walked,
+        "with nothing remembered, the walk reads the same claim"
+    );
+    let transition = verify(p.a.genesis, p.a.device_id, first)
+        .await
+        .expect("A's lineage validates at its first payment");
+    assert_eq!(*transition.accepted_claim(), walked);
+    assert_eq!(peers.claim_walks(), before + 2);
+}
