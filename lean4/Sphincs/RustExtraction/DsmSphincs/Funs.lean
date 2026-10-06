@@ -18,6 +18,26 @@ set_option maxRecDepth 2048
 
 namespace DSMSphincsRust
 
+/-- [dsm_sphincs::{dsm_sphincs::Adrs}::set_tree]:
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 200:4-204:5 -/
+def Adrs.set_tree (self : Adrs) (tree : Std.U64) : Result Adrs := do
+  let a ← Array.update self.w 1#usize 0#u32
+  let i ← tree >>> 32#i32
+  let i1 ← lift (UScalar.cast .U32 i)
+  let a1 ← Array.update a 2#usize i1
+  let i2 ← lift (UScalar.cast .U32 tree)
+  let a2 ← Array.update a1 3#usize i2
+  ok { w := a2 }
+
+/-- [dsm_sphincs::{dsm_sphincs::Adrs}::set_type_and_clear]:
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 206:4-211:5 -/
+def Adrs.set_type_and_clear (self : Adrs) (t : Std.U32) : Result Adrs := do
+  let a ← Array.update self.w 4#usize t
+  let a1 ← Array.update a 5#usize 0#u32
+  let a2 ← Array.update a1 6#usize 0#u32
+  let a3 ← Array.update a2 7#usize 0#u32
+  ok { w := a3 }
+
 /-- [dsm_sphincs::next_layer]:
     Source: 'crates/dsm-sphincs/src/lib.rs', lines 547:0-549:1 -/
 def next_layer
