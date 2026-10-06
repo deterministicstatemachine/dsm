@@ -17,7 +17,11 @@
 //! A match is a sequence of turns. Each turn is both sides' Commit, then both
 //! sides' Reveal: neither commitment of a turn may follow a reveal of it, and
 //! no commitment of the next turn may precede the last reveal of this one.
-//! Each revealed move is a canonical `DuelMoveV1`. A Core `Resign` ends the
+//! Each revealed move plays as `DuelMoveV1::played` reads it: the move its
+//! bytes canonically encode, and a pass for any bytes that are not a
+//! canonical move. A garbled reveal is its side's own committed and signed
+//! choice, so it costs that side its turn and never stops the match from
+//! being decided (owner ruling 2026-10-06). A Core `Resign` ends the
 //! match at once: the turn it lands in is played with the resigning side
 //! resigning and the other side's move of that turn, if it revealed one, or a
 //! pass. The program is `Done` exactly when the duel rules decided a winner,
@@ -32,7 +36,7 @@ use dsm::sofi::computed::{
 };
 use dsm::sofi::wire::{MatchSide, COMPUTED_LABEL_A_WINS, COMPUTED_LABEL_B_WINS};
 use wildstate_duel::vectors::DuelVectorSetV1;
-use wildstate_duel::{DuelMoveV1, DuelSetupV1, DuelState, DuelTurnV1, Side};
+use wildstate_duel::{DuelMoveV1, DuelOpenedTurnV1, DuelSetupV1, DuelState, DuelTurnV1, Side};
 
 type D32 = [u8; 32];
 
@@ -142,14 +146,7 @@ impl DuelProgress {
                 committed_at,
                 played,
             } => {
-                let decoded = DuelMoveV1::decode(played)
-                    .map_err(|e| fault(format!("the move at {}: {e}", opened.index)))?;
-                if decoded.encode() != *played {
-                    return Err(fault(format!(
-                        "the move at {} is not its canonical encoding",
-                        opened.index
-                    )));
-                }
+                let decoded = DuelMoveV1::played(played);
                 if *committed_at <= self.turn_floor {
                     return Err(fault(format!(
                         "the move at {} was committed before the last turn was revealed",
@@ -410,12 +407,13 @@ impl ConformingProgram for WildstateDuel {
 
 /// The opened entries of `turns` played in order, each turn as both sides'
 /// Commit and then both sides' Reveal: side A commits at `4t+1`, side B at
-/// `4t+2`, and they reveal at `4t+3` and `4t+4`.
-pub fn opened_of_turns(turns: &[DuelTurnV1]) -> Vec<Opened> {
+/// `4t+2`, and they reveal at `4t+3` and `4t+4`. Each reveal opens the
+/// turn's bytes exactly as given, garbled ones included.
+pub fn opened_of_turns(turns: &[DuelOpenedTurnV1]) -> Vec<Opened> {
     let mut opened = Vec::with_capacity(turns.len() * 2);
     for (t, turn) in turns.iter().enumerate() {
         let base = 4 * t as u32;
-        for (k, (side, played)) in [(MatchSide::A, turn.a), (MatchSide::B, turn.b)]
+        for (k, (side, played)) in [(MatchSide::A, &turn.a), (MatchSide::B, &turn.b)]
             .into_iter()
             .enumerate()
         {
@@ -425,7 +423,7 @@ pub fn opened_of_turns(turns: &[DuelTurnV1]) -> Vec<Opened> {
                 side,
                 kind: OpenedKind::Move {
                     committed_at: base + 1 + k,
-                    played: played.encode(),
+                    played: played.clone(),
                 },
             });
         }
@@ -445,7 +443,7 @@ pub fn adapter_conformance(program: &dyn OutcomeProgram, vectors: &[u8]) -> Resu
             body: vector.body.clone(),
         }
         .encode();
-        let opened = opened_of_turns(&vector.turns);
+        let opened = opened_of_turns(&vector.opened);
         let want = win_label(vector.winner);
         match program.outcome(&setup, &opened) {
             Ok(ProgramOutcome::Done(label)) if label == want => {}
@@ -594,9 +592,9 @@ mod tests {
         assert_eq!(
             hex_free(&WildstateDuel.id()),
             hex_free(&[
-                0x44, 0x82, 0x48, 0xec, 0x83, 0xd7, 0x08, 0xda, 0x32, 0x8b, 0x0b, 0xb6, 0x89, 0x96,
-                0x44, 0xde, 0xef, 0x75, 0xaf, 0x91, 0xf5, 0x61, 0x52, 0x7b, 0xdf, 0x51, 0x95, 0x58,
-                0x43, 0x9c, 0xb3, 0x76
+                0xa4, 0xcf, 0x70, 0xc6, 0xfc, 0xc1, 0x93, 0x6c, 0x60, 0xc0, 0x04, 0x61, 0x6d, 0xc4,
+                0x6b, 0xcd, 0xef, 0xc2, 0x00, 0x89, 0x28, 0x10, 0xcf, 0x6d, 0xa1, 0x90, 0x0a, 0xfe,
+                0x74, 0x19, 0x4d, 0xcd
             ]),
             "the program the computed vaults pin"
         );
@@ -614,7 +612,7 @@ mod tests {
         for (i, vector) in vectors().vectors.iter().enumerate() {
             let setup = setup_of(vector);
             let mut progress = DuelProgress::start(&setup).expect("a setup");
-            for entry in opened_of_turns(&vector.turns) {
+            for entry in opened_of_turns(&vector.opened) {
                 let kept = progress.encode();
                 progress = DuelProgress::decode(&kept).expect("the kept progress");
                 assert_eq!(progress.encode(), kept);
@@ -637,7 +635,7 @@ mod tests {
             .expect("a frozen match of more than one turn");
         let setup = setup_of(vector);
         // The first turn, which does not decide the match, then B resigns.
-        let mut opened = opened_of_turns(&vector.turns[..1]);
+        let mut opened = opened_of_turns(&vector.opened[..1]);
         assert_eq!(WildstateDuel.outcome(&setup, &opened), Ok(Incomplete));
         opened.push(Opened {
             index: 5,
@@ -670,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_out_of_order_or_a_move_not_canonical_is_a_fault() {
+    fn a_turn_out_of_order_is_a_fault() {
         let vector = &vectors().vectors[0];
         let setup = setup_of(vector);
         let turn = vector.turns[0];
@@ -698,12 +696,6 @@ mod tests {
         WildstateDuel
             .outcome(&setup, &twice)
             .expect_err("a side's second move of one turn");
-        // A move whose bytes are not a canonical DuelMoveV1.
-        let mut trailing = turn.a.encode();
-        trailing.push(7);
-        WildstateDuel
-            .outcome(&setup, &[mv(3, MatchSide::A, 1, trailing)])
-            .expect_err("a move with trailing bytes");
         // A setup pinning another program.
         let other = DuelSetupV1 {
             program: [0x5A; 32],
@@ -721,8 +713,8 @@ mod tests {
             .find(|v| v.turns.len() > 1)
             .expect("a frozen match of more than one turn");
         let long_setup = setup_of(long);
-        let early = opened_of_turns(&long.turns[..1]);
-        let mut pipelined = opened_of_turns(&long.turns[..2]);
+        let early = opened_of_turns(&long.opened[..1]);
+        let mut pipelined = opened_of_turns(&long.opened[..2]);
         assert_eq!(
             WildstateDuel.outcome(&long_setup, &pipelined),
             Ok(Incomplete)
@@ -743,6 +735,66 @@ mod tests {
         half.apply(&early[0]).expect("A's reveal");
         half.may_commit()
             .expect_err("a commitment after a reveal of the turn");
+    }
+
+    /// A reveal whose bytes are not a canonical move plays as its side's
+    /// pass: the transcript stays decidable, turn for turn as if that side
+    /// had revealed a pass, and is never a program fault (owner ruling
+    /// 2026-10-06: a fault there would freeze both stakes for good).
+    #[test]
+    fn a_garbled_reveal_plays_as_a_pass_and_never_faults() {
+        let set = vectors();
+        let vector = set
+            .vectors
+            .iter()
+            .find(|v| v.turns.len() > 1)
+            .expect("a frozen match of more than one turn");
+        let setup = setup_of(vector);
+        let mut trailing = vector.turns[0].a.encode();
+        trailing.push(7);
+        let garbled: [Vec<u8>; 4] = [
+            trailing,
+            vec![0x57, 0x04, 0x00, 0x01, 0x09],
+            vec![0xFF],
+            vector.turns[0].encode(),
+        ];
+        let as_passed = DuelOpenedTurnV1 {
+            a: DuelMoveV1::Pass.encode(),
+            b: vector.opened[0].b.clone(),
+        };
+        let passed = WildstateDuel.outcome(&setup, &opened_of_turns(&[as_passed.clone()]));
+        let mut by_pass = DuelProgress::start(&setup).expect("a setup");
+        for entry in opened_of_turns(&[as_passed]) {
+            by_pass.apply(&entry).expect("a pass");
+        }
+        for bytes in garbled {
+            let turn = DuelOpenedTurnV1 {
+                a: bytes,
+                b: vector.opened[0].b.clone(),
+            };
+            let opened = opened_of_turns(&[turn]);
+            assert_eq!(WildstateDuel.outcome(&setup, &opened), passed);
+            let mut progress = DuelProgress::start(&setup).expect("a setup");
+            for entry in &opened {
+                progress.apply(entry).expect("a garbled reveal is applied");
+            }
+            assert_eq!(progress.encode(), by_pass.encode());
+        }
+        // Every frozen vector with garbled reveals is decided through Core's
+        // interface exactly as frozen.
+        let mut decided = 0;
+        for v in set.vectors.iter().filter(|v| {
+            v.opened.iter().any(|t| {
+                DuelMoveV1::played(&t.a).encode() != t.a || DuelMoveV1::played(&t.b).encode() != t.b
+            })
+        }) {
+            assert_eq!(
+                WildstateDuel.outcome(&setup_of(v), &opened_of_turns(&v.opened)),
+                Ok(Done(win_label(v.winner).to_vec()))
+            );
+            decided += 1;
+        }
+        assert!(decided >= 3, "{decided} vectors with garbled reveals");
     }
 
     /// A program whose rules disagree with its own vectors is refused, and a

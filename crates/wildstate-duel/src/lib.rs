@@ -26,6 +26,7 @@
 //! | `0x5708` | `OutcomeProgramV1` (the program-hash preimage) |
 //! | `0x5709` | [`vectors::DuelVectorV1`] |
 //! | `0x570A` | [`vectors::DuelVectorSetV1`] |
+//! | `0x570B` | [`DuelOpenedTurnV1`] |
 //!
 //! Every object uses the house CCB grammar ([`codec`]), schema 1.
 //!
@@ -48,7 +49,10 @@
 //! - Resign hands the other side the win; both resigning in one turn is
 //!   decided as at the cap;
 //! - an opened move the rules cannot play (an unknown index, an empty charge,
-//!   an item out of stock or aimed at a fainted creature) plays as a pass;
+//!   an item out of stock or aimed at a fainted creature) plays as a pass, and
+//!   so does an opening whose bytes are not a canonical `DuelMoveV1` at all
+//!   ([`DuelMoveV1::played`]): a garbled reveal never stops the match from
+//!   being decided;
 //! - after `turn_cap` (60) turns the side with more total team HP wins, and
 //!   equal HP goes to the tiebreak seed's parity. There is never a tie.
 
@@ -66,7 +70,10 @@ pub use engine::{
     SideState, Status, TurnLog, Winner,
 };
 pub use tables::{Tables, TABLES};
-pub use types::{CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelSetupV1, DuelSide, DuelTurnV1};
+pub use types::{
+    CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelSetupV1, DuelSide, DuelTurnV1,
+    MAX_OPENED_MOVE_BYTES,
+};
 
 use codec::{tagged_hash, Writer};
 use vectors::DuelVectorSetV1;
@@ -83,6 +90,7 @@ pub mod class {
     pub const OUTCOME_PROGRAM: u16 = 0x5708;
     pub const DUEL_VECTOR: u16 = 0x5709;
     pub const DUEL_VECTOR_SET: u16 = 0x570A;
+    pub const DUEL_OPENED_TURN: u16 = 0x570B;
 }
 
 pub const TAG_OUTCOME_PROGRAM: &str = "DSM/outcome-program/v1";

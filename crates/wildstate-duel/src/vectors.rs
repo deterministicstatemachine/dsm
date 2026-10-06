@@ -8,7 +8,7 @@ use crate::class;
 use crate::codec::{tagged_hash, DecodeError, Reader, Writer};
 use crate::engine::{DuelState, End, Side, Winner};
 use crate::tables::TABLES;
-use crate::types::{DuelMatchV1, DuelTurnV1};
+use crate::types::{DuelMatchV1, DuelOpenedTurnV1, DuelTurnV1};
 use crate::{Refusal, TAG_VECTOR_TRACE};
 
 /// Bound on vectors in one set (an allocation guard, not a target).
@@ -19,7 +19,8 @@ pub const MAX_LABEL_BYTES: usize = 64;
 /// `0x5709 DuelVectorV1` — one frozen match.
 ///
 /// 1 `label` bytes, `1..=64`, what the vector exercises · 2 `match` nested
-/// `0x5702` · 3 `turns` `seq<0x5705>` (nested), `1..=turn_cap` · 4 `winner`
+/// `0x5702` · 3 `opened` `seq<0x570B>` (nested), `1..=turn_cap`, each turn's
+/// openings exactly as revealed, garbled ones included · 4 `winner`
 /// u8 · 5 `end` u8 · 6 `final_state` digest32, the state digest after the
 /// last turn · 7 `trace` digest32, the chain over every state the match
 /// passed through (`t_0 = H(trace ‖ state_0)`, `t_i = H(trace ‖ t_{i−1} ‖
@@ -29,6 +30,10 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub struct DuelVectorV1 {
     pub label: Vec<u8>,
     pub body: DuelMatchV1,
+    /// Each turn's openings as revealed: what the vector freezes.
+    pub opened: Vec<DuelOpenedTurnV1>,
+    /// The turns the rules play from `opened` ([`DuelOpenedTurnV1::turn`]).
+    /// Derived, never encoded.
     pub turns: Vec<DuelTurnV1>,
     pub winner: Side,
     pub end: End,
@@ -39,12 +44,18 @@ pub struct DuelVectorV1 {
 impl DuelVectorV1 {
     pub const CLASS: u16 = class::DUEL_VECTOR;
 
-    /// Freezes a match: plays it and records what it decided.
-    pub fn freeze(label: &str, body: DuelMatchV1, turns: Vec<DuelTurnV1>) -> Result<Self, Refusal> {
+    /// Freezes a match: plays its openings and records what it decided.
+    pub fn freeze(
+        label: &str,
+        body: DuelMatchV1,
+        opened: Vec<DuelOpenedTurnV1>,
+    ) -> Result<Self, Refusal> {
+        let turns: Vec<DuelTurnV1> = opened.iter().map(DuelOpenedTurnV1::turn).collect();
         let (state, winner, trace) = play(&body, &turns)?;
         Ok(Self {
             label: label.as_bytes().to_vec(),
             body,
+            opened,
             turns,
             winner: winner.side,
             end: winner.end,
@@ -56,8 +67,8 @@ impl DuelVectorV1 {
     fn write_body(&self, w: &mut Writer) {
         w.bytes(&self.label);
         w.nested(&self.body.encode());
-        w.count(self.turns.len());
-        for t in &self.turns {
+        w.count(self.opened.len());
+        for t in &self.opened {
             w.nested(&t.encode());
         }
         w.u8(self.winner.code());
@@ -68,11 +79,12 @@ impl DuelVectorV1 {
     fn read_body(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let label = r.bytes("vector.label", 1, MAX_LABEL_BYTES)?;
         let body = r.nested(DuelMatchV1::read_body, DuelMatchV1::CLASS)?;
-        let n = r.count("vector.turns", 1, usize::from(TABLES.constants.turn_cap))?;
-        let mut turns = Vec::with_capacity(n);
+        let n = r.count("vector.opened", 1, usize::from(TABLES.constants.turn_cap))?;
+        let mut opened = Vec::with_capacity(n);
         for _ in 0..n {
-            turns.push(r.nested(DuelTurnV1::read_body, DuelTurnV1::CLASS)?);
+            opened.push(r.nested(DuelOpenedTurnV1::read_body, DuelOpenedTurnV1::CLASS)?);
         }
+        let turns = opened.iter().map(DuelOpenedTurnV1::turn).collect();
         let w = r.u8("vector.winner")?;
         let winner = Side::from_code(w).ok_or(DecodeError::UnknownValue {
             field: "vector.winner",
@@ -88,6 +100,7 @@ impl DuelVectorV1 {
         Ok(Self {
             label,
             body,
+            opened,
             turns,
             winner,
             end,
@@ -98,7 +111,8 @@ impl DuelVectorV1 {
 
     /// Plays the vector and compares every recorded result.
     pub fn check(&self) -> Result<(), &'static str> {
-        let (state, winner, trace) = play(&self.body, &self.turns).map_err(|r| match r {
+        let turns: Vec<DuelTurnV1> = self.opened.iter().map(DuelOpenedTurnV1::turn).collect();
+        let (state, winner, trace) = play(&self.body, &turns).map_err(|r| match r {
             Refusal::MatchOver { .. } => "the match was decided before its last turn",
             Refusal::Unfinished { .. } => "the match is not decided at its last turn",
             _ => "a turn was refused",
