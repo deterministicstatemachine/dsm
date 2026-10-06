@@ -698,3 +698,87 @@ async fn a_stakes_status_walks_only_the_wallets_own_vault() {
         );
     }
 }
+
+/// A collect's status reads each vault and its verdict through one context,
+/// and once it established the release it answers from its record: a
+/// Retired vault and a final verdict are permanent. A collects both stakes;
+/// R's first status reads each vault's genesis once from each member, and
+/// later polls read nothing and say exactly what the first said. A second
+/// request naming the same vaults is not answered by the first one's
+/// record: it is read again, and established the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_collects_status_is_read_once_and_answered_from_its_record() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let staked = both_staked(&p, &r, &relay).await;
+    adjudicate(&r, &staked.a_vault, b"a-wins").await;
+    let vaults = [staked.a_vault.as_slice(), staked.b_vault.as_slice()];
+    let collect_a = request(&r, &relay, &staked.sid_a, collect(&vaults)).await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    carried_out(&p.a, &staked.sid_a, collect_a).await;
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let first = status(&r, &staked.sid_a, collect_a).await;
+    assert_eq!(
+        fact(&first),
+        generated::ConnectFact::EscrowReleased,
+        "{}",
+        first.fact_detail
+    );
+    for vault in vaults {
+        let vault: [u8; 32] = vault.try_into().expect("a vault id");
+        let genesis_scan = format!(
+            "GET /api/v2/index/{}",
+            crate::util::text_id::encode_base32_crockford(
+                &dsm::sofi::derive::vault_genesis_locator(&vault)
+            )
+        );
+        for node in &p.nodes.nodes {
+            let scans = node
+                .requests()
+                .iter()
+                .filter(|r| r.starts_with(&genesis_scan))
+                .count();
+            assert!(
+                scans <= 1,
+                "{} was asked for vault {genesis_scan}'s genesis {scans} times: the vault and its \
+                 verdict are read through one context",
+                node.member_id
+            );
+        }
+    }
+
+    for poll in 1..=2 {
+        for node in &p.nodes.nodes {
+            node.forget_requests();
+        }
+        let again = status(&r, &staked.sid_a, collect_a).await;
+        assert_eq!(again, first, "poll {poll}: the record says what the reads said");
+        let read: Vec<String> = asked(&p)
+            .into_iter()
+            .filter(|r| r.contains("/api/v2/cell/") || r.contains("/api/v2/index/"))
+            .collect();
+        assert_eq!(read, Vec::<String>::new(), "poll {poll}: nothing is read again");
+    }
+
+    let collect_again = request(&r, &relay, &staked.sid_a, collect(&vaults)).await;
+    let other = status(&r, &staked.sid_a, collect_again).await;
+    assert_eq!(
+        fact(&other),
+        generated::ConnectFact::EscrowReleased,
+        "{}",
+        other.fact_detail
+    );
+    assert_eq!(
+        (other.escrow_vault_ids, other.escrow_verdict_cell, other.fact_detail),
+        (
+            first.escrow_vault_ids.clone(),
+            first.escrow_verdict_cell.clone(),
+            first.fact_detail.clone()
+        )
+    );
+}

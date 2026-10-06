@@ -518,13 +518,43 @@ pub async fn verdict(
     set: &StorageSet,
     vault_id: &D32,
 ) -> Result<VerdictView, DsmError> {
-    let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
-    let verifier = ctx.verifier();
-    let terms = escrow_terms_of(&verifier, vault_id)?;
-    Ok(VerdictView::of(&read_cell(
-        &verifier,
-        &escrow::verdict_cell_of(&terms),
-    )?))
+    EscrowReads::new(core, set)?.verdict(vault_id)
+}
+
+/// Escrow vaults and their verdicts read through one verifier context: a
+/// vault's genesis, accepted to read its head, is stood on again to read its
+/// verdict cell, and not read and accepted a second time.
+pub struct EscrowReads<'a> {
+    set: &'a StorageSet,
+    ctx: VerifierContext<'a>,
+}
+
+impl<'a> EscrowReads<'a> {
+    pub fn new(core: &CoreSDK, set: &'a StorageSet) -> Result<Self, DsmError> {
+        Ok(Self {
+            set,
+            ctx: VerifierContext::new(set, Some(identity(core)?), None)?,
+        })
+    }
+
+    /// The escrow vault `vault_id` at its walked head, its genesis accepted
+    /// and its terms escrow terms. Its id names it; nothing else about it is
+    /// taken from whoever named it.
+    pub async fn vault(&self, vault_id: &D32) -> Result<EscrowVaultView, DsmError> {
+        let verifier = self.ctx.verifier();
+        escrow_terms_of(&verifier, vault_id)?;
+        view_of(self.set, &verifier, vault_id).await
+    }
+
+    /// What the verdict cell of `vault_id` holds.
+    pub fn verdict(&self, vault_id: &D32) -> Result<VerdictView, DsmError> {
+        let verifier = self.ctx.verifier();
+        let terms = escrow_terms_of(&verifier, vault_id)?;
+        Ok(VerdictView::of(&read_cell(
+            &verifier,
+            &escrow::verdict_cell_of(&terms),
+        )?))
+    }
 }
 
 // ── escrow.release ──────────────────────────────────────────────────────────
@@ -691,10 +721,7 @@ pub async fn vault(
     set: &StorageSet,
     vault_id: &D32,
 ) -> Result<EscrowVaultView, DsmError> {
-    let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
-    let verifier = ctx.verifier();
-    escrow_terms_of(&verifier, vault_id)?;
-    view_of(set, &verifier, vault_id).await
+    EscrowReads::new(core, set)?.vault(vault_id).await
 }
 
 /// `escrow.locked`: the escrow vaults bound to `verdict_cell`, each accepted,
