@@ -351,6 +351,160 @@ namespace DSM.Sphincs
     16^(3-1) ≤ 2*(params v).n*15 ∧ 2*(params v).n*15 < 16^3 := by
   cases v <;> decide
 
+ theorem xor_one_is_sibling (index : Nat) : Nat.xor index 1 = siblingIndex index := by
+  change (index ^^^ 1) = siblingIndex index
+  have quotient : (index ^^^ 1)/2 = index/2 := by rw [Nat.xor_div_two]; simp
+  have parity : ((index ^^^ 1)%2 = 1) ↔ index%2 ≠ 1 := by
+    simp
+  have arithmetic : ∀ x y : Nat, y/2 = x/2 →
+      (y%2 = 1 ↔ x%2 ≠ 1) → y = siblingIndex x := by
+    intro x y sameDiv opposite
+    by_cases even : x%2 = 0
+    · simp [siblingIndex,even]
+      omega
+    · simp [siblingIndex,even]
+      omega
+  exact arithmetic index (index ^^^ 1) quotient parity
+
+ theorem fixed_block_slice (headBytes block tailBytes : Bytes) (width : Nat)
+    (blockWidth : block.length = width) :
+    slice (headBytes++block++tailBytes) headBytes.length width = block := by
+  simp [slice,List.append_assoc,blockWidth]
+
+#print axioms xor_one_is_sibling
+#print axioms fixed_block_slice
+ theorem bit_fold_bound (bits : List Nat) (bit : Nat → Nat)
+    (bounded : ∀ j, bit j < 2) (acc width : Nat) (initial : acc < 2^width) :
+    bits.foldl (fun value j => value*2+bit j) acc < 2^(width+bits.length) := by
+  induction bits generalizing acc width with
+  | nil => simpa using initial
+  | cons j rest ih =>
+    have next : acc*2+bit j < 2^(width+1) := by
+      rw [Nat.pow_succ]
+      have hb := bounded j
+      omega
+    have result := ih (acc*2+bit j) (width+1) next
+    simpa [Nat.add_assoc,Nat.add_comm,Nat.add_left_comm] using result
+
+ theorem base2b_digit_bound (input : Bytes) (b count digit : Nat)
+    (member : digit ∈ base2b input b count) : digit < 2^b := by
+  obtain ⟨i,_,rfl⟩ := List.mem_map.mp member
+  have result := bit_fold_bound (List.range b)
+    (fun j => ((input[(i*b+j)/8]?.getD 0).toNat / 2^(7-(i*b+j)%8))%2)
+    (fun j => Nat.mod_lt _ (by decide)) 0 0 (by decide)
+  simpa using result
+
+ theorem wots_digit_bound (p : Params) (msg : Bytes) (digit : Nat)
+    (member : digit ∈ wotsDigits p msg) : digit ≤ 15 := by
+  simp only [wotsDigits,Id.run,pure,List.mem_append] at member
+  rcases member with first | checksum
+  · have bound := base2b_digit_bound msg 4 (2*p.n) digit first
+    omega
+  · have bound := base2b_digit_bound _ 4 3 digit checksum
+    omega
+
+#print axioms base2b_digit_bound
+#print axioms wots_digit_bound
+ theorem wots_generated_digit_recovers (o : Oracle Id) (p : Params)
+    (tk : Bytes) (a : Adrs) (secret msg : Bytes) (digit : Nat)
+    (member : digit ∈ wotsDigits p msg) :
+    chain o p tk a (chain o p tk a secret 0 digit) digit (15-digit) =
+      chain o p tk a secret 0 15 := by
+  exact wots_signature_recovers_chain_top o p tk a secret digit
+    (wots_digit_bound p msg digit member)
+
+#print axioms wots_generated_digit_recovers
+-- This contract describes fixed-width primitive output, not hash security.
+def OutputWidths (o : Oracle Id) : Prop := ∀ request, (o request).length = request.outLen
+
+ theorem thash_width (o : Oracle Id) (widths : OutputWidths o)
+    (p : Params) (tk : Bytes) (a : Adrs) (input : Bytes) :
+    (thash o p tk a input).length = p.n := by
+  exact widths _
+
+ theorem prf_width (o : Oracle Id) (widths : OutputWidths o)
+    (p : Params) (key seed : Bytes) (a : Adrs) :
+    (prf o p key seed a).length = p.n := by
+  exact widths _
+
+ theorem chain_width (o : Oracle Id) (widths : OutputWidths o)
+    (p : Params) (tk : Bytes) (a : Adrs) (x : Bytes) (start steps : Nat)
+    (initial : x.length = p.n) :
+    (chain o p tk a x start steps).length = p.n := by
+  induction steps generalizing x start with
+  | zero => exact initial
+  | succ steps ih =>
+    exact ih (thash o p tk {a with hash := start} x) (start+1)
+      (thash_width o widths p tk _ x)
+
+ theorem wots_pkgen_width (o : Oracle Id) (widths : OutputWidths o)
+    (p : Params) (tk prfKey seed : Bytes) (a : Adrs) :
+    (wotsPkgen o p tk prfKey seed a).length = p.n := by
+  unfold wotsPkgen
+  exact thash_width o widths p tk _ _
+
+ theorem xmss_node_width (o : Oracle Id) (widths : OutputWidths o)
+    (p : Params) (tk prfKey seed : Bytes) (a : Adrs) (index height : Nat) :
+    (xmssNode o p tk prfKey seed a index height).length = p.n := by
+  cases height with
+  | zero => exact wots_pkgen_width o widths p tk prfKey seed _
+  | succ height => exact thash_width o widths p tk _ _
+
+#print axioms wots_pkgen_width
+#print axioms xmss_node_width
+ theorem xmss_node_parent (o : Oracle Id) (p : Params) (tk prfKey seed : Bytes)
+    (a : Adrs) (level index : Nat) :
+    thash o p tk {a.setType 2 with chain := level+1, hash := index}
+      (List.append (xmssNode o p tk prfKey seed a (2*index) level)
+       (xmssNode o p tk prfKey seed a (2*index+1) level)) =
+    xmssNode o p tk prfKey seed a index (level+1) := by
+  rfl
+
+ theorem fors_node_parent (o : Oracle Id) (p : Params) (tk prfKey seed : Bytes)
+    (a : Adrs) (level index : Nat) :
+    thash o p tk {a with chain := level+1, hash := index}
+      (List.append (forsNode o p tk prfKey seed a (2*index) level)
+       (forsNode o p tk prfKey seed a (2*index+1) level)) =
+    forsNode o p tk prfKey seed a index (level+1) := by
+  rfl
+
+ theorem fors_node_width (o : Oracle Id) (widths : OutputWidths o)
+    (p : Params) (tk prfKey seed : Bytes) (a : Adrs) (index height : Nat) :
+    (forsNode o p tk prfKey seed a index height).length = p.n := by
+  cases height with
+  | zero => exact thash_width o widths p tk _ _
+  | succ height => exact thash_width o widths p tk _ _
+
+-- Parent recurrence is discharged using the signer itself. Only the leaf
+-- and authentication-byte correspondence remain premises here.
+ theorem xmss_signer_tree_path (o : Oracle Id) (p : Params) (tk prfKey seed : Bytes)
+    (a : Adrs) (index : Nat) (auth : Bytes)
+    (siblings : ∀ j, j < p.hp → slice auth (j*p.n) p.n =
+      xmssNode o p tk prfKey seed a (siblingIndex (index/2^j)) j) :
+    authRoot o p tk (a.setType 2) index index
+      (xmssNode o p tk prfKey seed a index 0) auth p.hp =
+      xmssNode o p tk prfKey seed a (index/2^p.hp) p.hp := by
+  apply xmss_authentication_path_recovers_tree o p tk (a.setType 2)
+    (fun level idx => xmssNode o p tk prfKey seed a idx level) index auth
+  · intro level idx
+    simpa [Adrs.setType] using xmss_node_parent o p tk prfKey seed a level idx
+  · exact siblings
+
+ theorem fors_signer_tree_path (o : Oracle Id) (p : Params) (tk prfKey seed : Bytes)
+    (a : Adrs) (treeIndex leaf : Nat) (auth : Bytes) (bound : leaf < 2^p.a)
+    (siblings : ∀ j, j < p.a → slice auth (j*p.n) p.n =
+      forsNode o p tk prfKey seed a (siblingIndex ((treeIndex*2^p.a+leaf)/2^j)) j) :
+    authRoot o p tk a leaf (treeIndex*2^p.a+leaf)
+      (forsNode o p tk prfKey seed a (treeIndex*2^p.a+leaf) 0) auth p.a =
+      forsNode o p tk prfKey seed a treeIndex p.a := by
+  exact fors_authentication_path_recovers_tree o p tk a
+    (fun level idx => forsNode o p tk prfKey seed a idx level) treeIndex leaf auth bound
+    (fors_node_parent o p tk prfKey seed a) siblings
+
+#print axioms chain_width
+#print axioms fors_node_width
+#print axioms xmss_signer_tree_path
+#print axioms fors_signer_tree_path
 #print axioms verify_bad_signature_no_hash_calls
 #print axioms checksum_width_three
 #print axioms ek_seed_preimage_binding
