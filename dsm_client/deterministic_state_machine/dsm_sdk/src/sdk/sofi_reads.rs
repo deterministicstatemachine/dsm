@@ -296,6 +296,7 @@ impl<'a> LiveSofiReads<'a> {
             members: &members,
             set_id: self.set.id(),
             network_id: &self.network,
+            programs: crate::sdk::outcome_programs::registry(),
         };
         resolve_peer(
             &self.peer_resolver(),
@@ -499,6 +500,7 @@ impl SofiReads for LiveSofiReads<'_> {
             members: &members,
             set_id: self.set.id(),
             network_id: &self.network,
+            programs: crate::sdk::outcome_programs::registry(),
         };
         resolve_peer_root(
             &self.peer_resolver(),
@@ -530,7 +532,8 @@ impl SofiReads for LiveSofiReads<'_> {
                 members: &members,
                 set_id: self.set.id(),
                 network_id: &self.network,
-            };
+            programs: crate::sdk::outcome_programs::registry(),
+        };
             return resolve_peer_claim(
                 &self.peer_resolver(),
                 &self.network,
@@ -700,6 +703,7 @@ impl<'a> VerifierContext<'a> {
             members: &self.members,
             set_id: self.set_id,
             network_id: &self.network,
+            programs: crate::sdk::outcome_programs::registry(),
         }
     }
 
