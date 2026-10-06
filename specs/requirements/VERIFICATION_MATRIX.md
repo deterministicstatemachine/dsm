@@ -236,3 +236,13 @@ Tests named `dsm_sdk::…` run on devices created as wallet creation creates the
 | MR-SOFI-0303 (§6.75): a ticker is 2 to 8 characters, counted in characters, in `token.create` and `token.check` alike | `dsm_sdk` · handlers/token_routes.rs · `token_fields` | `dsm_sdk::handlers::token_create_tests::token_check_names_each_field_token_create_would_refuse_and_creates_nothing` | Counted in bytes → red (2026-10-05). | — |
 | MR-SOFI-0349 (§6.75): a burn is entered in token units and debits its base units at the token's committed decimals | `dsm_sdk` · handlers/token_routes.rs · `burn_operation` | `dsm_sdk::handlers::sender_admission_tests::a_burn_is_entered_in_token_units_and_debits_its_base_units` | Parsed at decimals 0 → red (2026-10-05). | — |
 | SoFi §28 (§6.75): a pair named in either order holds each reserve against its own token | `dsm_sdk` · handlers/sofi_routes.rs · `sofi_create_vault` | `dsm_sdk::handlers::node_e2e_tests::a_pair_named_in_either_order_holds_each_reserve_against_its_own_token` | The reserves crossed when the pair is reordered → red (2026-10-05). | — |
+
+## SPHINCS construction-v2 refinement evidence
+
+MR-DSM-0259 and canonical signing/key binding: see
+[SPHINCS_REFINEMENT.md](SPHINCS_REFINEMENT.md) for kernel-checked statements,
+ordered primitive-transcript checks, exact source map and open proof obligations.
+Run `bash scripts/check_sphincs_refinement.sh`; the Lean CI job enforces it.
+This evidence does not discharge cryptographic unforgeability, constant-time,
+CCB codec, JNI, or compiled-binary refinement obligations. MR-SOFI-0111's
+signature uniqueness must not be inferred from deterministic signing alone.

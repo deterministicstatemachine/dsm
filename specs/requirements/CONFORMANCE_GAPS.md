@@ -3782,3 +3782,14 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | STOR-014/L422 | Met | `dsm_storage_node::db::pg::close_cycle` (pending check) | `dsm_storage_node::bytecommit_chain::cycles_close_over_new_entries_and_commit_their_records` ("no new entry, no new cycle") | Confirmed. |
 | STOR-014/L423 | Partial | dsm_storage_node · db/pg.rs::`cell_commit_proof`; api/objects/bytecommit.rs::`proof` | bytecommit_chain::`cycles_close_over_new_entries_and_commit_their_records` (node-serving side only) | Confirmed no SDK/Core verifier consumer (grep: 0 hits for `record_is_committed`/`CellCommitProof` in `dsm_sdk`). |
 | STOR-014/L424 | Met | `dsm_storage_node::api::objects::bytecommit::mirror_sync`; `dsm_storage_node::api::objects::bytecommit::sync_one`; `dsm_storage_node::api::objects::bytecommit::fetch_commit`; `dsm_storage_node::db::pg::mirror_put` | `dsm_storage_node::bytecommit_chain::a_set_mate_mirrors_by_fetching_from_the_member_itself`; `dsm_storage_node::bytecommit_chain::an_impostor_at_a_set_mates_endpoint_is_not_mirrored`; `dsm_storage_node::bytecommit_chain::a_rewritten_cycle_is_kept_beside_the_first` | Confirmed. |
+
+## SPHINCS construction-v2 formal boundary
+
+The model, structural proofs and executable refinement program are recorded in
+[SPHINCS_REFINEMENT.md](SPHINCS_REFINEMENT.md). They preserve the current
+construction and add source-drift checking, rather than replacing the primitive.
+Universal Rust/source/binary simulation, universal signer correctness, custom BLAKE3 security reductions, side-channel/secret-memory review
+and complete DSM canonical wrapper refinement remain unproved. These additions
+supply evidence for MR-DSM-0259; they do not change it to unconditional proof of
+post-quantum security. Deterministic R does not establish MR-SOFI-0111's assertion
+that at most one envelope can verify for a body.

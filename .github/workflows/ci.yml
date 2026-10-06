@@ -837,6 +837,14 @@ jobs:
           done
           exit "$failed"
 
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: Install SPHINCS refinement build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - name: Cross-check SPHINCS construction and DSM signing wrappers
+        run: bash scripts/check_sphincs_refinement.sh
+
   # --------------------------------------------------------------------------
   # SPDX: every source file under the primary code paths must carry an
   # SPDX-License-Identifier header (Issue #23). The check itself is just
