@@ -10,11 +10,12 @@
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
+use wildstate_duel::creatures::CreatureRecordV1;
 use wildstate_duel::vectors::DuelVectorSetV1;
 use wildstate_duel::{
-    Acted, ActionLog, CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelSetupV1, DuelSide, DuelState,
-    DuelTurnV1, End, Event, EventKind, Fighter, Guard, Phase, Played, Side, SideState, TurnLog,
-    Winner, TABLES,
+    Acted, ActionLog, CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelSetupV1,
+    DuelSide, DuelState, DuelTurnV1, End, Event, EventKind, Fighter, Guard, Phase, Played, Side,
+    SideState, TurnLog, Winner, TABLES,
 };
 
 fn fail(what: impl core::fmt::Display) -> JsError {
@@ -36,7 +37,7 @@ where
     let v = get(o, key)?
         .as_f64()
         .ok_or_else(|| fail(format!("{key} is not a number")))?;
-    if v.fract() != 0.0 || v < 0.0 || v > 4_294_967_295.0 {
+    if v.fract() != 0.0 || !(0.0..=4_294_967_295.0).contains(&v) {
         return Err(fail(format!("{key} is not a whole number in range")));
     }
     T::try_from(v as u64).map_err(|e| fail(format!("{key}: {e}")))
@@ -95,37 +96,43 @@ fn status_name(id: u8) -> JsValue {
         .map_or(JsValue::NULL, |s| JsValue::from_str(s.id))
 }
 
+fn creature_of(c: &JsValue) -> Result<CreatureStateV1, JsError> {
+    let charges = get(c, "charges")?;
+    let charges = if charges.is_instance_of::<Uint8Array>() {
+        bytes_of(&charges, "charges")?
+    } else {
+        let list = Array::from(&charges);
+        let mut out = Vec::new();
+        for (i, n) in list.iter().enumerate() {
+            let n = n
+                .as_f64()
+                .ok_or_else(|| fail(format!("charges[{i}] is not a number")))?;
+            if n.fract() != 0.0 || !(0.0..=255.0).contains(&n) {
+                return Err(fail(format!("charges[{i}] is not a byte")));
+            }
+            out.push(n as u8);
+        }
+        out
+    };
+    CreatureStateV1::new(
+        digest(c, "anchor")?,
+        int(c, "species")?,
+        int(c, "xp")?,
+        int(c, "hp")?,
+        charges,
+    )
+    .map_err(fail)
+}
+
 fn team_of(v: &JsValue) -> Result<Vec<CreatureStateV1>, JsError> {
     let arr = Array::from(&get(v, "team")?);
     let mut team = Vec::new();
     for c in arr.iter() {
-        let charges = get(&c, "charges")?;
-        let charges = if charges.is_instance_of::<Uint8Array>() {
-            bytes_of(&charges, "charges")?
-        } else {
-            let list = Array::from(&charges);
-            let mut out = Vec::new();
-            for (i, n) in list.iter().enumerate() {
-                let n = n
-                    .as_f64()
-                    .ok_or_else(|| fail(format!("charges[{i}] is not a number")))?;
-                if n.fract() != 0.0 || !(0.0..=255.0).contains(&n) {
-                    return Err(fail(format!("charges[{i}] is not a byte")));
-                }
-                out.push(n as u8);
-            }
-            out
-        };
-        team.push(
-            CreatureStateV1::new(
-                digest(&c, "anchor")?,
-                int(&c, "species")?,
-                int(&c, "xp")?,
-                int(&c, "hp")?,
-                charges,
-            )
-            .map_err(fail)?,
-        );
+        if c.is_instance_of::<Uint8Array>() {
+            team.push(CreatureStateV1::decode(&bytes_of(&c, "team[]")?).map_err(fail)?);
+            continue;
+        }
+        team.push(creature_of(&c)?);
     }
     Ok(team)
 }
@@ -182,6 +189,24 @@ pub fn encode_move(mv: JsValue) -> Result<Uint8Array, JsError> {
         other => return Err(fail(format!("unknown move kind {other}"))),
     };
     Ok(u8a(&m.encode()))
+}
+
+/// The canonical bytes of the move an opening plays: the move it is the
+/// canonical encoding of, and a pass for any other bytes.
+#[wasm_bindgen(js_name = playedMove)]
+pub fn played_move(opened: &[u8]) -> Uint8Array {
+    u8a(&DuelMoveV1::played(opened).encode())
+}
+
+/// The turn's canonical bytes the rules play from both sides' openings,
+/// exactly as revealed: each plays as `playedMove` reads it.
+#[wasm_bindgen(js_name = turnOfOpenings)]
+pub fn turn_of_openings(a: &[u8], b: &[u8]) -> Uint8Array {
+    let opened = DuelOpenedTurnV1 {
+        a: a.to_vec(),
+        b: b.to_vec(),
+    };
+    u8a(&opened.turn().encode())
 }
 
 /// A turn's canonical bytes from both sides' move bytes.
@@ -303,6 +328,14 @@ pub fn conformance_vectors() -> Result<Array, JsError> {
             turns.push(&u8a(&t.encode()));
         }
         set(&o, "turns", turns)?;
+        let opened = Array::new();
+        for t in &v.opened {
+            let pair = Object::new();
+            set(&pair, "a", u8a(&t.a))?;
+            set(&pair, "b", u8a(&t.b))?;
+            opened.push(&pair);
+        }
+        set(&o, "opened", opened)?;
         set(&o, "winner", side_name(v.winner))?;
         set(&o, "end", end_name(v.end))?;
         set(&o, "finalState", u8a(&v.final_state))?;
@@ -485,4 +518,112 @@ fn event_view(e: &Event) -> Result<Object, JsError> {
     )?;
     set(&o, "teamIndex", e.team_index)?;
     Ok(o)
+}
+
+fn side_arg(side: &str) -> Result<Side, JsError> {
+    match side {
+        "a" => Ok(Side::A),
+        "b" => Ok(Side::B),
+        other => Err(fail(format!("a side is 'a' or 'b', not {other:?}"))),
+    }
+}
+
+fn salt_arg(salt: &[u8]) -> Result<[u8; 32], JsError> {
+    salt.try_into()
+        .map_err(|e| fail(format!("a salt is 32 bytes: {e}")))
+}
+
+/// `H(DSM/escrow/move-commit/v1 ‖ salt ‖ u32be(|move|) ‖ move)`.
+#[wasm_bindgen(js_name = moveCommitment)]
+pub fn move_commitment(salt: &[u8], played: &[u8]) -> Result<Uint8Array, JsError> {
+    Ok(u8a(&wildstate_duel::transcript::move_commitment(
+        &salt_arg(salt)?,
+        played,
+    )))
+}
+
+/// Transcript entry `index` (DSM class 0x0068): `side` commits to `played`
+/// under `salt`.
+#[wasm_bindgen(js_name = commitEntry)]
+pub fn commit_entry(
+    index: u32,
+    side: &str,
+    salt: &[u8],
+    played: &[u8],
+) -> Result<Uint8Array, JsError> {
+    let bytes =
+        wildstate_duel::transcript::commit_entry(index, side_arg(side)?, &salt_arg(salt)?, played)
+            .map_err(fail)?;
+    Ok(u8a(&bytes))
+}
+
+/// Transcript entry `index`: `side` opens the move it committed to under `salt`.
+#[wasm_bindgen(js_name = revealEntry)]
+pub fn reveal_entry(
+    index: u32,
+    side: &str,
+    salt: &[u8],
+    played: &[u8],
+) -> Result<Uint8Array, JsError> {
+    let bytes =
+        wildstate_duel::transcript::reveal_entry(index, side_arg(side)?, &salt_arg(salt)?, played)
+            .map_err(fail)?;
+    Ok(u8a(&bytes))
+}
+
+/// Transcript entry `index`: `side` resigns.
+#[wasm_bindgen(js_name = resignEntry)]
+pub fn resign_entry(index: u32, side: &str) -> Result<Uint8Array, JsError> {
+    let bytes = wildstate_duel::transcript::resign_entry(index, side_arg(side)?).map_err(fail)?;
+    Ok(u8a(&bytes))
+}
+
+/// The canonical bytes of one creature's state, `{ anchor, species, xp, hp,
+/// charges }` (charges one per move of the species, in table order).
+#[wasm_bindgen(js_name = encodeCreatureState)]
+pub fn encode_creature_state(c: JsValue) -> Result<Uint8Array, JsError> {
+    Ok(u8a(&creature_of(&c)?.encode()))
+}
+
+/// A creature's published state record: `parent` the digest of the record
+/// before it, or `null` for the record it was issued with.
+#[wasm_bindgen(js_name = creatureRecord)]
+pub fn creature_record(parent: JsValue, state: &[u8]) -> Result<Uint8Array, JsError> {
+    let parent = if parent.is_null() || parent.is_undefined() {
+        None
+    } else {
+        let bytes = bytes_of(&parent, "parent")?;
+        Some(<[u8; 32]>::try_from(bytes.as_slice()).map_err(|e| fail(format!("parent: {e}")))?)
+    };
+    let record = CreatureRecordV1 {
+        parent,
+        state: CreatureStateV1::decode(state).map_err(fail)?,
+    };
+    Ok(u8a(&record.encode()))
+}
+
+/// The digest a successor names a record by.
+#[wasm_bindgen(js_name = creatureRecordDigest)]
+pub fn creature_record_digest(record: &[u8]) -> Result<Uint8Array, JsError> {
+    Ok(u8a(&CreatureRecordV1::decode(record)
+        .map_err(fail)?
+        .digest()))
+}
+
+/// The latest state of creature `anchor` among its issuer's published
+/// records: `{ state, digest }`, the tip of the one chain from issuance.
+#[wasm_bindgen(js_name = latestCreatureState)]
+pub fn latest_creature_state(anchor: &[u8], records: Array) -> Result<JsValue, JsError> {
+    let anchor: [u8; 32] = anchor
+        .try_into()
+        .map_err(|e| fail(format!("an anchor is 32 bytes: {e}")))?;
+    let mut published = Vec::new();
+    for (i, r) in records.iter().enumerate() {
+        published.push(bytes_of(&r, &format!("records[{i}]"))?);
+    }
+    let (state, digest) = wildstate_duel::creatures::latest(&anchor, &published).map_err(fail)?;
+    let o = Object::new();
+    set(&o, "state", u8a(&state.encode()))?;
+    set(&o, "digest", u8a(&digest))?;
+    Ok(o.into())
 }

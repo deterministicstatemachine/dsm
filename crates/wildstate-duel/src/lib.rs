@@ -27,6 +27,7 @@
 //! | `0x5709` | [`vectors::DuelVectorV1`] |
 //! | `0x570A` | [`vectors::DuelVectorSetV1`] |
 //! | `0x570B` | [`DuelOpenedTurnV1`] |
+//! | `0x570C` | [`creatures::CreatureRecordV1`] |
 //!
 //! Every object uses the house CCB grammar ([`codec`]), schema 1.
 //!
@@ -57,8 +58,10 @@
 //!   equal HP goes to the tiebreak seed's parity. There is never a tie.
 
 pub mod codec;
+pub mod creatures;
 pub mod engine;
 pub mod tables;
+pub mod transcript;
 pub mod types;
 pub mod vectors;
 
@@ -91,6 +94,7 @@ pub mod class {
     pub const DUEL_VECTOR: u16 = 0x5709;
     pub const DUEL_VECTOR_SET: u16 = 0x570A;
     pub const DUEL_OPENED_TURN: u16 = 0x570B;
+    pub const CREATURE_RECORD: u16 = 0x570C;
 }
 
 pub const TAG_OUTCOME_PROGRAM: &str = "DSM/outcome-program/v1";
@@ -102,6 +106,7 @@ pub const TAG_CREATURE_STATE: &str = "DSM/wildstate-duel/creature-state/v1";
 pub const TAG_FIRST_ACTOR: &str = "DSM/wildstate-duel/first-actor/v1";
 pub const TAG_VECTOR_TRACE: &str = "DSM/wildstate-duel/vector-trace/v1";
 pub const TAG_TIEBREAK: &str = "DSM/wildstate-duel/tiebreak/v1";
+pub const TAG_CREATURE_RECORD: &str = "DSM/wildstate-duel/creature-record/v1";
 
 pub const PROGRAM_NAME: &str = "wildstate-duel";
 pub const RULES_VERSION: u32 = 1;
