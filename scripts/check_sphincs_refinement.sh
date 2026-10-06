@@ -6,7 +6,8 @@ export LEAN_PATH="$PWD/target/sphincs-lean:$PWD/lean4"
 python3 scripts/sphincs_source_map.py --check
 mkdir -p target/sphincs-refinement target/sphincs-lean/Sphincs
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Model.olean lean4/Sphincs/Model.lean
-lean -DwarningAsError=true lean4/Sphincs/Proofs.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Proofs.olean lean4/Sphincs/Proofs.lean
+lean -DwarningAsError=true lean4/Sphincs/Signer.lean
 lean -DwarningAsError=true lean4/Sphincs/CrossCheck.lean
 DSM_SPHINCS_VECTOR_DIR="$PWD/target/sphincs-refinement" \
   cargo test --locked -p dsm-sphincs refinement_vectors::export_refinement_vectors -- --exact
