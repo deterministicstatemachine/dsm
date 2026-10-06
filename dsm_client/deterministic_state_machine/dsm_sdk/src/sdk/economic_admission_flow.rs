@@ -846,7 +846,17 @@ async fn finish_locked(
     // (storage spec §5 rule 6) before the claim is registered: a root whose
     // evidence nobody holds would be registered but unwalkable. The sweep
     // carries the EXACT frozen bytes. Anything not yet `Stored` holds the
-    // admission for resume; the next pass re-runs the sweep.
+    // admission for resume; the next pass re-runs the sweep. This
+    // admission's own evidence, frozen with its manifest, goes first and by
+    // key: the sweep takes the oldest rows, and a backlog older than the
+    // admission would otherwise leave its own evidence for a later pass.
+    let manifest_key = crate::sdk::economic_registers::immutable_object_key_for_inner(
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+        &coords.admission_manifest_addr,
+    );
+    crate::handlers::artifact_republish::republish_frozen_with(&manifest_key)
+        .await
+        .map_err(|e| storage_err("publish admission evidence", e))?;
     crate::handlers::artifact_republish::republish_unpublished_artifacts()
         .await
         .map_err(|e| storage_err("publish admission evidence", e))?;

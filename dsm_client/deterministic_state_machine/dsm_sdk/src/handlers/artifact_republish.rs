@@ -28,6 +28,17 @@ pub(crate) async fn republish_unpublished_artifacts() -> Result<u32, String> {
     republish_rows(rows).await
 }
 
+/// Put every unpublished artifact frozen in the same advance as the one at
+/// `object_key` (an admission's manifest: its evidence) and read each back.
+/// The sweep takes the oldest rows first, so an admission behind a backlog
+/// would wait passes for its own evidence; this publishes that evidence by
+/// key, whatever is older. Returns how many were established `Stored`.
+pub(crate) async fn republish_frozen_with(object_key: &str) -> Result<u32, String> {
+    let rows = fpa::list_unpublished_frozen_with(object_key)
+        .map_err(|e| format!("list the artifacts frozen with {object_key}: {e}"))?;
+    republish_rows(rows).await
+}
+
 /// Continue this device's route-chain writes at the seats that did not
 /// answer (storage spec §9 rule 8): how many writes are now linked at every
 /// seat. Independent of the republish pass; neither is a condition of the
@@ -64,6 +75,16 @@ async fn put_and_confirm(
     Ok(stored.as_deref() == Some(payload))
 }
 
+/// What putting one row came to.
+enum Published {
+    /// The row's set is not resolvable through the local catalog.
+    NoSet,
+    /// The row's key is not an object address.
+    NotAnAddress,
+    /// Put and read back: whether `Stored` holds for exactly its bytes.
+    Put(Result<bool, String>),
+}
+
 /// The pass proper, over an already-selected batch.
 async fn republish_rows(rows: Vec<fpa::FrozenArtifact>) -> Result<u32, String> {
     if rows.is_empty() {
@@ -72,26 +93,42 @@ async fn republish_rows(rows: Vec<fpa::FrozenArtifact>) -> Result<u32, String> {
     let catalog = StorageSetCatalog::from_env_config()
         .map_err(|e| format!("storage-set catalog unavailable: {e}"))?;
     let mut stored = 0u32;
-    for row in rows {
+    // Each row is an object of its own: every row's put and read-back runs at
+    // once, and each row's state is recorded in row order after.
+    let catalog = &catalog;
+    let published = futures::future::join_all(rows.iter().map(|row| async move {
         // THE SET IS THE ROW'S, NOT OURS. An id the catalog cannot re-derive
         // means this device does not know how to reach that set; the bytes
         // stay owed, and are sent nowhere else.
         let Some(set) = catalog.resolve(&row.storage_set_id) else {
-            fpa::upsert_artifact_publication_state(
-                &row.object_key,
-                fpa::ArtifactState::PublicationPending,
-                "the frozen storage set is not resolvable through the local catalog",
-            )
-            .map_err(|e| e.to_string())?;
-            continue;
+            return Published::NoSet;
         };
         let Some((namespace, addr)) = fpa::parse_immutable_object_key(&row.object_key) else {
-            return Err(format!(
-                "frozen artifact {} has a key that is not an object address",
-                row.object_key
-            ));
+            return Published::NotAnAddress;
         };
-        match put_and_confirm(set, namespace, &addr, &row.payload).await {
+        Published::Put(put_and_confirm(set, namespace, &addr, &row.payload).await)
+    }))
+    .await;
+    for (row, published) in rows.iter().zip(published) {
+        let confirmed = match published {
+            Published::NoSet => {
+                fpa::upsert_artifact_publication_state(
+                    &row.object_key,
+                    fpa::ArtifactState::PublicationPending,
+                    "the frozen storage set is not resolvable through the local catalog",
+                )
+                .map_err(|e| e.to_string())?;
+                continue;
+            }
+            Published::NotAnAddress => {
+                return Err(format!(
+                    "frozen artifact {} has a key that is not an object address",
+                    row.object_key
+                ))
+            }
+            Published::Put(confirmed) => confirmed,
+        };
+        match confirmed {
             Ok(true) => {
                 fpa::upsert_artifact_publication_state(
                     &row.object_key,
