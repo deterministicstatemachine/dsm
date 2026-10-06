@@ -19,10 +19,12 @@
 //! one downstream, so the safe design is for regeneration to be impossible.
 
 use dsm::economic::claim_envelope::RegisteredEconomicClaim;
+use dsm::economic::lineage::ValidatedEconomicRoot;
 use dsm::economic::peer_lineage::{
-    validate_peer_lineage, ConditionalPositionResolver, PeerEvidenceFetcher, PeerFrontier,
-    ValidatedPeerLineage, PeerFrontiers,
+    peer_root_reached, validate_peer_lineage, ConditionalPositionResolver, PeerEvidenceFetcher,
+    PeerFrontier, PeerFrontiers, ValidatedPeerLineage,
 };
+use dsm::sofi::wire::ParentClaimRef;
 use dsm::economic::provenance::{
     PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
 };
@@ -491,18 +493,107 @@ impl PeerFrontiers for RememberedFrontiers<'_> {
     }
 }
 
+/// The root a trader's lineage selected at a position and the reference a
+/// later `P` names it by (`SofiReads::trader_root_at`): what the
+/// frontier-relative walk of the lineage to that position establishes.
+///
+/// A position's lineage is fixed once it exists, so the walk that validated
+/// it once validates it every time, and the root it reached is that root for
+/// good. This process keeps each one by network, trader and position, as
+/// [`resolve_peer`] keeps a validated transition: a holdings status asked
+/// every few seconds walked the wallet's whole lineage on every poll, and a
+/// vault walk asked the same trader's parent for every exercise naming it.
+/// Only a complete walk is kept; a refusal, an incomplete or an unresolved
+/// walk is walked again. The walk starts from [`RememberedFrontiers`], and
+/// the coordinates it validated are kept for later walks of the same trader,
+/// as `resolve_peer`'s are. Nothing is recorded as a frontier.
+pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
+    fetcher: &F,
+    expected_network_id: &[u8],
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    position: u64,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure> {
+    let key = (expected_network_id.to_vec(), *genesis, *device_id, position);
+    if let Some(known) = validated_peers().roots.get(&key) {
+        return Ok(known);
+    }
+    validated_peers()
+        .root_walks
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (known, reached) = peer_root_reached(
+        fetcher,
+        expected_network_id,
+        genesis,
+        device_id,
+        position,
+        &RememberedFrontiers {
+            network: expected_network_id,
+        },
+        conditional,
+    )?
+    .into_parts();
+    log::info!(
+        "[A8] trader {} root validated at position {position}",
+        text_id::encode_base32_crockford(device_id)
+    );
+    for frontier in reached {
+        validated_peers().reach(expected_network_id, frontier);
+    }
+    validated_peers().roots.keep(key, known);
+    Ok(known)
+}
+
 /// The peer positions this process validated (see [`resolve_peer`]).
 type PeerKey = (Vec<u8>, [u8; 32], [u8; 32], u64);
 /// A peer on a network: whose validated coordinates [`ValidatedPeers`] keeps.
 type PeerOn = (Vec<u8>, [u8; 32], [u8; 32]);
+
+/// What complete walks established, by network, peer and position.
+struct Kept<V> {
+    entries: std::sync::Mutex<std::collections::HashMap<PeerKey, V>>,
+}
+
+impl<V: Clone> Kept<V> {
+    fn new() -> Self {
+        Self {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+    /// The kept answers. A thread that panicked holding the lock left whole
+    /// entries behind (each is inserted in one step), so the map is taken as
+    /// it stands.
+    fn entries(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<PeerKey, V>> {
+        match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+    fn get(&self, key: &PeerKey) -> Option<V> {
+        self.entries().get(key).cloned()
+    }
+    fn keep(&self, key: PeerKey, value: V) {
+        let mut entries = self.entries();
+        if entries.len() >= VALIDATED_PEERS_MAX {
+            entries.clear();
+        }
+        entries.insert(key, value);
+    }
+}
+
 pub(crate) struct ValidatedPeers {
-    kept: std::sync::Mutex<std::collections::HashMap<PeerKey, ValidatedPeerTransition>>,
+    kept: Kept<ValidatedPeerTransition>,
+    /// The roots [`resolve_peer_root`] established.
+    roots: Kept<(ValidatedEconomicRoot, ParentClaimRef)>,
     /// The coordinates walks validated, by peer and position.
     reached: std::sync::Mutex<
         std::collections::HashMap<PeerOn, std::collections::BTreeMap<u64, PeerFrontier>>,
     >,
     /// The walks [`resolve_peer`] made: each question the memory did not answer.
     walks: std::sync::atomic::AtomicU64,
+    /// The walks [`resolve_peer_root`] made.
+    root_walks: std::sync::atomic::AtomicU64,
 }
 
 /// More than a phone's traders: past it the memory starts over, and the next
@@ -510,19 +601,10 @@ pub(crate) struct ValidatedPeers {
 const VALIDATED_PEERS_MAX: usize = 4096;
 
 impl ValidatedPeers {
-    /// The kept validations. A thread that panicked holding the lock left
-    /// whole entries behind (each is inserted in one step), so the map is
-    /// taken as it stands.
-    fn kept(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<PeerKey, ValidatedPeerTransition>> {
-        match self.kept.lock() {
-            Ok(kept) => kept,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
     fn get(&self, key: &PeerKey) -> Option<ValidatedPeerTransition> {
-        self.kept().get(key).cloned()
+        self.kept.get(key)
     }
-    /// The validated coordinates. As [`Self::kept`]: each is inserted in one
+    /// The validated coordinates. As [`Kept::entries`]: each is inserted in one
     /// step, so a panic leaves whole entries.
     fn reached(
         &self,
@@ -565,28 +647,31 @@ impl ValidatedPeers {
             .map(|(_, frontier)| frontier.clone())
     }
     fn keep(&self, key: PeerKey, validated: ValidatedPeerTransition) {
-        let mut kept = self.kept();
-        if kept.len() >= VALIDATED_PEERS_MAX {
-            kept.clear();
-        }
-        kept.insert(key, validated);
+        self.kept.keep(key, validated);
     }
     #[cfg(test)]
     pub(crate) fn walks(&self) -> u64 {
         self.walks.load(std::sync::atomic::Ordering::Relaxed)
     }
     #[cfg(test)]
+    pub(crate) fn root_walks(&self) -> u64 {
+        self.root_walks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(test)]
     pub(crate) fn forget(&self) {
-        self.kept().clear();
+        self.kept.entries().clear();
+        self.roots.entries().clear();
         self.reached().clear();
     }
 }
 
 pub(crate) fn validated_peers() -> &'static ValidatedPeers {
     static PEERS: once_cell::sync::Lazy<ValidatedPeers> = once_cell::sync::Lazy::new(|| ValidatedPeers {
-        kept: std::sync::Mutex::new(std::collections::HashMap::new()),
+        kept: Kept::new(),
+        roots: Kept::new(),
         reached: std::sync::Mutex::new(std::collections::HashMap::new()),
         walks: std::sync::atomic::AtomicU64::new(0),
+        root_walks: std::sync::atomic::AtomicU64::new(0),
     });
     &PEERS
 }
