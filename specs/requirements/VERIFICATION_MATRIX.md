@@ -255,3 +255,10 @@ and signer composition now hold in `Signer.lean`, including `keygen_sign_verify`
 for all six variants. Extracted Rust `next_layer` has a total source-refinement
 proof; full signer source/binary and JNI/timing guarantees remain open. See the
 report for exact premises and pinned regeneration commands.
+
+The source follow-up additionally proves total extracted Rust address writes
+(`type_clear_correct`, `tree_set_correct`) with no hash premise. The Android
+arm64 release and JNI ABI were checked after removing raw `'static` handle
+reconstruction from `processEnvelopeV3` and preserving pending exceptions.
+A seed-redaction regression test passes. SDK Android Clippy remains failing
+(190 errors; baseline 191); these checks are not timing/binary/JVM proofs.

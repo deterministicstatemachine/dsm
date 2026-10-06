@@ -212,6 +212,65 @@ obligations; catching panics does not prove those unsafe contracts.
 No timing theorem is claimed: index/chain schedules and root comparison alone do
 not establish constant-time BLAKE3, generated machine code, caches or CPU behavior.
 
+### Rust, binary and JNI follow-up
+
+`type_clear_correct` and `tree_set_correct` now prove total execution of the
+actual extracted Rust address methods, including every fixed-array update.
+The former preserves all other address words and writes type plus three zeros;
+the latter writes the zero high tree word, the narrowed upper 32 bits and lower
+32 bits. These universal source statements use no hash premise and report only
+Lean logical axioms. The pinned source-refinement gate regenerates all three
+extracted functions and rejects a changed generated file.
+
+The Android `processEnvelopeV3` entry point now receives the JNI library's
+transparent, lifetime-bearing `JNIEnv`, `JClass` and `JByteArray` parameters.
+It no longer reconstructs raw input handles with `'static` lifetimes, including
+on panic recovery. Byte-array conversion errors and panic recovery preserve a
+pending JVM exception, and response-allocation failure returns null without
+attempting another allocation. This follows the permitted exception-handling
+calls in the [JNI specification](https://docs.oracle.com/en/java/javase/21/docs/specs/jni/design.html#exception_handling).
+Kotlin declares this method `@JvmStatic`, so the class parameter matches its
+call path. No unsafe block was introduced. JNI validity, JVM implementations,
+callbacks, other raw-handle entry points and error helpers remain outside this
+proof; typed parameters are not a formal JVM/binary theorem.
+
+`SphincsKeyPair` diagnostics redact the entire secret key, with a test that
+checks seed contents are absent from formatting. The public key stays visible.
+No cryptographic bytes, domain tags, key derivation or signatures change.
+
+An Android arm64/API-28 release `libdsm_sdk.so` was built using NDK
+27.0.12077973, `--locked --features jni,bluetooth`, emitting IR and assembly.
+The ELF is AArch64 and exports the exact JNI symbol; its optimized LLVM signature
+has three pointer arguments and a pointer result. A binary hash/build manifest is
+provided with the review outputs. Build success and ABI inspection do not prove
+compiler preservation, ARM instruction semantics, side-channel noninterference
+or any whole-binary equivalence theorem. No device execution is claimed.
+
+Full verifier extraction was rerun with current source. Even when cryptographic
+subroutines are treated as opaque for diagnosis, the verifier translation fails
+on its returned borrowed error string. Constant-value extraction crashes the
+translator; built-MIR/string lowering instead encounters unsupported raw-memory
+interpretation. These failed runs are retained as evidence, not included in the
+checked proof graph. Full signer equivalence still requires a supported,
+validated extraction for the whole crate and proofs for its remaining functions.
+
+The next binary/timing theorem must fix the exact executable, compiler/linker,
+ARM machine model, linked primitive/JVM contracts and leakage model. It must
+prove a simulation from machine execution to the source/spec, plus relational
+trace equivalence for secrets with explicitly permitted public outputs. This
+work has no such machine semantics or validated compiler theorem. Register,
+stack, allocator, dependency and RNG erasure are also not proved by the existing
+buffer cleanup. These obligations cannot be discharged by treating compilation,
+Miri, branch inspection or transcript equality as universal proofs.
+
+Follow-up validation: all 17 crate tests, the 114 transcript cases and five
+mutation controls pass; source proofs pass with warnings as errors; Android
+arm64 SDK checking and the release build pass. Crate Clippy, real-code guard,
+invariant scan, codegen guard, SPDX and formatting pass. Android SDK Clippy with
+`-D warnings` fails: 190 errors versus 191 on the unchanged JNI baseline, with no
+added diagnostic categories. The SDK lint gate, on-device exception/lifetime
+checks, full source/binary simulation and timing/memory guarantees remain open.
+
 ## Executable evidence and reproducibility
 
 Run `bash scripts/check_sphincs_refinement.sh` from the repository root. The CI

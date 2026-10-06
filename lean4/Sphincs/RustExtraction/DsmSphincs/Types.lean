@@ -37,4 +37,9 @@ structure Params where
   sk_bytes : Std.Usize
   sig_bytes : Std.Usize
 
+/-- [dsm_sphincs::Adrs]
+    Source: 'crates/dsm-sphincs/src/lib.rs', lines 189:0-191:1 -/
+structure Adrs where
+  w : Array Std.U32 8#usize
+
 end DSMSphincsRust

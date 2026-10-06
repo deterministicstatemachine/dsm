@@ -33,6 +33,27 @@ namespace DSMSphincsRust
   intro result matched
   simp only [DSM.Sphincs.nextLayer, ← hp, matched.1, matched.2]
 
+ theorem type_clear_correct (self : Adrs) (t : U32) :
+    self.set_type_and_clear t ⦃ result =>
+      result.w.val = (((self.w.val.set 4 t).set 5 0#u32).set 6 0#u32).set 7 0#u32 ⦄ := by
+  unfold Adrs.set_type_and_clear
+  step*
+  all_goals simp_all
+
+ theorem tree_set_correct (self : Adrs) (tree : U64) :
+    self.set_tree tree ⦃ result =>
+      ∃ hi : U64, hi.val = tree.val / 2^32 ∧
+        result.w.val = ((self.w.val.set 1 0#u32).set 2
+          (UScalar.cast .U32 hi)).set 3 (UScalar.cast .U32 tree) ⦄ := by
+  unfold Adrs.set_tree
+  step*
+  all_goals try simp_all
+  refine ⟨i, ?_, ?_⟩
+  · simpa [Nat.shiftRight_eq_div_pow] using i_post
+  · simp_all
+
+#print axioms type_clear_correct
+#print axioms tree_set_correct
 #print axioms next_layer_success
 #print axioms next_layer_refines
 end DSMSphincsRust
