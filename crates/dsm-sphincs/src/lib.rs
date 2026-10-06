@@ -289,12 +289,13 @@ impl SecretCtx {
 }
 
 fn keyed(n: usize, key: &[u8; 32], inputs: &[&[u8]]) -> Vec<u8> {
-    let mut h = blake3::Hasher::new_keyed(key);
+    let mut h = Zeroizing::new(blake3::Hasher::new_keyed(key));
     for input in inputs {
         h.update(input);
     }
     let mut out = vec![0u8; n];
-    out.copy_from_slice(&h.finalize().as_bytes()[..n]);
+    let digest = Zeroizing::new(h.finalize());
+    out.copy_from_slice(&digest.as_bytes()[..n]);
     #[cfg(test)]
     refinement_vectors::record(1, "", key, &inputs.concat(), &out);
     out
@@ -393,12 +394,14 @@ fn wots_digits(p: &Params, m: &[u8]) -> Vec<u32> {
 
 /// FIPS 205 Algorithm 5, `chain`: `s` steps from step `i`.
 fn chain(pc: &PublicCtx, x: &[u8], i: u32, s: u32, adrs: &mut Adrs) -> Vec<u8> {
-    let mut tmp = x.to_vec();
+    // Intermediate chains can contain unreleased secret-derived values.
+    // Clear each replaced allocation and the final working copy on drop.
+    let mut tmp = Zeroizing::new(x.to_vec());
     for j in i..i + s {
         adrs.set_hash(j);
-        tmp = thash(pc, adrs, &[&tmp]);
+        tmp = Zeroizing::new(thash(pc, adrs, &[&tmp]));
     }
-    tmp
+    tmp.to_vec()
 }
 
 /// The address a WOTS+ secret value is drawn under.
@@ -729,7 +732,7 @@ pub fn generate_keypair_from_seed(
     seed32: &[u8; 32],
 ) -> Result<SphincsKeyPair, Error> {
     let p = param_set(v);
-    let mut sk = vec![0u8; p.sk_bytes];
+    let mut sk = Zeroizing::new(vec![0u8; p.sk_bytes]);
     let mut rng = ChaCha20Rng::from_seed(*seed32);
     rng.fill_bytes(&mut sk[..3 * p.n]);
     #[cfg(test)]
@@ -747,7 +750,7 @@ pub fn generate_keypair_from_seed(
     sk[3 * p.n..].copy_from_slice(&root);
     Ok(SphincsKeyPair {
         public_key: pk,
-        secret_key: sk,
+        secret_key: sk.to_vec(),
     })
 }
 
