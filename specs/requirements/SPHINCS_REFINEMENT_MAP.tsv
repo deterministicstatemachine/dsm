@@ -24,24 +24,24 @@ crates/dsm-sphincs/src/lib.rs	304	thash	thash	52caa30994725e4f16cbcb5d726932a3d2
 crates/dsm-sphincs/src/lib.rs	315	prf	prf	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	323	prf_msg	sign (deriveKey(prf-msg) then keyed)	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	329	h_msg	hmsg	52caa30994725e4f16cbcb5d726932a3d2fd61bb
-crates/dsm-sphincs/src/lib.rs	352	base_2b	base2b	52caa30994725e4f16cbcb5d726932a3d2fd61bb
+crates/dsm-sphincs/src/lib.rs	352	base_2b	base2b / base2b_digit_bound	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	372	to_int	toInt	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	377	to_byte	be / be_roundtrip	52caa30994725e4f16cbcb5d726932a3d2fd61bb
-crates/dsm-sphincs/src/lib.rs	383	wots_digits	wotsDigits / wots_digit_count / checksum_width_three	52caa30994725e4f16cbcb5d726932a3d2fd61bb
-crates/dsm-sphincs/src/lib.rs	395	chain	chain / chain_composes / wots_signature_recovers_chain_top	52caa30994725e4f16cbcb5d726932a3d2fd61bb
+crates/dsm-sphincs/src/lib.rs	383	wots_digits	wotsDigits / wots_digit_count / wots_digit_bound / checksum_width_three	52caa30994725e4f16cbcb5d726932a3d2fd61bb
+crates/dsm-sphincs/src/lib.rs	395	chain	chain / chain_composes / chain_width / wots_generated_digit_recovers	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	405	wots_sk_adrs	wotsSign / wotsPkgen	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	413	wots_compress	wotsCompress	52caa30994725e4f16cbcb5d726932a3d2fd61bb
-crates/dsm-sphincs/src/lib.rs	422	wots_pkgen	wotsPkgen	52caa30994725e4f16cbcb5d726932a3d2fd61bb
+crates/dsm-sphincs/src/lib.rs	422	wots_pkgen	wotsPkgen / wots_pkgen_width	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	436	wots_sign	wotsSign	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	450	wots_pk_from_sig	wotsPkFromSig	52caa30994725e4f16cbcb5d726932a3d2fd61bb
-crates/dsm-sphincs/src/lib.rs	469	xmss_node	xmssNode	52caa30994725e4f16cbcb5d726932a3d2fd61bb
+crates/dsm-sphincs/src/lib.rs	469	xmss_node	xmssNode / xmss_node_parent / xmss_node_width / xmss_signer_tree_path	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	492	xmss_sign	xmssSign	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	513	xmss_pk_from_sig	xmssPkFromSig / xmss_authentication_path_recovers_tree	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	544	next_layer	nextLayer / next_layer_reconstructs	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	549	ht_sign	htSign	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	577	ht_verify	htRoot / verification_structure	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	612	fors_sk_gen	forsSecret	52caa30994725e4f16cbcb5d726932a3d2fd61bb
-crates/dsm-sphincs/src/lib.rs	622	fors_node	forsNode	52caa30994725e4f16cbcb5d726932a3d2fd61bb
+crates/dsm-sphincs/src/lib.rs	622	fors_node	forsNode / fors_node_parent / fors_node_width / fors_signer_tree_path	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	637	fors_sign	forsSign	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	657	fors_pk_from_sig	forsPkFromSig / fors_authentication_path_recovers_tree	52caa30994725e4f16cbcb5d726932a3d2fd61bb
 crates/dsm-sphincs/src/lib.rs	687	Indices	Indices	52caa30994725e4f16cbcb5d726932a3d2fd61bb

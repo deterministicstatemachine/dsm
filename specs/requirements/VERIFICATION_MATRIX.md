@@ -246,3 +246,9 @@ Run `bash scripts/check_sphincs_refinement.sh`; the Lean CI job enforces it.
 This evidence does not discharge cryptographic unforgeability, constant-time,
 CCB codec, JNI, or compiled-binary refinement obligations. MR-SOFI-0111's
 signature uniqueness must not be inferred from deterministic signing alone.
+
+The signer follow-up proves generated digit bounds, generated WOTS chain recovery,
+XOR/parity sibling equivalence, exact block extraction, node/chain output widths
+under the explicit primitive-width contract, and parent recurrence against the
+actual XMSS/FORS signer model. Serialized sibling/leaf correspondence and full
+signer composition remain open; see the report for exact theorem premises.

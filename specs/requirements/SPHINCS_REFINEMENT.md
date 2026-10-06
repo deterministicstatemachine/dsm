@@ -156,11 +156,39 @@ this work neither depends on them nor presents their assumptions as discharged.
 
 **Universal signer correctness is not yet proved.** The general inductive
 authentication-path theorem is proved under explicit parent-recurrence and sibling
-node premises, including FORS orientation arithmetic; these premises have not all
-been discharged for the complete signer. The executable FORS/XMSS/hypertree
+node premises, including FORS orientation arithmetic. The parent recurrences are
+now discharged against `xmssNode` and `forsNode` in `xmss_signer_tree_path` and
+`fors_signer_tree_path`. The complete serialized sibling/leaf correspondence and
+whole WOTS/FORS/hypertree signer composition still remain to be discharged. The executable FORS/XMSS/hypertree
 algorithms and acceptance equation are present; their agreement with Rust is
 currently established on the generated cases below, not for every possible input.
 The complete CCB/operation/JNI wrapper refinement also remains open.
+
+### Additional signer obligations discharged
+
+`base2b_digit_bound` proves every generated digit is below `2^b` for all inputs;
+`wots_digit_bound` specializes this to 0–15, including the checksum digits.
+`wots_generated_digit_recovers` therefore discharges the digit-range premise of
+WOTS chain recovery for the actual `wotsDigits` function.
+`xor_one_is_sibling` proves the signer's XOR sibling selection equals the path
+verifier's parity selection for every natural index. `fixed_block_slice` proves
+an exact-width concatenated block is recovered at its serialized offset.
+`thash_width`, `prf_width`, `chain_width`, `wots_pkgen_width`,
+`xmss_node_width`, and `fors_node_width` explicitly require
+`OutputWidths`: primitives return the requested byte count. This is an interface
+contract, not collision resistance or PRF security. Parent recurrence theorems and
+signer tree path theorems require no hash-security assumption. The path theorems
+still require sibling-byte correspondence; they are not complete signer proofs.
+
+For source refinement, [Aeneas](https://github.com/AeneasVerif/aeneas) supplies a
+Rust-to-Lean translation pipeline for a supported safe-Rust subset. Its
+[cryptographic verification documentation](https://github.com/AeneasVerif/aeneas/blob/main/documentation/crypto-verification.md)
+describes proving translated implementations against mathematical specifications.
+Neither `aeneas` nor `charon` is installed in this environment. No extracted DSM
+crate, translated semantics, or extraction compatibility result has been produced.
+Installing a translator alone would not discharge the simulation theorem, BLAKE3
+primitive contracts, or compiled-binary/JNI refinement. These are still explicit
+open obligations, not claims made on the strength of the manual source map.
 
 ## Executable evidence and reproducibility
 
