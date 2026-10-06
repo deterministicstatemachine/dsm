@@ -241,6 +241,10 @@ pub(crate) fn close_database_for_tests() {
 #[cfg(any(test, feature = "test-utils"))]
 #[allow(clippy::panic)] // a reset that fails leaves the next test on stale rows; it must stop
 pub fn reset_database_for_tests() {
+    // A fresh world: tests reuse device identities on new nodes, so a peer
+    // position validated in an earlier world names another chain here.
+    #[cfg(test)]
+    crate::sdk::economic_registers::validated_peers().forget();
     #[cfg(test)]
     let lifecycle = TEST_DB_LIFECYCLE_LOCK
         .lock()
