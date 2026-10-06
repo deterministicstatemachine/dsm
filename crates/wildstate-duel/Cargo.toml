@@ -1,0 +1,12 @@
+[package]
+name = "wildstate-duel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The Wildstate duel outcome program: canonical CCB match objects and the deterministic battle rules a staked match is decided by. Pinned by hash; lives outside DSM Core."
+
+[lib]
+name = "wildstate_duel"
+
+[dependencies]
+blake3 = { version = "1", default-features = false }
