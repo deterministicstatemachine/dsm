@@ -155,6 +155,9 @@ export type AddContactResult =
  * its encoding boundary, so a row without its token, symbol, name or display
  * amount is refused, never filled in.
  */
+/** The two kinds of holding the wallet lists apart. */
+export type BalanceHoldingView = 'currency' | 'object';
+
 export interface TokenBalanceView {
   /** The ticker the balance is projected under. Not an identity: see `canonicalTokenId`. */
   tokenId: string;
@@ -180,6 +183,13 @@ export interface TokenBalanceView {
   protocolDefined: boolean;
   /** The whole supply that will ever exist, rendered by Rust; absent when Rust holds none. */
   genesisSupplyDisplay?: string;
+  /**
+   * What kind of holding this is, as Rust decided from the committed supply: a
+   * token that exists exactly once (a creature, an item) is a state `object`,
+   * anything else a `currency`. Listed apart; never decided here. Rust always
+   * states it; a row built without Rust (a practice coin) is a currency.
+   */
+  holding?: BalanceHoldingView;
   /** What the committed policy permits, as Rust read it; absent when Rust holds no policy for the token. */
   permissions?: TokenPolicyPermissionsView;
   /**
