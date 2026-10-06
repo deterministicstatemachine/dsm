@@ -262,3 +262,11 @@ arm64 release and JNI ABI were checked after removing raw `'static` handle
 reconstruction from `processEnvelopeV3` and preserving pending exceptions.
 A seed-redaction regression test passes. SDK Android Clippy remains failing
 (190 errors; baseline 191); these checks are not timing/binary/JVM proofs.
+
+The parser follow-up proves total extracted `base_2b` refill for every implemented
+width, exact zero/one/two-byte reads under sufficient-buffer bounds, and paired
+read-count noninterference for arbitrary byte/accumulator contents. It does not
+prove full parser bitstream equality or machine timing. Typed failures remove
+borrowed diagnostic strings from the cryptographic result; fixed text and wire
+behavior are preserved. The public Rust graph translates at its explicit hash
+boundary; 40 external declarations still require models and source proofs.

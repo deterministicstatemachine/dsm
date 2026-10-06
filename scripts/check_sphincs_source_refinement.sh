@@ -11,7 +11,7 @@ out="$root/target/sphincs-source-refinement"
 mkdir -p "$out/generated" "$out/check/DsmSphincs" "$out/check/Sphincs"
 "$DSM_CHARON_REPO/bin/charon" cargo --preset=aeneas --sysroot default \
   --start-from dsm_sphincs::next_layer --start-from 'dsm_sphincs::Adrs::set_tree' \
-  --start-from 'dsm_sphincs::Adrs::set_type_and_clear' --dest "$out" -- --locked -p dsm-sphincs --lib
+  --start-from 'dsm_sphincs::Adrs::set_type_and_clear' --start-from dsm_sphincs::base_2b --dest "$out" -- --locked -p dsm-sphincs --lib
 "$DSM_AENEAS_REPO/src/_build/default/main.exe" -backend lean -use-lean-modules false \
   -split-files -dest "$out/generated" -namespace DSMSphincsRust -no-progress-bar "$out/dsm_sphincs.llbc"
 for name in Types Funs; do
