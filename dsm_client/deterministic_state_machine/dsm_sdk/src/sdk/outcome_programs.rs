@@ -303,6 +303,72 @@ fn take_part<'b>(bytes: &mut &'b [u8]) -> Result<&'b [u8], String> {
     take(bytes, len)
 }
 
+/// One side of a match setup, as a wallet locking a stake reads it: the
+/// identity its branch pays and the session key its table commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupSide {
+    pub genesis: D32,
+    pub device_id: D32,
+    pub session_public_key: Vec<u8>,
+}
+
+/// What a wallet needs from a match setup to lock a stake in it: the program
+/// it pins, the nonce its session keys are derived from, and both sides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchSetup {
+    pub program: D32,
+    pub match_nonce: D32,
+    pub a: SetupSide,
+    pub b: SetupSide,
+}
+
+impl MatchSetup {
+    pub fn side(&self, side: MatchSide) -> &SetupSide {
+        match side {
+            MatchSide::A => &self.a,
+            MatchSide::B => &self.b,
+        }
+    }
+}
+
+/// `setup` read for a lock: the canonical setup of a program this process
+/// registered, whose tiebreak seed is the one its nonce and both session keys
+/// derive (`wildstate_duel::tiebreak_seed`), so the application relaying the
+/// setup could not have picked it.
+pub fn read_setup(setup: &[u8]) -> Result<MatchSetup, String> {
+    let decoded = DuelSetupV1::decode(setup).map_err(|e| format!("the setup: {e}"))?;
+    if decoded.encode() != setup {
+        return Err("the setup is not its canonical encoding".into());
+    }
+    if decoded.program != WildstateDuel.id() || !is_registered(&decoded.program) {
+        return Err(format!(
+            "the setup pins program {}, which this wallet does not run",
+            dsm::utils::text_id::encode_base32_crockford(&decoded.program)
+        ));
+    }
+    DuelProgress::start(setup).map_err(|e| e.0)?;
+    let body = &decoded.body;
+    let seed = wildstate_duel::tiebreak_seed(
+        body.match_nonce(),
+        &body.a().session_public_key,
+        &body.b().session_public_key,
+    );
+    if *body.tiebreak_seed() != seed {
+        return Err("the setup's tiebreak seed is not the one its nonce and keys derive".into());
+    }
+    let side = |s: &wildstate_duel::DuelSide| SetupSide {
+        genesis: s.genesis,
+        device_id: s.device_id,
+        session_public_key: s.session_public_key.clone(),
+    };
+    Ok(MatchSetup {
+        program: decoded.program,
+        match_nonce: *body.match_nonce(),
+        a: side(body.a()),
+        b: side(body.b()),
+    })
+}
+
 /// `wildstate-duel` v1 as Core's outcome program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WildstateDuel;

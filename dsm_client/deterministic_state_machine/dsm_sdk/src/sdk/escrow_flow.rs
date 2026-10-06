@@ -646,8 +646,12 @@ pub(crate) async fn exercise_release(
     )
     .await?;
     let (vault, ..) = head_of(set, &verifier, vault_id, chain).await?;
-    let VaultTerms::Escrow(terms) = &vault.terms else {
-        return Err(refuse("the vault is not an escrow vault"));
+    // The cell a release names: `K_verdict` of signed terms, `K_match` of
+    // computed ones (SoFi Amendment S22).
+    let (token, verdict_cell) = match &vault.terms {
+        VaultTerms::Escrow(terms) => (*terms.token(), escrow::verdict_cell_of(terms)),
+        VaultTerms::Computed(terms) => (*terms.token(), dsm::sofi::computed::match_cell_of(terms)),
+        VaultTerms::Market(..) => return Err(refuse("the vault is not an escrow vault")),
     };
     if vault.state.status != VAULT_STATUS_ACTIVE {
         return Err(refuse("the escrow vault is already released"));
@@ -659,7 +663,7 @@ pub(crate) async fn exercise_release(
     let dlv = vault_core(&standing, &vault, &retired, base)?;
     let trader = trader_core(
         &standing,
-        &[(*terms.token(), vault.state.reserve_a, 0)],
+        &[(token, vault.state.reserve_a, 0)],
         &[(*vault_id, base)],
     )?;
     let public_key = crate::sdk::signing_authority::current_public_key()?;
@@ -669,7 +673,7 @@ pub(crate) async fn exercise_release(
             vault_id: *vault_id,
             parent_root: vault.root,
             setup_ref,
-            verdict_cell: escrow::verdict_cell_of(terms),
+            verdict_cell,
             outcome,
             amount: vault.state.reserve_a,
         },

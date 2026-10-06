@@ -31,6 +31,7 @@ pub mod completion_proofs;
 pub mod connect;
 mod contacts;
 pub mod counterparty_canonical_heads;
+pub mod duel_matches;
 pub mod economic_admission;
 pub mod economic_lineage;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
@@ -854,6 +855,40 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- Storage-node auth tokens are gone with writer authorization
         -- (storage spec §4); an older database drops its table here.
         DROP TABLE IF EXISTS auth_tokens;
+
+        -- Computed escrow matches this wallet locked a stake in (SoFi
+        -- Amendment S22; duel_matches.rs). One row per match cell: the
+        -- wallet's side, its own terms and the setup, its ready signature,
+        -- the Start found final, and the verified state after the last
+        -- applied entry, so each entry is applied in O(1).
+        CREATE TABLE IF NOT EXISTS duel_match(
+            match_cell   BLOB PRIMARY KEY CHECK (length(match_cell) = 32),
+            side         INTEGER NOT NULL CHECK (side IN (1, 2)),
+            terms        BLOB NOT NULL,
+            setup        BLOB NOT NULL,
+            vault_id     BLOB NOT NULL CHECK (length(vault_id) = 32),
+            ready        BLOB,
+            start_final  BLOB,
+            last_index   INTEGER NOT NULL CHECK (last_index >= 0),
+            head         BLOB NOT NULL CHECK (length(head) = 32),
+            open_a       BLOB CHECK (open_a IS NULL OR length(open_a) = 36),
+            open_b       BLOB CHECK (open_b IS NULL OR length(open_b) = 36),
+            progress     BLOB NOT NULL,
+            equivocation BLOB
+        );
+        -- Every entry applied to a match, with the head after it and its
+        -- side's signature over that head. One entry per index, ever: the
+        -- primary key is what keeps this wallet from signing two different
+        -- entries at one index, across any restart.
+        CREATE TABLE IF NOT EXISTS duel_entry(
+            match_cell BLOB NOT NULL CHECK (length(match_cell) = 32),
+            idx        INTEGER NOT NULL CHECK (idx > 0),
+            side       INTEGER NOT NULL CHECK (side IN (1, 2)),
+            entry      BLOB NOT NULL,
+            head       BLOB NOT NULL CHECK (length(head) = 32),
+            signature  BLOB NOT NULL,
+            PRIMARY KEY (match_cell, idx)
+        );
 
         -- DSM Connect (DSM Amendment A11), the wallet's side (connect.rs).
         -- An offer fetched and verified for the approval screen.
