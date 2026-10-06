@@ -1128,7 +1128,10 @@ async fn a_skipped_key_is_judged_once_by_the_process() {
         (walked, asked)
     };
     let (again, kept) = walk_asking();
-    assert_eq!(again, judged, "the kept judgement walks as the fresh one did");
+    assert_eq!(
+        again, judged,
+        "the kept judgement walks as the fresh one did"
+    );
     assert!(
         kept.contains(&open_key(&judged.0[0])),
         "the open key is read again"
@@ -1140,7 +1143,10 @@ async fn a_skipped_key_is_judged_once_by_the_process() {
 
     crate::sdk::sofi_reads::forget_judgements();
     let (fresh, judging) = walk_asking();
-    assert_eq!(fresh, judged, "a walk that judges the key afresh reaches the same");
+    assert_eq!(
+        fresh, judged,
+        "a walk that judges the key afresh reaches the same"
+    );
     assert!(
         kept.len() < judging.len(),
         "standing on the judgement reads less than judging the key afresh ({} requests; afresh, \
@@ -1197,7 +1203,7 @@ async fn trade_whose_position_is_taken(
             .expect("read admitted")
             .expect("an admitted position")
     };
-    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
+    let pair = position_cells(set, &p.b.genesis, &p.b.device_id, q, &root)
         .expect("B's next position pair");
     let rival = {
         p.b.enter();
@@ -1220,7 +1226,7 @@ async fn trade_whose_position_is_taken(
         .expect("B signs its own claim")
         .encode()
     };
-    let taken = crate::sdk::route_seats::write_recorded(&set, pair.root().routed(), &rival)
+    let taken = crate::sdk::route_seats::write_recorded(set, pair.root().routed(), &rival)
         .await
         .expect("the claim is written along its route");
     assert!(

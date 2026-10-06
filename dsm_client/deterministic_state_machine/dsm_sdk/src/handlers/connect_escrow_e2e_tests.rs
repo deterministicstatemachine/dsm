@@ -757,12 +757,19 @@ async fn a_collects_status_is_read_once_and_answered_from_its_record() {
             node.forget_requests();
         }
         let again = status(&r, &staked.sid_a, collect_a).await;
-        assert_eq!(again, first, "poll {poll}: the record says what the reads said");
+        assert_eq!(
+            again, first,
+            "poll {poll}: the record says what the reads said"
+        );
         let read: Vec<String> = asked(&p)
             .into_iter()
             .filter(|r| r.contains("/api/v2/cell/") || r.contains("/api/v2/index/"))
             .collect();
-        assert_eq!(read, Vec::<String>::new(), "poll {poll}: nothing is read again");
+        assert_eq!(
+            read,
+            Vec::<String>::new(),
+            "poll {poll}: nothing is read again"
+        );
     }
 
     let collect_again = request(&r, &relay, &staked.sid_a, collect(&vaults)).await;
@@ -774,7 +781,11 @@ async fn a_collects_status_is_read_once_and_answered_from_its_record() {
         other.fact_detail
     );
     assert_eq!(
-        (other.escrow_vault_ids, other.escrow_verdict_cell, other.fact_detail),
+        (
+            other.escrow_vault_ids,
+            other.escrow_verdict_cell,
+            other.fact_detail
+        ),
         (
             first.escrow_vault_ids.clone(),
             first.escrow_verdict_cell.clone(),

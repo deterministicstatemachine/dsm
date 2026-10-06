@@ -809,7 +809,8 @@ async fn a_traders_accepted_claim_is_not_walked_again_by_the_same_process() {
     };
     assert_eq!(start(), None, "B holds no frontier for A");
     let before = peers.claim_walks();
-    let walked = claim_at(p.a.genesis, p.a.device_id, first).expect("A's claim at its first payment");
+    let walked =
+        claim_at(p.a.genesis, p.a.device_id, first).expect("A's claim at its first payment");
     assert_eq!(walked.economic_position(), first);
     assert_eq!(peers.claim_walks(), before + 1, "the first question walks");
 
@@ -876,7 +877,10 @@ async fn a_holdings_status_walks_the_root_once_and_reads_the_next_cell_every_tim
             .expect("A's proof is current");
         assert_eq!(verified.position, proven);
         if let Some(first) = &fresh {
-            assert_eq!(&verified, first, "a later poll proves what the first proved");
+            assert_eq!(
+                &verified, first,
+                "a later poll proves what the first proved"
+            );
         }
         fresh.get_or_insert(verified);
         assert_eq!(
