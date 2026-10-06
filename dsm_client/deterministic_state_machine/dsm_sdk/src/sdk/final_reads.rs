@@ -139,6 +139,8 @@ pub(crate) fn keep_final_cell(cell: &RoutedCell, evidence: &CellEvidence) {
 pub(crate) fn forget_everything() {
     *lock(&OBJECTS) = Bounded::new();
     *lock(&FINAL_CELLS) = Bounded::new();
+    // The walks' judgements stand on cells read final in the same world.
+    crate::sdk::sofi_reads::forget_judgements();
 }
 
 #[cfg(test)]

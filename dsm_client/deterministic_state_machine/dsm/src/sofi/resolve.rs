@@ -253,7 +253,59 @@ pub trait SofiReads {
         evidence: &CellEvidence,
         proof: &CompletionProof,
     ) -> Result<(), ReadFailure>;
+    /// The judgement an earlier walk kept for `key` ([`Self::keep_judgement`]),
+    /// or `None`.
+    fn kept_judgement(&self, key: &JudgedKey) -> Result<Option<KeptJudgement>, ReadFailure>;
+    /// Keep the judgement of a key a walk skipped. The walk keeps one only
+    /// when the key's cell is final on the exercise it holds and the walk
+    /// classified that exercise `Skipped` there: a key that can never consume
+    /// its parent, on facts each of which is permanent (a final cell, and an
+    /// arm of `RouteImpossible`, a conformance verdict or a lost position, all
+    /// monotone). The judgement answers for the key again for as long as the
+    /// reads keep it; nothing else a walk establishes is kept.
+    fn keep_judgement(&self, key: JudgedKey, judgement: KeptJudgement) -> Result<(), ReadFailure>;
 }
+
+/// An attempt key as a walk judged it: the pinned set its cell is routed
+/// over, the vault, the parent root and the attempt, and the exact bytes of
+/// the exercise holding the cell, final. Another exercise's bytes at the
+/// same key are another key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct JudgedKey {
+    set_id: D32,
+    vault_id: D32,
+    parent_root: D32,
+    attempt: u64,
+    exercise: Vec<u8>,
+}
+
+impl JudgedKey {
+    /// The key `read` was read at, when an exercise holds its cell finally:
+    /// the only reads whose judgement can stand for good.
+    fn of(set_id: D32, read: &AttemptCellRead) -> Option<Self> {
+        let CellFact::Held {
+            state: ChainState::Final,
+            ..
+        } = read.fact()
+        else {
+            return None;
+        };
+        Some(Self {
+            set_id,
+            vault_id: *read.vault_id(),
+            parent_root: *read.parent_root(),
+            attempt: read.attempt(),
+            exercise: read.value()?.to_vec(),
+        })
+    }
+}
+
+/// A walk's judgement of one attempt key that can never consume its parent:
+/// the read that found the exercise holding it, and what the walk knew of
+/// that exercise ([`SofiReads::keep_judgement`]). Built by the walk and by
+/// nothing else; the reads only keep it and hand it back.
+#[derive(Debug, Clone)]
+pub struct KeptJudgement(KeyKnown);
 
 /// This device's own `R_econ` leaves, checked against the root they claim to
 /// form. Built from the device's leaf cache for its validated root, or by a
@@ -530,7 +582,7 @@ pub struct Walked {
 }
 
 /// What this verifier knows about one exercise.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Known {
     /// Refuted by its own bytes: nothing else was read.
     RefutedInHand(InHandRefutation),
@@ -543,13 +595,30 @@ enum Known {
 
 /// One key the walk classified: the read that found the exercise holding
 /// it, and what is known about that exercise.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct KeyKnown {
     read: AttemptCellRead,
     known: Known,
 }
 
 impl KeyKnown {
+    /// Whether a walk skips this key on what is known of it: the key can
+    /// never consume its parent ([`AttemptClass::Skipped`]). A walk of this
+    /// one key moves past it exactly when it is skipped.
+    fn skipped(&self) -> bool {
+        matches!(
+            walk(
+                self.read.vault_id(),
+                self.read.parent_root(),
+                self.read.attempt(),
+                1,
+                |_| self.key_facts(),
+            )
+            .outcome(),
+            WalkOutcome::Continue { .. } | WalkOutcome::CounterExhausted { .. }
+        )
+    }
+
     /// The facts of this key as Core binds them to it: the exercise the read
     /// holds, and the facts established for that exercise.
     fn key_facts(&self) -> Option<KeyFacts<'_>> {
@@ -1667,6 +1736,17 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     let Some(exercise) = read.exercise().cloned() else {
                         return Ok(done(None, None, known));
                     };
+                    // A key an earlier walk skipped, held finally by these
+                    // very bytes, can never consume its parent: its
+                    // judgement stands, and nothing about its exercise is
+                    // read or judged again.
+                    let judged = JudgedKey::of(self.set_id, &read);
+                    if let Some(key) = &judged {
+                        if let Some(KeptJudgement(kept)) = self.reads.kept_judgement(key)? {
+                            known.insert(attempt, kept);
+                            continue;
+                        }
+                    }
                     // The walk reached this key by skipping every one before
                     // it. That liveness is stated as the walk over them, for
                     // the facts to read, never as a flag.
@@ -1683,7 +1763,16 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     };
                     match self.facts_of(chains, &exercise, key, depth)? {
                         Ok(facts) => {
-                            known.insert(attempt, KeyKnown { read, known: facts });
+                            let judgement = KeyKnown { read, known: facts };
+                            // Kept only when the cell is final on the
+                            // exercise and the key is skipped: every skip
+                            // stands on permanent facts. Anything else, a
+                            // consumption included, is judged again.
+                            if let Some(key) = judged.filter(|_| judgement.skipped()) {
+                                self.reads
+                                    .keep_judgement(key, KeptJudgement(judgement.clone()))?;
+                            }
+                            known.insert(attempt, judgement);
                         }
                         Err(why) => return Ok(done(None, Some(why), known)),
                     }
