@@ -68,7 +68,8 @@ pub async fn read_stored_object(
 
 /// The exact bytes at `addr` once `Stored` holds for them, `None` otherwise.
 /// For a caller that holds the address rather than the identity (a vault
-/// state commits its policies by address).
+/// state commits its policies by address). Always read from the members: a
+/// publisher reads its object back with it.
 pub(crate) async fn read_stored_bytes(
     set: &StorageSet,
     addr: &[u8; 32],
@@ -79,6 +80,28 @@ pub(crate) async fn read_stored_bytes(
         StoredFact::Unavailable => None,
     })
 }
+
+/// [`read_stored_bytes`] for a reader: the bytes at `addr` once this process
+/// read them `Stored`, which never changes what they are (§5: an address is
+/// its bytes, and there is no overwrite path), and read from the members
+/// otherwise. Bytes not `Stored` are not kept, and are read again when asked
+/// for. A publisher reading its own object back does not use this.
+pub(crate) async fn read_stored_bytes_kept(
+    set: &StorageSet,
+    addr: &[u8; 32],
+) -> Result<Option<Vec<u8>>, DsmError> {
+    if let Some(kept) = crate::sdk::final_reads::stored_object(addr) {
+        return Ok(Some(kept));
+    }
+    let read = read_stored_bytes(set, addr).await?;
+    if let Some(bytes) = &read {
+        crate::sdk::final_reads::keep_stored_object(addr, bytes);
+    }
+    Ok(read)
+}
+
+/// Candidates whose bytes are asked for at once.
+const CANDIDATE_READS_AT_ONCE: usize = 8;
 
 /// Append `addr` under `locator` at every member of `set` (§7). Returns how
 /// many members took it.
@@ -116,14 +139,20 @@ async fn stored_candidates(
     candidates: &[[u8; 32]],
     budget: usize,
 ) -> Result<Vec<Option<Vec<u8>>>, DsmError> {
-    let client = SetClient::new(set)?;
-    let mut fetched = Vec::with_capacity(candidates.len().min(budget + 1));
-    for addr in candidates.iter().take(budget + 1) {
-        let reads = client.get_immutable(addr).await;
-        fetched.push(match dsm::sofi::storage::stored(addr, &reads) {
-            StoredFact::Stored(bytes) => Some(bytes),
-            StoredFact::Unavailable => None,
-        });
+    let client = &SetClient::new(set)?;
+    let asked = &candidates[..candidates.len().min(budget + 1)];
+    let mut fetched = Vec::with_capacity(asked.len());
+    // Each candidate is its own object: a few are asked for at once, and
+    // their answers are taken in candidate order.
+    for some in asked.chunks(CANDIDATE_READS_AT_ONCE) {
+        let reads =
+            futures::future::join_all(some.iter().map(|addr| client.get_immutable(addr))).await;
+        for (addr, reads) in some.iter().zip(reads) {
+            fetched.push(match dsm::sofi::storage::stored(addr, &reads) {
+                StoredFact::Stored(bytes) => Some(bytes),
+                StoredFact::Unavailable => None,
+            });
+        }
     }
     Ok(fetched)
 }
@@ -168,4 +197,116 @@ pub async fn resolve_locator_all<T>(
     Ok(dsm::sofi::storage::keep_all_verifying(
         locator, &fetched, budget, recognize,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::economic_fixtures::NETWORK;
+    use crate::sdk::storage_set::canonical_set;
+    use crate::test_support::one_device::Fleet;
+
+    const NAMESPACE: TaggedHashDomain<'static> =
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST;
+
+    /// How many times the members were asked for the object at `addr`
+    /// since they last forgot.
+    fn asked_for(fleet: &Fleet, addr: &[u8; 32]) -> usize {
+        let read = format!(
+            "GET /api/v2/immutable/{}",
+            crate::util::text_id::encode_base32_crockford(addr)
+        );
+        fleet
+            .nodes()
+            .nodes
+            .iter()
+            .map(|node| node.requests().iter().filter(|r| **r == read).count())
+            .sum()
+    }
+
+    fn forget_requests(fleet: &Fleet) {
+        for node in &fleet.nodes().nodes {
+            node.forget_requests();
+        }
+    }
+
+    /// An object a reader read `Stored` is its bytes for good: asked for
+    /// again it asks no member, and answers the same bytes. Bytes that are
+    /// not `Stored` are not kept, and a publisher's read-back always asks
+    /// the members.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_object_read_stored_is_not_read_again_by_a_reader() {
+        let fleet = Fleet::start();
+        crate::sdk::final_reads::forget_everything();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        let payload = b"an object a reader reads twice".to_vec();
+        let (addr, took) = put_immutable(&set, NAMESPACE, &payload)
+            .await
+            .expect("the put");
+        assert!(took >= 3, "the members took the object");
+
+        let absent = dsm::storage_object::immutable_addr(NAMESPACE, b"never put");
+        for _ in 0..2 {
+            assert_eq!(
+                read_stored_bytes_kept(&set, &absent).await.expect("read"),
+                None
+            );
+        }
+
+        forget_requests(&fleet);
+        let first = read_stored_bytes_kept(&set, &addr).await.expect("read");
+        assert_eq!(first, Some(payload.clone()));
+        assert!(
+            asked_for(&fleet, &addr) >= 3,
+            "the first read asks the members"
+        );
+
+        forget_requests(&fleet);
+        let again = read_stored_bytes_kept(&set, &addr).await.expect("read");
+        assert_eq!(again, first, "the same bytes");
+        assert_eq!(asked_for(&fleet, &addr), 0, "a kept object asks no member");
+
+        let read_back = read_stored_bytes(&set, &addr).await.expect("read");
+        assert_eq!(read_back, first);
+        assert!(
+            asked_for(&fleet, &addr) >= 3,
+            "a publisher's read-back asks the members"
+        );
+    }
+
+    /// A locator's candidates are fetched a few at once and kept in the
+    /// order they were appended: twenty objects under one locator, more than
+    /// are asked for at once, come back in append order, every one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn candidates_fetched_at_once_keep_their_append_order() {
+        let _fleet = Fleet::start();
+        crate::sdk::final_reads::forget_everything();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        let index = b"DSM/test/candidate-order";
+        let locator = [0x4C; 32];
+        let mut appended = Vec::new();
+        for n in 0..20u8 {
+            let payload = vec![n; 1 + usize::from(n)];
+            let (addr, ..) = put_immutable(&set, NAMESPACE, &payload)
+                .await
+                .expect("the put");
+            append_to_index(&set, index, &locator, &addr)
+                .await
+                .expect("the append");
+            appended.push(payload);
+        }
+        let found = resolve_locator_all(&set, index, &locator, 64, |bytes| {
+            Some((locator, bytes.to_vec()))
+        })
+        .await
+        .expect("the scan");
+        match found {
+            Discovered::Complete(objects) => assert_eq!(objects, appended),
+            Discovered::Partial(objects) => {
+                panic!("every candidate is Stored, yet the scan is partial: {objects:?}")
+            }
+        }
+    }
 }

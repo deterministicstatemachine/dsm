@@ -167,8 +167,16 @@ async fn from_leader<S: RouteSeats, const N: usize>(
     record: &mut Recorder<'_, N>,
 ) -> Result<[WriteReport; N], DsmError> {
     let mut links: [Option<ArrivalRecord>; N] = [(); N].map(|()| None);
-    for (link, (cell, value)) in links.iter_mut().zip(&cells) {
-        match leader_holds(seats, cell, value).await {
+    // The leader's log of each cell is its own read, and none waits on
+    // another: they are asked at once and taken in the cells' order.
+    let held = futures::future::join_all(
+        cells
+            .iter()
+            .map(|(cell, value)| leader_holds(seats, cell, value)),
+    )
+    .await;
+    for (link, holds) in links.iter_mut().zip(held) {
+        match holds {
             LeaderHolds::Record(found) => *link = Some(found),
             LeaderHolds::Nothing => {}
             LeaderHolds::Unread => {
@@ -406,24 +414,28 @@ pub async fn write_recorded_position(
                 let [report] = reports;
                 record(root_cell, claim, report)
             };
-            Ok([
+            // Two cells, each continued seat by seat along its own chain;
+            // neither chain carries anything of the other, so they move at
+            // once, and both run to their end before either's error is
+            // returned.
+            let (ful, root) = futures::future::join(
                 continue_write(
                     &seats,
                     ful_cell,
                     fulfillment,
                     WriteReport { slots: ful.slots },
                     &mut ful_recorder,
-                )
-                .await?,
+                ),
                 continue_write(
                     &seats,
                     root_cell,
                     claim,
                     WriteReport { slots: root.slots },
                     &mut root_recorder,
-                )
-                .await?,
-            ])
+                ),
+            )
+            .await;
+            Ok([ful?, root?])
         }
         (ful, root) => {
             log::info!(

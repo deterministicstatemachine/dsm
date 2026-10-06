@@ -192,28 +192,34 @@ async fn carry_exercise(
     cells: Vec<(D32, D32, u64, AttemptCell)>,
     bytes: &[u8],
 ) -> Result<Vec<LegWrite>, DsmError> {
-    let mut legs = Vec::new();
-    for (vault_id, parent_root, attempt, cell) in cells {
-        // The one exercise names every leg's key, so the same bytes belong at
-        // each of them; Core counts only an exercise naming the key it sits
-        // at, so carrying it where it names nothing would carry nothing.
-        if dsm::sofi::exercise::exercise_names_key(bytes, &vault_id, &parent_root, attempt)
-            .is_none()
+    // The one exercise names every leg's key, so the same bytes belong at
+    // each of them; Core counts only an exercise naming the key it sits at,
+    // so carrying it where it names nothing would carry nothing. Every key
+    // is checked before anything is carried.
+    for (vault_id, parent_root, attempt, _) in &cells {
+        if dsm::sofi::exercise::exercise_names_key(bytes, vault_id, parent_root, *attempt).is_none()
         {
             return Err(refuse(
                 "the exercise found does not name every key its F does",
             ));
         }
-        let write = write_recorded(set, cell.routed(), bytes).await?;
-        legs.push(LegWrite {
-            vault_id,
-            parent_root,
-            attempt,
-            key: *cell.routed().key(),
-            reached_leader: write.reached_leader(),
-        });
     }
-    Ok(legs)
+    // Each leg's key is its own vault's cell on its own route: the legs are
+    // carried at once, as `write_exercise` writes them, and reported in the
+    // order `F` names them.
+    futures::future::try_join_all(cells.into_iter().map(
+        |(vault_id, parent_root, attempt, cell)| async move {
+            let write = write_recorded(set, cell.routed(), bytes).await?;
+            Ok::<_, DsmError>(LegWrite {
+                vault_id,
+                parent_root,
+                attempt,
+                key: *cell.routed().key(),
+                reached_leader: write.reached_leader(),
+            })
+        },
+    ))
+    .await
 }
 
 /// §33: complete a fulfillment whose hops are not all final.
