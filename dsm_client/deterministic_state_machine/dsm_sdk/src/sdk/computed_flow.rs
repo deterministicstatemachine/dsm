@@ -249,6 +249,10 @@ pub struct LockIntent {
     /// The other side's vault, when it locked first; checked to mirror this
     /// stake before this one is locked.
     pub counterpart: Option<D32>,
+    /// The opponent's proof of holding the creatures the setup fields for
+    /// it, as its own wallet made it (`HoldingsProofV1` bytes); verified
+    /// against its validated root.
+    pub opponent_holdings: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,9 +300,22 @@ pub async fn create(
             "the setup's session key for this side is not this wallet's for the match",
         ));
     }
-    crate::sdk::outcome_programs::check_teams(core, set, &intent.setup, intent.side)
-        .await
-        .map_err(refuse)?;
+    let relayed = intent
+        .opponent_holdings
+        .as_deref()
+        .ok_or_else(|| refuse("no proof that the opponent holds the creatures it fields"))?;
+    let their_holdings: dsm::types::proto::HoldingsProofV1 =
+        crate::sdk::connect::signed::canonical(relayed, "the opponent's holdings proof")
+            .map_err(refuse)?;
+    crate::sdk::outcome_programs::check_teams(
+        core,
+        set,
+        &intent.setup,
+        intent.side,
+        &their_holdings,
+    )
+    .await
+    .map_err(refuse)?;
     let terms = terms_of(&intent.setup, &read, intent.token, me)?;
     let match_cell = computed::match_cell_of(&terms);
     if store::get_match(&match_cell)

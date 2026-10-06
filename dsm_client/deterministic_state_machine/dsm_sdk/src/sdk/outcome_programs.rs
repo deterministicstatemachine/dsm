@@ -434,15 +434,18 @@ pub async fn latest_published_state(
 }
 
 /// Whether the teams `setup` fields are the creatures as their issuers last
-/// published them, and whether this wallet, playing `own`, holds every
-/// creature on its own side. A creature whose state differs by one byte from
-/// its issuer's latest record, or one this wallet does not hold, refuses the
-/// lock: a modded creature never enters a match this wallet stakes in.
+/// published them, whether this wallet, playing `own`, holds every creature
+/// on its own side, and whether `their_holdings` proves the opponent holds
+/// every creature on the other side. A creature whose state differs by one
+/// byte from its issuer's latest record, or one its side does not hold,
+/// refuses the lock: a modded or borrowed creature never enters a match this
+/// wallet stakes in.
 pub async fn check_teams(
     core: &crate::sdk::core_sdk::CoreSDK,
     set: &crate::sdk::storage_set::StorageSet,
     setup: &[u8],
     own: MatchSide,
+    their_holdings: &dsm::types::proto::HoldingsProofV1,
 ) -> Result<(), String> {
     let decoded = DuelSetupV1::decode(setup).map_err(|e| format!("the setup: {e}"))?;
     let sides = [
@@ -465,9 +468,9 @@ pub async fn check_teams(
     for checked in futures::future::join_all(checks).await {
         checked?;
     }
-    let mine = match own {
-        MatchSide::A => decoded.body.a(),
-        MatchSide::B => decoded.body.b(),
+    let (mine, theirs) = match own {
+        MatchSide::A => (decoded.body.a(), decoded.body.b()),
+        MatchSide::B => (decoded.body.b(), decoded.body.a()),
     };
     let anchors: Vec<D32> = mine.team.iter().map(|c| *c.anchor()).collect();
     let held = crate::sdk::connect::holdings::prove(core, &anchors)
@@ -478,6 +481,36 @@ pub async fn check_teams(
                 "this wallet does not hold creature {}",
                 dsm::utils::text_id::encode_base32_crockford(&holding.policy_commit)
             ));
+        }
+    }
+    let their_anchors: Vec<D32> = theirs.team.iter().map(|c| *c.anchor()).collect();
+    let verified = crate::sdk::connect::holdings::verify(
+        their_holdings,
+        &theirs.genesis,
+        &theirs.device_id,
+        &their_anchors,
+    )
+    .await
+    .map_err(|refusal| match refusal {
+        crate::sdk::connect::holdings::Refusal::Invalid(why) => {
+            format!("the opponent's holdings proof is invalid: {why}")
+        }
+        crate::sdk::connect::holdings::Refusal::NotCurrent(why) => {
+            format!("the opponent's holdings proof is no longer current ({why}); ask again")
+        }
+        crate::sdk::connect::holdings::Refusal::Incomplete(why) => {
+            format!("the opponent's holdings are not decided yet ({why}); ask again")
+        }
+    })?;
+    for anchor in &their_anchors {
+        match verified.balances.get(anchor) {
+            Some(amount) if *amount > 0 => {}
+            _ => {
+                return Err(format!(
+                    "the opponent does not hold creature {}",
+                    dsm::utils::text_id::encode_base32_crockford(anchor)
+                ))
+            }
         }
     }
     Ok(())

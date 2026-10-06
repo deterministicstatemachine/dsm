@@ -1083,6 +1083,7 @@ impl AppRouterImpl {
                 amount: lock.amount,
                 opponent: (lock.opponent_genesis, lock.opponent_device_id),
                 counterpart: lock.counterpart,
+                opponent_holdings: lock.opponent_holdings.clone(),
             },
         )
         .await

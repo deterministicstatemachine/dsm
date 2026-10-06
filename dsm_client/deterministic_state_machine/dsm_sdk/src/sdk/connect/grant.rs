@@ -330,6 +330,10 @@ pub struct DuelLock {
     /// The other side's vault, when it locked first.
     pub counterpart: Option<[u8; 32]>,
     pub memo: String,
+    /// The opponent's proof of holding the creatures it fields, as relayed
+    /// (`HoldingsProofV1` bytes). Checked by the wallet when it locks; a lock
+    /// without it locks nothing.
+    pub opponent_holdings: Option<Vec<u8>>,
 }
 
 /// An entry of a computed match and its side's signature over its head.
@@ -436,6 +440,10 @@ fn duel_lock_from_wire(r: &generated::ConnectDuelLockV1) -> Result<DuelLock, Str
         opponent_device_id: d32(&r.opponent_device_id, "the opponent's device id")?,
         counterpart,
         memo: r.memo.clone(),
+        opponent_holdings: r
+            .opponent_holdings
+            .as_ref()
+            .map(prost::Message::encode_to_vec),
     })
 }
 
@@ -1182,6 +1190,9 @@ mod tests {
                     opponent_device_id: vec![5; 32],
                     counterpart_vault_id: Vec::new(),
                     memo: "best of one".into(),
+                    // The grant decides whether a lock may run; the proof is
+                    // the lock's own check (computed_flow::create).
+                    opponent_holdings: None,
                 },
             )),
         }

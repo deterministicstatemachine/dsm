@@ -157,6 +157,23 @@ fn setup(
     setup_with_keys(&p.a, &p.b, nonce, (&key_a, team_a), (&key_b, team_b))
 }
 
+/// `d`'s proof that it holds the creatures `setup` fields on `side`, as its
+/// own wallet makes it for an opponent's lock.
+pub(super) fn holdings_of(
+    d: &TestDevice,
+    setup: &[u8],
+    side: MatchSide,
+) -> dsm::types::proto::HoldingsProofV1 {
+    let body = DuelSetupV1::decode(setup).expect("a setup").body;
+    let team = match side {
+        MatchSide::A => &body.a().team,
+        MatchSide::B => &body.b().team,
+    };
+    let anchors: Vec<D32> = team.iter().map(|c| *c.anchor()).collect();
+    d.enter();
+    crate::sdk::connect::holdings::prove(&d.router().core_sdk, &anchors).expect("a holdings proof")
+}
+
 async fn lock(
     d: &TestDevice,
     other: &TestDevice,
@@ -165,6 +182,7 @@ async fn lock(
     stake: u64,
     counterpart: Option<D32>,
 ) -> Result<Locked, DsmError> {
+    let opponent_holdings = holdings_of(other, setup, side.other());
     d.enter();
     computed_flow::create(
         &d.router().core_sdk,
@@ -176,6 +194,7 @@ async fn lock(
             amount: stake,
             opponent: (other.genesis, other.device_id),
             counterpart,
+            opponent_holdings: Some(prost::Message::encode_to_vec(&opponent_holdings)),
         },
     )
     .await
@@ -713,7 +732,6 @@ async fn a_modded_or_unheld_creature_is_refused_at_lock() {
     let (team_a, team_b) = teams(&p).await;
     let nonce = [0x34; 32];
     let (key_a, key_b) = (session_key(&p.a, &nonce), session_key(&p.b, &nonce));
-    let a_start = balance(&p.a, &era());
     let stake = whole_era(25);
     let refused = |setup: Vec<u8>, reason: &'static str| {
         let p = &p;
@@ -762,6 +780,15 @@ async fn a_modded_or_unheld_creature_is_refused_at_lock() {
         "does not hold creature",
     )
     .await;
+    // A's spare creature, published by A, fielded on B's side: B does not hold
+    // it, and the proof B's wallet makes says so.
+    let (body, _) = frozen();
+    let spare = issue_team(&p.a, body.a(), "CRX").await;
+    refused(
+        setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &spare)),
+        "the opponent does not hold creature",
+    )
+    .await;
     // A state under an anchor nobody issued.
     let unissued = CreatureStateV1::new(
         [0x5E; 32],
@@ -771,6 +798,7 @@ async fn a_modded_or_unheld_creature_is_refused_at_lock() {
         c.charges().to_vec(),
     )
     .expect("a state");
+    let a_start = balance(&p.a, &era());
     refused(
         setup_with_keys(&p.a, &p.b, nonce, (&key_a, &[unissued]), (&key_b, &team_b)),
         "no policy is published under its anchor",
