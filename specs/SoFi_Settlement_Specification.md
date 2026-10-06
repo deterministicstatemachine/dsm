@@ -809,6 +809,8 @@ TAG_DSM_ESCROW_TRANSCRIPT                   DSM/escrow/transcript/v1            
 TAG_DSM_ESCROW_TRANSCRIPT_STEP              DSM/escrow/transcript-step/v1             h_i
 TAG_DSM_ESCROW_TRANSCRIPT_HEAD              DSM/escrow/transcript-head/v1             m_head(i, h_i)
 TAG_DSM_ESCROW_MOVE_COMMIT                  DSM/escrow/move-commit/v1                 a Commit's commitment
+The wallet's session-key derivation (§19.10), constant in SDK/sdk/computed_flow.rs.
+TAG_SESSION_KEY                             DSM/escrow/session-key/v1                 the HKDF salt of a match session key
 
 
 <!-- spec-section: SOFI-014-2 -->
@@ -1585,6 +1587,15 @@ The value that counts at `K_match` is the first object at its leader that is rec
 - **`EquivocationProof`**, class `0x006A`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `side`, `index`, and two `(head, signature)` pairs with the heads strictly ascending. It is recognized at `K` when `Y` and the table derive `K`, and both signatures verify, under the session key of `side`, over `m_head(index, head)` for their own heads. Its outcome is the other side's win: `b-wins` when side A equivocated, `a-wins` when side B did.
   - A side signs one head per index of its own entries, ever. Two different heads signed at one index are proof that the key's holder cheated.
 - The first recognized occupant holds the cell for good (§8, consequences 2 and 3), whatever arrives after it.
+
+**The session keys: a wallet obligation**
+
+A session key is the authority of everything its side does in a match: its ready, its Withdraw and every head it signs. Core reads only the public halves the table commits. How a key is made and kept is the wallet's obligation, and every wallet meets it the same way.
+
+- **Derivation.** A wallet derives its session key for a match from its own wallet seed, its own genesis and the match's 32-byte nonce: `k = HKDF(salt = DSM/escrow/session-key/v1 ∥ 0x00; ikm = wallet seed; info = genesis ∥ match_nonce)`, 32 bytes of HKDF over BLAKE3 (RFC 5869, HMAC-BLAKE3). The key pair is the SPHINCS+ key pair (§14.3) whose deterministic key generation takes `k` as its entropy. The nonce is the one the setup carries; the program reads it, and DSM never does.
+- **The secret stays in the wallet.** The wallet answers with the public half only. The secret half is derived when it is used, from the seed the wallet holds while unlocked, and is never stored, exported or shown. A locked wallet derives nothing and signs nothing.
+- **One key per match.** Two matches with different nonces have different keys, and a key signs only for the match whose setup names it. A wallet locks a stake only when the setup's session key for its side is exactly the one it derives for the setup's nonce.
+- **Restoring.** The derivation reads nothing but the seed, the genesis and the nonce, so a wallet restored from its seed derives the same key and can still ready, withdraw, play or settle a match it staked in.
 
 **The start cell: a ready handshake, or a Withdraw** (owner ruling, 2026-10-06)
 
