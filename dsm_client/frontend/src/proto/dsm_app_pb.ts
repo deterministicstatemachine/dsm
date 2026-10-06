@@ -1093,6 +1093,38 @@ proto3.util.setEnumType(ContactPairingPhase, "dsm.ContactPairingPhase", [
 ]);
 
 /**
+ * What kind of holding a balance row is (BalanceGetResponse.holding).
+ *
+ * @generated from enum dsm.BalanceHolding
+ */
+export enum BalanceHolding {
+  /**
+   * @generated from enum value: BALANCE_HOLDING_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Fungible: counted in units.
+   *
+   * @generated from enum value: BALANCE_HOLDING_CURRENCY = 1;
+   */
+  CURRENCY = 1,
+
+  /**
+   * A token whose whole supply is one: a state object, held or not.
+   *
+   * @generated from enum value: BALANCE_HOLDING_STATE_OBJECT = 2;
+   */
+  STATE_OBJECT = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(BalanceHolding)
+proto3.util.setEnumType(BalanceHolding, "dsm.BalanceHolding", [
+  { no: 0, name: "BALANCE_HOLDING_UNSPECIFIED" },
+  { no: 1, name: "BALANCE_HOLDING_CURRENCY" },
+  { no: 2, name: "BALANCE_HOLDING_STATE_OBJECT" },
+]);
+
+/**
  * @generated from enum dsm.SdkEventKind
  */
 export enum SdkEventKind {
@@ -23281,6 +23313,16 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
    */
   offlineAllocation?: OfflineAllocationView;
 
+  /**
+   * What kind of holding the token is, decided by Rust from its committed
+   * supply: a token that exists exactly once (a creature, an item) is a state
+   * object, anything else a currency. The wallet lists the two apart; a screen
+   * that decided it from the amount or the ticker would carry its own rule.
+   *
+   * @generated from field: dsm.BalanceHolding holding = 16;
+   */
+  holding = BalanceHolding.UNSPECIFIED;
+
   constructor(data?: PartialMessage<BalanceGetResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -23304,6 +23346,7 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
     { no: 13, name: "genesis_supply_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "permissions", kind: "message", T: TokenPolicyPermissions },
     { no: 15, name: "offline_allocation", kind: "message", T: OfflineAllocationView },
+    { no: 16, name: "holding", kind: "enum", T: proto3.getEnumType(BalanceHolding) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceGetResponse {

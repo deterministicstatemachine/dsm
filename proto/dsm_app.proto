@@ -3710,6 +3710,20 @@ message BalanceGetResponse {
   // keyed by the appliance's bundle, and only the appliance states its bundle.
   // Absent means unknown, never zero.
   OfflineAllocationView offline_allocation = 15;
+  // What kind of holding the token is, decided by Rust from its committed
+  // supply: a token that exists exactly once (a creature, an item) is a state
+  // object, anything else a currency. The wallet lists the two apart; a screen
+  // that decided it from the amount or the ticker would carry its own rule.
+  BalanceHolding holding = 16;
+}
+
+// What kind of holding a balance row is (BalanceGetResponse.holding).
+enum BalanceHolding {
+  BALANCE_HOLDING_UNSPECIFIED = 0;
+  // Fungible: counted in units.
+  BALANCE_HOLDING_CURRENCY = 1;
+  // A token whose whole supply is one: a state object, held or not.
+  BALANCE_HOLDING_STATE_OBJECT = 2;
 }
 
 // Cash in hand: what this device has loaded into its offline allocation of a
