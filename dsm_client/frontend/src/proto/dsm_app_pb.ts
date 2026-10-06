@@ -29951,6 +29951,19 @@ export class ConnectSessionV1 extends Message<ConnectSessionV1> {
    */
   offerDigest = new Uint8Array(0);
 
+  /**
+   * The peer's identity as its contact card names it: what an escrow lock (A12)
+   * names an opponent by. Application side: the wallet's; wallet side: the application's.
+   *
+   * @generated from field: bytes peer_genesis = 12;
+   */
+  peerGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes peer_signing_key = 13;
+   */
+  peerSigningKey = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectSessionV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -29970,6 +29983,8 @@ export class ConnectSessionV1 extends Message<ConnectSessionV1> {
     { no: 9, name: "scope_lines", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 10, name: "last_error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 11, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 12, name: "peer_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "peer_signing_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSessionV1 {

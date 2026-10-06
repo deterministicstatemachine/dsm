@@ -4829,6 +4829,10 @@ message ConnectSessionV1 {
   repeated string         scope_lines   = 9;
   string                  last_error    = 10; // why the last sync with it did not complete; empty when it did
   bytes                   offer_digest  = 11 [(dsm_fixed_len)=32]; // the offer the session was connected from
+  // The peer's identity as its contact card names it: what an escrow lock (A12)
+  // names an opponent by. Application side: the wallet's; wallet side: the application's.
+  bytes                   peer_genesis     = 12 [(dsm_fixed_len)=32];
+  bytes                   peer_signing_key = 13 [(dsm_max_len)=64];
 }
 message ConnectSessionsV1 {
   repeated ConnectSessionV1 sessions = 1;

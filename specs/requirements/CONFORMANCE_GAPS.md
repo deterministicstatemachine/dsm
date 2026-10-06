@@ -2920,6 +2920,8 @@ Every gate above has a mutation control: each was removed or weakened in turn an
   - `side_b_locks_only_against_a_stake_that_pays_it_on_b_wins`: A's own vault on the match's cell with the game's table, every branch paying A; B locks nothing against it.
 - Unit: `dsm_sdk::sdk::connect::wager::tests` (the table, the opponent refusals, `is_match_of`) and the escrow rows of `dsm_sdk::sdk::connect::grant::tests` (the scope's shape, within and past its caps, the collect, the lock's shape).
 
+**Found wiring the game** (2026-10-05). A lock names the opponent by genesis, device id and signing key, and the application's account held all three from the card each wallet's accept carried, but `connect.app.sessions` listed only the device id: an application reaching its account through the ingress could not name an opponent at all. `ConnectSessionV1` now carries the peer's identity as its card names it, `peer_genesis` (12) and `peer_signing_key` (13): the wallet's on the application side, the application's on the wallet side. The three end-to-end tests now name each opponent from that listing, and check it against what the account holds.
+
 **Mutation controls** (2026-10-05, each restored; the tree's digest was the same before and after): `void` refunding the other player; the application allowed as a player; the collect's template check passed for any vault; any Active vault on the cell counted as the lock; the collection counted whoever was paid; side B's amount comparison and its terms comparison, each removed; a lock's caps skipped; a collect taken in without an escrow scope. Each turned its named test red (`VERIFICATION_MATRIX.md`, the A12 rows).
 
 **Open.**
