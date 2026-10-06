@@ -23,8 +23,8 @@ use dsm::sofi::derive;
 use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
-    AcceptedGeneses, LocalLeaves, PeerPositionResolver, ReadFailure, RecordedGenerationRow,
-    SofiReads, VaultLeaves, Verifier, VerifierFailure,
+    AcceptedGeneses, JudgedKey, KeptJudgement, LocalLeaves, PeerPositionResolver, ReadFailure,
+    RecordedGenerationRow, SofiReads, VaultLeaves, Verifier, VerifierFailure,
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
@@ -556,6 +556,57 @@ impl SofiReads for LiveSofiReads<'_> {
             .insert(cell_id(cell), evidence.clone());
         Ok(())
     }
+
+    fn kept_judgement(&self, key: &JudgedKey) -> Result<Option<KeptJudgement>, ReadFailure> {
+        Ok(judgements().get(key).cloned())
+    }
+
+    fn keep_judgement(&self, key: JudgedKey, judgement: KeptJudgement) -> Result<(), ReadFailure> {
+        let mut kept = judgements();
+        if kept.len() >= JUDGEMENTS_MAX {
+            kept.clear();
+        }
+        kept.insert(key, judgement);
+        Ok(())
+    }
+}
+
+/// The skipped keys walks judged, kept for the life of the process (see
+/// `SofiReads::keep_judgement`): a vault's head is walked by every quote,
+/// every `sofi.vaults` and every escrow status, and each re-read and
+/// re-judged the exercises its skipped keys hold, their validation evidence
+/// and the traders' lineages included. Only the walk decides what is kept.
+static JUDGEMENTS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<JudgedKey, KeptJudgement>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// More than the skipped keys a phone's vaults hold: past it the memory
+/// starts over, and the next walk judges each key again.
+const JUDGEMENTS_MAX: usize = 512;
+
+/// The kept judgements. A thread that panicked holding the lock left whole
+/// entries behind (each is inserted in one step), so the map is taken as it
+/// stands.
+fn judgements() -> std::sync::MutexGuard<'static, std::collections::HashMap<JudgedKey, KeptJudgement>>
+{
+    match JUDGEMENTS.lock() {
+        Ok(kept) => kept,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Forget every kept judgement, where a test stands in for a fresh start
+/// (`final_reads::forget_everything`): tests reuse identities, and so
+/// vaults and exercises, over fleets that start empty.
+#[cfg(test)]
+pub(crate) fn forget_judgements() {
+    judgements().clear();
+}
+
+/// The judgements kept, for a test.
+#[cfg(test)]
+pub(crate) fn judgements_kept() -> usize {
+    judgements().len()
 }
 
 /// Everything a [`Verifier`] borrows, held together: the reads over the
