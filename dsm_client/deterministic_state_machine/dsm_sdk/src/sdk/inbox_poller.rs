@@ -358,6 +358,10 @@ pub enum Backgrounded {
     /// the recipient opening the app. Nothing tells a device a transfer is
     /// coming; listening is the only way it arrives on its own.
     Listening,
+    /// An application is connected (DSM Connect): its requests arrive at any
+    /// time, and only a wallet that is still running fetches and answers them.
+    /// The host keeps the process alive, so the connect listener keeps going.
+    Serving,
     /// Nothing owed and nobody to hear from: the poller was stopped.
     Stopped,
 }
@@ -382,6 +386,13 @@ pub fn stop_poller_for_lifecycle() -> anyhow::Result<Backgrounded> {
              device; listening in the background"
         );
         return Ok(Backgrounded::Listening);
+    }
+    if crate::sdk::connect::wallet::any_connected().map_err(|e| anyhow::anyhow!(e))? {
+        log::info!(
+            "[inbox_poller] lifecycle stop DECLINED — an application is connected; \
+             its requests keep being answered in the background"
+        );
+        return Ok(Backgrounded::Serving);
     }
     stop_poller();
     Ok(Backgrounded::Stopped)
@@ -589,6 +600,49 @@ mod tests {
         );
         assert!(POLLER_STOP.load(Ordering::SeqCst));
         POLLER_STOP.store(false, Ordering::SeqCst);
+    }
+
+    /// A connected application asks at any time, and only a running wallet
+    /// answers: with one connected and no contact, the lifecycle stop declines
+    /// and the host keeps the process alive; once it is disconnected, the stop
+    /// goes through.
+    #[test]
+    #[serial_test::serial]
+    fn a_wallet_serving_a_connected_application_keeps_running_in_the_background() {
+        use crate::storage::client_db::connect::{disconnect, insert_session, SessionStatus, WalletSession};
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        let stopping_before = POLLER_STOP.load(Ordering::SeqCst);
+        let session = WalletSession {
+            session_id: [0x51; 32],
+            app_device_id: [0x52; 32],
+            app_genesis: [0x53; 32],
+            app_ak: vec![0x54; 32],
+            display_name: "a game".into(),
+            endpoint: "https://127.0.0.1:8443".into(),
+            cert_pin: [0x55; 32],
+            offer_digest: [0x56; 32],
+            accept_body: Vec::new(),
+            last_seq: 0,
+            connected: SessionStatus::Connected,
+        };
+        insert_session(&session).expect("a session stored");
+        assert_eq!(
+            stop_poller_for_lifecycle().expect("a readable store"),
+            Backgrounded::Serving
+        );
+        assert_eq!(
+            POLLER_STOP.load(Ordering::SeqCst),
+            stopping_before,
+            "the poller was told to stop"
+        );
+        disconnect(&session.session_id).expect("disconnected");
+        assert_eq!(
+            stop_poller_for_lifecycle().expect("a readable store"),
+            Backgrounded::Stopped
+        );
+        assert!(POLLER_STOP.load(Ordering::SeqCst), "nothing to serve: the poller stops");
+        POLLER_STOP.store(stopping_before, Ordering::SeqCst);
     }
 
     /// Nothing tells a device a transfer is on its way. A device with a

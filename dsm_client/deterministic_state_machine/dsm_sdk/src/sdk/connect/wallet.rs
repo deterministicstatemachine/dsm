@@ -298,14 +298,18 @@ pub fn start_listener() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether any application is connected: its requests can arrive at any time.
+pub fn any_connected() -> Result<bool, String> {
+    Ok(crate::storage::client_db::connect::sessions()
+        .map_err(|e| format!("the connected applications: {e}"))?
+        .iter()
+        .any(|s| s.connected == crate::storage::client_db::connect::SessionStatus::Connected))
+}
+
 /// Start the listener when the wallet starts again with an application still
 /// connected: approving or answering one starts it otherwise.
 pub fn resume_listener() -> Result<(), String> {
-    let connected = crate::storage::client_db::connect::sessions()
-        .map_err(|e| format!("the connected applications: {e}"))?
-        .iter()
-        .any(|s| s.connected == crate::storage::client_db::connect::SessionStatus::Connected);
-    if connected {
+    if any_connected()? {
         start_listener()?;
     }
     Ok(())
