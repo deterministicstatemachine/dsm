@@ -70,7 +70,29 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A cryptographic precondition failed (bad sizes, empty message, etc.).
-    Crypto(&'static str),
+    Crypto(CryptoFailure),
+}
+
+/// Failure reasons are data; borrowed diagnostic strings are produced only at
+/// the reporting boundary, outside the signing/verification return value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CryptoFailure {
+    EmptySigningMessage,
+    BadSecretKeySize,
+    SignerSelfCheck,
+    EmptyVerificationMessage,
+}
+
+impl CryptoFailure {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::EmptySigningMessage => "Cannot sign empty message",
+            Self::BadSecretKeySize => "Bad secret key size",
+            Self::SignerSelfCheck => "the signature does not verify under its own key: a fault during signing, or a secret \
+             key whose root is not its own",
+            Self::EmptyVerificationMessage => "Cannot verify empty message",
+        }
+    }
 }
 
 /// The version of the construction: the address layout and the BLAKE3
@@ -243,7 +265,12 @@ impl Adrs {
 mod refinement_vectors;
 
 fn derive_key(context: &str, input: &[u8]) -> [u8; 32] {
-    let output = blake3::derive_key(context, input);
+    // The material phase processes signing seeds; retain a guard for its
+    // state and digest, rather than leaving the one-shot KDF's working state.
+    let mut state = Zeroizing::new(blake3::Hasher::new_derive_key(context));
+    state.update(input);
+    let digest = Zeroizing::new(state.finalize());
+    let output = *digest.as_bytes();
     #[cfg(test)]
     refinement_vectors::record(0, context, &[], input, &output);
     output
@@ -780,11 +807,11 @@ pub fn sign(
     m: &[u8],
 ) -> Result<Vec<u8>, Error> {
     if m.is_empty() {
-        return Err(Error::Crypto("Cannot sign empty message"));
+        return Err(Error::Crypto(CryptoFailure::EmptySigningMessage));
     }
     let p = param_set(v);
     if sk.len() != p.sk_bytes {
-        return Err(Error::Crypto("Bad secret key size"));
+        return Err(Error::Crypto(CryptoFailure::BadSecretKeySize));
     }
     let (sk_seed, rest) = sk.split_at(p.n);
     let (sk_prf, public) = rest.split_at(p.n);
@@ -792,17 +819,19 @@ pub fn sign(
     let pc = PublicCtx::new(p.n, pk_seed);
     let sc = SecretCtx::new(sk_seed);
 
-    let r = prf_msg(p.n, sk_prf, pk_seed, m);
+    let r = Zeroizing::new(prf_msg(p.n, sk_prf, pk_seed, m));
     let at = split_digest(&p, &h_msg(&p, &r, pk_seed, pk_root, m));
     let mut adrs = fors_adrs(&at);
-    let fors_sig = fors_sign(&p, &pc, &sc, &at.md, &mut adrs);
+    let fors_sig = Zeroizing::new(fors_sign(&p, &pc, &sc, &at.md, &mut adrs));
     let fors_pk = fors_pk_from_sig(&p, &pc, &fors_sig, &at.md, &mut adrs);
-    let ht_sig = ht_sign(&p, &pc, &sc, &fors_pk, at.idx_tree, at.idx_leaf);
+    let ht_sig = Zeroizing::new(ht_sign(&p, &pc, &sc, &fors_pk, at.idx_tree, at.idx_leaf));
 
-    let mut sig = Vec::with_capacity(p.sig_bytes);
-    sig.extend(r);
-    sig.extend(fors_sig);
-    sig.extend(ht_sig);
+    // Until the self-check succeeds, no signature component is released.
+    // Clear these working copies on both the success and failure paths.
+    let mut sig = Zeroizing::new(Vec::with_capacity(p.sig_bytes));
+    sig.extend_from_slice(&r);
+    sig.extend_from_slice(&fors_sig);
+    sig.extend_from_slice(&ht_sig);
     if !ht_verify(
         &p,
         &pc,
@@ -812,12 +841,9 @@ pub fn sign(
         at.idx_leaf,
         pk_root,
     ) {
-        return Err(Error::Crypto(
-            "the signature does not verify under its own key: a fault during signing, or a secret \
-             key whose root is not its own",
-        ));
+        return Err(Error::Crypto(CryptoFailure::SignerSelfCheck));
     }
-    Ok(sig)
+    Ok(sig.to_vec())
 }
 
 /// FIPS 205 Algorithm 20, `slh_verify_internal`. A key or signature of the
@@ -829,7 +855,7 @@ pub fn verify(
     sig: &[u8],
 ) -> Result<bool, Error> {
     if m.is_empty() {
-        return Err(Error::Crypto("Cannot verify empty message"));
+        return Err(Error::Crypto(CryptoFailure::EmptyVerificationMessage));
     }
     let p = param_set(v);
     if pk.len() != p.pk_bytes || sig.len() != p.sig_bytes {
@@ -1172,6 +1198,19 @@ mod tests {
     }
 
     #[test]
+    fn guarded_kdf_preserves_the_blake3_material_definition() {
+        for n in [16, 24, 32] {
+            let material: Vec<u8> = (0..n).map(|i| (i * 7 + 13) as u8).collect();
+            for context in [CONTEXT_PRF, CONTEXT_THASH, CONTEXT_PRF_MSG] {
+                assert_eq!(
+                    derive_key(context, &material),
+                    blake3::derive_key(context, &material)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn diagnostics_do_not_disclose_the_signing_seed() {
         let pair = SphincsKeyPair {
             public_key: vec![17; 32],
@@ -1188,16 +1227,16 @@ mod tests {
         let kp = key(v, 0x09);
         assert_eq!(
             sign(v, &kp.secret_key, b"").unwrap_err(),
-            Error::Crypto("Cannot sign empty message")
+            Error::Crypto(CryptoFailure::EmptySigningMessage)
         );
         assert_eq!(
             sign(v, &kp.secret_key[1..], b"m").unwrap_err(),
-            Error::Crypto("Bad secret key size")
+            Error::Crypto(CryptoFailure::BadSecretKeySize)
         );
         let sig = sign(v, &kp.secret_key, b"m").unwrap();
         assert_eq!(
             verify(v, &kp.public_key, b"", &sig).unwrap_err(),
-            Error::Crypto("Cannot verify empty message")
+            Error::Crypto(CryptoFailure::EmptyVerificationMessage)
         );
     }
 
@@ -1210,7 +1249,7 @@ mod tests {
         let mut sk = key(v, 0x44).secret_key.clone();
         sk[3 * p.n] ^= 1;
         assert!(
-            matches!(sign(v, &sk, b"m"), Err(Error::Crypto(why)) if why.contains("does not verify"))
+            matches!(sign(v, &sk, b"m"), Err(Error::Crypto(why)) if why == CryptoFailure::SignerSelfCheck)
         );
     }
 
