@@ -3664,8 +3664,7 @@ impl EquivocationProof {
     }
 }
 
-/// What a `MatchStart` says: the match started (side B, when it locks), or
-/// it is withdrawn (side A, while its vault is the only one).
+/// What a `MatchStart` says: the match started, or it is withdrawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartKind {
     Start,
@@ -3679,36 +3678,36 @@ impl StartKind {
             Self::Withdraw => 2,
         }
     }
+}
 
-    /// The side whose session key signs this kind: B starts, A withdraws.
-    pub fn signer(self) -> MatchSide {
+/// The body of a `MatchStart` (SoFi §19.10, the ready handshake).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartBody {
+    /// Both sides' signatures over `m_ready`: side A's, then side B's.
+    Start { ready_a: Vec<u8>, ready_b: Vec<u8> },
+    /// One side's signature over `m_withdraw`. Either side may withdraw.
+    Withdraw { side: MatchSide, signature: Vec<u8> },
+}
+
+impl StartBody {
+    pub fn kind(&self) -> StartKind {
         match self {
-            Self::Start => MatchSide::B,
-            Self::Withdraw => MatchSide::A,
-        }
-    }
-
-    fn from_byte(byte: u8) -> Result<Self, SofiWireError> {
-        match byte {
-            1 => Ok(Self::Start),
-            2 => Ok(Self::Withdraw),
-            value => Err(SofiWireError::UndeclaredValue {
-                field: "start kind",
-                value: u32::from(value),
-            }),
+            Self::Start { .. } => StartKind::Start,
+            Self::Withdraw { .. } => StartKind::Withdraw,
         }
     }
 }
 
 /// `0x006B MatchStart` — a Start or a Withdraw at a match's start cell (SoFi
-/// §19.10), with its signer's signature over `m_start`. Whichever is first
-/// at the cell's leader holds it for good.
+/// §19.10). A Start carries both sides' ready signatures; a Withdraw names
+/// the side that withdraws and carries its signature. Whichever is first at
+/// the cell's leader holds it for good. Whether the signatures verify is
+/// `sofi::computed::start_occupant`'s, not this type's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchStart {
     external_commitment: D32,
     table: ComputedTable,
-    kind: StartKind,
-    signature: Vec<u8>,
+    body: StartBody,
 }
 
 impl MatchStart {
@@ -3716,15 +3715,21 @@ impl MatchStart {
     pub fn new(
         external_commitment: D32,
         table: ComputedTable,
-        kind: StartKind,
-        signature: &[u8],
+        body: StartBody,
     ) -> Result<Self, SofiWireError> {
-        check_signature_bytes("start signature", signature)?;
+        match &body {
+            StartBody::Start { ready_a, ready_b } => {
+                check_signature_bytes("ready signature", ready_a)?;
+                check_signature_bytes("ready signature", ready_b)?;
+            }
+            StartBody::Withdraw { signature, .. } => {
+                check_signature_bytes("withdraw signature", signature)?;
+            }
+        }
         Ok(Self {
             external_commitment,
             table,
-            kind,
-            signature: signature.to_vec(),
+            body,
         })
     }
 
@@ -3737,11 +3742,11 @@ impl MatchStart {
     }
 
     pub fn kind(&self) -> StartKind {
-        self.kind
+        self.body.kind()
     }
 
-    pub fn signature(&self) -> &[u8] {
-        &self.signature
+    pub fn body(&self) -> &StartBody {
+        &self.body
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -3749,8 +3754,17 @@ impl MatchStart {
         push_env(&mut out, class::ESCROW_MATCH_START);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
-        out.push(self.kind.byte());
-        push_part(&mut out, &self.signature);
+        out.push(self.kind().byte());
+        match &self.body {
+            StartBody::Start { ready_a, ready_b } => {
+                push_part(&mut out, ready_a);
+                push_part(&mut out, ready_b);
+            }
+            StartBody::Withdraw { side, signature } => {
+                out.push(side.byte());
+                push_part(&mut out, signature);
+            }
+        }
         out
     }
 
@@ -3759,9 +3773,23 @@ impl MatchStart {
         c.envelope(class::ESCROW_MATCH_START, SCHEMA_V1)?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
-        let kind = StartKind::from_byte(c.u8()?).map_err(wire_invalid)?;
-        let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
-        let v = Self::new(external_commitment, table, kind, &signature).map_err(wire_invalid)?;
+        let body = match c.u8()? {
+            1 => StartBody::Start {
+                ready_a: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
+                ready_b: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
+            },
+            2 => StartBody::Withdraw {
+                side: MatchSide::at(&mut c)?,
+                signature: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
+            },
+            value => {
+                return Err(wire_invalid(SofiWireError::UndeclaredValue {
+                    field: "start kind",
+                    value: u32::from(value),
+                }))
+            }
+        };
+        let v = Self::new(external_commitment, table, body).map_err(wire_invalid)?;
         finish(&c, v)
     }
 }
