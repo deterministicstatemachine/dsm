@@ -201,6 +201,37 @@ pub(crate) fn open_sealed(
     Ok(inner)
 }
 
+/// Why a member did not take a submit.
+#[derive(Debug)]
+enum Refused {
+    /// It refused for good: a retry would be refused the same way.
+    Final(DsmError),
+    /// It did not answer, or answered with a status a retry may clear.
+    Retryable(String),
+}
+
+impl Refused {
+    /// The error a submit to `endpoint` that made `attempts` attempts ends
+    /// with.
+    fn into_error(self, endpoint: &str, attempts: u32) -> DsmError {
+        match self {
+            Refused::Final(e) => e,
+            Refused::Retryable(why) => DsmError::network(
+                format!("submit via {endpoint} failed after {attempts} attempts: {why}"),
+                None::<std::io::Error>,
+            ),
+        }
+    }
+}
+
+/// Which submits to one member a delivery's ask makes.
+enum Attempts {
+    /// The first.
+    First,
+    /// The retries after a first that failed retryably, with why it failed.
+    Retries(String),
+}
+
 /// Retry configuration for b0x operations
 #[derive(Debug, Clone)]
 pub struct B0xRetryConfig {
@@ -1457,7 +1488,7 @@ impl B0xSDK {
     /// register quorum whatever the breaker holds: a member it marked failed
     /// is still asked once the others are used up.
     async fn deliver(
-        &mut self,
+        &self,
         routing_key: &str,
         message_id_b32: &str,
         sealed: &[u8],
@@ -1484,20 +1515,58 @@ impl B0xSDK {
             }
         }
         let this = &*self;
-        let ask = |endpoint: String| async move {
-            let answer = this
-                .submit_with_retry(&endpoint, sealed, routing_key, message_id_b32, retry_config)
-                .await;
-            (endpoint, answer)
+        let ask = |endpoint: String, attempts: Attempts| async move {
+            let answer = match &attempts {
+                Attempts::First => {
+                    this.submit_once(&endpoint, sealed, routing_key, message_id_b32)
+                        .await
+                }
+                Attempts::Retries(first) => this
+                    .submit_retries(
+                        &endpoint,
+                        sealed,
+                        routing_key,
+                        message_id_b32,
+                        retry_config,
+                        first.clone(),
+                    )
+                    .await
+                    .map_err(Refused::Final),
+            };
+            (endpoint, attempts, answer)
         };
         let mut waiting = healthy.into_iter().chain(marked_failed);
         let mut answers = futures::stream::FuturesUnordered::new();
         for endpoint in waiting.by_ref().take(quorum) {
-            answers.push(ask(endpoint));
+            answers.push(ask(endpoint, Attempts::First));
         }
         let mut delivered = 0usize;
         let mut errors: Vec<String> = Vec::new();
-        while let Some((endpoint, answer)) = futures::StreamExt::next(&mut answers).await {
+        while let Some((endpoint, attempts, answer)) = futures::StreamExt::next(&mut answers).await
+        {
+            // A member that failed its first submit is replaced by the next
+            // at once, while its own retries back off: the delivery waits for
+            // whichever answers first, never for a member's backoff.
+            let answer = match (answer, attempts) {
+                (Err(Refused::Retryable(why)), Attempts::First) if retry_config.max_retries > 0 => {
+                    if let Some(next) = waiting.next() {
+                        answers.push(ask(next, Attempts::First));
+                    }
+                    answers.push(ask(endpoint, Attempts::Retries(why)));
+                    continue;
+                }
+                (Err(refused), Attempts::First) => {
+                    if let Some(next) = waiting.next() {
+                        answers.push(ask(next, Attempts::First));
+                    }
+                    Err(refused.into_error(&endpoint, 1))
+                }
+                // Its replacement was asked at its first failure.
+                (Err(refused), Attempts::Retries(..)) => {
+                    Err(refused.into_error(&endpoint, retry_config.max_retries + 1))
+                }
+                (Ok(()), ..) => Ok(()),
+            };
             match answer {
                 Ok(()) => {
                     delivered += 1;
@@ -1515,9 +1584,6 @@ impl B0xSDK {
                 }
                 Err(e) => {
                     errors.push(format!("{endpoint}: {e}"));
-                    if let Some(next) = waiting.next() {
-                        answers.push(ask(next));
-                    }
                 }
             }
         }
@@ -2042,9 +2108,14 @@ impl B0xSDK {
     ///  - **The transport owns its deadline.** No outer timeout is imposed;
     ///    the retry schedule bounds each submission (`stored_envelope_deadline`).
     ///
-    /// Order is transfer first, then artifacts in role order. Correctness does
-    /// not depend on it — the recipient stages whichever half lands first — but
-    /// determinism makes logs and tests legible.
+    /// Every half is delivered at once, and the send is delivered when every
+    /// half has reached quorum. Correctness does not depend on which lands
+    /// first: the recipient stages whichever half lands first and binds the
+    /// pair when the other does (`recipient_dispatch`'s
+    /// `evidence_first_binds_when_the_transfer_lands`). Every artifact's role
+    /// is checked before anything is sent, and the outcome is reported in the
+    /// order the halves are named: the transfer, then the artifacts in role
+    /// order.
     pub async fn deliver_frozen_logical_send(
         &mut self,
         outbox: &crate::storage::client_db::SenderOutboxRecord,
@@ -2052,25 +2123,11 @@ impl B0xSDK {
         retry: &B0xRetryConfig,
     ) -> Result<FrozenSendDelivery, DsmError> {
         let route = outbox.routing_address.as_str();
-
-        self.submit_stored_envelope_with_retry(route, &outbox.submission_id, retry)
-            .await
-            .map_err(|e| {
-                DsmError::internal(
-                    format!(
-                        "frozen send {}: transfer half not delivered: {e}",
-                        outbox.submission_id
-                    ),
-                    None::<std::io::Error>,
-                )
-            })?;
-
-        let mut artifact_ids = Vec::with_capacity(artifacts.len());
+        // Only initial-send artifacts ride the transfer's route. A received
+        // countersign delta or the finality certificate (own route, own
+        // sweep) reaching this primitive is a caller bug — refuse, never
+        // relocate it under a route the node would silently dedup.
         for artifact in artifacts {
-            // Only initial-send artifacts ride the transfer's route. A received
-            // countersign delta or the finality certificate (own route, own
-            // sweep) reaching this primitive is a caller bug — refuse, never
-            // relocate it under a route the node would silently dedup.
             if !artifact.role.is_initial_send_artifact() {
                 return Err(DsmError::internal(
                     format!(
@@ -2081,19 +2138,43 @@ impl B0xSDK {
                     None::<std::io::Error>,
                 ));
             }
-            self.submit_stored_envelope_with_retry(route, &artifact.submission_id, retry)
-                .await
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!(
-                            "frozen send {}: {} artifact {} not delivered: {e}",
-                            outbox.submission_id,
-                            artifact.role.as_str(),
-                            artifact.submission_id
-                        ),
-                        None::<std::io::Error>,
-                    )
-                })?;
+        }
+        let this = &*self;
+        let deliver = |id: String| async move {
+            let sealed = kept_seal(&id)?;
+            this.deliver(route, &id, &sealed, retry).await
+        };
+        let (transfer, delivered) = futures::future::join(
+            deliver(outbox.submission_id.clone()),
+            futures::future::join_all(
+                artifacts
+                    .iter()
+                    .map(|artifact| deliver(artifact.submission_id.clone())),
+            ),
+        )
+        .await;
+        transfer.map_err(|e| {
+            DsmError::internal(
+                format!(
+                    "frozen send {}: transfer half not delivered: {e}",
+                    outbox.submission_id
+                ),
+                None::<std::io::Error>,
+            )
+        })?;
+        let mut artifact_ids = Vec::with_capacity(artifacts.len());
+        for (artifact, answer) in artifacts.iter().zip(delivered) {
+            answer.map_err(|e| {
+                DsmError::internal(
+                    format!(
+                        "frozen send {}: {} artifact {} not delivered: {e}",
+                        outbox.submission_id,
+                        artifact.role.as_str(),
+                        artifact.submission_id
+                    ),
+                    None::<std::io::Error>,
+                )
+            })?;
             artifact_ids.push(artifact.submission_id.clone());
         }
 
@@ -2109,73 +2190,86 @@ impl B0xSDK {
         })
     }
 
-    /// Submit sealed spool bytes to a single endpoint with retry logic. The
-    /// node answers 204 once it holds them; a replay of a held message id
-    /// answers the same.
-    async fn submit_with_retry(
+    /// One submit of sealed spool bytes to `endpoint`: `Ok` once the node
+    /// answers 204 (it holds them; a replay of a held message id answers the
+    /// same), and otherwise whether a retry may still succeed.
+    async fn submit_once(
+        &self,
+        endpoint: &str,
+        sealed: &[u8],
+        routing_key: &str,
+        message_id_b32: &str,
+    ) -> Result<(), Refused> {
+        let url = format!("{}/api/v2/b0x/submit", endpoint);
+        let resp = self
+            .client_for(endpoint)
+            .map_err(Refused::Final)?
+            .post(&url)
+            .header("Content-Type", "application/protobuf")
+            .header("x-dsm-message-id", message_id_b32)
+            .header("x-dsm-recipient", routing_key)
+            .body(sealed.to_vec())
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
+                self.circuit_breaker.mark_node_healthy(endpoint).await;
+                Ok(())
+            }
+            Ok(r) => {
+                let status = r.status();
+                let body = match r.text().await {
+                    Ok(text) => text,
+                    Err(e) => format!("(body unreadable: {e})"),
+                };
+                warn!("Submit failed {} via {}: {}", status, endpoint, body);
+                self.circuit_breaker.mark_node_failed(endpoint).await;
+                if !Self::is_retryable_error(status) {
+                    return Err(Refused::Final(DsmError::network(
+                        format!("Submit failed {status} via {endpoint}: {body}"),
+                        None::<std::io::Error>,
+                    )));
+                }
+                Err(Refused::Retryable(format!("{status}: {body}")))
+            }
+            Err(e) => {
+                warn!("HTTP error via {}: {}", endpoint, e);
+                self.circuit_breaker.mark_node_failed(endpoint).await;
+                Err(Refused::Retryable(e.to_string()))
+            }
+        }
+    }
+
+    /// The retries of a submit whose first attempt failed with `first`, a
+    /// retryable failure: each after the backoff `retry_config` sets, until
+    /// one is taken, one fails for good, or the retries run out.
+    async fn submit_retries(
         &self,
         endpoint: &str,
         sealed: &[u8],
         routing_key: &str,
         message_id_b32: &str,
         retry_config: &B0xRetryConfig,
+        first: String,
     ) -> Result<(), DsmError> {
-        let url = format!("{}/api/v2/b0x/submit", endpoint);
-        let mut attempt = 0;
+        let mut last = first;
         let mut delay = std::time::Duration::from_millis(retry_config.base_delay_ms);
-        loop {
-            let resp = self
-                .client_for(endpoint)?
-                .post(&url)
-                .header("Content-Type", "application/protobuf")
-                .header("x-dsm-message-id", message_id_b32)
-                .header("x-dsm-recipient", routing_key)
-                .body(sealed.to_vec())
-                .send()
-                .await;
-            let retryable = match resp {
-                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    self.circuit_breaker.mark_node_healthy(endpoint).await;
-                    return Ok(());
-                }
-                Ok(r) => {
-                    let status = r.status();
-                    let body = match r.text().await {
-                        Ok(text) => text,
-                        Err(e) => format!("(body unreadable: {e})"),
-                    };
-                    warn!("Submit failed {} via {}: {}", status, endpoint, body);
-                    self.circuit_breaker.mark_node_failed(endpoint).await;
-                    if !Self::is_retryable_error(status) {
-                        return Err(DsmError::network(
-                            format!("Submit failed {status} via {endpoint}: {body}"),
-                            None::<std::io::Error>,
-                        ));
-                    }
-                    format!("{status}: {body}")
-                }
-                Err(e) => {
-                    warn!("HTTP error via {}: {}", endpoint, e);
-                    self.circuit_breaker.mark_node_failed(endpoint).await;
-                    e.to_string()
-                }
-            };
-            if attempt >= retry_config.max_retries {
-                return Err(DsmError::network(
-                    format!(
-                        "submit via {endpoint} failed after {} attempts: {retryable}",
-                        attempt + 1
-                    ),
-                    None::<std::io::Error>,
-                ));
-            }
-            attempt += 1;
+        for _ in 0..retry_config.max_retries {
             tokio::time::sleep(delay).await;
             delay = std::cmp::min(
                 delay.mul_f64(retry_config.backoff_multiplier),
                 std::time::Duration::from_millis(retry_config.max_delay_ms),
             );
+            match self
+                .submit_once(endpoint, sealed, routing_key, message_id_b32)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(Refused::Final(e)) => return Err(e),
+                Err(Refused::Retryable(why)) => last = why,
+            }
         }
+        Err(Refused::Retryable(last).into_error(endpoint, retry_config.max_retries + 1))
     }
 
     /// Validate submission parameters comprehensively
@@ -3297,7 +3391,7 @@ mod tests {
         .encode_to_vec();
         let id = encode_base32_crockford(&message_id);
         for endpoint in device.fleet.endpoints() {
-            sdk.submit_with_retry(&endpoint, &sealed, &route, &id, &B0xRetryConfig::default())
+            sdk.submit_once(&endpoint, &sealed, &route, &id)
                 .await
                 .expect("the node spools it");
         }
@@ -3595,6 +3689,52 @@ mod tests {
         sdk.submit_stored_envelope_with_retry(&route, &id, &once)
             .await
             .expect("with the members back, the same bytes reach the quorum");
+    }
+
+    /// A member that does not take a delivery is replaced at once. The first
+    /// member asked is down; the default retries would back off 1, 2 and 4 s
+    /// before the delivery asked another member, and the delivery waited for
+    /// them. The next member is asked at the first failure, so the frozen
+    /// bytes reach the quorum in about one round of answers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_member_that_fails_a_delivery_is_replaced_before_its_retries_back_off() {
+        let mut p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+
+        p.a.enter();
+        let (route, id): (String, String) = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = match binding.lock() {
+                Ok(conn) => conn,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            conn.query_row(
+                "SELECT routing_address, submission_id FROM sender_outbox",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the frozen transfer")
+        };
+        let first = p.nodes.members()[0].0.clone();
+        p.nodes.take_down(std::slice::from_ref(&first)).await;
+        let mut sdk = B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+            p.a.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("B0xSDK");
+        let started = std::time::Instant::now();
+        sdk.submit_stored_envelope_with_retry(&route, &id, &B0xRetryConfig::default())
+            .await
+            .expect("the members still up take the delivery");
+        let took = started.elapsed();
+        p.nodes.bring_up(&[first]).await;
+        assert!(
+            took < std::time::Duration::from_secs(3),
+            "the delivery waited {took:?} for the down member's retries"
+        );
     }
 
     fn encode_via_production_path(params: &B0xSubmissionParams) -> usize {

@@ -167,8 +167,16 @@ async fn from_leader<S: RouteSeats, const N: usize>(
     record: &mut Recorder<'_, N>,
 ) -> Result<[WriteReport; N], DsmError> {
     let mut links: [Option<ArrivalRecord>; N] = [(); N].map(|()| None);
-    for (link, (cell, value)) in links.iter_mut().zip(&cells) {
-        match leader_holds(seats, cell, value).await {
+    // The leader's log of each cell is its own read, and none waits on
+    // another: they are asked at once and taken in the cells' order.
+    let held = futures::future::join_all(
+        cells
+            .iter()
+            .map(|(cell, value)| leader_holds(seats, cell, value)),
+    )
+    .await;
+    for (link, holds) in links.iter_mut().zip(held) {
+        match holds {
             LeaderHolds::Record(found) => *link = Some(found),
             LeaderHolds::Nothing => {}
             LeaderHolds::Unread => {
@@ -406,24 +414,28 @@ pub async fn write_recorded_position(
                 let [report] = reports;
                 record(root_cell, claim, report)
             };
-            Ok([
+            // Two cells, each continued seat by seat along its own chain;
+            // neither chain carries anything of the other, so they move at
+            // once, and both run to their end before either's error is
+            // returned.
+            let (ful, root) = futures::future::join(
                 continue_write(
                     &seats,
                     ful_cell,
                     fulfillment,
                     WriteReport { slots: ful.slots },
                     &mut ful_recorder,
-                )
-                .await?,
+                ),
                 continue_write(
                     &seats,
                     root_cell,
                     claim,
                     WriteReport { slots: root.slots },
                     &mut root_recorder,
-                )
-                .await?,
-            ])
+                ),
+            )
+            .await;
+            Ok([ful?, root?])
         }
         (ful, root) => {
             log::info!(
@@ -584,6 +596,40 @@ async fn committed_at<S: RouteSeats>(
 /// seat's view of the leader is the leader's ByteCommit at the leader's
 /// latest cycle as that seat's own mirror holds it, with the leader's proof
 /// (§9 route chains, rule 4).
+/// [`read_cell`] for a cell whose final value, once there, holds it for good
+/// (storage spec §9, finality 2): the reads this process kept when Core
+/// evaluated them as final at the cell, or else the seats' reads, kept when
+/// `is_final` — Core's evaluation of them at this cell — says they show a
+/// final value. An open or undecided cell is read from the seats every time.
+pub(crate) async fn read_cell_kept<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    is_final: impl FnOnce(&CellEvidence) -> bool,
+) -> CellEvidence {
+    if let Some(kept) = crate::sdk::final_reads::final_cell(cell) {
+        return kept;
+    }
+    let evidence = read_cell(seats, cell).await;
+    if is_final(&evidence) {
+        crate::sdk::final_reads::keep_final_cell(cell, &evidence);
+    }
+    evidence
+}
+
+/// Whether Core reads a final claim at the root cell `cell` from `evidence`.
+pub(crate) fn root_claim_final(
+    cell: &dsm::economic::register::RootCell,
+    evidence: &CellEvidence,
+) -> bool {
+    matches!(
+        dsm::economic::register::read_root_cell(cell, evidence),
+        Ok(dsm::route_chain::CellReading::Held {
+            state: dsm::route_chain::ChainState::Final,
+            ..
+        })
+    )
+}
+
 pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvidence {
     let (route, namespace, key) = (cell.route(), cell.namespace(), cell.key());
     // Each phase logs where it ends; the log's own timestamps time it. The

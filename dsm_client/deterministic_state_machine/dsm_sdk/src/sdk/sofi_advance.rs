@@ -52,7 +52,7 @@ use dsm::types::operations::Operation;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
 use crate::sdk::economic_admission_flow::validated_root_or_activate;
-use crate::sdk::route_seats::{read_cell, NodeSeats};
+use crate::sdk::route_seats::{read_cell_kept, root_claim_final, NodeSeats};
 use crate::sdk::sofi_exercise::{build_exercise, write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
 use crate::sdk::sofi_reads::{verifier_error, VerifierContext};
@@ -458,7 +458,11 @@ async fn final_root_cell(
 ) -> Result<Option<Vec<u8>>, DsmError> {
     let cells = position_cells(set, genesis, device_id, position, parent_root)?;
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cells.root().routed()).await;
+    // A claim final at K_root holds it for good: kept once read final.
+    let evidence = read_cell_kept(&seats, cells.root().routed(), |evidence| {
+        root_claim_final(cells.root(), evidence)
+    })
+    .await;
     Ok(match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {
             value,
