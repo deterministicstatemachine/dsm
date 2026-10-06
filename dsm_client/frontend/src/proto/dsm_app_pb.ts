@@ -29175,6 +29175,16 @@ export class ConnectDuelLockV1 extends Message<ConnectDuelLockV1> {
    */
   memo = "";
 
+  /**
+   * The opponent's holdings of exactly the creatures the setup fields for it,
+   * as its own wallet proved them, relayed by the application. The wallet
+   * verifies it against the opponent's validated economic root itself and
+   * locks nothing without it.
+   *
+   * @generated from field: dsm.HoldingsProofV1 opponent_holdings = 9;
+   */
+  opponentHoldings?: HoldingsProofV1;
+
   constructor(data?: PartialMessage<ConnectDuelLockV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -29191,6 +29201,7 @@ export class ConnectDuelLockV1 extends Message<ConnectDuelLockV1> {
     { no: 6, name: "opponent_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "counterpart_vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "opponent_holdings", kind: "message", T: HoldingsProofV1 },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelLockV1 {

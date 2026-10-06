@@ -4717,6 +4717,11 @@ message ConnectDuelLockV1 {
   bytes  opponent_device_id   = 6 [(dsm_fixed_len)=32];
   bytes  counterpart_vault_id = 7 [(dsm_max_len)=32];    // the other side's vault when it locked first; may be empty
   string memo                 = 8 [(dsm_max_len)=256];
+  // The opponent's holdings of exactly the creatures the setup fields for it,
+  // as its own wallet proved them, relayed by the application. The wallet
+  // verifies it against the opponent's validated economic root itself and
+  // locks nothing without it.
+  HoldingsProofV1 opponent_holdings = 9;
 }
 // Ready the wallet for the match: it verifies both players' vaults, then signs
 // its ready. With the other side's ready signature, it readies second and

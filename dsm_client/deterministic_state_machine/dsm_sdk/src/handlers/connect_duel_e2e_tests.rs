@@ -39,8 +39,9 @@ async fn game(p: &Pair) -> TestDevice {
 }
 
 /// R's offer: a duel scope staking up to 30 ERA a time and 60 ERA in all, in
-/// matches the registered `wildstate-duel` decides.
-async fn offer(r: &TestDevice, relay: &ForwardRelay) -> String {
+/// matches the registered `wildstate-duel` decides, and holdings proofs of
+/// the players' `creatures`.
+async fn offer(r: &TestDevice, relay: &ForwardRelay, creatures: &[D32]) -> String {
     let made = invoke(
         r,
         "connect.app.offer",
@@ -48,16 +49,24 @@ async fn offer(r: &TestDevice, relay: &ForwardRelay) -> String {
             display_name: "Wildstate".into(),
             endpoint: relay.endpoint.clone(),
             cert_pin: relay.pin.to_vec(),
-            scopes: vec![generated::ConnectScopeV1 {
-                kind: generated::ConnectScopeKind::Duel as i32,
-                policy_commits: Vec::new(),
-                caps: vec![generated::ConnectCapV1 {
-                    policy_commit: era().to_vec(),
-                    per_request: whole_era(30),
-                    total: whole_era(60),
-                }],
-                programs: vec![wildstate_duel::program_hash().to_vec()],
-            }],
+            scopes: vec![
+                generated::ConnectScopeV1 {
+                    kind: generated::ConnectScopeKind::Duel as i32,
+                    policy_commits: Vec::new(),
+                    caps: vec![generated::ConnectCapV1 {
+                        policy_commit: era().to_vec(),
+                        per_request: whole_era(30),
+                        total: whole_era(60),
+                    }],
+                    programs: vec![wildstate_duel::program_hash().to_vec()],
+                },
+                generated::ConnectScopeV1 {
+                    kind: generated::ConnectScopeKind::Holdings as i32,
+                    policy_commits: creatures.iter().map(|c| c.to_vec()).collect(),
+                    caps: Vec::new(),
+                    programs: Vec::new(),
+                },
+            ],
             token_anchors: Vec::new(),
         }),
     )
@@ -80,7 +89,11 @@ async fn connect(r: &TestDevice, wallet: &TestDevice, relay: &ForwardRelay, code
     let Reply::Preview(preview) = reply(&previewed) else {
         panic!("connect.preview answered another reply");
     };
-    assert_eq!(preview.scope_lines.len(), 1);
+    assert_eq!(
+        preview.scope_lines.len(),
+        2,
+        "the duel scope and the creatures' holdings"
+    );
     assert!(
         preview.scope_lines[0].starts_with(
             "Stake up to 30.00 ERA a time, 60.00 ERA in all, in battles decided by program \
@@ -194,7 +207,14 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
     let p = Pair::boot(100, 100).await;
     let r = game(&p).await;
     let relay = ForwardRelay::start().await;
-    let code = offer(&r, &relay).await;
+    let (body, _) = frozen();
+    let team_a = issue_team(&p.a, body.a(), "CRA").await;
+    let team_b = issue_team(&p.b, body.b(), "CRB").await;
+    let anchors = |team: &[wildstate_duel::CreatureStateV1]| -> Vec<D32> {
+        team.iter().map(|c| *c.anchor()).collect()
+    };
+    let creatures = [anchors(&team_a), anchors(&team_b)].concat();
+    let code = offer(&r, &relay, &creatures).await;
     let sid_a = connect(&r, &p.a, &relay, &code).await;
     let sid_b = connect(&r, &p.b, &relay, &code).await;
     let stake = whole_era(25);
@@ -209,13 +229,25 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
     });
     let key_a = key(ask(&r, &p.a, &relay, &sid_a, session_key.clone()).await);
     let key_b = key(ask(&r, &p.b, &relay, &sid_b, session_key).await);
-    let (body, _) = frozen();
-    let team_a = issue_team(&p.a, body.a(), "CRA").await;
-    let team_b = issue_team(&p.b, body.b(), "CRB").await;
     let (a_start, b_start) = (balance(&p.a, &era()), balance(&p.b, &era()));
+    // Each wallet proves it holds its team, and R relays each proof to the
+    // other wallet's lock.
+    let proof = |s: generated::ConnectAppStatusV1| match answered(&s) {
+        Answer::Holdings(proof) => proof,
+        other => panic!("the wallet answered {other:?}"),
+    };
+    let holdings = |team: Vec<D32>| {
+        Kind::Holdings(generated::ConnectHoldingsV1 {
+            policy_commits: team.iter().map(|c| c.to_vec()).collect(),
+        })
+    };
+    let proof_b = proof(ask(&r, &p.b, &relay, &sid_b, holdings(anchors(&team_b))).await);
     let setup = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &team_b));
 
-    let lock = |side: u32, opponent: &TestDevice, counterpart: Vec<u8>| {
+    let lock = |side: u32,
+                opponent: &TestDevice,
+                counterpart: Vec<u8>,
+                opponent_holdings: generated::HoldingsProofV1| {
         Kind::DuelLock(generated::ConnectDuelLockV1 {
             setup: setup.clone(),
             side,
@@ -225,9 +257,10 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
             opponent_device_id: opponent.device_id.to_vec(),
             counterpart_vault_id: counterpart,
             memo: "arena".into(),
+            opponent_holdings: Some(opponent_holdings),
         })
     };
-    let locked_a = ask(&r, &p.a, &relay, &sid_a, lock(1, &p.b, Vec::new())).await;
+    let locked_a = ask(&r, &p.a, &relay, &sid_a, lock(1, &p.b, Vec::new(), proof_b)).await;
     assert_eq!(
         fact(&locked_a),
         generated::ConnectFact::DuelLocked,
@@ -240,7 +273,15 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
         .as_slice()
         .try_into()
         .expect("the match cell");
-    let locked_b = ask(&r, &p.b, &relay, &sid_b, lock(2, &p.a, a_vault.clone())).await;
+    let proof_a = proof(ask(&r, &p.a, &relay, &sid_a, holdings(anchors(&team_a))).await);
+    let locked_b = ask(
+        &r,
+        &p.b,
+        &relay,
+        &sid_b,
+        lock(2, &p.a, a_vault.clone(), proof_a),
+    )
+    .await;
     assert_eq!(
         fact(&locked_b),
         generated::ConnectFact::DuelLocked,
