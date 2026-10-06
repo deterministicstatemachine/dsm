@@ -84,6 +84,12 @@ pub enum ChainRefusal {
     TwoIssuances,
     /// Two different successors of one record.
     Fork { parent: [u8; 32] },
+    /// The record it was issued with is not the state every creature is born
+    /// in (`CreatureStateV1::birth`): its issuer handed it over at a later
+    /// state than level 1.
+    NotBorn,
+    /// The birth state of the issued record's species cannot be built.
+    BirthState(DecodeError),
 }
 
 impl fmt::Display for ChainRefusal {
@@ -96,6 +102,11 @@ impl fmt::Display for ChainRefusal {
             Self::Fork { .. } => {
                 write!(f, "its issuer published two successors of one state")
             }
+            Self::BirthState(e) => write!(f, "its birth state cannot be built: {e}"),
+            Self::NotBorn => write!(
+                f,
+                "its issuer published it as issued at a state other than level 1's birth state"
+            ),
         }
     }
 }
@@ -128,6 +139,13 @@ pub fn latest(
     let mut tip = issued.next().ok_or(ChainRefusal::NoIssuance)?;
     if issued.next().is_some() {
         return Err(ChainRefusal::TwoIssuances);
+    }
+    // Whatever its issuer hands over is born at level 1; only play, or a
+    // trade between players, carries a creature past that.
+    let born = CreatureStateV1::birth(*anchor, tip.0.state.species())
+        .map_err(ChainRefusal::BirthState)?;
+    if tip.0.state != born {
+        return Err(ChainRefusal::NotBorn);
     }
     // Each step follows the one successor of the record before it. A chain
     // visits each record at most once: a successor names its parent by a
