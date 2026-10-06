@@ -649,3 +649,171 @@ async fn a_devices_own_lineage_starts_at_its_own_admitted_history() {
     p.b.enter();
     assert_eq!(start(), None, "B holds no frontier for A");
 }
+
+/// The request a member logs for a read of the native reserve's successor
+/// cell of `parent`.
+fn successor_read(parent: &dsm::economic::native_reserve::NativeReserveState) -> String {
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    let members = crate::sdk::storage_set::as_ccb_members(&set).expect("members");
+    let cell = dsm::economic::native_reserve::SuccessorCell::of(parent, &members)
+        .expect("the successor cell");
+    format!(
+        "GET /api/v2/cell/{}",
+        crate::util::text_id::encode_base32_crockford(cell.routed().key())
+    )
+}
+
+/// A cell whose value is final holds it for good (storage spec §9, finality
+/// 2), so a process reads it from the seats once. The device's claim at its
+/// first position and the reserve's first release are final: a second
+/// settlement read of the claim, and a second read of the release, ask no
+/// member for anything; the answers are the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_final_cell_is_read_from_its_seats_once() {
+    use crate::sdk::economic_registers::{root_cell, root_claim_settlement, RootClaimSettlement};
+    use crate::sdk::native_reserve::{genesis_state, read_successor};
+    use dsm::economic::native_reserve::SuccessorRead;
+    let d = Device::funded(0xF5).await;
+    crate::sdk::final_reads::forget_everything();
+    let head = d.core().device_head().expect("head");
+    let (genesis, devid) = (head.genesis_digest(), head.devid());
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    let cell = root_cell(
+        &set,
+        NETWORK,
+        &genesis,
+        &devid,
+        1,
+        &dsm::economic::tree::empty_economic_root(),
+    )
+    .expect("the root cell at 1");
+    let (_, claim) = client_db::economic_lineage::get_frozen_root_claim(1)
+        .expect("frozen claims")
+        .expect("the claim frozen at 1");
+    let r0 = genesis_state(NETWORK).expect("R_0");
+    let release = |read: &SuccessorRead| match read {
+        SuccessorRead::Final { release, child } => (release.envelope_bytes.clone(), child.clone()),
+        other => panic!("the reserve's first release is final: {other:?}"),
+    };
+
+    for node in &d.nodes.nodes {
+        node.forget_requests();
+    }
+    assert_eq!(
+        root_claim_settlement(&set, &cell, &claim)
+            .await
+            .expect("the cell reads"),
+        RootClaimSettlement::Final
+    );
+    let first = release(&read_successor(&set, &r0).await.expect("the reserve cell"));
+    assert!(
+        requests(&d.nodes).contains(&successor_read(&r0)),
+        "the first reads ask the seats"
+    );
+
+    for node in &d.nodes.nodes {
+        node.forget_requests();
+    }
+    assert_eq!(
+        root_claim_settlement(&set, &cell, &claim)
+            .await
+            .expect("the cell reads"),
+        RootClaimSettlement::Final
+    );
+    assert_eq!(
+        release(&read_successor(&set, &r0).await.expect("the reserve cell")),
+        first
+    );
+    assert_eq!(
+        requests(&d.nodes),
+        Vec::<String>::new(),
+        "a final cell read again asks no member"
+    );
+}
+
+/// A faucet claim reads the reserve cell it wins once to learn that it won:
+/// the completion proof is built from that reading, and the release is
+/// memoised at once, so the claim's own verification of its credit reads
+/// neither that cell again nor the head after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_faucet_claim_reads_the_cell_it_won_once() {
+    use crate::sdk::native_reserve::{genesis_state, read_successor};
+    use dsm::economic::native_reserve::SuccessorRead;
+    let d = Device::start(0xF6).await;
+    crate::sdk::final_reads::forget_everything();
+    for node in &d.nodes.nodes {
+        node.forget_requests();
+    }
+    assert_eq!(
+        crate::economic_fixtures::claim_era(&d.router).await,
+        1,
+        "the claim is economic position 1"
+    );
+    let asked = requests(&d.nodes);
+    let r0 = genesis_state(NETWORK).expect("R_0");
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    let r1 = match read_successor(&set, &r0).await.expect("the reserve cell") {
+        SuccessorRead::Final { child, .. } => child,
+        other => panic!("the claim's release is final: {other:?}"),
+    };
+    // Two readings over the route's seats — the walk that found the cell
+    // open, the read that found the release final — and the writer's
+    // pre-read at the leader.
+    let won = successor_read(&r0);
+    let seats = asked.iter().filter(|r| **r == won).count();
+    let members = d.nodes.nodes.len();
+    assert!(
+        seats <= 2 * members + 1,
+        "the cell the claim won was asked for {seats} times over {members} seats"
+    );
+    let past = successor_read(&r1);
+    assert!(
+        !asked.contains(&past),
+        "the claim read the reserve's head past its own release"
+    );
+    assert_eq!(d.era_balance(), crate::economic_fixtures::whole_era(100));
+}
+
+/// An admission publishes its own evidence, whatever older debt the device
+/// holds. Eight unrelated frozen objects, older than the claim, fill the
+/// sweep's batch; the claim's own evidence is published by its manifest's
+/// key before the sweep, so the claim is admitted in the same pass, and the
+/// older objects are still published by the sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_admission_publishes_its_own_evidence_behind_an_older_backlog() {
+    use crate::storage::client_db::frozen_publication_artifact as fpa;
+    let d = Device::start(0xF7).await;
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    let namespace = dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ;
+    let batch = crate::handlers::artifact_republish::ARTIFACT_REPUBLISH_ROWS_PER_POLL;
+    let older: Vec<String> = (0..batch)
+        .map(|n| {
+            let payload = format!("an older object owed to the set, {n}").into_bytes();
+            let key = crate::sdk::economic_registers::immutable_object_key(namespace, &payload);
+            let binding = client_db::get_connection().expect("the store");
+            let conn = match binding.lock() {
+                Ok(conn) => conn,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            fpa::freeze_artifact_with_conn(&conn, &set.id(), &key, &payload, &[0x0D; 32], "older")
+                .expect("frozen");
+            key
+        })
+        .collect();
+
+    let claimed = crate::sdk::faucet_claim_flow::claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the claim is admitted in the pass that publishes its evidence");
+    assert_eq!(claimed.economic_position, 1);
+    for key in &older {
+        let row = fpa::get_artifact(key).expect("the store").expect("the row");
+        assert_eq!(
+            row.state,
+            fpa::ArtifactState::Stored,
+            "{key} is published too"
+        );
+    }
+}

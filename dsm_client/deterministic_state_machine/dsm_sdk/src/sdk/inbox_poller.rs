@@ -306,6 +306,34 @@ pub(crate) fn cycle_done() -> tokio::sync::futures::Notified<'static> {
     CYCLE_DONE.notified()
 }
 
+/// Wait until a poller cycle after the `before`-th has completed, or `limit`
+/// passes. An arrival the inbox waiter sees starts a cycle at once, so this
+/// ends as soon as the sync that took it does.
+pub(crate) async fn cycle_after(before: u64, limit: std::time::Duration) {
+    let limit_passed = tokio::time::sleep(limit);
+    tokio::pin!(limit_passed);
+    loop {
+        let done = cycle_done();
+        tokio::pin!(done);
+        done.as_mut().enable();
+        if cycles_completed() > before {
+            return;
+        }
+        tokio::select! {
+            () = &mut done => {}
+            () = &mut limit_passed => return,
+        }
+    }
+}
+
+/// A poller cycle completes, as the poller's own does, for a test that waits
+/// on one while the harness holds the poller off.
+#[cfg(test)]
+pub(crate) fn complete_cycle_for_test() {
+    CYCLES_COMPLETED.fetch_add(1, Ordering::SeqCst);
+    CYCLE_DONE.notify_waiters();
+}
+
 /// Whether the poller has been told to stop.
 pub(crate) fn poller_stopping() -> bool {
     POLLER_STOP.load(Ordering::SeqCst)

@@ -830,6 +830,7 @@ async fn finish_locked(
     if let Some(outcome) = admission_already_finished(core, &pending)? {
         return Ok(outcome);
     }
+    let mut timing = crate::util::phase_timing::PhaseTimer::start("admission");
     let operation_digest = pending.operation_digest;
     let head = core
         .device_head()
@@ -846,7 +847,17 @@ async fn finish_locked(
     // (storage spec §5 rule 6) before the claim is registered: a root whose
     // evidence nobody holds would be registered but unwalkable. The sweep
     // carries the EXACT frozen bytes. Anything not yet `Stored` holds the
-    // admission for resume; the next pass re-runs the sweep.
+    // admission for resume; the next pass re-runs the sweep. This
+    // admission's own evidence, frozen with its manifest, goes first and by
+    // key: the sweep takes the oldest rows, and a backlog older than the
+    // admission would otherwise leave its own evidence for a later pass.
+    let manifest_key = crate::sdk::economic_registers::immutable_object_key_for_inner(
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+        &coords.admission_manifest_addr,
+    );
+    crate::handlers::artifact_republish::republish_frozen_with(&manifest_key)
+        .await
+        .map_err(|e| storage_err("publish admission evidence", e))?;
     crate::handlers::artifact_republish::republish_unpublished_artifacts()
         .await
         .map_err(|e| storage_err("publish admission evidence", e))?;
@@ -864,6 +875,7 @@ async fn finish_locked(
     }
     pending.state = EconomicAdmissionState::EvidencePublished;
     core.update_pending_admission_state(&pending)?;
+    timing.phase("evidence");
 
     // The root claim: frozen-or-sign-once BEFORE the first member write.
     let manifest_addr = coords.admission_manifest_addr;
@@ -928,6 +940,7 @@ async fn finish_locked(
         &validated.economic_root(),
     )?;
     let write = register_economic_root(set, &cell, &frozen_root).await?;
+    timing.phase("root-register");
     if !write.reached_leader() {
         return Err(storage_err(
             "root register",
@@ -939,7 +952,10 @@ async fn finish_locked(
     // The position is this device's only once its claim is FINAL at the
     // cell. Another claim holding the leader link — this trader's own SoFi
     // `C_q`, for one — takes the position, and this admission never lands.
-    match crate::sdk::economic_registers::root_claim_settlement(set, &cell, &frozen_root).await? {
+    let settled =
+        crate::sdk::economic_registers::root_claim_settlement(set, &cell, &frozen_root).await?;
+    timing.phase("root-final");
+    match settled {
         crate::sdk::economic_registers::RootClaimSettlement::Final => {}
         crate::sdk::economic_registers::RootClaimSettlement::Lost { holder } => {
             let taken_by = match holder.single_root() {

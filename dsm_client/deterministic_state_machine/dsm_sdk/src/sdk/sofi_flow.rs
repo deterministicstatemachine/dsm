@@ -49,7 +49,7 @@ use crate::sdk::sofi_advance::{
     resolve_pending_position, Advanced, Completion, FulfillRequest,
 };
 use crate::sdk::sofi_reads::{
-    local_leaves_of_validated, verifier_error, LiveSofiReads, VerifierContext,
+    local_leaves_of_validated, verifier_error, KeptReadings, LiveSofiReads, VerifierContext,
 };
 use crate::sdk::sofi_publish::{fetch_setup_for, publish, publish_produced, Published};
 use crate::sdk::sofi_relay::relay_fulfillment;
@@ -224,6 +224,15 @@ pub(crate) fn sign(message: &[u8]) -> Result<Vec<u8>, DsmError> {
 
 /// The published object must be `Stored`, read back from the members, before
 /// anything is built on it.
+/// The address `object` is stored at: its bytes under its namespace.
+pub(crate) fn publication_addr(object: &Publication<'_>) -> Result<D32, DsmError> {
+    let bytes = object.object_bytes().map_err(refuse)?;
+    Ok(dsm::storage_object::immutable_addr(
+        object.namespace(),
+        &bytes,
+    ))
+}
+
 pub(crate) fn require_stored(what: &str, published: &Published) -> Result<(), DsmError> {
     if published.stored {
         Ok(())
@@ -257,6 +266,7 @@ pub async fn create_vault(
     set: &StorageSet,
     intent: &CreateVaultIntent,
 ) -> Result<VaultCreated, DsmError> {
+    let mut timing = crate::util::phase_timing::PhaseTimer::start("sofi.createVault");
     let (genesis, device_id) = identity(core)?;
     let validated = validated_root_or_activate(core)?;
     let create_position = next_position(validated.economic_position()).map_err(refuse)?;
@@ -274,12 +284,17 @@ pub async fn create_vault(
         (VaultPolicyClass::Fee, &fee),
         (VaultPolicyClass::Release, &release),
     ];
+    // The genesis names each policy by its address, which its bytes fix: the
+    // addresses are derived here, and the policies and the genesis that
+    // names them are published together below, every one read back Stored
+    // before the admission.
     let mut addresses = BTreeMap::new();
-    for (class, bytes) in policies {
-        let publication = Publication::VaultPolicy { class, bytes };
-        let published = publish(set, &publication).await?;
-        require_stored("vault policy", &published)?;
-        addresses.insert(class.class(), published.addr);
+    for (class, bytes) in &policies {
+        let publication = Publication::VaultPolicy {
+            class: *class,
+            bytes,
+        };
+        addresses.insert(class.class(), publication_addr(&publication)?);
     }
     let address = |class: u16| {
         addresses
@@ -307,17 +322,30 @@ pub async fn create_vault(
         state,
     };
     let produced = build_vault_create(&preimage, &market).map_err(refuse)?;
-    // Indexed under its genesis locator and under each token of its pair, so
-    // any trader finds it by the tokens it trades (Amendment S16).
-    let published = publish(
-        set,
-        &Publication::VaultGenesis {
-            preimage: &preimage,
-            market: &pair,
-        },
-    )
-    .await?;
-    require_stored("vault genesis", &published)?;
+    // The genesis is indexed under its genesis locator and under each token
+    // of its pair, so any trader finds it by the tokens it trades (Amendment
+    // S16). None of the four objects waits on another's answer.
+    let mut publications: Vec<Publication<'_>> = policies
+        .iter()
+        .map(|(class, bytes)| Publication::VaultPolicy {
+            class: *class,
+            bytes,
+        })
+        .collect();
+    publications.push(Publication::VaultGenesis {
+        preimage: &preimage,
+        market: &pair,
+    });
+    let published =
+        futures::future::try_join_all(publications.iter().map(|object| publish(set, object)))
+            .await?;
+    for (object, published) in publications.iter().zip(&published) {
+        require_stored("vault object", published)?;
+        if published.addr != publication_addr(object)? {
+            return Err(refuse("a vault object was stored at another address"));
+        }
+    }
+    timing.phase("publish");
 
     let operation = produced
         .operation
@@ -348,6 +376,7 @@ pub async fn create_vault(
         Some(BuiltOn::of(&validated)),
     )
     .await?;
+    timing.phase("admission");
     let vault_id = preimage.vault_id();
     let moved: Vec<Moved> = deltas
         .iter()
@@ -553,19 +582,25 @@ pub(crate) fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
 /// The terms `state` commits — a market's three policies, or an escrow
 /// vault's terms — fetched by the addresses it names and decoded by Core,
 /// which re-addresses each first.
+///
+/// The objects are content-addressed and none names another: they are read
+/// at once, and an object once read `Stored` is kept by the process.
 async fn vault_terms(set: &StorageSet, state: &VaultStateLeaf) -> Result<VaultTerms, DsmError> {
-    let mut objects = BTreeMap::new();
-    for (class, addr) in EvidenceNeeds::policies_of(state) {
-        let bytes = crate::sdk::storage_io::read_stored_bytes(set, &addr)
-            .await?
-            .ok_or_else(|| {
-                storage(
-                    "vault policy",
-                    format!("the class {class:#06x} object the vault commits is not Stored"),
-                )
-            })?;
-        objects.insert(addr, bytes);
-    }
+    let read = futures::future::try_join_all(EvidenceNeeds::policies_of(state).into_iter().map(
+        |(class, addr)| async move {
+            let bytes = crate::sdk::storage_io::read_stored_bytes_kept(set, &addr)
+                .await?
+                .ok_or_else(|| {
+                    storage(
+                        "vault policy",
+                        format!("the class {class:#06x} object the vault commits is not Stored"),
+                    )
+                })?;
+            Ok::<_, DsmError>((addr, bytes))
+        },
+    ))
+    .await?;
+    let objects: BTreeMap<_, _> = read.into_iter().collect();
     let evidence = Evidence::acquired(
         objects,
         BTreeMap::new(),
@@ -615,6 +650,25 @@ fn chains_at_once(
                 .collect()
         })
     })
+}
+
+/// Each of `vault_ids` at its walked head, in the order given: the chains
+/// walked at once ([`chains_at_once`]), then each head's leaves and terms
+/// taken at once. A vault's walk and head need nothing another vault's find
+/// first, and nothing here writes to storage.
+async fn heads_at_once(
+    set: &StorageSet,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_ids: &[D32],
+) -> Vec<Result<(VaultAtHead, VaultChain), DsmError>> {
+    let chains = chains_at_once(verifier, vault_ids);
+    futures::future::join_all(
+        vault_ids
+            .iter()
+            .zip(chains)
+            .map(|(vault_id, chain)| async move { head_of(set, verifier, vault_id, chain?).await }),
+    )
+    .await
 }
 
 /// `vault_id` at the head of its walked `chain`.
@@ -689,11 +743,23 @@ impl Standing {
         set: &'a StorageSet,
         accepted: &AcceptedGeneses,
     ) -> Result<VerifierContext<'a>, DsmError> {
-        VerifierContext::sharing(
+        self.context_kept(set, accepted, &KeptReadings::default())
+    }
+
+    /// [`Self::context`], keeping what it reads in `kept`, which the other
+    /// contexts of the same operation share.
+    pub(crate) fn context_kept<'a>(
+        &'a self,
+        set: &'a StorageSet,
+        accepted: &AcceptedGeneses,
+        kept: &KeptReadings,
+    ) -> Result<VerifierContext<'a>, DsmError> {
+        VerifierContext::sharing_kept(
             set,
             Some((self.genesis, self.device_id)),
             Some(&self.admitted),
             accepted,
+            kept,
         )
     }
 }
@@ -1068,11 +1134,15 @@ pub async fn find_route(
     let firsts: Vec<D32> = firsts.iter().map(|v| v.vault_id).collect();
     let seconds: Vec<D32> = seconds.iter().map(|v| v.vault_id).collect();
     let mut heads: BTreeMap<D32, VaultAtHead> = BTreeMap::new();
+    let mut unique: Vec<D32> = Vec::with_capacity(walked.len());
     for vault_id in &walked {
-        if heads.contains_key(vault_id) {
-            continue;
+        if !unique.contains(vault_id) {
+            unique.push(*vault_id);
         }
-        match vault_at_head(set, &verifier, vault_id).await {
+    }
+    let at_heads = heads_at_once(set, &verifier, &unique).await;
+    for (vault_id, at_head) in unique.iter().zip(at_heads) {
+        match at_head {
             Ok((head, ..)) => {
                 if head.state.status == VAULT_STATUS_ACTIVE {
                     heads.insert(*vault_id, head);
@@ -1289,12 +1359,18 @@ async fn walk_for_attempt(
         }
     };
     let mut attempt = first;
+    // The walk read the key it stopped on: that reading is what holds the key
+    // as this attempt knows it, and the key is not read again to learn it.
+    let mut in_hand = walked.unresolved_reading().cloned();
     let mut advanced = 0;
     while advanced <= ATTEMPT_ADVANCE {
-        let read = match verifier
-            .read_attempt_cell(vault_id, parent_root, attempt)
-            .map_err(verifier_error)?
-        {
+        let held = match in_hand.take() {
+            Some(read) => Ok(read),
+            None => verifier
+                .read_attempt_cell(vault_id, parent_root, attempt)
+                .map_err(verifier_error)?,
+        };
+        let read = match held {
             Ok(read) => read,
             Err(missing) => {
                 return Err(storage(
@@ -1597,15 +1673,18 @@ async fn settle(
 
 /// Stages 3 to 10 of §31 for a draft: validate over acquired evidence, sign
 /// and publish, fulfill through the Core transition, complete, resolve.
+///
+/// `ctx` is the context the caller drafted over, built from the same
+/// standing: what it read and kept is not read again here.
 pub(crate) async fn exercise_draft(
     core: &CoreSDK,
     set: &StorageSet,
-    standing: &Standing,
+    ctx: &VerifierContext<'_>,
     draft: UncheckedDraft,
     accepted: &AcceptedGeneses,
 ) -> Result<PositionOutcome, DsmError> {
+    let mut timing = crate::util::phase_timing::PhaseTimer::start("sofi.exercise");
     // Stage 3.
-    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let evidence = match verifier
         .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
@@ -1621,6 +1700,7 @@ pub(crate) async fn exercise_draft(
     };
     let checked = check_draft(draft, &evidence).map_err(refuse)?;
     let precommit_signature = sign(&checked.precommit_signing_digest())?;
+    timing.phase("evidence");
 
     // Stage 6: each leg's live attempt, from the walk at its parent.
     let mut chains = BTreeMap::new();
@@ -1641,11 +1721,13 @@ pub(crate) async fn exercise_draft(
     let produced = build_fulfillment(&checked, precommit_signature.clone(), &attempts, att_a)
         .map_err(refuse)?;
     let fulfillment_signature = sign(produced.signs.bytes())?;
+    timing.phase("attempts");
 
     // Stages 4 and 5.
     for published in publish_produced(set, &produced, &fulfillment_signature).await? {
         require_stored("route object", &published)?;
     }
+    timing.phase("publish");
     let fulfillment = produced
         .publish
         .iter()
@@ -1676,7 +1758,10 @@ pub(crate) async fn exercise_draft(
         },
     )
     .await?;
-    complete_and_settle(core, set, accepted).await
+    timing.phase("fulfill");
+    let settled = complete_and_settle(core, set, accepted).await;
+    timing.phase("settle");
+    settled
 }
 
 /// Stages 7 to 10 for the pending position: the install and the exercise
@@ -1739,12 +1824,13 @@ async fn check_route(
     standing: &Standing,
     intent: &TradeIntent,
     accepted: &AcceptedGeneses,
+    kept: &KeptReadings,
 ) -> Result<(), DsmError> {
-    let ctx = standing.context(set, accepted)?;
+    let ctx = standing.context_kept(set, accepted, kept)?;
     let verifier = ctx.verifier();
     let mut vaults = Vec::with_capacity(intent.vault_ids.len());
-    for vault_id in &intent.vault_ids {
-        vaults.push(vault_at_head(set, &verifier, vault_id).await?.0);
+    for at_head in heads_at_once(set, &verifier, &intent.vault_ids).await {
+        vaults.push(at_head?.0);
     }
     let refs: Vec<&VaultAtHead> = vaults.iter().collect();
     let (token, amount) = planned_out(&plan(
@@ -1793,7 +1879,11 @@ pub async fn trade(
 ) -> Result<PositionOutcome, DsmError> {
     // One memo for the whole operation: the check, the setups, the plan at
     // the heads and the settle each read a vault's genesis from it.
+    let mut timing = crate::util::phase_timing::PhaseTimer::start("sofi.trade");
     let accepted = &AcceptedGeneses::default();
+    // And one store of what its contexts read and keep: the check's, the
+    // walk at the heads' and the draft's.
+    let kept = &KeptReadings::default();
     {
         let standing = standing(core)?;
         let unset = intent
@@ -1801,40 +1891,60 @@ pub async fn trade(
             .iter()
             .any(|vault_id| standing.local.relationship(vault_id).is_none());
         if unset {
-            check_route(core, set, &standing, intent, accepted).await?;
+            check_route(core, set, &standing, intent, accepted, kept).await?;
         }
     }
+    timing.phase("check");
     set_up_with(core, set, &intent.vault_ids, accepted).await?;
+    timing.phase("setup");
     // Each stage logs where it ends; the log's own timestamps time it.
     log::info!(
         "[sofi] trade: set up with each of {} vaults",
         intent.vault_ids.len()
     );
     let standing = standing(core)?;
-    let ctx = standing.context(set, accepted)?;
-    let verifier = ctx.verifier();
-    let mut heads = Vec::with_capacity(intent.vault_ids.len());
+    let verifying = standing.context_kept(set, accepted, kept)?;
+    let verifier = verifying.verifier();
+    // Each vault walked past its withheld pairs in turn: two vaults' walks
+    // can meet one exercise of a split route and would each register its
+    // pair. Each head's leaves and terms are then taken at once.
+    let mut chains = Vec::with_capacity(intent.vault_ids.len());
     for (vault_id, chain) in intent
         .vault_ids
         .iter()
         .zip(chains_at_once(&verifier, &intent.vault_ids))
     {
-        let chain = chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?;
-        heads.push(head_of(set, &verifier, vault_id, chain).await?.0);
+        chains.push(chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?);
+    }
+    let verifier_ref = &verifier;
+    let mut heads = Vec::with_capacity(intent.vault_ids.len());
+    for at_head in
+        futures::future::join_all(intent.vault_ids.iter().zip(chains).map(
+            |(vault_id, chain)| async move { head_of(set, verifier_ref, vault_id, chain).await },
+        ))
+        .await
+    {
+        heads.push(at_head?.0);
     }
     log::info!("[sofi] trade: walked {} vault heads", heads.len());
+    timing.phase("heads");
     // A chain, or a split across two vaults of the pair (Amendment S19),
     // planned again at the heads walked now.
     let refs: Vec<&VaultAtHead> = heads.iter().collect();
     let planned = plan(&refs, intent.token_in_policy_commit, intent.amount_in)?;
     let (token, amount) = planned_out(&planned)?;
     received(core, intent, &token, amount)?;
+    // Each vault's setup is found by its own index scan: all at once, in
+    // hop order.
+    let setup_refs =
+        futures::future::try_join_all(heads.iter().map(|vault| {
+            own_setup_ref(set, &standing.genesis, &standing.device_id, &vault.vault_id)
+        }))
+        .await?;
     let mut hops = Vec::new();
     let mut cores = Vec::new();
     let mut vaults = Vec::new();
-    for (index, (vault, p)) in heads.iter().zip(&planned).enumerate() {
-        let setup_ref =
-            own_setup_ref(set, &standing.genesis, &standing.device_id, &vault.vault_id).await?;
+    for (index, ((vault, p), setup_ref)) in heads.iter().zip(&planned).zip(setup_refs).enumerate() {
         let base = relationship_base(&standing, &vault.vault_id)?;
         let (hop, post) = price_hop(vault, p.token_in, p.amount_in, setup_ref, index)?;
         cores.push(vault_core(&standing, vault, &post, base)?);
@@ -1850,7 +1960,8 @@ pub async fn trade(
     let ctx = context(&standing, set, &public_key, trader)?;
     let draft = draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)?;
     log::info!("[sofi] trade: drafted {} hops", planned.len());
-    exercise_draft(core, set, &standing, draft, accepted).await
+    timing.phase("draft");
+    exercise_draft(core, set, &verifying, draft, accepted).await
 }
 
 // ── §32 Closing a vault ────────────────────────────────────────────────────
@@ -1885,8 +1996,8 @@ pub async fn close(
     }
     set_up_with(core, set, &[intent.vault_id], accepted).await?;
     let standing = standing(core)?;
-    let ctx = standing.context(set, accepted)?;
-    let verifier = ctx.verifier();
+    let verifying = standing.context(set, accepted)?;
+    let verifier = verifying.verifier();
     let chain = chain_past_withheld_pairs(
         set,
         &verifier,
@@ -1935,7 +2046,7 @@ pub async fn close(
         &standing.local,
     )
     .map_err(refuse)?;
-    exercise_draft(core, set, &standing, draft, accepted).await
+    exercise_draft(core, set, &verifying, draft, accepted).await
 }
 
 // ── §33 Relaying ───────────────────────────────────────────────────────────

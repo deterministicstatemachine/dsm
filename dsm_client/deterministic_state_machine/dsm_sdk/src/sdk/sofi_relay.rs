@@ -32,7 +32,8 @@ use dsm::sofi::wire::{TraderFulfillmentBody, TraderPrecommitBody};
 use dsm::types::error::DsmError;
 
 use crate::sdk::route_seats::{
-    read_cell, write_recorded, write_recorded_position, NodeSeats, WriteReport,
+    read_cell, read_cell_kept, root_claim_final, write_recorded, write_recorded_position,
+    NodeSeats, WriteReport,
 };
 use crate::sdk::sofi_exercise::{attempt_cell, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit};
@@ -98,7 +99,11 @@ async fn carry_pair(
     .map_err(refuse)?;
     let derived = dsm::sofi::derive::resolution_claim(&precommit.body, &fulfillment.body);
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cells.root().routed()).await;
+    // A claim final at K_root holds it for good: kept once read final.
+    let evidence = read_cell_kept(&seats, cells.root().routed(), |evidence| {
+        root_claim_final(cells.root(), evidence)
+    })
+    .await;
     let claim = match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {
             object: RegisteredEconomicClaim::ConditionalSofi(held),
@@ -192,28 +197,34 @@ async fn carry_exercise(
     cells: Vec<(D32, D32, u64, AttemptCell)>,
     bytes: &[u8],
 ) -> Result<Vec<LegWrite>, DsmError> {
-    let mut legs = Vec::new();
-    for (vault_id, parent_root, attempt, cell) in cells {
-        // The one exercise names every leg's key, so the same bytes belong at
-        // each of them; Core counts only an exercise naming the key it sits
-        // at, so carrying it where it names nothing would carry nothing.
-        if dsm::sofi::exercise::exercise_names_key(bytes, &vault_id, &parent_root, attempt)
-            .is_none()
+    // The one exercise names every leg's key, so the same bytes belong at
+    // each of them; Core counts only an exercise naming the key it sits at,
+    // so carrying it where it names nothing would carry nothing. Every key
+    // is checked before anything is carried.
+    for (vault_id, parent_root, attempt, _) in &cells {
+        if dsm::sofi::exercise::exercise_names_key(bytes, vault_id, parent_root, *attempt).is_none()
         {
             return Err(refuse(
                 "the exercise found does not name every key its F does",
             ));
         }
-        let write = write_recorded(set, cell.routed(), bytes).await?;
-        legs.push(LegWrite {
-            vault_id,
-            parent_root,
-            attempt,
-            key: *cell.routed().key(),
-            reached_leader: write.reached_leader(),
-        });
     }
-    Ok(legs)
+    // Each leg's key is its own vault's cell on its own route: the legs are
+    // carried at once, as `write_exercise` writes them, and reported in the
+    // order `F` names them.
+    futures::future::try_join_all(cells.into_iter().map(
+        |(vault_id, parent_root, attempt, cell)| async move {
+            let write = write_recorded(set, cell.routed(), bytes).await?;
+            Ok::<_, DsmError>(LegWrite {
+                vault_id,
+                parent_root,
+                attempt,
+                key: *cell.routed().key(),
+                reached_leader: write.reached_leader(),
+            })
+        },
+    ))
+    .await
 }
 
 /// §33: complete a fulfillment whose hops are not all final.
@@ -272,7 +283,19 @@ pub async fn relay_exercise(
 ) -> Result<Relayed, DsmError> {
     let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cell.routed()).await;
+    // An exercise final at the key holds it for good: kept once read final.
+    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+        attempt_resolution(&cell, evidence).is_ok_and(|read| {
+            matches!(
+                read.fact(),
+                dsm::route_chain::CellFact::Held {
+                    state: dsm::route_chain::ChainState::Final,
+                    ..
+                }
+            )
+        })
+    })
+    .await;
     let read = attempt_resolution(&cell, &evidence)
         .map_err(|undecided| refuse(format!("the key is not decided yet: {undecided:?}")))?;
     let (Some(exercise), Some(bytes)) = (read.exercise(), read.value()) else {
