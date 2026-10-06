@@ -2757,6 +2757,9 @@ message Envelope {
     EscrowVaultsResponse              escrow_vaults_response           = 133;
     // Reply to `token.check`.
     TokenCheckResponse                token_check_response             = 134;
+    // Replies to `authored.publish` and `authored.read`.
+    AuthoredPublishedResponse         authored_published_response      = 135;
+    AuthoredObjectsResponse           authored_objects_response        = 136;
 
 
     // Reply to `token.forget`.
@@ -4748,6 +4751,53 @@ message ConnectDuelSettleV1 {
 // once the match cell's outcome is final on a branch that pays it.
 message ConnectDuelCollectV1 {
   repeated bytes vault_ids = 1 [(dsm_fixed_len)=32]; // 1..2
+}
+
+// ---- Authored objects: content-addressed immutable objects an account
+// publishes under a topic of its own, each signed by its author's AK. Any
+// reader finds an author's objects on a topic by one locator and checks each
+// from its own bytes: the AK and AttA derive the author's device id, and the
+// AK signed the body. Nothing more is decided here: what the payloads mean
+// is the reader's. ----
+
+// The signed part of an authored object.
+message AuthoredObjectBodyV1 {
+  bytes author_genesis   = 1 [(dsm_fixed_len)=32];
+  bytes author_device_id = 2 [(dsm_fixed_len)=32]; // H(DSM/devid ‖ AK ‖ AttA)
+  bytes author_ak        = 3 [(dsm_max_len)=64];
+  bytes author_att_a     = 4 [(dsm_fixed_len)=32];
+  bytes topic            = 5 [(dsm_fixed_len)=32]; // the author's own name for what the objects are about
+  bytes payload          = 6 [(dsm_max_len)=16384];
+}
+// An authored object as storage holds it: the body and the author's
+// signature over H(DSM/object/authored-statement/v1 ‖ body).
+message AuthoredObjectV1 {
+  bytes body      = 1 [(dsm_max_len)=20480]; // AuthoredObjectBodyV1
+  bytes signature = 2 [(dsm_max_len)=65535];
+}
+// authored.publish: this account publishes `payload` under `topic`.
+message AuthoredPublishRequestV1 {
+  bytes topic   = 1 [(dsm_fixed_len)=32];
+  bytes payload = 2 [(dsm_max_len)=16384];
+}
+message AuthoredPublishedResponse {
+  bytes address = 1 [(dsm_fixed_len)=32]; // the object's immutable address
+  bytes locator = 2 [(dsm_fixed_len)=32]; // H(DSM/object/authored-locator/v1 ‖ author device id ‖ topic)
+  bool  stored  = 3;                      // Stored, read back from the members
+}
+// authored.read: every object `author_device_id` published under `topic`.
+message AuthoredReadRequestV1 {
+  bytes author_device_id = 1 [(dsm_fixed_len)=32];
+  bytes topic            = 2 [(dsm_fixed_len)=32];
+}
+message AuthoredObjectReadV1 {
+  bytes address        = 1 [(dsm_fixed_len)=32];
+  bytes author_genesis = 2 [(dsm_fixed_len)=32];
+  bytes payload        = 3 [(dsm_max_len)=16384];
+}
+message AuthoredObjectsResponse {
+  repeated AuthoredObjectReadV1 objects  = 1; // in append order, each verified from its own bytes
+  bool                          complete = 2; // every candidate under the locator was read
 }
 
 // session_id = H(DSM/connect/session ‖ offer_digest ‖ wallet device id).

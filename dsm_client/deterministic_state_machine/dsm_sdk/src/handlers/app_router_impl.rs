@@ -2568,6 +2568,8 @@ impl AppRouter for AppRouterImpl {
             "bilateral.pending_list" => self.handle_bilateral_query(q).await,
             // Storage routes
             "storage.status" | "storage.sync" => self.handle_storage_query(q).await,
+            // Objects an account published under a topic of its own.
+            "authored.read" => self.handle_authored_query(q).await,
             // Diagnostics routes
             // Token query routes
             "tokens.getPolicy"
@@ -2630,6 +2632,8 @@ impl AppRouter for AppRouterImpl {
             // Bilateral reconcile
             // Faucet
             "faucet.claim" => self.handle_faucet_invoke(i).await,
+            // Publish an object of this account's under a topic of its own.
+            "authored.publish" => self.handle_authored_invoke(i).await,
             // Session invoke routes
             "session.lock"
             | "session.unlock"
