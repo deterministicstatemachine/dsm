@@ -448,7 +448,26 @@ pub fn build_escrow_vault_create(
     preimage: &VaultGenesisPreimage,
     terms: &dsm::sofi::wire::EscrowTerms,
 ) -> Result<Produced, BuildError> {
-    let addr = dsm::sofi::escrow::terms_address(terms);
+    escrow_vault_create(preimage, &terms.encode())
+}
+
+/// `EscrowVaultCreate` of a computed escrow vault (SoFi Amendment S22): the
+/// operation carries the exact `ComputedEscrowTerms` bytes in place of
+/// `EscrowTerms`; the debit, the record and the write set are §19.9's.
+pub fn build_computed_vault_create(
+    preimage: &VaultGenesisPreimage,
+    terms: &dsm::sofi::wire::ComputedEscrowTerms,
+) -> Result<Produced, BuildError> {
+    escrow_vault_create(preimage, &terms.encode())
+}
+
+/// The creation of an escrow vault of either kind whose three slots name
+/// `terms_bytes` (the class of the bytes is the kind).
+fn escrow_vault_create(
+    preimage: &VaultGenesisPreimage,
+    terms_bytes: &[u8],
+) -> Result<Produced, BuildError> {
+    let addr = dsm::sofi::escrow::terms_address_of(terms_bytes);
     let state = &preimage.state;
     if state.market_policy != addr || state.fee_policy != addr || state.release_policy != addr {
         return Err(BuildError::Wire(SofiWireError::EscrowTermsNotCommitted));
@@ -465,7 +484,7 @@ pub fn build_escrow_vault_create(
     let operation = Operation::EscrowVaultCreate {
         genesis_preimage: preimage.encode()?,
         creation: creation.encode(),
-        terms: terms.encode(),
+        terms: terms_bytes.to_vec(),
         signature: Vec::new(),
     };
     Ok(Produced {
