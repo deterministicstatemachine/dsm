@@ -22,7 +22,7 @@ use generated::connect_reply_v1::Reply;
 use prost::Message;
 use serial_test::serial;
 
-use super::computed_escrow_e2e_tests::{frozen, salt, setup_with_keys};
+use super::computed_escrow_e2e_tests::{frozen, issue_team, salt, setup_with_keys};
 use super::connect_e2e_tests::{
     args_raw, carried_out, fact, reply, request, status, wallet_log, ForwardRelay,
 };
@@ -209,7 +209,11 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
     });
     let key_a = key(ask(&r, &p.a, &relay, &sid_a, session_key.clone()).await);
     let key_b = key(ask(&r, &p.b, &relay, &sid_b, session_key).await);
-    let setup = setup_with_keys(&p.a, &p.b, nonce, &key_a, &key_b);
+    let (body, _) = frozen();
+    let team_a = issue_team(&p.a, body.a(), "CRA").await;
+    let team_b = issue_team(&p.b, body.b(), "CRB").await;
+    let (a_start, b_start) = (balance(&p.a, &era()), balance(&p.b, &era()));
+    let setup = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &team_b));
 
     let lock = |side: u32, opponent: &TestDevice, counterpart: Vec<u8>| {
         Kind::DuelLock(generated::ConnectDuelLockV1 {
@@ -391,6 +395,6 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
         "{}",
         collected.fact_detail
     );
-    assert_eq!(balance(&p.a, &era()), whole_era(100) + stake);
-    assert_eq!(balance(&p.b, &era()), whole_era(100) - stake);
+    assert_eq!(balance(&p.a, &era()), a_start + stake);
+    assert_eq!(balance(&p.b, &era()), b_start - stake);
 }

@@ -17,7 +17,8 @@ use dsm::sofi::wire::{EntryKind, MatchSide, StartKind, TranscriptEntry};
 use dsm::types::error::DsmError;
 use serial_test::serial;
 use wildstate_duel::vectors::DuelVectorSetV1;
-use wildstate_duel::{DuelMatchV1, DuelSetupV1, DuelSide, DuelTurnV1};
+use wildstate_duel::creatures::CreatureRecordV1;
+use wildstate_duel::{CreatureStateV1, DuelMatchV1, DuelSetupV1, DuelSide, DuelTurnV1};
 
 use super::node_e2e_tests::{balance, era, pending_position};
 use crate::economic_fixtures::{whole_era, NETWORK};
@@ -49,25 +50,86 @@ fn session_key(d: &TestDevice, nonce: &D32) -> Vec<u8> {
     computed_flow::session_public_key(nonce).expect("a session key")
 }
 
-/// The setup of a match between `a` and `b` on the frozen teams, each side
-/// naming its wallet's identity and its session key, and the tiebreak seed
-/// both keys and the nonce derive.
+/// `d` issues the creatures of its side of the frozen match, `of`, as its
+/// own: for each, a token of supply one `d` creates (`prefix` names its
+/// tickers) and holds, and the frozen state under that anchor, published by
+/// `d` as the record the creature was issued with. What a wallet locking a
+/// stake reads its teams against.
+pub(super) async fn issue_team(
+    d: &TestDevice,
+    of: &DuelSide,
+    prefix: &str,
+) -> Vec<CreatureStateV1> {
+    use crate::bridge::{AppInvoke, AppRouter};
+    use prost::Message;
+    d.enter();
+    let mut team = Vec::new();
+    for (i, frozen) in of.team.iter().enumerate() {
+        let request = crate::handlers::token_create_tests::request(&format!("{prefix}{i}"), 0, 1);
+        let result = d
+            .router()
+            .invoke(AppInvoke {
+                method: "token.create".to_string(),
+                args: dsm::types::proto::ArgPack {
+                    schema_hash: None,
+                    codec: dsm::types::proto::Codec::Proto as i32,
+                    body: request.encode_to_vec(),
+                }
+                .encode_to_vec(),
+            })
+            .await;
+        assert!(result.success, "token.create: {:?}", result.error_message);
+        let anchor: D32 =
+            match crate::handlers::response_helpers::decode_local_envelope(&result.data)
+                .expect("a local answer")
+                .payload
+            {
+                Some(dsm::types::proto::envelope::Payload::TokenCreateResponse(r)) => {
+                    r.policy_anchor.as_slice().try_into().expect("an anchor")
+                }
+                other => panic!("token.create answered {other:?}"),
+            };
+        let state = CreatureStateV1::new(
+            anchor,
+            frozen.species(),
+            frozen.xp(),
+            frozen.hp(),
+            frozen.charges().to_vec(),
+        )
+        .expect("the frozen state under the new anchor");
+        let record = CreatureRecordV1 {
+            parent: None,
+            state: state.clone(),
+        };
+        let published = crate::sdk::authored_objects::publish(&set(), &anchor, &record.encode())
+            .await
+            .expect("the record the creature was issued with");
+        assert!(published.stored, "the record is Stored");
+        team.push(state);
+    }
+    team
+}
+
+/// The setup of a match between `a` and `b` fielding `team_a` and `team_b`
+/// in the frozen match, each side naming its wallet's identity and its
+/// session key, and the tiebreak seed both keys and the nonce derive.
 pub(super) fn setup_with_keys(
     a: &TestDevice,
     b: &TestDevice,
     nonce: D32,
-    key_a: &[u8],
-    key_b: &[u8],
+    (key_a, team_a): (&[u8], &[CreatureStateV1]),
+    (key_b, team_b): (&[u8], &[CreatureStateV1]),
 ) -> Vec<u8> {
     let (body, _) = frozen();
-    let side = |of: &DuelSide, d: &TestDevice, key: &[u8]| DuelSide {
+    let side = |of: &DuelSide, d: &TestDevice, key: &[u8], team: &[CreatureStateV1]| DuelSide {
         genesis: d.genesis,
         device_id: d.device_id,
         session_public_key: key.to_vec(),
+        team: team.to_vec(),
         ..of.clone()
     };
-    let side_a = side(body.a(), a, key_a);
-    let side_b = side(body.b(), b, key_b);
+    let side_a = side(body.a(), a, key_a, team_a);
+    let side_b = side(body.b(), b, key_b, team_b);
     let seed = wildstate_duel::tiebreak_seed(&nonce, key_a, key_b);
     let body = DuelMatchV1::new(nonce, body.turn_cap(), seed, side_a, side_b).expect("a match");
     DuelSetupV1 {
@@ -77,9 +139,22 @@ pub(super) fn setup_with_keys(
     .encode()
 }
 
-fn setup(p: &Pair, nonce: D32) -> Vec<u8> {
+/// Both players' frozen teams, each issued by its own player's wallet.
+async fn teams(p: &Pair) -> (Vec<CreatureStateV1>, Vec<CreatureStateV1>) {
+    let (body, _) = frozen();
+    (
+        issue_team(&p.a, body.a(), "CRA").await,
+        issue_team(&p.b, body.b(), "CRB").await,
+    )
+}
+
+fn setup(
+    p: &Pair,
+    nonce: D32,
+    (team_a, team_b): &(Vec<CreatureStateV1>, Vec<CreatureStateV1>),
+) -> Vec<u8> {
     let (key_a, key_b) = (session_key(&p.a, &nonce), session_key(&p.b, &nonce));
-    setup_with_keys(&p.a, &p.b, nonce, &key_a, &key_b)
+    setup_with_keys(&p.a, &p.b, nonce, (&key_a, team_a), (&key_b, team_b))
 }
 
 async fn lock(
@@ -121,14 +196,19 @@ fn view(d: &TestDevice, cell: &D32) -> MatchView {
 /// One match both players locked a stake in.
 struct Match {
     stake: u64,
+    /// Each player's ERA once its creatures were issued, before its lock.
+    a_start: u64,
+    b_start: u64,
     cell: D32,
     a_vault: D32,
     b_vault: D32,
 }
 
-/// A locks 25 ERA, then B locks 25 ERA against A's vault.
+/// Each player issues its team; A locks 25 ERA, then B locks 25 ERA against
+/// A's vault.
 async fn open_match(p: &Pair, nonce: D32) -> (Match, Vec<u8>) {
-    let setup = setup(p, nonce);
+    let setup = setup(p, nonce, &teams(p).await);
+    let (a_start, b_start) = (balance(&p.a, &era()), balance(&p.b, &era()));
     let stake = whole_era(25);
     let a = lock(&p.a, &p.b, &setup, MatchSide::A, stake, None)
         .await
@@ -142,6 +222,8 @@ async fn open_match(p: &Pair, nonce: D32) -> (Match, Vec<u8>) {
     (
         Match {
             stake,
+            a_start,
+            b_start,
             cell: a.match_cell,
             a_vault: a.vault_id,
             b_vault: b.vault_id,
@@ -320,8 +402,8 @@ async fn refused_collect(d: &TestDevice, vault: &D32, reason: &str) {
 async fn the_winner_by_computation_takes_both_stakes() {
     let p = Pair::boot(100, 100).await;
     let (m, setup) = open_match(&p, [0x31; 32]).await;
-    assert_eq!(balance(&p.a, &era()), whole_era(100) - m.stake);
-    assert_eq!(balance(&p.b, &era()), whole_era(100) - m.stake);
+    assert_eq!(balance(&p.a, &era()), m.a_start - m.stake);
+    assert_eq!(balance(&p.b, &era()), m.b_start - m.stake);
 
     // Before a Start, no wallet signs an entry.
     let mut relay = Relay::new(m.cell);
@@ -399,8 +481,8 @@ async fn the_winner_by_computation_takes_both_stakes() {
     assert_eq!(pending_position(&p.b), None);
     collect(&p.a, &m.a_vault).await;
     collect(&p.a, &m.b_vault).await;
-    assert_eq!(balance(&p.a, &era()), whole_era(100) + m.stake);
-    assert_eq!(balance(&p.b, &era()), whole_era(100) - m.stake);
+    assert_eq!(balance(&p.a, &era()), m.a_start + m.stake);
+    assert_eq!(balance(&p.b, &era()), m.b_start - m.stake);
     refused_collect(&p.a, &m.a_vault, "already released").await;
 }
 
@@ -553,8 +635,8 @@ async fn tampered_entries_are_refused_and_an_equivocation_settles_for_the_honest
     refused_collect(&p.a, &m.a_vault, "pays another identity").await;
     collect(&p.b, &m.a_vault).await;
     collect(&p.b, &m.b_vault).await;
-    assert_eq!(balance(&p.b, &era()), whole_era(100) + m.stake);
-    assert_eq!(balance(&p.a, &era()), whole_era(100) - m.stake);
+    assert_eq!(balance(&p.b, &era()), m.b_start + m.stake);
+    assert_eq!(balance(&p.a, &era()), m.a_start - m.stake);
 }
 
 /// Withdraw before a Start voids the match: each stake goes back to its own
@@ -563,7 +645,8 @@ async fn tampered_entries_are_refused_and_an_equivocation_settles_for_the_honest
 #[serial]
 async fn a_withdraw_before_the_start_voids_the_match_and_refunds_both() {
     let p = Pair::boot(100, 100).await;
-    let setup = setup(&p, [0x33; 32]);
+    let setup = setup(&p, [0x33; 32], &teams(&p).await);
+    let (a_start, b_start) = (balance(&p.a, &era()), balance(&p.b, &era()));
     let stake = whole_era(25);
     let a = lock(&p.a, &p.b, &setup, MatchSide::A, stake, None)
         .await
@@ -579,6 +662,8 @@ async fn a_withdraw_before_the_start_voids_the_match_and_refunds_both() {
         .expect("B's lock");
     let m = Match {
         stake,
+        a_start,
+        b_start,
         cell: a.match_cell,
         a_vault: a.vault_id,
         b_vault: b.vault_id,
@@ -612,6 +697,91 @@ async fn a_withdraw_before_the_start_voids_the_match_and_refunds_both() {
     refused_collect(&p.a, &m.b_vault, "pays another identity").await;
     collect(&p.a, &m.a_vault).await;
     collect(&p.b, &m.b_vault).await;
-    assert_eq!(balance(&p.a, &era()), whole_era(100));
-    assert_eq!(balance(&p.b, &era()), whole_era(100));
+    assert_eq!(balance(&p.a, &era()), m.a_start);
+    assert_eq!(balance(&p.b, &era()), m.b_start);
+}
+
+/// A wallet locks a stake only in a setup whose teams are the creatures as
+/// their issuers last published them, and only fielding creatures it holds:
+/// a modded state, a creature it does not hold, a creature of a token that is
+/// not of supply one and a state never published are each refused, and no
+/// stake moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_modded_or_unheld_creature_is_refused_at_lock() {
+    let p = Pair::boot(100, 100).await;
+    let (team_a, team_b) = teams(&p).await;
+    let nonce = [0x34; 32];
+    let (key_a, key_b) = (session_key(&p.a, &nonce), session_key(&p.b, &nonce));
+    let a_start = balance(&p.a, &era());
+    let stake = whole_era(25);
+    let refused = |setup: Vec<u8>, reason: &'static str| {
+        let p = &p;
+        async move {
+            match lock(&p.a, &p.b, &setup, MatchSide::A, stake, None).await {
+                Err(e) => assert!(e.to_string().contains(reason), "{e}"),
+                Ok(locked) => panic!("A locked a stake in a refused setup: {locked:?}"),
+            }
+        }
+    };
+
+    // One more XP than A's creature was issued with.
+    let c = &team_a[0];
+    let modded = CreatureStateV1::new(
+        *c.anchor(),
+        c.species(),
+        c.xp() + 1,
+        c.hp(),
+        c.charges().to_vec(),
+    )
+    .expect("a modded state");
+    refused(
+        setup_with_keys(&p.a, &p.b, nonce, (&key_a, &[modded]), (&key_b, &team_b)),
+        "never published as its latest",
+    )
+    .await;
+    // The opponent's creature modded: A's wallet checks both teams.
+    let theirs = &team_b[0];
+    let modded_b = CreatureStateV1::new(
+        *theirs.anchor(),
+        theirs.species(),
+        theirs.xp(),
+        theirs.hp() - 1,
+        theirs.charges().to_vec(),
+    )
+    .expect("a modded state");
+    refused(
+        setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &[modded_b])),
+        "never published as its latest",
+    )
+    .await;
+    // B's own creature, published by B, fielded on A's side: A does not hold it.
+    let swapped = vec![team_b[0].clone()];
+    refused(
+        setup_with_keys(&p.a, &p.b, nonce, (&key_a, &swapped), (&key_b, &team_a)),
+        "does not hold creature",
+    )
+    .await;
+    // A state under an anchor nobody issued.
+    let unissued = CreatureStateV1::new(
+        [0x5E; 32],
+        c.species(),
+        c.xp(),
+        c.hp(),
+        c.charges().to_vec(),
+    )
+    .expect("a state");
+    refused(
+        setup_with_keys(&p.a, &p.b, nonce, (&key_a, &[unissued]), (&key_b, &team_b)),
+        "no policy is published under its anchor",
+    )
+    .await;
+    assert_eq!(balance(&p.a, &era()), a_start, "no stake moved");
+
+    // The teams as published lock.
+    let setup = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &team_b));
+    lock(&p.a, &p.b, &setup, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock on the published teams");
+    assert_eq!(balance(&p.a, &era()), a_start - stake);
 }
