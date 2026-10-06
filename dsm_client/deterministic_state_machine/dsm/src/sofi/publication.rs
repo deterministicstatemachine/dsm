@@ -860,6 +860,63 @@ mod tests {
         );
     }
 
+    /// A computed escrow vault's genesis is found by its vault id and by the
+    /// match cell its terms bind it to (SoFi Amendment S22), and its terms
+    /// share the escrow terms namespace.
+    #[test]
+    fn a_computed_escrow_vault_is_found_by_its_match_cell() {
+        use crate::sofi::wire::{ComputedBranch, ComputedEscrowTerms, ComputedTable};
+        let key = |b: u8| crate::sofi::wire::EscrowSigner::new(ALG, &[b; 64]).unwrap();
+        let computed = |token: u8| {
+            ComputedEscrowTerms::new(
+                d(token),
+                escrow::external_commitment(b"a match"),
+                ComputedTable::new(d(0x9A), d(0x5E), key(0x3A), key(0x3B)).unwrap(),
+                vec![
+                    ComputedBranch::new(b"a-wins", G, dev()),
+                    ComputedBranch::new(b"b-wins", G, dev()),
+                    ComputedBranch::new(b"void", G, dev()),
+                ],
+            )
+            .unwrap()
+        };
+        let terms = computed(0x40);
+        let addr = escrow::terms_address_of(&terms.encode());
+        let mut genesis = escrow_genesis(&escrow_terms(0x40));
+        genesis.state.market_policy = addr;
+        genesis.state.fee_policy = addr;
+        genesis.state.release_policy = addr;
+        let published = Publication::ComputedEscrowVaultGenesis {
+            preimage: &genesis,
+            terms: &terms,
+        };
+        assert_eq!(
+            published.locators().unwrap(),
+            vec![
+                Locator {
+                    index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                    locator: derive::vault_genesis_locator(&genesis.vault_id()),
+                },
+                Locator {
+                    index_namespace: TAG_DSM_ESCROW_CELL_LOCATOR.source_bytes(),
+                    locator: escrow::cell_locator(&crate::sofi::computed::match_cell_of(&terms)),
+                },
+            ]
+        );
+        assert_eq!(
+            Publication::ComputedEscrowTerms(&terms).address().unwrap(),
+            addr
+        );
+        assert_eq!(
+            Publication::ComputedEscrowVaultGenesis {
+                preimage: &genesis,
+                terms: &computed(0x41),
+            }
+            .locators(),
+            Err(SofiWireError::EscrowTermsNotCommitted)
+        );
+    }
+
     /// A gathered verdict is indexed under its cell's statement locator for
     /// its outcome.
     #[test]

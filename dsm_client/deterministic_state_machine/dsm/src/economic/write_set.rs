@@ -2057,6 +2057,41 @@ mod escrow_create_binding_tests {
         ));
     }
 
+    /// A computed escrow vault (SoFi Amendment S22) is created by the same
+    /// operation: the class of the carried terms is its kind, and the one
+    /// debit is the stake of the token those terms name.
+    #[test]
+    fn a_computed_escrow_creation_debits_the_stake_of_its_terms_token() {
+        use crate::sofi::wire::{ComputedBranch, ComputedEscrowTerms, ComputedTable};
+        let key = |b: u8| {
+            EscrowSigner::new(crate::ccb::sigalg::SPHINCS_PLUS_SPX256F, &[b; 64])
+                .expect("a declared key")
+        };
+        let computed = ComputedEscrowTerms::new(
+            [0x42; 32],
+            crate::sofi::escrow::external_commitment(b"a match"),
+            ComputedTable::new([0x9A; 32], [0x5E; 32], key(0x3A), key(0x3B)).expect("table"),
+            vec![
+                ComputedBranch::new(b"a-wins", G, DEV),
+                ComputedBranch::new(b"b-wins", G, DEV),
+                ComputedBranch::new(b"void", G, DEV),
+            ],
+        )
+        .expect("terms");
+        let bytes = computed.encode();
+        let op = op_from(
+            &state(crate::sofi::escrow::terms_address_of(&bytes)),
+            &bytes,
+            (STAKE, 0),
+        );
+        let Ok(SemanticWriteSet::EscrowVaultCreate { stake, .. }) =
+            semantic_write_set(&op, &G, &DEV, POS)
+        else {
+            panic!("a valid computed escrow creation has a write set")
+        };
+        assert_eq!(stake, ([0x42; 32], STAKE));
+    }
+
     #[test]
     fn terms_other_than_the_ones_all_three_slots_name_are_refused() {
         let t = terms();
