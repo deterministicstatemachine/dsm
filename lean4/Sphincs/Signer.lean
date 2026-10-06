@@ -595,5 +595,3 @@ def ValidSecretKey (o : Oracle Id) (v : Variant) (sk : Bytes) : Prop :=
 #print axioms xmss_sign_correct
 #print axioms wots_sign_correct
 end DSM.Sphincs
-
-

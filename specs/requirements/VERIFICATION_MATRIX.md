@@ -250,5 +250,8 @@ signature uniqueness must not be inferred from deterministic signing alone.
 The signer follow-up proves generated digit bounds, generated WOTS chain recovery,
 XOR/parity sibling equivalence, exact block extraction, node/chain output widths
 under the explicit primitive-width contract, and parent recurrence against the
-actual XMSS/FORS signer model. Serialized sibling/leaf correspondence and full
-signer composition remain open; see the report for exact theorem premises.
+actual XMSS/FORS signer model. Complete serialized sibling/leaf correspondence
+and signer composition now hold in `Signer.lean`, including `keygen_sign_verify`
+for all six variants. Extracted Rust `next_layer` has a total source-refinement
+proof; full signer source/binary and JNI/timing guarantees remain open. See the
+report for exact premises and pinned regeneration commands.

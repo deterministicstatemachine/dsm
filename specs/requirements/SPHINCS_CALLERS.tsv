@@ -24,40 +24,40 @@ crates/dsm-sphincs/src/lib.rs	141	SphincsVariant::SPX192f => (24, 66, 22, 8, 33)
 crates/dsm-sphincs/src/lib.rs	142	SphincsVariant::SPX256s => (32, 64, 8, 14, 22),
 crates/dsm-sphincs/src/lib.rs	143	SphincsVariant::SPX256f => (32, 68, 17, 9, 35),
 crates/dsm-sphincs/src/lib.rs	172	pub fn sizes(v: SphincsVariant) -> (usize, usize, usize) {
-crates/dsm-sphincs/src/lib.rs	728	v: SphincsVariant,
-crates/dsm-sphincs/src/lib.rs	765	v: SphincsVariant,
-crates/dsm-sphincs/src/lib.rs	813	v: SphincsVariant,
-crates/dsm-sphincs/src/lib.rs	845	pub fn public_key_bytes(v: SphincsVariant) -> usize {
-crates/dsm-sphincs/src/lib.rs	848	pub fn secret_key_bytes(v: SphincsVariant) -> usize {
-crates/dsm-sphincs/src/lib.rs	851	pub fn signature_bytes(v: SphincsVariant) -> usize {
-crates/dsm-sphincs/src/lib.rs	858	pub fn sphincs_sign(sk: &[u8], msg: &[u8]) -> Result<Vec<u8>, Error> {
-crates/dsm-sphincs/src/lib.rs	859	sign(SphincsVariant::SPX256f, sk, msg)
-crates/dsm-sphincs/src/lib.rs	864	pub fn sphincs_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<bool, Error> {
-crates/dsm-sphincs/src/lib.rs	865	verify(SphincsVariant::SPX256f, pk, msg, sig)
-crates/dsm-sphincs/src/lib.rs	929	const DEPLOYED: [SphincsVariant; 2] = [SphincsVariant::SPX128f, SphincsVariant::SPX256f];
-crates/dsm-sphincs/src/lib.rs	930	const ALL: [SphincsVariant; 6] = [
-crates/dsm-sphincs/src/lib.rs	931	SphincsVariant::SPX128s,
-crates/dsm-sphincs/src/lib.rs	932	SphincsVariant::SPX128f,
-crates/dsm-sphincs/src/lib.rs	933	SphincsVariant::SPX192s,
-crates/dsm-sphincs/src/lib.rs	934	SphincsVariant::SPX192f,
-crates/dsm-sphincs/src/lib.rs	935	SphincsVariant::SPX256s,
-crates/dsm-sphincs/src/lib.rs	936	SphincsVariant::SPX256f,
-crates/dsm-sphincs/src/lib.rs	939	fn key(v: SphincsVariant, fill: u8) -> SphincsKeyPair {
-crates/dsm-sphincs/src/lib.rs	948	fn indices_of(v: SphincsVariant, kp: &SphincsKeyPair, m: &[u8], sig: &[u8]) -> Indices {
-crates/dsm-sphincs/src/lib.rs	957	(SphincsVariant::SPX128s, 7_856, 30),
-crates/dsm-sphincs/src/lib.rs	958	(SphincsVariant::SPX128f, 17_088, 34),
-crates/dsm-sphincs/src/lib.rs	959	(SphincsVariant::SPX192s, 16_224, 39),
-crates/dsm-sphincs/src/lib.rs	960	(SphincsVariant::SPX192f, 35_664, 42),
-crates/dsm-sphincs/src/lib.rs	961	(SphincsVariant::SPX256s, 29_792, 47),
-crates/dsm-sphincs/src/lib.rs	962	(SphincsVariant::SPX256f, 49_856, 49),
-crates/dsm-sphincs/src/lib.rs	1013	let p = param_set(SphincsVariant::SPX128f);
-crates/dsm-sphincs/src/lib.rs	1100	let v = SphincsVariant::SPX128f;
-crates/dsm-sphincs/src/lib.rs	1151	let v = SphincsVariant::SPX128f;
-crates/dsm-sphincs/src/lib.rs	1163	let v = SphincsVariant::SPX128f;
-crates/dsm-sphincs/src/lib.rs	1184	let v = SphincsVariant::SPX128f;
-crates/dsm-sphincs/src/lib.rs	1266	let expected: [(SphincsVariant, [u8; 32], [u8; 32]); 2] = [
-crates/dsm-sphincs/src/lib.rs	1267	(SphincsVariant::SPX128f, FROZEN_128F_PK, FROZEN_128F_SIG),
-crates/dsm-sphincs/src/lib.rs	1268	(SphincsVariant::SPX256f, FROZEN_256F_PK, FROZEN_256F_SIG),
+crates/dsm-sphincs/src/lib.rs	731	v: SphincsVariant,
+crates/dsm-sphincs/src/lib.rs	768	v: SphincsVariant,
+crates/dsm-sphincs/src/lib.rs	816	v: SphincsVariant,
+crates/dsm-sphincs/src/lib.rs	848	pub fn public_key_bytes(v: SphincsVariant) -> usize {
+crates/dsm-sphincs/src/lib.rs	851	pub fn secret_key_bytes(v: SphincsVariant) -> usize {
+crates/dsm-sphincs/src/lib.rs	854	pub fn signature_bytes(v: SphincsVariant) -> usize {
+crates/dsm-sphincs/src/lib.rs	861	pub fn sphincs_sign(sk: &[u8], msg: &[u8]) -> Result<Vec<u8>, Error> {
+crates/dsm-sphincs/src/lib.rs	862	sign(SphincsVariant::SPX256f, sk, msg)
+crates/dsm-sphincs/src/lib.rs	867	pub fn sphincs_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<bool, Error> {
+crates/dsm-sphincs/src/lib.rs	868	verify(SphincsVariant::SPX256f, pk, msg, sig)
+crates/dsm-sphincs/src/lib.rs	932	const DEPLOYED: [SphincsVariant; 2] = [SphincsVariant::SPX128f, SphincsVariant::SPX256f];
+crates/dsm-sphincs/src/lib.rs	933	const ALL: [SphincsVariant; 6] = [
+crates/dsm-sphincs/src/lib.rs	934	SphincsVariant::SPX128s,
+crates/dsm-sphincs/src/lib.rs	935	SphincsVariant::SPX128f,
+crates/dsm-sphincs/src/lib.rs	936	SphincsVariant::SPX192s,
+crates/dsm-sphincs/src/lib.rs	937	SphincsVariant::SPX192f,
+crates/dsm-sphincs/src/lib.rs	938	SphincsVariant::SPX256s,
+crates/dsm-sphincs/src/lib.rs	939	SphincsVariant::SPX256f,
+crates/dsm-sphincs/src/lib.rs	942	fn key(v: SphincsVariant, fill: u8) -> SphincsKeyPair {
+crates/dsm-sphincs/src/lib.rs	951	fn indices_of(v: SphincsVariant, kp: &SphincsKeyPair, m: &[u8], sig: &[u8]) -> Indices {
+crates/dsm-sphincs/src/lib.rs	960	(SphincsVariant::SPX128s, 7_856, 30),
+crates/dsm-sphincs/src/lib.rs	961	(SphincsVariant::SPX128f, 17_088, 34),
+crates/dsm-sphincs/src/lib.rs	962	(SphincsVariant::SPX192s, 16_224, 39),
+crates/dsm-sphincs/src/lib.rs	963	(SphincsVariant::SPX192f, 35_664, 42),
+crates/dsm-sphincs/src/lib.rs	964	(SphincsVariant::SPX256s, 29_792, 47),
+crates/dsm-sphincs/src/lib.rs	965	(SphincsVariant::SPX256f, 49_856, 49),
+crates/dsm-sphincs/src/lib.rs	1016	let p = param_set(SphincsVariant::SPX128f);
+crates/dsm-sphincs/src/lib.rs	1103	let v = SphincsVariant::SPX128f;
+crates/dsm-sphincs/src/lib.rs	1154	let v = SphincsVariant::SPX128f;
+crates/dsm-sphincs/src/lib.rs	1166	let v = SphincsVariant::SPX128f;
+crates/dsm-sphincs/src/lib.rs	1187	let v = SphincsVariant::SPX128f;
+crates/dsm-sphincs/src/lib.rs	1269	let expected: [(SphincsVariant, [u8; 32], [u8; 32]); 2] = [
+crates/dsm-sphincs/src/lib.rs	1270	(SphincsVariant::SPX128f, FROZEN_128F_PK, FROZEN_128F_SIG),
+crates/dsm-sphincs/src/lib.rs	1271	(SphincsVariant::SPX256f, FROZEN_256F_PK, FROZEN_256F_SIG),
 crates/dsm-sphincs/src/refinement_vectors.rs	78	for (id, v) in [(1, SphincsVariant::SPX128f), (5, SphincsVariant::SPX256f)] {
 crates/dsm-sphincs/src/refinement_vectors.rs	146	SphincsVariant::SPX128s,
 crates/dsm-sphincs/src/refinement_vectors.rs	147	SphincsVariant::SPX128f,
