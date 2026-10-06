@@ -724,15 +724,16 @@ impl ValidatedPeers {
 }
 
 pub(crate) fn validated_peers() -> &'static ValidatedPeers {
-    static PEERS: once_cell::sync::Lazy<ValidatedPeers> = once_cell::sync::Lazy::new(|| ValidatedPeers {
-        kept: Kept::new(),
-        roots: Kept::new(),
-        claims: Kept::new(),
-        reached: std::sync::Mutex::new(std::collections::HashMap::new()),
-        walks: std::sync::atomic::AtomicU64::new(0),
-        root_walks: std::sync::atomic::AtomicU64::new(0),
-        claim_walks: std::sync::atomic::AtomicU64::new(0),
-    });
+    static PEERS: once_cell::sync::Lazy<ValidatedPeers> =
+        once_cell::sync::Lazy::new(|| ValidatedPeers {
+            kept: Kept::new(),
+            roots: Kept::new(),
+            claims: Kept::new(),
+            reached: std::sync::Mutex::new(std::collections::HashMap::new()),
+            walks: std::sync::atomic::AtomicU64::new(0),
+            root_walks: std::sync::atomic::AtomicU64::new(0),
+            claim_walks: std::sync::atomic::AtomicU64::new(0),
+        });
     &PEERS
 }
 

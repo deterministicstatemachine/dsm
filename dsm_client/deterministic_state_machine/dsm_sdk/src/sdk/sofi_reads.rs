@@ -587,8 +587,8 @@ const JUDGEMENTS_MAX: usize = 512;
 /// The kept judgements. A thread that panicked holding the lock left whole
 /// entries behind (each is inserted in one step), so the map is taken as it
 /// stands.
-fn judgements() -> std::sync::MutexGuard<'static, std::collections::HashMap<JudgedKey, KeptJudgement>>
-{
+fn judgements(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<JudgedKey, KeptJudgement>> {
     match JUDGEMENTS.lock() {
         Ok(kept) => kept,
         Err(poisoned) => poisoned.into_inner(),
