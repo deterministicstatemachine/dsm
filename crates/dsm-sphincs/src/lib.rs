@@ -719,10 +719,20 @@ fn fors_adrs(at: &Indices) -> Adrs {
 
 // =============================== Key Material ===============================
 
-#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SphincsKeyPair {
     pub public_key: Vec<u8>, // PK.seed || PK.root
     pub secret_key: Vec<u8>, // SK.seed || SK.prf || PK.seed || PK.root
+}
+
+// Diagnostic formatting must never disclose the caller's signing seeds.
+impl core::fmt::Debug for SphincsKeyPair {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SphincsKeyPair")
+            .field("public_key", &self.public_key)
+            .field("secret_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// FIPS 205 Algorithm 18, `slh_keygen_internal`, from seeds ChaCha20 draws
@@ -1159,6 +1169,17 @@ mod tests {
             sign(v, &kp.secret_key, b"same").unwrap(),
             sign(v, &kp.secret_key, b"same").unwrap()
         );
+    }
+
+    #[test]
+    fn diagnostics_do_not_disclose_the_signing_seed() {
+        let pair = SphincsKeyPair {
+            public_key: vec![17; 32],
+            secret_key: vec![239; 64],
+        };
+        let diagnostic = std::format!("{pair:?}");
+        assert!(!diagnostic.contains("239"));
+        assert!(diagnostic.contains("public_key"));
     }
 
     #[test]
