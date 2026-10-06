@@ -182,7 +182,8 @@ mod tests {
     // table, the match and start cells and their seeds, the start statement,
     // the setup, the occupant id, the transcript head chain and statement,
     // and the move commitment.
-    const EXPECTED_TAG_COUNT: usize = 380;
+    // +1 for the ready handshake (owner ruling 2026-10-06): `m_ready`.
+    const EXPECTED_TAG_COUNT: usize = 381;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

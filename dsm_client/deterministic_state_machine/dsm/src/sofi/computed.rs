@@ -26,10 +26,11 @@ use std::sync::Arc;
 
 use crate::common::domain_tags::{
     TAG_DSM_ESCROW_COMPUTED_MATCH, TAG_DSM_ESCROW_COMPUTED_MATCH_SEED,
-    TAG_DSM_ESCROW_COMPUTED_OCCUPANT, TAG_DSM_ESCROW_COMPUTED_SETUP, TAG_DSM_ESCROW_COMPUTED_START,
-    TAG_DSM_ESCROW_COMPUTED_START_SEED, TAG_DSM_ESCROW_COMPUTED_START_STATEMENT,
-    TAG_DSM_ESCROW_COMPUTED_TABLE, TAG_DSM_ESCROW_MOVE_COMMIT, TAG_DSM_ESCROW_TRANSCRIPT,
-    TAG_DSM_ESCROW_TRANSCRIPT_HEAD, TAG_DSM_ESCROW_TRANSCRIPT_STEP,
+    TAG_DSM_ESCROW_COMPUTED_OCCUPANT, TAG_DSM_ESCROW_COMPUTED_READY, TAG_DSM_ESCROW_COMPUTED_SETUP,
+    TAG_DSM_ESCROW_COMPUTED_START, TAG_DSM_ESCROW_COMPUTED_START_SEED,
+    TAG_DSM_ESCROW_COMPUTED_START_STATEMENT, TAG_DSM_ESCROW_COMPUTED_TABLE,
+    TAG_DSM_ESCROW_MOVE_COMMIT, TAG_DSM_ESCROW_TRANSCRIPT, TAG_DSM_ESCROW_TRANSCRIPT_HEAD,
+    TAG_DSM_ESCROW_TRANSCRIPT_STEP,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
@@ -42,7 +43,7 @@ use super::escrow::VerdictStanding;
 use super::signature::{verify_bytes, SignatureError};
 use super::wire::{
     ComputedEscrowTerms, ComputedTable, EntryKind, EquivocationProof, MatchSide, MatchStart,
-    StartKind, TranscriptEntry, TranscriptOutcome, COMPUTED_LABELS, COMPUTED_LABEL_VOID,
+    StartBody, StartKind, TranscriptEntry, TranscriptOutcome, COMPUTED_LABELS, COMPUTED_LABEL_VOID,
 };
 
 type D32 = [u8; 32];
@@ -108,12 +109,19 @@ pub fn start_seed(start_cell: &D32) -> D32 {
     h(TAG_DSM_ESCROW_COMPUTED_START_SEED, &[start_cell])
 }
 
-/// `m_start = H(DSM/escrow/computed-start-statement/v1 ‖ K_start ‖
-/// u8(kind))`: what side B signs to Start and side A to Withdraw.
-pub fn start_statement(start_cell: &D32, kind: StartKind) -> D32 {
+/// `m_ready = H(DSM/escrow/computed-ready/v1 ‖ K_match)`: what each side's
+/// session key signs once its wallet has checked both vaults. A Start holds
+/// both sides' signatures over it.
+pub fn ready_statement(match_cell: &D32) -> D32 {
+    h(TAG_DSM_ESCROW_COMPUTED_READY, &[match_cell])
+}
+
+/// `m_withdraw = H(DSM/escrow/computed-start-statement/v1 ‖ K_start ‖
+/// u8(2))`: what either side signs to Withdraw before a Start.
+pub fn withdraw_statement(start_cell: &D32) -> D32 {
     h(
         TAG_DSM_ESCROW_COMPUTED_START_STATEMENT,
-        &[start_cell, &[kind.byte()]],
+        &[start_cell, &[StartKind::Withdraw.byte()]],
     )
 }
 
@@ -433,28 +441,76 @@ pub fn sign_head(
     Ok(signature)
 }
 
-/// A Start (side B) or a Withdraw (side A) for the match `Y` and `table`
-/// bind to, signed by `kind`'s side. Refuses a key that does not sign as
-/// that side's session key.
-pub fn sign_start(
+/// `side`'s ready signature for the match `Y` and `table` bind to: its
+/// session key over `m_ready`. A wallet signs it only after it has checked
+/// both vaults (SoFi §19.10, the ready handshake). Refuses a key that does
+/// not sign as that side's session key.
+pub fn sign_ready(
     external_commitment: &D32,
     table: &ComputedTable,
-    kind: StartKind,
+    side: MatchSide,
     secret_key: &[u8],
-) -> Result<MatchStart, crate::types::error::DsmError> {
-    let start_cell = start_cell_key(&match_cell_of_table(external_commitment, table));
-    let digest = start_statement(&start_cell, kind);
-    let session = table.session(kind.signer());
+) -> Result<Vec<u8>, crate::types::error::DsmError> {
+    let digest = ready_statement(&match_cell_of_table(external_commitment, table));
+    let session = table.session(side);
     let signature = crate::crypto::sphincs::sphincs_sign(secret_key, &digest)?;
     verify_bytes(
-        "MatchStart",
+        "Ready",
         session.signature_alg(),
         session.public_key(),
         &digest,
         &signature,
     )?;
-    MatchStart::new(*external_commitment, table.clone(), kind, &signature)
-        .map_err(|e| crate::types::error::DsmError::invalid_operation(e.to_string()))
+    Ok(signature)
+}
+
+/// The Start the side that readies second writes: both ready signatures,
+/// once each verifies under its side's session key.
+pub fn assemble_start(
+    external_commitment: &D32,
+    table: &ComputedTable,
+    ready_a: &[u8],
+    ready_b: &[u8],
+) -> Result<MatchStart, ComputedRefusal> {
+    let start = MatchStart::new(
+        *external_commitment,
+        table.clone(),
+        StartBody::Start {
+            ready_a: ready_a.to_vec(),
+            ready_b: ready_b.to_vec(),
+        },
+    )
+    .map_err(ComputedRefusal::NoEncoding)?;
+    let start_cell = start_cell_key(&match_cell_of_table(external_commitment, table));
+    start_authority(&start, &start_cell)?;
+    Ok(start)
+}
+
+/// `side`'s Withdraw for the match `Y` and `table` bind to. Refuses a key
+/// that does not sign as that side's session key.
+pub fn sign_withdraw(
+    external_commitment: &D32,
+    table: &ComputedTable,
+    side: MatchSide,
+    secret_key: &[u8],
+) -> Result<MatchStart, crate::types::error::DsmError> {
+    let start_cell = start_cell_key(&match_cell_of_table(external_commitment, table));
+    let digest = withdraw_statement(&start_cell);
+    let session = table.session(side);
+    let signature = crate::crypto::sphincs::sphincs_sign(secret_key, &digest)?;
+    verify_bytes(
+        "Withdraw",
+        session.signature_alg(),
+        session.public_key(),
+        &digest,
+        &signature,
+    )?;
+    MatchStart::new(
+        *external_commitment,
+        table.clone(),
+        StartBody::Withdraw { side, signature },
+    )
+    .map_err(|e| crate::types::error::DsmError::invalid_operation(e.to_string()))
 }
 
 // ── recognition ────────────────────────────────────────────────────────────
@@ -488,6 +544,8 @@ pub enum ComputedRefusal {
     EndedBeforeTheLastEntry,
     /// The program named a label that is not a branch of the terms.
     LabelNotABranch { label: Vec<u8> },
+    /// The signatures in hand form no `MatchStart` with canonical bytes.
+    NoEncoding(super::wire::SofiWireError),
 }
 
 /// The outcome a recognized match-cell occupant gives, and which kind of
@@ -644,32 +702,51 @@ pub fn match_occupant(
 }
 
 /// What `bytes` are at the start cell `start_cell`, when they prove their
-/// own authority there: a Start signed by side B's session key, or a
-/// Withdraw signed by side A's, for the match whose `Y` and table derive the
-/// cell.
+/// own authority there ([`start_authority`]): a Start or a Withdraw.
 pub fn start_occupant(bytes: &[u8], start_cell: &D32) -> Result<StartKind, ComputedRefusal> {
     let class = class_of(bytes)?;
     if class != crate::ccb::class::ESCROW_MATCH_START {
         return Err(ComputedRefusal::NotAnOccupantClass { class });
     }
     let start = MatchStart::decode(bytes).map_err(ComputedRefusal::DoesNotDecode)?;
-    let derived = start_cell_key(&match_cell_of_table(
-        start.external_commitment(),
-        start.table(),
-    ));
-    if derived != *start_cell {
+    start_authority(&start, start_cell)?;
+    Ok(start.kind())
+}
+
+/// Whether `start` proves its own authority at the start cell `start_cell`
+/// (SoFi §19.10, the ready handshake): its `Y` and table derive the cell,
+/// and
+/// - a Start holds side A's signature over `m_ready` under `session_a` and
+///   side B's under `session_b`, for the match cell its `Y` and table
+///   derive; one side's ready alone is no Start;
+/// - a Withdraw holds the signature of the side it names, under that side's
+///   session key, over `m_withdraw`.
+pub fn start_authority(start: &MatchStart, start_cell: &D32) -> Result<(), ComputedRefusal> {
+    let match_cell = match_cell_of_table(start.external_commitment(), start.table());
+    if start_cell_key(&match_cell) != *start_cell {
         return Err(ComputedRefusal::NotThisCell);
     }
-    let session = start.table().session(start.kind().signer());
-    verify_bytes(
-        "MatchStart",
-        session.signature_alg(),
-        session.public_key(),
-        &start_statement(start_cell, start.kind()),
-        start.signature(),
-    )
-    .map_err(ComputedRefusal::Signature)?;
-    Ok(start.kind())
+    let by = |side: MatchSide, statement: &D32, signature: &[u8]| {
+        let session = start.table().session(side);
+        verify_bytes(
+            "MatchStart",
+            session.signature_alg(),
+            session.public_key(),
+            statement,
+            signature,
+        )
+        .map_err(ComputedRefusal::Signature)
+    };
+    match start.body() {
+        StartBody::Start { ready_a, ready_b } => {
+            let ready = ready_statement(&match_cell);
+            by(MatchSide::A, &ready, ready_a)?;
+            by(MatchSide::B, &ready, ready_b)
+        }
+        StartBody::Withdraw { side, signature } => {
+            by(*side, &withdraw_statement(start_cell), signature)
+        }
+    }
 }
 
 fn class_of(bytes: &[u8]) -> Result<u16, ComputedRefusal> {
@@ -1314,6 +1391,17 @@ mod tests {
         }
     }
 
+    /// Both sides ready: the Start the second to ready writes.
+    fn start_of(m: &Match) -> MatchStart {
+        let ready_a = sign_ready(&m.y, &m.table, MatchSide::A, &m.a.secret).expect("A ready");
+        let ready_b = sign_ready(&m.y, &m.table, MatchSide::B, &m.b.secret).expect("B ready");
+        assemble_start(&m.y, &m.table, &ready_a, &ready_b).expect("a Start")
+    }
+
+    fn withdraw_by(m: &Match, side: MatchSide) -> MatchStart {
+        sign_withdraw(&m.y, &m.table, side, &m.player(side).secret).expect("a Withdraw")
+    }
+
     fn the_match() -> Match {
         let a = player(0x61);
         let b = player(0x62);
@@ -1445,8 +1533,21 @@ mod tests {
 
         let outcome = m.outcome(a_wins());
         assert_eq!(TranscriptOutcome::decode(&outcome.encode()), Ok(outcome));
-        let start = sign_start(&m.y, &m.table, StartKind::Start, &m.b.secret).expect("start");
+        let start = start_of(&m);
         assert_eq!(MatchStart::decode(&start.encode()), Ok(start));
+        let withdraw = withdraw_by(&m, MatchSide::B);
+        assert_eq!(MatchStart::decode(&withdraw.encode()), Ok(withdraw.clone()));
+        // A Withdraw's bytes, by hand from the field table.
+        let StartBody::Withdraw { signature, .. } = withdraw.body() else {
+            panic!("a Withdraw")
+        };
+        let mut want = vec![0x00, 0x6B, 0x00, 0x01];
+        want.extend_from_slice(&m.y);
+        want.extend_from_slice(&m.table.canonical());
+        want.extend_from_slice(&[2, 2]);
+        want.extend_from_slice(&(signature.len() as u32).to_be_bytes());
+        want.extend_from_slice(signature);
+        assert_eq!(withdraw.encode(), want);
         let proof = EquivocationProof::new(
             m.y,
             m.table.clone(),
@@ -1587,8 +1688,12 @@ mod tests {
             independent("DSM/escrow/computed-start-seed/v1", &[&ks])
         );
         assert_eq!(
-            start_statement(&ks, StartKind::Withdraw),
+            withdraw_statement(&ks),
             independent("DSM/escrow/computed-start-statement/v1", &[&ks, &[2]])
+        );
+        assert_eq!(
+            ready_statement(&k),
+            independent("DSM/escrow/computed-ready/v1", &[&k])
         );
         assert_eq!(
             setup_digest(&m.setup),
@@ -2133,64 +2238,92 @@ mod tests {
 
     // ── the start cell ─────────────────────────────────────────────────
 
+    /// A Start is both sides' readies, each under its own session key over
+    /// this match's `m_ready`; a Withdraw is either side's, under the key of
+    /// the side it names.
     #[test]
-    fn the_start_cell_holds_a_start_by_b_or_a_withdraw_by_a() {
+    fn a_start_holds_both_readies_and_a_withdraw_either_sides_key() {
         let m = the_match();
         let ks = start_cell_key(&m.key());
-        let start = sign_start(&m.y, &m.table, StartKind::Start, &m.b.secret).expect("start");
-        let withdraw =
-            sign_start(&m.y, &m.table, StartKind::Withdraw, &m.a.secret).expect("withdraw");
-        assert_eq!(start_occupant(&start.encode(), &ks), Ok(StartKind::Start));
         assert_eq!(
-            start_occupant(&withdraw.encode(), &ks),
-            Ok(StartKind::Withdraw)
+            start_occupant(&start_of(&m).encode(), &ks),
+            Ok(StartKind::Start)
         );
-        // The wrong side cannot even produce one.
-        assert!(matches!(
-            sign_start(&m.y, &m.table, StartKind::Start, &m.a.secret),
-            Err(..)
-        ));
-        // A Start signed by A and a Withdraw signed by B, each over its own
-        // statement: the key is not the one the kind names.
-        let signed_by = |kind: StartKind, by: &Player| {
-            let signature =
-                crate::crypto::sphincs::sphincs_sign(&by.secret, &start_statement(&ks, kind))
-                    .expect("signs");
-            MatchStart::new(m.y, m.table.clone(), kind, &signature).expect("encodes")
+        for side in [MatchSide::A, MatchSide::B] {
+            assert_eq!(
+                start_occupant(&withdraw_by(&m, side).encode(), &ks),
+                Ok(StartKind::Withdraw)
+            );
+        }
+
+        let ready_a = sign_ready(&m.y, &m.table, MatchSide::A, &m.a.secret).expect("A ready");
+        let ready_b = sign_ready(&m.y, &m.table, MatchSide::B, &m.b.secret).expect("B ready");
+        let start = |a: &[u8], b: &[u8]| {
+            MatchStart::new(
+                m.y,
+                m.table.clone(),
+                StartBody::Start {
+                    ready_a: a.to_vec(),
+                    ready_b: b.to_vec(),
+                },
+            )
+            .expect("encodes")
         };
-        for wrong in [
-            signed_by(StartKind::Start, &m.a),
-            signed_by(StartKind::Withdraw, &m.b),
-        ] {
-            assert!(matches!(
-                start_occupant(&wrong.encode(), &ks),
+        let refused = |bytes: Vec<u8>| {
+            matches!(
+                start_occupant(&bytes, &ks),
                 Err(ComputedRefusal::Signature(
                     SignatureError::DoesNotVerify { .. }
                 ))
-            ));
-        }
-        // A Withdraw's signature restated as a Start: it is over the other
-        // statement.
-        let relabeled =
-            MatchStart::new(m.y, m.table.clone(), StartKind::Start, withdraw.signature())
-                .expect("start");
-        assert!(matches!(
-            start_occupant(&relabeled.encode(), &ks),
-            Err(ComputedRefusal::Signature(
-                SignatureError::DoesNotVerify { .. }
-            ))
-        ));
-        // At another match's start cell, or at the match cell itself.
+            )
+        };
+        // One side's ready alone, in both slots: no Start.
+        assert!(refused(start(&ready_a, &ready_a).encode()));
+        assert!(refused(start(&ready_b, &ready_b).encode()));
+        // Each ready in the other side's slot: the wrong key for the slot.
+        assert!(refused(start(&ready_b, &ready_a).encode()));
+        // Readies for another match: another K_match, so another statement.
         let other = Match {
             y: external_commitment(b"computed match 2"),
             ..the_match()
         };
+        let other_a = sign_ready(&other.y, &other.table, MatchSide::A, &m.a.secret).expect("ready");
+        let other_b = sign_ready(&other.y, &other.table, MatchSide::B, &m.b.secret).expect("ready");
+        assert!(refused(start(&other_a, &other_b).encode()));
+        assert!(refused(start(&ready_a, &other_b).encode()));
+        // This match's Start at another match's start cell.
         assert_eq!(
-            start_occupant(&start.encode(), &start_cell_key(&other.key())),
+            start_occupant(&start_of(&m).encode(), &start_cell_key(&other.key())),
             Err(ComputedRefusal::NotThisCell)
         );
+        // A side cannot ready under the other side's key, and a Start is
+        // assembled only from two readies that verify.
+        assert!(matches!(
+            sign_ready(&m.y, &m.table, MatchSide::B, &m.a.secret),
+            Err(..)
+        ));
+        assert!(matches!(
+            assemble_start(&m.y, &m.table, &ready_a, &ready_a),
+            Err(ComputedRefusal::Signature(..))
+        ));
+
+        // A Withdraw naming one side with the other side's signature, or a
+        // signature over the ready statement instead of the withdraw one.
+        let StartBody::Withdraw { signature, .. } = withdraw_by(&m, MatchSide::B).body().clone()
+        else {
+            panic!("a Withdraw")
+        };
+        for (side, signature) in [(MatchSide::A, signature), (MatchSide::A, ready_a.clone())] {
+            let wrong = MatchStart::new(
+                m.y,
+                m.table.clone(),
+                StartBody::Withdraw { side, signature },
+            )
+            .expect("encodes");
+            assert!(refused(wrong.encode()));
+        }
         assert_eq!(
-            match_occupant(&start.encode(), &m.key(), &registry(HighestSum)),
+            match_occupant(&start_of(&m).encode(), &m.key(), &registry(HighestSum)),
             Err(ComputedRefusal::NotAnOccupantClass {
                 class: crate::ccb::class::ESCROW_MATCH_START
             })
@@ -2229,57 +2362,66 @@ mod tests {
         }
     }
 
-    /// A Withdraw first at the start cell voids the match: `void` is final
-    /// once the Withdraw is, every other outcome is lost, and a Start after
-    /// it and a transcript at the match cell count for nothing.
+    /// A Withdraw first at the start cell, by either side, voids the match:
+    /// `void` is final once the Withdraw is, every other outcome is lost, and
+    /// a full Start after it and a transcript at the match cell count for
+    /// nothing.
     #[test]
-    fn a_withdraw_holding_the_start_cell_voids_the_match() {
+    fn a_withdraw_by_either_side_holding_the_start_cell_voids_the_match() {
         let m = the_match();
-        let mut seats = Seats::new(&m);
-        // Junk first at the leader: a Start signed by A counts as nothing.
-        let withdraw =
-            sign_start(&m.y, &m.table, StartKind::Withdraw, &m.a.secret).expect("withdraw");
-        let junk = MatchStart::new(m.y, m.table.clone(), StartKind::Start, withdraw.signature())
-            .expect("start");
-        seats.start.write(&junk.encode(), 0, &[]);
-        seats.start.write(&withdraw.encode(), 0, &[]);
-        let start = sign_start(&m.y, &m.table, StartKind::Start, &m.b.secret).expect("start");
-        seats.start.write(&start.encode(), 2, &[]);
-        seats.matched.write(&m.outcome(a_wins()).encode(), 2, &[]);
+        let ready_a = sign_ready(&m.y, &m.table, MatchSide::A, &m.a.secret).expect("A ready");
+        for side in [MatchSide::A, MatchSide::B] {
+            let mut seats = Seats::new(&m);
+            // Junk first at the leader: a Start holding A's ready twice.
+            let junk = MatchStart::new(
+                m.y,
+                m.table.clone(),
+                StartBody::Start {
+                    ready_a: ready_a.clone(),
+                    ready_b: ready_a.clone(),
+                },
+            )
+            .expect("encodes");
+            seats.start.write(&junk.encode(), 0, &[]);
+            let withdraw = withdraw_by(&m, side);
+            seats.start.write(&withdraw.encode(), 0, &[]);
+            seats.start.write(&start_of(&m).encode(), 2, &[]);
+            seats.matched.write(&m.outcome(a_wins()).encode(), 2, &[]);
 
-        let read = seats.read();
-        assert_eq!(read.start().held(), Some(StartKind::Withdraw));
-        assert_eq!(read.start().passed_over().len(), 1, "the junk Start");
-        assert_eq!(read.matched(), None, "the match cell is not read");
-        assert_eq!(read.key(), m.key());
-        // Only the leader link so far: void is held, not final.
-        assert_eq!(
-            read.standing_for(COMPUTED_LABEL_VOID),
-            VerdictStanding::Unsettled
-        );
-        assert_eq!(
-            read.standing_for(COMPUTED_LABEL_A_WINS),
-            VerdictStanding::Lost
-        );
-        assert_eq!(
-            read.standing_for(COMPUTED_LABEL_B_WINS),
-            VerdictStanding::Lost
-        );
+            let read = seats.read();
+            assert_eq!(read.start().held(), Some(StartKind::Withdraw));
+            assert_eq!(read.start().passed_over().len(), 1, "the junk Start");
+            assert_eq!(read.matched(), None, "the match cell is not read");
+            assert_eq!(read.key(), m.key());
+            // Only the leader link so far: void is held, not final.
+            assert_eq!(
+                read.standing_for(COMPUTED_LABEL_VOID),
+                VerdictStanding::Unsettled
+            );
+            assert_eq!(
+                read.standing_for(COMPUTED_LABEL_A_WINS),
+                VerdictStanding::Lost
+            );
+            assert_eq!(
+                read.standing_for(COMPUTED_LABEL_B_WINS),
+                VerdictStanding::Lost
+            );
 
-        // The Withdraw's chain carried to final.
-        seats.start.continue_chain(&withdraw.encode(), 2, 2);
-        let read = seats.read();
-        assert_eq!(
-            read.standing_for(COMPUTED_LABEL_VOID),
-            VerdictStanding::Final
-        );
-        assert_eq!(
-            read.standing_for(COMPUTED_LABEL_A_WINS),
-            VerdictStanding::Lost
-        );
-        let proof =
-            start_completion(&seats.cells, read.start(), &seats.start.evidence()).expect("decided");
-        assert!(proof.is_some(), "a final Withdraw has a completion proof");
+            // The Withdraw's chain carried to final.
+            seats.start.continue_chain(&withdraw.encode(), 2, 2);
+            let read = seats.read();
+            assert_eq!(
+                read.standing_for(COMPUTED_LABEL_VOID),
+                VerdictStanding::Final
+            );
+            assert_eq!(
+                read.standing_for(COMPUTED_LABEL_A_WINS),
+                VerdictStanding::Lost
+            );
+            let proof = start_completion(&seats.cells, read.start(), &seats.start.evidence())
+                .expect("decided");
+            assert!(proof.is_some(), "a final Withdraw has a completion proof");
+        }
     }
 
     /// The match cell counts only once a Start holds the start cell, and an
@@ -2312,7 +2454,7 @@ mod tests {
 
         // A Start held, not final: the other outcomes are lost already, and
         // A's win is not final yet.
-        let start = sign_start(&m.y, &m.table, StartKind::Start, &m.b.secret).expect("start");
+        let start = start_of(&m);
         seats.start.write(&start.encode(), 0, &[]);
         let read = seats.read();
         assert_eq!(
@@ -2346,14 +2488,20 @@ mod tests {
                 .is_some(),
             "a final occupant has a completion proof"
         );
-        // A Withdraw after the Start counts for nothing.
-        let withdraw =
-            sign_start(&m.y, &m.table, StartKind::Withdraw, &m.a.secret).expect("withdraw");
-        seats.start.write(&withdraw.encode(), 2, &[]);
-        assert_eq!(
-            seats.read().standing_for(COMPUTED_LABEL_A_WINS),
-            VerdictStanding::Final
-        );
+        // A Withdraw after the Start, by either side, counts for nothing.
+        for side in [MatchSide::A, MatchSide::B] {
+            seats.start.write(&withdraw_by(&m, side).encode(), 2, &[]);
+            let read = seats.read();
+            assert_eq!(read.start().held(), Some(StartKind::Start));
+            assert_eq!(
+                read.standing_for(COMPUTED_LABEL_A_WINS),
+                VerdictStanding::Final
+            );
+            assert_eq!(
+                read.standing_for(COMPUTED_LABEL_VOID),
+                VerdictStanding::Lost
+            );
+        }
     }
 
     /// The first recognized occupant holds the match cell for good: an
@@ -2363,7 +2511,7 @@ mod tests {
     fn the_first_recognized_occupant_holds_the_match_cell() {
         let m = the_match();
         let mut seats = Seats::new(&m);
-        let start = sign_start(&m.y, &m.table, StartKind::Start, &m.b.secret).expect("start");
+        let start = start_of(&m);
         seats.start.write(&start.encode(), 2, &[]);
         let one = vec![commit(1, MatchSide::A, 0, 5)];
         let two = vec![commit(1, MatchSide::A, 0, 6)];
