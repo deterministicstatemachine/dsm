@@ -366,6 +366,123 @@ pub fn read_setup(setup: &[u8]) -> Result<MatchSetup, String> {
     })
 }
 
+/// The device that issued creature `anchor`: the creator its token's
+/// committed policy names. The policy is this wallet's verified copy, or
+/// fetched from the pinned set and re-hashed to the anchor; a creature is a
+/// token of supply one, created whole by one device.
+async fn issuer_of(anchor: &D32) -> Result<D32, String> {
+    let named = dsm::utils::text_id::encode_base32_crockford(anchor);
+    let kept = crate::storage::client_db::token_registry::load_policy_verified(anchor)
+        .map_err(|e| format!("creature {named}: the token policy table: {e}"))?;
+    let bytes = match kept {
+        Some(bytes) => bytes,
+        None => crate::handlers::token_routes::try_fetch_policy_from_network(anchor)
+            .await
+            .map_err(|e| format!("creature {named}: its policy: {e}"))?
+            .ok_or_else(|| format!("creature {named}: no policy is published under its anchor"))?,
+    };
+    let derived =
+        dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_POLICY, &bytes);
+    if derived.as_bytes() != anchor {
+        return Err(format!(
+            "creature {named}: its policy does not hash to its anchor"
+        ));
+    }
+    let policy = dsm::economic::token_policy::parse_token_policy(&bytes)
+        .map_err(|e| format!("creature {named}: its policy: {e}"))?;
+    if policy.genesis_supply != 1 {
+        return Err(format!(
+            "creature {named}: a token of supply {}, not a creature (supply one)",
+            policy.genesis_supply
+        ));
+    }
+    match policy.release {
+        dsm::economic::token_policy::Release::AllAtCreation {
+            creator_device_id, ..
+        } => Ok(creator_device_id),
+        dsm::economic::token_policy::Release::Faucet => Err(format!(
+            "creature {named}: a network-anchored token has no issuer"
+        )),
+    }
+}
+
+/// The latest state creature `anchor`'s issuer published: the tip of the one
+/// chain from the record it was issued with, among every object its issuer
+/// authored on the anchor (`sdk::authored_objects`), each recognized from
+/// its own bytes as the issuer's.
+pub async fn latest_published_state(
+    set: &crate::sdk::storage_set::StorageSet,
+    anchor: &D32,
+) -> Result<wildstate_duel::CreatureStateV1, String> {
+    let named = dsm::utils::text_id::encode_base32_crockford(anchor);
+    let issuer = issuer_of(anchor).await?;
+    let published = match crate::sdk::authored_objects::read(set, &issuer, anchor)
+        .await
+        .map_err(|e| format!("creature {named}: its published states: {e}"))?
+    {
+        dsm::sofi::storage::Discovered::Complete(objects) => objects,
+        dsm::sofi::storage::Discovered::Partial(..) => {
+            return Err(format!(
+                "creature {named}: not every state its issuer published could be read; ask again"
+            ))
+        }
+    };
+    let payloads: Vec<Vec<u8>> = published.into_iter().map(|o| o.payload).collect();
+    wildstate_duel::creatures::latest(anchor, &payloads)
+        .map(|(state, _)| state)
+        .map_err(|e| format!("creature {named}: {e}"))
+}
+
+/// Whether the teams `setup` fields are the creatures as their issuers last
+/// published them, and whether this wallet, playing `own`, holds every
+/// creature on its own side. A creature whose state differs by one byte from
+/// its issuer's latest record, or one this wallet does not hold, refuses the
+/// lock: a modded creature never enters a match this wallet stakes in.
+pub async fn check_teams(
+    core: &crate::sdk::core_sdk::CoreSDK,
+    set: &crate::sdk::storage_set::StorageSet,
+    setup: &[u8],
+    own: MatchSide,
+) -> Result<(), String> {
+    let decoded = DuelSetupV1::decode(setup).map_err(|e| format!("the setup: {e}"))?;
+    let sides = [
+        (MatchSide::A, decoded.body.a()),
+        (MatchSide::B, decoded.body.b()),
+    ];
+    let checks = sides.iter().flat_map(|(side, s)| {
+        s.team.iter().map(move |fielded| async move {
+            let latest = latest_published_state(set, fielded.anchor()).await?;
+            if latest != *fielded {
+                return Err(format!(
+                    "side {side:?} fields creature {} in a state its issuer never published as \
+                     its latest",
+                    dsm::utils::text_id::encode_base32_crockford(fielded.anchor())
+                ));
+            }
+            Ok(())
+        })
+    });
+    for checked in futures::future::join_all(checks).await {
+        checked?;
+    }
+    let mine = match own {
+        MatchSide::A => decoded.body.a(),
+        MatchSide::B => decoded.body.b(),
+    };
+    let anchors: Vec<D32> = mine.team.iter().map(|c| *c.anchor()).collect();
+    let held = crate::sdk::connect::holdings::prove(core, &anchors)
+        .map_err(|e| format!("this wallet's holdings of its creatures: {e}"))?;
+    for holding in &held.holdings {
+        if holding.amount == 0 {
+            return Err(format!(
+                "this wallet does not hold creature {}",
+                dsm::utils::text_id::encode_base32_crockford(&holding.policy_commit)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `wildstate-duel` v1 as Core's outcome program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WildstateDuel;
@@ -762,7 +879,8 @@ mod tests {
             a: DuelMoveV1::Pass.encode(),
             b: vector.opened[0].b.clone(),
         };
-        let passed = WildstateDuel.outcome(&setup, &opened_of_turns(&[as_passed.clone()]));
+        let passed =
+            WildstateDuel.outcome(&setup, &opened_of_turns(std::slice::from_ref(&as_passed)));
         let mut by_pass = DuelProgress::start(&setup).expect("a setup");
         for entry in opened_of_turns(&[as_passed]) {
             by_pass.apply(&entry).expect("a pass");

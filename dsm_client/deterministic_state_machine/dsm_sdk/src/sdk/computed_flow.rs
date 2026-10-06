@@ -296,6 +296,9 @@ pub async fn create(
             "the setup's session key for this side is not this wallet's for the match",
         ));
     }
+    crate::sdk::outcome_programs::check_teams(core, set, &intent.setup, intent.side)
+        .await
+        .map_err(refuse)?;
     let terms = terms_of(&intent.setup, &read, intent.token, me)?;
     let match_cell = computed::match_cell_of(&terms);
     if store::get_match(&match_cell)
