@@ -38,7 +38,13 @@ use super::conformance::{
     Validation,
 };
 use super::derive;
-use super::escrow::{verdict_completion, verdict_resolution, VerdictCell, VerdictCellRead};
+use super::computed::{
+    match_completion, match_resolution, start_completion, start_resolution, ComputedCellRead,
+    ComputedCells, MatchUnread, ProgramRegistry,
+};
+use super::escrow::{
+    verdict_completion, verdict_resolution, EscrowCellRead, VerdictCell, VerdictCellRead,
+};
 use super::exercise::{
     attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
 };
@@ -511,6 +517,11 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     /// each token's discovery, each chain and each head. Only an acceptance
     /// is kept; anything not established is read again.
     accepted: AcceptedGeneses,
+    /// The outcome programs this verifier runs (SoFi Amendment S22), by the
+    /// hash each is pinned by. Registered by the verifier's own caller
+    /// ([`Verifier::with_programs`]); a computed escrow vault whose program
+    /// is not here has no established outcome.
+    programs: ProgramRegistry,
 }
 
 /// Vault geneses one operation accepted from the network, keyed by the vault
@@ -561,7 +572,21 @@ impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
             network_id,
             parent,
             accepted,
+            programs: ProgramRegistry::new(),
         }
+    }
+
+    /// This verifier, running the outcome programs `programs` holds (SoFi
+    /// Amendment S22). Registration is the verifier's own act: nothing a
+    /// party sends adds a program.
+    pub fn with_programs(mut self, programs: ProgramRegistry) -> Self {
+        self.programs = programs;
+        self
+    }
+
+    /// The outcome programs this verifier runs.
+    pub fn programs(&self) -> &ProgramRegistry {
+        &self.programs
     }
 }
 
@@ -661,8 +686,10 @@ struct LegsRead {
     registration: RegistrationRead,
     cells: Vec<AttemptCellRead>,
     walks: Vec<Option<AttemptWalk>>,
-    /// For a Release, its verdict cell (SoFi Amendment S21).
-    verdict: Option<VerdictCellRead>,
+    /// For a Release, the cell its vault's kind binds it to: the verdict
+    /// cell (SoFi Amendment S21) or the start and match cells (Amendment
+    /// S22).
+    verdict: Option<EscrowCellRead>,
 }
 
 impl LegsRead {
@@ -773,6 +800,126 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 .keep_completion(cell.routed(), &evidence, &proof)?;
         }
         Ok(Ok(read))
+    }
+
+    /// The start and match cells of a computed escrow vault as a Release
+    /// reads them (SoFi Amendment S22): the start cell first, and the match
+    /// cell only once a Start holds it. A Start, a Withdraw or an occupant
+    /// final at its cell has its completion proof kept (Amendment S10).
+    /// Reads that do not decide a cell yet, and a program this verifier has
+    /// not registered, are the inner `Err`: nothing is established.
+    pub fn read_computed_cells(
+        &self,
+        terms: &super::wire::ComputedEscrowTerms,
+    ) -> Result<Result<ComputedCellRead, NotEstablished>, VerifierFailure> {
+        let cells = ComputedCells::new(terms, self.members, &self.set_id)
+            .map_err(|e| VerifierFailure::Refused(format!("computed cells: {e:?}")))?;
+        let start_evidence = self.reads.cell(cells.start_routed())?;
+        let start = match start_resolution(&cells, &start_evidence) {
+            Ok(read) => read,
+            Err(missing) => {
+                return Ok(Err(NotEstablished::StartCell {
+                    start_cell: *cells.start_key(),
+                    missing,
+                }))
+            }
+        };
+        if let CellFact::Held {
+            state: ChainState::Final,
+            ..
+        } = start.fact()
+        {
+            let proof = start_completion(&cells, &start, &start_evidence)
+                .map_err(|missing| VerifierFailure::Read(format!("start completion: {missing:?}")))?
+                .ok_or_else(|| {
+                    VerifierFailure::Read(
+                        "start completion: a final Start or Withdraw has no completion proof"
+                            .to_string(),
+                    )
+                })?;
+            self.reads
+                .keep_completion(cells.start_routed(), &start_evidence, &proof)?;
+        }
+        // The match cell counts for nothing until a Start holds the start
+        // cell, and is not read before.
+        let started = matches!(
+            (start.held(), start.fact()),
+            (Some(super::wire::StartKind::Start), CellFact::Held { .. })
+        );
+        let matched = if started {
+            let evidence = self.reads.cell(cells.match_routed())?;
+            let read = match match_resolution(&cells, &evidence, &self.programs) {
+                Ok(read) => read,
+                Err(MatchUnread::ProgramNotRegistered { program }) => {
+                    return Ok(Err(NotEstablished::OutcomeProgramNotRegistered { program }))
+                }
+                Err(MatchUnread::Missing(missing)) => {
+                    return Ok(Err(NotEstablished::VerdictCell {
+                        verdict_cell: *cells.match_key(),
+                        missing,
+                    }))
+                }
+            };
+            if let CellFact::Held {
+                state: ChainState::Final,
+                ..
+            } = read.fact()
+            {
+                let proof = match_completion(&cells, &read, &evidence)
+                    .map_err(|missing| {
+                        VerifierFailure::Read(format!("match completion: {missing:?}"))
+                    })?
+                    .ok_or_else(|| {
+                        VerifierFailure::Read(
+                            "match completion: a final occupant has no completion proof"
+                                .to_string(),
+                        )
+                    })?;
+                self.reads
+                    .keep_completion(cells.match_routed(), &evidence, &proof)?;
+            }
+            Some(read)
+        } else {
+            None
+        };
+        ComputedCellRead::of(start, matched)
+            .map(Ok)
+            .map_err(|e| VerifierFailure::Refused(format!("computed cells: {e:?}")))
+    }
+
+    /// What a Release against `vault_id` stands on (SoFi Amendments S21,
+    /// S22): the computed cells when the vault's accepted genesis commits
+    /// computed terms, and otherwise the verdict cell the release names. A
+    /// release against a vault that is not an accepted computed escrow vault
+    /// reads the cell it names, as before: whatever it names, RouteValidation
+    /// decides whether it is that vault's.
+    fn read_release_cells(
+        &self,
+        vault_id: &D32,
+        verdict_cell: &D32,
+    ) -> Result<Result<EscrowCellRead, NotEstablished>, VerifierFailure> {
+        let computed = match self.vault_genesis(vault_id) {
+            Ok(VaultGenesis::Accepted(accepted)) => accepted.computed().cloned(),
+            Ok(
+                VaultGenesis::NotPublished
+                | VaultGenesis::OwnerUnresolved(_)
+                | VaultGenesis::Refused(_),
+            )
+            | Err(VerifierFailure::Refused(_)) => None,
+            Err(failure @ VerifierFailure::Read(_)) => return Err(failure),
+        };
+        Ok(match computed {
+            Some(terms) => self
+                .read_computed_cells(&terms)?
+                .map(EscrowCellRead::Computed),
+            None => match self.read_verdict_cell(verdict_cell)? {
+                Ok(read) => Ok(EscrowCellRead::Signed(read)),
+                Err(missing) => Err(NotEstablished::VerdictCell {
+                    verdict_cell: *verdict_cell,
+                    missing,
+                }),
+            },
+        })
     }
 
     /// `SuccessorResolution(K^(attempt))` of `vault_id` at `parent_root`, as
@@ -1348,10 +1495,19 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             }
             match self.vault_genesis(&vault_id) {
                 Ok(VaultGenesis::Accepted(accepted)) => {
-                    if let Some(terms) = accepted.escrow() {
-                        if super::escrow::verdict_cell_of(terms) == *verdict_cell {
-                            vaults.push(*accepted);
+                    // The cell the vault's kind binds it to: `K_verdict` or
+                    // `K_match` (SoFi Amendment S22).
+                    let bound_to = match accepted.terms() {
+                        super::lineage::GenesisTerms::Escrow(terms) => {
+                            Some(super::escrow::verdict_cell_of(terms))
                         }
+                        super::lineage::GenesisTerms::Computed(terms) => {
+                            Some(super::computed::match_cell_of(terms))
+                        }
+                        super::lineage::GenesisTerms::Market(..) => None,
+                    };
+                    if bound_to == Some(*verdict_cell) {
+                        vaults.push(*accepted);
                     }
                 }
                 // Not a vault anyone created, or a genesis refused: not a
@@ -2012,21 +2168,18 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             cells.push(cell);
             walks.push(walk);
         }
-        // A Release stands on the verdict its cell holds (SoFi Amendment S21):
-        // the cell is read like any other, and nothing is read for any other
-        // operation.
+        // A Release stands on the cell its vault's kind binds it to (SoFi
+        // Amendments S21, S22): the verdict cell, or the start and match
+        // cells. Nothing is read for any other operation.
         let verdict = match exercise.preimage().settlement() {
-            SettlementBody::Release { verdict_cell, .. } => {
-                match self.read_verdict_cell(verdict_cell)? {
-                    Ok(read) => Some(read),
-                    Err(missing) => {
-                        return Ok(Err(NotEstablished::VerdictCell {
-                            verdict_cell: *verdict_cell,
-                            missing,
-                        }))
-                    }
-                }
-            }
+            SettlementBody::Release {
+                vault_id,
+                verdict_cell,
+                ..
+            } => match self.read_release_cells(vault_id, verdict_cell)? {
+                Ok(read) => Some(read),
+                Err(why) => return Ok(Err(why)),
+            },
             SettlementBody::Swap { .. } | SettlementBody::Close { .. } => None,
         };
         Ok(Ok(LegsRead {
@@ -2328,11 +2481,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 | NotEstablished::ConformanceEvidence(..)
                 | NotEstablished::RouteEvidence(..)
                 | NotEstablished::AttemptCell { .. }
-                | NotEstablished::VerdictCell { .. } => {
+                | NotEstablished::VerdictCell { .. }
+                | NotEstablished::StartCell { .. } => {
                     Incomplete(format!("position {q}: the facts: {why:?}"))
                 }
                 NotEstablished::ParentUnresolved { .. }
                 | NotEstablished::AttemptLiveness { .. }
+                | NotEstablished::OutcomeProgramNotRegistered { .. }
                 | NotEstablished::NotThisExercise(..) => {
                     Unresolved(format!("position {q}: the facts: {why:?}"))
                 }

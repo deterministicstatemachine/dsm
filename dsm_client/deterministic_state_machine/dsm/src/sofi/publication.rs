@@ -47,9 +47,9 @@ use super::derive;
 use super::escrow;
 use super::signature::{verify_fulfillment, verify_precommit, verify_setup};
 use super::wire::{
-    DlvPolicyFulfillmentBody, EscrowTerms, EscrowVerdict, SettlementPreimage, SignedSofiObject,
-    SofiSetupBody, SofiWireError, TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody,
-    VaultGenesisPreimage,
+    ComputedEscrowTerms, DlvPolicyFulfillmentBody, EscrowTerms, EscrowVerdict, SettlementPreimage,
+    SignedSofiObject, SofiSetupBody, SofiWireError, TraderFulfillmentBody, TraderPreBalance,
+    TraderPrecommitBody, VaultGenesisPreimage,
 };
 
 type D32 = [u8; 32];
@@ -145,6 +145,18 @@ pub enum Publication<'a> {
     /// the statement locator of its cell and outcome (SoFi Amendment S21). It
     /// carries no authority: only a verdict recognized at the cell decides.
     EscrowVerdict(&'a EscrowVerdict),
+    /// A computed escrow vault's terms, bare, found by the address all three
+    /// of its state's slots name (SoFi Amendment S22). They share the escrow
+    /// terms namespace: the class of the bytes is the kind.
+    ComputedEscrowTerms(&'a ComputedEscrowTerms),
+    /// A computed escrow vault's genesis preimage, bare, indexed under
+    /// `vault_genesis_locator(v)` and under the cell locator of the match
+    /// cell its terms bind it to (SoFi Amendment S22). Publishing it asserts
+    /// nothing: its acceptance binds it to the owner's validated creation.
+    ComputedEscrowVaultGenesis {
+        preimage: &'a VaultGenesisPreimage,
+        terms: &'a ComputedEscrowTerms,
+    },
 }
 
 fn envelope(
@@ -187,6 +199,8 @@ impl Publication<'_> {
             Self::EscrowTerms(terms) => Ok(terms.encode()),
             Self::EscrowVaultGenesis { preimage, .. } => preimage.encode(),
             Self::EscrowVerdict(verdict) => Ok(verdict.encode()),
+            Self::ComputedEscrowTerms(terms) => Ok(terms.encode()),
+            Self::ComputedEscrowVaultGenesis { preimage, .. } => preimage.encode(),
         }
     }
 
@@ -210,6 +224,8 @@ impl Publication<'_> {
             // other, found under the same namespace.
             Self::EscrowVaultGenesis { .. } => TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
             Self::EscrowVerdict(_) => TAG_DSM_ESCROW_VERDICT_OBJECT,
+            Self::ComputedEscrowTerms(_) => TAG_DSM_ESCROW_TERMS_OBJECT,
+            Self::ComputedEscrowVaultGenesis { .. } => TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
         }
     }
 
@@ -309,9 +325,32 @@ impl Publication<'_> {
                     locator: escrow::statement_locator(&cell, verdict.outcome()),
                 }]
             }
-            Self::VaultPolicy { .. } | Self::TraderPreBalance(_) | Self::EscrowTerms(_) => {
-                Vec::new()
+            Self::ComputedEscrowVaultGenesis { preimage, terms } => {
+                // The cell a vault is found by is the one its slots commit it
+                // to, as for a signed escrow vault.
+                let addr = escrow::terms_address_of(&terms.encode());
+                let state = &preimage.state;
+                if state.market_policy != addr
+                    || state.fee_policy != addr
+                    || state.release_policy != addr
+                {
+                    return Err(SofiWireError::EscrowTermsNotCommitted);
+                }
+                vec![
+                    Locator {
+                        index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                        locator: derive::vault_genesis_locator(&preimage.vault_id()),
+                    },
+                    Locator {
+                        index_namespace: TAG_DSM_ESCROW_CELL_LOCATOR.source_bytes(),
+                        locator: escrow::cell_locator(&super::computed::match_cell_of(terms)),
+                    },
+                ]
             }
+            Self::VaultPolicy { .. }
+            | Self::TraderPreBalance(_)
+            | Self::EscrowTerms(_)
+            | Self::ComputedEscrowTerms(_) => Vec::new(),
         })
     }
 }

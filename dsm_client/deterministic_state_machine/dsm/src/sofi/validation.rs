@@ -40,10 +40,10 @@ use super::derive;
 use super::escrow;
 use super::smt::{verify_batch, FoldEntry, FoldError};
 use super::wire::{
-    next_position, CoreEntry, DlvCore, EscrowTerms, OwnerAuthority, SettlementBody,
-    SettlementPreimage, SwapHop, TraderCore, TraderPreBalance, TraderPrecommitBody,
-    TraderRelationshipLeaf, ValidationRef, VaultRelationshipLeaf, VaultStateLeaf,
-    MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
+    next_position, ComputedEscrowTerms, CoreEntry, DlvCore, EscrowKind, EscrowTerms,
+    OwnerAuthority, SettlementBody, SettlementPreimage, SwapHop, TraderCore, TraderPreBalance,
+    TraderPrecommitBody, TraderRelationshipLeaf, ValidationRef, VaultRelationshipLeaf,
+    VaultStateLeaf, MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
 };
 
 type D32 = [u8; 32];
@@ -623,6 +623,9 @@ impl Policies {
 pub enum VaultTerms {
     Market(Policies),
     Escrow(EscrowTerms),
+    /// Computed escrow terms (SoFi Amendment S22): the class of the bytes
+    /// the slots name decides the kind.
+    Computed(ComputedEscrowTerms),
 }
 
 impl VaultTerms {
@@ -636,9 +639,12 @@ impl VaultTerms {
     pub fn resolve(evidence: &Evidence, state: &VaultStateLeaf) -> Result<Self, Refusal> {
         if Self::slots_name_escrow(state) {
             let bytes = evidence.terms_bytes(&state.market_policy)?;
-            let terms = EscrowTerms::decode(bytes)
+            let terms = EscrowKind::decode(bytes)
                 .map_err(|why| Refusal::Invalid(Invalid::EscrowTermsDoNotDecode(why)))?;
-            return Ok(Self::Escrow(terms));
+            return Ok(match terms {
+                EscrowKind::Signed(terms) => Self::Escrow(terms),
+                EscrowKind::Computed(terms) => Self::Computed(terms),
+            });
         }
         Ok(Self::Market(Policies::resolve(evidence, state)?))
     }
@@ -648,15 +654,18 @@ impl VaultTerms {
     pub fn market(self) -> Result<Policies, Refusal> {
         match self {
             Self::Market(policies) => Ok(policies),
-            Self::Escrow(..) => Err(Refusal::Invalid(Invalid::TermsAreNotAMarket)),
+            Self::Escrow(..) | Self::Computed(..) => {
+                Err(Refusal::Invalid(Invalid::TermsAreNotAMarket))
+            }
         }
     }
 
-    /// An escrow vault's terms; a market has none, so a Release against one
-    /// is Invalid.
-    pub fn escrow(self) -> Result<EscrowTerms, Refusal> {
+    /// An escrow vault's terms, of either kind; a market has none, so a
+    /// Release against one is Invalid.
+    pub fn escrow(self) -> Result<EscrowKind, Refusal> {
         match self {
-            Self::Escrow(terms) => Ok(terms),
+            Self::Escrow(terms) => Ok(EscrowKind::Signed(terms)),
+            Self::Computed(terms) => Ok(EscrowKind::Computed(terms)),
             Self::Market(..) => Err(Refusal::Invalid(Invalid::TermsAreNotEscrow)),
         }
     }
@@ -667,6 +676,7 @@ impl VaultTerms {
         match self {
             Self::Market(policies) => EvidenceNeeds::token_policies_of(&policies.market).to_vec(),
             Self::Escrow(terms) => vec![*terms.token()],
+            Self::Computed(terms) => vec![*terms.token()],
         }
     }
 }
@@ -2401,15 +2411,20 @@ fn validate_release(verdict: &mut Verdict, r: &ReleaseCheck<'_>) {
         .and_then(|s| verdict.get(VaultTerms::resolve(r.evidence, s).and_then(VaultTerms::escrow)));
     let trader_core = r.preimage.trader_core();
     if let Some(terms) = terms.as_ref() {
+        // The cell the kind binds the vault to: `K_verdict` for signed
+        // terms, `K_match` for computed ones (SoFi Amendment S22).
+        let bound_to = match terms {
+            EscrowKind::Signed(terms) => escrow::verdict_cell_of(terms),
+            EscrowKind::Computed(terms) => super::computed::match_cell_of(terms),
+        };
         verdict.note(require(
-            escrow::verdict_cell_of(terms) == *r.verdict_cell,
+            bound_to == *r.verdict_cell,
             Invalid::VerdictCellIsNotTheTerms,
         ));
-        match terms.branch(r.outcome) {
+        match terms.recipient(r.outcome) {
             None => verdict.note(Err(Refusal::Invalid(Invalid::OutcomeHasNoBranch))),
-            Some(branch) => verdict.note(require(
-                branch.recipient_genesis() == r.precommit.genesis()
-                    && branch.recipient_device_id() == r.precommit.device_id(),
+            Some((genesis, device_id)) => verdict.note(require(
+                genesis == r.precommit.genesis() && device_id == r.precommit.device_id(),
                 Invalid::NotTheBranchRecipient,
             )),
         }
@@ -5741,10 +5756,42 @@ mod tests {
         .unwrap()
     }
 
-    /// An escrow vault's state at its parent: all three slots name its terms,
-    /// the stake in `reserve_a`, nothing in `reserve_b`.
-    fn escrow_state(owner_device: D32, terms: &EscrowTerms) -> VaultStateLeaf {
-        let addr = escrow::terms_address(terms);
+    /// The fixture's computed terms (SoFi Amendment S22): "a-wins" pays the
+    /// trader, "b-wins" another identity, "void" the vault's owner; a program
+    /// and two session keys decide. Static validity runs no program and
+    /// verifies no signature, so neither key signs anything here.
+    fn computed_terms(owner_device: D32) -> ComputedEscrowTerms {
+        use crate::sofi::wire::{ComputedBranch, ComputedTable};
+        ComputedEscrowTerms::new(
+            tokens()[0].0,
+            escrow::external_commitment(b"fixture match"),
+            ComputedTable::new(
+                token(0x9A),
+                token(0x5E),
+                EscrowSigner::new(SIG_ALG, &[0x3A; 64]).unwrap(),
+                EscrowSigner::new(SIG_ALG, &[0x3B; 64]).unwrap(),
+            )
+            .unwrap(),
+            vec![
+                ComputedBranch::new(b"a-wins", G, dev()),
+                ComputedBranch::new(b"b-wins", token(0xB1), token(0xB2)),
+                ComputedBranch::new(b"void", G, owner_device),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The cell a kind of terms binds its vault to: `K_verdict` or `K_match`.
+    fn bound_cell(terms: &EscrowKind) -> D32 {
+        match terms {
+            EscrowKind::Signed(terms) => escrow::verdict_cell_of(terms),
+            EscrowKind::Computed(terms) => crate::sofi::computed::match_cell_of(terms),
+        }
+    }
+
+    /// An escrow vault's state at its parent: all three slots name the terms
+    /// at `addr`, the stake in `reserve_a`, nothing in `reserve_b`.
+    fn escrow_state_at(owner_device: D32, addr: D32) -> VaultStateLeaf {
         VaultStateLeaf {
             owner_genesis: G,
             owner_device_id: owner_device,
@@ -5764,13 +5811,23 @@ mod tests {
     /// fixture trader, built the way a trader builds one: the vault retires,
     /// the trader takes the stake and is debited nothing.
     fn escrow_fixture(owner_device: D32, op: EscrowOp) -> Fixture {
-        let terms = escrow_terms(owner_device);
+        escrow_fixture_of(
+            owner_device,
+            EscrowKind::Signed(escrow_terms(owner_device)),
+            op,
+        )
+    }
+
+    /// The same operation against an escrow vault of either kind.
+    fn escrow_fixture_of(owner_device: D32, terms: EscrowKind, op: EscrowOp) -> Fixture {
         let held = *terms.token();
+        let terms_bytes = terms.encode();
+        let terms_addr = escrow::terms_address_of(&terms_bytes);
         let vault_id = derive::vault_id(&G, &owner_device, P_CREATE);
         let rel_key = derive::relationship_key(&G, &dev(), &vault_id);
         let base =
             derive::relationship_leaf_genesis(&derive::setup_id(&G, &dev(), P_POS, &vault_id));
-        let state = escrow_state(owner_device, &terms);
+        let state = escrow_state_at(owner_device, terms_addr);
         let state_key = derive::vault_state_key(&vault_id);
         let relationship = VaultRelationshipLeaf {
             trader_genesis: G,
@@ -5845,7 +5902,7 @@ mod tests {
                 setup_ref: setup_ref_for(vault_id),
                 verdict_cell: match verdict_cell {
                     Some(cell) => cell,
-                    None => escrow::verdict_cell_of(&terms),
+                    None => bound_cell(&terms),
                 },
                 outcome: outcome.to_vec(),
                 amount,
@@ -5869,7 +5926,7 @@ mod tests {
             SettlementPreimage::new(settlement, trader_core.clone(), vec![dlv_core]).unwrap();
         let e = derive::recompute_e(&preimage).unwrap();
         let evidence = Evidence {
-            objects: BTreeMap::from([(escrow::terms_address(&terms), terms.encode())]),
+            objects: BTreeMap::from([(terms_addr, terms_bytes)]),
             vault_leaves: BTreeMap::from([
                 ((vault_id, state_key), VaultLeafPre::State(state)),
                 (
@@ -6078,5 +6135,108 @@ mod tests {
             refusal_of(&f),
             Err(Refusal::Incomplete(Missing::NonVerifyingObject { addr }))
         );
+    }
+
+    // ── computed escrow vaults (SoFi Amendment S22) ───────────────────────
+
+    fn computed_fixture(owner_device: D32, op: EscrowOp) -> Fixture {
+        escrow_fixture_of(
+            owner_device,
+            EscrowKind::Computed(computed_terms(owner_device)),
+            op,
+        )
+    }
+
+    /// A Release against a computed vault names its match cell, and takes
+    /// the whole stake to the recipient of the branch it names; the vault
+    /// retires as a signed escrow vault does.
+    #[test]
+    fn a_release_of_a_computed_vault_names_its_match_cell() {
+        let f = computed_fixture(OTHER_OWNER, release(b"a-wins"));
+        assert_eq!(refusal_of(&f), Ok(()));
+        assert_eq!(
+            trader_credits(&f.preimage, &f.evidence),
+            Ok(vec![tokens()[0].0])
+        );
+        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        assert_eq!(posts[0].state().status, VAULT_STATUS_RETIRED);
+
+        // The verdict cell the same Y would have under signed terms is not
+        // this vault's cell, and neither is any other.
+        let signed_cell = escrow::verdict_cell_of(&escrow_terms(OTHER_OWNER));
+        for cell in [signed_cell, token(0xCE)] {
+            let f = computed_fixture(
+                OTHER_OWNER,
+                EscrowOp::Release {
+                    outcome: b"a-wins",
+                    amount: STAKE,
+                    verdict_cell: Some(cell),
+                },
+            );
+            assert_eq!(
+                refusal_of(&f),
+                Err(Refusal::Invalid(Invalid::VerdictCellIsNotTheTerms))
+            );
+        }
+    }
+
+    /// The recipient check is unchanged: a computed branch pays only its own
+    /// recipient, and a label the terms do not have pays no one.
+    #[test]
+    fn a_computed_release_pays_only_its_branchs_recipient() {
+        let f = computed_fixture(OTHER_OWNER, release(b"b-wins"));
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::NotTheBranchRecipient))
+        );
+        // The owner's void branch shares the trader's genesis, not its
+        // device: it pays the owner, not the trader.
+        let f = computed_fixture(OTHER_OWNER, release(b"void"));
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::NotTheBranchRecipient))
+        );
+        let f = computed_fixture(OTHER_OWNER, release(b"draw"));
+        assert_eq!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::OutcomeHasNoBranch))
+        );
+        // The owner's own void branch is how its stake returns.
+        let void = computed_fixture(dev(), release(b"void"));
+        assert_eq!(refusal_of(&void), Ok(()));
+        // And it has no owner close.
+        let close = computed_fixture(dev(), EscrowOp::Close);
+        assert_eq!(
+            refusal_of(&close),
+            Err(Refusal::Invalid(Invalid::TermsAreNotAMarket))
+        );
+    }
+
+    /// The class of the bytes the slots name is the kind: bytes of another
+    /// class that authenticate to the address are no escrow terms.
+    #[test]
+    fn terms_of_another_class_are_no_escrow_terms() {
+        let mut f = computed_fixture(OTHER_OWNER, release(b"a-wins"));
+        let not_terms = crate::sofi::wire::VaultCreation {
+            vault_id: token(0x01),
+            genesis_root: token(0x02),
+            amount_a: STAKE,
+            amount_b: 0,
+        }
+        .encode();
+        let addr = escrow::terms_address_of(&not_terms);
+        let vault_id = derive::vault_id(&G, &OTHER_OWNER, P_CREATE);
+        let state_key = derive::vault_state_key(&vault_id);
+        f.evidence.vault_leaves.insert(
+            (vault_id, state_key),
+            VaultLeafPre::State(escrow_state_at(OTHER_OWNER, addr)),
+        );
+        f.evidence.objects.insert(addr, not_terms);
+        assert!(matches!(
+            refusal_of(&f),
+            Err(Refusal::Invalid(Invalid::EscrowTermsDoNotDecode(
+                crate::ccb::decode::DecodeError::WrongClass { .. }
+            )))
+        ));
     }
 }

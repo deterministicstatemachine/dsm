@@ -634,7 +634,7 @@ fn escrow_creation_write_set(
             reason: e.to_string(),
         }
     })?;
-    let parsed = crate::sofi::wire::EscrowTerms::decode(terms).map_err(|e| {
+    let parsed = crate::sofi::wire::EscrowKind::decode(terms).map_err(|e| {
         WriteSetError::MalformedEscrowObject {
             object: "terms",
             reason: e.to_string(),

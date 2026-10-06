@@ -746,7 +746,9 @@ pub enum Operation {
         genesis_preimage: Vec<u8>,
         /// Canonical `VaultCreation` bytes (class `0x005B`).
         creation: Vec<u8>,
-        /// Canonical `EscrowTerms` bytes (class `0x0063`): the EXACT object
+        /// Canonical escrow terms: `EscrowTerms` (class `0x0063`) or
+        /// `ComputedEscrowTerms` (class `0x0067`, SoFi Amendment S22), whose
+        /// class decides the vault's kind. The EXACT object
         /// the genesis state's slots name, carried for the reason
         /// `SofiVaultCreate` carries its market policy, so acceptance is a
         /// function of the operation's bytes. Core re-addresses them under the
