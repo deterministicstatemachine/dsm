@@ -324,6 +324,53 @@ used by either checked gate. Android SDK Clippy's existing failure remains open;
 on-device exception handling, whole signer/binary equivalence and general
 constant-time/memory/JNI guarantees are still not certified.
 
+### New security game and artifact-lock projects
+
+`SPHINCS_SECURITY_CHARTER.md` freezes the initial classical single-key EUF-CMA
+scope for deployed SPX128f/SPX256f, symbolic signing-attempt/message limits,
+deterministic signing and a uniform 32-byte master seed. It records the PRG
+expansion, public thash key, correlated EK/multi-key and quantum boundaries.
+The current `SecurityGames.lean` Strategy is extensional and unbounded; an
+adversary runtime/primitive-query cost model is still required for a computational
+security theorem. No numerical or post-quantum advantage bound is asserted.
+
+The executable game calls the existing `generateKeypair`, `sign` and `verify`
+model definitions with an explicit deterministic Oracle Id parameter. It does
+not supply an independent concrete BLAKE3/ChaCha implementation or close the
+model-to-Rust gap; the current transcript and partial extraction boundaries
+continue to apply. The adversary's finite random tape is sampled independently
+of the uniform master seed. Kernel-checked results establish master-seed sampler
+bijectivity, legal-query rejection, the attempt budget, public-key preservation,
+repeated-query replies, queried-message exclusion and finite-event union bounds.
+Probabilities are exact numerator/positive-denominator pairs with a rational
+view; union bounds use the shared denominator. These are game/accounting proofs,
+not PRF/XOF replacement, bad-event classification or forgery extraction.
+No security assumption or external axiom template was imported.
+
+Executable controls check adaptive queries, invalid/oversized messages, freshness,
+budget exhaustion and exact event accounting. A deliberately insecure zero-output
+oracle satisfies the requested output widths yet permits a fresh SPX128f forgery.
+This negative control prevents equating honest signer correctness/output widths
+with security; it is not a counterexample to actual BLAKE3. The CI refinement gate
+now compiles the games and runs these controls.
+
+`scripts/lock_sphincs_artifact.py` (Python 3.11+) records and rechecks the fixed
+Android arm64/API-28 SDK's build inputs and emitted artifacts, exact SDK compiler
+invocation, compiler/LLVM/NDK/linker tools, dependency archives, generated inputs,
+Cargo.lock, effective CPU/features and build-time Android link interfaces.
+A verbose fresh build supplies the compiler command. This is local artifact
+identity evidence, not source-to-IR or machine simulation. Runtime libc/JVM/OS,
+allocator state, signals, scheduling and the microarchitecture remain unlocked.
+No supported ARM machine/leakage/erasure semantics or compiler-preservation
+proof exists. The initial closed-kernel theorem therefore remains open even
+though the larger SDK candidate has a locked inventory of 1,199 build files.
+The inventory check passed; altered artifact, altered inventory and missing
+artifact controls were rejected. Lean games/control checks, the full existing
+114-case/five-mutation refinement gate, the verbose Android release build,
+invariant scan, codegen guard, SPDX and diff checks passed for this follow-up.
+Runtime Rust/JNI behavior was not changed. Existing Android SDK lint failures
+and absent device/runtime proof checks remain as documented above.
+
 ## Executable evidence and reproducibility
 
 Run `bash scripts/check_sphincs_refinement.sh` from the repository root. The CI
