@@ -596,6 +596,40 @@ async fn committed_at<S: RouteSeats>(
 /// seat's view of the leader is the leader's ByteCommit at the leader's
 /// latest cycle as that seat's own mirror holds it, with the leader's proof
 /// (§9 route chains, rule 4).
+/// [`read_cell`] for a cell whose final value, once there, holds it for good
+/// (storage spec §9, finality 2): the reads this process kept when Core
+/// evaluated them as final at the cell, or else the seats' reads, kept when
+/// `is_final` — Core's evaluation of them at this cell — says they show a
+/// final value. An open or undecided cell is read from the seats every time.
+pub(crate) async fn read_cell_kept<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    is_final: impl FnOnce(&CellEvidence) -> bool,
+) -> CellEvidence {
+    if let Some(kept) = crate::sdk::final_reads::final_cell(cell) {
+        return kept;
+    }
+    let evidence = read_cell(seats, cell).await;
+    if is_final(&evidence) {
+        crate::sdk::final_reads::keep_final_cell(cell, &evidence);
+    }
+    evidence
+}
+
+/// Whether Core reads a final claim at the root cell `cell` from `evidence`.
+pub(crate) fn root_claim_final(
+    cell: &dsm::economic::register::RootCell,
+    evidence: &CellEvidence,
+) -> bool {
+    matches!(
+        dsm::economic::register::read_root_cell(cell, evidence),
+        Ok(dsm::route_chain::CellReading::Held {
+            state: dsm::route_chain::ChainState::Final,
+            ..
+        })
+    )
+}
+
 pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvidence {
     let (route, namespace, key) = (cell.route(), cell.namespace(), cell.key());
     // Each phase logs where it ends; the log's own timestamps time it. The

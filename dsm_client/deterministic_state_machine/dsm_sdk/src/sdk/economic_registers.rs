@@ -30,7 +30,9 @@ use dsm::economic::register::{read_root_cell, RootCell};
 use dsm::route_chain::{CellEvidence, CellReading, ChainState, Missing};
 use dsm::types::error::DsmError;
 
-use crate::sdk::route_seats::{read_cell, write_recorded, NodeSeats, WriteReport};
+use crate::sdk::route_seats::{
+    read_cell, read_cell_kept, root_claim_final, write_recorded, NodeSeats, WriteReport,
+};
 use crate::sdk::storage_set::StorageSet;
 use crate::util::text_id;
 
@@ -94,7 +96,11 @@ pub(crate) async fn next_root_cell(
     })?;
     let cell = root_cell(set, network_id, genesis, devid, next, root)?;
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cell.routed()).await;
+    // A claim final at the cell holds it for good: kept once read final.
+    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+        root_claim_final(&cell, evidence)
+    })
+    .await;
     Ok(match read_root_cell(&cell, &evidence) {
         Ok(CellReading::Open) => NextRootCell::Open,
         Ok(CellReading::Held { .. }) => NextRootCell::Held,
@@ -137,7 +143,11 @@ pub async fn root_claim_settlement(
     envelope: &[u8],
 ) -> Result<RootClaimSettlement, DsmError> {
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cell.routed()).await;
+    // A claim final at the cell holds it for good: kept once read final.
+    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+        root_claim_final(cell, evidence)
+    })
+    .await;
     let ours = dsm::storage_cell::entry_digest(envelope);
     Ok(match read_root_cell(cell, &evidence) {
         Ok(CellReading::Held {

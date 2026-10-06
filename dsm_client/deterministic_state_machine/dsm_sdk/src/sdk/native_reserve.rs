@@ -25,7 +25,7 @@ use dsm::economic::native_reserve::{
 use dsm::economic::provenance::ReserveReleaseWin;
 use dsm::types::error::DsmError;
 
-use crate::sdk::route_seats::{keep_completion, read_cell, write_recorded, NodeSeats, WriteReport};
+use crate::sdk::route_seats::{keep_completion, read_cell_kept, write_recorded, NodeSeats, WriteReport};
 use crate::sdk::storage_set::StorageSet;
 use crate::storage::client_db::native_reserve as memo;
 
@@ -66,8 +66,24 @@ pub async fn read_successor(
 ) -> Result<SuccessorRead, DsmError> {
     let cell = successor_cell(set, parent)?;
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cell.routed()).await;
+    let evidence = read_successor_cell(&seats, &cell).await;
     Ok(resolve_successor(&cell, &evidence))
+}
+
+/// The reads of a successor cell: kept by the process once Core resolves a
+/// final release there, which holds the cell for good (storage spec §9,
+/// finality 2), and read from the seats otherwise.
+async fn read_successor_cell(
+    seats: &NodeSeats,
+    cell: &SuccessorCell,
+) -> dsm::route_chain::CellEvidence {
+    read_cell_kept(seats, cell.routed(), |evidence| {
+        matches!(
+            resolve_successor(cell, evidence),
+            SuccessorRead::Final { .. }
+        )
+    })
+    .await
 }
 
 /// Walk the reserve lineage from the latest memoised state (or `R_0`) to
@@ -146,7 +162,7 @@ pub async fn keep_release_completion(
 ) -> Result<bool, DsmError> {
     let cell = successor_cell(set, parent)?;
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cell.routed()).await;
+    let evidence = read_successor_cell(&seats, &cell).await;
     let Some((release, child, proof)) = successor_completion(&cell, &evidence)
         .map_err(|missing| storage_err("reserve completion", format!("{missing:?}")))?
     else {
