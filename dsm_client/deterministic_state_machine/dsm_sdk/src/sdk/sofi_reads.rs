@@ -98,11 +98,25 @@ pub struct LiveSofiReads<'a> {
     /// traders' positions, by `(genesis, device_id, position)`, kept for this
     /// context's life: they are verified, so a walk that meets one trader's
     /// exercises again does not walk that lineage again.
-    roots: std::sync::Mutex<BTreeMap<(D32, D32, u64), (ValidatedEconomicRoot, ParentClaimRef)>>,
+    roots: std::sync::Arc<std::sync::Mutex<PeerRoots>>,
     /// What this context read and keeps for its life — one resolution, one
     /// quote, one walk — so the verifier's passes over the same cells and
     /// objects read each once ([`ReadOnce`]).
-    once: ReadOnce,
+    once: std::sync::Arc<ReadOnce>,
+}
+
+type PeerRoots = BTreeMap<(D32, D32, u64), (ValidatedEconomicRoot, ParentClaimRef)>;
+
+/// What the contexts of one operation keep between them: the readings
+/// [`ReadOnce`] keeps and the roots verified for other traders. Each is final
+/// or verified, and holds whatever position this device stands on, so a
+/// context built after the device's own position moved (a setup admitted
+/// mid-operation) stands on them too. One operation's contexts share one; a
+/// new operation starts from none.
+#[derive(Clone, Default)]
+pub struct KeptReadings {
+    roots: std::sync::Arc<std::sync::Mutex<PeerRoots>>,
+    once: std::sync::Arc<ReadOnce>,
 }
 
 /// The readings one context keeps: only those nothing later can change. A
@@ -240,13 +254,23 @@ impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
 
 impl<'a> LiveSofiReads<'a> {
     pub fn new(set: &'a StorageSet, own: Option<(D32, D32)>) -> Result<Self, DsmError> {
+        Self::keeping(set, own, &KeptReadings::default())
+    }
+
+    /// [`Self::new`], keeping its readings in `kept`, which the other
+    /// contexts of the same operation share.
+    fn keeping(
+        set: &'a StorageSet,
+        own: Option<(D32, D32)>,
+        kept: &KeptReadings,
+    ) -> Result<Self, DsmError> {
         Ok(Self {
             set,
             runtime: tokio::runtime::Handle::current(),
             network: committed_network_id()?,
             own,
-            roots: std::sync::Mutex::new(BTreeMap::new()),
-            once: ReadOnce::default(),
+            roots: kept.roots.clone(),
+            once: kept.once.clone(),
         })
     }
 
@@ -610,8 +634,22 @@ impl<'a> VerifierContext<'a> {
         parent: Option<&'a AdmittedEconomicPosition>,
         accepted: &AcceptedGeneses,
     ) -> Result<Self, DsmError> {
+        Self::sharing_kept(set, own, parent, accepted, &KeptReadings::default())
+    }
+
+    /// [`Self::sharing`], keeping its readings in `kept`: every context one
+    /// operation builds over the set reads a final cell, an object or another
+    /// trader's verified root once between them, though the device's own
+    /// position moved between the contexts.
+    pub fn sharing_kept(
+        set: &'a StorageSet,
+        own: Option<(D32, D32)>,
+        parent: Option<&'a AdmittedEconomicPosition>,
+        accepted: &AcceptedGeneses,
+        kept: &KeptReadings,
+    ) -> Result<Self, DsmError> {
         Ok(Self {
-            reads: LiveSofiReads::new(set, own)?,
+            reads: LiveSofiReads::keeping(set, own, kept)?,
             members: as_ccb_members(set)?,
             set_id: set.id(),
             network: committed_network_id()?,

@@ -527,6 +527,30 @@ pub struct Walked {
     pub consumed: Option<RecognizedExercise>,
     pub not_established: Option<NotEstablished>,
     known: BTreeMap<u64, KeyKnown>,
+    /// The reading of the key the walk stopped on unresolved when it read
+    /// that key and classified nothing there: an open cell, or an exercise
+    /// whose facts are not established.
+    stopped_on: Option<AttemptCellRead>,
+}
+
+impl Walked {
+    /// The reading this walk made of the key it stopped on unresolved, when
+    /// it read one: the key's cell as the walk saw it, so a caller asking what
+    /// holds that key has the answer of this very walk in hand and need not
+    /// read it again. `None` past any other stop, and when the reads did not
+    /// decide the key.
+    pub fn unresolved_reading(&self) -> Option<&AttemptCellRead> {
+        let WalkOutcome::Unresolved { attempt } = self.outcome else {
+            return None;
+        };
+        match self.known.get(&attempt) {
+            Some(key) => Some(&key.read),
+            None => self
+                .stopped_on
+                .as_ref()
+                .filter(|read| read.attempt() == attempt),
+        }
+    }
 }
 
 /// What this verifier knows about one exercise.
@@ -1444,7 +1468,10 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     return self.post_state_of(vault_id, current, &exercise);
                 }
                 WalkOutcome::Unresolved { attempt } if pass == 0 && depth > 0 => {
-                    if !self.establish_siblings(vault_id, current, attempt, chains, depth)? {
+                    let in_hand = walked.unresolved_reading();
+                    if !self
+                        .establish_siblings(vault_id, current, attempt, in_hand, chains, depth)?
+                    {
                         return Ok(None);
                     }
                 }
@@ -1504,15 +1531,22 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         vault_id: &D32,
         current: &D32,
         attempt: u64,
+        in_hand: Option<&AttemptCellRead>,
         chains: &mut BTreeMap<D32, VaultChain>,
         depth: usize,
     ) -> Result<bool, VerifierFailure> {
-        let exercise = match self.read_attempt_cell(vault_id, current, attempt)? {
-            Ok(read) => read.into_exercise(),
-            Err(missing) => {
-                log::info!("[sofi chain] attempt {attempt} is not decided yet: {missing:?}");
-                None
-            }
+        // The walk that stopped here read the key: its reading is what holds
+        // the key now, as this pass knows it. Only a key the walk could not
+        // decide is read again.
+        let exercise = match in_hand {
+            Some(read) => read.exercise().cloned(),
+            None => match self.read_attempt_cell(vault_id, current, attempt)? {
+                Ok(read) => read.into_exercise(),
+                Err(missing) => {
+                    log::info!("[sofi chain] attempt {attempt} is not decided yet: {missing:?}");
+                    None
+                }
+            },
         };
         let Some(exercise) = exercise else {
             return Ok(false);
@@ -1639,12 +1673,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 known.get(&attempt).and_then(KeyKnown::key_facts)
             });
             let outcome = walked.outcome();
-            let done = |consumed, not_established, known| Walked {
+            let done = |consumed, not_established, known, stopped_on| Walked {
                 outcome,
                 walk: walked,
                 consumed,
                 not_established,
                 known,
+                stopped_on,
             };
             match outcome {
                 WalkOutcome::Unresolved { attempt } if !known.contains_key(&attempt) => {
@@ -1659,13 +1694,14 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                                     missing,
                                 }),
                                 known,
+                                None,
                             ))
                         }
                     };
                     // An open key is unresolved, never a skip: no key is ever
                     // dead.
                     let Some(exercise) = read.exercise().cloned() else {
-                        return Ok(done(None, None, known));
+                        return Ok(done(None, None, known, Some(read)));
                     };
                     // The walk reached this key by skipping every one before
                     // it. That liveness is stated as the walk over them, for
@@ -1685,18 +1721,18 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         Ok(facts) => {
                             known.insert(attempt, KeyKnown { read, known: facts });
                         }
-                        Err(why) => return Ok(done(None, Some(why), known)),
+                        Err(why) => return Ok(done(None, Some(why), known, Some(read))),
                     }
                 }
                 WalkOutcome::Consumed { attempt } => {
                     let consumed = known
                         .get(&attempt)
                         .and_then(|key| key.read.exercise().cloned());
-                    return Ok(done(consumed, None, known));
+                    return Ok(done(consumed, None, known, None));
                 }
                 WalkOutcome::Unresolved { .. }
                 | WalkOutcome::CounterExhausted { .. }
-                | WalkOutcome::Continue { .. } => return Ok(done(None, None, known)),
+                | WalkOutcome::Continue { .. } => return Ok(done(None, None, known, None)),
             }
         }
     }

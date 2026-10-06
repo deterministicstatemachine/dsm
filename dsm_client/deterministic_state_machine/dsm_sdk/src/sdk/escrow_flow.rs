@@ -637,7 +637,7 @@ pub(crate) async fn exercise_release(
         &standing.local,
     )
     .map_err(refuse)?;
-    exercise_draft(core, set, &standing, draft, accepted).await
+    exercise_draft(core, set, &ctx, draft, accepted).await
 }
 
 // ── escrow.locked and escrow.vaults ─────────────────────────────────────────

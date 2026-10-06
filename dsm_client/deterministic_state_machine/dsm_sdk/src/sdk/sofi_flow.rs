@@ -49,7 +49,7 @@ use crate::sdk::sofi_advance::{
     resolve_pending_position, Advanced, Completion, FulfillRequest,
 };
 use crate::sdk::sofi_reads::{
-    local_leaves_of_validated, verifier_error, LiveSofiReads, VerifierContext,
+    local_leaves_of_validated, verifier_error, KeptReadings, LiveSofiReads, VerifierContext,
 };
 use crate::sdk::sofi_publish::{fetch_setup_for, publish, publish_produced, Published};
 use crate::sdk::sofi_relay::relay_fulfillment;
@@ -689,11 +689,23 @@ impl Standing {
         set: &'a StorageSet,
         accepted: &AcceptedGeneses,
     ) -> Result<VerifierContext<'a>, DsmError> {
-        VerifierContext::sharing(
+        self.context_kept(set, accepted, &KeptReadings::default())
+    }
+
+    /// [`Self::context`], keeping what it reads in `kept`, which the other
+    /// contexts of the same operation share.
+    pub(crate) fn context_kept<'a>(
+        &'a self,
+        set: &'a StorageSet,
+        accepted: &AcceptedGeneses,
+        kept: &KeptReadings,
+    ) -> Result<VerifierContext<'a>, DsmError> {
+        VerifierContext::sharing_kept(
             set,
             Some((self.genesis, self.device_id)),
             Some(&self.admitted),
             accepted,
+            kept,
         )
     }
 }
@@ -1289,12 +1301,18 @@ async fn walk_for_attempt(
         }
     };
     let mut attempt = first;
+    // The walk read the key it stopped on: that reading is what holds the key
+    // as this attempt knows it, and the key is not read again to learn it.
+    let mut in_hand = walked.unresolved_reading().cloned();
     let mut advanced = 0;
     while advanced <= ATTEMPT_ADVANCE {
-        let read = match verifier
-            .read_attempt_cell(vault_id, parent_root, attempt)
-            .map_err(verifier_error)?
-        {
+        let held = match in_hand.take() {
+            Some(read) => Ok(read),
+            None => verifier
+                .read_attempt_cell(vault_id, parent_root, attempt)
+                .map_err(verifier_error)?,
+        };
+        let read = match held {
             Ok(read) => read,
             Err(missing) => {
                 return Err(storage(
@@ -1597,15 +1615,17 @@ async fn settle(
 
 /// Stages 3 to 10 of §31 for a draft: validate over acquired evidence, sign
 /// and publish, fulfill through the Core transition, complete, resolve.
+///
+/// `ctx` is the context the caller drafted over, built from the same
+/// standing: what it read and kept is not read again here.
 pub(crate) async fn exercise_draft(
     core: &CoreSDK,
     set: &StorageSet,
-    standing: &Standing,
+    ctx: &VerifierContext<'_>,
     draft: UncheckedDraft,
     accepted: &AcceptedGeneses,
 ) -> Result<PositionOutcome, DsmError> {
     // Stage 3.
-    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let evidence = match verifier
         .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
@@ -1739,8 +1759,9 @@ async fn check_route(
     standing: &Standing,
     intent: &TradeIntent,
     accepted: &AcceptedGeneses,
+    kept: &KeptReadings,
 ) -> Result<(), DsmError> {
-    let ctx = standing.context(set, accepted)?;
+    let ctx = standing.context_kept(set, accepted, kept)?;
     let verifier = ctx.verifier();
     let mut vaults = Vec::with_capacity(intent.vault_ids.len());
     for vault_id in &intent.vault_ids {
@@ -1794,6 +1815,9 @@ pub async fn trade(
     // One memo for the whole operation: the check, the setups, the plan at
     // the heads and the settle each read a vault's genesis from it.
     let accepted = &AcceptedGeneses::default();
+    // And one store of what its contexts read and keep: the check's, the
+    // walk at the heads' and the draft's.
+    let kept = &KeptReadings::default();
     {
         let standing = standing(core)?;
         let unset = intent
@@ -1801,7 +1825,7 @@ pub async fn trade(
             .iter()
             .any(|vault_id| standing.local.relationship(vault_id).is_none());
         if unset {
-            check_route(core, set, &standing, intent, accepted).await?;
+            check_route(core, set, &standing, intent, accepted, kept).await?;
         }
     }
     set_up_with(core, set, &intent.vault_ids, accepted).await?;
@@ -1811,8 +1835,8 @@ pub async fn trade(
         intent.vault_ids.len()
     );
     let standing = standing(core)?;
-    let ctx = standing.context(set, accepted)?;
-    let verifier = ctx.verifier();
+    let verifying = standing.context_kept(set, accepted, kept)?;
+    let verifier = verifying.verifier();
     let mut heads = Vec::with_capacity(intent.vault_ids.len());
     for (vault_id, chain) in intent
         .vault_ids
@@ -1850,7 +1874,7 @@ pub async fn trade(
     let ctx = context(&standing, set, &public_key, trader)?;
     let draft = draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)?;
     log::info!("[sofi] trade: drafted {} hops", planned.len());
-    exercise_draft(core, set, &standing, draft, accepted).await
+    exercise_draft(core, set, &verifying, draft, accepted).await
 }
 
 // ── §32 Closing a vault ────────────────────────────────────────────────────
@@ -1885,8 +1909,8 @@ pub async fn close(
     }
     set_up_with(core, set, &[intent.vault_id], accepted).await?;
     let standing = standing(core)?;
-    let ctx = standing.context(set, accepted)?;
-    let verifier = ctx.verifier();
+    let verifying = standing.context(set, accepted)?;
+    let verifier = verifying.verifier();
     let chain = chain_past_withheld_pairs(
         set,
         &verifier,
@@ -1935,7 +1959,7 @@ pub async fn close(
         &standing.local,
     )
     .map_err(refuse)?;
-    exercise_draft(core, set, &standing, draft, accepted).await
+    exercise_draft(core, set, &verifying, draft, accepted).await
 }
 
 // ── §33 Relaying ───────────────────────────────────────────────────────────
