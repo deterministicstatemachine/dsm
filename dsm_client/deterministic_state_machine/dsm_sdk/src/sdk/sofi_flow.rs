@@ -274,12 +274,21 @@ pub async fn create_vault(
         (VaultPolicyClass::Fee, &fee),
         (VaultPolicyClass::Release, &release),
     ];
+    // Three objects, none naming another: published at once, each read back
+    // Stored before the vault names it.
+    let published =
+        futures::future::try_join_all(policies.iter().map(|(class, bytes)| async move {
+            let publication = Publication::VaultPolicy {
+                class: *class,
+                bytes,
+            };
+            Ok::<_, DsmError>((class.class(), publish(set, &publication).await?))
+        }))
+        .await?;
     let mut addresses = BTreeMap::new();
-    for (class, bytes) in policies {
-        let publication = Publication::VaultPolicy { class, bytes };
-        let published = publish(set, &publication).await?;
+    for (class, published) in published {
         require_stored("vault policy", &published)?;
-        addresses.insert(class.class(), published.addr);
+        addresses.insert(class, published.addr);
     }
     let address = |class: u16| {
         addresses
@@ -553,19 +562,25 @@ pub(crate) fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
 /// The terms `state` commits — a market's three policies, or an escrow
 /// vault's terms — fetched by the addresses it names and decoded by Core,
 /// which re-addresses each first.
+///
+/// The objects are content-addressed and none names another: they are read
+/// at once, and an object once read `Stored` is kept by the process.
 async fn vault_terms(set: &StorageSet, state: &VaultStateLeaf) -> Result<VaultTerms, DsmError> {
-    let mut objects = BTreeMap::new();
-    for (class, addr) in EvidenceNeeds::policies_of(state) {
-        let bytes = crate::sdk::storage_io::read_stored_bytes(set, &addr)
-            .await?
-            .ok_or_else(|| {
-                storage(
-                    "vault policy",
-                    format!("the class {class:#06x} object the vault commits is not Stored"),
-                )
-            })?;
-        objects.insert(addr, bytes);
-    }
+    let read = futures::future::try_join_all(EvidenceNeeds::policies_of(state).into_iter().map(
+        |(class, addr)| async move {
+            let bytes = crate::sdk::storage_io::read_stored_bytes_kept(set, &addr)
+                .await?
+                .ok_or_else(|| {
+                    storage(
+                        "vault policy",
+                        format!("the class {class:#06x} object the vault commits is not Stored"),
+                    )
+                })?;
+            Ok::<_, DsmError>((addr, bytes))
+        },
+    ))
+    .await?;
+    let objects: BTreeMap<_, _> = read.into_iter().collect();
     let evidence = Evidence::acquired(
         objects,
         BTreeMap::new(),

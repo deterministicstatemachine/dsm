@@ -39,7 +39,7 @@ use crate::sdk::economic_registers::{
 };
 use crate::sdk::route_seats::{keep_completion, read_cell, NodeSeats};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes, LOCATOR_BUDGET};
-use crate::sdk::storage_io::{read_stored_bytes, resolve_locator_all};
+use crate::sdk::storage_io::{read_stored_bytes_kept, resolve_locator_all};
 use crate::sdk::storage_set::{as_ccb_members, StorageSet};
 use crate::storage::client_db::{economic_lineage, sofi_vault_head};
 
@@ -394,7 +394,7 @@ impl SofiReads for LiveSofiReads<'_> {
         read_once(
             &self.once.objects,
             *addr,
-            || self.read("stored bytes", read_stored_bytes(self.set, addr)),
+            || self.read("stored bytes", read_stored_bytes_kept(self.set, addr)),
             Option::is_some,
         )
     }

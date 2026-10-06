@@ -64,11 +64,19 @@ pub struct Published {
 pub async fn publish(set: &StorageSet, object: &Publication<'_>) -> Result<Published, DsmError> {
     let bytes = object.object_bytes().map_err(wire_err)?;
     let (addr, ..) = put_immutable(set, object.namespace(), &bytes).await?;
-    let mut indexed = Vec::new();
-    for locator in object.locators().map_err(wire_err)? {
-        let took = append_to_index(set, locator.index_namespace, &locator.locator, &addr).await?;
-        indexed.push((locator, took));
-    }
+    // Each locator is an index of its own: the appends go at once, and are
+    // reported in the order the object names its locators.
+    let addr_ref = &addr;
+    let indexed =
+        futures::future::try_join_all(object.locators().map_err(wire_err)?.into_iter().map(
+            |locator| async move {
+                let took =
+                    append_to_index(set, locator.index_namespace, &locator.locator, addr_ref)
+                        .await?;
+                Ok::<_, DsmError>((locator, took))
+            },
+        ))
+        .await?;
     // The fact, from the members' answers — never from the fanout.
     let stored = read_stored_bytes(set, &addr).await?.is_some();
     Ok(Published {
