@@ -10,6 +10,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as connect from '../../dsm/connect';
 import { onConnectLink, takeConnectLink } from '../../dsm/connectLink';
+import { returnToConnectCaller } from '../../dsm/WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
 import { Disclosure, Notice, ScreenFrame, ScreenTabs, middleTruncate } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
@@ -138,6 +139,8 @@ export default function AppsScreen(): React.JSX.Element {
   const [sessions, setSessions] = useState<connect.Session[]>([]);
   const [waiting, setWaiting] = useState<connect.Pending[]>([]);
   const [code, setCode] = useState('');
+  // The code a link from another app on this phone brought, while it is the one shown.
+  const [linkedCode, setLinkedCode] = useState<string | null>(null);
   const [offer, setOffer] = useState<connect.Preview | null>(null);
   /// A camera scan this screen started and has not heard back from. The
   /// camera answers on the shared `dsm-event` channel, so a result is this
@@ -163,6 +166,7 @@ export default function AppsScreen(): React.JSX.Element {
       setTab('apps');
       setOffer(null);
       setCode(linked);
+      setLinkedCode(linked);
       setStatus({ kind: 'info', text: 'An app on this phone handed over its connect code. READ it to see what it asks for.' });
     };
     show();
@@ -240,8 +244,12 @@ export default function AppsScreen(): React.JSX.Element {
     run('Connecting', async () => {
       if (offer === null) throw new Error('read a code first');
       const connected = await connect.approve(offer.offerDigest);
+      const fromLink = linkedCode !== null && linkedCode === code;
       setOffer(null);
       setCode('');
+      setLinkedCode(null);
+      // The app on this phone that sent the code is where the player goes on.
+      if (fromLink) await returnToConnectCaller();
       return `Connected to ${connected.displayName}.`;
     });
 
