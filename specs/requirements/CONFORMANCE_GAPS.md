@@ -3802,3 +3802,10 @@ removed the signer/verifier borrowed-string extraction failures. Whole public
 Rust translation succeeds at the keyed-hash primitive boundary, but 40 external
 interfaces and whole-function simulation theorems remain open. These facts do
 not establish machine timing, erasure, JVM validity or universal binary behavior.
+
+The new charter fixes an initial classical, single-key security game. Executable
+Lean games and seed/query/event-accounting proofs now exist; primitive hybrids,
+efficient-adversary bounds and forgery extraction do not. A width-correct insecure
+oracle negative control permits forgery. A pinned SDK file inventory improves
+artifact identity evidence but leaves device runtime identity, compiler/ISA
+simulation, leakage, erasure and JNI guarantees open.

@@ -270,3 +270,11 @@ prove full parser bitstream equality or machine timing. Typed failures remove
 borrowed diagnostic strings from the cryptographic result; fixed text and wire
 behavior are preserved. The public Rust graph translates at its explicit hash
 boundary; 40 external declarations still require models and source proofs.
+
+SecurityGames.lean adds the actual model-backed classical chosen-message game,
+independent seed/adversary sampling, seed sampler bijectivity, query budget,
+public-key preservation, freshness and finite-event accounting. SecurityGameChecks
+runs adaptive-query/freshness/budget controls and a width-correct insecure oracle
+forgery control in the existing refinement gate. The new charter retains open
+computational/quantum reduction and wrapper-authorization obligations. The
+artifact locker rechecks build-file identity; it is not a binary semantics proof.
