@@ -211,8 +211,9 @@
 //! `0x006A EquivocationProof`: 1 `external_commitment` · 2 `table` · 3 `side`
 //! u8 · 4 `index` u32 · 5 `head` digest32 · 6 `signature` · 7 `head` · 8
 //! `signature`, the heads strictly ascending.
-//! `0x006B MatchStart`: 1 `external_commitment` · 2 `table` · 3 `kind` u8 (1
-//! Start, 2 Withdraw) · 4 `signature` `u32 len ‖ bytes`.
+//! `0x006B MatchStart`: 1 `external_commitment` · 2 `table` · 3 `kind` u8 ·
+//! then for a Start (1) 4 `ready_a` · 5 `ready_b`, each `u32 len ‖ bytes`,
+//! and for a Withdraw (2) 4 `side` u8 · 5 `signature` `u32 len ‖ bytes`.
 
 pub mod objects;
 
