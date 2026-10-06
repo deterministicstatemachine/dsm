@@ -838,3 +838,65 @@ async fn a_traders_accepted_claim_is_not_walked_again_by_the_same_process() {
     assert_eq!(*transition.accepted_claim(), walked);
     assert_eq!(peers.claim_walks(), before + 2);
 }
+
+/// A holdings status verifies the holder's root at the proven position once
+/// for the process, and reads the next root cell on every poll: the proof is
+/// current only while that cell is empty, and only a read made now says so.
+/// A pays B and proves its ERA at the position it reached; B checks the proof
+/// three times, as the game's account polls a status. The root is walked
+/// once, and the next root cell is read each time; once A pays C, that cell
+/// is taken, and the same proof is no longer current.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_holdings_status_walks_the_root_once_and_reads_the_next_cell_every_time() {
+    use crate::sdk::connect::holdings;
+    let (p, c) = three_devices().await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.a.enter();
+    let (proven, root) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("A admitted its debit");
+    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA policy");
+    let proof = holdings::prove(&p.a.router().core_sdk, &[era]).expect("A's proof");
+    assert_eq!(proof.position, proven);
+    let next_cell = cell_read(&p.a.genesis, &p.a.device_id, proven + 1, &root);
+
+    p.b.enter();
+    let peers = crate::sdk::economic_registers::validated_peers();
+    peers.forget();
+    let before = peers.root_walks();
+    let mut fresh = None;
+    for poll in 1..=3u64 {
+        for node in &p.nodes.nodes {
+            node.forget_requests();
+        }
+        let verified = holdings::verify(&proof, &p.a.genesis, &p.a.device_id, &[era])
+            .await
+            .expect("A's proof is current");
+        assert_eq!(verified.position, proven);
+        if let Some(first) = &fresh {
+            assert_eq!(&verified, first, "a later poll proves what the first proved");
+        }
+        fresh.get_or_insert(verified);
+        assert_eq!(
+            peers.root_walks(),
+            before + 1,
+            "poll {poll}: the root at the proven position is walked once"
+        );
+        assert!(
+            requests(&p.nodes).contains(&next_cell),
+            "poll {poll}: the next root cell is read again"
+        );
+    }
+
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.enter();
+    let moved = holdings::verify(&proof, &p.a.genesis, &p.a.device_id, &[era]).await;
+    assert!(
+        matches!(moved, Err(holdings::Refusal::NotCurrent(..))),
+        "the holder moved past the proof: {moved:?}"
+    );
+    assert_eq!(peers.root_walks(), before + 1);
+}
