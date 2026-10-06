@@ -11,7 +11,7 @@
 //! states — a hop's price, a vault's post state, `R_realize` — comes from the
 //! Core function the verifier checks it with.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use dsm::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
 use dsm::dlv::route_commit::{constant_product_output_classified, ConstantProductRefusal};
@@ -971,7 +971,7 @@ fn vaults_of(
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     token: &D32,
     search: &mut Search,
-) -> Result<Vec<D32>, DsmError> {
+) -> Result<Vec<Paired>, DsmError> {
     let vaults = match verifier.vaults_of_token(token).map_err(verifier_error)? {
         Discovered::Complete(vaults) => vaults,
         Discovered::Partial(vaults) => {
@@ -979,7 +979,65 @@ fn vaults_of(
             vaults
         }
     };
-    Ok(vaults.iter().map(|accepted| *accepted.vault_id()).collect())
+    Ok(vaults
+        .iter()
+        .filter_map(|accepted| {
+            accepted.market().map(|market| Paired {
+                vault_id: *accepted.vault_id(),
+                tokens: (*market.token_a(), *market.token_b()),
+            })
+        })
+        .collect())
+}
+
+/// The vaults a route search walks to their heads: only those that can be in
+/// a candidate route of `find_route`, in the order found. One pairs the two
+/// tokens; or it is a leg of a chain whose middle token both legs pair. Every
+/// other vault of either token takes no part in any route, so walking its
+/// chain would decide nothing (and on a shared network, every vault of the
+/// native token is a vault of either token).
+fn route_legs(firsts: &[Paired], seconds: &[Paired], token_in: &D32, token_out: &D32) -> Vec<D32> {
+    let middles: BTreeSet<D32> = firsts
+        .iter()
+        .filter_map(|v| v.other(token_in))
+        .filter(|middle| middle != token_out)
+        .collect();
+    let second_legs: Vec<&Paired> = seconds
+        .iter()
+        .filter(|v| v.other(token_out).is_some_and(|m| middles.contains(&m)))
+        .collect();
+    let reached: BTreeSet<D32> = second_legs.iter().filter_map(|v| v.other(token_out)).collect();
+    let mut walked: Vec<D32> = firsts
+        .iter()
+        .filter(|v| v.other(token_in).is_some_and(|o| &o == token_out || reached.contains(&o)))
+        .map(|v| v.vault_id)
+        .collect();
+    for v in second_legs {
+        if !walked.contains(&v.vault_id) {
+            walked.push(v.vault_id);
+        }
+    }
+    walked
+}
+
+/// A vault of a token, with the two tokens its accepted genesis commits its
+/// market to: known before its chain is walked.
+struct Paired {
+    vault_id: D32,
+    tokens: (D32, D32),
+}
+
+impl Paired {
+    /// The token this vault's market pairs with `token`, if it pairs `token`.
+    fn other(&self, token: &D32) -> Option<D32> {
+        if &self.tokens.0 == token {
+            Some(self.tokens.1)
+        } else if &self.tokens.1 == token {
+            Some(self.tokens.0)
+        } else {
+            None
+        }
+    }
 }
 
 /// §30 and the path search of `sofi.findRoute` (Amendment S16): the best
@@ -1002,8 +1060,15 @@ pub async fn find_route(
     let mut search = Search::Complete;
     let firsts = vaults_of(&verifier, &intent.token_in_policy_commit, &mut search)?;
     let seconds = vaults_of(&verifier, &intent.token_out_policy_commit, &mut search)?;
+    let (token_in, token_out) = (
+        intent.token_in_policy_commit,
+        intent.token_out_policy_commit,
+    );
+    let walked = route_legs(&firsts, &seconds, &token_in, &token_out);
+    let firsts: Vec<D32> = firsts.iter().map(|v| v.vault_id).collect();
+    let seconds: Vec<D32> = seconds.iter().map(|v| v.vault_id).collect();
     let mut heads: BTreeMap<D32, VaultAtHead> = BTreeMap::new();
-    for vault_id in firsts.iter().chain(seconds.iter()) {
+    for vault_id in &walked {
         if heads.contains_key(vault_id) {
             continue;
         }
@@ -1022,10 +1087,6 @@ pub async fn find_route(
     // Every candidate route over the established heads: each vault of the
     // input token alone, each chain through a vault of each token, and each
     // split across two vaults of the pair (Amendment S19).
-    let (token_in, token_out) = (
-        intent.token_in_policy_commit,
-        intent.token_out_policy_commit,
-    );
     let mut candidates: Vec<Vec<&VaultAtHead>> = Vec::new();
     let direct: Vec<&VaultAtHead> = firsts
         .iter()
@@ -1957,6 +2018,24 @@ mod tests {
     use crate::sdk::storage_node_sdk::SetClient;
     use dsm::common::domain_tags::TAG_DSM_SOFI_REL_INDEX;
     use dsm::crypto::domain::TaggedHashDomain;
+
+    /// A route search walks only the vaults that can be in a route: the one
+    /// pairing ERA and WILD, and the two legs of the chain WILD→TKN→ERA.
+    /// An ERA vault of an unrelated pair, and a chain whose second leg is
+    /// missing, take no part in any route and are never walked.
+    #[test]
+    fn a_route_search_walks_only_the_vaults_a_route_can_use() {
+        let (wild, era, tkn, other, lone) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32]);
+        let vault = |id: u8, a: D32, b: D32| Paired { vault_id: [id; 32], tokens: (a, b) };
+        let firsts = [vault(10, wild, era), vault(11, tkn, wild), vault(12, wild, lone)];
+        let seconds = [vault(10, wild, era), vault(20, era, tkn), vault(21, other, era)];
+        assert_eq!(
+            route_legs(&firsts, &seconds, &wild, &era),
+            vec![[10; 32], [11; 32], [20; 32]],
+            "the direct vault and the WILD→TKN→ERA legs; not ERA/OTHER, not WILD/LONE"
+        );
+        assert!(route_legs(&[vault(12, wild, lone)], &seconds, &wild, &era).is_empty());
+    }
 
     /// MR-STOR-0021 (storage §4): a setup candidate whose bytes no member
     /// holds may be this device's setup, so a relationship-index scan that
