@@ -649,3 +649,85 @@ async fn a_devices_own_lineage_starts_at_its_own_admitted_history() {
     p.b.enter();
     assert_eq!(start(), None, "B holds no frontier for A");
 }
+
+/// The request a member logs for a read of the native reserve's successor
+/// cell of `parent`.
+fn successor_read(parent: &dsm::economic::native_reserve::NativeReserveState) -> String {
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    let members = crate::sdk::storage_set::as_ccb_members(&set).expect("members");
+    let cell = dsm::economic::native_reserve::SuccessorCell::of(parent, &members)
+        .expect("the successor cell");
+    format!(
+        "GET /api/v2/cell/{}",
+        crate::util::text_id::encode_base32_crockford(cell.routed().key())
+    )
+}
+
+/// A cell whose value is final holds it for good (storage spec §9, finality
+/// 2), so a process reads it from the seats once. The device's claim at its
+/// first position and the reserve's first release are final: a second
+/// settlement read of the claim, and a second read of the release, ask no
+/// member for anything; the answers are the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_final_cell_is_read_from_its_seats_once() {
+    use crate::sdk::economic_registers::{root_cell, root_claim_settlement, RootClaimSettlement};
+    use crate::sdk::native_reserve::{genesis_state, read_successor};
+    use dsm::economic::native_reserve::SuccessorRead;
+    let d = Device::funded(0xF5).await;
+    crate::sdk::final_reads::forget_everything();
+    let head = d.core().device_head().expect("head");
+    let (genesis, devid) = (head.genesis_digest(), head.devid());
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    let cell = root_cell(
+        &set,
+        NETWORK,
+        &genesis,
+        &devid,
+        1,
+        &dsm::economic::tree::empty_economic_root(),
+    )
+    .expect("the root cell at 1");
+    let (_, claim) = client_db::economic_lineage::get_frozen_root_claim(1)
+        .expect("frozen claims")
+        .expect("the claim frozen at 1");
+    let r0 = genesis_state(NETWORK).expect("R_0");
+    let release = |read: &SuccessorRead| match read {
+        SuccessorRead::Final { release, child } => (release.envelope_bytes.clone(), child.clone()),
+        other => panic!("the reserve's first release is final: {other:?}"),
+    };
+
+    for node in &d.nodes.nodes {
+        node.forget_requests();
+    }
+    assert_eq!(
+        root_claim_settlement(&set, &cell, &claim)
+            .await
+            .expect("the cell reads"),
+        RootClaimSettlement::Final
+    );
+    let first = release(&read_successor(&set, &r0).await.expect("the reserve cell"));
+    assert!(
+        requests(&d.nodes).contains(&successor_read(&r0)),
+        "the first reads ask the seats"
+    );
+
+    for node in &d.nodes.nodes {
+        node.forget_requests();
+    }
+    assert_eq!(
+        root_claim_settlement(&set, &cell, &claim)
+            .await
+            .expect("the cell reads"),
+        RootClaimSettlement::Final
+    );
+    assert_eq!(
+        release(&read_successor(&set, &r0).await.expect("the reserve cell")),
+        first
+    );
+    assert_eq!(
+        requests(&d.nodes),
+        Vec::<String>::new(),
+        "a final cell read again asks no member"
+    );
+}

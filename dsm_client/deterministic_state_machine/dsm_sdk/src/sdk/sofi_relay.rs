@@ -32,7 +32,8 @@ use dsm::sofi::wire::{TraderFulfillmentBody, TraderPrecommitBody};
 use dsm::types::error::DsmError;
 
 use crate::sdk::route_seats::{
-    read_cell, write_recorded, write_recorded_position, NodeSeats, WriteReport,
+    read_cell, read_cell_kept, root_claim_final, write_recorded, write_recorded_position,
+    NodeSeats, WriteReport,
 };
 use crate::sdk::sofi_exercise::{attempt_cell, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit};
@@ -98,7 +99,11 @@ async fn carry_pair(
     .map_err(refuse)?;
     let derived = dsm::sofi::derive::resolution_claim(&precommit.body, &fulfillment.body);
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cells.root().routed()).await;
+    // A claim final at K_root holds it for good: kept once read final.
+    let evidence = read_cell_kept(&seats, cells.root().routed(), |evidence| {
+        root_claim_final(cells.root(), evidence)
+    })
+    .await;
     let claim = match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {
             object: RegisteredEconomicClaim::ConditionalSofi(held),
@@ -278,7 +283,19 @@ pub async fn relay_exercise(
 ) -> Result<Relayed, DsmError> {
     let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cell.routed()).await;
+    // An exercise final at the key holds it for good: kept once read final.
+    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+        attempt_resolution(&cell, evidence).is_ok_and(|read| {
+            matches!(
+                read.fact(),
+                dsm::route_chain::CellFact::Held {
+                    state: dsm::route_chain::ChainState::Final,
+                    ..
+                }
+            )
+        })
+    })
+    .await;
     let read = attempt_resolution(&cell, &evidence)
         .map_err(|undecided| refuse(format!("the key is not decided yet: {undecided:?}")))?;
     let (Some(exercise), Some(bytes)) = (read.exercise(), read.value()) else {
