@@ -2319,6 +2319,10 @@ pub struct PeerPositionResolver<'a, R: SofiReads + ?Sized> {
     pub members: &'a StorageSetMembers,
     pub set_id: D32,
     pub network_id: &'a [u8],
+    /// The outcome programs the verifier walking the lineage runs (SoFi
+    /// Amendment S22): a position whose leg releases a computed escrow vault
+    /// is resolved under the same registry, never under an empty one.
+    pub programs: &'a ProgramRegistry,
 }
 
 impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionResolver
@@ -2352,7 +2356,8 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
             self.network_id,
             resolved,
             AcceptedGeneses::default(),
-        );
+        )
+        .with_programs(self.programs.clone());
         let advanced = verifier.peer_position(previous, parent, held)?;
         Ok((advanced.root, advanced.claim))
     }
