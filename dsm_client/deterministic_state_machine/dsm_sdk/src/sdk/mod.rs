@@ -25,6 +25,7 @@ pub mod economic_registers;
 pub mod escrow_flow;
 pub mod faucet_claim_flow;
 pub mod native_reserve;
+pub mod outcome_programs;
 pub mod runtime_config;
 pub mod sdk_context;
 
