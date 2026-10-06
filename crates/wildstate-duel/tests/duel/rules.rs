@@ -658,3 +658,53 @@ fn unusable_moves_play_as_passes() -> R {
     assert_eq!(s.side(Side::B).items(), [1, 0]);
     Ok(())
 }
+
+/// An opening whose bytes are not the canonical encoding of a move plays as
+/// a pass: the match goes on exactly as if its side had passed, and never
+/// stops being decidable. A canonical opening plays the move it encodes.
+#[test]
+fn a_garbled_opening_plays_as_a_pass() -> R {
+    let garbled: Vec<Vec<u8>> = vec![
+        Vec::new(),
+        vec![0xFF],
+        [mv(STRIKE).encode(), vec![0x00]].concat(),
+        vec![0x57, 0x04, 0x00, 0x01, 0x09],
+        vec![0x57, 0x04, 0x00, 0x01, 0x00],
+        vec![0x57, 0x04, 0x00, 0x02, 0x02],
+        vec![0x57, 0x05, 0x00, 0x01, 0x02],
+        turn(mv(STRIKE), mv(BIG)).encode(),
+    ];
+    for bytes in &garbled {
+        assert_eq!(DuelMoveV1::played(bytes), DuelMoveV1::Pass, "{bytes:?}");
+    }
+    for m in [
+        mv(STRIKE),
+        mv(BIG),
+        DuelMoveV1::Item {
+            item: 1,
+            team_index: 0,
+        },
+        DuelMoveV1::Pass,
+        DuelMoveV1::Resign,
+    ] {
+        assert_eq!(DuelMoveV1::played(&m.encode()), m);
+    }
+    // a tidefin L3 against b embercub L3: a garbled turn of a's is b's
+    // strike against a pass, state for state.
+    let s = DuelState::start(&duel(
+        3,
+        side(1, 0, 0, vec![creature(1, TIDEFIN, 3, None)?]),
+        side(2, 0, 0, vec![creature(2, EMBERCUB, 3, None)?]),
+    )?);
+    let (passed, passed_log) = play(&s, DuelMoveV1::Pass, mv(STRIKE))?;
+    for bytes in &garbled {
+        let opened = wildstate_duel::DuelOpenedTurnV1 {
+            a: bytes.clone(),
+            b: mv(STRIKE).encode(),
+        };
+        let (next, log) = s.step_logged(&opened.turn())?;
+        assert_eq!(next.encode(), passed.encode(), "{bytes:?}");
+        assert_eq!(log, passed_log, "{bytes:?}");
+    }
+    Ok(())
+}

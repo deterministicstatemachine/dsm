@@ -16,8 +16,8 @@ use wildstate_duel::{
 /// vector changes it, and this test fails until the new value is pinned on
 /// purpose.
 const PINNED_P: [u8; 32] = [
-    68, 130, 72, 236, 131, 215, 8, 218, 50, 139, 11, 182, 137, 150, 68, 222, 239, 117, 175, 145,
-    245, 97, 82, 123, 223, 81, 149, 88, 67, 156, 179, 118,
+    164, 207, 112, 198, 252, 193, 147, 108, 96, 192, 4, 97, 109, 196, 107, 205, 239, 194, 0, 137,
+    40, 16, 207, 109, 161, 144, 10, 254, 116, 25, 77, 205,
 ];
 
 fn vectors() -> R<DuelVectorSetV1> {
@@ -168,5 +168,32 @@ fn every_random_match_ends_with_a_winner_by_the_cap() -> R {
     }
     assert_eq!(ends.iter().sum::<u32>(), 4000);
     assert!(ends[0] > 0 && ends[2] > 0 && ends[3] > 0, "ends {ends:?}");
+    Ok(())
+}
+
+/// The frozen vectors hold garbled openings, and each one is decided: the
+/// pass rule for bytes that are no move is part of what `P` pins.
+#[test]
+fn the_frozen_vectors_decide_matches_with_garbled_openings() -> R {
+    let set = vectors()?;
+    let garbled = set
+        .vectors
+        .iter()
+        .filter(|v| {
+            v.opened.iter().any(|t| {
+                [&t.a, &t.b]
+                    .iter()
+                    .any(|o| DuelMoveV1::decode(o).map(|m| m.encode()).as_ref() != Ok(*o))
+            })
+        })
+        .count();
+    assert!(garbled >= 3, "{garbled} vectors with garbled openings");
+    for v in &set.vectors {
+        let setup = setup_bytes(&v.body);
+        let turns: Vec<DuelTurnV1> = v.opened.iter().map(|t| t.turn()).collect();
+        assert_eq!(turns, v.turns);
+        let w = outcome(&setup, &turns)?;
+        assert_eq!((w.side, w.end), (v.winner, v.end));
+    }
     Ok(())
 }

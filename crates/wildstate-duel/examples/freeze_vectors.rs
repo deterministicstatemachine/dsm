@@ -16,7 +16,7 @@ mod support;
 
 use support::{creature, duel, mv, random_match, random_move, side, turn, Play, Rng, R};
 use wildstate_duel::vectors::{DuelVectorSetV1, DuelVectorV1};
-use wildstate_duel::{DuelMatchV1, DuelMoveV1, DuelState, DuelTurnV1, Side};
+use wildstate_duel::{DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelState, DuelTurnV1, Side};
 
 const EMBERCUB: u8 = 0;
 const MOSSLING: u8 = 1;
@@ -32,12 +32,25 @@ enum Fill {
     Strike,
     /// Both sides pass, so the cap decides.
     Pass,
+    /// Both sides open bytes that are no move at all, so the cap decides.
+    Garbled,
     /// Seeded random play.
     Random(u64, Play),
 }
 
 /// Plays the script, then the fill, until the match is decided.
 fn scripted(label: &str, m: DuelMatchV1, script: &[DuelTurnV1], fill: Fill) -> R<DuelVectorV1> {
+    let opened: Vec<DuelOpenedTurnV1> = script.iter().map(DuelOpenedTurnV1::of).collect();
+    opened_scripted(label, m, &opened, fill)
+}
+
+/// [`scripted`] over openings exactly as revealed, garbled ones included.
+fn opened_scripted(
+    label: &str,
+    m: DuelMatchV1,
+    script: &[DuelOpenedTurnV1],
+    fill: Fill,
+) -> R<DuelVectorV1> {
     let mut state = DuelState::start(&m);
     let mut turns = Vec::new();
     let mut rng = Rng::new(match fill {
@@ -47,15 +60,19 @@ fn scripted(label: &str, m: DuelMatchV1, script: &[DuelTurnV1], fill: Fill) -> R
     let mut script = script.iter();
     while state.winner().is_none() {
         let t = match (script.next(), &fill) {
-            (Some(t), _) => *t,
-            (None, Fill::Strike) => turn(mv(0), mv(0)),
-            (None, Fill::Pass) => turn(DuelMoveV1::Pass, DuelMoveV1::Pass),
-            (None, Fill::Random(_, play)) => turn(
+            (Some(t), _) => t.clone(),
+            (None, Fill::Strike) => DuelOpenedTurnV1::of(&turn(mv(0), mv(0))),
+            (None, Fill::Pass) => DuelOpenedTurnV1::of(&turn(DuelMoveV1::Pass, DuelMoveV1::Pass)),
+            (None, Fill::Garbled) => DuelOpenedTurnV1 {
+                a: vec![0xFF],
+                b: vec![0x57, 0x04, 0x00, 0x01, 0x09],
+            },
+            (None, Fill::Random(_, play)) => DuelOpenedTurnV1::of(&turn(
                 random_move(&mut rng, &state, Side::A, *play),
                 random_move(&mut rng, &state, Side::B, *play),
-            ),
+            )),
         };
-        state = state.step(&t)?;
+        state = state.step(&t.turn())?;
         turns.push(t);
     }
     Ok(DuelVectorV1::freeze(label, m, turns)?)
@@ -365,6 +382,71 @@ fn main() -> R {
             Fill::Random(0x5EED_001C, Play::Legal),
         )?,
     ];
+    // Openings that are no canonical move: each plays as a pass.
+    let garbled: Vec<Vec<u8>> = vec![
+        // A canonical move with a byte after it.
+        [mv(0).encode(), vec![0x00]].concat(),
+        // A move kind the program does not define.
+        vec![0x57, 0x04, 0x00, 0x01, 0x09],
+        // A Move cut off before its index.
+        vec![0x57, 0x04, 0x00, 0x01, 0x00],
+        // A whole turn where one move belongs.
+        turn(mv(0), mv(1)).encode(),
+        // An unknown schema.
+        vec![0x57, 0x04, 0x00, 0x02, 0x02],
+        // One stray byte, and the longest opening there is.
+        vec![0xFF],
+        vec![0xA5; wildstate_duel::MAX_OPENED_MOVE_BYTES],
+    ];
+    vectors.push(opened_scripted(
+        "garbled-openings-play-as-passes",
+        duel(
+            0x1D,
+            side(1, 0, 0, vec![creature(1, TIDEFIN, 3, None)?]),
+            side(2, 0, 0, vec![creature(2, EMBERCUB, 3, None)?]),
+        )?,
+        &garbled
+            .iter()
+            .map(|bytes| DuelOpenedTurnV1 {
+                a: bytes.clone(),
+                b: mv(0).encode(),
+            })
+            .collect::<Vec<_>>(),
+        Fill::Strike,
+    )?);
+    vectors.push(opened_scripted(
+        "garbled-openings-b-then-items",
+        duel(
+            0x1E,
+            side(1, 1, 0, vec![creature(1, LEON, 2, Some(15))?]),
+            side(2, 0, 0, vec![creature(2, MOSSLING, 2, None)?]),
+        )?,
+        &[
+            DuelOpenedTurnV1 {
+                a: DuelMoveV1::Item {
+                    item: 0,
+                    team_index: 0,
+                }
+                .encode(),
+                b: garbled[0].clone(),
+            },
+            DuelOpenedTurnV1 {
+                a: mv(1).encode(),
+                b: garbled[3].clone(),
+            },
+        ],
+        Fill::Strike,
+    )?);
+    vectors.push(opened_scripted(
+        "garbled-both-sides-cap-decides",
+        duel(
+            0x1F,
+            side(1, 0, 0, vec![creature(1, RATTLEFIN, 2, Some(21))?]),
+            side(2, 0, 0, vec![creature(2, BRINEBACK, 2, Some(20))?]),
+        )?,
+        &[],
+        Fill::Garbled,
+    )?);
     let mut rng = Rng::new(0x0057_1D57_A7E0_0001);
     for i in 0..48 {
         let m = random_match(&mut rng)?;

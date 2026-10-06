@@ -407,6 +407,74 @@ impl DuelMoveV1 {
         r.finish()?;
         Ok(v)
     }
+
+    /// The move a revealed opening plays: the move it is the canonical
+    /// encoding of, and a pass for any other bytes. A garbled opening is a
+    /// turn its side let go by, never a reason the match cannot be decided:
+    /// the opening was committed and signed, so it is the side's own move.
+    pub fn played(opened: &[u8]) -> Self {
+        match Self::decode(opened) {
+            Ok(m) if m.encode() == opened => m,
+            _ => Self::Pass,
+        }
+    }
+}
+
+/// The longest move opening a transcript carries (Core's
+/// `TRANSCRIPT_MAX_MOVE_BYTES`); a vector holds openings of `1..=` this.
+pub const MAX_OPENED_MOVE_BYTES: usize = 64;
+
+/// `0x570B DuelOpenedTurnV1` — both sides' openings of one turn exactly as
+/// revealed, before the rules read them.
+///
+/// 1 `a` bytes `1..=64` · 2 `b` bytes `1..=64`. Each plays as
+/// [`DuelMoveV1::played`] reads it, so bytes that are not a canonical move
+/// play as a pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuelOpenedTurnV1 {
+    pub a: Vec<u8>,
+    pub b: Vec<u8>,
+}
+
+impl DuelOpenedTurnV1 {
+    pub const CLASS: u16 = class::DUEL_OPENED_TURN;
+
+    /// Both sides' canonical moves of `turn`.
+    pub fn of(turn: &DuelTurnV1) -> Self {
+        Self {
+            a: turn.a.encode(),
+            b: turn.b.encode(),
+        }
+    }
+
+    /// The turn the rules play.
+    pub fn turn(&self) -> DuelTurnV1 {
+        DuelTurnV1 {
+            a: DuelMoveV1::played(&self.a),
+            b: DuelMoveV1::played(&self.b),
+        }
+    }
+
+    pub(crate) fn write_body(&self, w: &mut Writer) {
+        w.bytes(&self.a);
+        w.bytes(&self.b);
+    }
+    pub(crate) fn read_body(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let a = r.bytes("opened.a", 1, MAX_OPENED_MOVE_BYTES)?;
+        let b = r.bytes("opened.b", 1, MAX_OPENED_MOVE_BYTES)?;
+        Ok(Self { a, b })
+    }
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::object(Self::CLASS);
+        self.write_body(&mut w);
+        w.finish()
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::object(bytes, Self::CLASS)?;
+        let v = Self::read_body(&mut r)?;
+        r.finish()?;
+        Ok(v)
+    }
 }
 
 /// `0x5705 DuelTurnV1` — both sides' opened moves for one turn.
