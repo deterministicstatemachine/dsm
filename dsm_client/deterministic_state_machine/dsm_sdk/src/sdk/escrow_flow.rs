@@ -529,13 +529,43 @@ pub async fn verdict(
     set: &StorageSet,
     vault_id: &D32,
 ) -> Result<VerdictView, DsmError> {
-    let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
-    let verifier = ctx.verifier();
-    let terms = escrow_terms_of(&verifier, vault_id)?;
-    Ok(VerdictView::of(&read_cell(
-        &verifier,
-        &escrow::verdict_cell_of(&terms),
-    )?))
+    EscrowReads::new(core, set)?.verdict(vault_id)
+}
+
+/// Escrow vaults and their verdicts read through one verifier context: a
+/// vault's genesis, accepted to read its head, is stood on again to read its
+/// verdict cell, and not read and accepted a second time.
+pub struct EscrowReads<'a> {
+    set: &'a StorageSet,
+    ctx: VerifierContext<'a>,
+}
+
+impl<'a> EscrowReads<'a> {
+    pub fn new(core: &CoreSDK, set: &'a StorageSet) -> Result<Self, DsmError> {
+        Ok(Self {
+            set,
+            ctx: VerifierContext::new(set, Some(identity(core)?), None)?,
+        })
+    }
+
+    /// The escrow vault `vault_id` at its walked head, its genesis accepted
+    /// and its terms escrow terms. Its id names it; nothing else about it is
+    /// taken from whoever named it.
+    pub async fn vault(&self, vault_id: &D32) -> Result<EscrowVaultView, DsmError> {
+        let verifier = self.ctx.verifier();
+        escrow_terms_of(&verifier, vault_id)?;
+        view_of(self.set, &verifier, vault_id).await
+    }
+
+    /// What the verdict cell of `vault_id` holds.
+    pub fn verdict(&self, vault_id: &D32) -> Result<VerdictView, DsmError> {
+        let verifier = self.ctx.verifier();
+        let terms = escrow_terms_of(&verifier, vault_id)?;
+        Ok(VerdictView::of(&read_cell(
+            &verifier,
+            &escrow::verdict_cell_of(&terms),
+        )?))
+    }
 }
 
 // ── escrow.release ──────────────────────────────────────────────────────────
@@ -702,10 +732,7 @@ pub async fn vault(
     set: &StorageSet,
     vault_id: &D32,
 ) -> Result<EscrowVaultView, DsmError> {
-    let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
-    let verifier = ctx.verifier();
-    escrow_terms_of(&verifier, vault_id)?;
-    view_of(set, &verifier, vault_id).await
+    EscrowReads::new(core, set)?.vault(vault_id).await
 }
 
 /// `escrow.locked`: the escrow vaults bound to `verdict_cell`, each accepted,
@@ -716,6 +743,29 @@ pub async fn locked(
     set: &StorageSet,
     verdict_cell: &D32,
 ) -> Result<(Vec<EscrowVaultView>, Search), DsmError> {
+    locked_of(core, set, verdict_cell, None).await
+}
+
+/// [`locked`], for the vaults `owner` created only: what a stake of
+/// `owner`'s on the cell can be. The owner is read from each vault's
+/// accepted genesis, and only those vaults are walked to their heads; the
+/// others on the cell, an opponent's among them, are neither shown nor
+/// walked, so none of them makes the search partial.
+pub async fn locked_by(
+    core: &CoreSDK,
+    set: &StorageSet,
+    verdict_cell: &D32,
+    owner: &(D32, D32),
+) -> Result<(Vec<EscrowVaultView>, Search), DsmError> {
+    locked_of(core, set, verdict_cell, Some(owner)).await
+}
+
+async fn locked_of(
+    core: &CoreSDK,
+    set: &StorageSet,
+    verdict_cell: &D32,
+    owner: Option<&(D32, D32)>,
+) -> Result<(Vec<EscrowVaultView>, Search), DsmError> {
     let ctx = VerifierContext::new(set, Some(identity(core)?), None)?;
     let verifier = ctx.verifier();
     let (vaults, mut search) = match verifier
@@ -724,6 +774,16 @@ pub async fn locked(
     {
         Discovered::Complete(vaults) => (vaults, Search::Complete),
         Discovered::Partial(vaults) => (vaults, Search::Partial),
+    };
+    let vaults: Vec<_> = match owner {
+        Some(owner) => vaults
+            .into_iter()
+            .filter(|accepted| {
+                let preimage = accepted.preimage();
+                (preimage.owner_genesis, preimage.owner_device_id) == *owner
+            })
+            .collect(),
+        None => vaults,
     };
     let mut out = Vec::with_capacity(vaults.len());
     for accepted in vaults {

@@ -817,3 +817,258 @@ async fn an_admission_publishes_its_own_evidence_behind_an_older_backlog() {
         );
     }
 }
+
+/// The root a trader's lineage selected at `position`, as a SoFi verifier of
+/// the entered device asks for it: through a context of its own, as every
+/// holdings status and every chain walk builds one.
+fn root_at(
+    genesis: [u8; 32],
+    devid: [u8; 32],
+    position: u64,
+) -> Result<
+    (
+        dsm::economic::lineage::ValidatedEconomicRoot,
+        dsm::sofi::wire::ParentClaimRef,
+    ),
+    PeerLineageFailure,
+> {
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    tokio::task::block_in_place(|| {
+        let reads = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("the reads");
+        dsm::sofi::resolve::SofiReads::trader_root_at(&reads, &genesis, &devid, position)
+    })
+}
+
+/// A trader's root, once its lineage was walked to it, is not walked again
+/// by the process: a holdings status builds a fresh context every poll, and
+/// each walked the wallet's lineage again. A pays B and then C, and no device
+/// here takes either payment in. B asks for A's root at the first payment
+/// twice, each time through a context of its own; the second answer is the
+/// first, and asks the members for nothing. The walk to the second payment
+/// starts at the first, which the root walk validated, and a fresh walk with
+/// nothing remembered reaches the same roots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_traders_root_is_not_walked_again_by_the_same_process() {
+    use dsm::economic::peer_lineage::PeerFrontiers;
+    let (p, c) = three_devices().await;
+    let paid = |p: &Pair| {
+        p.a.enter();
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .expect("A admitted its debit")
+    };
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let (first, first_root) = paid(&p);
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let (second, second_root) = paid(&p);
+    assert!(second > first);
+    p.b.enter();
+    let peers = crate::sdk::economic_registers::validated_peers();
+    peers.forget();
+    let start = || {
+        crate::sdk::economic_registers::RememberedFrontiers { network: NETWORK }
+            .frontier_below(&p.a.genesis, &p.a.device_id, second)
+            .expect("the frontiers")
+            .map(|f| f.economic_position())
+    };
+    assert_eq!(start(), None, "B holds no frontier for A");
+    let before = peers.root_walks();
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let walked = root_at(p.a.genesis, p.a.device_id, first).expect("A's root at its first payment");
+    assert_eq!(walked.0.economic_root(), first_root);
+    assert_eq!(peers.root_walks(), before + 1, "the first question walks");
+    let walk_requests = requests(&p.nodes).len();
+    assert!(walk_requests > 0, "the walk read A's lineage");
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let again = root_at(p.a.genesis, p.a.device_id, first).expect("A's root again");
+    assert_eq!(again, walked, "the kept root is the walked one");
+    assert_eq!(
+        requests(&p.nodes).len(),
+        0,
+        "the second question asks the members for nothing (the walk asked {walk_requests} times)"
+    );
+    assert_eq!(
+        peers.root_walks(),
+        before + 1,
+        "a verified root is not walked again"
+    );
+
+    assert_eq!(
+        start(),
+        Some(first),
+        "the root walk's coordinate starts the next walk"
+    );
+    let onward =
+        root_at(p.a.genesis, p.a.device_id, second).expect("A's root at its second payment");
+    assert_eq!(onward.0.economic_root(), second_root);
+
+    peers.forget();
+    let fresh = root_at(p.a.genesis, p.a.device_id, first).expect("walked again");
+    assert_eq!(
+        fresh, walked,
+        "with nothing remembered, the walk reaches the same root"
+    );
+    peers.forget();
+    let fresh =
+        root_at(p.a.genesis, p.a.device_id, second).expect("walked from the activation root");
+    assert_eq!(
+        fresh, onward,
+        "a walk from the remembered coordinate reaches the same root"
+    );
+    assert_eq!(peers.root_walks(), before + 4);
+}
+
+/// The claim a trader's lineage accepted at `position`, as a SoFi verifier of
+/// the entered device reads it for a setup: through a context of its own.
+fn claim_at(
+    genesis: [u8; 32],
+    devid: [u8; 32],
+    position: u64,
+) -> Result<dsm::economic::lineage::AcceptedClaim, PeerLineageFailure> {
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    tokio::task::block_in_place(|| {
+        let reads = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("the reads");
+        dsm::sofi::resolve::SofiReads::accepted_claim_at(&reads, &genesis, &devid, position)
+    })
+}
+
+/// The claim a trader's lineage accepted at a position, once walked to, is
+/// not walked again by the process: route evidence reads it once per setup
+/// in every acquisition round, and every context walked it again. A pays B
+/// and then C, and no device here takes either in. B reads the claim A's
+/// lineage accepted at the first payment twice, each through a context of
+/// its own: one walk, the same claim, the claim the peer walk's validated
+/// transition accepted there. The walk's coordinate starts the next walk,
+/// and a walk with nothing remembered reads the same claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_traders_accepted_claim_is_not_walked_again_by_the_same_process() {
+    use dsm::economic::peer_lineage::PeerFrontiers;
+    let (p, c) = three_devices().await;
+    let paid = |p: &Pair| {
+        p.a.enter();
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .expect("A admitted its debit")
+            .0
+    };
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let first = paid(&p);
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let second = paid(&p);
+    p.b.enter();
+    let peers = crate::sdk::economic_registers::validated_peers();
+    peers.forget();
+    let start = || {
+        crate::sdk::economic_registers::RememberedFrontiers { network: NETWORK }
+            .frontier_below(&p.a.genesis, &p.a.device_id, second)
+            .expect("the frontiers")
+            .map(|f| f.economic_position())
+    };
+    assert_eq!(start(), None, "B holds no frontier for A");
+    let before = peers.claim_walks();
+    let walked =
+        claim_at(p.a.genesis, p.a.device_id, first).expect("A's claim at its first payment");
+    assert_eq!(walked.economic_position(), first);
+    assert_eq!(peers.claim_walks(), before + 1, "the first question walks");
+
+    let again = claim_at(p.a.genesis, p.a.device_id, first).expect("A's claim again");
+    assert_eq!(again, walked, "the kept claim is the walked one");
+    assert_eq!(
+        peers.claim_walks(),
+        before + 1,
+        "an accepted claim is not walked again"
+    );
+    assert_eq!(
+        start(),
+        Some(first),
+        "the claim walk's coordinate starts the next walk"
+    );
+
+    peers.forget();
+    let fresh = claim_at(p.a.genesis, p.a.device_id, first).expect("walked again");
+    assert_eq!(
+        fresh, walked,
+        "with nothing remembered, the walk reads the same claim"
+    );
+    let transition = verify(p.a.genesis, p.a.device_id, first)
+        .await
+        .expect("A's lineage validates at its first payment");
+    assert_eq!(*transition.accepted_claim(), walked);
+    assert_eq!(peers.claim_walks(), before + 2);
+}
+
+/// A holdings status verifies the holder's root at the proven position once
+/// for the process, and reads the next root cell on every poll: the proof is
+/// current only while that cell is empty, and only a read made now says so.
+/// A pays B and proves its ERA at the position it reached; B checks the proof
+/// three times, as the game's account polls a status. The root is walked
+/// once, and the next root cell is read each time; once A pays C, that cell
+/// is taken, and the same proof is no longer current.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_holdings_status_walks_the_root_once_and_reads_the_next_cell_every_time() {
+    use crate::sdk::connect::holdings;
+    let (p, c) = three_devices().await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.a.enter();
+    let (proven, root) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("A admitted its debit");
+    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA policy");
+    let proof = holdings::prove(&p.a.router().core_sdk, &[era]).expect("A's proof");
+    assert_eq!(proof.position, proven);
+    let next_cell = cell_read(&p.a.genesis, &p.a.device_id, proven + 1, &root);
+
+    p.b.enter();
+    let peers = crate::sdk::economic_registers::validated_peers();
+    peers.forget();
+    let before = peers.root_walks();
+    let mut fresh = None;
+    for poll in 1..=3u64 {
+        for node in &p.nodes.nodes {
+            node.forget_requests();
+        }
+        let verified = holdings::verify(&proof, &p.a.genesis, &p.a.device_id, &[era])
+            .await
+            .expect("A's proof is current");
+        assert_eq!(verified.position, proven);
+        if let Some(first) = &fresh {
+            assert_eq!(
+                &verified, first,
+                "a later poll proves what the first proved"
+            );
+        }
+        fresh.get_or_insert(verified);
+        assert_eq!(
+            peers.root_walks(),
+            before + 1,
+            "poll {poll}: the root at the proven position is walked once"
+        );
+        assert!(
+            requests(&p.nodes).contains(&next_cell),
+            "poll {poll}: the next root cell is read again"
+        );
+    }
+
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.enter();
+    let moved = holdings::verify(&proof, &p.a.genesis, &p.a.device_id, &[era]).await;
+    assert!(
+        matches!(moved, Err(holdings::Refusal::NotCurrent(..))),
+        "the holder moved past the proof: {moved:?}"
+    );
+    assert_eq!(peers.root_walks(), before + 1);
+}

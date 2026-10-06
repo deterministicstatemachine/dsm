@@ -596,3 +596,200 @@ async fn side_b_locks_only_against_a_stake_that_pays_it_on_b_wins() {
         none.fact_detail
     );
 }
+
+/// One match both players staked, as R's account established it.
+struct Staked {
+    sid_a: [u8; 32],
+    sid_b: [u8; 32],
+    lock_a: u64,
+    lock_b: u64,
+    a_vault: Vec<u8>,
+    b_vault: Vec<u8>,
+}
+
+/// A locks 25 ERA for a match against B, and B locks 25 ERA against A's vault,
+/// each asked by R through its own session.
+async fn both_staked(p: &Pair, r: &TestDevice, relay: &ForwardRelay) -> Staked {
+    let code = offer(r, relay).await;
+    let sid_a = connect(r, &p.a, relay, &code).await;
+    let sid_b = connect(r, &p.b, relay, &code).await;
+    let (as_a, as_b) = (player_of(r, &sid_a).await, player_of(r, &sid_b).await);
+    let stake = whole_era(25);
+    let external = b"arena match 1: A v B";
+    let lock_a = request(r, relay, &sid_a, lock(external, stake, 1, &as_b, None)).await;
+    assert_eq!(sync(&p.a, r, relay).await, "");
+    carried_out(&p.a, &sid_a, lock_a).await;
+    let (a_vault, ..) = locked(r, &sid_a, lock_a, stake).await;
+    let lock_b = request(
+        r,
+        relay,
+        &sid_b,
+        lock(external, stake, 2, &as_a, Some(&a_vault)),
+    )
+    .await;
+    assert_eq!(sync(&p.b, r, relay).await, "");
+    carried_out(&p.b, &sid_b, lock_b).await;
+    let (b_vault, ..) = locked(r, &sid_b, lock_b, stake).await;
+    Staked {
+        sid_a,
+        sid_b,
+        lock_a,
+        lock_b,
+        a_vault,
+        b_vault,
+    }
+}
+
+/// The read a walk of `vault`'s chain makes at its head, entered as R: the
+/// first attempt key of the root its head stands on. It is open while the
+/// vault is Active, so every walk to the head reads it again.
+fn head_read(set: &crate::sdk::storage_set::StorageSet, vault: &[u8]) -> String {
+    let vault: [u8; 32] = vault.try_into().expect("a vault id");
+    let ctx = crate::sdk::sofi_reads::VerifierContext::new(set, None, None).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&vault).expect("the vault's chain");
+    let (.., head) = chain.head().expect("an accepted vault has a head");
+    let key = verifier
+        .attempt_cell(&vault, &head, 0)
+        .expect("the head's first key");
+    format!(
+        "GET /api/v2/cell/{}",
+        crate::util::text_id::encode_base32_crockford(key.routed().key())
+    )
+}
+
+/// Every request the members were asked since they last forgot.
+fn asked(p: &Pair) -> Vec<String> {
+    p.nodes.nodes.iter().flat_map(|n| n.requests()).collect()
+}
+
+/// A stake's status walks only the wallet's own vault on the match's verdict
+/// cell. Both players staked on one cell; R's status of each lock walks that
+/// wallet's vault to its head, and never the opponent's, which is not the
+/// wallet's stake whatever it holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_stakes_status_walks_only_the_wallets_own_vault() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let staked = both_staked(&p, &r, &relay).await;
+    r.enter();
+    let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+        .expect("the pinned set");
+    let a_head = head_read(&set, &staked.a_vault);
+    let b_head = head_read(&set, &staked.b_vault);
+    for (sid, seq, own, other) in [
+        (&staked.sid_a, staked.lock_a, &a_head, &b_head),
+        (&staked.sid_b, staked.lock_b, &b_head, &a_head),
+    ] {
+        for node in &p.nodes.nodes {
+            node.forget_requests();
+        }
+        locked(&r, sid, seq, whole_era(25)).await;
+        let asked = asked(&p);
+        assert!(
+            asked.contains(own),
+            "the wallet's vault is walked to its head"
+        );
+        assert!(
+            !asked.contains(other),
+            "the opponent's vault is not walked for the wallet's stake"
+        );
+    }
+}
+
+/// A collect's status reads each vault and its verdict through one context,
+/// and once it established the release it answers from its record: a
+/// Retired vault and a final verdict are permanent. A collects both stakes;
+/// R's first status reads each vault's genesis once from each member, and
+/// later polls read nothing and say exactly what the first said. A second
+/// request naming the same vaults is not answered by the first one's
+/// record: it is read again, and established the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_collects_status_is_read_once_and_answered_from_its_record() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let staked = both_staked(&p, &r, &relay).await;
+    adjudicate(&r, &staked.a_vault, b"a-wins").await;
+    let vaults = [staked.a_vault.as_slice(), staked.b_vault.as_slice()];
+    let collect_a = request(&r, &relay, &staked.sid_a, collect(&vaults)).await;
+    assert_eq!(sync(&p.a, &r, &relay).await, "");
+    carried_out(&p.a, &staked.sid_a, collect_a).await;
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let first = status(&r, &staked.sid_a, collect_a).await;
+    assert_eq!(
+        fact(&first),
+        generated::ConnectFact::EscrowReleased,
+        "{}",
+        first.fact_detail
+    );
+    for vault in vaults {
+        let vault: [u8; 32] = vault.try_into().expect("a vault id");
+        let genesis_scan = format!(
+            "GET /api/v2/index/{}",
+            crate::util::text_id::encode_base32_crockford(
+                &dsm::sofi::derive::vault_genesis_locator(&vault)
+            )
+        );
+        for node in &p.nodes.nodes {
+            let scans = node
+                .requests()
+                .iter()
+                .filter(|r| r.starts_with(&genesis_scan))
+                .count();
+            assert!(
+                scans <= 1,
+                "{} was asked for vault {genesis_scan}'s genesis {scans} times: the vault and its \
+                 verdict are read through one context",
+                node.member_id
+            );
+        }
+    }
+
+    for poll in 1..=2 {
+        for node in &p.nodes.nodes {
+            node.forget_requests();
+        }
+        let again = status(&r, &staked.sid_a, collect_a).await;
+        assert_eq!(
+            again, first,
+            "poll {poll}: the record says what the reads said"
+        );
+        let read: Vec<String> = asked(&p)
+            .into_iter()
+            .filter(|r| r.contains("/api/v2/cell/") || r.contains("/api/v2/index/"))
+            .collect();
+        assert_eq!(
+            read,
+            Vec::<String>::new(),
+            "poll {poll}: nothing is read again"
+        );
+    }
+
+    let collect_again = request(&r, &relay, &staked.sid_a, collect(&vaults)).await;
+    let other = status(&r, &staked.sid_a, collect_again).await;
+    assert_eq!(
+        fact(&other),
+        generated::ConnectFact::EscrowReleased,
+        "{}",
+        other.fact_detail
+    );
+    assert_eq!(
+        (
+            other.escrow_vault_ids,
+            other.escrow_verdict_cell,
+            other.fact_detail
+        ),
+        (
+            first.escrow_vault_ids.clone(),
+            first.escrow_verdict_cell.clone(),
+            first.fact_detail.clone()
+        )
+    );
+}
