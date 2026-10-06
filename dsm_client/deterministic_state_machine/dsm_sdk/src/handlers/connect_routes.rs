@@ -155,9 +155,10 @@ fn connected(sid: &[u8; 32]) -> Result<store::WalletSession, String> {
 }
 
 /// Why `request` cannot be carried out yet, if it cannot. A payment waits
-/// while its relationship with the application catches up; a holdings proof
-/// waits while this device is still admitting its latest position. Neither
-/// is a refusal: the request stays queued, unanswered and unspent.
+/// while its relationship with the application catches up; a holdings proof,
+/// an escrow request, a quote and a swap wait while this device is still
+/// admitting its latest position (SoFi builds no route on a pending one).
+/// None is a refusal: the request stays queued, unanswered and unspent.
 fn waits(
     core: &crate::sdk::core_sdk::CoreSDK,
     session: &store::WalletSession,
@@ -166,11 +167,13 @@ fn waits(
     match request {
         Request::Pay { .. } => Ok(payment_waits(&session.app_device_id)
             .map(|why| format!("the relationship with the application is settling: {why}"))),
-        Request::Holdings { .. } | Request::EscrowLock(..) | Request::EscrowRelease { .. } => {
-            Ok(holdings::admission_pending(core)?
-                .map(|position| format!("position {position} is still being admitted")))
-        }
-        Request::AcceptIssued { .. } | Request::Quote { .. } | Request::Swap { .. } => Ok(None),
+        Request::Holdings { .. }
+        | Request::EscrowLock(..)
+        | Request::EscrowRelease { .. }
+        | Request::Quote { .. }
+        | Request::Swap { .. } => Ok(holdings::admission_pending(core)?
+            .map(|position| format!("position {position} is still being admitted"))),
+        Request::AcceptIssued { .. } => Ok(None),
     }
 }
 
@@ -668,6 +671,17 @@ impl AppRouterImpl {
         };
         match decide(&scopes, &request, &spent_of, &issued) {
             Decision::InScope { spend } => {
+                // A quote or swap behind this device's own pending SoFi position (a
+                // trade cut off before it settled) finishes that position first, from
+                // what storage holds, as `sofi.resolve` does; anything else pending is
+                // waited for.
+                if matches!(request, Request::Quote { .. } | Request::Swap { .. })
+                    && holdings::admission_pending(&self.core_sdk)?.is_some()
+                {
+                    if let Err(e) = crate::sdk::sofi_flow::resolve(&self.core_sdk, &own_set()?).await {
+                        log::info!("[connect] request {seq}: the pending position is not a SoFi one to finish here ({e})");
+                    }
+                }
                 if let Some(why) = waits(&self.core_sdk, session, &request)? {
                     return Ok(Flow::NotYet(format!("request {seq} waits: {why}")));
                 }
