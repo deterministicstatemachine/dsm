@@ -3162,6 +3162,75 @@ async fn one_order_fills_through_two_vaults_of_the_same_pair() {
     }
 }
 
+/// A trade reads its vault's open head cell once for each walk that needs
+/// it. B, set up with nothing, trades one hop through A's vault: the check
+/// before the setup walks the vault, the trade walks it and finds its live
+/// attempt, and the draft walks it again at the parent it names. A walk that
+/// stops on the open key hands that reading on, so the key is not read again
+/// to learn what the walk just read; every reading is still a fresh one for
+/// its walk, since the cell is open. The trade realizes and pays what the
+/// vault prices, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market_unset(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (own, parents) = standing_of(&p.a);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let r0 = ctx
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain")
+        .roots()[0];
+    let head = format!(
+        "GET /api/v2/cell/{}",
+        crate::util::text_id::encode_base32_crockford(
+            attempt_cell(&set, &m.vault_id, &r0, 0)
+                .expect("the head's first key")
+                .routed()
+                .key()
+        )
+    );
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let traded = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    let asked: Vec<String> = p.nodes.nodes.iter().flat_map(|n| n.requests()).collect();
+    let (_position, state) = position_of(&traded, "sofi.trade");
+    assert_eq!(state, generated::SofiPositionState::Realized as i32);
+    let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
+        .expect("the vault prices the hop");
+    assert_eq!(
+        balance(&p.b, &m.tkn),
+        out,
+        "B receives what the vault priced"
+    );
+    assert_eq!(
+        balance(&p.b, &m.era),
+        crate::economic_fixtures::whole_era(200) - 10,
+        "and pays what it gave"
+    );
+    // Each reading asks every seat of the head's route once, and the leader
+    // is also asked by the writer's pre-read. With each walk's reading of the
+    // key it stopped on handed on, no seat is asked more than seven times in
+    // this trade; reading that key again after each walk asked every seat
+    // eleven times, the leader twelve.
+    let per_seat = p
+        .nodes
+        .nodes
+        .iter()
+        .map(|n| n.requests().iter().filter(|r| **r == head).count())
+        .max()
+        .expect("a set has members");
+    assert!(
+        per_seat <= 7,
+        "a seat was asked for the head {per_seat} times ({} requests in all)",
+        asked.iter().filter(|r| **r == head).count()
+    );
+}
+
 /// SoFi §27 (MR-SOFI-0255) as Amendment S16 leaves it: the app reaches SoFi
 /// through exactly its eight routes. Each, sent through the production
 /// router, reaches its producer and answers with the result §27 names:
