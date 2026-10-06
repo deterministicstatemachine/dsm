@@ -1535,6 +1535,8 @@ fn wallet_session_view(
             .collect(),
         last_error,
         offer_digest: s.offer_digest.to_vec(),
+        peer_genesis: s.app_genesis.to_vec(),
+        peer_signing_key: s.app_ak.clone(),
     })
 }
 
@@ -1639,6 +1641,8 @@ fn app_session_view(s: &store::AppSession) -> Result<generated::ConnectSessionV1
             .collect(),
         last_error: String::new(),
         offer_digest: s.offer_digest.to_vec(),
+        peer_genesis: s.wallet_genesis.to_vec(),
+        peer_signing_key: s.wallet_ak.clone(),
     })
 }
 

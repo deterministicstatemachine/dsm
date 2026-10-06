@@ -131,13 +131,28 @@ async fn sync(wallet: &TestDevice, r: &TestDevice, relay: &ForwardRelay) -> Stri
         .join("; ")
 }
 
-/// The wallet of R's session `sid`, as R's own account holds it from the
-/// card the wallet's accept carried: the identity and key R names it by.
-fn player_of(r: &TestDevice, sid: &[u8; 32]) -> crate::storage::client_db::connect::AppSession {
+/// The wallet of R's session `sid`, as R's account lists it to the application
+/// (`connect.app.sessions`): the identity and key R names it by. The listing
+/// must carry what the account holds from the card the wallet's accept carried.
+async fn player_of(r: &TestDevice, sid: &[u8; 32]) -> generated::ConnectSessionV1 {
+    let Reply::Sessions(listed) = reply(&query(r, "connect.app.sessions", Vec::new()).await) else {
+        panic!("connect.app.sessions answered no session list");
+    };
+    let listed = listed
+        .sessions
+        .into_iter()
+        .find(|s| s.session_id == sid.to_vec())
+        .expect("R lists its session with the wallet");
     r.enter();
-    crate::storage::client_db::connect::app_session(sid)
+    let held = crate::storage::client_db::connect::app_session(sid)
         .expect("R's sessions")
-        .expect("R's session with the wallet")
+        .expect("R's session with the wallet");
+    assert_eq!(
+        (listed.peer_device_id.as_slice(), listed.peer_genesis.as_slice(), listed.peer_signing_key.as_slice()),
+        (held.wallet_device_id.as_slice(), held.wallet_genesis.as_slice(), held.wallet_ak.as_slice()),
+        "the listing names the wallet as the account holds it"
+    );
+    listed
 }
 
 /// R's request that its session `sid`'s wallet lock `stake` ERA for the
@@ -146,7 +161,7 @@ fn lock(
     external: &[u8],
     stake: u64,
     side: u32,
-    opponent: &crate::storage::client_db::connect::AppSession,
+    opponent: &generated::ConnectSessionV1,
     counterpart: Option<&[u8]>,
 ) -> Kind {
     Kind::EscrowLock(generated::ConnectEscrowLockV1 {
@@ -154,9 +169,9 @@ fn lock(
         policy_commit: era().to_vec(),
         amount: stake,
         side,
-        opponent_genesis: opponent.wallet_genesis.to_vec(),
-        opponent_device_id: opponent.wallet_device_id.to_vec(),
-        opponent_signing_key: opponent.wallet_ak.clone(),
+        opponent_genesis: opponent.peer_genesis.clone(),
+        opponent_device_id: opponent.peer_device_id.clone(),
+        opponent_signing_key: opponent.peer_signing_key.clone(),
         counterpart_vault_id: match counterpart {
             Some(v) => v.to_vec(),
             None => Vec::new(),
@@ -239,7 +254,7 @@ async fn a_match_the_game_referees_pays_the_winner_both_stakes() {
     let code = offer(&r, &relay).await;
     let sid_a = connect(&r, &p.a, &relay, &code).await;
     let sid_b = connect(&r, &p.b, &relay, &code).await;
-    let (as_a, as_b) = (player_of(&r, &sid_a), player_of(&r, &sid_b));
+    let (as_a, as_b) = (player_of(&r, &sid_a).await, player_of(&r, &sid_b).await);
     let stake = whole_era(25);
     let external = b"arena match 1: A v B";
 
@@ -372,7 +387,7 @@ async fn a_match_nobody_joined_is_voided_and_the_stake_returns() {
     let code = offer(&r, &relay).await;
     let sid_a = connect(&r, &p.a, &relay, &code).await;
     let sid_b = connect(&r, &p.b, &relay, &code).await;
-    let as_b = player_of(&r, &sid_b);
+    let as_b = player_of(&r, &sid_b).await;
     let stake = whole_era(20);
 
     let lock_a = request(
@@ -387,7 +402,7 @@ async fn a_match_nobody_joined_is_voided_and_the_stake_returns() {
     assert_eq!(balance(&p.a, &era()), whole_era(100) - stake);
 
     // Half A's stake, against A's vault: B's wallet locks nothing.
-    let as_a = player_of(&r, &sid_a);
+    let as_a = player_of(&r, &sid_a).await;
     let smaller = request(
         &r,
         &relay,
@@ -515,7 +530,7 @@ async fn side_b_locks_only_against_a_stake_that_pays_it_on_b_wins() {
     let code = offer(&r, &relay).await;
     let sid_a = connect(&r, &p.a, &relay, &code).await;
     let sid_b = connect(&r, &p.b, &relay, &code).await;
-    let as_a = player_of(&r, &sid_a);
+    let as_a = player_of(&r, &sid_a).await;
     let (pa, pb, pr) = (party(&p.a).await, party(&p.b).await, party(&r).await);
     let signer = |x: &generated::EscrowPartyResponse| x.signer.clone().expect("a signer");
     let mut players = vec![signer(&pa), signer(&pb)];
