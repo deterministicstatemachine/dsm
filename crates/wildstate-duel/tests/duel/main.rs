@@ -7,5 +7,6 @@
 mod support;
 
 mod codec;
+mod creatures;
 mod golden;
 mod rules;

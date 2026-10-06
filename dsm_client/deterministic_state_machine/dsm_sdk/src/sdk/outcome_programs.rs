@@ -841,6 +841,61 @@ mod tests {
         assert!(init().is_empty());
     }
 
+    /// The entry bytes the game builds through the duel crate are Core's
+    /// `TranscriptEntry` encoding byte for byte, and its commitment is
+    /// Core's, so a wallet signs exactly what the game relays.
+    #[test]
+    fn the_duel_crates_entries_are_cores_encoding() {
+        use dsm::sofi::wire::{EntryKind, TranscriptEntry};
+        use wildstate_duel::transcript::{commit_entry, move_commitment, resign_entry, reveal_entry};
+        let salt = [0x3C; 32];
+        for (side, ours) in [(MatchSide::A, Side::A), (MatchSide::B, Side::B)] {
+            for played in [
+                DuelMoveV1::Move { index: 2 }.encode(),
+                vec![0xFF],
+                vec![0xA5; wildstate_duel::MAX_OPENED_MOVE_BYTES],
+            ] {
+                assert_eq!(
+                    move_commitment(&salt, &played),
+                    dsm::sofi::computed::move_commitment(&salt, &played)
+                );
+                let core = |index, kind| {
+                    TranscriptEntry::new(index, side, kind)
+                        .expect("an entry")
+                        .encode()
+                };
+                assert_eq!(
+                    commit_entry(7, ours, &salt, &played).expect("a commit"),
+                    core(
+                        7,
+                        EntryKind::Commit {
+                            commitment: dsm::sofi::computed::move_commitment(&salt, &played)
+                        }
+                    )
+                );
+                assert_eq!(
+                    reveal_entry(9, ours, &salt, &played).expect("a reveal"),
+                    core(
+                        9,
+                        EntryKind::Reveal {
+                            salt,
+                            played: played.clone()
+                        }
+                    )
+                );
+            }
+            assert_eq!(
+                resign_entry(11, ours).expect("a resign"),
+                TranscriptEntry::new(11, side, EntryKind::Resign)
+                    .expect("an entry")
+                    .encode()
+            );
+            commit_entry(0, ours, &salt, &[1]).expect_err("index 0");
+            reveal_entry(1, ours, &salt, &[]).expect_err("an empty move");
+            reveal_entry(1, ours, &salt, &[1; 65]).expect_err("a move past 64 bytes");
+        }
+    }
+
     #[test]
     fn the_tiebreak_seed_commits_the_nonce_and_both_keys_in_order() {
         let seed = wildstate_duel::tiebreak_seed(&[1; 32], &[2; 64], &[3; 64]);
