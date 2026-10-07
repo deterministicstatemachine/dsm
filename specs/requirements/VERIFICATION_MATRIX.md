@@ -305,3 +305,14 @@ bijection, field/key widths, query budget and exact common-denominator PRG-gap
 bound. SeedHybridChecks exercises correlated expansion and freshness. Efficient
 adversary cost, actual ChaCha20 hardness and the BLAKE3 substitution rows remain
 unproved; the bound does not assign a numerical security level.
+
+## Paper and specification claims (audit-prep, 2026-10-07)
+
+Every claim the papers and specifications make about the formal artifacts is
+traced in [CLAIM_TRACE.tsv](CLAIM_TRACE.tsv): claim, exact theorem, exact
+assumptions, implementation symbol and test. `scripts/check_claim_trace.py`
+(CI, Lean job) fails if a named theorem is missing from the kernel's axiom
+ledger, rests on anything beyond Lean's core axioms, or names a Rust symbol or
+test that does not exist. Published wording that the artifacts do not support,
+and its replacement, is recorded in [PUBLISHED_CLAIMS.md](PUBLISHED_CLAIMS.md).
+

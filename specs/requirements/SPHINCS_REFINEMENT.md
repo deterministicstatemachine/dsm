@@ -151,9 +151,10 @@ four tested DSM wrapper preimages and the resolution-claim input builder.
 No new `axiom`, `sorry`, `admit`, `opaque` security claim or `native_decide` proof
 is introduced. Headline `#print axioms` output contains only Lean logical axioms
 `propext`, `Classical.choice` and/or `Quot.sound`, or none. Cryptographic security is not assumed as
-an unconditional globally injective finite-output hash. The existing
-`DSMCryptoBinding.lean` and `DSMCertChain.lean` have stronger global assumptions;
-this work neither depends on them nor presents their assumptions as discharged.
+an unconditional globally injective finite-output hash. `DSMCryptoBinding.lean`
+and `DSMCertChain.lean` previously declared stronger global axioms; on audit-prep
+(2026-10-07) they were restated as collision/forgery reductions and declare none
+(CONFORMANCE_GAPS.md, "Lean premises"). This work does not depend on them.
 
 ### Complete model signer correctness
 

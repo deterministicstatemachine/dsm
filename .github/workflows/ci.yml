@@ -843,6 +843,9 @@ jobs:
       - name: Kernel axiom audit (ledger must match)
         run: python3 scripts/lean_axiom_audit.py --check
 
+      - name: Paper and spec claims point at existing theorems
+        run: python3 scripts/check_claim_trace.py
+
       - uses: dtolnay/rust-toolchain@1.98.0
       - name: Install SPHINCS refinement build dependencies
         run: |
