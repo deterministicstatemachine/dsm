@@ -1190,6 +1190,17 @@ message DsmSuccessorEvidenceV1 {
   bytes  sigma_dsm            = 8 [(dsm_max_len)=65535];   // SPX256f under the owner AK
 }
 
+// An owner baseline of a vault (SoFi Amendment S24): the owner's
+// presentation over c_n = H(vault-baseline/v1; auth_ccb), the exact
+// OwnerBaselineAuthV1 bytes it signs, and the exact VaultFrontierV1 bytes
+// those bind. Published under vault_baseline_locator(v, g); discovery only
+// until Core authenticates it.
+message VaultBaselineV1 {
+  AnchorPresentationV3 presentation = 1;
+  bytes auth_ccb     = 2 [(dsm_max_len)=4096]; // class 0x0073
+  bytes frontier_ccb = 3 [(dsm_max_len)=4096]; // class 0x0071
+}
+
 message AnchorPresentationV3 {
   bytes  state_commitment       = 1 [(dsm_fixed_len)=32];  // c_n
   bytes  candidate_public_key   = 2 [(dsm_max_len)=65535];
@@ -4673,16 +4684,28 @@ message ConnectPayV1 {
   uint64 amount        = 2; // base units
   string memo          = 3 [(dsm_max_len)=256];
 }
+// A vault this account owns, at the generation of a baseline it published
+// (SoFi Amendment S24), with the session wallet's witness under that
+// baseline's root: the vault's state leaf and the wallet's relationship proof.
+// It carries no authority; the wallet authenticates the baseline it reads
+// under vault_baseline_locator(v, g) and checks the witness against its root.
+message ConnectVaultWitnessV1 {
+  bytes  vault_id    = 1 [(dsm_fixed_len)=32];
+  uint64 generation  = 2;
+  bytes  witness_ccb = 3 [(dsm_max_len)=65536]; // class 0x0072
+}
 message ConnectQuoteV1 {
   bytes  token_in  = 1 [(dsm_fixed_len)=32];
   bytes  token_out = 2 [(dsm_fixed_len)=32];
   uint64 amount_in = 3; // base units of token_in
+  repeated ConnectVaultWitnessV1 vault_witnesses = 4;
 }
 message ConnectSwapV1 {
   bytes  token_in       = 1 [(dsm_fixed_len)=32];
   bytes  token_out      = 2 [(dsm_fixed_len)=32];
   uint64 amount_in      = 3; // base units of token_in
   uint64 min_amount_out = 4; // base units of token_out
+  repeated ConnectVaultWitnessV1 vault_witnesses = 5;
 }
 message ConnectHoldingsV1 {
   repeated bytes policy_commits = 1 [(dsm_fixed_len)=32];

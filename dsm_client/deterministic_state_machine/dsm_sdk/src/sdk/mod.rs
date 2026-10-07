@@ -64,6 +64,7 @@ pub mod sofi_sdk;
 pub mod tls_transport_sdk;
 pub mod token_sdk;
 pub mod token_state;
+pub mod vault_baseline;
 pub mod vault_history;
 // Storage-node client wrapper
 pub mod device_directory;

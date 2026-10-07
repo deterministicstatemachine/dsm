@@ -21,6 +21,7 @@ use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
 use dsm::economic::tree::{EconomicSmt, ABSENT_LEAF};
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::sofi::derive;
+use dsm::sofi::frontier::VaultWitness;
 use dsm::sofi::publication::{Publication, VaultPolicyClass};
 use dsm::sofi::registration::{PairStanding, Registration};
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
@@ -517,14 +518,15 @@ async fn setup(
 
 // ── §30 Finding the head of a vault ────────────────────────────────────────
 
-/// A vault at its walked head: the root the next hop is built on, the whole
-/// tree there, its state, and its terms: a market's policies, or an escrow
-/// vault's terms (SoFi Amendment S21).
+/// A vault at its walked head: the root the next hop is built on, its state,
+/// this device's witness there — the state leaf and this device's
+/// relationship leaf with their paths (SoFi Amendment S24) — and its terms: a
+/// market's policies, or an escrow vault's terms (SoFi Amendment S21).
 pub(crate) struct VaultAtHead {
     pub(crate) vault_id: D32,
     pub(crate) root: D32,
     pub(crate) state: VaultStateLeaf,
-    pub(crate) tree: EconomicSmt,
+    pub(crate) witness: VaultWitness,
     pub(crate) terms: VaultTerms,
 }
 
@@ -613,9 +615,8 @@ async fn vault_terms(set: &StorageSet, state: &VaultStateLeaf) -> Result<VaultTe
     VaultTerms::resolve(&evidence, state).map_err(|refusal| refuse(format!("{refusal:?}")))
 }
 
-/// §30: walk `vault_id` from its accepted genesis to its head. At generation
-/// zero the tree is the genesis state leaf alone; past it, the head store the
-/// walk wrote must reproduce the head's root.
+/// §30: walk `vault_id` to its head — from the genesis, or from the owner
+/// baseline this device started its record at — and witness it there.
 pub(crate) async fn vault_at_head(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
@@ -627,6 +628,27 @@ pub(crate) async fn vault_at_head(
     let chain =
         tokio::task::block_in_place(|| crate::sdk::vault_history::walk(set, verifier, &history))?;
     head_of(set, verifier, vault_id, chain).await
+}
+
+/// Start the record of each vault `offered` that this device holds nothing
+/// of at the owner baseline offered for it (SoFi Amendment S24): what a
+/// quote and a swap do before they walk the vaults' heads.
+pub(crate) async fn adopt_offered(
+    core: &CoreSDK,
+    set: &StorageSet,
+    offered: &[dsm::types::proto::ConnectVaultWitnessV1],
+) -> Result<(), DsmError> {
+    let accepted = &AcceptedGeneses::default();
+    let standing = standing(core)?;
+    let ctx = standing.context(set, accepted)?;
+    let verifier = ctx.verifier();
+    crate::sdk::vault_baseline::adopt(
+        set,
+        &verifier,
+        offered,
+        (standing.genesis, standing.device_id),
+    )
+    .await
 }
 
 /// Each of `vault_ids`' chains, walked at once, in the order given. A vault's
@@ -687,68 +709,114 @@ async fn heads_at_once(
     .await
 }
 
-/// `vault_id` at the head of its walked `chain`.
+/// `vault_id` at the head of its walked `chain`, witnessed for this device.
 pub(crate) async fn head_of(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
     chain: VaultChain,
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
-    let (generation, root) = chain
+    if let Some(why) =
+        sofi_vault_head::quarantined(vault_id).map_err(|e| storage("vault quarantine", e))?
+    {
+        return Err(refuse(format!("the vault is quarantined: {why}")));
+    }
+    let (.., root) = chain
         .head()
         .ok_or_else(|| refuse("no head of this vault is established"))?;
-    let (state, tree) = if generation == 0 {
-        let accepted = match verifier.vault_genesis(vault_id).map_err(verifier_error)? {
-            VaultGenesis::Accepted(accepted) => accepted,
-            VaultGenesis::NotPublished => {
-                return Err(refuse(
-                    "no genesis the owner's creation carried is published",
-                ))
-            }
-            VaultGenesis::OwnerUnresolved(why) => {
-                return Err(refuse(format!(
-                    "the vault owner's lineage is unresolved: {why}"
-                )))
-            }
-            VaultGenesis::Refused(why) => {
-                return Err(refuse(format!("vault genesis refused: {why}")))
-            }
-        };
-        let state = accepted.state().clone();
-        let mut tree = EconomicSmt::new();
-        tree.insert(
-            derive::vault_state_key(vault_id),
-            derive::vault_state_leaf_value(&state).map_err(refuse)?,
-        );
-        (state, tree)
-    } else {
-        let (head, tree, state) = sofi_vault_head::tree_at_head(vault_id)
-            .map_err(|e| storage("vault head", e))?
-            .ok_or_else(|| refuse("this device's record of the vault cannot reproduce its head"))?;
-        if head.generation != generation {
-            return Err(refuse(format!(
-                "the recorded head is generation {}, the walk reached {generation}",
-                head.generation
-            )));
-        }
-        (state, tree)
-    };
-    if tree.root() != root {
-        return Err(refuse(
-            "the vault's leaves do not recompute its walked head",
-        ));
-    }
+    let own = verifier.reads.own().ok_or_else(|| {
+        refuse("a vault's head is witnessed for a trader, and this context is none")
+    })?;
+    let witness = head_witness(verifier, vault_id, &chain, own)?;
+    let state = witness.state().clone();
     let terms = vault_terms(set, &state).await?;
     Ok((
         VaultAtHead {
             vault_id: *vault_id,
             root,
             state,
-            tree,
+            witness,
             terms,
         },
         chain,
     ))
+}
+
+/// This device's witness of `vault_id` at the head of `chain`: the one it
+/// recorded and advanced to that head; at the genesis, the genesis's; or,
+/// where this device holds the whole tree at the head (it walked every
+/// generation), one stated from that tree. Each is checked by Core against
+/// the chain's head before it is stood on, and kept, so the generations
+/// recorded next advance it.
+fn head_witness(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_id: &D32,
+    chain: &VaultChain,
+    own: (D32, D32),
+) -> Result<VaultWitness, DsmError> {
+    let (generation, root) = chain
+        .head()
+        .ok_or_else(|| refuse("no head of this vault is established"))?;
+    let recorded = sofi_vault_head::witness(vault_id).map_err(|e| storage("vault witness", e))?;
+    let witness = match recorded {
+        Some(held)
+            if held.generation == generation
+                && held.root == root
+                && (held.trader_genesis, held.trader_device_id) == own =>
+        {
+            match VaultWitness::recorded(chain, vault_id, &held.witness, own.0, own.1) {
+                Ok(witness) => witness,
+                Err(refused) => {
+                    // This device's witness at the head it recorded does not
+                    // fold to that head: two of its own conclusions disagree.
+                    let why =
+                        format!("the recorded witness at the head does not fold to it: {refused}");
+                    sofi_vault_head::quarantine(vault_id, &why)
+                        .map_err(|e| storage("vault quarantine", e))?;
+                    return Err(refuse(why));
+                }
+            }
+        }
+        _ if generation == 0 => {
+            let accepted = match verifier.vault_genesis(vault_id).map_err(verifier_error)? {
+                VaultGenesis::Accepted(accepted) => accepted,
+                VaultGenesis::NotPublished => {
+                    return Err(refuse(
+                        "no genesis the owner's creation carried is published",
+                    ))
+                }
+                VaultGenesis::OwnerUnresolved(why) => {
+                    return Err(refuse(format!(
+                        "the vault owner's lineage is unresolved: {why}"
+                    )))
+                }
+                VaultGenesis::Refused(why) => {
+                    return Err(refuse(format!("vault genesis refused: {why}")))
+                }
+            };
+            VaultWitness::at_genesis(&accepted, own.0, own.1).map_err(refuse)?
+        }
+        _ => {
+            let (tree, state, relationships) = crate::sdk::vault_baseline::tree_at(
+                vault_id, generation, &root,
+            )?
+            .ok_or_else(|| {
+                refuse("this device holds no witness of the vault's head, and not its whole tree")
+            })?;
+            let rel_key = derive::relationship_key(&own.0, &own.1, vault_id);
+            let wire = dsm::sofi::frontier::witness_from_tree(
+                &tree,
+                vault_id,
+                &state,
+                relationships.get(&rel_key).copied(),
+                &own.0,
+                &own.1,
+            );
+            VaultWitness::recorded(chain, vault_id, &wire, own.0, own.1).map_err(refuse)?
+        }
+    };
+    sofi_vault_head::put_witness(&witness).map_err(|e| storage("vault witness", e))?;
+    Ok(witness)
 }
 
 impl Standing {
@@ -1520,28 +1588,33 @@ pub(crate) async fn chain_past_withheld_pairs(
 }
 
 /// `V°` of one vault: its state mutation to `post_state`, and this trader's
-/// relationship advancement from `base`, against the vault's tree at its head.
+/// relationship advancement from `base`, by the paths of this device's
+/// witness at the vault's head.
 pub(crate) fn vault_core(
     standing: &Standing,
     vault: &VaultAtHead,
     post_state: &VaultStateLeaf,
     base: D32,
 ) -> Result<DlvCore, DsmError> {
+    // The paths are this device's witness at the head: the vault's state
+    // leaf's, and this device's own relationship leaf's.
+    if vault.witness.trader() != (&standing.genesis, &standing.device_id) {
+        return Err(refuse("the vault's witness is another trader's"));
+    }
     let state_key = derive::vault_state_key(&vault.vault_id);
-    let rel_key = derive::relationship_key(&standing.genesis, &standing.device_id, &vault.vault_id);
     let mut entries = vec![
         CoreEntry::Mutation {
             key: state_key,
             pre: derive::vault_state_leaf_value(&vault.state).map_err(refuse)?,
             post: derive::vault_state_leaf_value(post_state).map_err(refuse)?,
-            path: vault.tree.siblings(&state_key).to_vec(),
+            path: vault.witness.state_path().to_vec(),
         },
         CoreEntry::Relationship {
             genesis: standing.genesis,
             device_id: standing.device_id,
             vault_id: vault.vault_id,
             base,
-            path: vault.tree.siblings(&rel_key).to_vec(),
+            path: vault.witness.relationship_path().to_vec(),
         },
     ];
     entries.sort_by_key(CoreEntry::key);

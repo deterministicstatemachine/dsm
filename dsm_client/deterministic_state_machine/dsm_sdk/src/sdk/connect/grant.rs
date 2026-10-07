@@ -343,6 +343,40 @@ pub struct DuelSigned {
     pub signature: Vec<u8>,
 }
 
+/// A vault the application owns, at the generation of a baseline it
+/// published, with this wallet's witness under that baseline's root (SoFi
+/// Amendment S24). No authority: the wallet authenticates the baseline and
+/// checks the witness itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedWitness {
+    pub vault_id: [u8; 32],
+    pub generation: u64,
+    pub witness: Vec<u8>,
+}
+
+impl OfferedWitness {
+    pub(crate) fn to_wire(&self) -> generated::ConnectVaultWitnessV1 {
+        generated::ConnectVaultWitnessV1 {
+            vault_id: self.vault_id.to_vec(),
+            generation: self.generation,
+            witness_ccb: self.witness.clone(),
+        }
+    }
+}
+
+fn offered(given: &[generated::ConnectVaultWitnessV1]) -> Result<Vec<OfferedWitness>, String> {
+    given
+        .iter()
+        .map(|w| {
+            Ok(OfferedWitness {
+                vault_id: d32(&w.vault_id, "an offered vault")?,
+                generation: w.generation,
+                witness: w.witness_ccb.clone(),
+            })
+        })
+        .collect()
+}
+
 /// A request, read from its signed body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -358,12 +392,14 @@ pub enum Request {
         token_in: [u8; 32],
         token_out: [u8; 32],
         amount_in: u64,
+        witnesses: Vec<OfferedWitness>,
     },
     Swap {
         token_in: [u8; 32],
         token_out: [u8; 32],
         amount_in: u64,
         min_amount_out: u64,
+        witnesses: Vec<OfferedWitness>,
     },
     Holdings {
         policy_commits: Vec<[u8; 32]>,
@@ -559,6 +595,7 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
                 token_in,
                 token_out,
                 amount_in: positive(r.amount_in)?,
+                witnesses: offered(&r.vault_witnesses)?,
             })
         }
         Some(Kind::Swap(r)) => {
@@ -568,6 +605,7 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
                 token_out,
                 amount_in: positive(r.amount_in)?,
                 min_amount_out: r.min_amount_out,
+                witnesses: offered(&r.vault_witnesses)?,
             })
         }
         Some(Kind::Holdings(r)) => {
@@ -833,6 +871,7 @@ mod tests {
             token_out: WILD,
             amount_in: 500,
             min_amount_out: 1,
+            witnesses: Vec::new(),
         };
         assert_eq!(
             decide(&grant(), &swap, &nothing_spent, &BTreeSet::new()),
@@ -886,6 +925,7 @@ mod tests {
             token_out: OTHER,
             amount_in: 1,
             min_amount_out: 1,
+            witnesses: Vec::new(),
         };
         assert!(matches!(
             decide(&grant(), &other_pair, &nothing_spent, &BTreeSet::new()),
@@ -896,6 +936,7 @@ mod tests {
             token_out: ERA,
             amount_in: 1,
             min_amount_out: 1,
+            witnesses: Vec::new(),
         };
         assert!(
             matches!(

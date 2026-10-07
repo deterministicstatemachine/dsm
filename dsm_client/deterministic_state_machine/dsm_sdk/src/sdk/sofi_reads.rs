@@ -8,7 +8,7 @@
 //! runs on the SDK's multi-thread runtime from the verifier's synchronous
 //! call (`block_in_place`), which is the shape the peer walk already has.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::future::Future;
 
 use dsm::ccb::StorageSetMembers;
@@ -24,7 +24,7 @@ use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
     AcceptedGeneses, JudgedKey, KeptJudgement, LocalLeaves, PeerPositionResolver, ReadFailure,
-    RecordedGenerationRow, SofiReads, VaultLeaves, Verifier, VerifierFailure,
+    RecordedGenerationRow, SofiReads, Verifier, VerifierFailure,
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
@@ -265,6 +265,11 @@ impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
 }
 
 impl<'a> LiveSofiReads<'a> {
+    /// This device's `(genesis, device_id)` when it verifies as a trader.
+    pub(crate) fn own(&self) -> Option<(D32, D32)> {
+        self.own
+    }
+
     pub fn new(set: &'a StorageSet, own: Option<(D32, D32)>) -> Result<Self, DsmError> {
         Self::keeping(set, own, &KeptReadings::default())
     }
@@ -493,15 +498,33 @@ impl SofiReads for LiveSofiReads<'_> {
         self.peer_walk(genesis, device_id, position)
     }
 
-    fn vault_leaves_at(
+    fn vault_state_at(
         &self,
         vault_id: &D32,
         root: &D32,
-        keys: &BTreeSet<D32>,
-    ) -> Result<Option<VaultLeaves>, ReadFailure> {
-        Ok(sofi_vault_head::leaves_at(vault_id, root, keys)
-            .map_err(|e| ReadFailure(format!("vault head: {e}")))?
-            .map(|(.., leaves)| leaves))
+    ) -> Result<Option<dsm::sofi::wire::VaultStateLeaf>, ReadFailure> {
+        sofi_vault_head::state_at(vault_id, root)
+            .map_err(|e| ReadFailure(format!("vault head: {e}")))
+    }
+
+    fn recorded_baseline(
+        &self,
+        genesis: &dsm::sofi::lineage::AcceptedVaultGenesis,
+    ) -> Result<Option<dsm::sofi::frontier::VerifiedFrontier>, ReadFailure> {
+        let Some((generation, bundle)) = sofi_vault_head::baseline(genesis.vault_id())
+            .map_err(|e| ReadFailure(format!("vault baseline: {e}")))?
+        else {
+            return Ok(None);
+        };
+        // The record is this device's own; it stands only as Core
+        // authenticates it again now.
+        match crate::sdk::vault_baseline::authenticate(&bundle, genesis) {
+            Ok(verified) if verified.frontier().generation == generation => Ok(Some(verified)),
+            Ok(..) => Err(ReadFailure(
+                "the recorded baseline is not at the generation it was recorded at".into(),
+            )),
+            Err(e) => Err(ReadFailure(format!("the recorded baseline: {e}"))),
+        }
     }
 
     fn trader_root_at(
