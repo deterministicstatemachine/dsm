@@ -1,6 +1,11 @@
 # DSM construction-v2 security and binary proof charter
 
-Status: proof target frozen for the initial projects; neither target is achieved.
+Status: proof target frozen for the initial projects. Computational target:
+the classical reduction of EUF-CMA to explicit primitive events and
+distinguisher advantages is proved (`euf_cma_reduction`, audit-prep
+2026-10-07; see SPHINCS_REFINEMENT.md); the primitive assumptions themselves,
+a cost model, numerical bounds and the quantum target are not. Binary target:
+not achieved.
 Authority: the current four DSM specifications, MR-DSM-0259, and the owner's
 explicit request for new computational-security and pinned-binary proof projects.
 This charter defines analysis scope, not a change to protocol acceptance.
