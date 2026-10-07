@@ -108,7 +108,7 @@ async fn locate_ahead(
     count: usize,
 ) -> Result<Vec<SuccessorCell>, DsmError> {
     let mut cells = Vec::with_capacity(count);
-    let mut state = from.clone();
+    let mut state = *from;
     while cells.len() < count {
         let cell = successor_cell(set, &state)?;
         let routed = cell.routed();
