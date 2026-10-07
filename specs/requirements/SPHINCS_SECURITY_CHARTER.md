@@ -33,7 +33,10 @@ ChaCha20Rng expansion and key generation. Do not replace its 3n-byte expansion
 with three independent uniform n-byte seeds without a separate PRG hybrid and
 advantage term. In particular, SPX256f's 96 expansion bytes carry at most the
 master seed's 256 bits of entropy. DSM EK derivation supplies correlated seeds;
-that distribution and multi-key exposure require a later, separate game.
+that distribution and multi-key exposure are covered by the multi-key game
+(`MultiKey.lean`, `multi_key_reduction`, audit-prep 2026-10-07): for any joint
+distribution of seeds, a forgery under any key is one of that key's four
+primitive events.
 Production seed sources are outside the uniform-master-seed experiment.
 
 Signing uses the implemented deterministic R: derive-key context
