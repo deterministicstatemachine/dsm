@@ -674,6 +674,7 @@ is Unavailable, never Invalid.
 | `vault_token_locator(t)` | the genesis preimage of each vault whose market pairs token `t` (Amendment S16) |
 | `escrow_cell_locator(K)` | the genesis preimage of each escrow vault whose terms derive verdict cell `K` (Amendment S21) |
 | `escrow_statement_locator(K, o)` | gathered signatures deciding outcome `o` at verdict cell `K` (Amendment S21) |
+| `lineage_epoch_locator(k, id, e)` | the generation hints and checkpoints of epoch `e` of shared lineage `(k, id)` (Amendment S23) |
 | ρ | the setup body |
 | PolicyFulfillmentIdj | Gj |
 | the auxiliary reference | auxiliary evidence candidates |
@@ -798,6 +799,14 @@ Computed escrow vaults (Amendment S22), constants in CORE/common/domain_tags/dsm
 TAG_DSM_ESCROW_TERMS_OBJECT also addresses ComputedEscrowTerms, and TAG_DSM_ESCROW_CELL_LOCATOR also locates the vaults bound to K_match.
 TAG_DSM_ESCROW_COMPUTED_TABLE               DSM/escrow/computed-table/v1              τ_c
 TAG_DSM_ESCROW_COMPUTED_MATCH               DSM/escrow/computed-match/v1              K_match
+
+Shared lineages (Amendment S23), constants in CORE/common/domain_tags/dsm/misc/shared_lineage.rs
+TAG_DSM_SHARED_LINEAGE_GENESIS              DSM/shared-lineage/genesis/v1             d_0
+TAG_DSM_SHARED_LINEAGE_GENERATION           DSM/shared-lineage/generation/v1          d_g
+TAG_DSM_SHARED_LINEAGE_VAULT_STEP           DSM/shared-lineage/vault-step/v1          a vault generation's step_digest
+TAG_DSM_SHARED_LINEAGE_CHECKPOINT           DSM/shared-lineage/checkpoint/v1          checkpoint_digest
+TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR        DSM/shared-lineage/epoch-locator/v1       locator of an epoch's hints and checkpoints
+TAG_DSM_SHARED_LINEAGE_OBJECT               DSM/shared-lineage/object/v1              address of a hint, checkpoint or bundle
 TAG_DSM_ESCROW_COMPUTED_MATCH_SEED          DSM/escrow/computed-match-seed/v1         s_match, the seed of the match cell
 TAG_DSM_ESCROW_COMPUTED_START               DSM/escrow/computed-start/v1              K_start
 TAG_DSM_ESCROW_COMPUTED_START_SEED          DSM/escrow/computed-start-seed/v1         s_start, the seed of the start cell
@@ -862,6 +871,11 @@ pre
 0x0069           ESCROW_TRANSCRIPT_OUTCOME                     a transcript occupying a match cell (Amendment S22)
 0x006A           ESCROW_EQUIVOCATION_PROOF                     two heads one session key signed at one index (Amendment S22)
 0x006B           ESCROW_MATCH_START                            Start (both readies) or Withdraw at a start cell (Amendment S22)
+0x006C           SHARED_LINEAGE_GENESIS                        a shared lineage's genesis (Amendment S23)
+0x006D           SHARED_LINEAGE_GENERATION                     a shared lineage's generation (Amendment S23)
+0x006E           SHARED_LINEAGE_GENERATION_HINT                a generation hint, discovery only (Amendment S23)
+0x006F           SHARED_LINEAGE_CHECKPOINT                     a 32-generation checkpoint, discovery only (Amendment S23)
+0x0070           SHARED_LINEAGE_TRANSITION_BUNDLE              a segment's read plan, discovery only (Amendment S23)
 
 
 <!-- Source PDF page 19 -->
@@ -2043,6 +2057,29 @@ to the next. An unresolved attempt ends the walk: the head is Rn and that attemp
 > - **Another trader's conditional parent.** A walk that meets an exercise whose `P` names its trader's conditional position as its parent resolves that position from SoFi's public objects through frontier-relative verification of the trader's lineage (DSM Amendment A8, Amendment S15), exactly as it resolves one inside a lineage it verifies; it does not wait on the trader. Without it, any trader's second trade through a vault stalls every other device's walk of that vault.
 > - **What it does not change.** The vault side, the walk, the resolution and every predicate are unchanged. Setting up is an ordinary admitted transition, so a setup admitted ahead of a trade that then fails, or is never built, stands as the trader's position. The next trade through that vault reuses it.
 
+> **Amendment S23 (owner, 2026-10-07) — vault and reserve checkpoints: discovery without authority.** Phone finding, 2026-10-07: a fresh wallet found a 24-generation vault's head by the walk above in ~60 s and a 90-generation reserve's head (§51) in ~16 s, because each generation's cell is computed from the root the generation before it established, so every read waited on the one before. The owner ruled the same day that shared lineages carry their history as proof-carrying generations, in phases: (A) checkpoints and generation hints that let a reader fetch a lineage's evidence in parallel, (B) a proof tree over checkpoints, (C) a recursive validity proof (DSM Amendment A15). This amendment specifies phase A. It amends §11, §14.1, §14.2, §30 and §51.
+>
+> - **Nothing here establishes anything.** A discovered root tells a reader where to look; it never tells the reader what the state is. The head is still found by the walk in steps 1–3, from the accepted genesis, one consumption at a time, and every generation is established by Core exactly as before. Hints, checkpoints and bundles only decide which cells and objects are read, and when.
+> - **The consumption key is unchanged.** A generation's successor is still found at `K(a)` derived from its parent root `R_n` (§23), never at a key derived from the generation number: a key computed before its parent exists would let anyone pre-position bytes at it, and would contradict DSM §43.
+> - **Objects** (CCB, §14.2; tags §14.1). For a lineage of kind `k` (1 a vault, 2 the native reserve of §51) and identity `id` (the vault id `v`, or the reserve id):
+>   - `SharedGenesisV1 {kind, lineage_id, state_root, genesis_preimage_digest}`, with `d_0 = H(shared-lineage/genesis/v1; CCB(·))`.
+>   - `SharedGenerationV1 {kind, lineage_id, generation, parent_generation_digest, state_root, step_digest}`, with `d_g = H(shared-lineage/generation/v1; CCB(·))`; `parent_generation_digest` is `d_{g−1}`, and generation 1 names `d_0`. `step_digest` identifies the canonical transition: for a vault `H(shared-lineage/vault-step/v1; E ∥ u64be(a) ∥ K(a))`, for the reserve the release's evidence address. A reader computes `d_g` only from generations it established.
+>   - `GenerationHintV1 {kind, lineage_id, generation, state_root, generation_digest, step_digest}`: one per realized generation.
+>   - `CheckpointV1 {kind, lineage_id, start_generation, end_generation, start_generation_digest, end_generation_digest, roots[33], transition_bundle_digest, checkpoint_digest}`, with `end_generation = start_generation + 32`, `roots[i]` the claimed root of generation `start_generation + i`, and `checkpoint_digest = H(shared-lineage/checkpoint/v1; CCB(every other field))`.
+>   - `TransitionBundleV1`: the addresses a reader needs to read a segment's generations, for a vault per generation the attempt, the earlier attempts and the exercises at them, `E`, the precommit and fulfillment ids, the closure addresses, the trader's coordinates and the sibling legs; for the reserve the release envelope's address. `transition_bundle_digest` is the bundle's address: retrieval integrity only, never a transition's identity.
+> - **The epoch index.** `lineage_epoch_locator(k, id, e) = H(shared-lineage/epoch-locator/v1; u8 k ∥ id ∥ u64be(e))`, an index like every other (§11): it lists the hints and checkpoints of generations `32e … 32e + 31`. Anyone may append to it, so it may hold anything.
+> - **Who writes.** The trader whose position resolves Realized at generation `g` of a vault (§24), and the claimant whose release is final at generation `g` of the reserve, append a hint for `g` after their own state is committed; when `g` is a multiple of 32 and greater than 0, they also publish the bundle and the checkpoint of the segment that ends at `g`. Any reader that established a segment whose checkpoint it does not find MAY publish it. Publishing is never on the path of an admission, and its absence costs only speed.
+> - **A fresh reader.** From the accepted genesis, the reader:
+>   1. probes the epoch index at `e = 1, 2, 4, …` and then by bisection, and reads every epoch up to the highest populated one, all at once;
+>   2. takes a checkpoint for the segment starting at the generation `s` it has established only when its kind and lineage are the lineage's, `start_generation = s`, `start_generation_digest = d_s` as the reader computed it, `roots[0] = R_s`, `end_generation = s + 32`, its encoding round-trips and `checkpoint_digest` recomputes; it fetches that checkpoint's bundle;
+>   3. derives from the claimed roots every cell and object the walk will need — the attempt cells and their routes, the trader positions, the sibling legs, the reserve cells — and reads them all at once, re-hashing each object to its address;
+>   4. runs the walk of steps 1–3 over what it read, establishing each generation by Core exactly as before; after the segment it compares the `d` and root it computed with the checkpoint's end; a mismatch discards the checkpoint and nothing else;
+>   5. reads the generations after the last checkpoint the same way, from their hints.
+>
+>   Anything a hint, checkpoint or bundle names that the reads do not bear out is passed over, and the walk reads that generation as steps 1–3 describe.
+> - **Flooding.** The epoch index is predictable and anyone may append to it. A reader reads a bounded number of candidates per epoch. Exhausting that bound means discovery is unavailable for that epoch: the reader walks it as steps 1–3 describe. It never means the lineage is invalid, and it never means no later generation exists. No hint's generation is evidence of anything: a hint naming generation 1,000,000 is a place to look.
+> - **What phase A costs.** The reads a reader waits on, one after another, are logarithmic in the lineage's age; the evidence it reads, the bytes it moves and the work Core does are still proportional to the age. Only phase C makes them independent of it (DSM Amendment A15).
+
 <!-- spec-section: SOFI-031 -->
 ### 31 A trade and a multihop route
 A single vault trade is a route with one hop. A multihop route is one operation whose hops run through distinct vaults,
@@ -2925,6 +2962,8 @@ the only number that matters is what remains unreleased.
 
 **Code**
 ERA is native: its policy (Amendment S11) fixes its genesis supply, and every release, the beta faucet's and later emission's, comes out of the network's reserve.
+
+> **Amendment S23 (owner, 2026-10-07).** The reserve is a shared lineage of kind 2: its generations are found from its genesis by the same discovery as a vault's (§30, Amendment S23), and each is established by `release_constructible` from the generation before it, as before. Its hints and checkpoints carry no authority.
 
 <!-- spec-section: SOFI-052 -->
 ### 52 Externally backed supply
