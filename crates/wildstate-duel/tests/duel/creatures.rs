@@ -124,10 +124,16 @@ fn a_modded_state_is_not_the_latest() -> R {
 fn a_creature_is_issued_only_at_its_birth_state() -> R {
     let grown = record(None, 30)?;
     assert_ne!(grown.state, born()?.state, "level 3 is not the birth state");
-    assert_eq!(latest(&ANCHOR, &[grown.encode()]), Err(ChainRefusal::NotBorn));
+    assert_eq!(
+        latest(&ANCHOR, &[grown.encode()]),
+        Err(ChainRefusal::NotBorn)
+    );
     let issued = born()?;
     let played = record(Some(issued.digest()), 30)?;
-    assert_eq!(latest(&ANCHOR, &[issued.encode(), played.encode()])?.0, played.state);
+    assert_eq!(
+        latest(&ANCHOR, &[issued.encode(), played.encode()])?.0,
+        played.state
+    );
     let birth = CreatureStateV1::birth(ANCHOR, 2)?;
     assert_eq!(birth.xp(), 0);
     assert_eq!(birth.hp(), wildstate_duel::TABLES.max_hp(0));

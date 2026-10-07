@@ -779,7 +779,9 @@ impl AppRouterImpl {
                 if matches!(request, Request::Quote { .. } | Request::Swap { .. })
                     && holdings::admission_pending(&self.core_sdk)?.is_some()
                 {
-                    if let Err(e) = crate::sdk::sofi_flow::resolve(&self.core_sdk, &own_set()?).await {
+                    if let Err(e) =
+                        crate::sdk::sofi_flow::resolve(&self.core_sdk, &own_set()?).await
+                    {
                         log::info!("[connect] request {seq}: the pending position is not a SoFi one to finish here ({e})");
                     }
                 }

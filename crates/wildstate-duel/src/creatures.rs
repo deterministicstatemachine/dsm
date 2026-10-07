@@ -142,8 +142,8 @@ pub fn latest(
     }
     // Whatever its issuer hands over is born at level 1; only play, or a
     // trade between players, carries a creature past that.
-    let born = CreatureStateV1::birth(*anchor, tip.0.state.species())
-        .map_err(ChainRefusal::BirthState)?;
+    let born =
+        CreatureStateV1::birth(*anchor, tip.0.state.species()).map_err(ChainRefusal::BirthState)?;
     if tip.0.state != born {
         return Err(ChainRefusal::NotBorn);
     }

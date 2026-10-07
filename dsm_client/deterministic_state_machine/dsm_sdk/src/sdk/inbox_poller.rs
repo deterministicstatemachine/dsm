@@ -637,7 +637,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn a_wallet_serving_a_connected_application_keeps_running_in_the_background() {
-        use crate::storage::client_db::connect::{disconnect, insert_session, SessionStatus, WalletSession};
+        use crate::storage::client_db::connect::{
+            disconnect, insert_session, SessionStatus, WalletSession,
+        };
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         let stopping_before = POLLER_STOP.load(Ordering::SeqCst);
@@ -669,7 +671,10 @@ mod tests {
             stop_poller_for_lifecycle().expect("a readable store"),
             Backgrounded::Stopped
         );
-        assert!(POLLER_STOP.load(Ordering::SeqCst), "nothing to serve: the poller stops");
+        assert!(
+            POLLER_STOP.load(Ordering::SeqCst),
+            "nothing to serve: the poller stops"
+        );
         POLLER_STOP.store(stopping_before, Ordering::SeqCst);
     }
 
