@@ -491,6 +491,10 @@ fn get_database_path() -> Result<PathBuf> {
 /// `connect_previews`) and an application account's side
 /// (`connect_app_offers`, `connect_app_sessions`, `connect_app_requests`,
 /// `connect_app_facts`).
+///
+/// Still 29: a peer's step is validated one hop, from its own parent (DSM
+/// Amendment A14), so no frontier is kept and `peer_frontier` is no longer
+/// created, read or written. A database made before keeps the table, unused.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 29;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -790,21 +794,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             leaf_key   BLOB PRIMARY KEY,     -- 32B derived key
             leaf_value BLOB NOT NULL,        -- 32B economic_leaf_value
             state_ccb  BLOB NOT NULL        -- exact leaf-state CCB bytes
-        );
-
-        -- This receiver's frontiers (DSM Amendment A8): for each peer, the
-        -- coordinates it authenticated on the way to a step it accepted
-        -- from that peer, each with the claim it accepted there. Written
-        -- only in the transaction that accepts the step. A verification
-        -- starts at the latest one below its target and never reads
-        -- behind it.
-        CREATE TABLE IF NOT EXISTS peer_frontier(
-            peer_genesis        BLOB NOT NULL,      -- 32B
-            peer_devid          BLOB NOT NULL,      -- 32B
-            economic_position   INTEGER NOT NULL,
-            economic_root       BLOB NOT NULL,      -- 32B
-            accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
-            PRIMARY KEY(peer_genesis, peer_devid, economic_position)
         );
 
         -- The device's per-relationship per-SIGNER content-addressed EK step

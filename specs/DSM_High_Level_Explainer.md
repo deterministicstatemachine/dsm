@@ -575,6 +575,19 @@ accept.
 > - **The offered step.** The transition presented to the receiver is validated the same way, with the precommitment, guard, linearity and policy checks (Amendment A4).
 > - **SoFi positions in the chain.** A position inside that segment whose claim is conditional (`C_q`) selects no root by its bytes alone. The receiver derives the root it selected from SoFi's public objects for that position only (SoFi Amendment S15) and continues the chain from it. It does so only for such positions inside its own frontier-to-parent segment that it has not resolved before.
 > - **Never read.** Anything behind a frontier the receiver holds for the identity being walked, the payer or a source, and any position outside the segments it validates.
+>
+> **Superseded for acceptance by Amendment A14 (owner, 2026-10-06).** The frontier walk above, and its extension to credit sources, are no longer how a receiver verifies a peer: a peer's step is validated one hop, from its own parent.
+
+> **Amendment A14 (owner, 2026-10-06) — one-hop acceptance.** Online acceptance is local and constant (owner paper, *Deterministic State Machines as Guarded Linear Constraint Systems*, July 2026: Definition 57, "a receiver accepts a candidate only if the candidate is adjacent to the receiver's current local frontier for the named relationship or object, the candidate satisfies Step, and no local pending lock for the same consumed parent blocks the transition"; §29; Remark 6). A receiver validates a peer's step from that step's own parent and reads nothing behind it. There is no frontier and no walk.
+>
+> - **Discovery.** For the peer's step at position `n`, the receiver reads `K_root(n)`, a hash of `(G, DevID, n)` independent of any route, at every member of the register. What it finds there is where to look, never authority (Rule 7: a verifier never accepts a transition because a storage node served it).
+> - **The parent.** For each claim of the peer found there, the parent is the root its own transition witness was built on (`pre_economic_root`), and the activation root at position 1.
+> - **Finality (Tripwire).** The claim must be the one final at the cell routed from that parent. Exactly one claim may survive: none leaves the step not yet established, and two, each final at the cell routed from its own parent, are a fork and are refused, never one chosen.
+> - **The step.** The transition is validated from that parent with the same predicate any device runs (`advance_validated`): candidate, guard, structure, linearity, policy (conservation and non-negativity), and the witness must have been built on exactly that parent.
+> - **Credit sources.** A credit's source is the source's own step, validated the same way, one hop. It must be an online transfer, a debit that names no source of its own; nothing behind it is read.
+> - **Conditional positions.** A conditional claim at `n` selects no root by its bytes. Its parent is the step at `n − 1`, validated one hop, and the claim accepted there; the root it selected is derived from SoFi's public objects (SoFi Amendment S15). A conditional claim at `n − 1` is not resolved from its own parent: nothing at `n − 2` is read, and the question waits.
+> - **Cost.** A constant number of lookup stages, whatever `n`: one probe and one routed read for each claim found, at most one position back for a conditional claim, one step for each credit's source.
+> - **Boundary.** First contact is not a special case. Against a sender that controls both ends of an invalid step, DSM's stated boundary is exposure and non-mergeability at reconciliation (owner paper §3.1), not a history walk at acceptance.
 
 
 <!-- Source PDF page 16 -->
