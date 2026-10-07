@@ -3809,3 +3809,10 @@ efficient-adversary bounds and forgery extraction do not. A width-correct insecu
 oracle negative control permits forgery. A pinned SDK file inventory improves
 artifact identity evidence but leaves device runtime identity, compiler/ISA
 simulation, leakage, erasure and JNI guarantees open.
+
+Certificate wrapper extraction now proves the actual fresh-signature-or-hash-
+collision classification and the resulting finite-event bound, with q+1 hash
+query overhead. The full extracted Rust base_2b function now has a termination/
+output-length theorem at the actual bit-budget bound. Underlying SPHINCS
+security reductions, adaptive oracle simulation, parser digit/spec equality,
+allocator/compiler/machine refinement and leakage/erasure/JNI remain open.

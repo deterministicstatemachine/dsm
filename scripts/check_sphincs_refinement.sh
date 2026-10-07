@@ -10,6 +10,8 @@ lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Proofs.olean lean4/Sph
 lean -DwarningAsError=true lean4/Sphincs/Signer.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/SecurityGames.olean lean4/Sphincs/SecurityGames.lean
 lean -DwarningAsError=true --run lean4/Sphincs/SecurityGameChecks.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/WrapperReduction.olean lean4/Sphincs/WrapperReduction.lean
+lean -DwarningAsError=true --run lean4/Sphincs/WrapperReductionChecks.lean
 lean -DwarningAsError=true lean4/Sphincs/CrossCheck.lean
 DSM_SPHINCS_VECTOR_DIR="$PWD/target/sphincs-refinement" \
   cargo test --locked -p dsm-sphincs refinement_vectors::export_refinement_vectors -- --exact

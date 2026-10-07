@@ -371,6 +371,40 @@ invariant scan, codegen guard, SPDX and diff checks passed for this follow-up.
 Runtime Rust/JNI behavior was not changed. Existing Android SDK lint failures
 and absent device/runtime proof checks remain as documented above.
 
+### Certificate extraction and complete parser termination proofs
+
+`WrapperReduction.lean` implements an extractor from a fresh accepted signed
+object and its signing-query transcript. It searches for a previously queried
+object with the same digest. With a match it returns two different canonical
+preimages with equal hash outputs; without a match it returns the accepted
+signature on a digest absent from the primitive signing-query list. The
+classification is proved, not assumed. The concrete Certificate instance uses
+64-byte keys, 32-byte parent tips and DSM/ek-cert framing (108 preimage bytes),
+with the existing SPHINCS model verifier. It corresponds to the deployed default
+SPX256f certificate format; it is not a stateful authorization/replay theorem.
+
+The instrumented extractor refines the uninstrumented function and provably
+issues at most q+1 hash queries for q queried objects. Its exact finite-space
+bound is P(wrapper success) <= P(extracted fresh-signature break) +
+P(extracted hash collision), with equal denominators. It does not assume hash
+injectivity, independent BLAKE3 families or a primitive security bound. This is
+a transcript-level reduction: whole adaptive-oracle simulation, adversary time
+and memory accounting, primitive replacements, and the underlying SPHINCS
+EUF-CMA reduction remain open. Executable controls cover both extraction
+branches, exact hash-query inputs and queried-object rejection.
+
+`base_2b_complete` now proves total execution and exact output length for the
+actual extracted Rust function, including both loops and its initial mask
+construction, for every width 1..14 and b*count <= 8*input.length. The outer-loop
+induction preserves the exact bit budget, input bounds and vector-length bound;
+each iteration consumes exactly its refill read count and retains at most seven
+bits. The source model includes bounded words, casts, slices and Vec operations.
+No cryptographic or external-template axiom is used. This closes parser
+termination/length and modeled index/arithmetic safety, not digit equality with
+the MSB-first specification. Real allocation/OOM, compiler/machine memory and
+signer-wide or hardware leakage/erasure/JNI guarantees remain open. The pinned
+source gate recompiles these proofs from the unchanged current Rust extraction.
+
 ## Executable evidence and reproducibility
 
 Run `bash scripts/check_sphincs_refinement.sh` from the repository root. The CI
