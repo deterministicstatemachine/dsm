@@ -100,7 +100,7 @@ pub enum ValidatedPeerTransition {
     /// STILL refused as a debit source: P15-9 rules on lineage, not on whether
     /// resolution happened. A boolean `is_unresolved` would get this wrong.
     ///
-    /// **Nothing constructs this arm (E1c-3).** `validate_peer_lineage`
+    /// **Nothing constructs this arm (E1c-3).** `validate_peer_step`
     /// refuses every conditional claim, resolved or not, because a resolved
     /// position's register cell still holds `C_q` — resolution is
     /// verifier-local and never rewrites the cell. The arm exists so that when
@@ -148,12 +148,12 @@ pub struct PeerTransitionFacts {
 }
 
 impl ValidatedPeerTransition {
-    /// The walk's constructor for an ordinary single-root lineage.
+    /// The step verifier's constructor for an ordinary single-root step.
     ///
-    /// **Only `peer_lineage::validate_peer_lineage` may call this.** It is the
-    /// one place that has proven every conjunct the lineage label asserts:
-    /// that the register winner at each position decoded as a single-root
-    /// claim, named these coordinates, and advanced validation. A second
+    /// **Only `peer_lineage`'s step verifier may call this.** It is the one
+    /// place that has proven every conjunct the label asserts: that the claim
+    /// final at the step's position decoded as a single-root claim, named
+    /// these coordinates, and advanced validation from its parent. A second
     /// caller would be asserting a lineage rather than establishing one, and
     /// `ci/peer_debit_lineage_authoritative.sh` fails the build if one appears.
     #[allow(clippy::too_many_arguments)]

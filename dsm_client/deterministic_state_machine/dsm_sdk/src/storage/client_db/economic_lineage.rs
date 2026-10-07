@@ -73,12 +73,6 @@ type AdmittedRow = (
 const SELECT_ADMITTED: &str = "SELECT economic_position, claim_kind, economic_root, \
      fulfillment_id, realize_root, void_root, claim_ref FROM economic_admitted_v2 WHERE id = 1";
 
-/// The highest ordinary (claim kind 0) position admitted below `?1`.
-const SELECT_ADMITTED_SINGLE_ROOT_BELOW: &str = "SELECT economic_position, claim_kind, \
-     economic_root, fulfillment_id, realize_root, void_root, claim_ref FROM \
-     economic_admitted_history WHERE economic_position < ?1 AND claim_kind = 0 \
-     ORDER BY economic_position DESC LIMIT 1";
-
 const SELECT_ADMITTED_AT: &str = "SELECT economic_position, claim_kind, economic_root, \
      fulfillment_id, realize_root, void_root, claim_ref FROM economic_admitted_history \
      WHERE economic_position = ?1";
@@ -367,120 +361,6 @@ pub fn load_leaf_cache() -> Result<Vec<([u8; 32], [u8; 32], Vec<u8>)>> {
         out.push((digest32(k, "leaf_key")?, digest32(v, "leaf_value")?, ccb));
     }
     Ok(out)
-}
-
-/// This device's own frontier strictly below `position`: the highest
-/// ordinary position its own lineage admitted there, with the root and the
-/// claim it admitted. A device authenticated every step of its own lineage
-/// when it admitted it, so its admitted history is its frontier for itself; a
-/// conditional SoFi position is never one (as [`PeerFrontier::reached_by`]
-/// holds), so the search passes over those. `None` when nothing below
-/// `position` was admitted as an ordinary position.
-///
-/// The caller passes this device's own identity; the frontier carries it.
-pub fn own_frontier_below(
-    own_genesis: &[u8; 32],
-    own_devid: &[u8; 32],
-    position: u64,
-) -> Result<Option<dsm::economic::peer_lineage::PeerFrontier>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let row = conn
-        .query_row(
-            SELECT_ADMITTED_SINGLE_ROOT_BELOW,
-            params![i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?],
-            read_admitted_row,
-        )
-        .optional()?;
-    match row.map(admitted_from_row).transpose()? {
-        Some(AdmittedEconomicPosition::SingleRoot {
-            economic_position,
-            economic_root,
-            claim_ref,
-        }) => Ok(Some(
-            dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
-                *own_genesis,
-                *own_devid,
-                economic_position,
-                economic_root,
-                dsm::sofi::wire::ParentClaimRef::SingleRoot { claim_ref },
-            ),
-        )),
-        Some(other) => Err(anyhow!(
-            "the ordinary position admitted below {position} reads back as {other:?}"
-        )),
-        None => Ok(None),
-    }
-}
-
-/// This receiver's latest frontier for a peer strictly below `position`
-/// (DSM Amendment A8): a coordinate it authenticated on the way to a step it
-/// accepted from the peer, with the claim it accepted there.
-pub fn frontier_below(
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    position: u64,
-) -> Result<Option<dsm::economic::peer_lineage::PeerFrontier>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let row = conn
-        .query_row(
-            "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
-             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND economic_position < ?3
-             ORDER BY economic_position DESC LIMIT 1",
-            params![
-                peer_genesis.as_slice(),
-                peer_devid.as_slice(),
-                i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?
-            ],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    row.map(|(recorded, root, accepted)| {
-        Ok(
-            dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
-                *peer_genesis,
-                *peer_devid,
-                u64::try_from(recorded)
-                    .map_err(|e| anyhow!("frontier position {recorded}: {e}"))?,
-                digest32(root, "frontier root")?,
-                dsm::sofi::wire::ParentClaimRef::decode(&accepted)
-                    .map_err(|e| anyhow!("frontier claim at {recorded}: {e:?}"))?,
-            ),
-        )
-    })
-    .transpose()
-}
-
-/// Record, inside the transaction that accepts a step from the peer, the
-/// frontier that step's verification reached. The activation root is every
-/// receiver's frontier and is never recorded.
-pub fn record_frontier_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    frontier: &dsm::economic::peer_lineage::PeerFrontier,
-) -> Result<()> {
-    let (position, root, accepted) = frontier.recorded().ok_or_else(|| {
-        anyhow!("the activation root is every receiver's frontier and is never recorded")
-    })?;
-    tx.execute(
-        "INSERT OR IGNORE INTO peer_frontier(
-             peer_genesis, peer_devid, economic_position, economic_root, accepted_claim)
-         VALUES(?1, ?2, ?3, ?4, ?5)",
-        params![
-            frontier.genesis().as_slice(),
-            frontier.device_id().as_slice(),
-            i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?,
-            root.as_slice(),
-            accepted.encode()
-        ],
-    )?;
-    Ok(())
 }
 
 // ── q-durability memos (3.5b PR4) ──────────────────────────────────────────

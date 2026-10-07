@@ -183,15 +183,26 @@ fn discovered_all<T>(discovered: &Discovered<T>) -> bool {
     matches!(discovered, Discovered::Complete(..))
 }
 
-/// The peer walks' reads, through the context's: every step of a lineage
-/// fetches the objects its steps share again, and a resolution that walks a
-/// lineage twice reads its register cells twice. Each is read once.
+/// The peer step checks' reads, through the context's: a resolution that
+/// checks the same trader's step twice reads its register cell and objects
+/// once.
 struct OnceFetcher<'r, 'a> {
     live: LiveRegisterResolver<'a>,
     once: &'r ReadOnce,
 }
 
 impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
+    /// Never kept: what members hold under a key is where to look, and a
+    /// later look may find a claim that was not there yet.
+    fn register_key_values(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+        self.live.register_key_values(genesis, device_id, position)
+    }
+
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
         // Kept once Core reads a final claim at the cell from them.
         read_once(
@@ -532,8 +543,8 @@ impl SofiReads for LiveSofiReads<'_> {
                 members: &members,
                 set_id: self.set.id(),
                 network_id: &self.network,
-            programs: crate::sdk::outcome_programs::registry(),
-        };
+                programs: crate::sdk::outcome_programs::registry(),
+            };
             return resolve_peer_claim(
                 &self.peer_resolver(),
                 &self.network,
