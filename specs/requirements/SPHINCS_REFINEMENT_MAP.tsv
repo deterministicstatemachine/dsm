@@ -21,12 +21,12 @@ crates/dsm-sphincs/src/lib.rs	252	tree_index	Adrs.hash	e7b801a54ae6a8436373847ea
 crates/dsm-sphincs/src/lib.rs	255	as_bytes	Adrs.bytes / be_roundtrip / address_width	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	289	PublicCtx	deriveKey(thash)	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	306	SecretCtx	deriveKey(prf)	e7b801a54ae6a8436373847eab797b1b9577d3ce
-crates/dsm-sphincs/src/lib.rs	267	derive_key	deriveKey	e7b801a54ae6a8436373847eab797b1b9577d3ce
-crates/dsm-sphincs/src/lib.rs	318	keyed	keyed	e7b801a54ae6a8436373847eab797b1b9577d3ce
-crates/dsm-sphincs/src/lib.rs	332	thash	thash	e7b801a54ae6a8436373847eab797b1b9577d3ce
-crates/dsm-sphincs/src/lib.rs	343	prf	prf	e7b801a54ae6a8436373847eab797b1b9577d3ce
-crates/dsm-sphincs/src/lib.rs	351	prf_msg	sign (deriveKey(prf-msg) then keyed)	e7b801a54ae6a8436373847eab797b1b9577d3ce
-crates/dsm-sphincs/src/lib.rs	357	h_msg	hmsg	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	267	derive_key	deriveKey / Blake3.derive_request / derive_xof_same_32 / evaluate_width	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	318	keyed	keyed / Blake3.keyed_request / evaluate_width	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	332	thash	thash / Blake3.thash_request	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	343	prf	prf / Blake3.prf_request	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	351	prf_msg	sign (deriveKey(prf-msg) then keyed) / Blake3.derive / keyedHash	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	357	h_msg	hmsg / Blake3.hmsg_request / deployed_hmsg_widths / root_prefix	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	380	base_2b	base2b / base2b_digit_bound / RustExtraction.base_2b_complete / parser_outer_complete_fuel / refill_complete / refill_read_count_noninterference	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	400	to_int	toInt	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	405	to_byte	be / be_roundtrip	e7b801a54ae6a8436373847eab797b1b9577d3ce
