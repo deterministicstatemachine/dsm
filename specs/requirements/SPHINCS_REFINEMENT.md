@@ -450,6 +450,23 @@ Pinned primary sources and the per-function cross-reference are in
 `SPHINCS_EXTERNAL_PROOF_ARTIFACTS.md`. The paper's <=32-byte output bound does not
 directly apply to the deployed message XOFs.
 
+## Narrow SHA-2/BLAKE3 substitution and seed hybrid
+
+`SPHINCS_EXTERNAL_PROOF_ARTIFACTS.md` compares the actual primitive roles to
+FIPS 205's SHA-256/SHA-512 constructions and pins five transfer boundaries.
+The comparison preserves DSM's algorithm; it does not replace BLAKE3 with SHA.
+
+`SeedHybrid.lean` implements the first explicit challenge reduction. It proves
+the existing `generateKeypair` is expansion followed by the unchanged root/key
+computation. A distinguisher given only expanded bytes reproduces the adaptive
+signing/forgery game exactly. The destination sampler covers all 3n-byte strings
+bijectively; field/key widths and signing-attempt bounds are checked. The exact
+cross-multiplied probability theorem bounds actual success by ideal-expansion
+success plus this distinguisher's PRG advantage, preserving different space
+cardinalities. No small-advantage premise or independent deployed seed draw is
+introduced. Efficient runtime/memory/primitive-query costs, actual ChaCha20 PRG
+hardness and the remaining BLAKE3 family reductions remain open.
+
 ## Remaining trusted computing base and review obligations
 
 1. Lean kernel, core library, toolchain and logical axioms; executable-checker
@@ -457,7 +474,7 @@ directly apply to the deployed message XOFs.
 2. Correctness and security of BLAKE3 derive-key/keyed/XOF modes and truncation;
    hash/PRF assumptions appropriate to the **custom** multi-key construction,
    domain/address separation, robustness to deterministic R and quantum attacks.
-   No security reduction or numerical forgery bound is proved here.
+   No complete SPHINCS security reduction or numerical forgery bound is proved here.
 3. ChaCha expansion and seed entropy/uniqueness; OS RNG, wallet entropy
    normalization, KDF inputs, master/AK/EK ownership, secret storage and erasure.
 4. Rust-to-Lean correspondence outside the extracted layer/address/refill proofs is a

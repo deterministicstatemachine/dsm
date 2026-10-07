@@ -3826,3 +3826,10 @@ need proofs. BLAKE3 cryptographic assumptions and correlated-context/multi-targe
 reductions remain open. The published bound restricted to <=32 output bytes
 cannot directly cover the deployed 34-/49-byte H_msg outputs, and a 32-byte
 BLAKE3 key must not be described as proving 256-bit computational security.
+
+The first explicit seed-distribution hybrid now has a constructed distinguisher
+and checked real-game equivalence, uniform-expansion sampler and exact advantage
+loss. The SHA-2/DSM difference is pinned to five primitive/encoding boundaries.
+Efficient-adversary/primitive-query costs, ChaCha20 hardness and the remaining
+BLAKE3 family transfers still need proofs; the original unbounded Strategy type
+has not been relabeled as an efficient adversary.
