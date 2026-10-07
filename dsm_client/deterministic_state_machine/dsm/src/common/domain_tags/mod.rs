@@ -183,7 +183,10 @@ mod tests {
     // the setup, the occupant id, the transcript head chain and statement,
     // and the move commitment.
     // +1 for the ready handshake (owner ruling 2026-10-06): `m_ready`.
-    const EXPECTED_TAG_COUNT: usize = 381;
+    // +6 with shared lineages (SoFi Amendment S23): the genesis and generation
+    // digests, the vault step digest, the checkpoint digest, the epoch locator
+    // and the object namespace.
+    const EXPECTED_TAG_COUNT: usize = 387;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

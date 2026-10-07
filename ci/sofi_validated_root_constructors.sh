@@ -346,4 +346,26 @@ while IFS= read -r hit; do
 done <<<"$literals"
 echo "  ✓ one caller of the anchored, linked chain memo, at the walk's start; facts are built by establish only"
 
+# [6] Shared lineages (DSM Amendment A15, SoFi Amendment S23): discovery
+#     carries no authority. The code that handles discovered hints,
+#     checkpoints and bundles — Core's `shared_lineage` module and the SDK's
+#     `lineage_discovery` — names nothing that constructs or records an
+#     established lineage: no vault chain, no reserve state, no memo write.
+#     A discovered root reaches established state only through the Core walk.
+echo "[6] Shared lineages: discovery constructs no established state..."
+discovery_files=$(ls "$core/dsm/src/shared_lineage/mod.rs" "$core/dsm_sdk/src/sdk/lineage_discovery.rs" 2>/dev/null || true)
+[[ -n "$discovery_files" ]] || { echo "[FAIL] the shared-lineage modules are not where this gate expects them"; exit 1; }
+forbidden='VaultChain|from_recorded|\.extend\(&|record_generation|record_walked|record_resolved|record_final_release|NativeReserveState \{|NativeReserveState::genesis|ValidatedEconomicRoot|VaultPostState \{'
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  prod=$(python3 ci/production_text.py "$f")
+  hits=$(grep -nE "$forbidden" <<<"$prod" || true)
+  if [[ -n "$hits" ]]; then
+    echo "[FAIL] $f names a constructor or record of established lineage state:"
+    echo "$hits"
+    exit 1
+  fi
+done <<<"$discovery_files"
+echo "  ✓ discovery code names no constructor or record of established state"
+
 echo "✓ raw envelope -> verified claim -> registered root: every arrow is opaque"
