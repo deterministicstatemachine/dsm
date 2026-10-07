@@ -51,7 +51,7 @@ crates/dsm-sphincs/src/lib.rs	717	Indices	Indices	e7b801a54ae6a8436373847eab797b
 crates/dsm-sphincs/src/lib.rs	723	split_digest	splitDigest / digest_tree_bounded / digest_leaf_bounded	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	739	fors_adrs	verify/sign (FORS address)	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	750	SphincsKeyPair	generateKeypair pair of bytes	e7b801a54ae6a8436373847eab797b1b9577d3ce
-crates/dsm-sphincs/src/lib.rs	767	generate_keypair_from_seed	generateKeypair / keygen_sign_verify	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	767	generate_keypair_from_seed	generateKeypair / keygen_sign_verify / SeedHybrid.lean:keygen_expansion_refines / seed_prg_hybrid_bound	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	804	sign	sign / signer_correct	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	851	verify	verify / verification_structure	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	884	public_key_bytes	2*Params.n	e7b801a54ae6a8436373847eab797b1b9577d3ce
