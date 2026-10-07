@@ -3833,3 +3833,52 @@ loss. The SHA-2/DSM difference is pinned to five primitive/encoding boundaries.
 Efficient-adversary/primitive-query costs, ChaCha20 hardness and the remaining
 BLAKE3 family transfers still need proofs; the original unbounded Strategy type
 has not been relabeled as an efficient adversary.
+
+## Lean premises (audit-prep, 2026-10-07)
+
+`scripts/lean_axiom_audit.py` asks the kernel what each theorem rests on and
+records it in `LEAN_AXIOM_LEDGER.tsv`; CI fails on `sorryAx`, `native_decide`,
+an undeclared axiom, or a ledger change nobody reviewed. The tree now declares
+no axioms (`LEAN_DECLARED_ASSUMPTIONS.tsv` is empty).
+
+Closed in this pass:
+
+- `DSMCryptoBinding.lean` was unsound: `claim_key_material_binding` asserted
+  that `preimage ‖ hash_lock` determines both parts, which the module's own
+  definition refutes (`[1] ++ [2,3] = [1,2] ++ [3]`); the kernel derived
+  `False` from it. The deployed code fixes `hash_lock` at 32 bytes
+  (`derive_claim_keypair`), and the restated theorem carries that premise.
+- `domain_hash_injective`, `verify_message_binding`,
+  `sphincs_signature_message_binding` (DSMCryptoBinding, DSMCertChain) were
+  axioms no real primitive satisfies: no fixed-width hash is injective, and a
+  hash-based signature does not bind at most one message. Each binding theorem
+  now concludes "equal, or an explicit hash collision, or an explicit EUF-CMA
+  forgery", with the primitives as parameters. Signature correctness is a
+  field of the parameter, not an axiom.
+- `canonical_encode_injective` (DSMGuardedTripwire) is proved for a concrete
+  encoding; digest binding is stated as "same state, or a collision".
+
+Open:
+
+- `DSMRecognition.lean` (`Crypto.H_inj`, `Crypto.signature_message_binding`)
+  and `DSMSofiStorage.lean` (`Hash.H_inj`) take the same idealizations as
+  structure hypotheses. They are not axioms, so the ledger shows these
+  theorems as clean, but their premises do not hold for BLAKE3 or SPHINCS+;
+  restate them in collision/forgery-extraction form.
+- The axiom audit does not cover `lean4/Sphincs/RustExtraction` (Aeneas
+  backend, Lean 4.31); `check_sphincs_source_refinement.sh` gates it and needs
+  the pinned Aeneas/Charon checkouts.
+
+## SPHINCS+ signers added after construction-v2 evidence (audit-prep, 2026-10-07)
+
+Upstream added production SPHINCS+ signing wrappers after the refinement branch
+was written; they are recorded in `SPHINCS_REFINEMENT_MAP.tsv` as unproved:
+
+- DSM Connect signed objects (`dsm_sdk::sdk::connect::signed`, Amendment A11):
+  `domain_hash(kind tag, canonical body)`.
+- Escrow verdict statements (`dsm::sofi::escrow`, Amendment S21):
+  `K_verdict ‖ u32be(|o|) ‖ o`, bounded by `ESCROW_MAX_OUTCOME_BYTES`.
+
+Their canonical-byte injectivity and wrapper reductions belong with the other
+wrapper targets in `SPHINCS_SECURITY_CHARTER.md`.
+

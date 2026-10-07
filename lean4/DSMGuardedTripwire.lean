@@ -34,10 +34,11 @@
     * `malformed_family_admits_fork` proves the well-formedness hypothesis is
       load-bearing (the theorem is not vacuously true).
     * `step_inhabited` proves the step relation is satisfiable (not vacuous).
-    * The only `axiom`s are the paper's cryptographic Assumptions (1 hash
-      soundness, 3 canonical-encoding injectivity), matching the existing
-      lean4/DSMCryptoBinding.lean / DSMCertChain.lean practice. The
-      uniqueness/tripwire core does NOT depend on them.
+    * The module declares no `axiom`s. Paper Assumption 3 (canonical-encoding
+      injectivity) is PROVED for a concrete encoding (`canonical_encode_injective`);
+      Assumption 1 (hash soundness) appears only as an explicit collision
+      disjunct (`candidate_digest_binds_or_collides`), never as an axiom.
+      scripts/lean_axiom_audit.py checks this.
 
   Run: `lean DSMGuardedTripwire.lean` to verify all proofs.
 -/
@@ -325,27 +326,57 @@ theorem candidate_multiplicity_without_realized_fork :
   exact realized_unique_at_key [bA, bB] s0 t₁ t₂ k famConflict_well_formed h₁ h₂
 
 -- ============================================================
--- Cryptographic assumptions (paper Assumptions 1, 3) — labeled axioms
+-- Canonical encoding (paper Assumption 3, PROVED) and digest binding
 -- ============================================================
--- These are the paper's stated assumptions, matching the existing
--- DSMCryptoBinding.lean / DSMCertChain.lean practice. The uniqueness and
--- tripwire theorems above do NOT depend on them; they are used only for the
--- CandidateOK digest-binding consequence (paper Def 36 clause 2).
+-- An earlier version declared `canonicalEncode : State → Nat` and its
+-- injectivity as axioms. `State` is countable, so injectivity is a theorem
+-- about a concrete encoding, not an assumption. Digest binding is stated with
+-- the hash as a parameter: equal digests mean equal states or an explicit
+-- collision. The uniqueness and tripwire theorems above use neither.
+
+/-- Encoding of the consumed-key list: each key contributes its two fields. -/
+def encodeKeys : List ResKey → List Nat
+  | [] => []
+  | k :: ks => k.parentRoot :: k.descriptor :: encodeKeys ks
+
+theorem encodeKeys_injective : ∀ {a b : List ResKey}, encodeKeys a = encodeKeys b → a = b
+  | [], [], _ => rfl
+  | [], _ :: _, h => by simp [encodeKeys] at h
+  | _ :: _, [], h => by simp [encodeKeys] at h
+  | ⟨p₁, d₁⟩ :: ks, ⟨p₂, d₂⟩ :: js, h => by
+      simp only [encodeKeys, List.cons.injEq] at h
+      obtain ⟨hp, hd, hr⟩ := h
+      subst hp
+      subst hd
+      rw [encodeKeys_injective hr]
 
 /-- Canonical encoding enc(s) of a DSM state (paper Assumption 3 carrier). -/
-axiom canonicalEncode : State → Nat
+def canonicalEncode (s : State) : List Nat :=
+  s.root :: encodeKeys s.consumed
 
-/-- Assumption 3 (Canonical Encoding Injectivity): two distinct well-formed DSM
-    states cannot share a canonical encoding. -/
-axiom canonical_encode_injective :
-  ∀ s t, canonicalEncode s = canonicalEncode t → s = t
+/-- Assumption 3 (Canonical Encoding Injectivity), PROVED. -/
+theorem canonical_encode_injective :
+    ∀ s t, canonicalEncode s = canonicalEncode t → s = t := by
+  intro ⟨r₁, c₁⟩ ⟨r₂, c₂⟩ h
+  simp only [canonicalEncode, List.cons.injEq] at h
+  obtain ⟨hr, hc⟩ := h
+  rw [hr, encodeKeys_injective hc]
 
-/-- CandidateOK digest binding (paper Def 36 clause 2): a candidate whose
-    committed digest matches the parent-committed candidate record is bound to a
-    unique state. Consequence of Assumption 3. -/
+/-- A candidate whose canonical encoding matches is the same state. -/
 theorem candidate_digest_binds (s t : State)
     (h : canonicalEncode s = canonicalEncode t) : s = t :=
   canonical_encode_injective s t h
+
+/-- CandidateOK digest binding (paper Def 36 clause 2): equal committed
+    digests name the same state, or exhibit a collision of the digest
+    function on two distinct canonical encodings. -/
+theorem candidate_digest_binds_or_collides (digest : List Nat → Nat) (s t : State)
+    (h : digest (canonicalEncode s) = digest (canonicalEncode t)) :
+    s = t ∨ (canonicalEncode s ≠ canonicalEncode t ∧
+             digest (canonicalEncode s) = digest (canonicalEncode t)) := by
+  by_cases he : canonicalEncode s = canonicalEncode t
+  · exact Or.inl (canonical_encode_injective s t he)
+  · exact Or.inr ⟨he, h⟩
 
 -- ============================================================
 -- Summary
@@ -361,4 +392,6 @@ theorem candidate_digest_binds (s t : State)
 --   disjoint_progress_two_steps       (Prop 12 / DisjointProgressAllowed)
 --   step_inhabited                    (non-vacuity)
 --   malformed_family_admits_fork      (teeth: well-formedness is load-bearing)
--- Axioms used: only paper Assumptions 1/3 (canonical encoding), for CandidateOK.
+--   canonical_encode_injective        (Assumption 3, PROVED)
+--   candidate_digest_binds_or_collides (Def 36 clause 2: equal state or collision)
+-- Axioms used: none beyond Lean core (see specs/requirements/LEAN_AXIOM_LEDGER.tsv).

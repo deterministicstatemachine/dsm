@@ -79,17 +79,24 @@
   CRYPTOGRAPHIC ASSUMPTIONS — the model of DSMCertChain.lean, stated as
   fields of `Crypto` so the theorems are parametric in them:
     * `H_inj`: BLAKE3 domain-hash collision resistance, as the protocol-level
-      consequence (distinct inputs, distinct digests). The same axiom as
-      `domain_hash_injective` in DSMCertChain / DSMCryptoBinding.
+      consequence (distinct inputs, distinct digests). An idealization: no
+      fixed-width hash is injective, so a theorem resting on this field does
+      not apply to BLAKE3 as stated. DSMCertChain / DSMCryptoBinding now state
+      the honest form (equal digests, or an explicit collision); restating this
+      module the same way is open (CONFORMANCE_GAPS.md, "Lean premises").
     * `keyGen`, `sign`, `verify`: a SPHINCS+ keypair from a seed, DETERMINISTIC
       signing (whitepaper §11: the Cat-5 'f' deterministic variant), and a
       verification predicate. Nothing is assumed about `sign` as a function
       of its key, and a public key tells nothing about its seed.
     * `sign_verify_round_trip`: a signature produced with the secret half of
-      a keypair verifies under its public half (soundness). Exactly
-      `sphincs_sign_verify_round_trip` in DSMCertChain.
+      a keypair verifies under its public half (soundness). The same
+      property as `SigScheme.round_trip` in DSMCertChain.
     * `signature_message_binding`: for a fixed (pk, sig) at most one message
-      verifies. Exactly `sphincs_signature_message_binding` in DSMCertChain.
+      verifies. SPHINCS+ does NOT have this property (SPHINCS_SECURITY_CHARTER.md:
+      no uniqueness claim follows); a second message verifying an honest
+      signature is an EUF-CMA forgery, which is how DSMCertChain now states it.
+      Restating this field as forgery extraction is open (CONFORMANCE_GAPS.md,
+      "Lean premises").
     * `Adversary.euf`: existential unforgeability, phrased over what the
       adversary can OUTPUT. Any signature it presents that verifies under pk
       on some message was made with a seed it holds whose public half is

@@ -91,9 +91,10 @@
 
 namespace DSMSofiStorage
 
-/-- The hash: injective on its input list (collision resistance as its
-protocol-level consequence; the same axiom as `domain_hash_injective`
-elsewhere). -/
+/-- The hash: injective on its input list. An idealization of collision
+resistance: no fixed-width hash is injective, so theorems resting on `H_inj`
+do not apply to BLAKE3 as stated; restating them as "equal, or an explicit
+collision" is open (CONFORMANCE_GAPS.md, "Lean premises"). -/
 structure Hash where
   H : List Nat → Nat
   H_inj : ∀ a b, H a = H b → a = b
