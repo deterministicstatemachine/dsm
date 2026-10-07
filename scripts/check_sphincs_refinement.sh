@@ -12,10 +12,15 @@ lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/SecurityGames.olean le
 lean -DwarningAsError=true --run lean4/Sphincs/SecurityGameChecks.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/WrapperReduction.olean lean4/Sphincs/WrapperReduction.lean
 lean -DwarningAsError=true --run lean4/Sphincs/WrapperReductionChecks.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Transcript.olean lean4/Sphincs/Transcript.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Blake3.olean lean4/Sphincs/Blake3.lean
+lean -DwarningAsError=true lean4/Sphincs/Blake3Proofs.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Blake3Vectors.olean lean4/Sphincs/Blake3Vectors.lean
 lean -DwarningAsError=true lean4/Sphincs/CrossCheck.lean
 DSM_SPHINCS_VECTOR_DIR="$PWD/target/sphincs-refinement" \
   cargo test --locked -p dsm-sphincs refinement_vectors::export_refinement_vectors -- --exact
 DSM_SPHINCS_VECTOR_DIR="$PWD/target/sphincs-refinement" \
   cargo test --locked -p dsm --lib crypto::sphincs_refinement_tests::export_wrapper_vectors -- --exact
 lean --run lean4/Sphincs/CrossCheck.lean target/sphincs-refinement/*.bin
+bash scripts/check_sphincs_blake3.sh target/sphincs-refinement/*.bin
 python3 scripts/sphincs_refinement_controls.py
