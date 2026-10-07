@@ -3879,6 +3879,12 @@ was written; they are recorded in `SPHINCS_REFINEMENT_MAP.tsv` as unproved:
 - Escrow verdict statements (`dsm::sofi::escrow`, Amendment S21):
   `K_verdict ‖ u32be(|o|) ‖ o`, bounded by `ESCROW_MAX_OUTCOME_BYTES`.
 
-Their canonical-byte injectivity and wrapper reductions belong with the other
-wrapper targets in `SPHINCS_SECURITY_CHARTER.md`.
+Their canonical-byte injectivity is proved (audit-prep, 2026-10-07) in
+`lean4/Sphincs/WrapperInjective.lean`: `escrow_statement_injective`,
+`connect_signing_injective`, `resolution_claim_signing_injective`, and
+`signing_domain_separation` across the EK-cert, DevID, Kyber-binding,
+resolution-claim, escrow and Connect domains (the tag type forbids NUL, so
+`tag ‖ 0 ‖ body` is unambiguous). Equal digests of distinct objects are
+therefore an explicit hash collision. Stateful acceptance semantics per
+wrapper remain as recorded above.
 

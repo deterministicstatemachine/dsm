@@ -16,6 +16,7 @@ lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/OracleAgree.olean lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/PrfHybrid.olean lean4/Sphincs/PrfHybrid.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/MsgPrfHybrid.olean lean4/Sphincs/MsgPrfHybrid.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/AddressInjective.olean lean4/Sphincs/AddressInjective.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/WrapperInjective.olean lean4/Sphincs/WrapperInjective.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/RequestLog.olean lean4/Sphincs/RequestLog.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/AddressRange.olean lean4/Sphincs/AddressRange.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/TweakUse.olean lean4/Sphincs/TweakUse.lean
