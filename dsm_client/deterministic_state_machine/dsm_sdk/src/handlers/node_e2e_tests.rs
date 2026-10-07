@@ -2939,6 +2939,50 @@ async fn a_vault_traded_through_closes_for_its_owner() {
     );
 }
 
+/// DSM Amendment A14, conditional positions back to back: a trader trades
+/// three times in a row, so each trade's `P` names the trader's previous
+/// trade, a conditional position, as its parent. Every trade resolves
+/// Realized, and the owner's close, which judges each of the trader's
+/// exercises as a peer's, resolves too: a conditional parent on a conditional
+/// parent is found one position back, among the roots the claim there
+/// commits, never by reading further.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn trades_back_to_back_resolve_and_the_owner_closes_after_them() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    let first = realized_trade(&p, &m, 5).await;
+    let second = realized_trade(&p, &m, 5).await;
+    let third = realized_trade(&p, &m, 5).await;
+    assert_eq!(
+        (second, third),
+        (first + 1, first + 2),
+        "the trades are B's positions back to back"
+    );
+    assert_eq!(
+        balance(&p.b, &m.era),
+        crate::economic_fixtures::whole_era(200) - 15,
+        "B paid for three trades"
+    );
+    let tkn_held = balance(&p.b, &m.tkn);
+    let era_before = balance(&p.a, &m.era);
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        balance(&p.a, &m.era),
+        era_before + 115,
+        "the vault's ERA: its reserve and all three of B's inputs"
+    );
+    assert!(tkn_held > 0, "B holds what its trades took");
+}
+
 /// SoFi Amendment S16: discovery carries no authority. Under ERA's vault
 /// token locator, beside A's real ERA/TKN vault, sit what anyone may append:
 /// bytes that are no genesis; the genesis of a vault B claims to own but
