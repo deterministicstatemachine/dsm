@@ -27,7 +27,7 @@ crates/dsm-sphincs/src/lib.rs	332	thash	thash	e7b801a54ae6a8436373847eab797b1b95
 crates/dsm-sphincs/src/lib.rs	343	prf	prf	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	351	prf_msg	sign (deriveKey(prf-msg) then keyed)	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	357	h_msg	hmsg	e7b801a54ae6a8436373847eab797b1b9577d3ce
-crates/dsm-sphincs/src/lib.rs	380	base_2b	base2b / base2b_digit_bound / RustExtraction.refill_complete / refill_read_count_noninterference	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	380	base_2b	base2b / base2b_digit_bound / RustExtraction.base_2b_complete / parser_outer_complete_fuel / refill_complete / refill_read_count_noninterference	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	400	to_int	toInt	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	405	to_byte	be / be_roundtrip	e7b801a54ae6a8436373847eab797b1b9577d3ce
 crates/dsm-sphincs/src/lib.rs	411	wots_digits	wotsDigits / wots_digit_count / wots_digit_bound / checksum_width_three	e7b801a54ae6a8436373847eab797b1b9577d3ce

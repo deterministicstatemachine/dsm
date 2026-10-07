@@ -164,6 +164,128 @@ def refillReads (b bits : Nat) : Nat :=
   intro right rightPost
   exact ⟨leftPost.1.trans rightPost.1.symm, leftPost.2.1.trans rightPost.2.1.symm⟩
 
+ theorem parser_outer_step (x : Slice U8) (b input bits : Usize) (total mask : U64)
+    (iter : core.ops.range.Range Usize) (out : alloc.vec.Vec U32)
+    (width : 0 < b.val ∧ b.val ≤ 14) (residual : bits.val ≤ 7)
+    (buffered : input.val+refillReads b.val bits.val ≤ x.val.length)
+    (remaining : iter.start.val < iter.end.val)
+    (capacity : out.val.length < Usize.max) :
+    base_2b_loop0.body x b mask iter input bits total out ⦃ result =>
+      ∃ iter' input' bits' total' out',
+        result = .cont (iter',input',bits',total',out') ∧
+        iter'.start.val = iter.start.val+1 ∧ iter'.end = iter.end ∧
+        input'.val = input.val+refillReads b.val bits.val ∧
+        bits'.val = bits.val+8*refillReads b.val bits.val-b.val ∧ bits'.val ≤ 7 ∧
+        out'.val.length = out.val.length+1 ⦄ := by
+  unfold base_2b_loop0.body
+  apply WP.spec_bind (core.iter.range.IteratorRange.next_UScalar_some_spec
+    (by intro a; rfl) (by intro a b; rfl) iter remaining)
+  intro result post
+  obtain ⟨opt,iter'⟩ := result
+  obtain ⟨rfl,iterNext,iterEnd⟩ := post
+  have readsBound : refillReads b.val bits.val ≤ 2 := by
+    unfold refillReads
+    split
+    · decide
+    · split <;> decide
+  apply WP.spec_bind (refill_complete x input b bits total width residual (by omega))
+  intro result post
+  obtain ⟨input',bits',total'⟩ := result
+  obtain ⟨inputNext,bitsNext,bitsLower,bitsUpper⟩ := post
+  change input'.val = input.val + refillReads b.val bits.val at inputNext
+  change bits'.val = bits.val + 8 * refillReads b.val bits.val at bitsNext
+  change b.val ≤ bits'.val at bitsLower
+  change bits'.val < b.val+8 at bitsUpper
+  have kept : bits'.val-b.val < 8 := by omega
+  have nonzero : 1 ≤ (1 <<< (bits'.val-b.val)) % U64.size := by
+    simp only [Nat.shiftLeft_eq,Nat.one_mul,U64.size,U64.numBits,UScalarTy.numBits]
+    have small : 2^(bits'.val-b.val) < 2^64 :=
+      Nat.pow_lt_pow_right (by decide) (by omega)
+    rw [Nat.mod_eq_of_lt small]
+    have positive := Nat.pow_pos (n := bits'.val-b.val) (show 0 < 2 by decide)
+    omega
+  step*
+  all_goals simp_all
+  all_goals scalar_tac
+ theorem parser_outer_finished (x : Slice U8) (b input bits : Usize) (total mask : U64)
+    (iter : core.ops.range.Range Usize) (out : alloc.vec.Vec U32)
+    (finished : iter.end.val ≤ iter.start.val) :
+    base_2b_loop0.body x b mask iter input bits total out ⦃ result => result = .done out ⦄ := by
+  unfold base_2b_loop0.body
+  apply WP.spec_bind (core.iter.range.IteratorRange.next_UScalar_none_spec
+    (by intro a b; rfl) iter finished)
+  intro result post
+  obtain ⟨opt,iter'⟩ := result
+  obtain ⟨rfl,rfl⟩ := post
+  change Result.ok (ControlFlow.done out : ControlFlow
+    (core.ops.range.Range Usize × Usize × Usize × U64 × alloc.vec.Vec U32)
+    (alloc.vec.Vec U32)) ⦃ _ ⦄
+  simp
+
+ theorem parser_outer_complete_fuel (x : Slice U8) (b : Usize) (mask : U64)
+    (width : 0 < b.val ∧ b.val ≤ 14) (fuel : Nat)
+    (iter : core.ops.range.Range Usize) (input bits : Usize) (total : U64)
+    (out : alloc.vec.Vec U32) (ordered : iter.start.val ≤ iter.end.val)
+    (count : iter.end.val-iter.start.val = fuel) (residual : bits.val ≤ 7)
+    (inputBound : input.val ≤ x.val.length)
+    (buffered : 8*input.val+b.val*fuel ≤ 8*x.val.length+bits.val)
+    (capacity : out.val.length+fuel ≤ Usize.max) :
+    base_2b_loop0 iter x b input bits total mask out ⦃ result =>
+      result.val.length = out.val.length+fuel ⦄ := by
+  induction fuel generalizing iter input bits total out with
+  | zero =>
+    unfold base_2b_loop0
+    rw [loop]
+    apply WP.spec_bind (parser_outer_finished x b input bits total mask iter out (by omega))
+    intro result equal
+    subst result
+    simp
+  | succ fuel ih =>
+    unfold base_2b_loop0
+    rw [loop]
+    have enough : input.val+refillReads b.val bits.val ≤ x.val.length := by
+      simp only [Nat.mul_succ] at buffered
+      unfold refillReads
+      split
+      · omega
+      · split <;> omega
+    apply WP.spec_bind (parser_outer_step x b input bits total mask iter out width residual
+      enough (by omega) (by omega))
+    intro result post
+    obtain ⟨iter',input',bits',total',out',equal,next,stop,reads,bitBalance,kept,length⟩ := post
+    subst result
+    change base_2b_loop0 iter' x b input' bits' total' mask out' ⦃ _ ⦄
+    have stopVal : iter'.end.val = iter.end.val := congrArg UScalar.val stop
+    simp only [Nat.mul_succ] at buffered
+    have completed := ih iter' input' bits' total' out' (by omega) (by omega) kept
+      (by omega) (by omega) (by omega)
+    apply WP.spec_mono completed
+    intro result post
+    omega
+ theorem base_2b_complete (x : Slice U8) (b count : Usize)
+    (width : 0 < b.val ∧ b.val ≤ 14)
+    (buffered : b.val*count.val ≤ 8*x.val.length) :
+    base_2b x b count ⦃ result => result.val.length = count.val ⦄ := by
+  unfold base_2b
+  have positive : 1 ≤ (1 <<< b.val) % U64.size := by
+    simp only [Nat.shiftLeft_eq,Nat.one_mul,U64.size,U64.numBits,UScalarTy.numBits]
+    have small : 2^b.val < 2^64 := Nat.pow_lt_pow_right (by decide) (by omega)
+    rw [Nat.mod_eq_of_lt small]
+    have powerPositive := Nat.pow_pos (n := b.val) (show 0 < 2 by decide)
+    omega
+  have empty : (alloc.vec.Vec.with_capacity U32 count).val.length = 0 := rfl
+  step
+  step
+  apply WP.spec_mono (parser_outer_complete_fuel x b _ width count.val
+    {start := 0#usize, «end» := count} 0#usize 0#usize 0#u64
+    (alloc.vec.Vec.with_capacity U32 count) (by simp) (by simp) (by simp)
+    (by simp) (by simpa using buffered) (by rw [empty]; scalar_tac))
+  intro result post
+  simpa only [empty,Nat.zero_add] using post
+#print axioms base_2b_complete
+#print axioms parser_outer_step
+#print axioms parser_outer_complete_fuel
+
 #print axioms refill_read_count_noninterference
 #print axioms refill_complete
 #print axioms byte_refill_complete

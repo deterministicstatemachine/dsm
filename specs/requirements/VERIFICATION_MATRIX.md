@@ -278,3 +278,10 @@ runs adaptive-query/freshness/budget controls and a width-correct insecure oracl
 forgery control in the existing refinement gate. The new charter retains open
 computational/quantum reduction and wrapper-authorization obligations. The
 artifact locker rechecks build-file identity; it is not a binary semantics proof.
+
+WrapperReduction.lean and its controls verify certificate forgery extraction,
+explicit collision witnesses, fresh primitive-signature witnesses and q+1 hash
+query traces. RustExtraction.base_2b_complete proves total parser execution and
+output length for widths 1..14 with b*count <= 8*input.length; it uses the proved
+outer-loop bit-budget induction. Both proof sets are in the existing gates.
+They do not close primitive hardness, parser digit equality or binary guarantees.

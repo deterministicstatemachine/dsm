@@ -22,7 +22,7 @@ model = {
 'PublicCtx':'deriveKey(thash)', 'SecretCtx':'deriveKey(prf)',
 'derive_key':'deriveKey', 'keyed':'keyed', 'thash':'thash', 'prf':'prf',
 'prf_msg':'sign (deriveKey(prf-msg) then keyed)', 'h_msg':'hmsg',
-'base_2b':'base2b / base2b_digit_bound / RustExtraction.refill_complete / refill_read_count_noninterference', 'to_int':'toInt', 'to_byte':'be / be_roundtrip',
+'base_2b':'base2b / base2b_digit_bound / RustExtraction.base_2b_complete / parser_outer_complete_fuel / refill_complete / refill_read_count_noninterference', 'to_int':'toInt', 'to_byte':'be / be_roundtrip',
 'wots_digits':'wotsDigits / wots_digit_count / wots_digit_bound / checksum_width_three',
 'chain':'chain / chain_composes / chain_width / wots_generated_digit_recovers',
 'wots_sk_adrs':'wotsSign / wotsPkgen', 'wots_compress':'wotsCompress',
