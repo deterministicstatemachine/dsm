@@ -15,6 +15,7 @@ lean -DwarningAsError=true --run lean4/Sphincs/SeedHybridChecks.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/OracleAgree.olean lean4/Sphincs/OracleAgree.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/PrfHybrid.olean lean4/Sphincs/PrfHybrid.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/MsgPrfHybrid.olean lean4/Sphincs/MsgPrfHybrid.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/AddressInjective.olean lean4/Sphincs/AddressInjective.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/WrapperReduction.olean lean4/Sphincs/WrapperReduction.lean
 lean -DwarningAsError=true --run lean4/Sphincs/WrapperReductionChecks.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Transcript.olean lean4/Sphincs/Transcript.lean
