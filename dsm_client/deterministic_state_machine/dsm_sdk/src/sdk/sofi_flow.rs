@@ -1114,6 +1114,95 @@ fn route_ends(hops: &[Hop]) -> Result<Option<RouteEnds>, DsmError> {
     }))
 }
 
+/// Geneses accepted at once.
+const GENESES_AT_ONCE: usize = 16;
+
+/// What accepting the vaults of a route's tokens ahead came to: a report
+/// only. What a vault of a token is, is decided by `vaults_of_token`.
+struct AcceptedAhead {
+    candidates: usize,
+    accepted: usize,
+    not_accepted: Vec<String>,
+}
+
+impl core::fmt::Display for AcceptedAhead {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} candidate vaults, {} geneses accepted at once, {} not",
+            self.candidates,
+            self.accepted,
+            self.not_accepted.len()
+        )?;
+        if let Some(first) = self.not_accepted.first() {
+            write!(f, " (first: {first})")?;
+        }
+        Ok(())
+    }
+}
+
+/// Accept the genesis of every vault published under `tokens`' indexes at
+/// once, through the verifier's own `vault_genesis`, which keeps each one it
+/// accepts for the rest of the operation. Each acceptance reads its owner's
+/// creation; one at a time, a token with many vaults cost a round trip per
+/// vault before a quote. Call from a thread that may block.
+fn accept_ahead(verifier: &Verifier<'_, LiveSofiReads<'_>>, tokens: &[D32]) -> AcceptedAhead {
+    use dsm::sofi::resolve::SofiReads as _;
+    let mut report = AcceptedAhead {
+        candidates: 0,
+        accepted: 0,
+        not_accepted: Vec::new(),
+    };
+    let mut vault_ids: Vec<D32> = Vec::new();
+    for token in tokens {
+        match verifier.reads.vault_token_candidates(token) {
+            Ok(Discovered::Complete(found) | Discovered::Partial(found)) => {
+                for vault_id in found {
+                    if !vault_ids.contains(&vault_id) {
+                        vault_ids.push(vault_id);
+                    }
+                }
+            }
+            Err(failure) => report
+                .not_accepted
+                .push(format!("the token index: {failure}")),
+        }
+    }
+    report.candidates = vault_ids.len();
+    for chunk in vault_ids.chunks(GENESES_AT_ONCE) {
+        let outcomes: Vec<Result<VaultGenesis, String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|vault_id| {
+                    scope.spawn(move || {
+                        verifier
+                            .vault_genesis(vault_id)
+                            .map_err(|failure| failure.to_string())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| match handle.join() {
+                    Ok(outcome) => outcome,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                })
+                .collect()
+        });
+        for outcome in outcomes {
+            match outcome {
+                Ok(VaultGenesis::Accepted(..)) => report.accepted += 1,
+                Ok(VaultGenesis::NotPublished) => report.not_accepted.push("not published".into()),
+                Ok(VaultGenesis::OwnerUnresolved(why) | VaultGenesis::Refused(why)) => {
+                    report.not_accepted.push(why)
+                }
+                Err(why) => report.not_accepted.push(why),
+            }
+        }
+    }
+    report
+}
+
 /// The vaults whose market pairs `token`, from its token index (Amendment
 /// S16): accepted by Core, never taken from the index. A discovery that is
 /// not complete marks the search partial.
@@ -1214,6 +1303,18 @@ pub async fn find_route(
     let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let mut search = Search::Complete;
+    // Every vault of either token is accepted at once, so the discovery
+    // below finds each one already accepted for this operation.
+    let ahead = tokio::task::block_in_place(|| {
+        accept_ahead(
+            &verifier,
+            &[
+                intent.token_in_policy_commit,
+                intent.token_out_policy_commit,
+            ],
+        )
+    });
+    log::info!("[sofi] route search: {ahead}");
     let firsts = vaults_of(&verifier, &intent.token_in_policy_commit, &mut search)?;
     let seconds = vaults_of(&verifier, &intent.token_out_policy_commit, &mut search)?;
     let (token_in, token_out) = (
