@@ -7,7 +7,7 @@ python3 scripts/sphincs_source_map.py --check
 mkdir -p target/sphincs-refinement target/sphincs-lean/Sphincs
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Model.olean lean4/Sphincs/Model.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Proofs.olean lean4/Sphincs/Proofs.lean
-lean -DwarningAsError=true lean4/Sphincs/Signer.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Signer.olean lean4/Sphincs/Signer.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/SecurityGames.olean lean4/Sphincs/SecurityGames.lean
 lean -DwarningAsError=true --run lean4/Sphincs/SecurityGameChecks.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/SeedHybrid.olean lean4/Sphincs/SeedHybrid.lean
@@ -16,6 +16,9 @@ lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/OracleAgree.olean lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/PrfHybrid.olean lean4/Sphincs/PrfHybrid.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/MsgPrfHybrid.olean lean4/Sphincs/MsgPrfHybrid.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/AddressInjective.olean lean4/Sphincs/AddressInjective.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/RequestLog.olean lean4/Sphincs/RequestLog.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/AddressRange.olean lean4/Sphincs/AddressRange.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/TweakUse.olean lean4/Sphincs/TweakUse.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/WrapperReduction.olean lean4/Sphincs/WrapperReduction.lean
 lean -DwarningAsError=true --run lean4/Sphincs/WrapperReductionChecks.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Transcript.olean lean4/Sphincs/Transcript.lean
