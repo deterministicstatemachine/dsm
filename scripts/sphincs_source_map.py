@@ -36,7 +36,7 @@ model = {
 'fors_node':'forsNode / fors_node_parent / fors_node_width / fors_signer_tree_path', 'fors_sign':'forsSign / fors_sign_correct', 'fors_pk_from_sig':'forsPkFromSig / fors_authentication_path_recovers_tree',
 'Indices':'Indices', 'split_digest':'splitDigest / digest_tree_bounded / digest_leaf_bounded',
 'fors_adrs':'verify/sign (FORS address)', 'SphincsKeyPair':'generateKeypair pair of bytes',
-'generate_keypair_from_seed':'generateKeypair / keygen_sign_verify', 'sign':'sign / signer_correct', 'verify':'verify / verification_structure',
+'generate_keypair_from_seed':'generateKeypair / keygen_sign_verify / SeedHybrid.lean:keygen_expansion_refines / seed_prg_hybrid_bound', 'sign':'sign / signer_correct', 'verify':'verify / verification_structure',
 'public_key_bytes':'2*Params.n', 'secret_key_bytes':'4*Params.n', 'signature_bytes':'Params.sigBytes',
 'sphincs_sign':'sign(.spx256f)', 'sphincs_verify':'verify(.spx256f)'
 }
