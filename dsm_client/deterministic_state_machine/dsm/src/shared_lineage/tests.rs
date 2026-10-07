@@ -318,3 +318,27 @@ fn junk_under_an_epoch_index_is_recognized_as_nothing() {
         LineageObject::recognize(junk).expect_err("junk is no hint and no checkpoint");
     }
 }
+
+/// Discovery carries no authority (DSM Amendment A15): this module names
+/// nothing that constructs or records an established vault chain, reserve
+/// state, root or memo. A discovered root reaches established state only
+/// through the Core walk.
+#[test]
+fn discovery_code_names_no_constructor_of_established_state() {
+    let source = include_str!("mod.rs");
+    for forbidden in [
+        "VaultChain",
+        "from_recorded",
+        "record_generation",
+        "record_walked",
+        "record_final_release",
+        "NativeReserveState",
+        "ValidatedEconomicRoot",
+        "VaultPostState",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "shared_lineage names {forbidden}"
+        );
+    }
+}

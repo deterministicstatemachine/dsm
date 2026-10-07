@@ -3044,6 +3044,131 @@ async fn a_vault_walk_over_settled_history_closes_no_cycle() {
     );
 }
 
+/// Forget everything `d` holds of `vault_id`'s chain, and every read this
+/// process kept: a device that keeps nothing of the vault.
+fn forget_the_vault(d: &TestDevice, vault_id: &[u8; 32]) {
+    d.enter();
+    {
+        let binding = crate::storage::client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute(
+            "DELETE FROM sofi_vault_leaf WHERE vault_id = ?1",
+            [vault_id.as_slice()],
+        )
+        .expect("forget the vault's leaves");
+        conn.execute(
+            "DELETE FROM sofi_vault_root WHERE vault_id = ?1",
+            [vault_id.as_slice()],
+        )
+        .expect("forget the vault's generations");
+    }
+    crate::sdk::economic_registers::validated_peers().forget();
+    crate::sdk::final_reads::forget_everything();
+}
+
+/// `d`'s walk of `vault_id` with its history read ahead (SoFi Amendment
+/// S23): the generations it established, root by root.
+async fn walk_with_history(d: &TestDevice, vault_id: &[u8; 32]) -> Vec<[u8; 32]> {
+    let (own, parents) = standing_of(d);
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let history = crate::sdk::vault_history::discover(&set, vault_id)
+        .await
+        .expect("the history");
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    tokio::task::block_in_place(|| crate::sdk::vault_history::walk(&set, &verifier, &history))
+        .expect("the walk");
+    crate::storage::client_db::sofi_vault_head::recorded_generations(vault_id)
+        .expect("the record")
+        .into_iter()
+        .map(|row| row.root)
+        .collect()
+}
+
+/// A vault's history read ahead decides nothing (SoFi Amendment S23). After
+/// three trades, the walkers' hints are published, and beside them sit a
+/// hint naming a root generation 2 never had and a hint naming generation
+/// 1,000,000. The owner, keeping nothing of the vault, walks it with its
+/// history read ahead and establishes exactly the generations a walk with
+/// no history establishes; the honest hints name exactly those roots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_vault_history_read_ahead_establishes_exactly_what_the_walk_does() {
+    use dsm::shared_lineage::{epoch_locator, epoch_of, GenerationHintV1, LineageKind};
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    for _ in 0..3 {
+        realized_trade(&p, &m, 5).await;
+    }
+    // The chain as a walk with nothing read ahead establishes it.
+    forget_the_vault(&p.a, &m.vault_id);
+    let (own, parents) = standing_of(&p.a);
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    ctx.verifier().chain(&m.vault_id).expect("the plain walk");
+    let plain: Vec<[u8; 32]> =
+        crate::storage::client_db::sofi_vault_head::recorded_generations(&m.vault_id)
+            .expect("the record")
+            .into_iter()
+            .map(|row| row.root)
+            .collect();
+    assert_eq!(plain.len(), 4, "the genesis and three trades");
+
+    // A walk with history owes the hints nobody published; the sweep
+    // publishes them.
+    forget_the_vault(&p.a, &m.vault_id);
+    assert_eq!(walk_with_history(&p.a, &m.vault_id).await, plain);
+    crate::handlers::artifact_republish::publish_lineage_debt()
+        .await
+        .expect("the sweep publishes what is owed");
+    let found =
+        crate::sdk::lineage_discovery::discover(&set, LineageKind::Vault, &m.vault_id, 0).await;
+    for (generation, root) in plain.iter().enumerate().skip(1) {
+        assert_eq!(
+            found.roots_at(generation as u64).collect::<Vec<_>>(),
+            vec![root],
+            "the hint names the root the walk established at {generation}"
+        );
+    }
+
+    // Lies beside the honest hints.
+    for (generation, root) in [(2u64, [0x6F; 32]), (1_000_000u64, [0x70; 32])] {
+        let lie = GenerationHintV1::new(
+            LineageKind::Vault,
+            m.vault_id,
+            generation,
+            root,
+            [0x71; 32],
+            [0x72; 32],
+        )
+        .expect("a hint");
+        let bytes = lie.encode();
+        let (addr, took) = crate::sdk::storage_io::put_immutable(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_OBJECT,
+            &bytes,
+        )
+        .await
+        .expect("anyone may put an object");
+        assert!(took > 0);
+        crate::sdk::storage_io::append_to_index(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
+            &epoch_locator(LineageKind::Vault, &m.vault_id, epoch_of(generation)),
+            &addr,
+        )
+        .await
+        .expect("anyone may append");
+    }
+    forget_the_vault(&p.a, &m.vault_id);
+    assert_eq!(
+        walk_with_history(&p.a, &m.vault_id).await,
+        plain,
+        "lying hints change nothing the walk establishes"
+    );
+}
+
 /// SoFi Amendment S16: discovery carries no authority. Under ERA's vault
 /// token locator, beside A's real ERA/TKN vault, sit what anyone may append:
 /// bytes that are no genesis; the genesis of a vault B claims to own but
