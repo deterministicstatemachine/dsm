@@ -480,10 +480,14 @@ async fn a_sources_frontier_is_recorded_and_the_next_credit_walks_only_its_suffi
 
 /// One walk validates a source's segment once. C pays A twice, and A pays
 /// B out of both: validating A's segment, B walks C to the first paying
-/// step, and the walk to the second starts there. Every member is asked for
-/// each of C's cells at or behind the first paying step exactly as often as
-/// for C's second paying step, which any walk reads once: never once more
-/// for the second source.
+/// step, and the walk to the second starts there. B's acceptance asks for
+/// each of C's root cells exactly once: never once more for the second
+/// source, and never again when the admission advances B's own root over
+/// the credit it accepted.
+///
+/// Counted as asks of B's resolver, not as the members' reads: a final cell
+/// is read from its seats once and kept, so a walk repeated in the same
+/// process reads nothing from the members and costs every signature again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn one_walk_validates_a_sources_segment_once() {
@@ -493,33 +497,207 @@ async fn one_walk_validates_a_sources_segment_once() {
     assert!(second_source > first_source);
     let sent = p.a.send(&p.b, 35).await;
     assert!(sent.success, "{:?}", sent.error_message);
-    let behind = cs_cells_through(&c, first_source);
-    let second = cs_cells_through(&c, second_source)
-        .pop()
-        .expect("C's cell at its second paying step");
-    for node in &p.nodes.nodes {
-        node.forget_requests();
-    }
-    let received = p.b.sync().await;
-    assert!(received.success, "{:?}", received.errors);
+    let cs_cells = cells_through(&c, second_source);
+    let asked = accept(&p.b).await;
     assert_eq!(p.b.era_balance(), 35);
-    let per_member = |read: &String| -> Vec<usize> {
-        p.nodes
-            .nodes
-            .iter()
-            .map(|n| n.requests().iter().filter(|r| *r == read).count())
-            .collect()
-    };
-    let once = per_member(&second);
-    assert!(
-        once.iter().any(|n| *n > 0),
-        "B validated C's second paying step"
-    );
-    for read in &behind {
+    for (position, key) in &cs_cells {
         assert_eq!(
-            per_member(read),
-            once,
-            "B walked C's segment through {read} more often than C's second paying step"
+            asks(&asked, key),
+            1,
+            "B's acceptance asked for C's cell at {position} other than once"
+        );
+    }
+}
+
+/// The root cells of `device` at positions `1..=through`, as its resolver is
+/// asked for them, by position.
+fn cells_through(device: &TestDevice, through: u64) -> Vec<(u64, [u8; 32])> {
+    device.enter();
+    let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+    let mut parent = dsm::economic::tree::empty_economic_root();
+    let mut cells = Vec::new();
+    for position in 1..=through {
+        let cell = crate::sdk::economic_registers::root_cell(
+            &set,
+            NETWORK,
+            &device.genesis,
+            &device.device_id,
+            position,
+            &parent,
+        )
+        .expect("the root cell");
+        cells.push((position, *cell.routed().key()));
+        parent = admitted(position).0;
+    }
+    cells
+}
+
+/// `receiver` takes in what was sent to it, as a process that remembers
+/// nothing it validated before: the root cells its resolver was asked for
+/// meanwhile, counted by routed key.
+async fn accept(receiver: &TestDevice) -> std::collections::HashMap<[u8; 32], usize> {
+    crate::sdk::economic_registers::validated_peers().forget();
+    crate::sdk::economic_registers::asked_cells::take();
+    let received = receiver.sync().await;
+    assert!(received.success, "{:?}", received.errors);
+    crate::sdk::economic_registers::asked_cells::take()
+}
+
+/// How many times the cell `key` was asked for.
+fn asks(asked: &std::collections::HashMap<[u8; 32], usize>, key: &[u8; 32]) -> usize {
+    asked.get(key).map_or(0, |n| *n)
+}
+
+/// A receiver accepting a sender's transfers one after another walks only
+/// each new suffix of the sender's lineage (owner ruling 2026-10-01: "Cache
+/// /update validated frontiers so subsequent interactions validate only the
+/// new suffix"). A pays B three times and B takes each in. Each acceptance
+/// records A's paying step as B's frontier for A, and the next validates A
+/// from there: it asks for A's cells past the frontier once each, and for
+/// none at or behind it, from the members or from what it kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn successive_acceptances_from_one_sender_walk_only_each_new_suffix() {
+    let p = Pair::boot(100, 0).await;
+    let mut frontier = 0;
+    for round in 1..=3 {
+        let sent = p.a.send(&p.b, 5).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        p.a.enter();
+        let (paid_at, _) = client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .expect("A admitted its debit");
+        let as_cells = cells_through(&p.a, paid_at);
+        for node in &p.nodes.nodes {
+            node.forget_requests();
+        }
+        let asked = accept(&p.b).await;
+        assert_eq!(p.b.era_balance(), 5 * round);
+        let requested = requests(&p.nodes);
+        for (position, key) in &as_cells {
+            let read = format!(
+                "GET /api/v2/cell/{}",
+                crate::util::text_id::encode_base32_crockford(key)
+            );
+            if *position <= frontier {
+                assert_eq!(
+                    asks(&asked, key),
+                    0,
+                    "acceptance {round} asked for A's cell at {position}, at or behind B's \
+                     frontier {frontier}"
+                );
+                assert!(
+                    !requested.contains(&read),
+                    "acceptance {round} read A's cell at {position} behind B's frontier"
+                );
+            } else {
+                assert_eq!(
+                    asks(&asked, key),
+                    1,
+                    "acceptance {round} walked A's cell at {position}, past B's frontier \
+                     {frontier}, other than once"
+                );
+            }
+        }
+        p.b.enter();
+        let recorded =
+            client_db::economic_lineage::frontier_below(&p.a.genesis, &p.a.device_id, paid_at + 1)
+                .expect("the frontier store")
+                .expect("B's frontier for A");
+        assert_eq!(
+            recorded.economic_position(),
+            paid_at,
+            "acceptance {round} recorded A's paying step as B's frontier for A"
+        );
+        frontier = paid_at;
+    }
+}
+
+/// A coordinate is kept as the walk validates it, not when the walk ends. A
+/// conditional position's resolution walks other traders, the payer among
+/// them, in walks of their own while the payer's walk is still running, and
+/// those start from what the process kept. A pays B; a walk of A one
+/// position past its payment, where no claim holds the cell yet, validates
+/// every step to the payment and stops there, incomplete. The next walk of A
+/// starts at the payment, though the walk that validated it never finished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_coordinate_is_kept_as_the_walk_validates_it() {
+    use dsm::economic::peer_lineage::PeerFrontiers;
+    let p = Pair::boot(100, 0).await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.a.enter();
+    let (paid_at, _) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("A admitted its debit");
+    p.b.enter();
+    crate::sdk::economic_registers::validated_peers().forget();
+    let unfinished = verify(p.a.genesis, p.a.device_id, paid_at + 1).await;
+    assert!(
+        matches!(&unfinished, Err(PeerLineageFailure::Incomplete(_))),
+        "no claim holds A's next position yet: {unfinished:?}"
+    );
+    let start = crate::sdk::economic_registers::RememberedFrontiers { network: NETWORK }
+        .frontier_below(&p.a.genesis, &p.a.device_id, paid_at + 1)
+        .expect("the frontiers")
+        .map(|f| f.economic_position());
+    assert_eq!(
+        start,
+        Some(paid_at),
+        "the next walk of A starts at the payment the unfinished walk validated"
+    );
+}
+
+/// A walk of the payer nested inside its own segment starts where that
+/// segment reached. C pays A, A pays C, and C pays A again, so the second
+/// credit's source, C's paying step, stands on a credit from A. B, meeting
+/// both first, validates A's segment from A's activation root, and inside
+/// it C's segment back to A's paying step to C. That source is a step A's
+/// own segment validated earlier in the same walk, an online transfer that
+/// names no credit source, so it is not validated again and nothing behind
+/// it is walked again: B asks for each of A's and C's cells exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_nested_walk_of_the_payer_starts_where_its_own_segment_reached() {
+    let (p, c) = three_devices().await;
+    c_pays_a(&p, &c, 30).await;
+    // C finalizes, so A may pay it.
+    assert!(c.sync().await.success);
+    let paid_c = p.a.send(&c, 10).await;
+    assert!(paid_c.success, "{:?}", paid_c.error_message);
+    p.a.enter();
+    let (a_paid_c_at, _) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("A admitted its debit to C");
+    let credited = c.sync().await;
+    assert!(credited.success, "{:?}", credited.errors);
+    // A finalizes, so C may pay it again.
+    assert!(p.a.sync().await.success);
+    let c_last = c_pays_a(&p, &c, 5).await;
+    let paid_b = p.a.send(&p.b, 1).await;
+    assert!(paid_b.success, "{:?}", paid_b.error_message);
+    p.a.enter();
+    let (a_paid_b_at, _) = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("A admitted its debit to B");
+    let as_cells = cells_through(&p.a, a_paid_b_at);
+    let cs_cells = cells_through(&c, c_last);
+    let asked = accept(&p.b).await;
+    assert_eq!(p.b.era_balance(), 1);
+    for (position, key) in &as_cells {
+        assert_eq!(
+            asks(&asked, key),
+            1,
+            "B's acceptance asked for A's cell at {position} other than once (A paid C at \
+             {a_paid_c_at})"
+        );
+    }
+    for (position, key) in &cs_cells {
+        assert_eq!(
+            asks(&asked, key),
+            1,
+            "B's acceptance asked for C's cell at {position} other than once"
         );
     }
 }
@@ -635,7 +813,7 @@ async fn a_devices_own_lineage_starts_at_its_own_admitted_history() {
     assert!(second > first);
     crate::sdk::economic_registers::validated_peers().forget();
     let start = || {
-        crate::sdk::economic_registers::StoredFrontiers
+        crate::sdk::economic_registers::StoredFrontiers { network: NETWORK }
             .frontier_below(&p.a.genesis, &p.a.device_id, second)
             .expect("the frontiers")
             .map(|f| f.economic_position())

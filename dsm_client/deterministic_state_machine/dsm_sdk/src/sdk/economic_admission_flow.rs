@@ -1015,6 +1015,7 @@ async fn finish_locked(
         &public_key,
     )
     .map_err(|e| DsmError::invalid_operation(format!("economic validation: {e}")))?;
+    timing.phase("validate");
 
     // ── ONE TX: admitted coordinate + leaf cache + clear pending + head ───
     // The cache is the FULL post-transition leaf set with exact state CCBs:
@@ -1053,6 +1054,7 @@ async fn finish_locked(
         }
         cache.into_iter().map(|(k, (v, ccb))| (k, v, ccb)).collect()
     };
+    timing.phase("leaf-cache");
 
     // ── THE INCLUSION PROOF for the leaves this transition wrote ─────────
     //
@@ -1087,6 +1089,7 @@ async fn finish_locked(
         &set.id(),
         &post_admit_artifacts,
     )?;
+    timing.phase("commit");
     if had_post_admit {
         // Land the post-admission objects (the release) on the fleet NOW —
         // the promoted reply delivers later in this same pass, and the
@@ -1098,6 +1101,7 @@ async fn finish_locked(
                 "[economic admission] post-admit publish pass failed (retried by the sweep): {e}"
             );
         }
+        timing.phase("post-admit-publish");
     }
 
     Ok(AdmittedOutcome {

@@ -304,6 +304,8 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     }
 
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
+        #[cfg(test)]
+        asked_cells::note(cell.routed().key());
         // A claim final at a root cell holds it for good (storage spec §9,
         // finality 2): reads Core evaluated as showing one are kept, and a
         // later walk through the same position evaluates them again instead
@@ -356,8 +358,45 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     }
 }
 
-/// This receiver's frontiers, as its store records them (DSM Amendment A8).
-pub struct StoredFrontiers;
+/// Every root cell a walk asked this process's resolver for, by routed key,
+/// kept reads included: a walk asks once for each position it validates, so
+/// this counts the steps walked where the members' request logs cannot (a
+/// final cell is read from its seats once and kept). Observation for tests.
+#[cfg(test)]
+pub(crate) mod asked_cells {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static ASKED: Mutex<Option<HashMap<[u8; 32], usize>>> = Mutex::new(None);
+
+    fn asked() -> std::sync::MutexGuard<'static, Option<HashMap<[u8; 32], usize>>> {
+        match ASKED.lock() {
+            Ok(asked) => asked,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub(crate) fn note(key: &[u8; 32]) {
+        *asked()
+            .get_or_insert_with(HashMap::new)
+            .entry(*key)
+            .or_insert(0) += 1;
+    }
+
+    /// The asks since the last take, and forget them.
+    pub(crate) fn take() -> HashMap<[u8; 32], usize> {
+        asked().take().into_iter().flatten().collect()
+    }
+}
+
+/// This receiver's frontiers on `network`, as its store records them (DSM
+/// Amendment A8). A walk over them starts at a recorded frontier only; each
+/// coordinate it validates is kept by the process as it is validated
+/// ([`PeerFrontiers::validated`]), so a walk another verification starts
+/// meanwhile, of a peer this one has walked, starts there.
+pub struct StoredFrontiers<'a> {
+    pub network: &'a [u8],
+}
 
 /// Whether `(genesis, device_id)` is this device's own identity.
 fn is_this_device(genesis: &[u8; 32], device_id: &[u8; 32]) -> bool {
@@ -367,7 +406,7 @@ fn is_this_device(genesis: &[u8; 32], device_id: &[u8; 32]) -> bool {
         && own_device.as_deref() == Some(device_id.as_slice())
 }
 
-impl PeerFrontiers for StoredFrontiers {
+impl PeerFrontiers for StoredFrontiers<'_> {
     fn frontier_below(
         &self,
         genesis: &[u8; 32],
@@ -406,6 +445,10 @@ impl PeerFrontiers for StoredFrontiers {
             }
         );
         Ok(frontier)
+    }
+
+    fn validated(&self, frontier: &PeerFrontier) {
+        validated_peers().reach(self.network, frontier.clone());
     }
 }
 
@@ -486,7 +529,10 @@ impl PeerFrontiers for RememberedFrontiers<'_> {
         device_id: &[u8; 32],
         position: u64,
     ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
-        let recorded = StoredFrontiers.frontier_below(genesis, device_id, position)?;
+        let recorded = StoredFrontiers {
+            network: self.network,
+        }
+        .frontier_below(genesis, device_id, position)?;
         let floor = recorded.as_ref().map_or(0, PeerFrontier::economic_position);
         match validated_peers().reached_below(self.network, genesis, device_id, position) {
             Some(remembered) if remembered.economic_position() > floor => {
@@ -500,6 +546,13 @@ impl PeerFrontiers for RememberedFrontiers<'_> {
             }
             Some(_) | None => Ok(recorded),
         }
+    }
+
+    fn validated(&self, frontier: &PeerFrontier) {
+        StoredFrontiers {
+            network: self.network,
+        }
+        .validated(frontier);
     }
 }
 
@@ -753,6 +806,13 @@ pub(crate) fn validated_peers() -> &'static ValidatedPeers {
 /// verification consumed, with the frontiers its credits' sources reached.
 /// Nothing is recorded here: a frontier, the peer's or a source's, is
 /// recorded only in the transaction that accepts a step from the peer.
+///
+/// The walk always starts at the RECORDED frontier, never at one this
+/// process only remembers, so the closure it records chains to a frontier
+/// the receiver holds. What it validated is kept as [`resolve_peer`] keeps
+/// its walks, by network, peer and position: the admission that accepts
+/// the step asks [`resolve_peer`] for the same transition when it advances
+/// its own root, and walked the whole segment a second time.
 pub(crate) fn resolve_peer_lineage<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -767,12 +827,30 @@ pub(crate) fn resolve_peer_lineage<F: PeerEvidenceFetcher>(
         peer_genesis,
         peer_devid,
         peer_economic_position,
-        &StoredFrontiers,
+        &StoredFrontiers {
+            network: expected_network_id,
+        },
         conditional,
     )?;
     log::info!(
         "[A8] peer {} validated at position {peer_economic_position}",
         text_id::encode_base32_crockford(peer_devid)
+    );
+    let transition = validated.transition();
+    for reached in PeerFrontier::reached_by(transition)
+        .into_iter()
+        .chain(validated.source_frontiers().iter().cloned())
+    {
+        validated_peers().reach(expected_network_id, reached);
+    }
+    validated_peers().keep(
+        (
+            expected_network_id.to_vec(),
+            *peer_genesis,
+            *peer_devid,
+            peer_economic_position,
+        ),
+        transition.clone(),
     );
     Ok(validated)
 }
