@@ -1074,10 +1074,16 @@ fn route_legs(firsts: &[Paired], seconds: &[Paired], token_in: &D32, token_out: 
         .iter()
         .filter(|v| v.other(token_out).is_some_and(|m| middles.contains(&m)))
         .collect();
-    let reached: BTreeSet<D32> = second_legs.iter().filter_map(|v| v.other(token_out)).collect();
+    let reached: BTreeSet<D32> = second_legs
+        .iter()
+        .filter_map(|v| v.other(token_out))
+        .collect();
     let mut walked: Vec<D32> = firsts
         .iter()
-        .filter(|v| v.other(token_in).is_some_and(|o| &o == token_out || reached.contains(&o)))
+        .filter(|v| {
+            v.other(token_in)
+                .is_some_and(|o| &o == token_out || reached.contains(&o))
+        })
         .map(|v| v.vault_id)
         .collect();
     for v in second_legs {
@@ -2139,9 +2145,20 @@ mod tests {
     #[test]
     fn a_route_search_walks_only_the_vaults_a_route_can_use() {
         let (wild, era, tkn, other, lone) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32]);
-        let vault = |id: u8, a: D32, b: D32| Paired { vault_id: [id; 32], tokens: (a, b) };
-        let firsts = [vault(10, wild, era), vault(11, tkn, wild), vault(12, wild, lone)];
-        let seconds = [vault(10, wild, era), vault(20, era, tkn), vault(21, other, era)];
+        let vault = |id: u8, a: D32, b: D32| Paired {
+            vault_id: [id; 32],
+            tokens: (a, b),
+        };
+        let firsts = [
+            vault(10, wild, era),
+            vault(11, tkn, wild),
+            vault(12, wild, lone),
+        ];
+        let seconds = [
+            vault(10, wild, era),
+            vault(20, era, tkn),
+            vault(21, other, era),
+        ];
         assert_eq!(
             route_legs(&firsts, &seconds, &wild, &era),
             vec![[10; 32], [11; 32], [20; 32]],

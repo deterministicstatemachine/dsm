@@ -1935,13 +1935,8 @@ mod tests {
 
         // A token whose whole supply is one (a creature the game issued) is a
         // state object, whatever its policy permits holders to do.
-        let (creature, creature_commit) = store_created_policy(
-            "MOS0001",
-            0,
-            1,
-            policy.burn_enabled,
-            policy.transferable,
-        );
+        let (creature, creature_commit) =
+            store_created_policy("MOS0001", 0, 1, policy.burn_enabled, policy.transferable);
         register(&creature, creature_commit, 1);
         let mut held = seed("MOS0001", 1, 0);
         super::enrich_balance_metadata(&mut held, &|_| None).expect("a state object is named");

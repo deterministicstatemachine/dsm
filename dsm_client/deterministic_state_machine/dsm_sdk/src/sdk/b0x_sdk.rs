@@ -1514,7 +1514,7 @@ impl B0xSDK {
                 marked_failed.push(endpoint.clone());
             }
         }
-        let this = &*self;
+        let this = self;
         let ask = |endpoint: String, attempts: Attempts| async move {
             let answer = match &attempts {
                 Attempts::First => {

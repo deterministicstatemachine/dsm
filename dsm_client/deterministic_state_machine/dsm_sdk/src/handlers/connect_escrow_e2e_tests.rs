@@ -149,8 +149,16 @@ async fn player_of(r: &TestDevice, sid: &[u8; 32]) -> generated::ConnectSessionV
         .expect("R's sessions")
         .expect("R's session with the wallet");
     assert_eq!(
-        (listed.peer_device_id.as_slice(), listed.peer_genesis.as_slice(), listed.peer_signing_key.as_slice()),
-        (held.wallet_device_id.as_slice(), held.wallet_genesis.as_slice(), held.wallet_ak.as_slice()),
+        (
+            listed.peer_device_id.as_slice(),
+            listed.peer_genesis.as_slice(),
+            listed.peer_signing_key.as_slice()
+        ),
+        (
+            held.wallet_device_id.as_slice(),
+            held.wallet_genesis.as_slice(),
+            held.wallet_ak.as_slice()
+        ),
         "the listing names the wallet as the account holds it"
     );
     listed

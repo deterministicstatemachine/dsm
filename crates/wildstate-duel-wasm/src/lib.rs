@@ -591,7 +591,9 @@ pub fn encode_creature_state(c: JsValue) -> Result<Uint8Array, JsError> {
 #[wasm_bindgen(js_name = birthCreatureState)]
 pub fn birth_creature_state(anchor: &[u8], species: u8) -> Result<Uint8Array, JsError> {
     let anchor = <[u8; 32]>::try_from(anchor).map_err(|e| fail(format!("anchor: {e}")))?;
-    Ok(u8a(&CreatureStateV1::birth(anchor, species).map_err(fail)?.encode()))
+    Ok(u8a(&CreatureStateV1::birth(anchor, species)
+        .map_err(fail)?
+        .encode()))
 }
 
 /// A creature's published state record: `parent` the digest of the record
