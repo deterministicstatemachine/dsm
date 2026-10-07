@@ -177,8 +177,9 @@ pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> Paren
 /// rather than recording past it.
 ///
 /// A chain is established, never assembled: it starts at an accepted genesis
-/// ([`VaultChain::from_genesis`]) and grows by one Core-recomputed
-/// consumption at a time ([`VaultChain::extend`]). The one other way in is
+/// ([`VaultChain::from_genesis`]) or at an owner baseline Core authenticated
+/// ([`VaultChain::from_baseline`], SoFi Amendment S24), and grows by one
+/// Core-recomputed consumption at a time ([`VaultChain::extend`]). The one other way in is
 /// this verifier's own memo of generations it established before, anchored
 /// at the genesis it accepts now and linked row to row before it is stood on
 /// ([`VaultChain::from_recorded`]), which the CI gate
@@ -186,6 +187,10 @@ pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> Paren
 /// read off the network becomes a root here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultChain {
+    /// The generation `roots[0]` is at: zero for a chain from the genesis,
+    /// the baseline's for a chain from an owner baseline (SoFi Amendment
+    /// S24). Nothing below it is established.
+    base: u64,
     roots: Vec<[u8; 32]>,
 }
 
@@ -241,8 +246,70 @@ impl VaultChain {
     /// accepted (SoFi §19.8; §30 step 1).
     pub fn from_genesis(genesis: &super::lineage::AcceptedVaultGenesis) -> Self {
         Self {
+            base: 0,
             roots: vec![*genesis.genesis_root()],
         }
+    }
+
+    /// The chain at an owner baseline (SoFi Amendment S24): `R*_b` is the
+    /// root of the frontier the vault's owner signed, as Core authenticated
+    /// it, and nothing below `b` is established. The generations this
+    /// verifier recorded from `b` are its own memo, linked one to the next
+    /// exactly as [`Self::from_recorded`] links them; the first must be the
+    /// baseline's own. The CI gate pins this constructor to its one caller.
+    pub fn from_baseline(
+        baseline: &super::frontier::VerifiedFrontier,
+        rows: &[RecordedGeneration],
+    ) -> Result<Self, MemoBroken> {
+        let frontier = baseline.frontier();
+        let mut chain = Self {
+            base: frontier.generation,
+            roots: vec![frontier.root],
+        };
+        let Some((first, later)) = rows.split_first() else {
+            return Ok(chain);
+        };
+        if first.generation != frontier.generation || first.root != frontier.root {
+            return Err(MemoBroken {
+                generation: first.generation,
+                why: "the recorded baseline is not the authenticated one",
+            });
+        }
+        chain.link(later)?;
+        Ok(chain)
+    }
+
+    /// Append recorded rows, each built on the head before it and naming
+    /// the operation that consumed it.
+    fn link(&mut self, rows: &[RecordedGeneration]) -> Result<(), MemoBroken> {
+        for row in rows {
+            let Some((generation, head)) = self.head() else {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "no head to link to",
+                });
+            };
+            if row.generation != generation + 1 {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "the rows are not contiguous",
+                });
+            }
+            if row.pre_root != Some(head) {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "the generation was not built on the one before it",
+                });
+            }
+            if row.consumed_by.is_none() {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "no operation is recorded as consuming the generation before it",
+                });
+            }
+            self.roots.push(row.root);
+        }
+        Ok(())
     }
 
     /// Extend the chain by the consumption `post` recomputes: `R*_{g+1}` is
@@ -278,74 +345,62 @@ impl VaultChain {
         rows: &[RecordedGeneration],
     ) -> Result<Self, MemoBroken> {
         let mut chain = Self::from_genesis(genesis);
-        for (index, row) in rows.iter().enumerate() {
-            let generation = u64::try_from(index).map_err(|_| MemoBroken {
-                generation: row.generation,
-                why: "generation overflow",
-            })?;
-            if row.generation != generation {
-                return Err(MemoBroken {
-                    generation: row.generation,
-                    why: "the rows are not contiguous from generation zero",
-                });
-            }
-            if generation == 0 {
-                if row.root != *genesis.genesis_root() {
-                    return Err(MemoBroken {
-                        generation: 0,
-                        why: "the recorded genesis is not the accepted genesis",
-                    });
-                }
-                if row.pre_root.is_some() || row.consumed_by.is_some() {
-                    return Err(MemoBroken {
-                        generation: 0,
-                        why: "the genesis generation records a consumption",
-                    });
-                }
-                continue;
-            }
-            let Some((.., head)) = chain.head() else {
-                return Err(MemoBroken {
-                    generation,
-                    why: "no head to link to",
-                });
-            };
-            if row.pre_root != Some(head) {
-                return Err(MemoBroken {
-                    generation,
-                    why: "the generation was not built on the one before it",
-                });
-            }
-            if row.consumed_by.is_none() {
-                return Err(MemoBroken {
-                    generation,
-                    why: "no operation is recorded as consuming the generation before it",
-                });
-            }
-            chain.roots.push(row.root);
+        let Some((first, later)) = rows.split_first() else {
+            return Ok(chain);
+        };
+        if first.generation != 0 {
+            return Err(MemoBroken {
+                generation: first.generation,
+                why: "the rows are not contiguous from generation zero",
+            });
         }
+        if first.root != *genesis.genesis_root() {
+            return Err(MemoBroken {
+                generation: 0,
+                why: "the recorded genesis is not the accepted genesis",
+            });
+        }
+        if first.pre_root.is_some() || first.consumed_by.is_some() {
+            return Err(MemoBroken {
+                generation: 0,
+                why: "the genesis generation records a consumption",
+            });
+        }
+        chain.link(later)?;
         Ok(chain)
     }
 
-    /// `R*_g` for every generation established, in generation order.
+    /// `R*_g` for every generation established, in generation order, from
+    /// [`Self::base`].
     pub fn roots(&self) -> &[[u8; 32]] {
         &self.roots
+    }
+
+    /// The generation the chain starts at.
+    pub fn base(&self) -> u64 {
+        self.base
     }
 
     /// A chain stated for a test of what reads it; in-crate only.
     #[cfg(test)]
     pub(crate) fn of_roots_for_test(roots: Vec<[u8; 32]>) -> Self {
-        Self { roots }
+        Self { base: 0, roots }
+    }
+
+    /// `R*_g`, when this chain established generation `g`.
+    fn root_at(&self, generation: u64) -> Option<[u8; 32]> {
+        let offset = generation.checked_sub(self.base)?;
+        usize::try_from(offset)
+            .ok()
+            .and_then(|g| self.roots.get(g))
+            .copied()
     }
 
     /// The status of a parent asked about at `generation` — [`parent_status`]
-    /// over what this chain established there.
+    /// over what this chain established there. Below a baseline nothing is
+    /// established, so nothing there is refuted.
     pub fn status_of(&self, generation: u64, claimed: &[u8; 32]) -> ParentStatus {
-        let established = usize::try_from(generation)
-            .ok()
-            .and_then(|g| self.roots.get(g))
-            .copied();
-        parent_status(established, claimed)
+        parent_status(self.root_at(generation), claimed)
     }
 
     /// Whether this chain names `root` at any generation.
@@ -360,14 +415,17 @@ impl VaultChain {
 
     /// The generation `root` sits at, when this chain names it.
     pub fn generation_of(&self, root: &[u8; 32]) -> Option<u64> {
-        self.roots.iter().position(|r| r == root).map(|g| g as u64)
+        self.roots
+            .iter()
+            .position(|r| r == root)
+            .map(|g| self.base + g as u64)
     }
 
     /// The highest generation this chain established.
     pub fn head(&self) -> Option<(u64, [u8; 32])> {
         self.roots
             .last()
-            .map(|r| ((self.roots.len() - 1) as u64, *r))
+            .map(|r| (self.base + (self.roots.len() - 1) as u64, *r))
     }
 }
 

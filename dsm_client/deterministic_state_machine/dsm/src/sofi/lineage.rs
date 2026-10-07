@@ -577,6 +577,23 @@ pub struct AcceptedVaultGenesis {
 }
 
 impl AcceptedVaultGenesis {
+    /// A genesis stated for a test of what reads one: the owner baseline's
+    /// authentication takes an accepted genesis as given; in-crate only.
+    #[cfg(test)]
+    pub(crate) fn of_preimage_for_test(
+        preimage: VaultGenesisPreimage,
+        market: crate::ccb::state::MarketPolicy,
+    ) -> Self {
+        let vault_id = preimage.vault_id();
+        let genesis_root = genesis_root(&vault_id, &preimage.state).expect("the genesis state");
+        Self {
+            vault_id,
+            preimage,
+            genesis_root,
+            terms: GenesisTerms::Market(market),
+        }
+    }
+
     /// `v = vault_id(G_o, DevID_o, p_create)`.
     pub fn vault_id(&self) -> &D32 {
         &self.vault_id
@@ -868,28 +885,6 @@ fn token_is_a_market_leg(
     crate::economic::issuance::check_market_leg_permitted(&policy).map_err(|_| {
         GenesisRefusal::Invalid(GenesisInvalid::TokenNotTransferable { token: *token })
     })
-}
-
-/// The vault's leaves at `R_0`, for the keys an acquisition needs: the state
-/// leaf at its key, and `Absent` at every other — nobody has traded with it
-/// yet, so no relationship leaf exists (rebuild step R5).
-pub fn vault_leaves_at_genesis(
-    vault_id: &D32,
-    state: &VaultStateLeaf,
-    keys: &std::collections::BTreeSet<D32>,
-) -> std::collections::BTreeMap<(D32, D32), crate::sofi::validation::VaultLeafPre> {
-    use crate::sofi::validation::VaultLeafPre;
-    let state_key = derive::vault_state_key(vault_id);
-    keys.iter()
-        .map(|key| {
-            let pre = if *key == state_key {
-                VaultLeafPre::State(state.clone())
-            } else {
-                VaultLeafPre::Absent
-            };
-            ((*vault_id, *key), pre)
-        })
-        .collect()
 }
 
 /// `R_0` — the vault's tree holding exactly its own state leaf, and no

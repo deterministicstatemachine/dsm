@@ -42,6 +42,7 @@ pub mod escrow;
 pub mod exercise;
 pub mod facts;
 pub mod fisher_yates;
+pub mod frontier;
 pub mod lineage;
 pub mod publication;
 pub mod registration;

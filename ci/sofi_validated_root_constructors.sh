@@ -382,4 +382,45 @@ if [[ -n "$hits" ]]; then
 fi
 echo "  ✓ discovery code names no constructor or record of established state"
 
+# [7] The owner baseline (SoFi Amendment S24). A frontier's root becomes a
+#     chain's start only through `authenticate_frontier_owner`, the one
+#     place that builds a `VerifiedFrontier`, and the chain's baseline start
+#     has one production caller, the verifier's chain walk. A reader's
+#     witness has no public field: every way in checks its paths against an
+#     authenticated root.
+echo "[7] Owner baselines: one authentication, one chain start..."
+frontier="$core/dsm/src/sofi/frontier/mod.rs"
+[[ -f "$frontier" ]] || { echo "[FAIL] $frontier is not where this gate expects it"; exit 1; }
+check_no_pub_field VerifiedFrontier "$frontier"
+check_no_pub_field VaultWitness "$frontier"
+prod=$(python3 ci/production_text.py "$frontier")
+literals=$(grep -E 'VerifiedFrontier \{' <<<"$prod" | grep -vE '^(pub struct|impl) ' | wc -l | tr -d ' ')
+if [[ "$literals" -ne 1 ]]; then
+  echo "[FAIL] VerifiedFrontier is stated $literals times in $frontier; exactly one construction earns it"
+  exit 1
+fi
+if ! awk '/^pub fn authenticate_frontier_owner\(/{f=1} f&&/Ok\(VerifiedFrontier \{/{found=1} f&&/^\}/{exit} END{exit !found}' "$frontier"; then
+  echo "[FAIL] the one VerifiedFrontier literal is not inside authenticate_frontier_owner"
+  exit 1
+fi
+others=$(grep -rln 'VerifiedFrontier {' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null | grep -v "sofi/frontier/mod.rs" || true)
+if [[ -n "$others" ]]; then
+  echo "[FAIL] VerifiedFrontier is constructed outside its own module:"
+  echo "$others"
+  exit 1
+fi
+baseline_callers=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  prod=$(python3 ci/production_text.py "$f")
+  grep -q 'VaultChain::from_baseline(' <<<"$prod" && baseline_callers="$baseline_callers$f"$'\n'
+done < <(grep -rln 'VaultChain::from_baseline(' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null | sort)
+baseline_callers=${baseline_callers%$'\n'}
+if [[ "$baseline_callers" != "$expected_memo" ]]; then
+  echo "[FAIL] VaultChain::from_baseline must be called only from $expected_memo"
+  echo "       production callers found: ${baseline_callers:-none}"
+  exit 1
+fi
+echo "  ✓ one authentication builds a verified frontier; one chain walk starts from it"
+
 echo "✓ raw envelope -> verified claim -> registered root: every arrow is opaque"

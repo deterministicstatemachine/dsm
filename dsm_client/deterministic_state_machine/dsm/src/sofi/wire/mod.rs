@@ -309,6 +309,8 @@ pub enum SofiWireError {
     LengthOverflow,
     /// `status` is not one of the two declared vault statuses.
     UnknownVaultStatus { status: u16 },
+    /// A frontier witness's relationship kind is neither Absent nor Present.
+    UnknownFrontierRelationship { kind: u16 },
     /// An object exceeds the frozen byte bound for its class, so it has no
     /// canonical representation.
     ObjectTooLarge {
@@ -397,6 +399,10 @@ impl core::fmt::Display for SofiWireError {
             Self::UnknownVaultStatus { status } => write!(
                 f,
                 "vault status {status:#06x} is neither Active nor Retired"
+            ),
+            Self::UnknownFrontierRelationship { kind } => write!(
+                f,
+                "frontier relationship kind {kind:#06x} is neither Absent nor Present"
             ),
             Self::PathDepth { expected, got } => write!(
                 f,
