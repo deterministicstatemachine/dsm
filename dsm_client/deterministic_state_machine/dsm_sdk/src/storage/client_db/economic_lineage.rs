@@ -437,6 +437,23 @@ pub fn latest_ek_step_with_conn(
     })
 }
 
+/// The key the step at `step_addr` in `signer_devid`'s chain certified, when
+/// this device holds that step: a step of one of its own relationships,
+/// recorded as the bilateral step completed. `None` when it does not.
+pub fn held_ek_step(signer_devid: &[u8; 32], step_addr: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(conn
+        .query_row(
+            "SELECT ek_pk FROM ek_cert_step_chain
+             WHERE signer_devid = ?1 AND step_addr = ?2
+             LIMIT 1",
+            params![signer_devid.as_slice(), step_addr.as_slice()],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?)
+}
+
 /// Append one signer-chain step inside the caller's transaction. Idempotent
 /// on exact re-append of the same head (crash replay); a DIFFERENT addr at
 /// the same next ordinal is refused by the primary key.
@@ -734,5 +751,33 @@ mod admitted_row_tests {
 
         // An unknown kind is refused rather than defaulted.
         assert!(admitted_from_row(row(3, SINGLE)).is_err());
+    }
+
+    /// A step this device recorded in one of its relationships is held, in
+    /// its signer's chain only, with the key it certified.
+    #[test]
+    #[serial_test::serial]
+    fn a_recorded_step_is_held_in_its_signers_chain_only() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let (rel, signer, other) = ([0x31; 32], [0x32; 32], [0x33; 32]);
+        let (first, second) = ([0x41; 32], [0x42; 32]);
+        {
+            let binding = get_connection().expect("connection");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            append_ek_step_with_conn(&conn, &rel, &signer, &first, b"first key").expect("append");
+            append_ek_step_with_conn(&conn, &rel, &signer, &second, b"second key").expect("append");
+        }
+        assert_eq!(
+            held_ek_step(&signer, &first).expect("read"),
+            Some(b"first key".to_vec())
+        );
+        assert_eq!(
+            held_ek_step(&signer, &second).expect("read"),
+            Some(b"second key".to_vec())
+        );
+        assert_eq!(held_ek_step(&other, &second).expect("read"), None);
+        assert_eq!(held_ek_step(&signer, &[0x43; 32]).expect("read"), None);
     }
 }
