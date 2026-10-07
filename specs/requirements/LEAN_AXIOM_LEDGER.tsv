@@ -920,6 +920,12 @@ lean4/Sphincs/WotsExtraction.lean	DSM.Sphincs.wots_forgery_extract	Classical.cho
 lean4/Sphincs/WotsExtraction.lean	DSM.Sphincs.wots_forgery_extract_of	Classical.choice,Quot.sound,propext
 lean4/Sphincs/WotsExtraction.lean	DSM.Sphincs.wots_forgery_extract_of_ne	Classical.choice,Quot.sound,propext
 lean4/Sphincs/WotsExtraction.lean	DSM.Sphincs.wots_sign_reveals	Quot.sound,propext
+lean4/Sphincs/WrapperForgery.lean	DSM.Sphincs.Security.connect_forgery_extract	Classical.choice,Quot.sound,propext
+lean4/Sphincs/WrapperForgery.lean	DSM.Sphincs.Security.ek_cert_forgery_extract	Classical.choice,Quot.sound,propext
+lean4/Sphincs/WrapperForgery.lean	DSM.Sphincs.Security.escrow_forgery_extract	Classical.choice,Quot.sound,propext
+lean4/Sphincs/WrapperForgery.lean	DSM.Sphincs.Security.mforge_of_parts	propext
+lean4/Sphincs/WrapperForgery.lean	DSM.Sphincs.Security.not_fresh_signed	Classical.choice,Quot.sound,propext
+lean4/Sphincs/WrapperForgery.lean	DSM.Sphincs.Security.wrapper_forgery_extract	Classical.choice,Quot.sound,propext
 lean4/Sphincs/WrapperInjective.lean	DSM.Sphincs.ConnectKind.tag_injective	Quot.sound,propext
 lean4/Sphincs/WrapperInjective.lean	DSM.Sphincs.ConnectKind.tag_mem	propext
 lean4/Sphincs/WrapperInjective.lean	DSM.Sphincs.be_head	Quot.sound,propext
