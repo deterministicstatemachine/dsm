@@ -517,6 +517,9 @@ lean4/DSM_dBTC_TrustReduction.lean	non_mainnet_cannot_authorize_final_burn	(none
 lean4/DSM_dBTC_TrustReduction.lean	rustVerifierAccepted_implies_mainnet_finality	(none)
 lean4/DSM_dBTC_TrustReduction.lean	weakened_evidence_counterexample	propext
 lean4/DSM_dBTC_TrustReduction.lean	weakened_evidence_does_not_reduce_to_mainnet	propext
+lean4/Sphincs/AddressInjective.lean	DSM.Sphincs.adrs_bytes_injective	Quot.sound,propext
+lean4/Sphincs/AddressInjective.lean	DSM.Sphincs.be_injective	Quot.sound,propext
+lean4/Sphincs/AddressInjective.lean	DSM.Sphincs.distinct_addresses_distinct_requests	Quot.sound,propext
 lean4/Sphincs/Blake3.lean	DSM.Sphincs.Blake3.contexts_distinct	(none)
 lean4/Sphincs/Blake3.lean	DSM.Sphincs.Blake3.deployed_hmsg_widths	(none)
 lean4/Sphincs/Blake3.lean	DSM.Sphincs.Blake3.deployed_keyed_width	(none)
