@@ -14,7 +14,7 @@ Every extraction in this round is taken against exactly these bytes:
 
 | File | `git hash-object` | Lines |
 |---|---|---|
-| `specs/DSM_High_Level_Explainer.md` | `94c9aae53eaa44aefa4335fb5bd15e6309b35b81` | 4387 |
+| `specs/DSM_High_Level_Explainer.md` | `28e7c00cddcfc4fbf5c62bcc1ea845a317f7c786` | 4387 |
 | `specs/SoFi_Settlement_Specification.md` | `9b99ff8cf98c5de5271eb62698ddb2fc10fdbc19` | 2988 |
 | `specs/dBTC_Native_Specification.md` | `233a3e72a5b16a023af830f4c8ffaad4ba9391a8` | 2160 |
 | `specs/DSM_Storage_Node_Specification.md` | `415a9b9c67c7a2b4b6df78b0af85fb3bc7282ae8` | 636 |
@@ -495,7 +495,7 @@ Columns: **ID** is the canonical ID (`MR-<spec>-nnnn`, in document order). **Sou
 | MR-DSM-0306 | obligation | explicit | A candidate's parent is the root its own transition witness was built on (the activation root at position 1); the candidate must be the one claim final at the cell routed from that parent, and the step is validated from that parent with the predicate any device runs, which refuses a witness built on any other root. | amendment: DSM Amendment A14 (2026-10-06) | owner | none |
 | MR-DSM-0307 | prohibition | explicit | Exactly one candidate may survive finality and the step predicate: none leaves the step not yet established; two, each final at the cell routed from its own parent, are a fork and are refused, never one chosen. | amendment: DSM Amendment A14 (2026-10-06) | owner | none |
 | MR-DSM-0308 | obligation | explicit | A credit's source is the source's own step validated one hop, which must be an online transfer, a debit naming no source of its own; nothing behind it is read. | amendment: DSM Amendment A14 (2026-10-06) | owner | none |
-| MR-DSM-0309 | prohibition | explicit | A conditional claim at n is resolved from the step at n − 1 validated one hop and the claim accepted there; a conditional claim at n − 1 is not resolved from its own parent, and nothing at n − 2 is read. | amendment: DSM Amendment A14 (2026-10-06) | owner | none |
+| MR-DSM-0309 | prohibition | explicit | A conditional claim at n is resolved from a parent among the roots the claims at n − 1 commit (a single-root claim's installed root, or either root of a conditional claim), the one from which the claim at n is final at its routed cell; nothing at n − 2 is read. | amendment: DSM Amendment A14 (2026-10-06) | owner | none |
 
 ### 8.2 SoFi settlement specification
 

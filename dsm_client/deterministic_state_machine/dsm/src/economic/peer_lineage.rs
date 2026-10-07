@@ -32,12 +32,13 @@
 //!
 //! ## Conditional positions
 //!
-//! A conditional claim (`C_q`) selects no root by its bytes. Its parent is the
-//! step one position back, validated one hop, and the
+//! A conditional claim (`C_q`) selects no root by its bytes. Its parent is one
+//! of the roots the claims one position back commit: the root a single-root
+//! claim installed, or either root a conditional claim commits. The claim
+//! must be final at the cell routed from exactly one of them, and the
 //! [`ConditionalPositionResolver`] derives the root it selected from SoFi's
-//! public objects for that position alone (SoFi Amendment S15). A
-//! conditional claim one position back is not resolved from its own parent:
-//! nothing two positions back is read.
+//! public objects for that position alone (SoFi Amendment S15). Nothing two
+//! positions back is read.
 
 use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_ADMISSION_MANIFEST, TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
@@ -774,38 +775,19 @@ impl Verifier<'_> {
         position: u64,
         conditional_at: ConditionalAt,
     ) -> Result<Located, PeerLineageFailure> {
-        let key = economic_root_register_key(genesis, device_id, position);
-        self.count(|c| c.register_probes += 1);
-        let held = self
-            .fetcher
-            .register_key_values(genesis, device_id, position)?;
-        // A member holds each value as a route entry, the copy written at one
-        // position of some route: the value inside is the candidate, whatever
-        // route it was written along.
-        let namespace = crate::economic::register::economic_root_namespace();
-        let mut seen = std::collections::BTreeSet::new();
-        let candidates: Vec<RegisteredEconomicClaim> = held
-            .iter()
-            .filter_map(|bytes| crate::route_chain::RouteEntry::decode(bytes))
-            .filter(|entry| entry.namespace == namespace && entry.key == key)
-            .filter_map(|entry| root_claim_naming(&entry.value, &key))
-            .filter(|claim| seen.insert(claim_identity(claim)))
-            .collect();
-        if candidates.is_empty() {
-            return Err(incomplete(format!(
-                "position {position}: no claim of this peer is held at its register key yet"
-            )));
-        }
+        let candidates = self.probed(genesis, device_id, position)?;
         let mut survivors: Vec<Located> = Vec::new();
         let mut waiting: Vec<String> = Vec::new();
         let mut unresolved: Vec<String> = Vec::new();
         let mut conditional: Option<String> = None;
         for candidate in candidates {
-            let parent = match &candidate {
-                RegisteredEconomicClaim::SingleRoot(claim) => self.parent_named_by(position, claim),
+            let parents = match &candidate {
+                RegisteredEconomicClaim::SingleRoot(claim) => self
+                    .parent_named_by(position, claim)
+                    .map(|parent| vec![parent]),
                 RegisteredEconomicClaim::ConditionalSofi(_) => match conditional_at {
                     ConditionalAt::Resolve => {
-                        self.parent_of_conditional(genesis, device_id, position)
+                        self.parents_of_conditional(genesis, device_id, position)
                     }
                     ConditionalAt::Unresolved | ConditionalAt::Invalid => {
                         if let Err(why) = candidate.single_root() {
@@ -815,8 +797,8 @@ impl Verifier<'_> {
                     }
                 },
             };
-            let parent = match parent {
-                Ok(parent) => parent,
+            let parents = match parents {
+                Ok(parents) => parents,
                 Err(PeerLineageFailure::Incomplete(m)) => {
                     waiting.push(m);
                     continue;
@@ -827,22 +809,26 @@ impl Verifier<'_> {
                 }
                 Err(other) => return Err(other),
             };
-            self.count(|c| c.routed_reads += 1);
-            match self.final_claim(genesis, device_id, position, &parent.root) {
-                Ok(final_there) if claim_identity(&final_there) == claim_identity(&candidate) => {
-                    survivors.push(Located {
-                        parent,
-                        claim: final_there,
-                    })
+            for parent in parents {
+                self.count(|c| c.routed_reads += 1);
+                match self.final_claim(genesis, device_id, position, &parent.root) {
+                    Ok(final_there)
+                        if claim_identity(&final_there) == claim_identity(&candidate) =>
+                    {
+                        survivors.push(Located {
+                            parent,
+                            claim: final_there,
+                        })
+                    }
+                    // Another claim holds this route. If it is the peer's at
+                    // this key, it is a candidate here of its own.
+                    Ok(_) => waiting.push(format!(
+                        "position {position}: a claim found at the register key is not the one \
+                         final at the cell routed from its parent"
+                    )),
+                    Err(PeerLineageFailure::Incomplete(m)) => waiting.push(m),
+                    Err(other) => return Err(other),
                 }
-                // Another claim holds this candidate's route. If it is the
-                // peer's at this key, it is a candidate here of its own.
-                Ok(_) => waiting.push(format!(
-                    "position {position}: a claim found at the register key is not the one final \
-                     at the cell routed from its parent"
-                )),
-                Err(PeerLineageFailure::Incomplete(m)) => waiting.push(m),
-                Err(other) => return Err(other),
             }
         }
         if survivors.len() > 1 {
@@ -925,17 +911,51 @@ impl Verifier<'_> {
         })
     }
 
-    /// The parent of a conditional claim at `position`: the step one position
-    /// back, validated from its own parent, and the claim accepted there,
-    /// which the resolution names as its parent (SoFi Amendment S15). One
-    /// position back and no further: a conditional claim there is not
-    /// resolved from its own parent here.
-    fn parent_of_conditional(
+    /// Every claim of `(genesis, device_id)` any member holds under
+    /// `K_root(position)`, each once. A member holds each value as a route
+    /// entry, the copy written at one position of some route: the value
+    /// inside is the candidate, whatever route it was written along.
+    fn probed(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
-    ) -> Result<ChainPoint, PeerLineageFailure> {
+    ) -> Result<Vec<RegisteredEconomicClaim>, PeerLineageFailure> {
+        let key = economic_root_register_key(genesis, device_id, position);
+        self.count(|c| c.register_probes += 1);
+        let held = self
+            .fetcher
+            .register_key_values(genesis, device_id, position)?;
+        let namespace = crate::economic::register::economic_root_namespace();
+        let mut seen = std::collections::BTreeSet::new();
+        let candidates: Vec<RegisteredEconomicClaim> = held
+            .iter()
+            .filter_map(|bytes| crate::route_chain::RouteEntry::decode(bytes))
+            .filter(|entry| entry.namespace == namespace && entry.key == key)
+            .filter_map(|entry| root_claim_naming(&entry.value, &key))
+            .filter(|claim| seen.insert(claim_identity(claim)))
+            .collect();
+        if candidates.is_empty() {
+            return Err(incomplete(format!(
+                "position {position}: no claim of this peer is held at its register key yet"
+            )));
+        }
+        Ok(candidates)
+    }
+
+    /// The parents a conditional claim at `position` may have been built on,
+    /// read one position back and no further: the root a single-root claim
+    /// there installed, with that claim; or either root a conditional claim
+    /// there commits, with its fulfillment. Each is only where to look: the
+    /// claim at `position` must be final at the cell routed from exactly one
+    /// of them, and the resolution of `position` is then derived from it
+    /// (SoFi Amendment S15). Nothing two positions back is read.
+    fn parents_of_conditional(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Vec<ChainPoint>, PeerLineageFailure> {
         if position <= 1 {
             return Err(invalid(format!(
                 "position {position}: a conditional position cannot follow the activation root, \
@@ -944,32 +964,31 @@ impl Verifier<'_> {
         }
         self.count(|c| c.conditional_hops += 1);
         let back = position - 1;
-        let at = self
-            .located(genesis, device_id, back, ConditionalAt::Unresolved)
-            .map_err(|failure| match failure {
-                PeerLineageFailure::Unresolved(m) => PeerLineageFailure::Unresolved(format!(
-                    "the parent of conditional position {position} is itself conditional and is \
-                     not resolved from its own parent here: {m}"
-                )),
-                other => other,
-            })?;
-        let claim = at.claim.single_root().map_err(|conditional| {
-            PeerLineageFailure::Unresolved(format!("position {back}: {conditional}"))
-        })?;
-        let step = self.full_step(
-            genesis,
-            device_id,
-            back,
-            &at.parent,
-            claim,
-            StepRole::Offered,
-        )?;
-        Ok(ChainPoint {
-            root: *step.validated_root(),
-            accepted: Some(ParentClaimRef::SingleRoot {
-                claim_ref: step.accepted_claim().claim_ref(),
-            }),
-        })
+        let mut parents = Vec::new();
+        for claim in self.probed(genesis, device_id, back)? {
+            match claim {
+                RegisteredEconomicClaim::SingleRoot(claim) => {
+                    let registered = RegisteredEconomicRoot::from_verified_single_root(&claim);
+                    parents.push(ChainPoint {
+                        root: authenticated_root(back, registered.post_economic_root()),
+                        accepted: Some(ParentClaimRef::SingleRoot {
+                            claim_ref: registered.claim_ref(),
+                        }),
+                    });
+                }
+                RegisteredEconomicClaim::ConditionalSofi(held) => {
+                    for root in [held.realize_root, held.void_root] {
+                        parents.push(ChainPoint {
+                            root: authenticated_root(back, root),
+                            accepted: Some(ParentClaimRef::Conditional {
+                                fulfillment_id: held.fulfillment_id,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(parents)
     }
 
     /// The single-root step at `position`, validated from its own parent in
@@ -1345,41 +1364,73 @@ mod tests {
         }
     }
 
-    /// DSM Amendment A14, the conditional bound: a conditional claim's parent
-    /// is read one position back and no further. Two conditional positions
-    /// back to back leave the later one `Unresolved`, and nothing two
-    /// positions back is ever asked for.
+    /// DSM Amendment A14, the conditional bound: a conditional claim on a
+    /// conditional parent (two trades in a row) is resolved from the parent
+    /// one position back, never two. The claim at 40 is final only along the
+    /// cell routed from the realize root the claim at 39 commits, so that is
+    /// its parent, and the resolver is asked from it; the claim at 38 is never
+    /// read.
     #[test]
-    fn a_conditional_claims_parent_is_read_one_position_back_and_never_two() {
+    fn a_conditional_claim_on_a_conditional_parent_reads_one_position_back_and_never_two() {
         let position = 40;
-        let fetcher = CellsAt::new(vec![
-            (position, vec![peer_c_q(conditional_claim(position))]),
+        let parent = SofiResolutionClaim {
+            fulfillment_id: [0xF9; 32],
+            realize_root: [0xA9; 32],
+            void_root: [0xB9; 32],
+            ..conditional_claim(position - 1)
+        };
+        let held = peer_c_q(conditional_claim(position));
+        let fetcher = RoutedClaims {
+            probed: vec![
+                (position, held.clone()),
+                (position - 1, peer_c_q(parent)),
+                (position - 2, peer_c_q(conditional_claim(position - 2))),
+            ],
+            routed: vec![(position, [0xA9; 32], held)],
+            objects: std::collections::BTreeMap::new(),
+            asked: std::cell::RefCell::new(Vec::new()),
+        };
+        let verifier =
+            Verifier::new(&fetcher, NETWORK, &NoResolution).expect("the network's register");
+        let at = verifier
+            .located(&PEER_G, &peer_d(), position, ConditionalAt::Resolve)
+            .expect("the claim is final along its parent's realize root alone");
+        assert_eq!(at.parent.root.economic_root(), [0xA9; 32]);
+        assert_eq!(at.parent.root.economic_position(), position - 1);
+        assert_eq!(
+            at.parent.accepted,
+            Some(ParentClaimRef::Conditional {
+                fulfillment_id: [0xF9; 32]
+            })
+        );
+        assert_eq!(
+            *fetcher.asked.borrow(),
+            vec![position, position - 1],
+            "only the position and the one before it were read"
+        );
+        let cost = verifier.cost.get();
+        assert_eq!(
             (
-                position - 1,
-                vec![peer_c_q(conditional_claim(position - 1))],
+                cost.register_probes,
+                cost.routed_reads,
+                cost.conditional_hops
             ),
-            (
-                position - 2,
-                vec![peer_c_q(conditional_claim(position - 2))],
-            ),
-        ]);
-        let outcome = peer_claim_at(
+            (2, 2, 1)
+        );
+        match peer_claim_at(
             &fetcher,
             NETWORK,
             &PEER_G,
             &peer_d(),
             position,
             &NoResolution,
-        );
-        assert!(
-            matches!(outcome, Err(PeerLineageFailure::Unresolved(ref m)) if m.contains("itself conditional")),
-            "{outcome:?}"
-        );
-        assert_eq!(
-            *fetcher.probed.borrow(),
-            vec![position, position - 1],
-            "only the position and the one before it were read"
-        );
+        ) {
+            Err(PeerLineageFailure::Incomplete(why)) => assert!(
+                why.contains("position 40 after 39"),
+                "the resolver is asked from the parent at 39: {why}"
+            ),
+            other => panic!("the resolver answers here, not {other:?}"),
+        }
     }
 
     /// A conditional claim whose one-back parent holds nothing yet waits for
@@ -1586,10 +1637,10 @@ mod tests {
     /// witnesses they name; every member's probe of the key returns
     /// `probed`, in that order.
     struct RoutedClaims {
-        position: u64,
-        probed: Vec<Vec<u8>>,
-        routed: Vec<([u8; 32], Vec<u8>)>,
+        probed: Vec<(u64, Vec<u8>)>,
+        routed: Vec<(u64, [u8; 32], Vec<u8>)>,
         objects: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+        asked: std::cell::RefCell<Vec<u64>>,
     }
 
     impl PeerEvidenceFetcher for RoutedClaims {
@@ -1610,10 +1661,12 @@ mod tests {
             )
             .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))?;
             let routed = cell.routed();
+            self.asked.borrow_mut().push(position);
             Ok(self
                 .probed
                 .iter()
-                .map(|value| {
+                .filter(|(at, _)| *at == position)
+                .map(|(_, value)| {
                     crate::route_chain::RouteEntry::at_leader(
                         routed.namespace().to_vec(),
                         *routed.key(),
@@ -1627,11 +1680,11 @@ mod tests {
         fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
             let register = Register::resolve(self, NETWORK)?;
             let mut seats = crate::route_chain::fixtures::Cell::at(cell.routed());
-            for (parent, value) in &self.routed {
+            for (at, parent, value) in &self.routed {
                 let from = RootCell::new(
                     &PEER_G,
                     &peer_d(),
-                    self.position,
+                    *at,
                     parent,
                     &register.set,
                     &register.profile.storage_set_id,
@@ -1769,10 +1822,10 @@ mod tests {
         let unfinal = claim_built_on(position, [0x42; 32], [0x62; 32], &mut objects);
         let finalized = claim_built_on(position, [0x41; 32], [0x61; 32], &mut objects);
         let fetcher = RoutedClaims {
-            position,
-            probed: vec![unfinal, finalized.clone()],
-            routed: vec![([0x41; 32], finalized.clone())],
+            probed: vec![(position, unfinal), (position, finalized.clone())],
+            routed: vec![(position, [0x41; 32], finalized.clone())],
             objects,
+            asked: std::cell::RefCell::new(Vec::new()),
         };
         let verifier =
             Verifier::new(&fetcher, NETWORK, &NoResolution).expect("the network's register");
@@ -1794,10 +1847,13 @@ mod tests {
         let first = claim_built_on(position, [0x41; 32], [0x61; 32], &mut objects);
         let second = claim_built_on(position, [0x42; 32], [0x62; 32], &mut objects);
         let fetcher = RoutedClaims {
-            position,
-            probed: vec![first.clone(), second.clone()],
-            routed: vec![([0x41; 32], first.clone()), ([0x42; 32], second.clone())],
+            probed: vec![(position, first.clone()), (position, second.clone())],
+            routed: vec![
+                (position, [0x41; 32], first.clone()),
+                (position, [0x42; 32], second.clone()),
+            ],
             objects,
+            asked: std::cell::RefCell::new(Vec::new()),
         };
         let verifier =
             Verifier::new(&fetcher, NETWORK, &NoResolution).expect("the network's register");
