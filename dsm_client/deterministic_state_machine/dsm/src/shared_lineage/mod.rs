@@ -910,12 +910,12 @@ impl TransitionBundleV1 {
 
 /// A discovered object, recognized from its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Discovered {
+pub enum LineageObject {
     Hint(GenerationHintV1),
     Checkpoint(CheckpointV1),
 }
 
-impl Discovered {
+impl LineageObject {
     /// The hint or checkpoint these bytes are. Anything else is refused —
     /// an index anyone may append to holds whatever was appended.
     pub fn recognize(bytes: &[u8]) -> Result<Self, DecodeError> {

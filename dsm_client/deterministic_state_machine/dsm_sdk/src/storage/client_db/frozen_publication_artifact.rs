@@ -252,6 +252,23 @@ pub fn list_unpublished_artifacts(limit: u32) -> Result<Vec<FrozenArtifact>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Every artifact frozen under `purpose` not yet read back `Stored`, oldest
+/// first, at most `limit`.
+pub fn list_unpublished_with_purpose(purpose: &str, limit: u32) -> Result<Vec<FrozenArtifact>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("frozen artifacts: the store is poisoned: {e}"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM frozen_publication_artifact
+          WHERE state IN ('frozen', 'publication_pending') AND purpose = ?1
+          ORDER BY insertion_ordinal ASC
+          LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![purpose, i64::from(limit)], row_to_artifact)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

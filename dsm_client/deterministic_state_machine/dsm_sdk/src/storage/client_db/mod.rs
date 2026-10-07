@@ -37,6 +37,7 @@ pub mod economic_lineage;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
 mod genesis;
 mod history_repair;
+pub mod lineage_publication;
 mod manifold_seeds;
 pub mod native_reserve;
 mod nonces;
@@ -614,6 +615,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- them as `Stored` (storage spec §5 rule 6: three members return the
         -- exact bytes), established by reading them back. The object key is
         -- the object's content address, so one key names one byte string.
+        -- SoFi Amendment S23: the appends this device owes the epoch index
+        -- of a shared lineage, made once the object is Stored.
+        CREATE TABLE IF NOT EXISTS lineage_index_debt(
+            object_key     TEXT NOT NULL,
+            locator        BLOB NOT NULL,             -- 32B epoch locator
+            storage_set_id BLOB NOT NULL,             -- 32B
+            state          TEXT NOT NULL CHECK (state IN ('pending','appended')),
+            last_error     TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(object_key, locator)
+        );
+
         CREATE TABLE IF NOT EXISTS frozen_publication_artifact(
             insertion_ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
             object_key        TEXT NOT NULL UNIQUE,

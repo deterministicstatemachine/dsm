@@ -49,6 +49,7 @@ pub mod identity_publication; // publication-quorum lifecycle for device identit
 pub mod inbox_poller;
 pub mod inbox_waiter; // long-poll on the storage nodes beside the poller
 pub mod kyber_identity; // ML-KEM identity binding for online contact establishment (§11.1)
+pub mod lineage_discovery;
 pub mod realized_records;
 pub mod session_manager; // Native-first session state projection
 pub mod signing_authority;

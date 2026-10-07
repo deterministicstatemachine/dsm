@@ -25,7 +25,65 @@ pub(crate) const ARTIFACT_REPUBLISH_ROWS_PER_POLL: u32 = 8;
 pub(crate) async fn republish_unpublished_artifacts() -> Result<u32, String> {
     let rows = fpa::list_unpublished_artifacts(ARTIFACT_REPUBLISH_ROWS_PER_POLL)
         .map_err(|e| format!("list unpublished artifacts: {e}"))?;
-    republish_rows(rows).await
+    let stored = republish_rows(rows).await?;
+    Ok(stored + publish_lineage_debt().await?)
+}
+
+/// Shared-lineage objects owed per pass (SoFi Amendment S23). A reader that
+/// walked a long history owes a hint per generation it found unhinted; they
+/// are put at once, apart from the admission evidence the main pass bounds.
+pub(crate) const LINEAGE_OBJECTS_PER_POLL: u32 = 64;
+
+/// Put the shared-lineage objects this device owes and read them back, then
+/// make the epoch-index appends owed for those `Stored`. Returns how many
+/// objects were established `Stored` and appends made. A row not yet done
+/// records why and stays owed.
+pub(crate) async fn publish_lineage_debt() -> Result<u32, String> {
+    use crate::storage::client_db::lineage_publication as owed;
+    let rows = fpa::list_unpublished_with_purpose(owed::PURPOSE, LINEAGE_OBJECTS_PER_POLL)
+        .map_err(|e| format!("list owed lineage objects: {e}"))?;
+    let stored = republish_rows(rows).await?;
+    let due = owed::appends_due(LINEAGE_OBJECTS_PER_POLL)
+        .map_err(|e| format!("list owed lineage appends: {e}"))?;
+    if due.is_empty() {
+        return Ok(stored);
+    }
+    let catalog = StorageSetCatalog::from_env_config()
+        .map_err(|e| format!("storage-set catalog unavailable: {e}"))?;
+    let catalog = &catalog;
+    let made = futures::future::join_all(due.iter().map(|append| async move {
+        let Some(set) = catalog.resolve(&append.storage_set_id) else {
+            return Err(
+                "the owed storage set is not resolvable through the local catalog".to_string(),
+            );
+        };
+        let Some((_, addr)) = fpa::parse_immutable_object_key(&append.object_key) else {
+            return Err(format!("{} is not an object address", append.object_key));
+        };
+        crate::sdk::storage_io::append_to_index(
+            set,
+            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
+            &append.locator,
+            &addr,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }))
+    .await;
+    let mut appended = 0u32;
+    for (append, made) in due.iter().zip(made) {
+        match made {
+            Ok(members) if members > 0 => {
+                owed::appended(append).map_err(|e| e.to_string())?;
+                appended += 1;
+            }
+            Ok(..) => {
+                owed::not_appended(append, "no member appended it").map_err(|e| e.to_string())?
+            }
+            Err(why) => owed::not_appended(append, &why).map_err(|e| e.to_string())?,
+        }
+    }
+    Ok(stored + appended)
 }
 
 /// Put every unpublished artifact frozen in the same advance as the one at
