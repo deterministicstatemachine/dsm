@@ -3858,13 +3858,20 @@ Closed in this pass:
 - `canonical_encode_injective` (DSMGuardedTripwire) is proved for a concrete
   encoding; digest binding is stated as "same state, or a collision".
 
-Open:
+- `DSMRecognition.lean` and `DSMSofiStorage.lean` no longer take an injective
+  hash or signature message binding as structure hypotheses (2026-10-07).
+  `msgOf_inj`, `addr_inj`, `counting_reads_agree` and
+  `a_wrong_namespace_never_counts` now conclude "the same, or an explicit
+  collision of `H`"; `replayed_signature_pins_the_fields` adds the `Retarget`
+  case (one signature verifying two messages). `Adversary.euf` is standard
+  message-level EUF-CMA, so `hostile_bytes_never_become_state` now concludes
+  that the owner was observed signing exactly this object's message (before:
+  this exact signature was observed, which needed message binding). The payload
+  is the canonical bytes, so the codec needs no hash. Every theorem name is
+  kept, and the recognition mutation controls still fail exactly their named
+  theorems with the witness green.
 
-- `DSMRecognition.lean` (`Crypto.H_inj`, `Crypto.signature_message_binding`)
-  and `DSMSofiStorage.lean` (`Hash.H_inj`) take the same idealizations as
-  structure hypotheses. They are not axioms, so the ledger shows these
-  theorems as clean, but their premises do not hold for BLAKE3 or SPHINCS+;
-  restate them in collision/forgery-extraction form.
+Open:
 - The axiom audit does not cover `lean4/Sphincs/RustExtraction` (Aeneas
   backend, Lean 4.31); `check_sphincs_source_refinement.sh` gates it and needs
   the pinned Aeneas/Charon checkouts.
