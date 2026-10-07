@@ -46,14 +46,13 @@ theorem seedDistinguisher_congr (v : Variant) (limits : Limits) (strategy : Stra
     derivation, the message hash, and every keyed request under the public key
     (`M` never equals a derived public key). -/
 theorem verify_congr (v : Variant) (o₁ o₂ : Oracle Id) (M K : Bytes)
-    (agree : KeyedAgree o₁ o₂ M K)
+    (agreeAt : ∀ x, KeyedAgreeAt o₁ o₂ (o₂ ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩) M K)
     (dThash : ∀ x, o₁ ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩ = o₂ ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩)
-    (tkNotM : ∀ x, o₂ ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩ = M → M = K)
     (hMsg : ∀ x len, o₁ ⟨2,"DSM/sphincs/v2/h-msg",[],x,len⟩ = o₂ ⟨2,"DSM/sphincs/v2/h-msg",[],x,len⟩)
     (pk m s : Bytes) : verify o₁ v pk m s = verify o₂ v pk m s := by
-  have htk := tkNotM (pk.take (params v).n)
+  have htk := agreeAt (pk.take (params v).n)
   simp only [verify, deriveKey, hmsg, dThash, hMsg, id_bind, id_pure,
-    forsPkFromSig_agree agree htk, htRoot_agree agree htk]
+    forsPkFromSig_agree htk, htRoot_agree htk]
 
 
 /-- What a world must agree on for signing to agree. Besides the verification
@@ -61,9 +60,8 @@ theorem verify_congr (v : Variant) (o₁ o₂ : Oracle Id) (M K : Bytes)
     the PRF key derivation, which yields `M` in the first world and `K` in the
     second. The two secret keys may differ only in SK.seed. -/
 theorem sign_congr (v : Variant) (o₁ o₂ : Oracle Id) (M K sk₁ sk₂ : Bytes)
-    (agree : KeyedAgree o₁ o₂ M K)
+    (agreeAt : ∀ x, KeyedAgreeAt o₁ o₂ (o₂ ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩) M K)
     (dThash : ∀ x, o₁ ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩ = o₂ ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩)
-    (tkNotM : ∀ x, o₂ ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩ = M → M = K)
     (hMsg : ∀ x len, o₁ ⟨2,"DSM/sphincs/v2/h-msg",[],x,len⟩ = o₂ ⟨2,"DSM/sphincs/v2/h-msg",[],x,len⟩)
     (dMsgKey : ∀ x, o₁ ⟨0,"DSM/sphincs/v2/prf-msg",[],x,32⟩ =
       o₂ ⟨0,"DSM/sphincs/v2/prf-msg",[],x,32⟩)
@@ -76,11 +74,11 @@ theorem sign_congr (v : Variant) (o₁ o₂ : Oracle Id) (M K sk₁ sk₂ : Byte
     (prfEq : slice sk₁ (params v).n (params v).n = slice sk₂ (params v).n (params v).n)
     (rootEq : sk₁.drop (3*(params v).n) = sk₂.drop (3*(params v).n))
     (m : Bytes) : sign o₁ v sk₁ m = sign o₂ v sk₂ m := by
-  have htk := tkNotM (slice sk₂ (2*(params v).n) (params v).n)
+  have htk := agreeAt (slice sk₂ (2*(params v).n) (params v).n)
   simp only [sign, deriveKey, keyed, hmsg, id_bind, id_pure, len, seedEq, prfEq, rootEq,
     dThash, dMsgKey, rAgree, hMsg, dPrf₁, dPrf₂,
-    forsSign_agree agree htk, forsPkFromSig_agree agree htk,
-    htSign_agree agree htk, htRoot_agree agree htk]
+    forsSign_agree htk, forsPkFromSig_agree htk,
+    htSign_agree htk, htRoot_agree htk]
 
 /-! ## Secret-key layout -/
 
@@ -171,7 +169,7 @@ theorem key_distinguisher_exact (v : Variant) (limits : Limits) (strategy : Stra
   have htk : ∀ x, o ⟨0,"DSM/sphincs/v2/thash",[],x,32⟩ = K → K = K := fun _ _ => rfl
   have root : ∀ seed tk, xmssNode (patchPrfKey o K) (params v) tk K seed {layer := (params v).d-1} 0
       (params v).hp = xmssNode o (params v) tk K seed {layer := (params v).d-1} 0 (params v).hp :=
-    fun seed tk => xmssNode_agree (patch_agree o K) (fun _ => rfl) _ _ _ _
+    fun seed tk => xmssNode_agree ((patch_agree o K).at (fun _ => rfl)) _ _ _ _
   have elen := e.property
   have zlen : (zeros (params v).n ++ e.val.drop (params v).n).length = 3*(params v).n := by
     simp [zeros, elen]; omega
@@ -186,10 +184,10 @@ theorem key_distinguisher_exact (v : Variant) (limits : Limits) (strategy : Stra
     rw [kp_shape _ v _ zlen, kp_shape o v _ elen, kp1]
     obtain ⟨l1, l2, l3, l4, _, l6⟩ :=
       zeroed_layout (params v).n e.val ((keypairFromExpansion o v e.val).1.drop (params v).n) elen
-    apply sign_congr v (patchPrfKey o K) o K K _ _ (patch_agree o K) dThash htk hMsg dMsg
+    apply sign_congr v (patchPrfKey o K) o K K _ _ (fun x => (patch_agree o K).at (htk x)) dThash hMsg dMsg
       (fun _ _ _ => patch_keyed _ _ _ _ _) (patch_prf _ _ _) _ l1 l2 l3 l4
     rw [l6]; exact hK'
-  · exact verify_congr v _ _ K K (patch_agree o K) dThash htk hMsg
+  · exact verify_congr v _ _ K K (fun x => (patch_agree o K).at (htk x)) dThash hMsg
 
 /-! ## Hop 2a, probabilities -/
 
@@ -293,7 +291,7 @@ theorem function_distinguisher_exact (v : Variant) (limits : Limits) (strategy :
       (patchPrfKey o K ⟨0,"DSM/sphincs/v2/thash",[],seed,32⟩) MARK seed {layer := (params v).d-1} 0
       (params v).hp = xmssNode (patchPrfKey o K) (params v)
       (patchPrfKey o K ⟨0,"DSM/sphincs/v2/thash",[],seed,32⟩) K seed {layer := (params v).d-1} 0
-      (params v).hp := fun seed => xmssNode_agree agree (tkNotM seed) _ _ _ _
+      (params v).hp := fun seed => xmssNode_agree (agree.at (tkNotM seed)) _ _ _ _
   have zlen : (zeros (params v).n ++ rest.val).length = 3*(params v).n := by
     simp only [zeros, List.length_append, List.length_replicate, rest.property]; omega
   have kp1 : (keypairFromExpansion (routePrf o (fun x len => o ⟨1,"",K,x,len⟩)) v
@@ -305,9 +303,9 @@ theorem function_distinguisher_exact (v : Variant) (limits : Limits) (strategy :
   · exact kp1
   · intro m
     rw [kp_shape _ v _ zlen, kp_shape (patchPrfKey o K) v _ zlen, kp1]
-    exact sign_congr v _ _ MARK K _ _ agree dThash tkNotM hMsg dMsg rAgree (dPrf₁ _)
+    exact sign_congr v _ _ MARK K _ _ (fun x => agree.at (tkNotM x)) dThash hMsg dMsg rAgree (dPrf₁ _)
       (patch_prf _ _ _) rfl rfl rfl rfl m
-  · exact verify_congr v _ _ MARK K agree dThash tkNotM hMsg
+  · exact verify_congr v _ _ MARK K (fun x => agree.at (tkNotM x)) dThash hMsg
 
 /-! ## Hop 2b, probabilities -/
 
