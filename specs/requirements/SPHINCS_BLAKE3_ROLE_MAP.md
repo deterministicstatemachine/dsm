@@ -105,3 +105,23 @@ in the security sense; it only fixes which public hash function `Th` is. Its
    signer's code.
 3. No row is a known weakness. The gap is that the published SPHINCS+ proofs
    do not transfer to these primitive roles automatically.
+
+## Where each role enters the proved reduction
+
+`euf_cma_reduction` (SPHINCS_REFINEMENT.md, "Classical EUF-CMA reduction")
+leaves exactly these terms, each one an assumption on a role above:
+
+| Term | Role | Assumption it stands for |
+| --- | --- | --- |
+| `Adv_seed` | seed expansion | ChaCha20 is a PRG |
+| `Adv_prfKey`, `Adv_msgKey` | key derivation from a secret seed | `derive_key` output is pseudorandom |
+| `Adv_prfFunction`, `Adv_msgFunction` | PRF, PRF_msg | keyed BLAKE3 under a secret key is a PRF |
+| `Pr[CanonColl]` | Th (F, H, T_l) | no collision under one tweak with the honest input (TCR/SPR-type) |
+| `Pr[WotsPreimage]`, `Pr[ForsSecret]` | Th on random secrets | no preimage below the revealed chain position or at an unrevealed leaf (PRE/UD-type) |
+| `Pr[ForsCovered]` | H_msg | the ITSR event |
+
+The first three rows are covered by the BLAKE3 specification's own claims.
+The last three are the hash-function properties the published SPHINCS+ proofs
+take from SHA-2/SHAKE and that the BLAKE3 specification does not state for
+keyed mode under a public key or for this XOF use: they are what an external
+cryptographer must assess for DSM's instantiation.

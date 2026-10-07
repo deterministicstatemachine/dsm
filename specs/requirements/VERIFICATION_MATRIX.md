@@ -316,3 +316,11 @@ ledger, rests on anything beyond Lean's core axioms, or names a Rust symbol or
 test that does not exist. Published wording that the artifacts do not support,
 and its replacement, is recorded in [PUBLISHED_CLAIMS.md](PUBLISHED_CLAIMS.md).
 
+## SPHINCS+ (BLAKE3) security reduction (audit-prep, 2026-10-07)
+
+MR-DSM-0259: the classical EUF-CMA game reduces to explicit primitive events and
+distinguisher advantages (`euf_cma_reduction`, Lean, core axioms only; claim
+trace rows C15–C32). Kernel-checked; no test evidence is claimed for it, and it
+bounds nothing numerically. See SPHINCS_REFINEMENT.md, "Classical EUF-CMA
+reduction", and SPHINCS_BLAKE3_ROLE_MAP.md for which assumption each term is.
+

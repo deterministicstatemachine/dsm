@@ -468,6 +468,64 @@ cardinalities. No small-advantage premise or independent deployed seed draw is
 introduced. Efficient runtime/memory/primitive-query costs, actual ChaCha20 PRG
 hardness and the remaining BLAKE3 family reductions remain open.
 
+## Classical EUF-CMA reduction (audit-prep, 2026-10-07)
+
+The classical single-key EUF-CMA game of `SecurityGames.lean` is now reduced,
+in Lean with core axioms only, to explicit primitive events and explicit
+distinguisher advantages. Headline: `euf_cma_reduction`
+(`lean4/Sphincs/EufCmaReduction.lean`), an exact rational inequality:
+
+```text
+Pr[forgery] ≤ Pr[CanonColl] + Pr[WotsPreimage] + Pr[ForsSecret] + Pr[ForsCovered]
+            + Adv_seed + Adv_prfKey + Adv_prfFunction + Adv_msgKey + Adv_msgFunction
+```
+
+Hybrid chain (each hop has a constructed distinguisher proved to reproduce the
+previous game exactly; the gap is that distinguisher's advantage):
+
+| Hop | Replaces | Theorem |
+| --- | --- | --- |
+| 1 | ChaCha20 expansion by uniform 3n bytes | `seed_prg_hybrid_bound` |
+| 2a | `derive_key("…/prf", SK.seed)` by a uniform key | `prf_key_hybrid_bound` |
+| 2b | keyed BLAKE3 PRF by a random function | `prf_function_hybrid_bound` |
+| 3a | `derive_key("…/prf-msg", SK.prf)` by a uniform key | `msg_key_hybrid_bound` |
+| 3b | keyed BLAKE3 computing R by a random function | `msg_function_hybrid_bound` |
+
+After hop 3b no secret seed appears in the game. The simulation step for every
+signer and verifier component is `OracleAgree.lean`.
+
+Forgery extraction (deterministic, no probability): any signature that
+verifies under an honestly generated key yields one of four explicit events
+(`forgery_extract`, `forgery_extract_exp`), assembled from `chain_extract`,
+`auth_walk_extract`, `wots_checksum_decreases`, `wots_forgery_extract`,
+`xmss_forgery_extract`, `ht_forgery_extract`, `fors_forgery_extract`:
+
+* `CanonCollIn`: the verifier hashed, at an in-range address of the honest
+  key, an input different from the honest key's value there, and the outputs
+  collide (a collision under one tweak, the TCR/SPR-type event of `Th`);
+* a WOTS chain value below the honestly revealed position (the PRE/UD-type
+  event of `Th` on a random secret);
+* a FORS secret at an index no honest signature revealed;
+* `ForsCovered`: every forged FORS index was revealed at the same (tree, leaf)
+  by honest signatures, stated with the actual H_msg outputs (the ITSR event).
+
+Supporting results: every signer and key-generation address is in range
+(`sign_requests_in_range`, `keygen_requests_in_range`); every thash tweak is
+used for one input within and across signing runs of one key
+(`sign_tweak_single_use`, `sign_tweak_single_use_across`,
+`keygen_sign_tweak_single_use`); the 32-byte address encoding is injective
+(`adrs_bytes_injective`). Canonical-byte injectivity of every signed DSM
+wrapper and domain separation across them: `WrapperInjective.lean`.
+
+What this does not establish. The events and advantages are not bounded: they
+are exactly the assumptions on the primitives (BLAKE3 `derive_key` output
+pseudorandom, keyed BLAKE3 a PRF under a secret key, keyed BLAKE3 under the
+public-seed key resisting tweak collisions and chain/leaf preimages, the
+BLAKE3 XOF resisting the ITSR event, ChaCha20 a PRG). The `Strategy` interface
+has no runtime or hash-query cost model, so no numerical bound or query
+counting is claimed, and no quantum (QROM) statement. `SPHINCS_BLAKE3_ROLE_MAP.md`
+records which assumption each term is.
+
 ## Remaining trusted computing base and review obligations
 
 1. Lean kernel, core library, toolchain and logical axioms; executable-checker
@@ -475,7 +533,8 @@ hardness and the remaining BLAKE3 family reductions remain open.
 2. Correctness and security of BLAKE3 derive-key/keyed/XOF modes and truncation;
    hash/PRF assumptions appropriate to the **custom** multi-key construction,
    domain/address separation, robustness to deterministic R and quantum attacks.
-   No complete SPHINCS security reduction or numerical forgery bound is proved here.
+   The classical EUF-CMA reduction to these assumptions is proved (section above);
+   no numerical forgery bound, query-cost model or quantum bound is.
 3. ChaCha expansion and seed entropy/uniqueness; OS RNG, wallet entropy
    normalization, KDF inputs, master/AK/EK ownership, secret storage and erasure.
 4. Rust-to-Lean correspondence outside the extracted layer/address/refill proofs is a
