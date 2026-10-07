@@ -285,3 +285,15 @@ query traces. RustExtraction.base_2b_complete proves total parser execution and
 output length for widths 1..14 with b*count <= 8*input.length; it uses the proved
 outer-loop bit-budget induction. Both proof sets are in the existing gates.
 They do not close primitive hardness, parser digit equality or binary guarantees.
+
+Blake3.lean provides a concrete Lean compression/tree/XOF implementation linked
+to the exact DSM request encoding. Blake3Proofs.lean proves model output widths,
+accepted-request widths and root-XOF prefix consistency. Wiring and deployed
+H_msg width theorems expose actual modes, contexts and input bytes. The official
+35-length/three-mode vector suite and independent recomputation of all 517,251
+BLAKE3 outputs in the 114 Rust transcripts pass; altered-output and unknown-mode
+controls reject. These tests add independent primitive-output evidence to the
+existing transcript-request checks. They do not prove the Rust crate universally
+equivalent, compression/tree correctness against an independent formal spec,
+computational hardness, leakage, erasure or JNI. See the pinned cross-reference
+in SPHINCS_EXTERNAL_PROOF_ARTIFACTS.md.

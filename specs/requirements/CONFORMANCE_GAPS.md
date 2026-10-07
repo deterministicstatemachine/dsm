@@ -3816,3 +3816,13 @@ query overhead. The full extracted Rust base_2b function now has a termination/
 output-length theorem at the actual bit-budget bound. Underlying SPHINCS
 security reductions, adaptive oracle simulation, parser digit/spec equality,
 allocator/compiler/machine refinement and leakage/erasure/JNI remain open.
+
+BLAKE3 oracle outputs now have a concrete Lean evaluator, output-width and XOF
+prefix theorems, official-vector tests and full independent transcript-output
+recomputation. This closes the previous test limitation that hash outputs were
+only replayed. The abstraction remains in the general functional/security
+theorems; concrete evaluator shape safety and whole signer specialization still
+need proofs. BLAKE3 cryptographic assumptions and correlated-context/multi-target
+reductions remain open. The published bound restricted to <=32 output bytes
+cannot directly cover the deployed 34-/49-byte H_msg outputs, and a 32-byte
+BLAKE3 key must not be described as proving 256-bit computational security.
