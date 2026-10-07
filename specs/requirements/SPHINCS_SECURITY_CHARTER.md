@@ -3,9 +3,10 @@
 Status: proof target frozen for the initial projects. Computational target:
 the classical reduction of EUF-CMA to explicit primitive events and
 distinguisher advantages is proved (`euf_cma_reduction`, audit-prep
-2026-10-07; see SPHINCS_REFINEMENT.md); the primitive assumptions themselves,
-a cost model, numerical bounds and the quantum target are not. Binary target:
-not achieved.
+2026-10-07; see SPHINCS_REFINEMENT.md), as is the challenger's primitive-request
+budget (`challenger_request_budget`); the primitive assumptions themselves, an
+adversary cost model, numerical bounds and the quantum target are not. Binary
+target: not achieved.
 Authority: the current four DSM specifications, MR-DSM-0259, and the owner's
 explicit request for new computational-security and pinned-binary proof projects.
 This charter defines analysis scope, not a change to protocol acceptance.
@@ -23,7 +24,9 @@ stateful verification oracle or secret-key export. The initial extensional
 Strategy interface has no runtime or primitive-query cost model. A computational
 security bound must introduce explicit adversary time/memory and primitive-query
 budgets; it cannot quantify over unrestricted Strategy functions as efficient
-adversaries. Those efficiency/reduction obligations remain open. This is EUF-CMA, not strong
+adversaries. The reduction's own overhead is bounded: the challenger issues at
+most keygenCost + q_s·signCost + verifyCost primitive requests (`QueryCost.lean`).
+The adversary's time/memory/query budget remains open. This is EUF-CMA, not strong
 unforgeability: a different signature on an already queried message does not win.
 Invalid-message queries return no signature and consume an attempt. Exhaustion
 fails the game. These are experimental query-budget rules, not runtime changes.
