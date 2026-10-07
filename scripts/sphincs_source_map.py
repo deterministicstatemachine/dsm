@@ -55,6 +55,8 @@ core+'types/operations.rs':{'signing_bytes':'operation-specific canonical signin
 core+'types/receipt_types.rs':{'relationship_finalized_signing_target':'finalized relationship digest; unproved'},
 sdk+'jni/unified_protobuf_bridge.rs':{'process_envelope_v3':'JNI → ingress; unproved','dispatch_envelope_via_ingress':'ingress dispatch; unproved','Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3':'JNI byte-array and unwind boundary; unproved'},
 sdk+'handlers/core_bridge_adapters.rs':{'install_app_router_adapter':'router installation; unproved'},
+sdk+'sdk/connect/signed.rs':{'signing_digest':'domain_hash(kind tag, canonical body); wrapper injectivity unproved (DSM Connect, A11)','sign_own':'AK sphincs_sign on signing_digest; unproved','verify':'sphincs_verify on signing_digest; unproved'},
+core+'sofi/escrow.rs':{'statement':'K_verdict(32) ‖ u32be(|o|) ‖ o; wrapper injectivity unproved (escrow, S21)','sign_statement':'sphincs_sign on statement digest; unproved','verdict_authority':'signer set + verify per signature; tested, unproved'},
 sdk+'sdk/sofi_flow.rs':{},
 'crates/dsm-anchor-secure-monitor/src/anchor_glue.rs':{},
 'crates/dsm-anchor-pico/src/main.rs':{},
