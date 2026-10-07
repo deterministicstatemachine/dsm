@@ -91,13 +91,13 @@
 
 namespace DSMSofiStorage
 
-/-- The hash: injective on its input list. An idealization of collision
-resistance: no fixed-width hash is injective, so theorems resting on `H_inj`
-do not apply to BLAKE3 as stated; restating them as "equal, or an explicit
-collision" is open (CONFORMANCE_GAPS.md, "Lean premises"). -/
+/-- The hash, an arbitrary function: no property of it is assumed. Where a
+theorem needs an address to name one (namespace, payload), it concludes "the
+same, or an explicit collision of `H`" (`AddrCollision`). (Restated on
+audit-prep, 2026-10-07; an earlier version assumed `H` injective, which no
+fixed-width hash is.) -/
 structure Hash where
   H : List Nat → Nat
-  H_inj : ∀ a b, H a = H b → a = b
 
 variable (h : Hash)
 
@@ -105,16 +105,26 @@ variable (h : Hash)
 def inner (ns p : Nat) : Nat := h.H [1, ns, p]
 def addr (ns p : Nat) : Nat := h.H [0, ns, inner h ns p]
 
+/-- A collision of `H` on two distinct inputs. -/
+def HCollision (x y : List Nat) : Prop := x ≠ y ∧ h.H x = h.H y
+
+/-- Two (namespace, payload) pairs whose addresses agree through a collision
+of `H`, at the outer or the inner hash. -/
+def AddrCollision (ns₁ p₁ ns₂ p₂ : Nat) : Prop :=
+  HCollision h [0, ns₁, inner h ns₁ p₁] [0, ns₂, inner h ns₂ p₂] ∨
+    HCollision h [1, ns₁, p₁] [1, ns₂, p₂]
+
+/-- An address names one (namespace, payload), or `H` collides. -/
 theorem addr_inj {ns₁ p₁ ns₂ p₂ : Nat} (e : addr h ns₁ p₁ = addr h ns₂ p₂) :
-    ns₁ = ns₂ ∧ p₁ = p₂ := by
-  unfold addr at e
-  have o := h.H_inj _ _ e
-  simp only [List.cons.injEq] at o
-  obtain ⟨_, hns, hin, _⟩ := o
-  unfold inner at hin
-  have i := h.H_inj _ _ hin
-  simp only [List.cons.injEq] at i
-  exact ⟨hns, i.2.2.1⟩
+    (ns₁ = ns₂ ∧ p₁ = p₂) ∨ AddrCollision h ns₁ p₁ ns₂ p₂ := by
+  by_cases ho : ([0, ns₁, inner h ns₁ p₁] : List Nat) = [0, ns₂, inner h ns₂ p₂]
+  · simp only [List.cons.injEq] at ho
+    obtain ⟨_, hns, hin, _⟩ := ho
+    by_cases hi : ([1, ns₁, p₁] : List Nat) = [1, ns₂, p₂]
+    · simp only [List.cons.injEq] at hi
+      exact Or.inl ⟨hns, hi.2.2.1⟩
+    · exact Or.inr (Or.inr ⟨hi, hin⟩)
+  · exact Or.inr (Or.inl ⟨ho, e⟩)
 
 -- ── §10 Stored ─────────────────────────────────────────────────────────────
 
@@ -186,12 +196,16 @@ theorem stored_returns_exact_bytes {a : Nat} {reads : List Read} {p : Nat}
     · cases hs
   · cases hs
 
-/-- Any two counted answers carry the same payload. -/
+/-- Any two counted answers carry the same payload, or their addresses
+agree through a collision of `H`. -/
 theorem counting_reads_agree {a : Nat} {r₁ r₂ : Read} {p₁ p₂ : Nat}
-    (h₁ : counts h a r₁ = some p₁) (h₂ : counts h a r₂ = some p₂) : p₁ = p₂ := by
+    (h₁ : counts h a r₁ = some p₁) (h₂ : counts h a r₂ = some p₂) :
+    p₁ = p₂ ∨ ∃ ns₁ ns₂, AddrCollision h ns₁ p₁ ns₂ p₂ := by
   obtain ⟨ns₁, _, e₁⟩ := counts_some h h₁
   obtain ⟨ns₂, _, e₂⟩ := counts_some h h₂
-  exact (addr_inj h (e₁.trans e₂.symm)).2
+  rcases addr_inj h (e₁.trans e₂.symm) with ⟨_, hp⟩ | hc
+  · exact Or.inl hp
+  · exact Or.inr ⟨ns₁, ns₂, hc⟩
 
 /-- Bytes that do not derive the address are nothing. -/
 theorem wrong_bytes_never_count {a ns p : Nat} (hne : addr h ns p ≠ a) :
@@ -199,12 +213,15 @@ theorem wrong_bytes_never_count {a ns p : Nat} (hne : addr h ns p ≠ a) :
   simp [counts, hne]
 
 /-- The address binds the namespace: the same payload under another
-namespace is another address, so it is nothing under this one. -/
+namespace is another address, so it is nothing under this one, unless the
+two addresses agree through a collision of `H`. -/
 theorem a_wrong_namespace_never_counts {ns ns' p : Nat} (hne : ns' ≠ ns) :
-    counts h (addr h ns p) (some (ns', p)) = none := by
-  apply wrong_bytes_never_count
-  intro e
-  exact hne (addr_inj h e).1
+    counts h (addr h ns p) (some (ns', p)) = none ∨ AddrCollision h ns' p ns p := by
+  by_cases e : addr h ns' p = addr h ns p
+  · rcases addr_inj h e with ⟨hns, _⟩ | hc
+    · exact absurd hns hne
+    · exact Or.inr hc
+  · exact Or.inl (wrong_bytes_never_count h e)
 
 /-- Fewer than three counted answers is not `Stored`. -/
 theorem two_members_is_not_stored {a : Nat} {reads : List Read}
