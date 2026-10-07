@@ -34,6 +34,7 @@ lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/ForgeryExtractExp.olea
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/EufCmaReduction.olean lean4/Sphincs/EufCmaReduction.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/MultiKey.olean lean4/Sphincs/MultiKey.lean
 lean -DwarningAsError=true --run lean4/Sphincs/MultiKeyChecks.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/WrapperForgery.olean lean4/Sphincs/WrapperForgery.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/WrapperReduction.olean lean4/Sphincs/WrapperReduction.lean
 lean -DwarningAsError=true --run lean4/Sphincs/WrapperReductionChecks.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Transcript.olean lean4/Sphincs/Transcript.lean

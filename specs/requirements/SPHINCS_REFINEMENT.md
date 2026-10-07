@@ -528,6 +528,14 @@ seeds and adversary coins, correlated or not; no hybrid or premise is used.
 that freshness is per key. Bounding each key's events under correlated seeds
 is again a primitive question (multi-target, with distinct PK.seeds).
 
+Object-level forgery (`WrapperForgery.lean`). DSM signs digests of wrapper
+objects, not raw bytes. `wrapper_forgery_extract`: if every message legally
+signed under key k is the digest of an object in Q, and a signature verifies
+under key k on the digest of an object outside Q, then key k's four primitive
+events occurred or the hash collided on the encodings of two different
+objects. Instances for EK certificates, DSM Connect objects and escrow verdict
+statements use the injectivity theorems of `WrapperInjective.lean`.
+
 What this does not establish. The events and advantages are not bounded: they
 are exactly the assumptions on the primitives (BLAKE3 `derive_key` output
 pseudorandom, keyed BLAKE3 a PRF under a secret key, keyed BLAKE3 under the
