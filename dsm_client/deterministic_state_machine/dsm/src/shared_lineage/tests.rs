@@ -3,6 +3,9 @@
 use super::*;
 use crate::ccb::decode::DecodeError;
 
+/// A decoder, its result discarded once it decoded.
+type Decode = fn(&[u8]) -> Result<(), DecodeError>;
+
 const VAULT_A: D32 = [0xA1; 32];
 const VAULT_B: D32 = [0xB1; 32];
 
@@ -97,7 +100,7 @@ fn every_object_round_trips_and_refuses_trailing_bytes() {
         bundle
     );
 
-    let decoders: [fn(&[u8]) -> Result<(), DecodeError>; 5] = [
+    let decoders: [Decode; 5] = [
         |b| SharedGenesisV1::decode(b).map(drop),
         |b| SharedGenerationV1::decode(b).map(drop),
         |b| GenerationHintV1::decode(b).map(drop),

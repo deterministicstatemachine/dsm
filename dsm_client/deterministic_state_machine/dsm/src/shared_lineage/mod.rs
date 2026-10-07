@@ -576,7 +576,7 @@ impl CheckpointV1 {
         roots: Vec<D32>,
         transition_bundle_digest: D32,
     ) -> Result<Self, LineageObjectError> {
-        if start_generation % EPOCH_GENERATIONS != 0 {
+        if !start_generation.is_multiple_of(EPOCH_GENERATIONS) {
             return Err(LineageObjectError::StartNotOnEpoch {
                 start: start_generation,
             });
@@ -786,7 +786,7 @@ impl TransitionBundleV1 {
         start_generation: u64,
         steps: Vec<BundleStep>,
     ) -> Result<Self, LineageObjectError> {
-        if start_generation % EPOCH_GENERATIONS != 0 {
+        if !start_generation.is_multiple_of(EPOCH_GENERATIONS) {
             return Err(LineageObjectError::StartNotOnEpoch {
                 start: start_generation,
             });
