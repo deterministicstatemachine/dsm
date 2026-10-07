@@ -25,13 +25,19 @@ use dsm::economic::native_reserve::{
 use dsm::economic::provenance::ReserveReleaseWin;
 use dsm::types::error::DsmError;
 
-use crate::sdk::route_seats::{keep_completion, read_cell_kept, write_recorded, NodeSeats, WriteReport};
+use crate::sdk::route_seats::{
+    keep_completion, read_cell_kept, write_recorded, NodeSeats, RouteSeats, WriteReport,
+};
 use crate::sdk::storage_set::StorageSet;
 use crate::storage::client_db::native_reserve as memo;
 
 /// Successor cells one walk may read before it is `BudgetExhausted` — never
 /// a verdict about the lineage, only about this walk.
 pub const RESERVE_WALK_BUDGET: usize = 4096;
+
+/// Successor cells a walk locates ahead of the state it stands on, and
+/// reads together.
+pub const RESERVE_LOOKAHEAD: usize = 16;
 
 fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
     DsmError::storage(format!("{what}: {e}"), None::<std::io::Error>)
@@ -86,9 +92,115 @@ async fn read_successor_cell(
     .await
 }
 
+/// The successor cells after `from`, up to `count` of them, located by the
+/// release the leader holds first at each — the copy every chain of a cell
+/// begins with — that verifies and succeeds the state before it. Where to
+/// look, never what holds a cell: Core decides that from each cell's full
+/// reads ([`resolve_successor`]). One leader read per cell, one after the
+/// other, since each cell is routed from the state the release before it
+/// builds — none for a cell kept final, whose release Core resolves from
+/// what was kept. It stops before a cell whose leader holds no such release:
+/// the walk reads that one itself.
+async fn locate_ahead(
+    set: &StorageSet,
+    seats: &NodeSeats,
+    from: &NativeReserveState,
+    count: usize,
+) -> Result<Vec<SuccessorCell>, DsmError> {
+    let mut cells = Vec::with_capacity(count);
+    let mut state = from.clone();
+    while cells.len() < count {
+        let cell = successor_cell(set, &state)?;
+        let routed = cell.routed();
+        // A cell this process already read final is stepped over from what
+        // it kept, with nothing asked of any member.
+        if let Some(kept) = crate::sdk::final_reads::final_cell(routed) {
+            if let SuccessorRead::Final { child, .. } = resolve_successor(&cell, &kept) {
+                cells.push(cell);
+                state = child;
+                continue;
+            }
+        }
+        let Some(held) = seats
+            .read_values(routed.route().leader(), routed.namespace(), routed.key())
+            .await
+        else {
+            break;
+        };
+        let Some(child) = held
+            .iter()
+            .find_map(|bytes| next_state(&state, routed, bytes))
+        else {
+            break;
+        };
+        cells.push(cell);
+        state = child;
+    }
+    Ok(cells)
+}
+
+/// The state the release in the leader's copy `bytes` builds on `state`,
+/// when the copy is a leader entry of this cell holding a release that
+/// verifies and succeeds `state`.
+fn next_state(
+    state: &NativeReserveState,
+    cell: &dsm::route_chain::RoutedCell,
+    bytes: &[u8],
+) -> Option<NativeReserveState> {
+    let entry = dsm::route_chain::RouteEntry::decode(bytes)?;
+    if entry.position != 0 || entry.namespace != cell.namespace() || entry.key != *cell.key() {
+        return None;
+    }
+    match dsm::economic::native_reserve::decode_and_verify_release(&entry.value) {
+        Ok(release) => {
+            match dsm::economic::native_reserve::release_constructible(state, &release) {
+                Ok(child) => Some(child),
+                Err(refusal) => {
+                    log::info!(
+                        "[reserve] a release at generation {} does not succeed it: {refusal:?}",
+                        state.generation + 1
+                    );
+                    None
+                }
+            }
+        }
+        Err(refusal) => {
+            log::info!(
+                "[reserve] bytes at generation {} are no release: {refusal:?}",
+                state.generation + 1
+            );
+            None
+        }
+    }
+}
+
+/// Read the cells `locate_ahead` found, all at once. Each final one is kept
+/// by the process (`read_successor_cell`), so the walk that follows reads it
+/// from what was kept; one that is not final is read again when the walk
+/// reaches it.
+pub(crate) async fn read_ahead(
+    set: &StorageSet,
+    from: &NativeReserveState,
+    count: usize,
+) -> Result<(), DsmError> {
+    let seats = NodeSeats::new(set)?;
+    let cells = locate_ahead(set, &seats, from, count).await?;
+    futures::future::join_all(cells.iter().map(|cell| read_successor_cell(&seats, cell))).await;
+    log::info!(
+        "[reserve] read {} successor cells ahead of generation {}",
+        cells.len(),
+        from.generation
+    );
+    Ok(())
+}
+
 /// Walk the reserve lineage from the latest memoised state (or `R_0`) to
-/// wherever it stops, memoising every final release on the way. Bridges to
-/// the async reads through `runtime`; call from a worker thread.
+/// wherever it stops, memoising every final release on the way. Once a cell
+/// reads final — the walk is behind the head — the next
+/// [`RESERVE_LOOKAHEAD`] cells are located and read together
+/// ([`read_ahead`]); Core then walks them one by one, each from its own
+/// reads. A walk that starts at the head reads only the head's cell. Bridges to the async reads through `runtime`; call from a
+/// worker thread.
 pub fn walk_reserve(
     set: &StorageSet,
     network_id: &[u8],
@@ -96,10 +208,26 @@ pub fn walk_reserve(
 ) -> Result<WalkStop, DsmError> {
     let genesis = genesis_state(network_id)?;
     let start = memo::latest_state(&genesis).map_err(|e| storage_err("reserve memo", e))?;
+    let mut read_through = start.generation;
     walk_lineage(
         start,
         RESERVE_WALK_BUDGET,
-        |parent| tokio::task::block_in_place(|| runtime.block_on(read_successor(set, parent))),
+        |parent| {
+            tokio::task::block_in_place(|| {
+                runtime.block_on(async {
+                    let read = read_successor(set, parent).await?;
+                    // A final release means the walk is behind the head: the
+                    // cells after it are located and read together.
+                    if let SuccessorRead::Final { child, .. } = &read {
+                        if child.generation > read_through {
+                            read_ahead(set, child, RESERVE_LOOKAHEAD).await?;
+                            read_through = child.generation + RESERVE_LOOKAHEAD as u64;
+                        }
+                    }
+                    Ok(read)
+                })
+            })
+        },
         |parent, release, child| {
             memo::record_final_release(parent, release, child)
                 .map_err(|e| storage_err("reserve memo write", e))

@@ -346,6 +346,85 @@ async fn a_repeat_claimant_succeeds_on_the_next_generation() {
     assert_eq!(reserve_head().await.generation, 2);
 }
 
+/// A walk reads the reserve's cells ahead of it together. After three
+/// claims, a device that keeps nothing of the reserve locates the next
+/// generations from the leader's copies and reads their cells at once: every
+/// final cell is then kept, and the walk that follows reaches the head
+/// without asking any member for those cells again — only the open head
+/// cell is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_reserve_walk_reads_the_cells_ahead_of_it_together() {
+    let d = Device::start(0xA4).await;
+    for _ in 0..3 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    {
+        let binding = client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute("DELETE FROM native_reserve_lineage_memo", [])
+            .expect("forget the walked lineage");
+    }
+    crate::sdk::final_reads::forget_everything();
+
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let members = as_ccb_members(&set).expect("members");
+    let mut states = vec![reserve_genesis()];
+    for generation in 1..=3 {
+        let win = release_at(generation).await;
+        let release = dsm::economic::native_reserve::decode_and_verify_release(&win.envelope_bytes)
+            .expect("a final release verifies");
+        let child = dsm::economic::native_reserve::release_constructible(
+            states.last().expect("a state"),
+            &release,
+        )
+        .expect("each release succeeds the state before it");
+        states.push(child);
+    }
+    let cell_of = |state: &NativeReserveState| {
+        SuccessorCell::of(state, &members).expect("the successor cell")
+    };
+    {
+        let binding = client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute("DELETE FROM native_reserve_lineage_memo", [])
+            .expect("forget the lineage the reads above walked");
+    }
+    crate::sdk::final_reads::forget_everything();
+
+    crate::sdk::native_reserve::read_ahead(
+        &set,
+        &states[0],
+        crate::sdk::native_reserve::RESERVE_LOOKAHEAD,
+    )
+    .await
+    .expect("the cells ahead are read");
+    for (generation, state) in states[..3].iter().enumerate() {
+        assert!(
+            crate::sdk::final_reads::final_cell(cell_of(state).routed()).is_some(),
+            "the cell of generation {} was read ahead and kept final",
+            generation + 1
+        );
+    }
+
+    for node in &d.nodes.nodes {
+        node.forget_requests();
+    }
+    assert_eq!(reserve_head().await.generation, 3);
+    let asked: Vec<String> = d.nodes.nodes.iter().flat_map(|n| n.requests()).collect();
+    for state in &states[..3] {
+        let read = format!(
+            "GET /api/v2/cell/{}",
+            crate::util::text_id::encode_base32_crockford(cell_of(state).routed().key())
+        );
+        assert!(
+            !asked.contains(&read),
+            "the walk read generation {}'s cell again",
+            state.generation + 1
+        );
+    }
+}
+
 /// Another claimant's release took generation 1 first: the next claim walks
 /// to the moved head and wins generation 2, and the reserve moved by exactly
 /// the two releases.
