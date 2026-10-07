@@ -368,6 +368,14 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         anchored_policy_bytes(self.set, policy_commit, &self.runtime)
     }
+
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        held_ek_step(signer, addr)
+    }
 }
 
 /// Every value any member of `set` holds under `K_root(position)` of
@@ -702,6 +710,16 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         // of the peer's evidence closure.
         anchored_policy_bytes(self.inner.set, policy_commit, &self.inner.runtime)
     }
+
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        // Not recorded: a held step is the verifier's own relationship
+        // record, not part of the peer's evidence closure.
+        held_ek_step(signer, addr)
+    }
 }
 
 impl ProvenanceResolver for LiveRegisterResolver<'_> {
@@ -756,6 +774,26 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         anchored_policy_bytes(self.set, policy_commit, &self.runtime)
     }
+
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        held_ek_step(signer, addr)
+    }
+}
+
+/// The key a held EK step certified: a step of one of this device's own
+/// relationships, recorded as its bilateral step completed. An unreadable
+/// store is `Incomplete`, never "not held".
+pub(crate) fn held_ek_step(
+    signer: &[u8; 32],
+    addr: &[u8; 32],
+) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+    crate::storage::client_db::economic_lineage::held_ek_step(signer, addr).map_err(|e| {
+        PeerLineageFailure::Incomplete(format!("the relationship record is unreadable: {e}"))
+    })
 }
 
 /// A token's policy bytes, rooted by the verifier itself: the local store

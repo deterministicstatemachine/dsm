@@ -369,6 +369,16 @@ pub trait ProvenanceResolver {
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
 
+    /// The certified key of the EK step at `addr` in `signer`'s chain, when
+    /// this verifier is a party to that relationship and holds the step: its
+    /// own record, written as each bilateral step completed. `None` when it
+    /// does not hold it. An acceptance check runs forward from a held step.
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
+
     /// The canonical `TokenPolicyV3` bytes rooted under `policy_commit` —
     /// the VERIFIER'S OWN anchoring in the token's public anchor, never
     /// counterparty-supplied bytes. Anchors are public identifiers (the
@@ -383,6 +393,24 @@ pub trait ProvenanceResolver {
         &self,
         policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
+}
+
+/// A resolver's EK steps: the ones it holds, and the immutable store.
+struct ResolverEkSteps<'r>(&'r dyn ProvenanceResolver);
+
+impl crate::economic::peer_acceptance::EkSteps for ResolverEkSteps<'_> {
+    fn held(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.0.held_ek_step(signer, addr)
+    }
+
+    fn fetch(&self, addr: &[u8; 32]) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.0
+            .immutable_evidence(crate::common::domain_tags::TAG_DSM_EK_CERT_STEP, addr)
+    }
 }
 
 /// Why a credit is not funded.
@@ -979,9 +1007,6 @@ pub fn verify_credit_source(
                     ),
                 ));
             }
-            let mut fetch_step = |addr: &[u8; 32]| {
-                resolver.immutable_evidence(crate::common::domain_tags::TAG_DSM_EK_CERT_STEP, addr)
-            };
             // The consuming transition's OWN successor pair — a peer-debit
             // credit can only ride a DSM successor, and the bundle's B-side
             // pair must be exactly that successor's, never self-selected.
@@ -1009,7 +1034,7 @@ pub fn verify_credit_source(
                     .to_bytes(),
                 peer.c_dsm_plus(),
                 &expected_b_pair,
-                &mut fetch_step,
+                &ResolverEkSteps(resolver),
             )
             .map_err(ProvenanceError::AcceptanceEvidence)?;
             FundedCredit {

@@ -254,6 +254,14 @@ impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
     fn anchored_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, PeerLineageFailure> {
         self.live.anchored_policy_bytes(policy_commit)
     }
+
+    fn held_ek_step(
+        &self,
+        signer: &D32,
+        addr: &D32,
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.live.held_ek_step(signer, addr)
+    }
 }
 
 impl<'a> LiveSofiReads<'a> {

@@ -109,6 +109,13 @@ pub trait PeerEvidenceFetcher {
         namespace: TaggedHashDomain<'static>,
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
+    /// The certified key of the EK step at `addr` in `signer`'s chain, when
+    /// this verifier is a party to that relationship and holds the step.
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
     /// The canonical `TokenPolicyV3` bytes rooted under `policy_commit` —
     /// the verifier's own anchoring (local store or the authoritative
     /// content-addressed path). The verifier re-hashes against the commit;
@@ -1093,6 +1100,14 @@ impl ProvenanceResolver for SourceAncestry<'_, '_> {
         self.verifier.fetcher.immutable(namespace, addr)
     }
 
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.verifier.fetcher.held_ek_step(signer, addr)
+    }
+
     fn anchored_policy_bytes(
         &self,
         policy_commit: &[u8; 32],
@@ -1143,6 +1158,14 @@ impl ProvenanceResolver for DebitHasNoSources<'_, '_> {
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         self.verifier.fetcher.immutable(namespace, addr)
+    }
+
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.verifier.fetcher.held_ek_step(signer, addr)
     }
 
     fn anchored_policy_bytes(
@@ -1279,6 +1302,17 @@ mod tests {
                 "no objects in this test: {} under {:?}",
                 encode_base32_crockford(addr),
                 namespace.source_bytes()
+            )))
+        }
+        fn held_ek_step(
+            &self,
+            signer: &[u8; 32],
+            addr: &[u8; 32],
+        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(format!(
+                "no relationship in this test: {} step {}",
+                encode_base32_crockford(signer),
+                encode_base32_crockford(addr)
             )))
         }
         fn anchored_policy_bytes(
@@ -1726,6 +1760,17 @@ mod tests {
                     encode_base32_crockford(addr)
                 ))
             })
+        }
+        fn held_ek_step(
+            &self,
+            signer: &[u8; 32],
+            addr: &[u8; 32],
+        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(format!(
+                "no relationship in this test: {} step {}",
+                encode_base32_crockford(signer),
+                encode_base32_crockford(addr)
+            )))
         }
         fn anchored_policy_bytes(
             &self,
