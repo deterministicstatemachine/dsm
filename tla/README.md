@@ -327,10 +327,14 @@ verifier, which has no `sk_prf` and cannot recompute the deterministic `R`.
 Seven mutation controls remove one recomputation each (signature binding,
 ancestry binding, coordinate derivation, canonical encoding, proof
 verification, consumed-key exclusion, the bound); the named theorems rest on
-`sorryAx` and the witness stays green. The cryptography is exactly the model
-of `DSMCertChain.lean`: an injective domain-separated hash and deterministic
-SPHINCS+ as `(keyGen, sign, verify)` with round-trip soundness and message
-binding; unforgeability is stated over the adversary's outputs, with replay
+`sorryAx` and the witness stays green. The cryptography is modelled as an injective
+domain-separated hash and deterministic SPHINCS+ as `(keyGen, sign, verify)`
+with round-trip soundness and message binding, taken as hypotheses of the
+`Crypto` structure, not axioms. Injectivity and message binding are
+idealizations no real hash or hash-based signature satisfies; `DSMCertChain.lean`
+now states the honest reduction form (equal, or an explicit collision or
+forgery), and restating this module the same way is open (CONFORMANCE_GAPS.md,
+"Lean premises"); unforgeability is stated over the adversary's outputs, with replay
 allowed; nothing is assumed about `sign` as a function of its key, and a
 public key tells nothing about its seed.
 Conservation, the tripwire, SoFi atomicity and leader finality are refinements

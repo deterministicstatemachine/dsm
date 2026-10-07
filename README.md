@@ -99,7 +99,7 @@ Membership is declared in the root [Cargo.toml](Cargo.toml). The default workspa
 - **Economic root register.** Admitted economic state is rooted in a register kept on the storage fleet as write-once slots, pinned to a member set and a quorum. Storage nodes accept or refuse a write; they never interpret it.
 - **Genesis v3, mnemonic-rooted.** Genesis is derived from the BIP39 mnemonic and self-attested on the device (`createGenesisV2`), then the identity record is published to the fleet and accepted at quorum.
 - **Determinism bans.** No wall-clock markers in protocol or core logic. No JSON in protocol paths; Envelope v3 protobuf only, strict-fail on any other version. Hex is banned; Base32 Crockford is the only string form and only at UI, QR, and log boundaries. No `unsafe` in core protocol paths without review. Enforced by [ci/production_safety_checks.sh](ci/production_safety_checks.sh).
-- **Post-quantum by default.** BLAKE3 everywhere, always with a domain tag; SPHINCS+ (BLAKE3-keyed, byte-compatible with `dsm-sphincs`) for every signature. Code: [dsm/src/crypto/](dsm_client/deterministic_state_machine/dsm/src/crypto/).
+- **Post-quantum primitives by default.** BLAKE3 everywhere, always with a domain tag; SPHINCS+ (BLAKE3-keyed, byte-compatible with `dsm-sphincs`) for every signature. These are hash-based primitives chosen for post-quantum security; DSM's BLAKE3 instantiation of SPHINCS+ is not a standardized parameter set, and what its security proof still owes is in [specs/requirements/SPHINCS_BLAKE3_ROLE_MAP.md](specs/requirements/SPHINCS_BLAKE3_ROLE_MAP.md). Code: [dsm/src/crypto/](dsm_client/deterministic_state_machine/dsm/src/crypto/).
 
 ## Sovereign Finance (SoFi)
 
