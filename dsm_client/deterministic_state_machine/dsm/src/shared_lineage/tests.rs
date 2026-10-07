@@ -315,6 +315,6 @@ fn a_bundle_holds_one_step_per_generation_of_its_own_kind() {
 #[test]
 fn junk_under_an_epoch_index_is_recognized_as_nothing() {
     for junk in [&b""[..], b"x", &[0x07u8; 64], &[0x00, 0x6E, 0x00, 0x01, 9]] {
-        Discovered::recognize(junk).expect_err("junk is no hint and no checkpoint");
+        LineageObject::recognize(junk).expect_err("junk is no hint and no checkpoint");
     }
 }
