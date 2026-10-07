@@ -132,3 +132,53 @@ compression, correlated KDF outputs, truncation, multi-target/different-tweak
 hash-family experiments and ChaCha20 expansion to the SPHINCS reduction. A
 concrete algorithm definition alone does not prove those properties, and no
 independent-random-oracle premise was introduced here.
+
+## SHA-2 comparison (2026-10-07)
+
+The comparison source is [FIPS 205, sections 11.2.1–11.2.2](https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.205.pdf), the standardized SLH-DSA constructions derived from SPHINCS+. This is a construction reference, not an assertion that the EasyCrypt artifact already instantiates these standard functions or proves SHA-2 itself secure.
+
+| Role | Standard SHA2-128 | Standard SHA2-192/256 | Actual DSM BLAKE3 |
+| --- | --- | --- | --- |
+| Message compression | SHA-256 prehash followed by MGF1-SHA-256, binding R, seed, root, message | Corresponding SHA-512/MGF1 construction | Derive-mode XOF directly over R, seed, root, message |
+| Message randomizer | Truncated HMAC-SHA-256 | Truncated HMAC-SHA-512 | Truncated keyed BLAKE3 under a context-derived SK.prf key |
+| Secret element PRF | Seed-prefixed SHA-256 with secret seed appended | Same | Keyed BLAKE3 under a context-derived SK.seed key |
+| F | Seed-prefixed, padded SHA-256 | Same | Public-seed-derived keyed BLAKE3 |
+| H and public-key compression | Seed-prefixed, padded SHA-256 | Seed-prefixed, padded SHA-512 | Public-seed-derived keyed BLAKE3 |
+| Address encoding | Compressed 22 bytes | Compressed 22 bytes | Full 32 bytes |
+
+Transfer consequence: WOTS/FORS/hypertree structural reductions can be reused only after establishing the matching primitive-family interfaces and assumptions. HMAC arguments do not automatically justify keyed BLAKE3; MGF1 arguments do not automatically justify DSM's derive-mode XOF; seed-prefix arguments do not automatically justify public-seed-derived keys. Explicit simulations/reductions must preserve the exact input encodings and public/secret key roles. The larger standard profiles change multiple primitive roles to SHA-512, so replacing the comparison with only SHA-256 would obscure relevant assumptions. No algorithm change, numerical bound, new cryptographic axiom or security-transfer theorem is claimed by this comparison.
+
+## Pinned substitution boundary and first hybrid
+
+The comparison is between primitive instantiations, not a demand that SHA and
+BLAKE3 produce equal bytes. The mathematical tree/composition model is unchanged.
+The EasyCrypt artifact's abstract interfaces are the target; the standard's SHA-2
+implementation is the reference showing how those interfaces are instantiated.
+
+| Narrow boundary | DSM definition pinned | What is established / next obligation |
+| --- | --- | --- |
+| Seed distribution | `generateKeypair`, mode 3, 32-byte master to 3n-byte expansion | `SeedHybrid.lean`: actual game equals explicit seed-challenge simulation; exact PRG-gap bound to uniform 3n-byte destination. Efficient distinguisher cost and actual ChaCha20 PRG hardness remain open. |
+| Secret primitive families | `deriveKey(prf)` + `prf`; `deriveKey(prf-msg)` + deterministic keyed request | Concrete BLAKE3 wiring/output checks exist. Joint KDF/keyed-hash PRF reductions and correlated use of public seed remain open. |
+| Public tweakable family | `deriveKey(thash, PK.seed)` + `ADRS || M` | Public key is computable. Establish the role-specific multi-target/different-tweak assumptions; a secret PRF premise cannot close this row. |
+| Message-compression family | `hmsg`: exact R/seed/root/message concatenation, 34-/49-byte deployed outputs | Concrete bytes, widths and XOF prefix consistency are checked/proved. ITSR/full-output transfer with public-key and randomizer dependencies remains open. |
+| Address/message encoding | Full 32-byte address; canonical DSM wrapper bytes | Existing address/binding theorems apply. Mapping to external abstract coordinates and standard compressed addressing still needs a checked injection. This comparison is at internal signing functions; standard external SLH-DSA message/context framing is not silently adopted. |
+
+`seedDistinguisher` is executable and receives expanded bytes, not the master
+seed. It computes the existing key-generation suffix, runs the existing adaptive
+query strategy, answers using unchanged `sign`, and applies the same freshness
+and `verify` predicates. `seed_distinguisher_exact` and
+`seed_hybrid_real_equivalence` prove the connection to the original game.
+`uniformExpansion` is proved bijective onto all 3n-byte strings; it is explicitly
+the ideal destination. Field/key widths and the signing-attempt budget are proved.
+
+`seed_prg_hybrid_bound` uses an exact cross-multiplied probability inequality:
+actual forgery probability is at most uniform-expansion forgery probability plus
+the real/ideal distinguishing advantage of this constructed distinguisher. The
+different sample-space cardinalities are preserved. No event-extraction premise,
+independent deployed seed sampling or small-advantage axiom was inserted.
+
+Controls exercise correlated nonzero expansion, adaptive signing, freshness,
+positive forgery under an intentionally insecure oracle, and unequal-denominator
+accounting. They do not assert a vulnerability of BLAKE3. This is the first
+explicit model-level hybrid reduction, not the complete computational-security
+theorem; primitive budgets, efficient strategies and remaining rows are open.

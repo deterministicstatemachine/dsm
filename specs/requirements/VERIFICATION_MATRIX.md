@@ -297,3 +297,11 @@ existing transcript-request checks. They do not prove the Rust crate universally
 equivalent, compression/tree correctness against an independent formal spec,
 computational hardness, leakage, erasure or JNI. See the pinned cross-reference
 in SPHINCS_EXTERNAL_PROOF_ARTIFACTS.md.
+
+SeedHybrid.lean proves the exact decomposition of existing key generation into
+actual expansion plus unchanged suffix, the explicit adaptive PRG challenge
+distinguisher's equality to the deployed model game, uniform 3n-byte sampler
+bijection, field/key widths, query budget and exact common-denominator PRG-gap
+bound. SeedHybridChecks exercises correlated expansion and freshness. Efficient
+adversary cost, actual ChaCha20 hardness and the BLAKE3 substitution rows remain
+unproved; the bound does not assign a numerical security level.
