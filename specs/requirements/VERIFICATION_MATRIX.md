@@ -324,3 +324,9 @@ trace rows C15–C32). Kernel-checked; no test evidence is claimed for it, and i
 bounds nothing numerically. See SPHINCS_REFINEMENT.md, "Classical EUF-CMA
 reduction", and SPHINCS_BLAKE3_ROLE_MAP.md for which assumption each term is.
 
+Reduction overhead: the challenger's primitive requests are bounded
+(`challenger_request_budget`, `sign_cost`, `verify_cost`, `keygen_cost`,
+`deployed_request_bounds`; claim trace row C41): at most keygenCost +
+q_s·signCost + verifyCost, evaluated for SPX128f and SPX256f. Executable
+controls: QueryCostChecks.lean. The adversary's own cost is not modeled.
+

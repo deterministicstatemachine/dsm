@@ -536,13 +536,33 @@ events occurred or the hash collided on the encodings of two different
 objects. Instances for EK certificates, DSM Connect objects and escrow verdict
 statements use the injectivity theorems of `WrapperInjective.lean`.
 
+Challenger request budget (`QueryCost.lean`). Every primitive request the
+challenger makes is counted. `Cost x c` says a run of `x` in the request-logging
+monad appends at most `c` requests, for every oracle, key and message; the only
+data-dependent loop bounds are WOTS chain lengths, bounded through digit ≤ 15.
+`keygen_cost`, `sign_cost` and `verify_cost` give explicit bounds as functions
+of the parameter set (`keygenCost`, `signCost`, `verifyCost`);
+`deployed_request_bounds` evaluates them: SPX128f 4,498 / 127,858 / 11,872 and
+SPX256f 17,186 / 379,087 / 17,523 requests for key generation / signing /
+verification (signing includes the signer's FORS and hypertree self-check).
+`challenger_request_budget`: the EUF-CMA experiment run with every request
+logged (`forgeEventM`) returns exactly the bit of `forgeEvent` and issues at
+most `keygenCost + q_s·signCost + verifyCost` requests. This is the reduction
+overhead each hybrid distinguisher adds to the adversary: it runs this same
+challenger with one primitive role answered by its challenge oracle. The
+bounds are upper bounds, not exact counts (signing's WOTS chains are charged
+15 steps each where the paired sign/verify chains total 15).
+`QueryCostChecks.lean` runs both deployed variants against a counting oracle
+and checks every count against its bound.
+
 What this does not establish. The events and advantages are not bounded: they
 are exactly the assumptions on the primitives (BLAKE3 `derive_key` output
 pseudorandom, keyed BLAKE3 a PRF under a secret key, keyed BLAKE3 under the
 public-seed key resisting tweak collisions and chain/leaf preimages, the
 BLAKE3 XOF resisting the ITSR event, ChaCha20 a PRG). The `Strategy` interface
-has no runtime or hash-query cost model, so no numerical bound or query
-counting is claimed, and no quantum (QROM) statement. `SPHINCS_BLAKE3_ROLE_MAP.md`
+has no runtime or hash-query cost model: the adversary's own computation is
+not counted (only the challenger's, above), so no numerical bound is claimed,
+and no quantum (QROM) statement. `SPHINCS_BLAKE3_ROLE_MAP.md`
 records which assumption each term is.
 
 ## Remaining trusted computing base and review obligations
@@ -552,8 +572,9 @@ records which assumption each term is.
 2. Correctness and security of BLAKE3 derive-key/keyed/XOF modes and truncation;
    hash/PRF assumptions appropriate to the **custom** multi-key construction,
    domain/address separation, robustness to deterministic R and quantum attacks.
-   The classical EUF-CMA reduction to these assumptions is proved (section above);
-   no numerical forgery bound, query-cost model or quantum bound is.
+   The classical EUF-CMA reduction to these assumptions is proved (section above),
+   with the challenger's primitive-request budget; no numerical forgery bound,
+   adversary cost model or quantum bound is.
 3. ChaCha expansion and seed entropy/uniqueness; OS RNG, wallet entropy
    normalization, KDF inputs, master/AK/EK ownership, secret storage and erasure.
 4. Rust-to-Lean correspondence outside the extracted layer/address/refill proofs is a
