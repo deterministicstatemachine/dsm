@@ -359,3 +359,47 @@ fn lineage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
         None::<std::io::Error>,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    /// Discovery carries no authority (DSM Amendment A15): the code that
+    /// reads hints and checkpoints names nothing that constructs or records
+    /// established state, and the vault walk with its history read ahead
+    /// builds, extends and records no chain itself — `Verifier::chain` does.
+    #[test]
+    fn discovery_code_names_no_constructor_of_established_state() {
+        let discovery = include_str!("lineage_discovery.rs");
+        let tests_start = discovery
+            .find("#[cfg(test)]")
+            .expect("this module has tests");
+        let discovery = &discovery[..tests_start];
+        for forbidden in [
+            "VaultChain",
+            "from_recorded",
+            "record_generation",
+            "record_walked",
+            "record_final_release",
+            "NativeReserveState",
+            "ValidatedEconomicRoot",
+        ] {
+            assert!(
+                !discovery.contains(forbidden),
+                "lineage_discovery names {forbidden}"
+            );
+        }
+        let vault_history = include_str!("vault_history.rs");
+        for forbidden in [
+            "from_recorded",
+            "VaultChain::",
+            ".extend(&",
+            "record_generation",
+            "record_walked",
+            "record_resolved",
+        ] {
+            assert!(
+                !vault_history.contains(forbidden),
+                "vault_history names {forbidden}"
+            );
+        }
+    }
+}

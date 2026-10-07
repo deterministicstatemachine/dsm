@@ -3008,7 +3008,24 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 
 **The specification.** DSM Amendment A15 (§43), SoFi Amendment S23 (§30, with §11, §14.1, §14.2 and §51), Storage §24 item 15.
 
-**Status.** Specified; nothing built yet. Phase A's honest cost: sequential network depth logarithmic in the lineage's age; evidence, bytes and Core work still proportional to it. MR-DSM-0316 and MR-DSM-0317 (phase C) stay Missing until a proof and the ByteCommit ancestry accumulator exist.
+**Status.** Phase A built on the same branch (2026-10-07), for the reserve and for vaults. Phase A's honest cost: sequential network depth logarithmic in the lineage's age; evidence, bytes and Core work still proportional to it. Measured on storage nodes with a simulated 60 ms round trip, a fresh walk of a three-generation vault: 3.9 s plain, 2.1 s with its history read ahead, the read-ahead's cost flat in the number of generations up to 32 at once. MR-DSM-0316 and MR-DSM-0317 (phase C) stay Missing until a proof and the ByteCommit ancestry accumulator exist.
+
+**Built.**
+- *Core* (`dsm::shared_lineage`): the five objects with strict decoders, the epoch locator, `GenerationChain` and `EstablishedSharedHead`, checkpoint eligibility and end matching, the phase-C `SharedLineageValidity` interface with no implementation.
+- *Discovery* (`sdk::lineage_discovery`): the probe-and-bisect read of the epoch index, bounded per epoch and per discovery.
+- *Reserve* (`sdk::native_reserve::walk_reserve`): the named cells read at once, each taken only when Core resolves it final; hints and checkpoints owed after the walk.
+- *Vault* (`sdk::vault_history`): the named roots' consumption cells, registrations and trader positions read at once through the verifier's own checks, then `Verifier::chain`; hints owed after the walk.
+- *Publication* (`client_db::lineage_publication`, `artifact_republish::publish_lineage_debt`): owed objects and appends, published by the storage sweep and retried.
+- *CI*: `sofi_validated_root_constructors.sh` [6].
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0310 to MR-DSM-0314 | Missing | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
+| MR-DSM-0315 | Missing | Partial | `EstablishedSharedHead` exists and is computed; SoFi does not yet consume it. |
+| MR-SOFI-0397, MR-SOFI-0398, MR-SOFI-0402, MR-SOFI-0403 | Missing | Met | Built (above). |
+| MR-SOFI-0399 | Missing | Partial | Hints are owed by every walker for what it established, and the reserve's checkpoints with them; a vault's checkpoints and bundles are not yet published. |
+| MR-SOFI-0400 | Missing | Partial | Eligibility is built and tested in Core; a reader uses a checkpoint's roots as places to look without filtering on it, and compares no end. |
+| MR-SOFI-0401 | Missing | Partial | The procedure runs for both kinds, from hints and checkpoint roots; the end comparison of step 4 is not made. |
 
 | Row | Was | Now | Why |
 |---|---|---|---|
@@ -3019,12 +3036,12 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 317 | 123 | 96 | 47 | 0 | 33 | 18 |
-| SoFi (MR-SOFI) | 403 | 269 | 87 | 26 | 4 | 17 | 0 |
+| DSM high-level (MR-DSM) | 317 | 128 | 97 | 41 | 0 | 33 | 18 |
+| SoFi (MR-SOFI) | 403 | 273 | 90 | 19 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **1024** | **466** | **202** | **130** | **4** | **68** | **154** |
+| **All** | **1024** | **475** | **206** | **117** | **4** | **68** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3341,12 +3358,12 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-DSM-0307 | Met | `dsm::economic::peer_lineage::validate_peer_step` | `dsm::economic::peer_lineage::tests::two_claims_final_at_their_own_routes_are_a_fork_and_refused` | Amendment A14. Two survivors are refused as a fork, naming both. |
 | MR-DSM-0308 | Met | `dsm::economic::peer_lineage::validate_peer_step` | `dsm_sdk::handlers::one_hop_verification_tests::a_credits_source_is_one_step`; `dsm::economic::peer_lineage::tests::a_source_at_a_conditional_position_is_invalid` | Amendment A14. A source names no source of its own. |
 | MR-DSM-0309 | Met | `dsm::economic::peer_lineage::peer_root_at`; `dsm::economic::peer_lineage::peer_claim_at` | `dsm::economic::peer_lineage::tests::a_conditional_claim_on_a_conditional_parent_reads_one_position_back_and_never_two`; `dsm::economic::peer_lineage::tests::a_conditional_claim_waits_for_its_parent_one_position_back` | Amendment A14. Nothing at n − 2 is read. |
-| MR-DSM-0310 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
-| MR-DSM-0311 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
-| MR-DSM-0312 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
-| MR-DSM-0313 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
-| MR-DSM-0314 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
-| MR-DSM-0315 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
+| MR-DSM-0310 | Met | `dsm_sdk::sdk::vault_history::walk`; `dsm_sdk::sdk::native_reserve::walk_reserve` | `dsm_sdk::handlers::node_e2e_tests::a_vault_history_read_ahead_establishes_exactly_what_the_walk_does`; `dsm_sdk::handlers::faucet_flow_tests::lying_reserve_hints_change_nothing_a_walk_establishes` | DSM Amendment A15 (§6.78). |
+| MR-DSM-0311 | Met | `dsm::sofi::derive::successor_attempt_key`; `dsm::economic::native_reserve::reserve_cell_key` | `dsm_sdk::handlers::node_e2e_tests::a_vault_history_read_ahead_establishes_exactly_what_the_walk_does`; `dsm_sdk::handlers::faucet_flow_tests::lying_reserve_hints_change_nothing_a_walk_establishes` | DSM Amendment A15 (§6.78). The keys are unchanged and derived from established roots. |
+| MR-DSM-0312 | Met | `dsm_sdk::sdk::vault_history::walk`; `dsm_sdk::sdk::native_reserve::walk_reserve` | `dsm_sdk::handlers::node_e2e_tests::a_vault_history_read_ahead_establishes_exactly_what_the_walk_does`; `dsm_sdk::handlers::faucet_flow_tests::lying_reserve_hints_change_nothing_a_walk_establishes` | DSM Amendment A15 (§6.78). |
+| MR-DSM-0313 | Met | `dsm_sdk::sdk::lineage_discovery::discover` | `dsm_sdk::handlers::faucet_flow_tests::a_flooded_epoch_index_makes_discovery_unavailable_and_nothing_else` | DSM Amendment A15 (§6.78). Mutation red (matrix). |
+| MR-DSM-0314 | Met | `dsm::shared_lineage::GenerationChain`; `dsm_sdk::sdk::lineage_discovery::discover` | `dsm::shared_lineage::tests::discovery_code_names_no_constructor_of_established_state`; `dsm_sdk::sdk::lineage_discovery::tests::discovery_code_names_no_constructor_of_established_state` | DSM Amendment A15 (§6.78). Also CI `sofi_validated_root_constructors.sh` [6]. |
+| MR-DSM-0315 | Partial | `dsm::shared_lineage::GenerationChain::head` | `dsm::shared_lineage::tests::a_checkpoint_end_matches_only_the_head_the_walk_reached` | DSM Amendment A15 (§6.78). The head is computed; SoFi does not yet consume it. |
 | MR-DSM-0316 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
 | MR-DSM-0317 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
 
@@ -3750,13 +3767,13 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-SOFI-0394 | Met | `dsm::sofi::wire::objects::MatchStart`; `dsm::sofi::computed::start_occupant`; `dsm::sofi::computed::start_authority`; `dsm::sofi::computed::assemble_start`; `dsm::sofi::computed::start_resolution`; `dsm::sofi::computed::ComputedCellRead`; `dsm::sofi::escrow::EscrowCellRead` | `dsm::sofi::computed::tests::a_start_holds_both_readies_and_a_withdraw_either_sides_key`; `dsm::sofi::computed::tests::a_withdraw_by_either_side_holding_the_start_cell_voids_the_match`; `dsm::sofi::computed::tests::the_match_cell_counts_only_once_start_holds` | Amendment S22 (§6.77), the ready handshake (owner, 2026-10-06): a Start is both readies, a Withdraw either side's. The standing feeds `VerdictFact` unchanged, so `ConsumedRoute`, arm (v) and the rungs read it as they read a verdict. |
 | MR-SOFI-0395 | Partial | `dsm::sofi::validation::validate_release`; `dsm::sofi::lineage::creation_accepted`; `dsm::economic::write_set::escrow_creation_write_set`; `dsm::sofi::publication::Publication`; `dsm::sofi::resolve::Verifier::read_computed_cells`; `dsm::sofi::resolve::Verifier::vaults_of_cell` | `dsm::sofi::validation::tests::a_release_of_a_computed_vault_names_its_match_cell`; `dsm::sofi::validation::tests::a_computed_release_pays_only_its_branchs_recipient`; `dsm::sofi::lineage::genesis_acceptance::a_computed_escrow_genesis_is_accepted_with_its_terms`; `dsm::economic::write_set::escrow_create_binding_tests::a_computed_escrow_creation_debits_the_stake_of_its_terms_token`; `dsm::sofi::publication::tests::a_computed_escrow_vault_is_found_by_its_match_cell` | Amendment S22 (§6.77). Core is built; no test drives a computed Release through the resolver on the nodes (`read_release_cells`, `vaults_of_cell`): that waits for the SDK's computed flow. |
 | MR-SOFI-0396 | Missing | — | — | Amendment S22 (§6.77). Core reads no clock and keeps the match cell closed until Start holds; the wallet obligations (sign no entry before Start is final, Withdraw only while alone, the relay) are the SDK's computed flow, not built. |
-| MR-SOFI-0397 | Missing | — | — | SoFi Amendment S23 (§6.78). Not built. |
-| MR-SOFI-0398 | Missing | — | — | SoFi Amendment S23 (§6.78). Not built. |
-| MR-SOFI-0399 | Missing | — | — | SoFi Amendment S23 (§6.78). Not built. |
-| MR-SOFI-0400 | Missing | — | — | SoFi Amendment S23 (§6.78). Not built. |
-| MR-SOFI-0401 | Missing | — | — | SoFi Amendment S23 (§6.78). Not built. |
-| MR-SOFI-0402 | Missing | — | — | SoFi Amendment S23 (§6.78). Not built. |
-| MR-SOFI-0403 | Missing | — | — | SoFi Amendment S23 (§6.78). Not built. |
+| MR-SOFI-0397 | Met | `dsm::shared_lineage::CheckpointV1::decode`; `dsm::shared_lineage::GenerationHintV1::decode` | `dsm::shared_lineage::tests::every_object_round_trips_and_refuses_trailing_bytes`; `dsm::shared_lineage::tests::a_generation_digest_binds_its_history_lineage_and_kind` | SoFi Amendment S23 (§6.78). |
+| MR-SOFI-0398 | Met | `dsm::shared_lineage::epoch_locator` | `dsm::shared_lineage::tests::the_epoch_locator_binds_kind_lineage_and_epoch` | SoFi Amendment S23 (§6.78). |
+| MR-SOFI-0399 | Partial | `dsm_sdk::sdk::lineage_discovery::owe_missing_hints` | `dsm_sdk::handlers::faucet_flow_tests::a_reserve_walker_publishes_a_hint_for_each_generation_it_established` | SoFi Amendment S23 (§6.78). Vault checkpoints not yet published. |
+| MR-SOFI-0400 | Partial | `dsm::shared_lineage::CheckpointV1::eligible_at` | `dsm::shared_lineage::tests::a_checkpoint_is_eligible_only_at_the_head_the_reader_established` | SoFi Amendment S23 (§6.78). Readers do not filter on eligibility yet. |
+| MR-SOFI-0401 | Partial | `dsm_sdk::sdk::vault_history::walk` | `dsm_sdk::handlers::node_e2e_tests::a_vault_history_read_ahead_establishes_exactly_what_the_walk_does` | SoFi Amendment S23 (§6.78). The end comparison is not made. |
+| MR-SOFI-0402 | Met | `dsm_sdk::sdk::lineage_discovery::discover` | `dsm_sdk::handlers::faucet_flow_tests::a_flooded_epoch_index_makes_discovery_unavailable_and_nothing_else` | SoFi Amendment S23 (§6.78). |
+| MR-SOFI-0403 | Met | `dsm_sdk::sdk::native_reserve::walk_reserve` | `dsm_sdk::handlers::faucet_flow_tests::a_reserve_walker_publishes_a_hint_for_each_generation_it_established`; `dsm_sdk::handlers::faucet_flow_tests::lying_reserve_hints_change_nothing_a_walk_establishes` | SoFi Amendment S23 (§6.78). |
 
 ### 8.3 dBTC native specification
 

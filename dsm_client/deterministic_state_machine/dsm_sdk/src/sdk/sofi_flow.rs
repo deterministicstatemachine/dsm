@@ -621,7 +621,11 @@ pub(crate) async fn vault_at_head(
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
-    let chain = verifier.chain(vault_id).map_err(verifier_error)?;
+    // The history others published is read ahead of the walk (SoFi
+    // Amendment S23); the walk establishes the chain exactly as before.
+    let history = crate::sdk::vault_history::discover(set, vault_id).await?;
+    let chain =
+        tokio::task::block_in_place(|| crate::sdk::vault_history::walk(set, verifier, &history))?;
     head_of(set, verifier, vault_id, chain).await
 }
 
@@ -630,16 +634,26 @@ pub(crate) async fn vault_at_head(
 /// another vault's walk finds first, so each runs on a thread of its own over
 /// the one verifier: the reads it keeps are shared, and each read blocks only
 /// its own walk.
-fn chains_at_once(
+async fn chains_at_once(
+    set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_ids: &[D32],
 ) -> Vec<Result<VaultChain, DsmError>> {
+    // Each vault's history is read from the epoch index first, at once
+    // (SoFi Amendment S23), and read ahead of its walk.
+    let histories = crate::sdk::vault_history::discover_all(set, vault_ids).await;
     tokio::task::block_in_place(|| {
         std::thread::scope(|scope| {
-            let walks: Vec<_> = vault_ids
+            let walks: Vec<_> = histories
                 .iter()
-                .map(|vault_id| {
-                    scope.spawn(move || verifier.chain(vault_id).map_err(verifier_error))
+                .map(|history| {
+                    scope.spawn(move || match history {
+                        Ok(history) => crate::sdk::vault_history::walk(set, verifier, history),
+                        Err(e) => Err(DsmError::storage(
+                            format!("vault history: {e}"),
+                            None::<std::io::Error>,
+                        )),
+                    })
                 })
                 .collect();
             // A walk that panicked panics here, as it would have in line.
@@ -663,7 +677,7 @@ async fn heads_at_once(
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_ids: &[D32],
 ) -> Vec<Result<(VaultAtHead, VaultChain), DsmError>> {
-    let chains = chains_at_once(verifier, vault_ids);
+    let chains = chains_at_once(set, verifier, vault_ids).await;
     futures::future::join_all(
         vault_ids
             .iter()
@@ -1920,7 +1934,7 @@ pub async fn trade(
     for (vault_id, chain) in intent
         .vault_ids
         .iter()
-        .zip(chains_at_once(&verifier, &intent.vault_ids))
+        .zip(chains_at_once(set, &verifier, &intent.vault_ids).await)
     {
         chains.push(chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?);
     }

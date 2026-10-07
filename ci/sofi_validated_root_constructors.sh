@@ -353,8 +353,10 @@ echo "  ✓ one caller of the anchored, linked chain memo, at the walk's start; 
 #     established lineage: no vault chain, no reserve state, no memo write.
 #     A discovered root reaches established state only through the Core walk.
 echo "[6] Shared lineages: discovery constructs no established state..."
-discovery_files=$(ls "$core/dsm/src/shared_lineage/mod.rs" "$core/dsm_sdk/src/sdk/lineage_discovery.rs" 2>/dev/null || true)
-[[ -n "$discovery_files" ]] || { echo "[FAIL] the shared-lineage modules are not where this gate expects them"; exit 1; }
+discovery_files="$core/dsm/src/shared_lineage/mod.rs"$'\n'"$core/dsm_sdk/src/sdk/lineage_discovery.rs"
+while IFS= read -r f; do
+  [[ -f "$f" ]] || { echo "[FAIL] $f is not where this gate expects it"; exit 1; }
+done <<<"$discovery_files"
 forbidden='VaultChain|from_recorded|\.extend\(&|record_generation|record_walked|record_resolved|record_final_release|NativeReserveState \{|NativeReserveState::genesis|ValidatedEconomicRoot|VaultPostState \{'
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
@@ -366,6 +368,18 @@ while IFS= read -r f; do
     exit 1
   fi
 done <<<"$discovery_files"
+# The vault walk with its history read ahead (`vault_history`) returns the
+# chain `Verifier::chain` established, so it names the type; it may not
+# build, extend or record one itself.
+vault_history="$core/dsm_sdk/src/sdk/vault_history.rs"
+[[ -f "$vault_history" ]] || { echo "[FAIL] $vault_history is not where this gate expects it"; exit 1; }
+prod=$(python3 ci/production_text.py "$vault_history")
+hits=$(grep -nE 'from_recorded|VaultChain::|\.extend\(&|record_generation|record_walked|record_resolved|ValidatedEconomicRoot' <<<"$prod" || true)
+if [[ -n "$hits" ]]; then
+  echo "[FAIL] $vault_history builds, extends or records a vault chain itself:"
+  echo "$hits"
+  exit 1
+fi
 echo "  ✓ discovery code names no constructor or record of established state"
 
 echo "✓ raw envelope -> verified claim -> registered root: every arrow is opaque"
