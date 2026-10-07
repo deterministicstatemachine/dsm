@@ -496,6 +496,10 @@ fn get_database_path() -> Result<PathBuf> {
 /// Still 29: a peer's step is validated one hop, from its own parent (DSM
 /// Amendment A14), so no frontier is kept and `peer_frontier` is no longer
 /// created, read or written. A database made before keeps the table, unused.
+///
+/// Still 29: the owner baseline (SoFi Amendment S24) adds
+/// `sofi_vault_witness`, `sofi_vault_baseline`, `sofi_vault_owner_baseline`
+/// and `sofi_vault_quarantine`, created on open; no existing table changes.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 29;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -679,6 +683,41 @@ fn create_schema(conn: &Connection) -> Result<()> {
             kind       INTEGER NOT NULL,
             preimage   BLOB NOT NULL,
             PRIMARY KEY (vault_id, generation, leaf_key)
+        ) WITHOUT ROWID;
+
+        -- v25 (SoFi Amendment S24): this device's witness of each vault at
+        -- the generation it last established — the vault's state leaf and
+        -- this device's relationship leaf, each with its path. Advanced as
+        -- each generation is recorded; checked against the chain's head
+        -- before it is stood on.
+        CREATE TABLE IF NOT EXISTS sofi_vault_witness(
+            vault_id         BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            generation       INTEGER NOT NULL CHECK (generation >= 0),
+            root             BLOB NOT NULL CHECK (length(root) = 32),
+            trader_genesis   BLOB NOT NULL CHECK (length(trader_genesis) = 32),
+            trader_device_id BLOB NOT NULL CHECK (length(trader_device_id) = 32),
+            witness          BLOB NOT NULL      -- CCB VaultFrontierWitnessV1
+        ) WITHOUT ROWID;
+        -- v25: the owner baseline this device started a vault's chain at,
+        -- authenticated again whenever the chain starts there.
+        CREATE TABLE IF NOT EXISTS sofi_vault_baseline(
+            vault_id   BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation > 0),
+            bundle     BLOB NOT NULL            -- VaultBaselineV1
+        ) WITHOUT ROWID;
+        -- v25: the baselines this device signed as a vault's owner, one per
+        -- generation, and whether each is published.
+        CREATE TABLE IF NOT EXISTS sofi_vault_owner_baseline(
+            vault_id   BLOB NOT NULL CHECK (length(vault_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation > 0),
+            bundle     BLOB NOT NULL,           -- VaultBaselineV1
+            PRIMARY KEY (vault_id, generation)
+        ) WITHOUT ROWID;
+        -- v25: a vault whose owner signed two frontiers at one generation
+        -- (Req 6.3): quarantined for this device, never chosen between.
+        CREATE TABLE IF NOT EXISTS sofi_vault_quarantine(
+            vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            why      TEXT NOT NULL
         ) WITHOUT ROWID;
 
         -- v15: the native ERA reserve (R4). This device's frozen release at

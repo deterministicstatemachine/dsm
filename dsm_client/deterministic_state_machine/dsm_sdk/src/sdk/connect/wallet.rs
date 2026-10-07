@@ -213,6 +213,7 @@ pub fn describe_request(request: &Request) -> String {
             token_in,
             token_out,
             amount_in,
+            ..
         } => format!(
             "Quote {} for {}",
             amount_of(token_in, *amount_in, &none),
@@ -223,6 +224,7 @@ pub fn describe_request(request: &Request) -> String {
             token_out,
             amount_in,
             min_amount_out,
+            ..
         } => format!(
             "Swap {} for at least {}",
             amount_of(token_in, *amount_in, &none),

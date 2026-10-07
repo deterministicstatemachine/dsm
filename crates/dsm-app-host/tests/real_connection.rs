@@ -167,6 +167,19 @@ impl Host {
         }
     }
 
+    /// Everything this host's processes logged, every start's log in order.
+    fn logged(&self) -> String {
+        (1..=self.starts)
+            .map(|start| {
+                let path = self.dir.join(format!("{}-{start}.log", self.name));
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(e) => panic!("the process log {}: {e}", path.display()),
+                }
+            })
+            .collect()
+    }
+
     /// Start the process (again, on the same account, after `stop`) and wait
     /// until its ingress answers. Each start logs to a file of its own.
     async fn start(&mut self) {
@@ -884,6 +897,9 @@ async fn connect_over_the_real_relay() {
             token_out: wild.to_vec(),
             amount_in: 500,
             min_amount_out: 1,
+            // The account fills in its vaults' witnesses as it signs the
+            // request (SoFi Amendment S24); the application asks for none.
+            vault_witnesses: Vec::new(),
         }),
     )
     .await;
@@ -928,6 +944,38 @@ async fn connect_over_the_real_relay() {
         },
     )
     .await;
+
+    // A second swap, now that the vault has moved: the account signs and
+    // publishes its baseline at the generation it established and hands the
+    // wallet its witness inside the request (SoFi Amendment S24). The wallet
+    // already holds the vault, so it walks on from what it holds; the
+    // request still carries, signs and decodes as it must.
+    let era_before = wallet.holds("ERA").await;
+    let again = ask(
+        &game,
+        &session,
+        Kind::Swap(pb::ConnectSwapV1 {
+            token_in: era().to_vec(),
+            token_out: wild.to_vec(),
+            amount_in: 100,
+            min_amount_out: 1,
+            vault_witnesses: Vec::new(),
+        }),
+    )
+    .await;
+    let swapped = answered(&game, &session, again, "the second swap runs").await;
+    assert_eq!(
+        outcome(&swapped),
+        pb::ConnectOutcome::CarriedOut,
+        "{}",
+        swapped.reason
+    );
+    assert_eq!(wallet.holds("ERA").await, era_before - 100);
+    assert!(
+        game.logged()
+            .contains("published the baseline at generation"),
+        "the account signed and published its baseline for the second swap"
+    );
 
     // Outside the grant: ERA was never payable to the game. It waits for the
     // player, who declines it on the wallet.
