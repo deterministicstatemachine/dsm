@@ -517,6 +517,17 @@ used for one input within and across signing runs of one key
 (`adrs_bytes_injective`). Canonical-byte injectivity of every signed DSM
 wrapper and domain separation across them: `WrapperInjective.lean`.
 
+Multi-key (`MultiKey.lean`). DSM signs each step with a fresh ephemeral key
+whose seed is derived from chain state. In the multi-key game the adversary
+sees every public key, queries any key adaptively and wins by a fresh forgery
+under any one. `multi_key_reduction` (and `multi_key_reduction_seeds`, keys
+generated as `generate_keypair_from_seed` does) bounds the forgery count by
+the sum over keys of each key's four-event count, for ANY joint distribution of
+seeds and adversary coins, correlated or not; no hybrid or premise is used.
+`MultiKeyChecks.lean` shows the game is winnable under an insecure oracle and
+that freshness is per key. Bounding each key's events under correlated seeds
+is again a primitive question (multi-target, with distinct PK.seeds).
+
 What this does not establish. The events and advantages are not bounded: they
 are exactly the assumptions on the primitives (BLAKE3 `derive_key` output
 pseudorandom, keyed BLAKE3 a PRF under a secret key, keyed BLAKE3 under the
