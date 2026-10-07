@@ -3032,16 +3032,38 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-DSM-0310 to MR-DSM-0317 | — | Missing | Added by Amendment A15. |
 | MR-SOFI-0397 to MR-SOFI-0403 | — | Missing | Added by Amendment S23. |
 
+### 6.79 A fresh reader still replayed a vault's whole history: the owner baseline (`feat/computed-escrow-sdk`, SoFi Amendment S24, DSM Amendment A15 refinement, 2026-10-07)
+
+**The finding.** On the A16 phones (2026-10-07), after §6.78's phase A, a fresh wallet still established every generation of a 27-generation vault before its first swap: catch-up 18–25 s of a 32–38 s swap, growing with every trade. The trader and the verifier both rebuilt the vault's whole tree from cached leaves (`sofi_vault_head::tree_at_head`, `SofiReads::vault_leaves_at`), so a reader could stand only where it had walked every generation.
+
+**The ruling.** Owner, 2026-10-07, from the SoFi paper (Def 6.1, Req 6.2, Req 6.3, the composition-depth boundary): a reader that holds nothing starts from the latest authenticated owner baseline; each later generation is authenticated by its own transition evidence; the proof material is constant — the root, the state leaf with its path, the reader's own relationship proof — and is advanced through each receipt; no zero-knowledge, recursion, server proving or history replay. The authority position is baseline authentication material, kept out of the frontier so it is never economic identity.
+
+**The specification.** SoFi Amendment S24 (§30, with §11, §14.1, §14.2), DSM Amendment A15's refinement (§43).
+
+**Built.**
+- *Core* (`dsm::sofi::frontier`): the three objects with strict decoders; `authenticate_frontier_owner`, the one constructor of `VerifiedFrontier`; `VaultWitness` (genesis, baseline, recorded, advance); `dsm::merkle::batch_fold::advance_path`; `VaultChain::from_baseline` and the chain's base generation; the authenticated-root mode (`validation::vault_leaves_from_core`, `SofiReads::vault_state_at`, `SofiReads::recorded_baseline`).
+- *SDK*: `client_db::sofi_vault_head` (the witness advanced in the transaction that records each generation, with a contradiction quarantining the vault; adoption only into an empty record; state at a root; quarantine); `sdk::vault_baseline` (the owner signs, publishes and offers; the reader authenticates every candidate at the generation, adopts one frontier, quarantines two, refuses a contradicting witness); `sofi_flow::head_of` stands on the witness, and `vault_core` takes its paths from it; DSM Connect quote and swap requests carry the account's witnesses (`ConnectVaultWitnessV1`).
+- *CI*: `sofi_validated_root_constructors.sh` [7].
+
+**Status.** Measured on storage nodes: a fresh reader adopting the baseline at the head makes the same number of storage reads, and is handed a witness of the same size, at generation 2 and at generation 4 (`a_fresh_reader_reads_the_same_at_any_vault_age`). MR-SOFI-0410 is Partial: the account publishes its baseline at its recorded head when it issues a quote or a swap rather than after each realized generation, and answers witnesses only inside DSM Connect requests. A reader that already holds an older record of a vault walks it forward rather than adopting a newer baseline.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-SOFI-0404 to MR-SOFI-0409, MR-SOFI-0411 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
+| MR-SOFI-0410 | — | Partial | Published on demand at the recorded head; witnesses only inside Connect requests. |
+| MR-DSM-0318 | — | Met | The vault's phase C is S24's baseline and authenticated-root mode. |
+| MR-DSM-0316 | Missing | Missing | Scoped to unowned lineages (the native reserve); not built. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 317 | 128 | 97 | 41 | 0 | 33 | 18 |
-| SoFi (MR-SOFI) | 403 | 273 | 90 | 19 | 4 | 17 | 0 |
+| DSM high-level (MR-DSM) | 318 | 129 | 97 | 41 | 0 | 33 | 18 |
+| SoFi (MR-SOFI) | 411 | 280 | 91 | 19 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **1024** | **475** | **206** | **117** | **4** | **68** | **154** |
+| **All** | **1033** | **483** | **207** | **117** | **4** | **68** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3364,8 +3386,9 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-DSM-0313 | Met | `dsm_sdk::sdk::lineage_discovery::discover` | `dsm_sdk::handlers::faucet_flow_tests::a_flooded_epoch_index_makes_discovery_unavailable_and_nothing_else` | DSM Amendment A15 (§6.78). Mutation red (matrix). |
 | MR-DSM-0314 | Met | `dsm::shared_lineage::GenerationChain`; `dsm_sdk::sdk::lineage_discovery::discover` | `dsm::shared_lineage::tests::discovery_code_names_no_constructor_of_established_state`; `dsm_sdk::sdk::lineage_discovery::tests::discovery_code_names_no_constructor_of_established_state` | DSM Amendment A15 (§6.78). Also CI `sofi_validated_root_constructors.sh` [6]. |
 | MR-DSM-0315 | Partial | `dsm::shared_lineage::GenerationChain::head` | `dsm::shared_lineage::tests::a_checkpoint_end_matches_only_the_head_the_walk_reached` | DSM Amendment A15 (§6.78). The head is computed; SoFi does not yet consume it. |
-| MR-DSM-0316 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
+| MR-DSM-0316 | Missing | — | — | DSM Amendment A15 (§6.78); scoped to unowned lineages (§6.79). Not built. |
 | MR-DSM-0317 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
+| MR-DSM-0318 | Met | `dsm::sofi::frontier`; `dsm::sofi::resolution::VaultChain::from_baseline` | `dsm_sdk::handlers::node_e2e_tests::a_wallet_that_holds_nothing_starts_at_the_owners_baseline_and_trades`; `dsm_sdk::handlers::node_e2e_tests::a_fresh_reader_reads_the_same_at_any_vault_age` | DSM Amendment A15 refinement (§6.79). |
 
 ### 8.2 SoFi settlement specification
 
@@ -3774,6 +3797,14 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-SOFI-0401 | Partial | `dsm_sdk::sdk::vault_history::walk` | `dsm_sdk::handlers::node_e2e_tests::a_vault_history_read_ahead_establishes_exactly_what_the_walk_does` | SoFi Amendment S23 (§6.78). The end comparison is not made. |
 | MR-SOFI-0402 | Met | `dsm_sdk::sdk::lineage_discovery::discover` | `dsm_sdk::handlers::faucet_flow_tests::a_flooded_epoch_index_makes_discovery_unavailable_and_nothing_else` | SoFi Amendment S23 (§6.78). |
 | MR-SOFI-0403 | Met | `dsm_sdk::sdk::native_reserve::walk_reserve` | `dsm_sdk::handlers::faucet_flow_tests::a_reserve_walker_publishes_a_hint_for_each_generation_it_established`; `dsm_sdk::handlers::faucet_flow_tests::lying_reserve_hints_change_nothing_a_walk_establishes` | SoFi Amendment S23 (§6.78). |
+| MR-SOFI-0404 | Met | `dsm::sofi::wire::objects::VaultFrontierV1`; `dsm::sofi::wire::objects::OwnerBaselineAuthV1`; `dsm::sofi::wire::objects::VaultFrontierWitnessV1` | `dsm::sofi::frontier::tests::the_baseline_objects_decode_strictly` | SoFi Amendment S24 (§6.79). |
+| MR-SOFI-0405 | Met | `dsm::sofi::frontier::authenticate_frontier_owner` | `dsm::sofi::frontier::tests::an_owner_baseline_authenticates_its_frontier`; `dsm::sofi::frontier::tests::a_baseline_is_refused_for_each_broken_binding` | SoFi Amendment S24 (§6.79). |
+| MR-SOFI-0406 | Met | `dsm::sofi::frontier::VaultWitness::from_baseline` | `dsm::sofi::frontier::tests::a_witness_is_accepted_only_under_the_authenticated_root` | SoFi Amendment S24 (§6.79). |
+| MR-SOFI-0407 | Met | `dsm::sofi::validation::vault_leaves_from_core`; `dsm::sofi::resolution::VaultChain::from_baseline` | `dsm_sdk::handlers::node_e2e_tests::a_wallet_that_holds_nothing_starts_at_the_owners_baseline_and_trades` | SoFi Amendment S24 (§6.79). |
+| MR-SOFI-0408 | Met | `dsm::merkle::batch_fold::advance_path`; `dsm::sofi::frontier::VaultWitness::advance` | `dsm::sofi::smt::fold::tests::a_held_leaf_advances_through_ten_write_sets_it_is_not_in`; `dsm::sofi::frontier::tests::a_witness_advances_through_ten_other_traders_trades`; `dsm::sofi::frontier::tests::an_advance_the_write_set_does_not_prove_is_refused` | SoFi Amendment S24 (§6.79). |
+| MR-SOFI-0409 | Met | `dsm_sdk::sdk::vault_baseline::adopt`; `dsm_sdk::storage::client_db::sofi_vault_head::quarantine` | `dsm_sdk::handlers::node_e2e_tests::an_owner_that_signed_two_frontiers_at_one_generation_is_quarantined`; `dsm_sdk::handlers::node_e2e_tests::a_contradicting_witness_is_refused_and_a_missing_baseline_is_walked` | SoFi Amendment S24 (§6.79). |
+| MR-SOFI-0410 | Partial | `dsm_sdk::sdk::vault_baseline::offer`; `dsm_sdk::handlers::connect_routes` | `dsm_sdk::handlers::node_e2e_tests::a_wallet_that_holds_nothing_starts_at_the_owners_baseline_and_trades` | SoFi Amendment S24 (§6.79). Published on demand at the recorded head; witnesses only inside Connect requests. |
+| MR-SOFI-0411 | Met | `dsm::sofi::derive::vault_baseline_locator`; `dsm_sdk::sdk::vault_baseline::publish` | `dsm_sdk::handlers::node_e2e_tests::a_fresh_reader_reads_the_same_at_any_vault_age` | SoFi Amendment S24 (§6.79). |
 
 ### 8.3 dBTC native specification
 
