@@ -335,9 +335,9 @@ adversary runtime/primitive-query cost model is still required for a computation
 security theorem. No numerical or post-quantum advantage bound is asserted.
 
 The executable game calls the existing `generateKeypair`, `sign` and `verify`
-model definitions with an explicit deterministic Oracle Id parameter. It does
-not supply an independent concrete BLAKE3/ChaCha implementation or close the
-model-to-Rust gap; the current transcript and partial extraction boundaries
+model definitions with an explicit deterministic Oracle Id parameter. A separate
+concrete BLAKE3 evaluator is now available; the game has not yet been universally
+specialized to it, and ChaCha remains abstract. The transcript and extraction boundaries
 continue to apply. The adversary's finite random tape is sampled independently
 of the uniform master seed. Kernel-checked results establish master-seed sampler
 bijectivity, legal-query rejection, the attempt budget, public-key preservation,
@@ -431,10 +431,24 @@ input, truncation and trailing data. Generated transcripts contain **synthetic
 secret material**; do not enable capture for production keys or upload live-key
 traces. They are test artifacts, not DSM protocol wire objects.
 
-The primitive **outputs** in a transcript are trusted Rust BLAKE3/ChaCha results,
-not Lean implementations of those primitives. Thus the check validates algorithmic
-control flow and construction requests **conditional on those results**. It does
-not independently test BLAKE3 compression, ChaCha, or their security.
+The original replay checker validates algorithmic control flow and construction
+requests conditional on recorded primitive outputs. A second checker now
+independently recomputes every BLAKE3 output using `Blake3.lean`; only ChaCha
+expansion remains replayed. The concrete model passes the 35 official vector
+lengths in all three BLAKE3 modes, including 131-byte XOF outputs. It matches
+517,251 BLAKE3 requests across all 114 DSM transcripts. Altered output bytes and
+unknown modes are rejected by independent recomputation controls.
+
+`Blake3Proofs.lean` proves exact output length for root expansion and every
+accepted request, and XOF prefix consistency for any two ordered lengths.
+`Blake3.lean` proves the request-to-definition wiring, equal 32-byte derive/XOF
+results, distinct context strings and the deployed 34-/49-byte H_msg lengths.
+These are functional model theorems, with no cryptographic axioms. Compression
+and tree equivalence to an independent formal specification, defaulted-access
+shape safety, universal Rust equivalence and security reductions remain open.
+Pinned primary sources and the per-function cross-reference are in
+`SPHINCS_EXTERNAL_PROOF_ARTIFACTS.md`. The paper's <=32-byte output bound does not
+directly apply to the deployed message XOFs.
 
 ## Remaining trusted computing base and review obligations
 

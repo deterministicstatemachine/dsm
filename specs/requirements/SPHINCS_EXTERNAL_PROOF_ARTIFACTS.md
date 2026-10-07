@@ -73,3 +73,62 @@ remaining `base_2b` digit-value equivalence. DSM now proves termination and exac
 output length of both extracted Rust parser loops under the exact input bit
 budget. Digit-value equivalence and concrete allocator/binary behavior remain
 separate obligations. The guide supplies techniques, not proofs of DSM.
+
+## BLAKE3 model cross-reference
+
+Official sources inspected: [specification](https://github.com/BLAKE3-team/BLAKE3-specs/blob/ac784c9f22a48327782f042ec2f4d8126b3b1744/blake3.tex)
+at `ac784c9f22a48327782f042ec2f4d8126b3b1744`, and
+[reference implementation](https://github.com/BLAKE3-team/BLAKE3/blob/f55849f89cd85083c1c9daa2c5de20766f309c00/reference_impl/reference_impl.rs)
+and official vectors at `f55849f89cd85083c1c9daa2c5de20766f309c00`.
+DSM actually resolves crate **1.8.5**, registry checksum
+`0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce`.
+The downloaded upstream head is a reference source, not a substitute for that
+locked production dependency. Its local `src/lib.rs` was also inspected.
+
+`lean4/Sphincs/Blake3.lean` now defines an executable compression/tree/XOF model
+using UInt32 arithmetic and no external hash implementation. The existing
+`Request` model remains available for abstract functional proofs. `evaluate`
+connects its BLAKE3 requests to the new concrete model, rejecting malformed keys
+and unsupported modes. ChaCha20 expansion remains a separate mode and obligation.
+
+| Actual DSM operation | Existing model | Concrete BLAKE3 lowering |
+| --- | --- | --- |
+| `derive_key` / `Hasher::new_derive_key` | request mode 0 | `contextKey`: IV + context-mode flag 32; material: context result as key + material-mode flag 64; take 32 output bytes |
+| `keyed` / `Hasher::new_keyed` | request mode 1 | 32 key bytes parsed as eight little-endian words; keyed-mode flag 16; take n bytes |
+| `thash` | `thash` request | Derived public-seed key; exact `ADRS || input` bytes |
+| `prf` | `prf` request | Derived secret-seed key; exact `PK.seed || ADRS` bytes |
+| `prf_msg` | signing's derived message key and keyed request | Exact deterministic `PK.seed || message`; no extra randomized input |
+| `h_msg` / `finalize_xof` | request mode 2 / `hmsg` | Same two-stage derive construction; exact `R || PK.seed || PK.root || message`; parameter-dependent XOF length |
+| certificate/device wrapper hashing | request mode 4 | IV, ordinary hash mode, existing canonical wrapper bytes |
+
+Cross-references in the official reference source: `g`/`round`/`compress` map to
+`mix`/`round`/`compress`; `Output::chaining_value` and `root_output_bytes` map to
+`Output.chaining` and `Output.root`; `ChunkState` maps to `chunk`; parent CV
+stack merging maps to `parent`, `merge` and `tree`. Root output uses its own
+output-block counter. DSM address serialization remains big-endian; BLAKE3
+compression words and output bytes are little-endian. Those are distinct layers.
+
+Kernel-checked wiring theorems connect `deriveKey`, `thash`, `prf` and `hmsg`
+requests to these concrete definitions. `derive_xof_same_32` proves that mode 0
+and mode 2 are identical at 32 output bytes for equal context/material. Context
+string distinctness is proved; independence of derived outputs is not implied.
+`Blake3Proofs.lean` proves exact output widths for the concrete model and all
+accepted requests, plus prefix consistency of arbitrary root XOF lengths. These
+theorems require no cryptographic assumption. The official-vector and
+Rust-transcript comparisons are tests, not universal proofs of compression
+correctness, tree correctness or the Rust crate's equivalence to the model.
+Defaulted array accesses still require a separate shape-safety proof.
+
+The specification's security target is 128 bits, despite its 256-bit key width.
+Its displayed mode-indifferentiability bound explicitly restricts output length
+to at most 256 bits. DSM's deployed `SPX128f` and `SPX256f` H_msg lengths are
+**34 and 49 bytes**, now computed by a kernel-checked theorem. That restricted
+bound therefore cannot simply be used for these XOF calls. The paper separately
+discusses full outputs; a transfer proof is still required. This does not establish
+an attack, or determine DSM's final security level.
+
+Remaining computational obligations: adapt public-key-dependent message
+compression, correlated KDF outputs, truncation, multi-target/different-tweak
+hash-family experiments and ChaCha20 expansion to the SPHINCS reduction. A
+concrete algorithm definition alone does not prove those properties, and no
+independent-random-oracle premise was introduced here.
