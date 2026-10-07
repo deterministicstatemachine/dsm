@@ -46,8 +46,24 @@ BLAKE3 specification's derive-key claim), then keyed BLAKE3 as a PRF (its
 keyed-hash claim). This is the closest match. Two caveats: the claims are design
 claims of the BLAKE3 authors, not reductions to a smaller assumption; and the
 key carries only the seed's entropy (n bytes: 128 bits for SPX128f), which is
-consistent with the target level but must appear in the bound. Owed: the
-written two-step hybrid with its advantage terms.
+consistent with the target level but must appear in the bound.
+
+**Proved (audit-prep, 2026-10-07).** Both secret-keyed roles are replaced by
+truly random functions in four exact hops, each with an explicit
+distinguisher proved to reproduce the previous game (Lean, core axioms only):
+
+| Hop | Replaces | Theorem | Gap term |
+| --- | --- | --- | --- |
+| 1 | ChaCha20 expansion of the master seed by uniform 3n bytes | `seed_prg_hybrid_bound` | PRG advantage of `seedDistinguisher` |
+| 2a | `derive_key("…/prf", SK.seed)` by a uniform key | `prf_key_hybrid_bound` | KDF advantage of `keyDistinguisher` |
+| 2b | keyed BLAKE3 under that key by a random function on PK.seed ‖ ADRS | `prf_function_hybrid_bound` | PRF advantage of `functionDistinguisher` |
+| 3a | `derive_key("…/prf-msg", SK.prf)` by a uniform key | `msg_key_hybrid_bound` | KDF advantage of `msgKeyDistinguisher` |
+| 3b | keyed BLAKE3 computing R by a random function on PK.seed ‖ M | `msg_function_hybrid_bound` | PRF advantage of `msgFunctionDistinguisher` |
+
+After hop 3b neither SK.seed nor SK.prf appears in the game. What remains
+assumed for these roles is exactly BLAKE3's stated claims: `derive_key` output
+indistinguishable from uniform, and keyed BLAKE3 a PRF. The simulation step
+for every signer and verifier component is `OracleAgree.lean`.
 
 **Th = F, H, T_l (public key).** This is where the BLAKE3 PRF claim says
 nothing. `K_th` is computed from PK.seed, which is public, so keyed BLAKE3 here
