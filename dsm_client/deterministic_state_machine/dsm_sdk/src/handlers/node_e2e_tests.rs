@@ -2983,6 +2983,67 @@ async fn trades_back_to_back_resolve_and_the_owner_closes_after_them() {
     assert!(tkn_held > 0, "B holds what its trades took");
 }
 
+/// A vault's history is read at the cycles its seats already closed. The
+/// owner walks three back-to-back trades from the vault's genesis with
+/// nothing kept: every cell the walk reads was committed in full when the
+/// trades settled, so no read asks a seat to close a cycle or a member to
+/// sync its mirror, and the walk still establishes all three generations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_vault_walk_over_settled_history_closes_no_cycle() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    for _ in 0..3 {
+        realized_trade(&p, &m, 5).await;
+    }
+
+    let (own, parents) = standing_of(&p.a);
+    {
+        let binding = crate::storage::client_db::get_connection().expect("A's store");
+        let conn = binding.lock().expect("A's store is not poisoned");
+        conn.execute(
+            "DELETE FROM sofi_vault_leaf WHERE vault_id = ?1",
+            [m.vault_id.as_slice()],
+        )
+        .expect("forget the vault's leaves");
+        conn.execute(
+            "DELETE FROM sofi_vault_root WHERE vault_id = ?1",
+            [m.vault_id.as_slice()],
+        )
+        .expect("forget the vault's generations");
+    }
+    crate::sdk::economic_registers::validated_peers().forget();
+    crate::sdk::final_reads::forget_everything();
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let chain = ctx.verifier().chain(&m.vault_id).expect("the chain");
+    assert_eq!(
+        chain.head().map(|(generation, _)| generation),
+        Some(3),
+        "the walk established all three trades"
+    );
+    let requests: Vec<String> = p.nodes.nodes.iter().flat_map(|n| n.requests()).collect();
+    assert!(
+        requests.iter().any(|r| r.starts_with("GET /api/v2/cell/")),
+        "the walk read the vault's cells"
+    );
+    let writes: Vec<&String> = requests
+        .iter()
+        .filter(|r| r.starts_with("POST /api/v2/bytecommit/"))
+        .collect();
+    assert!(
+        writes.is_empty(),
+        "settled history closes no cycle and syncs no mirror: {} requests, e.g. {:?}",
+        writes.len(),
+        writes.first()
+    );
+}
+
 /// SoFi Amendment S16: discovery carries no authority. Under ERA's vault
 /// token locator, beside A's real ERA/TKN vault, sit what anyone may append:
 /// bytes that are no genesis; the genesis of a vault B claims to own but
