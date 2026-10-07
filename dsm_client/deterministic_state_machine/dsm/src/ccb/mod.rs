@@ -281,6 +281,18 @@ pub mod class {
     /// `0x006B` — a Start (side B) or a Withdraw (side A) at a match's start
     /// cell (SoFi Amendment S22).
     pub const ESCROW_MATCH_START: u16 = 0x006B;
+    /// `0x006C` — a shared lineage's genesis (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENESIS: u16 = 0x006C;
+    /// `0x006D` — a shared lineage's generation (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENERATION: u16 = 0x006D;
+    /// `0x006E` — a generation hint, discovery only (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENERATION_HINT: u16 = 0x006E;
+    /// `0x006F` — a 32-generation checkpoint, discovery only (SoFi
+    /// Amendment S23).
+    pub const SHARED_LINEAGE_CHECKPOINT: u16 = 0x006F;
+    /// `0x0070` — a segment's read plan, discovery only (SoFi Amendment
+    /// S23).
+    pub const SHARED_LINEAGE_TRANSITION_BUNDLE: u16 = 0x0070;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones
