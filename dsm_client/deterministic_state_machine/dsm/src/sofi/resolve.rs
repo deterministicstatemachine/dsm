@@ -54,8 +54,8 @@ use super::facts::{
     TraderAtParent,
 };
 use super::lineage::{
-    advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted, genesis_root,
-    vault_leaves_at_genesis, AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
+    advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted,
+    AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
 };
 use super::publication::{recognize_setup, Signed};
 use super::registration::{
@@ -67,8 +67,8 @@ use super::resolution::{
 };
 use super::storage::{Discovered, Resolved};
 use super::validation::{
-    route_validation, setup_lineage, vault_post_states, Evidence, EvidenceNeeds, Missing,
-    SetupLineage, VaultLeafPre, VaultPostState,
+    route_validation, setup_lineage, vault_leaves_from_core, vault_post_states, Evidence,
+    EvidenceNeeds, Missing, SetupLineage, VaultLeafPre, VaultPostState,
 };
 use super::wire::{
     CoreEntry, ParentClaimRef, SettlementBody, SettlementPreimage, SofiResolutionClaim, TraderCore,
@@ -207,15 +207,22 @@ pub trait SofiReads {
         device_id: &D32,
         position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure>;
-    /// This device's own record of vault `vault_id`'s leaves at the
-    /// generation it established `root` at, for `keys` — a record that
-    /// reproduces `root`, or `None`.
-    fn vault_leaves_at(
+    /// This device's own record of vault `vault_id`'s state leaf at the
+    /// generation it established `root` at, or `None` when it established no
+    /// generation there. Every other leaf an operation reads is proven by
+    /// its core's own path against that root (SoFi Amendment S24).
+    fn vault_state_at(
         &self,
         vault_id: &D32,
         root: &D32,
-        keys: &BTreeSet<D32>,
-    ) -> Result<Option<VaultLeaves>, ReadFailure>;
+    ) -> Result<Option<VaultStateLeaf>, ReadFailure>;
+    /// The owner baseline this device adopted for `genesis`'s vault, as Core
+    /// authenticates it from this device's record now (SoFi Amendment
+    /// S24), or `None` when it adopted none.
+    fn recorded_baseline(
+        &self,
+        genesis: &AcceptedVaultGenesis,
+    ) -> Result<Option<crate::sofi::frontier::VerifiedFrontier>, ReadFailure>;
     /// The root trader `(genesis, device_id)`'s lineage selected AT
     /// `position`, and the reference a later `P` names it by, by
     /// frontier-relative verification of that lineage (DSM Amendment A8;
@@ -1217,8 +1224,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
 
         let mut vault_leaves: VaultLeaves = BTreeMap::new();
         let mut token_policies: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
-        for (vault_id, keys) in &needs.vaults {
-            let Some(state) = self.vault_pre(preimage, vault_id, keys, &mut vault_leaves)? else {
+        for vault_id in needs.vaults.keys() {
+            let Some(state) = self.vault_pre(preimage, vault_id, &mut vault_leaves)? else {
                 continue;
             };
             for (class, addr) in EvidenceNeeds::policies_of(&state) {
@@ -1296,25 +1303,26 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     }
 
     /// The pre values of vault `v`'s leaves at the root the operation's core
-    /// names, into `vault_leaves`, and the vault state they hold. At `R_0`
-    /// they are the accepted genesis; past it, the generation this device
-    /// established at the root the core was built on, which must reproduce
-    /// that root. `None` when they are not in hand.
+    /// names, into `vault_leaves`, and the vault state they hold (SoFi
+    /// Amendment S24, the authenticated-root mode). The state is the accepted
+    /// genesis's at `R_0`, and past it the one this device established at
+    /// that root; every other leaf is proven by the core's own path against
+    /// the root ([`vault_leaves_from_core`]). `None` when the state is not in
+    /// hand.
     fn vault_pre(
         &self,
         preimage: &SettlementPreimage,
         vault_id: &D32,
-        keys: &BTreeSet<D32>,
         vault_leaves: &mut VaultLeaves,
     ) -> Result<Option<VaultStateLeaf>, VerifierFailure> {
-        let Some(pre_root) = preimage
+        let Some(core) = preimage
             .dlv_cores()
             .iter()
             .find(|core| core.vault_id() == vault_id)
-            .map(|core| *core.pre_root())
         else {
             return Ok(None);
         };
+        let pre_root = *core.pre_root();
         let genesis = match self.vault_genesis(vault_id)? {
             VaultGenesis::Accepted(genesis) => genesis,
             VaultGenesis::NotPublished | VaultGenesis::OwnerUnresolved(..) => return Ok(None),
@@ -1325,18 +1333,15 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
-        if genesis_root(vault_id, genesis.state()).ok() == Some(pre_root) {
-            vault_leaves.extend(vault_leaves_at_genesis(vault_id, genesis.state(), keys));
-            return Ok(Some(genesis.state().clone()));
-        }
-        let Some(leaves) = self.reads.vault_leaves_at(vault_id, &pre_root, keys)? else {
-            return Ok(None);
+        let state = if *genesis.genesis_root() == pre_root {
+            genesis.state().clone()
+        } else {
+            match self.reads.vault_state_at(vault_id, &pre_root)? {
+                Some(state) => state,
+                None => return Ok(None),
+            }
         };
-        let state_key = derive::vault_state_key(vault_id);
-        let Some(VaultLeafPre::State(state)) = leaves.get(&(*vault_id, state_key)).cloned() else {
-            return Ok(None);
-        };
-        vault_leaves.extend(leaves);
+        vault_leaves.extend(vault_leaves_from_core(core, &state));
         Ok(Some(state))
     }
 
@@ -1612,7 +1617,24 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 consumed_by: row.consumed_by,
             })
             .collect();
-        let mut chain = VaultChain::from_recorded(&genesis, &recorded).map_err(|e| {
+        // A record that starts above the genesis starts at the owner
+        // baseline this device adopted (SoFi Amendment S24), authenticated
+        // again now; one that starts at zero starts at the genesis.
+        let anchored = match recorded.first() {
+            Some(first) if first.generation > 0 => match self.reads.recorded_baseline(&genesis)? {
+                Some(baseline) => VaultChain::from_baseline(&baseline, &recorded),
+                None => {
+                    return Err(VerifierFailure::Refused(format!(
+                        "chain: this device's record of vault {} starts at generation {} with \
+                         no baseline it authenticates",
+                        short_id(&vault_id),
+                        first.generation
+                    )))
+                }
+            },
+            _ => VaultChain::from_recorded(&genesis, &recorded),
+        };
+        let mut chain = anchored.map_err(|e| {
             VerifierFailure::Refused(format!(
                 "chain: this device's record of vault {}: {e}",
                 short_id(&vault_id)

@@ -133,6 +133,26 @@ pub const TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR: TaggedHashDomain<'static> =
 pub const TAG_DSM_SOFI_VAULT_GENESIS_OBJECT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/vault-genesis-object/v1");
 
+// ── The owner baseline (SoFi Amendment S24) ────────────────────────────────
+
+/// `c_f = H(tag ‖ CCB(VaultFrontierV1))` — a vault's frontier, economic
+/// state only.
+pub const TAG_DSM_SOFI_VAULT_FRONTIER: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-frontier/v1");
+/// `c_n = H(tag ‖ CCB(OwnerBaselineAuthV1))` — the state commitment an owner
+/// baseline's `AnchorPresentationV3` signs.
+pub const TAG_DSM_SOFI_VAULT_BASELINE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-baseline/v1");
+/// `H(tag ‖ v ‖ u64be(g))` — the locator under which a vault's owner
+/// baselines at generation `g` are indexed. Discovery only.
+pub const TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-baseline-locator/v1");
+/// Immutable-store namespace of a `VaultFrontierV1`, an
+/// `OwnerBaselineAuthV1`, a `VaultFrontierWitnessV1` and an owner baseline's
+/// presentation.
+pub const TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-frontier-object/v1");
+
 // ── Immutable-store namespaces of the published protocol objects (Part II
 //    §10, rebuild step R8). One per kind: the namespace is part of the
 //    address, so bytes of one kind can never be fetched as another. ────────
@@ -217,6 +237,10 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
     TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
     TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+    TAG_DSM_SOFI_VAULT_FRONTIER,
+    TAG_DSM_SOFI_VAULT_BASELINE,
+    TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR,
+    TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
     TAG_DSM_SOFI_SETUP_OBJECT,
     TAG_DSM_SOFI_PRECOMMIT_OBJECT,
     TAG_DSM_SOFI_PREIMAGE_OBJECT,

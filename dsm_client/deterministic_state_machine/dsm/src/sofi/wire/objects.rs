@@ -1496,15 +1496,174 @@ impl VaultRelationshipLeaf {
         out
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         c.envelope(class::SOFI_VAULT_RELATIONSHIP_LEAF, SCHEMA_V1)?;
-        let v = Self {
+        Ok(Self {
             trader_genesis: c.digest32()?,
             trader_device_id: c.digest32()?,
             leaf: c.digest32()?,
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0071 VaultFrontierV1 ─────────────────────────────────────────────────
+
+/// A vault's frontier: its root at one generation (SoFi Amendment S24).
+/// Economic state only — nothing about the owner's authority is in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultFrontierV1 {
+    pub vault_id: D32,
+    pub generation: u64,
+    pub root: D32,
+}
+
+impl VaultFrontierV1 {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_FRONTIER);
+        push_digest32(&mut out, &self.vault_id);
+        push_u64(&mut out, self.generation);
+        push_digest32(&mut out, &self.root);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_FRONTIER, SCHEMA_V1)?;
+        let v = Self {
+            vault_id: c.digest32()?,
+            generation: c.u64()?,
+            root: c.digest32()?,
         };
         finish(&c, v)
+    }
+}
+
+// ── 0x0073 OwnerBaselineAuthV1 ─────────────────────────────────────────────
+
+/// What an owner baseline's anchor signs: a frontier's commitment, and the
+/// owner-authority position its signer is proven at (SoFi Amendment S24).
+/// Authentication material, kept out of the frontier so the owner's
+/// authority lineage is never part of a vault's economic identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnerBaselineAuthV1 {
+    pub frontier_commitment: D32,
+    pub owner_authority_transition_digest: D32,
+}
+
+impl OwnerBaselineAuthV1 {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_OWNER_BASELINE_AUTH);
+        push_digest32(&mut out, &self.frontier_commitment);
+        push_digest32(&mut out, &self.owner_authority_transition_digest);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_OWNER_BASELINE_AUTH, SCHEMA_V1)?;
+        let v = Self {
+            frontier_commitment: c.digest32()?,
+            owner_authority_transition_digest: c.digest32()?,
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x0072 VaultFrontierWitnessV1 ──────────────────────────────────────────
+
+/// `relationship` kind: the trader holds no leaf in the vault's tree.
+const FRONTIER_RELATIONSHIP_ABSENT: u16 = 1;
+/// `relationship` kind: the trader's leaf, present.
+const FRONTIER_RELATIONSHIP_PRESENT: u16 = 2;
+
+/// One trader's relationship under a frontier's root: its leaf and path, or
+/// the path that proves it holds none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrontierRelationship {
+    Present {
+        leaf: VaultRelationshipLeaf,
+        path: Vec<D32>,
+    },
+    Absent {
+        path: Vec<D32>,
+    },
+}
+
+impl FrontierRelationship {
+    pub fn path(&self) -> &[D32] {
+        match self {
+            Self::Present { path, .. } | Self::Absent { path } => path,
+        }
+    }
+}
+
+/// The vault's state leaf with its path, and one trader's relationship proof,
+/// under a frontier's root (SoFi Amendment S24). Constant in size; it carries
+/// no authority, since every path is checked against the root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultFrontierWitnessV1 {
+    pub state_leaf: VaultStateLeaf,
+    pub state_path: Vec<D32>,
+    pub relationship: FrontierRelationship,
+}
+
+impl VaultFrontierWitnessV1 {
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        check_path(&self.state_path)?;
+        check_path(self.relationship.path())?;
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_FRONTIER_WITNESS);
+        out.extend_from_slice(&self.state_leaf.encode()?);
+        push_path(&mut out, &self.state_path);
+        match &self.relationship {
+            FrontierRelationship::Absent { path } => {
+                push_u16(&mut out, FRONTIER_RELATIONSHIP_ABSENT);
+                push_path(&mut out, path);
+            }
+            FrontierRelationship::Present { leaf, path } => {
+                push_u16(&mut out, FRONTIER_RELATIONSHIP_PRESENT);
+                out.extend_from_slice(&leaf.encode());
+                push_path(&mut out, path);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_FRONTIER_WITNESS, SCHEMA_V1)?;
+        let state_leaf = VaultStateLeaf::at(&mut c)?;
+        let state_path = read_path(&mut c)?;
+        let relationship = match c.u16()? {
+            FRONTIER_RELATIONSHIP_ABSENT => FrontierRelationship::Absent {
+                path: read_path(&mut c)?,
+            },
+            FRONTIER_RELATIONSHIP_PRESENT => FrontierRelationship::Present {
+                leaf: VaultRelationshipLeaf::at(&mut c)?,
+                path: read_path(&mut c)?,
+            },
+            kind => {
+                return Err(wire_invalid(SofiWireError::UnknownFrontierRelationship {
+                    kind,
+                }))
+            }
+        };
+        finish(
+            &c,
+            Self {
+                state_leaf,
+                state_path,
+                relationship,
+            },
+        )
     }
 }
 

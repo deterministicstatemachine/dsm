@@ -186,7 +186,7 @@ mod tests {
     // +6 with shared lineages (SoFi Amendment S23): the genesis and generation
     // digests, the vault step digest, the checkpoint digest, the epoch locator
     // and the object namespace.
-    const EXPECTED_TAG_COUNT: usize = 387;
+    const EXPECTED_TAG_COUNT: usize = 391;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

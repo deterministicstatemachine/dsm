@@ -861,6 +861,10 @@ pub struct VaultPostState {
     /// `E` of the operation that consumed `pre_root`: what a recorded
     /// generation names as the consumption that produced it.
     consumed_by: D32,
+    /// The vault core's write set as the fold took it, every path against
+    /// `pre_root`: what a held witness advances through (SoFi Amendment
+    /// S24).
+    entries: Vec<FoldEntry>,
 }
 
 impl VaultPostState {
@@ -900,6 +904,36 @@ impl VaultPostState {
 
     pub fn relationship(&self) -> Option<&(D32, VaultRelationshipLeaf)> {
         self.relationship.as_ref()
+    }
+
+    /// The write set that folds `pre_root` to `root`.
+    pub fn entries(&self) -> &[FoldEntry] {
+        &self.entries
+    }
+}
+
+#[cfg(test)]
+impl VaultPostState {
+    /// A post state stated for a test of what advances through one;
+    /// in-crate only.
+    pub(crate) fn of_write_set_for_test(
+        vault_id: D32,
+        pre_root: D32,
+        root: D32,
+        state: VaultStateLeaf,
+        relationship: Option<(D32, VaultRelationshipLeaf)>,
+        entries: Vec<FoldEntry>,
+    ) -> Self {
+        Self {
+            vault_id,
+            pre_root,
+            pre_generation: state.generation - 1,
+            root,
+            state,
+            relationship,
+            consumed_by: [0xE5; 32],
+            entries,
+        }
     }
 }
 
@@ -979,6 +1013,7 @@ pub fn vault_post_states(
             state: post_state,
             relationship,
             consumed_by: e,
+            entries,
         });
     }
     Ok(out)
@@ -1681,6 +1716,49 @@ fn entry_path(
             reason: "an entry's authentication path is not one sibling per level",
         })
     })
+}
+
+/// The pre values a vault core's leaves held, read from the core's own paths
+/// against its pre-root (SoFi Amendment S24, the authenticated-root mode).
+///
+/// `state` is the vault state this verifier holds at that root. A
+/// relationship entry's leaf is absent exactly when the absent leaf folds to
+/// the pre-root by the entry's path; otherwise it is the leaf the entry's
+/// base names, for this core's trader. Nothing here is taken on trust: the
+/// fold over every entry ([`fold_core`]) accepts the core only when these
+/// values and the paths are one tree under the pre-root, so an absence or a
+/// base the tree does not hold cannot survive it.
+pub fn vault_leaves_from_core(
+    core: &DlvCore,
+    state: &VaultStateLeaf,
+) -> BTreeMap<(D32, D32), VaultLeafPre> {
+    let vault_id = *core.vault_id();
+    let mut out = BTreeMap::new();
+    out.insert(
+        (vault_id, derive::vault_state_key(&vault_id)),
+        VaultLeafPre::State(state.clone()),
+    );
+    for entry in core.entries() {
+        let CoreEntry::Relationship { base, .. } = entry else {
+            continue;
+        };
+        let key = entry.key();
+        // A path that is not one sibling per level proves nothing; the fold
+        // refuses it whatever value is put beside it.
+        let absent_root = entry_path(entry).map(|path| {
+            crate::economic::tree::root_from_path(&key, &crate::economic::tree::ABSENT_LEAF, path)
+        });
+        let pre = match absent_root {
+            Ok(root) if root == *core.pre_root() => VaultLeafPre::Absent,
+            _ => VaultLeafPre::Relationship(VaultRelationshipLeaf {
+                trader_genesis: *core.trader_genesis(),
+                trader_device_id: *core.trader_device_id(),
+                leaf: *base,
+            }),
+        };
+        out.insert((vault_id, key), pre);
+    }
+    out
 }
 
 /// The same for a vault core, where a relationship leaf is the vault's own

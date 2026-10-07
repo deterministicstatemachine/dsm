@@ -293,6 +293,15 @@ pub mod class {
     /// `0x0070` — a segment's read plan, discovery only (SoFi Amendment
     /// S23).
     pub const SHARED_LINEAGE_TRANSITION_BUNDLE: u16 = 0x0070;
+    /// `0x0071` — a vault's frontier `(vault, generation, root)`, which an
+    /// owner baseline binds (SoFi Amendment S24).
+    pub const SOFI_VAULT_FRONTIER: u16 = 0x0071;
+    /// `0x0072` — a vault's state leaf and one trader's relationship proof
+    /// under a frontier's root (SoFi Amendment S24).
+    pub const SOFI_VAULT_FRONTIER_WITNESS: u16 = 0x0072;
+    /// `0x0073` — a frontier commitment and the owner-authority position the
+    /// baseline's signer is proven at (SoFi Amendment S24).
+    pub const SOFI_OWNER_BASELINE_AUTH: u16 = 0x0073;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones
