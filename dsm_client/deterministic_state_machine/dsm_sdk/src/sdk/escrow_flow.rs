@@ -237,7 +237,6 @@ pub async fn create(
     if intent.amount == 0 {
         return Err(refuse("an escrow vault holds a non-zero stake"));
     }
-    let mut timing = crate::util::phase_timing::PhaseTimer::start("escrow.create");
     let (genesis, device_id) = identity(core)?;
     let validated = validated_root_or_activate(core)?;
     let create_position = next_position(validated.economic_position()).map_err(refuse)?;
@@ -249,7 +248,6 @@ pub async fn create(
         let ctx = VerifierContext::new(set, Some((genesis, device_id)), None)?;
         counterpart_linked(set, &ctx.verifier(), &counterpart, &verdict_cell).await?;
     }
-    timing.phase("counterpart");
 
     // `A_T` is the terms' address, which their bytes fix: the genesis names
     // it as derived here, and the terms and the genesis are published
@@ -289,7 +287,6 @@ pub async fn create(
         return Err(refuse("the escrow terms were stored at another address"));
     }
     require_stored("escrow vault genesis", &genesis_published)?;
-    timing.phase("publish");
 
     let operation = produced
         .operation
@@ -310,7 +307,6 @@ pub async fn create(
         Some(BuiltOn::of(&validated)),
     )
     .await?;
-    timing.phase("admission");
     let vault_id = preimage.vault_id();
     record_realized(
         &outcome.new_device_state,

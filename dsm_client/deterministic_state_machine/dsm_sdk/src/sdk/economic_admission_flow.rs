@@ -830,7 +830,6 @@ async fn finish_locked(
     if let Some(outcome) = admission_already_finished(core, &pending)? {
         return Ok(outcome);
     }
-    let mut timing = crate::util::phase_timing::PhaseTimer::start("admission");
     let operation_digest = pending.operation_digest;
     let head = core
         .device_head()
@@ -875,7 +874,6 @@ async fn finish_locked(
     }
     pending.state = EconomicAdmissionState::EvidencePublished;
     core.update_pending_admission_state(&pending)?;
-    timing.phase("evidence");
 
     // The root claim: frozen-or-sign-once BEFORE the first member write.
     let manifest_addr = coords.admission_manifest_addr;
@@ -940,7 +938,6 @@ async fn finish_locked(
         &validated.economic_root(),
     )?;
     let write = register_economic_root(set, &cell, &frozen_root).await?;
-    timing.phase("root-register");
     if !write.reached_leader() {
         return Err(storage_err(
             "root register",
@@ -954,7 +951,6 @@ async fn finish_locked(
     // `C_q`, for one — takes the position, and this admission never lands.
     let settled =
         crate::sdk::economic_registers::root_claim_settlement(set, &cell, &frozen_root).await?;
-    timing.phase("root-final");
     match settled {
         crate::sdk::economic_registers::RootClaimSettlement::Final => {}
         crate::sdk::economic_registers::RootClaimSettlement::Lost { holder } => {
@@ -1015,7 +1011,6 @@ async fn finish_locked(
         &public_key,
     )
     .map_err(|e| DsmError::invalid_operation(format!("economic validation: {e}")))?;
-    timing.phase("validate");
 
     // ── ONE TX: admitted coordinate + leaf cache + clear pending + head ───
     // The cache is the FULL post-transition leaf set with exact state CCBs:
@@ -1054,7 +1049,6 @@ async fn finish_locked(
         }
         cache.into_iter().map(|(k, (v, ccb))| (k, v, ccb)).collect()
     };
-    timing.phase("leaf-cache");
 
     // ── THE INCLUSION PROOF for the leaves this transition wrote ─────────
     //
@@ -1089,7 +1083,6 @@ async fn finish_locked(
         &set.id(),
         &post_admit_artifacts,
     )?;
-    timing.phase("commit");
     if had_post_admit {
         // Land the post-admission objects (the release) on the fleet NOW —
         // the promoted reply delivers later in this same pass, and the
@@ -1101,7 +1094,6 @@ async fn finish_locked(
                 "[economic admission] post-admit publish pass failed (retried by the sweep): {e}"
             );
         }
-        timing.phase("post-admit-publish");
     }
 
     Ok(AdmittedOutcome {
@@ -1453,7 +1445,6 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     // one hop, and each of its credits' sources the same way, so the recorder
     // observes exactly the closure this acceptance depends on. Nothing behind
     // the parent is read.
-    let started = std::time::Instant::now();
     let checked = {
         let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
             .map_err(|e| incomplete(format!("SoFi reads: {e}")))?;
@@ -1487,12 +1478,11 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     log::info!(
         "[acceptance] peer_step_position={sender_economic_position} register_probe_count={} \
          routed_probe_count={} source_step_count={} conditional_extra_hops={} history_steps=0 \
-         frontier_reads=0 acceptance_ms={}",
+         frontier_reads=0",
         cost.register_probes,
         cost.routed_reads,
         cost.source_steps,
         cost.conditional_hops,
-        started.elapsed().as_millis()
     );
     let peer = checked.into_answer();
 

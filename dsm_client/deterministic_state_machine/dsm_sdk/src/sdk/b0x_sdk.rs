@@ -3725,16 +3725,15 @@ mod tests {
             p.fleet.endpoints(),
         )
         .expect("B0xSDK");
-        let started = std::time::Instant::now();
-        sdk.submit_stored_envelope_with_retry(&route, &id, &B0xRetryConfig::default())
-            .await
-            .expect("the members still up take the delivery");
-        let took = started.elapsed();
+        let delivered = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            sdk.submit_stored_envelope_with_retry(&route, &id, &B0xRetryConfig::default()),
+        )
+        .await;
         p.nodes.bring_up(&[first]).await;
-        assert!(
-            took < std::time::Duration::from_secs(3),
-            "the delivery waited {took:?} for the down member's retries"
-        );
+        delivered
+            .expect("the delivery does not wait for the down member's retries")
+            .expect("the members still up take the delivery");
     }
 
     fn encode_via_production_path(params: &B0xSubmissionParams) -> usize {
