@@ -32,7 +32,7 @@ export interface PositionResult {
   state: PositionState;
 }
 
-function positionResult(payload: any): PositionResult {
+export function positionResult(payload: any): PositionResult {
   if (payload.case !== 'sofiPositionResponse') {
     throw new Error(`Expected sofiPositionResponse, got ${payload.case}`);
   }
@@ -55,7 +55,7 @@ function positionResult(payload: any): PositionResult {
   return { position: r.position, state };
 }
 
-/** sofi.createVault (§28): the pair (ordered), both reserves as entered, and the fee. */
+/** sofi.createVault (§28): the two tokens in either order, each reserve as entered, and the fee. Rust orders the pair. */
 export async function createVault(args: {
   tokenA: Bytes32;
   tokenB: Bytes32;

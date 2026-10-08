@@ -69,7 +69,7 @@ export default function App() {
     dsmLogoSrc,
   } = useThemeAssets(runtime.theme);
 
-  const { unlock } = useLockState({ appState: runtime.appState });
+  useLockState({ appState: runtime.appState });
   useBottomNav({ currentScreen: navigation.currentScreen, navigate: navigationStore.navigate });
 
   useEffect(() => navigationStore.installGlobalNavigate(), []);
@@ -156,7 +156,6 @@ export default function App() {
                       handleGenerateGenesis={handleGenerateGenesis}
                       cancelPhraseBackup={cancelPhraseBackup}
                       answerPhraseCheck={answerPhraseCheck}
-                      unlockToWallet={() => { void unlock(); }}
                       menuItems={menuItems}
                       currentMenuIndex={navigation.currentMenuIndex}
                       setCurrentMenuIndex={(next) => navigationStore.setCurrentMenuIndex(next)}

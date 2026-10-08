@@ -361,6 +361,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAllBalance
                 );
             }
 
+            // Nothing the app asks runs while the wallet is locked (S-LOCK).
+            if let Err(locked) =
+                crate::sdk::session_manager::refuse_while_locked("getAllBalancesStrict")
+            {
+                return respond_error(
+                    &mut env,
+                    helpers::JniErrorCode::ProcessingFailed as u32,
+                    &locked,
+                );
+            }
+
             // WebView contract: return raw `BalancesListResponse` bytes on success.
             // This JNI export i now migrated to return FramedEnvelopeV3 (0x03 + Envelope).
             let result = crate::bridge::get_all_balances_strict();
@@ -2214,6 +2225,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
             Some(e) => e,
             None => return std::ptr::null_mut(),
         };
+        // Nothing the app asks runs while the wallet is locked (S-LOCK).
+        if let Err(locked) =
+            crate::sdk::session_manager::refuse_while_locked("acceptBilateralByCommitment")
+        {
+            return error_byte_array(
+                &mut env,
+                helpers::JniErrorCode::ProcessingFailed as u32,
+                &locked,
+            )
+            .into_raw();
+        }
         let jba = unsafe { jba_from(commitment_hash_raw) };
         let bytes = match env.convert_byte_array(&jba) {
             Ok(v) => v,
@@ -2384,6 +2406,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_rejectBilater
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
+            // Nothing the app asks runs while the wallet is locked (S-LOCK).
+            if let Err(locked) =
+                crate::sdk::session_manager::refuse_while_locked("rejectBilateralByCommitment")
+            {
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::ProcessingFailed as u32,
+                    &locked,
+                )
+                .into_raw();
+            }
             let jba = unsafe { jba_from(commitment_hash) };
             let bytes = match env.convert_byte_array(&jba) {
                 Ok(v) => v,
@@ -2546,6 +2579,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_cancelBilater
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
+            // Nothing the app asks runs while the wallet is locked (S-LOCK).
+            if let Err(locked) =
+                crate::sdk::session_manager::refuse_while_locked("cancelBilateralByCommitment")
+            {
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::ProcessingFailed as u32,
+                    &locked,
+                )
+                .into_raw();
+            }
             let jba = unsafe { jba_from(commitment_hash) };
             let ch: [u8; 32] = match env
                 .convert_byte_array(&jba)

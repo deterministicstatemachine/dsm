@@ -34,6 +34,9 @@ mod connect_e2e_tests;
 pub mod connect_routes;
 pub mod contacts_routes;
 #[cfg(test)]
+mod escrow_e2e_tests;
+pub mod escrow_routes;
+#[cfg(test)]
 mod faucet_flow_tests;
 pub mod faucet_routes;
 #[cfg(test)]
@@ -63,7 +66,7 @@ pub mod system_routes;
 #[cfg(test)]
 mod token_adoption_tests;
 #[cfg(test)]
-mod token_create_tests;
+pub(crate) mod token_create_tests;
 pub mod token_routes;
 pub mod transfer_helpers;
 pub mod wallet_routes;

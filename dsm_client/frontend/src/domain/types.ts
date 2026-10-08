@@ -50,7 +50,9 @@ export type DomainTxType =
   | 'vault_create'
   | 'sofi_setup'
   | 'sofi_trade'
-  | 'sofi_close';
+  | 'sofi_close'
+  | 'escrow_lock'
+  | 'escrow_release';
 
 /** One token a token or SoFi event moved, as Rust reported it. */
 export type DomainTokenMove = {

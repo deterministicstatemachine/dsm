@@ -176,7 +176,9 @@ mod tests {
     // +6 with a Web2 application connected to a wallet (DSM Amendment A11):
     // the offer, its digest, the accept, the session id, the request and the
     // response. The endpoint's certificate pin is the TLS certificate hash.
-    const EXPECTED_TAG_COUNT: usize = 359;
+    // +9 with escrow vaults (SoFi Amendment S21): `DSM/external/v1` and the
+    // eight `DSM/escrow/*` domains.
+    const EXPECTED_TAG_COUNT: usize = 368;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

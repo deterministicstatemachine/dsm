@@ -36,14 +36,20 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
     TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
 };
+use crate::common::domain_tags::{
+    TAG_DSM_ESCROW_CELL_LOCATOR, TAG_DSM_ESCROW_STATEMENT_LOCATOR, TAG_DSM_ESCROW_TERMS_OBJECT,
+    TAG_DSM_ESCROW_VERDICT_OBJECT,
+};
 use crate::crypto::domain::TaggedHashDomain;
 use crate::storage_object::immutable_addr;
 
 use super::derive;
+use super::escrow;
 use super::signature::{verify_fulfillment, verify_precommit, verify_setup};
 use super::wire::{
-    DlvPolicyFulfillmentBody, SettlementPreimage, SignedSofiObject, SofiSetupBody, SofiWireError,
-    TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, VaultGenesisPreimage,
+    DlvPolicyFulfillmentBody, EscrowTerms, EscrowVerdict, SettlementPreimage, SignedSofiObject,
+    SofiSetupBody, SofiWireError, TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody,
+    VaultGenesisPreimage,
 };
 
 type D32 = [u8; 32];
@@ -123,6 +129,22 @@ pub enum Publication<'a> {
     /// found by the address `𝒞_E^pre` names. The exercise carries it too;
     /// publishing it lets a reader that holds only the closure fetch it.
     TraderPreBalance(&'a TraderPreBalance),
+    /// An escrow vault's terms, bare, found by the address all three of its
+    /// state's slots name (SoFi Amendment S21).
+    EscrowTerms(&'a EscrowTerms),
+    /// An escrow vault's genesis preimage, bare, indexed under
+    /// `vault_genesis_locator(v)` and under the cell locator of the verdict
+    /// cell its terms bind it to, so a counterparty finds exactly the vaults
+    /// linked to its own (SoFi Amendment S21). Its acceptance binds it to the
+    /// owner's validated creation, so publishing it asserts nothing.
+    EscrowVaultGenesis {
+        preimage: &'a VaultGenesisPreimage,
+        terms: &'a EscrowTerms,
+    },
+    /// A verdict holding the signatures gathered so far, bare, indexed under
+    /// the statement locator of its cell and outcome (SoFi Amendment S21). It
+    /// carries no authority: only a verdict recognized at the cell decides.
+    EscrowVerdict(&'a EscrowVerdict),
 }
 
 fn envelope(
@@ -162,6 +184,9 @@ impl Publication<'_> {
             Self::VaultGenesis { preimage, .. } => preimage.encode(),
             Self::VaultPolicy { bytes, .. } => Ok(bytes.to_vec()),
             Self::TraderPreBalance(balance) => Ok(balance.encode()),
+            Self::EscrowTerms(terms) => Ok(terms.encode()),
+            Self::EscrowVaultGenesis { preimage, .. } => preimage.encode(),
+            Self::EscrowVerdict(verdict) => Ok(verdict.encode()),
         }
     }
 
@@ -180,6 +205,11 @@ impl Publication<'_> {
                 VaultPolicyClass::Release => TAG_DSM_RELEASE_POLICY_OBJECT,
             },
             Self::TraderPreBalance(_) => TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
+            Self::EscrowTerms(_) => TAG_DSM_ESCROW_TERMS_OBJECT,
+            // An escrow vault's genesis is a vault genesis preimage like any
+            // other, found under the same namespace.
+            Self::EscrowVaultGenesis { .. } => TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+            Self::EscrowVerdict(_) => TAG_DSM_ESCROW_VERDICT_OBJECT,
         }
     }
 
@@ -246,7 +276,42 @@ impl Publication<'_> {
                     token(market.token_b()),
                 ]
             }
-            Self::VaultPolicy { .. } | Self::TraderPreBalance(_) => Vec::new(),
+            Self::EscrowVaultGenesis { preimage, terms } => {
+                // The cell a vault is found by is the one its slots commit it
+                // to: other terms would index it under a cell it is not
+                // bound to.
+                let addr = escrow::terms_address(terms);
+                let state = &preimage.state;
+                if state.market_policy != addr
+                    || state.fee_policy != addr
+                    || state.release_policy != addr
+                {
+                    return Err(SofiWireError::EscrowTermsNotCommitted);
+                }
+                vec![
+                    Locator {
+                        index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                        locator: derive::vault_genesis_locator(&preimage.vault_id()),
+                    },
+                    Locator {
+                        index_namespace: TAG_DSM_ESCROW_CELL_LOCATOR.source_bytes(),
+                        locator: escrow::cell_locator(&escrow::verdict_cell_of(terms)),
+                    },
+                ]
+            }
+            Self::EscrowVerdict(verdict) => {
+                let cell = escrow::verdict_cell_key(
+                    verdict.external_commitment(),
+                    &escrow::table_digest(verdict.table()),
+                );
+                vec![Locator {
+                    index_namespace: TAG_DSM_ESCROW_STATEMENT_LOCATOR.source_bytes(),
+                    locator: escrow::statement_locator(&cell, verdict.outcome()),
+                }]
+            }
+            Self::VaultPolicy { .. } | Self::TraderPreBalance(_) | Self::EscrowTerms(_) => {
+                Vec::new()
+            }
         })
     }
 }
@@ -674,6 +739,107 @@ mod tests {
             }
             .locators(),
             Err(SofiWireError::MarketNotCommitted)
+        );
+    }
+
+    // ── escrow vaults (SoFi Amendment S21) ────────────────────────────────
+
+    fn escrow_terms(token: u8) -> EscrowTerms {
+        let referee = crate::sofi::wire::EscrowSigner::new(ALG, &[0x5A; 64]).unwrap();
+        EscrowTerms::new(
+            d(token),
+            escrow::external_commitment(b"a match"),
+            vec![crate::sofi::wire::EscrowBranch::new(
+                crate::sofi::wire::EscrowOutcome::new(b"void", vec![referee]).unwrap(),
+                G,
+                dev(),
+            )],
+        )
+        .unwrap()
+    }
+
+    fn escrow_genesis(terms: &EscrowTerms) -> VaultGenesisPreimage {
+        let addr = escrow::terms_address(terms);
+        VaultGenesisPreimage {
+            owner_genesis: G,
+            owner_device_id: dev(),
+            create_position: 7,
+            state: crate::sofi::wire::VaultStateLeaf {
+                owner_genesis: G,
+                owner_device_id: dev(),
+                create_position: 7,
+                market_policy: addr,
+                fee_policy: addr,
+                release_policy: addr,
+                storage_set_id: d(0x77),
+                generation: 0,
+                reserve_a: 2_500,
+                reserve_b: 0,
+                status: crate::sofi::wire::VAULT_STATUS_ACTIVE,
+            },
+        }
+    }
+
+    /// An escrow vault's genesis is found by its vault id and by the verdict
+    /// cell its terms bind it to, and its terms by the address its slots name.
+    #[test]
+    fn an_escrow_vault_is_found_by_its_verdict_cell() {
+        let terms = escrow_terms(0x40);
+        let genesis = escrow_genesis(&terms);
+        let published = Publication::EscrowVaultGenesis {
+            preimage: &genesis,
+            terms: &terms,
+        };
+        assert_eq!(
+            published.locators().unwrap(),
+            vec![
+                Locator {
+                    index_namespace: TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                    locator: derive::vault_genesis_locator(&genesis.vault_id()),
+                },
+                Locator {
+                    index_namespace: TAG_DSM_ESCROW_CELL_LOCATOR.source_bytes(),
+                    locator: escrow::cell_locator(&escrow::verdict_cell_of(&terms)),
+                },
+            ]
+        );
+        assert_eq!(published.object_bytes().unwrap(), genesis.encode().unwrap());
+        assert_eq!(
+            Publication::EscrowTerms(&terms).address().unwrap(),
+            escrow::terms_address(&terms)
+        );
+        // Terms other than the ones the slots name would index the vault
+        // under a cell it is not bound to.
+        let other = escrow_terms(0x41);
+        assert_eq!(
+            Publication::EscrowVaultGenesis {
+                preimage: &genesis,
+                terms: &other,
+            }
+            .locators(),
+            Err(SofiWireError::EscrowTermsNotCommitted)
+        );
+    }
+
+    /// A gathered verdict is indexed under its cell's statement locator for
+    /// its outcome.
+    #[test]
+    fn a_gathered_verdict_is_found_by_its_statement() {
+        let terms = escrow_terms(0x40);
+        let signer = crate::sofi::wire::EscrowSigner::new(ALG, &[0x5A; 64]).unwrap();
+        let verdict = EscrowVerdict::new(
+            *terms.external_commitment(),
+            terms.outcome_table(),
+            b"void",
+            vec![crate::sofi::wire::VerdictSignature::new(signer, &[0x99; 3]).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            Publication::EscrowVerdict(&verdict).locators().unwrap(),
+            vec![Locator {
+                index_namespace: TAG_DSM_ESCROW_STATEMENT_LOCATOR.source_bytes(),
+                locator: escrow::statement_locator(&escrow::verdict_cell_of(&terms), b"void"),
+            }]
         );
     }
 }

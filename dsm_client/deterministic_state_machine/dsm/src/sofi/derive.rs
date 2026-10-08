@@ -391,6 +391,12 @@ pub fn canonical_legs(preimage: &SettlementPreimage) -> Result<Vec<RouteLegEntry
                 parent_root,
                 setup_ref,
                 ..
+            }
+            | SettlementBody::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                ..
             } => (*vault_id, *parent_root, *setup_ref),
         };
         return Ok(vec![RouteLegEntry {
@@ -414,7 +420,7 @@ pub fn canonical_legs(preimage: &SettlementPreimage) -> Result<Vec<RouteLegEntry
                         max: CANONICAL_MAX_LEGS,
                         got: 0,
                     })?,
-                SettlementBody::Close { .. } => {
+                SettlementBody::Close { .. } | SettlementBody::Release { .. } => {
                     return Err(SofiWireError::Cardinality {
                         field: "close legs",
                         min: 1,

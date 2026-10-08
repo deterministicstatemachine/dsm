@@ -374,6 +374,57 @@ pub fn peer_root_at(
     Ok((point.root, accepted))
 }
 
+/// The claim a peer's lineage accepted AT `position` (SoFi Amendment S15,
+/// MR-SOFI-0347): what a setup naming that position is checked against. The
+/// segment from this receiver's frontier is validated in full as a payer's
+/// is, and `position` itself as its last step, or, when its claim is
+/// conditional, resolved through `conditional` exactly as an interior
+/// position is. A trader's setup made right after a SoFi position names the
+/// claim that position's resolution accepted, so a conditional position is a
+/// claim to resolve here, never a refusal. Nothing is recorded.
+pub fn peer_claim_at(
+    fetcher: &dyn PeerEvidenceFetcher,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    position: u64,
+    frontiers: &dyn PeerFrontiers,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<AcceptedClaim, PeerLineageFailure> {
+    if position == 0 {
+        return Err(invalid(
+            "position 0 is the activation root: no claim was accepted there",
+        ));
+    }
+    let verifier = Verifier {
+        fetcher,
+        expected_network_id,
+        register: Register::resolve(fetcher, expected_network_id)?,
+        frontiers,
+        conditional,
+        steps_remaining: std::cell::Cell::new(WALK_STEP_BUDGET),
+        sources_reached: std::cell::RefCell::new(Vec::new()),
+    };
+    let frontier = verifier.frontier_below(peer_genesis, peer_devid, position)?;
+    let point = verifier.chain_through(peer_genesis, peer_devid, &frontier, position - 1)?;
+    verifier.spend_step()?;
+    match verifier.final_claim(peer_genesis, peer_devid, position, &point.root)? {
+        RegisteredEconomicClaim::SingleRoot(claim) => Ok(*verifier
+            .full_step(
+                peer_genesis,
+                peer_devid,
+                position,
+                &point,
+                &claim,
+                StepRole::Segment,
+            )?
+            .accepted_claim()),
+        RegisteredEconomicClaim::ConditionalSofi(held) => verifier
+            .resolve_conditional(peer_genesis, peer_devid, position, &point, &held)
+            .map(|(_, accepted)| accepted),
+    }
+}
+
 /// A failure met inside a step, kept in its own class and located at the
 /// position where it was met.
 fn at_position(position: u64, failure: PeerLineageFailure) -> PeerLineageFailure {
@@ -741,6 +792,26 @@ impl Verifier<'_> {
         point: &ChainPoint,
         held: &SofiResolutionClaim,
     ) -> Result<ChainPoint, PeerLineageFailure> {
+        let (root, _) = self.resolve_conditional(genesis, device_id, position, point, held)?;
+        Ok(ChainPoint {
+            root,
+            accepted: Some(ParentClaimRef::Conditional {
+                fulfillment_id: held.fulfillment_id,
+            }),
+        })
+    }
+
+    /// The root a conditional position selected and the claim accepted
+    /// there, as the resolver derives them, held to this position of this
+    /// peer.
+    fn resolve_conditional(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+        point: &ChainPoint,
+        held: &SofiResolutionClaim,
+    ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure> {
         let parent = point.accepted.as_ref().ok_or_else(|| {
             invalid(format!(
                 "position {position}: a conditional position cannot follow the activation root, \
@@ -765,12 +836,7 @@ impl Verifier<'_> {
                 accepted.economic_position()
             )));
         }
-        Ok(ChainPoint {
-            root,
-            accepted: Some(ParentClaimRef::Conditional {
-                fulfillment_id: held.fulfillment_id,
-            }),
-        })
+        Ok((root, accepted))
     }
 
     /// One step validated in full from its own evidence: the transition that
@@ -1456,6 +1522,35 @@ mod tests {
         assert!(!matches!(err, PeerLineageFailure::Invalid(_)));
         assert!(!matches!(err, PeerLineageFailure::Quarantined(_)));
         assert!(!matches!(err, PeerLineageFailure::Incomplete(_)));
+    }
+
+    /// SoFi Amendment S15, MR-SOFI-0347: a setup made right after a SoFi
+    /// position names the claim that position's resolution accepted, so the
+    /// claim at a conditional position is asked of the resolver, never
+    /// refused as a payer's conditional target is. With no resolution in
+    /// hand the answer is the resolver's own, in its class.
+    #[test]
+    fn the_claim_at_a_conditional_position_is_asked_of_its_resolution() {
+        let position = 4;
+        let fetcher = ConditionalCellFetcher {
+            position,
+            writes: vec![peer_c_q(conditional_claim(position))],
+            last: crate::route_chain::ROUTE_LEN - 1,
+        };
+        match peer_claim_at(
+            &fetcher,
+            NETWORK,
+            &PEER_G,
+            &peer_d(),
+            position,
+            &Recorded::below(position),
+            &NoResolution,
+        ) {
+            Err(PeerLineageFailure::Incomplete(why)) => {
+                assert!(why.contains("no conditional resolution"), "{why}")
+            }
+            other => panic!("the resolver answers for a conditional position, not {other:?}"),
+        }
     }
 
     /// A claim naming other coordinates never holds the root cell (storage

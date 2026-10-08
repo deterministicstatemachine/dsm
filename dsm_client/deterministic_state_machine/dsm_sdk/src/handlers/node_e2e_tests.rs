@@ -91,7 +91,7 @@ pub(super) async fn create_token(d: &TestDevice, ticker: &str, supply: u128) -> 
             ticker: ticker.to_string(),
             alias: format!("{ticker} token"),
             decimals: 0,
-            genesis_supply_u128: supply.to_be_bytes().to_vec(),
+            genesis_supply_entered: supply.to_string(),
             burn_enabled: true,
             transferable: true,
             threshold: 1,
@@ -132,7 +132,7 @@ async fn history(d: &TestDevice) -> Vec<u8> {
 }
 
 /// The rows of `d`'s `wallet.history`, decoded.
-async fn history_rows(d: &TestDevice) -> Vec<generated::TransactionInfo> {
+pub(super) async fn history_rows(d: &TestDevice) -> Vec<generated::TransactionInfo> {
     let data = history(d).await;
     match generated::Envelope::decode(&data[1..])
         .expect("framed envelope")
@@ -735,13 +735,13 @@ pub(super) fn entered(d: &TestDevice, token: &[u8; 32], base: u64) -> String {
 }
 
 /// `d`'s `sofi.createVault` on two tokens at their reserves, at 30 bps, the
-/// pair in the order §28 requires (`token_a < token_b`). The vault id.
+/// pair in the order the caller names it: Rust orders it (§28). The vault id.
 pub(super) async fn create_vault(
     d: &TestDevice,
     x: ([u8; 32], u64),
     y: ([u8; 32], u64),
 ) -> [u8; 32] {
-    let ((token_a, reserve_a), (token_b, reserve_b)) = if x.0 < y.0 { (x, y) } else { (y, x) };
+    let ((token_a, reserve_a), (token_b, reserve_b)) = (x, y);
     let request = generated::SofiCreateVaultRequest {
         token_a_policy_commit: token_a.to_vec(),
         token_b_policy_commit: token_b.to_vec(),
@@ -761,7 +761,7 @@ pub(super) async fn create_vault(
 
 /// `d` adds `token` by its anchor. Adoption precedes receipt (owner ruling
 /// 2026-09-13): a trader adds a token before it can receive any.
-async fn adopt(d: &TestDevice, token: &[u8; 32]) {
+pub(super) async fn adopt(d: &TestDevice, token: &[u8; 32]) {
     d.enter();
     let adopted = d
         .router()
@@ -822,7 +822,7 @@ fn trade_request(p: &Pair, m: &Market, amount_in: u64) -> generated::SofiTradeRe
 }
 
 /// The position and its state, as a route reports them.
-fn position_of(r: &AppResult, route: &str) -> (u64, i32) {
+pub(super) fn position_of(r: &AppResult, route: &str) -> (u64, i32) {
     match payload(r) {
         Payload::SofiPositionResponse(r) => (r.position, r.state),
         other => panic!("{route} answered {other:?}"),
@@ -844,7 +844,7 @@ async fn resolve(p: &Pair) -> (u64, i32) {
 
 /// `d` takes a position through `route` and it resolves Realized, through
 /// `sofi.resolve` if the route's own rounds did not get there. The position.
-async fn realized_through(d: &TestDevice, route: &str, request: Vec<u8>) -> u64 {
+pub(super) async fn realized_through(d: &TestDevice, route: &str, request: Vec<u8>) -> u64 {
     let realized = generated::SofiPositionState::Realized as i32;
     let (position, state) = position_of(&invoke(d, route, request).await, route);
     if state == realized {
@@ -879,7 +879,7 @@ fn standing_of(d: &TestDevice) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomic
     ((d.genesis, d.device_id), parent)
 }
 
-fn pending_position(d: &TestDevice) -> Option<u64> {
+pub(super) fn pending_position(d: &TestDevice) -> Option<u64> {
     d.enter();
     d.router()
         .core_sdk
@@ -889,7 +889,7 @@ fn pending_position(d: &TestDevice) -> Option<u64> {
         .map(|pending| pending.economic_position)
 }
 
-fn admitted_position(d: &TestDevice) -> u64 {
+pub(super) fn admitted_position(d: &TestDevice) -> u64 {
     d.enter();
     economic_lineage::get_admitted_coordinate()
         .expect("read admitted")
@@ -903,7 +903,7 @@ fn member_name(member: &[u8]) -> String {
 
 /// The head and the admitted economic root of `d` agree about what it holds
 /// of each token.
-fn head_agrees_with_admitted_root(d: &TestDevice, tokens: &[[u8; 32]]) {
+pub(super) fn head_agrees_with_admitted_root(d: &TestDevice, tokens: &[[u8; 32]]) {
     d.enter();
     let head = d.router().core_sdk.device_head().expect("a head");
     let leaves =
@@ -2866,7 +2866,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
         &set,
         &Publication::VaultGenesis {
             preimage: &forged,
-            market: real.market(),
+            market: real.market().expect("a market vault"),
         },
     )
     .await
@@ -2876,7 +2876,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
     let other = accepted(&second);
     let other_addr = Publication::VaultGenesis {
         preimage: other.preimage(),
-        market: other.market(),
+        market: other.market().expect("a market vault"),
     }
     .address()
     .expect("an address");
@@ -2913,7 +2913,7 @@ async fn discovery_passes_over_what_is_not_a_vault_of_the_token() {
         &set,
         &Publication::VaultGenesis {
             preimage: &ahead,
-            market: real.market(),
+            market: real.market().expect("a market vault"),
         },
     )
     .await
@@ -3479,6 +3479,12 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
     ) -> Result<dsm::sofi::storage::Discovered<[u8; 32]>, dsm::sofi::resolve::ReadFailure> {
         self.live.vault_token_candidates(token)
     }
+    fn escrow_cell_candidates(
+        &self,
+        verdict_cell: &[u8; 32],
+    ) -> Result<dsm::sofi::storage::Discovered<[u8; 32]>, dsm::sofi::resolve::ReadFailure> {
+        self.live.escrow_cell_candidates(verdict_cell)
+    }
     fn vault_owner(
         &self,
         genesis: &[u8; 32],
@@ -3814,4 +3820,56 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
             "{member} was asked again for what the resolution had read: {again:?}"
         );
     }
+}
+
+/// The pair a vault commits is ordered bytewise (§28), and Rust orders it: a
+/// pair named in either order makes the same vault shape, each reserve held
+/// against its own token. A pair of one token twice is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_pair_named_in_either_order_holds_each_reserve_against_its_own_token() {
+    let p = Pair::boot(500, 0).await;
+    let era = era();
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let (low, high) = if era < tkn { (era, tkn) } else { (tkn, era) };
+    // Named high first, with reserves that tell the two tokens apart.
+    let vault = create_vault(&p.a, (high, 700), (low, 300)).await;
+    let listed =
+        match payload(&invoke(&p.a, "sofi.vaults", args(&generated::SofiVaultsRequest {})).await) {
+            Payload::SofiVaultsResponse(r) => r,
+            other => panic!("sofi.vaults answered {other:?}"),
+        };
+    let held = listed
+        .vaults
+        .iter()
+        .find(|v| v.vault_id == vault.to_vec())
+        .expect("the vault is listed");
+    assert_eq!(
+        (
+            held.token_a_policy_commit.clone(),
+            held.reserve_a,
+            held.token_b_policy_commit.clone(),
+            held.reserve_b
+        ),
+        (low.to_vec(), 300, high.to_vec(), 700)
+    );
+
+    let same = invoke(
+        &p.a,
+        "sofi.createVault",
+        args(&generated::SofiCreateVaultRequest {
+            token_a_policy_commit: era.to_vec(),
+            token_b_policy_commit: era.to_vec(),
+            reserve_a_entered: entered(&p.a, &era, 100),
+            reserve_b_entered: entered(&p.a, &era, 100),
+            fee_bps: 30,
+        }),
+    )
+    .await;
+    assert!(!same.success, "a pair of one token was made");
+    let message = same.error_message.expect("a refusal says why");
+    assert!(
+        message.contains("a pair is two different tokens"),
+        "{message}"
+    );
 }

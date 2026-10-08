@@ -243,6 +243,22 @@ pub mod class {
     /// trader's signature over it, under a key the claim's own `AttA` binds
     /// to its `DevID` (DSM Amendment A10, SoFi Amendment S20).
     pub const SOFI_SIGNED_RESOLUTION_CLAIM: u16 = 0x0062;
+    /// `0x0063` — an escrow vault's terms (SoFi Amendment S21): the held
+    /// token, the external commitment `Y`, and the branches, each an outcome,
+    /// the exact signer set that decides it, and the identity it pays. The
+    /// three policy slots of an escrow vault's state name this object.
+    pub const ESCROW_TERMS: u16 = 0x0063;
+    /// `0x0064` — a verdict on an external commitment (SoFi Amendment S21):
+    /// `Y`, the outcome table, the outcome, and its signers' signatures over
+    /// the statement for the verdict cell. It occupies the cell only when it
+    /// proves its own authority from these bytes.
+    pub const ESCROW_VERDICT: u16 = 0x0064;
+    /// `B°`, the Release branch (SoFi Amendment S21): an escrow vault's whole
+    /// amount to the recipient of the branch whose outcome the canonical
+    /// verdict names.
+    pub const SOFI_SETTLEMENT_RELEASE: u16 = 0x0065;
+    /// `X_route` preimage branch: a release.
+    pub const SOFI_ROUTE_DIGEST_RELEASE: u16 = 0x0066;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

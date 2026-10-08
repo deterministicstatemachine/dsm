@@ -44,6 +44,11 @@ pub(crate) enum Realized {
     Trade,
     /// The owner's close: both reserves credited.
     Close,
+    /// An escrow vault created: its stake locked (SoFi Amendment S21).
+    EscrowLock,
+    /// An escrow vault released: its whole stake credited to the recipient
+    /// of the branch the verdict named (SoFi Amendment S21).
+    EscrowRelease,
 }
 
 impl Realized {
@@ -55,6 +60,8 @@ impl Realized {
             Self::Setup => "sofi_setup",
             Self::Trade => "sofi_trade",
             Self::Close => "sofi_close",
+            Self::EscrowLock => "escrow_lock",
+            Self::EscrowRelease => "escrow_release",
         }
     }
 }

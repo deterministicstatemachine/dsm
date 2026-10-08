@@ -24,7 +24,6 @@ describe('AppContent securing device state', () => {
         handleGenerateGenesis={() => {}}
         cancelPhraseBackup={() => {}}
         answerPhraseCheck={() => Promise.resolve()}
-        unlockToWallet={() => {}}
         menuItems={[]}
         currentMenuIndex={0}
         setCurrentMenuIndex={() => {}}
