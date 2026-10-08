@@ -306,17 +306,26 @@ verifier's log contains the leaf request on the honest FORS secret at an
 index no signed message selects.
 
 **The extended game H1'** (`RomExt.lean`, claim trace C52). After H1 ends,
-the challenger recomputes two things:
+the challenger recomputes, recursively from the honest seeds:
 
 * the honest WOTS public keys on the hypertree path of the forged digest,
   which draws every honest chain value up to the top;
-* the honest FORS leaves at the forged digest's indices.
+* the honest FORS leaves at the forged digest's indices;
+* (`extTail`) the complete honest FORS key of the forged digest (every FORS
+  tree and the roots compression), and the complete honest XMSS tree at every
+  layer of the forged path. Every canonical request at an address of the
+  forgery's verification path is thereby an actual challenger draw (no
+  zero-fallback canonical values).
+
+The extension's draw count is a fixed function of the parameters. For
+SPHINCS+-128f it is at most 117,605 draws (under 2^17), about one
+signature's worth of hashing.
 
 The forged digest is recomputed with an adversary-side `h_msg` request. The
 extension runs after the adversary has stopped, so it does not change the
 adversary's view. It only appends draws: the main game's draws are a prefix
 of H1' (`pre_ext`), and the output and the key are those of H1 (`out_ext`,
-`finKey_ext`). The four events are read on H1''s final table (`finO'`), and
+`finKey_ext`; bundled as `ext_conservative`). The four events are read on H1''s final table (`finO'`), and
 `rom_extract_ext` gives them on every tape on which H1 is won.
 
 **Secrecy invariant** (`RomSecrecy.lean`, `RomSecGame.lean`, claim trace

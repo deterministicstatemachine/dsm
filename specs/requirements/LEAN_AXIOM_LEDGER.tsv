@@ -965,11 +965,13 @@ lean4/Sphincs/RomEval.lean	DSM.Rom.ql_xmssPkFromSig	Quot.sound,propext
 lean4/Sphincs/RomEval.lean	DSM.Rom.ql_xmssSign	Quot.sound,propext
 lean4/Sphincs/RomEval.lean	DSM.Rom.rom_extract	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomExt.lean	DSM.Rom.anyDis_ext	Quot.sound,propext
+lean4/Sphincs/RomExt.lean	DSM.Rom.ext_conservative	Quot.sound,propext
 lean4/Sphincs/RomExt.lean	DSM.Rom.finKey_ext	Quot.sound,propext
 lean4/Sphincs/RomExt.lean	DSM.Rom.out_ext	Quot.sound,propext
 lean4/Sphincs/RomExt.lean	DSM.Rom.pre_ext	Quot.sound,propext
 lean4/Sphincs/RomExt.lean	DSM.Rom.rom_extract_ext	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomExt.lean	DSM.Rom.runG'_eq	Quot.sound,propext
+lean4/Sphincs/RomExt.lean	DSM.Rom.sim_extTail	Quot.sound,propext
 lean4/Sphincs/RomExt.lean	DSM.Rom.sim_extW	Quot.sound,propext
 lean4/Sphincs/RomExt.lean	DSM.Rom.sim_game'	Quot.sound,propext
 lean4/Sphincs/RomFresh.lean	DSM.Rom.dis_pointF	Classical.choice,Quot.sound,propext
@@ -1347,6 +1349,7 @@ lean4/Sphincs/RomSecGame.lean	DSM.Rom.hq_ask	Quot.sound,propext
 lean4/Sphincs/RomSecGame.lean	DSM.Rom.inv2_coin	Quot.sound,propext
 lean4/Sphincs/RomSecGame.lean	DSM.Rom.j2_askE	Quot.sound,propext
 lean4/Sphincs/RomSecGame.lean	DSM.Rom.j2_ext	Classical.choice,Quot.sound,propext
+lean4/Sphincs/RomSecGame.lean	DSM.Rom.j2_extTail	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomSecGame.lean	DSM.Rom.j2_forsLeaf0	Quot.sound,propext
 lean4/Sphincs/RomSecGame.lean	DSM.Rom.j2_kgTail	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomSecGame.lean	DSM.Rom.j2_play	Classical.choice,Quot.sound,propext
@@ -1656,6 +1659,7 @@ lean4/Sphincs/RomStruct.lean	DSM.Rom.js_authWalk	Classical.choice,Quot.sound,pro
 lean4/Sphincs/RomStruct.lean	DSM.Rom.js_chain	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.js_compress	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.js_ext	Classical.choice,Quot.sound,propext
+lean4/Sphincs/RomStruct.lean	DSM.Rom.js_extTail	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.js_forsNode	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.js_forsPkFromSig	Classical.choice,Quot.sound,propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.js_forsSign	Classical.choice,Quot.sound,propext
@@ -1726,6 +1730,7 @@ lean4/Sphincs/RomStruct.lean	DSM.Rom.stableS_true	propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.stable_PS	propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.stable_authAt	propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.stable_chainsAt	propext
+lean4/Sphincs/RomStruct.lean	DSM.Rom.stable_extS	propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.stable_hsig	propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.stable_hts	propext
 lean4/Sphincs/RomStruct.lean	DSM.Rom.stable_revOK	Quot.sound,propext

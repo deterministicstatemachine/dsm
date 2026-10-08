@@ -15,6 +15,36 @@ import Sphincs.RomPath
 namespace DSM.Rom
 open DSM.Sphincs DSM.Sphincs.Security
 
+/-- The tree index at layer `l` of the hypertree path selected by digest indices `I`. -/
+def pathT (p : Params) (I : Indices) (l : Nat) : Nat := (I.tree*2^p.hp + I.leaf)/2^(p.hp*l)/2^p.hp
+
+/-- The extension's tail: the complete honest FORS key (all trees and the roots
+    compression) and the complete XMSS tree at every layer of the forged path,
+    computed recursively from the honest seeds. -/
+def extTail {m : Type → Type} [Monad m] (oc : Oracle m) (p : Params) (tk prfKey seed : Bytes) (I : Indices) :
+    m Unit := do
+  let fa := forsAdrs I.tree I.leaf
+  let mut roots : Bytes := []
+  for i in List.range p.k do
+    let r ← forsNode oc p tk prfKey seed fa i p.a
+    roots := roots ++ r
+  let _ ← thash oc p tk {fa.setType 4 with keypair := fa.keypair} roots
+  for l in List.range p.d do
+    let _ ← xmssNode oc p tk prfKey seed {layer := l, tree := pathT p I l} 0 p.hp
+    pure ()
+
+/-- The extension's tail, symbolically. -/
+def sExtTail (p : Params) (tk prfKey seed : SB) (I : Indices) : Prog Unit := do
+  let fa := forsAdrs I.tree I.leaf
+  let mut roots : SB := []
+  for i in List.range p.k do
+    let r ← sForsNode p tk prfKey seed fa i p.a
+    roots := roots ++ r
+  let _ ← sThash p tk {fa.setType 4 with keypair := fa.keypair} roots
+  for l in List.range p.d do
+    let _ ← sXmssNode p tk prfKey seed {layer := l, tree := pathT p I l} 0 p.hp
+    pure ()
+
 /-- The extension. `oc` is the challenger's oracle, `oa` the adversary's. -/
 def extW {m : Type → Type} [Monad m] (oc oa : Oracle m) (v : Variant) (sk msg sig : Bytes) : m Unit := do
   let p := params v
@@ -31,7 +61,7 @@ def extW {m : Type → Type} [Monad m] (oc oa : Oracle m) (v : Variant) (sk msg 
       (wA l (((splitDigest p dg).tree*2^p.hp + (splitDigest p dg).leaf)/2^(p.hp*l)/2^p.hp)
         (((splitDigest p dg).tree*2^p.hp + (splitDigest p dg).leaf)/2^(p.hp*l)%2^p.hp))
     pure ()
-  return ()
+  extTail oc p tk prfKey seed (splitDigest p dg)
 
 /-- The extension, symbolically. -/
 def sExtW (v : Variant) (sk : SB) (msg sig : Bytes) : Prog Unit := do
@@ -50,7 +80,7 @@ def sExtW (v : Variant) (sk : SB) (msg sig : Bytes) : Prog Unit := do
       (wA l (((splitDigest p dg).tree*2^p.hp + (splitDigest p dg).leaf)/2^(p.hp*l)/2^p.hp)
         (((splitDigest p dg).tree*2^p.hp + (splitDigest p dg).leaf)/2^(p.hp*l)%2^p.hp))
     pure ()
-  return ()
+  sExtTail p tk prfKey seed (splitDigest p dg)
 
 /-- The extended game H1' as a query tree. -/
 def gameQT' (v : Variant) (limits : Limits) (A : Bytes → RAdv) (ex : Bytes) : QT Out :=
@@ -66,6 +96,22 @@ def gameS' (v : Variant) (limits : Limits) (A : Bytes → RAdv) (ex : SB) : Prog
 
 section
 variable {t : List Nat}
+
+theorem sim_extTail (p : Params) (tk pk seed : SB) (tk' pk' seed' : Bytes) (htk : RB t tk tk')
+    (hpk : RB t pk pk') (hsd : RB t seed seed') (I : Indices) :
+    Sim t (sExtTail p tk pk seed I) (extTail challengerOracle p tk' pk' seed' I) (fun _ _ => True) := by
+  simp only [sExtTail, extTail]
+  refine Sim.bind (Sim.forIn _ _ _ (RBn t p.n) ?_ [] [] ⟨rfl, WN_nil _⟩) (fun roots roots' hr => ?_)
+  · intro i _ s s' hss
+    exact Sim.bind (sim_forsNode p tk tk' htk pk seed pk' seed' hpk hsd _ _ _)
+      (fun r r' hr => Sim.bind Sim.unit (fun _ _ _ => Sim.pure'
+        (show Sim.StepRel (RBn t p.n) (.yield (s ++ r)) (.yield (s' ++ r')) from RBn_append hss hr)))
+  refine Sim.bind (sim_thash p tk tk' _ roots roots' htk hr.1) (fun _ _ _ => ?_)
+  refine Sim.bind (Sim.forIn _ _ _ (fun _ _ => True) ?_ _ _ trivial) (fun _ _ _ => Sim.pure' trivial)
+  intro l _ u u' _
+  exact Sim.bind (sim_xmssNode p tk tk' htk pk seed pk' seed' hpk hsd _ _ _)
+    (fun _ _ _ => Sim.bind Sim.unit (fun _ _ _ => Sim.pure'
+      (show Sim.StepRel (fun _ _ => True) (.yield PUnit.unit) (.yield PUnit.unit) from trivial)))
 
 theorem sim_extW (v : Variant) (sk : SB) (sk' : Bytes) (hsk : RBn t (params v).n sk sk') (msg sig : Bytes) :
     Sim t (sExtW v sk msg sig) (extW challengerOracle advQ v sk' msg sig) (fun _ _ => True) := by
@@ -85,7 +131,8 @@ theorem sim_extW (v : Variant) (sk : SB) (sk' : Bytes) (hsk : RBn t (params v).n
       exact Sim.bind (sim_forsNode _ tk tk' htk.1 pk _ pk' _ hpk.1 hseed.1 _ _ _)
         (fun _ _ _ => Sim.bind Sim.unit (fun _ _ _ => Sim.pure'
           (show Sim.StepRel (fun _ _ => True) (.yield PUnit.unit) (.yield PUnit.unit) from trivial)))
-    · refine Sim.bind (Sim.forIn _ _ _ (fun _ _ => True) ?_ _ _ trivial) (fun _ _ _ => Sim.pure' trivial)
+    · refine Sim.bind (Sim.forIn _ _ _ (fun _ _ => True) ?_ _ _ trivial)
+        (fun _ _ _ => sim_extTail _ tk pk _ tk' pk' _ htk.1 hpk.1 hseed.1 _)
       intro l _ s s' _
       exact Sim.bind (sim_wotsPkgen _ tk tk' htk.1 pk _ pk' _ hpk.1 hseed.1 _)
         (fun _ _ _ => Sim.bind Sim.unit (fun _ _ _ => Sim.pure'
@@ -160,6 +207,14 @@ theorem finKey_ext (t : List Nat) :
       (fun O => kgTail (logOracle O) v (sres t (coinEx (params v).n))) := ql_kgTail false v _
   rw [← (ql_value hk _ _ (Pre.trans (kg_pre v limits A t) (pre_ext v limits A t))
     (kgTail_good (finO' v limits A t) v _)).1, kg_value]
+
+/-- Extension conservativity: the extended run has the main game's output (transcript,
+    win bit, signed messages), the main game's draws as a prefix of its own, and the
+    same honest key. -/
+theorem ext_conservative (t : List Nat) :
+    (runG' v limits A t).1 = (runG v limits A t).1 ∧ Pre (runG v limits A t).2 (runG' v limits A t).2 ∧
+      keypairFromExpansion (finO' v limits A t) v (sres t (coinEx (params v).n)) = finKey v limits A t :=
+  ⟨out_ext v limits A t, pre_ext v limits A t, finKey_ext v limits A t⟩
 
 /-- Event preservation: on every won tape, the forgery exhibits one of the
     path-located extraction events on the extended table. -/

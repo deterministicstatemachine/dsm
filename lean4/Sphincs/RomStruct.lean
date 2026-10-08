@@ -2363,8 +2363,85 @@ theorem js_play (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (limits : Limits) (p
 
 end
 
+/-- What the extension's tail materializes: the FORS roots compression of the
+    digest's FORS key and the root of the XMSS tree at every layer of the path. -/
+def ExtS (c : Ctx) (I : Indices) (st : St) : Prop :=
+  (∃ i, KidOK c st i (.th (frA (forsAdrs I.tree I.leaf)))) ∧
+  ∀ l, l < (params c.v).d → ∃ i, KidOK c st i (.th (nodeA {layer := l, tree := pathT (params c.v) I l}
+    (params c.v).hp 0))
+
 section
 variable {c : Ctx}
+
+theorem stable_extS (I : Indices) : StableS c (ExtS c I) := by
+  intro st st' _ hg ⟨⟨i, hi⟩, h2⟩
+  exact ⟨⟨i, kidOK_mono hg hi⟩, fun l hl => let ⟨j, hj⟩ := h2 l hl; ⟨j, kidOK_mono hg hj⟩⟩
+
+theorem js_extTail (itk ipk : Nat) (I : Indices) (htI : I.tree < 256^8) (hlI : I.leaf < 2^(params c.v).hp)
+    {P0 : St → Prop} (hs : StableS c P0)
+    (h : ∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧ st.ents[ipk]? = some (false, dPrf c.n)) :
+    JS c (sExtTail (params c.v) [.hid itk 32] [.hid ipk 32] [.hid 2 c.n] I) P0 (fun _ st => ExtS c I st) := by
+  obtain ⟨_, hH, hd, hkA, haA, _⟩ := variant_bounds c.v
+  have hkpos : 0 < (params c.v).k := by cases c.v <;> decide
+  have hfa : ForsR (forsAdrs I.tree I.leaf) := ⟨rfl, by show 0 < 256^4; decide, htI, Nat.lt_of_lt_of_le hlI hH⟩
+  simp only [sExtTail]
+  refine JS.bind (JS.loopI' (List.range (params c.v).k) _
+    (fun k v st => SlotsAt c (fun i => .th (fA (forsAdrs I.tree I.leaf) (params c.v).a i)) k v st)
+    hs (fun k v => stable_slotsAt _ _ v) [] (fun st _ _ => slotsAt_nil (c := c) _ st) (fun i hi v => ?_))
+    (fun roots => ?_) hs
+  · rw [List.length_range] at hi
+    rw [List.getElem_range]
+    have hP := stableS_and hs (stable_slotsAt (c := c) (fun i => .th (fA (forsAdrs I.tree I.leaf) (params c.v).a i)) i v)
+    refine JS.bind (js_forsNode itk ipk _ hfa (params c.v).a i hP (Nat.le_refl _)
+      (Nat.mul_le_mul_right _ hi) (fun st hI hp => h st hI hp.1)) (fun r => ?_) hP
+    refine JS.obtain (X := fun j st => KidOK c st j (.th (fA (forsAdrs I.tree I.leaf) (params c.v).a i)))
+      (fun j hj => ?_)
+    subst hj
+    refine JS.bind JS.unit (fun _ => JS.pure' (fun st _ hp => ?_)) (stableS_and hP (stableS_kid (c := c) j _))
+    obtain ⟨d, hd'⟩ := hp.1.2
+    exact ⟨_, rfl, slotsAt_snoc (d := d) hp.1.1.2 hd'⟩
+  rw [List.length_range]
+  have hs1 := stableS_and hs (stable_slotsAt (c := c) (fun i => .th (fA (forsAdrs I.tree I.leaf) (params c.v).a i))
+    (params c.v).k roots)
+  have hfr : ({(forsAdrs I.tree I.leaf).setType 4 with keypair := (forsAdrs I.tree I.leaf).keypair} : Adrs) =
+      frA (forsAdrs I.tree I.leaf) := rfl
+  rw [hfr]
+  refine JS.bind (js_thash (frA (forsAdrs I.tree I.leaf)) roots itk (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩))
+    (fun z => ?_) hs1
+  · obtain ⟨d, hlen, hv⟩ := hp.2
+    have hkl : (kids (params c.v) (frA (forsAdrs I.tree I.leaf))).length = (params c.v).k := by
+      rw [kids_frA _ _ hfa.1]; simp
+    refine ⟨d, frA_inRange hfa, by rw [← List.length_pos_iff, hkl]; exact hkpos, by rw [hlen, hkl], fun k hk => ?_⟩
+    obtain ⟨hh, h1, h2⟩ := hv k (by omega)
+    refine ⟨hh, h1, fun K hK => ?_⟩
+    rw [kids_frA _ _ hfa.1, List.getElem?_map, List.getElem?_range (by omega)] at hK
+    simp at hK; subst hK; exact h2
+  refine JS.obtain (X := fun j st => KidOK c st j (.th (frA (forsAdrs I.tree I.leaf)))) (fun f hf => ?_)
+  subst hf
+  have hs2 := stableS_and hs1 (stableS_kid (c := c) f (.th (frA (forsAdrs I.tree I.leaf))))
+  refine JS.bind (JS.loopI' (List.range (params c.v).d) _
+    (fun k _ st => ∀ l, l < k → ∃ i, KidOK c st i (.th (nodeA {layer := l, tree := pathT (params c.v) I l}
+      (params c.v).hp 0))) hs2
+    (fun k _ st st' _ hg h l hl => let ⟨j, hj⟩ := h l hl; ⟨j, kidOK_mono hg hj⟩) PUnit.unit
+    (fun _ _ _ l hl => absurd hl (by omega)) (fun l hl u => ?_)) (fun _ => JS.pure' (fun st _ hp => ?_)) hs2
+  · rw [List.length_range] at hl
+    rw [List.getElem_range]
+    have hP := stableS_and hs2 (fun st st' (_ : InvS c st) hg (h : ∀ l', l' < l → ∃ i, KidOK c st i
+      (.th (nodeA {layer := l', tree := pathT (params c.v) I l'} (params c.v).hp 0))) l' hl' =>
+        let ⟨j, hj⟩ := h l' hl'; ⟨j, kidOK_mono hg hj⟩)
+    refine JS.bind (js_xmssNode itk ipk {layer := l, tree := pathT (params c.v) I l} (by show l < 256^4; omega)
+      (Nat.lt_of_le_of_lt (ext_tree_le c.v I.tree I.leaf l hlI) htI) (params c.v).hp 0 hP (by simp)
+      (fun st hI hp => h st hI hp.1.1.1)) (fun r => ?_) hP
+    refine JS.obtain (X := fun j st => KidOK c st j (.th (nodeA {layer := l, tree := pathT (params c.v) I l}
+      (params c.v).hp 0))) (fun j hj => ?_)
+    subst hj
+    refine JS.bind JS.unit (fun _ => JS.pure' (fun st _ hp => ⟨_, rfl, fun l' hl' => ?_⟩))
+      (stableS_and hP (stableS_kid (c := c) j _))
+    by_cases he : l' = l
+    · subst he; exact ⟨j, hp.1.2⟩
+    · exact hp.1.1.2 l' (by omega)
+  · rw [List.length_range] at hp
+    exact ⟨⟨f, hp.1.2⟩, hp.2⟩
 
 theorem js_ext (ρ : Nat) (msg sig : Bytes) {P0 : St → Prop} (hs : StableS c P0)
     (h : ∀ st, InvS c st → P0 st → PS c ρ st) :
@@ -2412,7 +2489,10 @@ theorem js_ext (ρ : Nat) (msg sig : Bytes) {P0 : St → Prop} (hs : StableS c P
     exact JS.conseq (P0 := fun _ => True) (JS.bind JS.unit (fun _ => JS.pure' (fun _ _ _ => trivial)) stableS_true)
       (fun _ _ _ => trivial) (fun _ _ h => h)
   refine JS.bind (JS.loop' _ _ (fun _ _ => True) (stableS_and s3 stableS_true) (fun _ => stableS_true) PUnit.unit
-    (fun _ _ _ => trivial) (fun l hl u => ?_)) (fun _ => JS.pure' (fun _ _ _ => trivial)) (stableS_and s3 stableS_true)
+    (fun _ _ _ => trivial) (fun l hl u => ?_))
+    (fun _ => JS.conseq (js_extTail itk ipk I htI hlI (stableS_and (stableS_and s3 stableS_true) stableS_true)
+      (fun st _ hp => ⟨hp.1.1.1.1.2, hp.1.1.1.2⟩)) (fun _ _ h => h) (fun _ _ _ => trivial))
+    (stableS_and s3 stableS_true)
   have hl' := List.mem_range.mp hl
   have hw : WotsR (wA l (((I.tree*2^(params c.v).hp + I.leaf)/2^((params c.v).hp*l)/2^(params c.v).hp))
       (((I.tree*2^(params c.v).hp + I.leaf)/2^((params c.v).hp*l)%2^(params c.v).hp))) := by
