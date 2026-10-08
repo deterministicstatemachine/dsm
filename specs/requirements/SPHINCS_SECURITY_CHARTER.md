@@ -4,9 +4,13 @@ Status: proof target frozen for the initial projects. Computational target:
 the classical reduction of EUF-CMA to explicit primitive events and
 distinguisher advantages is proved (`euf_cma_reduction`, audit-prep
 2026-10-07; see SPHINCS_REFINEMENT.md), as is the challenger's primitive-request
-budget (`challenger_request_budget`); the primitive assumptions themselves, an
-adversary cost model, numerical bounds and the quantum target are not. Binary
-target: not achieved.
+budget (`challenger_request_budget`). Phase 2 adds a numerical level in the
+random-oracle model only (SPHINCS_ROM_BOUND.md: role bounds kernel-checked,
+the mapping of reduction terms to them argued) and a quantum narrative that is
+not machine-checked (SPHINCS_QROM_NARRATIVE.md). The primitive assumptions
+for actual BLAKE3/ChaCha20, a full adversary cost model and a proved quantum
+bound are not established. Binary target: identity locked
+(audit-freeze-2026-10-07), semantics not achieved.
 Authority: the current four DSM specifications, MR-DSM-0259, and the owner's
 explicit request for new computational-security and pinned-binary proof projects.
 This charter defines analysis scope, not a change to protocol acceptance.
