@@ -114,15 +114,42 @@ What this closes. The resampling step of link 3, as a theorem about every
 such program: the symbolic run never reads an unrevealed answer, so a hidden
 value is independent of everything the run did until it is revealed, and
 the real run departs from the symbolic one only through counted guesses or
-collisions. What it does not close yet, for DSM: (a) DSM's key generation
-and signer written as such a program and proved to resolve to `Model.lean`'s
-functions, with the forger's verification as adversary steps; (b) B for DSM
+collisions.
+
+**Instantiated for DSM's signer (game H1).** `RomSim.lean` gives a
+simulation judgment between symbolic programs and query trees (`Sim`, with
+rules for bind, the three kinds of step, `if` and `for` loops).
+`RomSigner.lean` writes every function of DSM's signer as a symbolic program
+and proves that its real run is the model function itself run as a query
+tree against the lazy random oracle: `sim_sign`, `sim_kgTail` (key
+generation after the seed expansion), and the components (`sim_forsSign`,
+`sim_htSign`, `sim_xmssNode`, `sim_htRoot`, ...). Control flow that depends on
+a hash output (the h_msg digest, the WOTS digits of a root, the signer's
+self-check) reveals that value first. `RomGame.lean` defines the EUF-CMA
+game against an interactive adversary (oracle queries, signing queries, a
+forgery checked by the model's `verify` with adversary-side requests) as a
+query tree and as a symbolic program, proves they agree on every tape
+(`sim_game`), and composes: `rom_game_hidden`: Pr[the model's game is won] ·
+2^(8n) ≤ Pr[the symbolic game is won] · 2^(8n) + R^N·B/R^N + Pr[wild guess or
+unopened collision] · 2^(8n). Game H1 takes the secret key's 3n-byte seed
+expansion as three independent uniform n-byte values; the seed hop (ChaCha20
+expansion of a secret 32-byte seed) is a separate hybrid step, not part of
+this theorem.
+
+What remains open for DSM: (b) B for DSM
 (each adversary request is compatible with at most one unopened challenger
-request at its address, by tweak single use); (c) that wild guesses and
-unopened collisions do not occur in DSM's run (output widths are at least n
-bytes, the budget bounds the tape, and distinct challenger requests carry
-distinct addresses). Until (a) to (c) are checked, the numbers above remain
-conditional on link 3.
+request at its address, by tweak single use); (c) that wild guesses do not
+occur in DSM's run (output widths are at least n bytes and the budget bounds
+the tape); (d) a probability bound on unopened collisions. Address uniqueness
+rules a collision out structurally only where two challenger requests differ
+in literal bytes at the same offset. Where they differ only in unrevealed
+handles (two hidden inputs, or the thash and PRF keys), equal resolutions are
+a collision of random-oracle outputs, and that needs its own bound (of the
+order of pairs/2^(8n)); it is not yet checked; (e) the step bound S of the
+symbolic game from the query budget; (f) the symbolic game's win
+probability, i.e. transporting the forgery extraction to the symbolic run,
+where hidden values are never read. Until (b) to (f) are checked, the
+numbers above remain conditional on link 3.
 
 ## What is argued, not machine-checked
 
