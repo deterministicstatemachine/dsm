@@ -565,7 +565,9 @@ Two caveats:
   bounded below (C59).
 * *SPHINCS+-256f.* There all handles are 32 bytes, so the split brings
   nothing, and the wide term `S^2/2^256` is not small against the 256f
-  target. 256f needs a wide-class count of the same kind.
+  target. 256f needs a wide-class count of the same kind, and also a
+  refinement of the `N^2/2^256` key-collision terms of C59 and C60, which are
+  of the same order (see C62).
 
 **Collisions of independently sampled values** (`RomColl.lean`, claim
 trace C59). The wild/collision event is needed only at the first
@@ -780,11 +782,60 @@ What this does not yet cover:
 * the bound is per key (see the multi-key note below);
 * the random-oracle and tape assumptions of C54–C60 still apply.
 
+**SPHINCS+-256f, as composed today** (`RomBudget.lean`, claim trace C62).
+The same ingredients compose for 256f (`rom_win_full_256f`). There `n = 32`,
+so every pin and collision term is against `2^256`, and the ITSR term is
+`JA/2^255`:
+
+    Pr[won] ≤ (2·JA + 11·AA + 6 + 2·S^2 + 3·N^2)/2^256
+
+With the query budget (`rom_win_budget_256f`, `stepB_256f`):
+
+| Routine | Steps |
+| --- | --- |
+| kgC | 17,185 |
+| signC | 1,704,961 |
+| verC | 17,523 |
+| extC | 364,152 |
+
+This gives:
+
+    JA = qh + 17523,  AA = qh + 17524,
+    S  = qh + 1704962·qs + 398864,  N = S + 1,
+    Pr[won] ≤ (13·qh + 227816 + 2·S^2 + 3·N^2)/2^256
+
+This bound is birthday-limited:
+
+* at `qh = 2^64`, `qs ≤ 2^20`, it is about 2^-125.7;
+* at `qh = qs = 2^64`, it is about 2^-84.3;
+* the linear term is about 2^-188 in both cases.
+
+So it is not the 256-bit-level statement (about `qh·2^-252`) that the ITSR
+term alone would give. The quadratic part has three sources, all of the same
+order:
+
+* `2·S^2`: wide pins (`B_hi ≤ S^2`, C58);
+* `2·N^2`: the 32-byte key collision of C59 (`coll_event`);
+* `N^2`: the 32-byte key coincidence of C60 (`canon_split`).
+
+The last two are collisions among the three 32-byte key entries (tweak key,
+PRF key, PRF-msg key), but the current events forget which entries they are,
+and are counted as any two of `N` tape entries. A linear 256f bound needs all
+three refined:
+
+* a wide-pin count `B_hi = O(AA)`;
+* the key collisions charged as at most three pairs of key entries.
+
+A wide-pin count alone changes only the constant. These evaluations are
+arithmetic outside Lean.
+
 Still open, and needed before this is a number for DSM:
 
-* a wide-class count for SPHINCS+-256f (the budget lemmas are generic in the
-  variant; only the collision count is 128f-specific);
-* the seed hop;
+* the 256f refinements above (wide pins and the two key-collision events);
+* the seed hop. H1 starts from three independent coin entries, while the
+  implementation expands a 32-byte seed with ChaCha20, idealized as a random
+  oracle. The final statement must keep that idealization visible and pay
+  for the hop explicitly;
 * the final composition.
 
 ## Assumptions, stated plainly
