@@ -37,6 +37,21 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
     if req.mnemonic.trim().is_empty() {
         return err("system.createGenesisV2: mnemonic is required".into());
     }
+    // A new identity is rooted only in a phrase this process generated from the OS CSPRNG
+    // (24 words, 256 bits). A typed-in phrase proves nothing about its entropy; restoring an
+    // existing identity goes through the recovery path instead.
+    let generated_here =
+        match crate::sdk::recovery_sdk::RecoverySDK::is_generated_mnemonic(&req.mnemonic) {
+            Ok(here) => here,
+            Err(e) => return err(format!("system.createGenesisV2: {e}")),
+        };
+    if !generated_here {
+        return err(
+            "system.createGenesisV2: a new wallet's phrase must be the one system.generateMnemonic \
+             produced in this session; generate a phrase and create the wallet from it"
+                .into(),
+        );
+    }
     // The network this build's root register is pinned for. The caller does
     // not choose which network a wallet joins.
     let network_id = match std::str::from_utf8(dsm::economic::register::BETA_NETWORK_ID) {
@@ -342,7 +357,7 @@ pub(crate) fn install_wallet_genesis(
         smt_proof: None,
         verification_step: None,
         genesis_nonce: nonce_b32,
-        genesis_profile: "MnemonicV3".to_string(),
+        genesis_profile: "MnemonicV3-KS1".to_string(),
         network_id: network_id.to_string(),
     };
     crate::storage::client_db::store_genesis_record_with_verification(&record)
@@ -453,7 +468,8 @@ mod tests {
 
         let answer = create_wallet(
             generated::WalletCreateGenesisV2Request {
-                mnemonic: crate::economic_fixtures::test_mnemonic(0x5D),
+                mnemonic: crate::sdk::recovery_sdk::RecoverySDK::generate_mnemonic()
+                    .expect("the phrase system.generateMnemonic produced"),
             }
             .encode_to_vec(),
         );
@@ -478,7 +494,8 @@ mod tests {
 
         let answer = create_wallet(
             generated::WalletCreateGenesisV2Request {
-                mnemonic: crate::economic_fixtures::test_mnemonic(0x5B),
+                mnemonic: crate::sdk::recovery_sdk::RecoverySDK::generate_mnemonic()
+                    .expect("the phrase system.generateMnemonic produced"),
             }
             .encode_to_vec(),
         );
@@ -497,6 +514,31 @@ mod tests {
         );
     }
 
+    /// A new wallet is created only from the phrase `system.generateMnemonic`
+    /// produced in this session: a valid 24-word phrase typed in instead says
+    /// nothing about its entropy, and creates nothing.
+    #[test]
+    #[serial_test::serial]
+    fn a_typed_in_phrase_creates_no_wallet() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        crate::reset_sdk_context_for_testing();
+        AppState::reset_for_testing();
+        let _poller = PollerOfThisTest::none_running();
+        crate::sdk::recovery_sdk::RecoverySDK::generate_mnemonic()
+            .expect("the phrase system.generateMnemonic produced");
+
+        let answer = create_wallet(
+            generated::WalletCreateGenesisV2Request {
+                mnemonic: crate::economic_fixtures::test_mnemonic(0x5E),
+            }
+            .encode_to_vec(),
+        );
+        assert!(!answer.success, "a typed-in phrase created a wallet");
+        assert_eq!(AppState::get_device_id(), None, "no identity was installed");
+    }
+
     /// The network a wallet joins is the one this build's root register is
     /// pinned for, never the caller's choice. A request that still names a
     /// network in the field the wire retired (3) creates the wallet on the
@@ -513,7 +555,8 @@ mod tests {
         let _poller = PollerOfThisTest::none_running();
 
         let mut body = generated::WalletCreateGenesisV2Request {
-            mnemonic: crate::economic_fixtures::test_mnemonic(0x5C),
+            mnemonic: crate::sdk::recovery_sdk::RecoverySDK::generate_mnemonic()
+                .expect("the phrase system.generateMnemonic produced"),
         }
         .encode_to_vec();
         // Field 3, length-delimited: the network id a caller used to choose.

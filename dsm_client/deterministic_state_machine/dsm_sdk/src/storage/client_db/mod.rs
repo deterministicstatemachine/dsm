@@ -486,7 +486,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// `connect_previews`) and an application account's side
 /// (`connect_app_offers`, `connect_app_sessions`, `connect_app_requests`,
 /// `connect_app_facts`).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 29;
+///
+/// 30: key schedule KS1 (Extract-then-Expand). Every identity secret, and so
+/// every key, DevID and genesis this store records, comes from a new
+/// derivation of the same mnemonic; a store written under the earlier
+/// schedule describes keys this build no longer derives.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 30;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
