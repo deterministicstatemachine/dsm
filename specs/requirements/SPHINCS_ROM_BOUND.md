@@ -546,19 +546,54 @@ Two caveats:
 * *Disagreements counted elsewhere.* The narrow-pin count covers
   disagreements caused by guessing a hidden `n`-byte handle. Disagreements
   caused by two independently sampled values coinciding are `collC`, in the
-  `wildColl` term, and are not bounded yet. The same goes for collisions
-  among the coins (`initColl`).
+  `wildColl` term, with collisions among the coins (`initColl`). Both are
+  bounded below (C59).
 * *SPHINCS+-256f.* There all handles are 32 bytes, so the split brings
   nothing, and the wide term `S^2/2^256` is not small against the 256f
   target. 256f needs a wide-class count of the same kind.
+
+**Collisions of independently sampled values** (`RomColl.lean`, claim
+trace C59). The wild/collision event is needed only at the first
+disagreement step. `hidden_bound_splitP` therefore restates the bound with
+the event restricted to steps with no earlier disagreement (`wildCollP`).
+At those steps the structural invariant holds:
+
+* *No guess is wild* (`wildE_false`). Every handle of every entry and
+  request is an existing entry of width `n` or 32, so it is at least
+  `wmin = n` wide and below `N` (given `S ≤ N`).
+* *An unopened collision is a key collision* (`collC_key`). Two distinct
+  hidden challenger requests with one resolution can be:
+  * both narrow-shaped: impossible, because their skeletons agree, so
+    `famOK_skel_unique` makes them one request;
+  * otherwise, of mode 1. Then they are keyed by two of the three 32-byte
+    key entries (tweak key, PRF key, PRF-msg key). If the key entries
+    differ, their values collide. If they are the same entry, the two
+    requests coincide, because a PRF request is determined by key and
+    address, and the randomizer by key and message.
+* *Initial collisions* (`initColl_coin`) are two coins agreeing modulo
+  `256^n`.
+
+So the event is a tape collision (`coll_event`): two of the first three
+tape entries agree modulo `256^n`, or two entries below `N` agree modulo
+`256^32`. Its count is `3/2^(8n) + N^2/2^256` of the tapes (`tape_coll`,
+via `hits_sum`).
+
+Composed for SPHINCS+-128f (`rom_win_coll_128f`):
+
+    Pr[won] ≤ Pr[canonical collision on H1''s table]
+              + (JA + 10·AA + 6)/2^128 + 2·(S^2 + N^2)/2^256
+
+This is conditional on:
+
+* the ITSR budget hypotheses;
+* the step bound `S ≤ N`, with `3 ≤ N`;
+* the adversary-step bound `AA` of H1'.
 
 Still open, and needed before this is a number:
 
 * the step bound `S` and the adversary-step bound `AA` for H1', derived from
   the query budget;
 * a wide-class count for SPHINCS+-256f;
-* the wild-guess and unopened-collision term `#wildColl(H1')`, and
-  `initColl`;
 * the canonical-collision bound on H1''s table;
 * deriving the budget hypotheses from the adversary's query budget;
 * the seed hop;
