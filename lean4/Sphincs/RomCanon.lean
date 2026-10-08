@@ -1125,7 +1125,8 @@ theorem canon_split (t : List Nat) (S N : Nat)
     (∃ i ∈ idx S N, pairW (params v).n (gameS' v limits A (coinEx (params v).n)) (coinSt (params v).n) i t = 1 ∧
       t.getD i.2.2 0 % 256^(params v).n =
         pairTg (params v).n (gameS' v limits A (coinEx (params v).n)) (coinSt (params v).n) i t % 256^(params v).n) ∨
-    (∃ a b, a < b ∧ b < N ∧ t.getD a 0 % 256^32 = t.getD b 0 % 256^32) := by
+    (∃ a b, KeyEnts (params v).n (xrun false t (gameS' v limits A (coinEx (params v).n)) (coinSt (params v).n)).2 a b ∧
+      t.getD a 0 % 256^32 = t.getD b 0 % 256^32) := by
   have hnd' : ∀ s ∈ strace t (gameS' v limits A (coinEx (params v).n)) (coinSt (params v).n), dis t s = false := by
     simp only [anyDis, List.any_eq_false] at hnd
     intro s hs; simpa using hnd s hs
@@ -1262,8 +1263,8 @@ theorem canon_split (t : List Nat) (S N : Nat)
         intro he; rw [he] at hipk; rw [hipk] at hitk; simp [dPrf, dTk] at hitk
       have hm := be_eq_mod hk
       rcases Nat.lt_or_gt_of_ne hne2 with hl | hl
-      · exact ⟨ipk, itk, hl, hent hitk, hm⟩
-      · exact ⟨itk, ipk, hl, hent hipk, hm.symm⟩
+      · exact ⟨ipk, itk, ⟨hl, ⟨_, dPrf_key _, hipk⟩, ⟨_, dTk_key _, hitk⟩⟩, hm⟩
+      · exact ⟨itk, ipk, ⟨hl, ⟨_, dTk_key _, hitk⟩, ⟨_, dPrf_key _, hipk⟩⟩, hm.symm⟩
     · subst hrq
       have hk : be 32 (t.getD dk 0) = be 32 (t.getD itk 0) := by
         simp [rqOf, SReq.res, sres, SV.res, thashReq] at hkey
@@ -1273,8 +1274,8 @@ theorem canon_split (t : List Nat) (S N : Nat)
         intro he; rw [he] at hdk; rw [hdk] at hitk; simp [dReq, dTk] at hitk
       have hm := be_eq_mod hk
       rcases Nat.lt_or_gt_of_ne hne2 with hl | hl
-      · exact ⟨dk, itk, hl, hent hitk, hm⟩
-      · exact ⟨itk, dk, hl, hent hdk, hm.symm⟩
+      · exact ⟨dk, itk, ⟨hl, ⟨_, dReq_key _, hdk⟩, ⟨_, dTk_key _, hitk⟩⟩, hm⟩
+      · exact ⟨itk, dk, ⟨hl, ⟨_, dTk_key _, hitk⟩, ⟨_, dReq_key _, hdk⟩⟩, hm.symm⟩
     · subst hrq; simp [hqOf, SReq.res, thashReq] at hmode
     · exfalso
       cases d2 with
@@ -1363,7 +1364,8 @@ theorem canon_count (R N S AA : Nat) (hRn : 256^(params v).n ∣ R) (hR : 256^32
             (if t.getD i.2.2 0 % 256^(params v).n == pairTg (params v).n (gameS' v limits A (coinEx (params v).n)) (coinSt (params v).n) i t % 256^(params v).n then 1 else 0)) :=
           List.mem_map.mpr ⟨i, hi, by simp only [hw, hh]; simp⟩
         exact Nat.le_trans (le_sum_of_mem this) (Nat.le_add_right _ _)
-      · rw [ind_of (P := K t) hk]; omega
+      · obtain ⟨a, b, ⟨hab, -, ⟨_, -, hb⟩⟩, hm⟩ := hk
+        rw [ind_of (P := K t) ⟨a, b, hab, ent_lt v limits A t S N (hS t) hSN h3N hb, hm⟩]; omega
     · rw [ind_of_not hev]; exact Nat.zero_le _
   have hMn : 0 < 256^(params v).n := Nat.pow_pos (by decide)
   have hix : ∀ i ∈ idx S N, i.2.2 < N := fun i hi => by
