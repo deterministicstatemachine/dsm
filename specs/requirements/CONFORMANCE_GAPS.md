@@ -3078,16 +3078,28 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 |---|---|---|---|
 | MR-SOFI-0415 to MR-SOFI-0420 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
 
+### 6.82 The wallet's contacts never reached a connected application (`feat/computed-escrow-sdk`, DSM Amendment A16, 2026-10-08)
+
+**The finding.** On the phones the owner wanted friends from the wallet's contacts listed in the game without searching. No A11 scope covered the wallet's contacts, so the game could not know them.
+
+**The ruling.** Owner, 2026-10-08: both the game's own friends and the wallet's contacts. DSM Amendment A16: a contacts scope; the wallet shares device ids only, never the connected applications' accounts, as its word.
+
+**Built.** `ConnectScopeKind::CONTACTS`, `ConnectContactsV1`, `ConnectContactsResultV1`; `grant::ScopeKind::Contacts`, `Request::Contacts`, its shape check and decision; `wallet::contacts_to_share` and `connect_routes::shared_contacts`; the scope and request rendered for the player; the request labelled in the account host's activity.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0319 to MR-DSM-0321 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 318 | 129 | 97 | 41 | 0 | 33 | 18 |
+| DSM high-level (MR-DSM) | 321 | 132 | 97 | 41 | 0 | 33 | 18 |
 | SoFi (MR-SOFI) | 420 | 289 | 91 | 19 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **1042** | **492** | **207** | **117** | **4** | **68** | **154** |
+| **All** | **1045** | **495** | **207** | **117** | **4** | **68** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3413,6 +3425,9 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-DSM-0316 | Missing | — | — | DSM Amendment A15 (§6.78); scoped to unowned lineages (§6.79). Not built. |
 | MR-DSM-0317 | Missing | — | — | DSM Amendment A15 (§6.78). Not built. |
 | MR-DSM-0318 | Met | `dsm::sofi::frontier`; `dsm::sofi::resolution::VaultChain::from_baseline` | `dsm_sdk::handlers::node_e2e_tests::a_wallet_that_holds_nothing_starts_at_the_owners_baseline_and_trades`; `dsm_sdk::handlers::node_e2e_tests::a_fresh_reader_reads_the_same_at_any_vault_age` | DSM Amendment A15 refinement (§6.79). |
+| MR-DSM-0319 | Met | `dsm_sdk::sdk::connect::grant::decide`; `dsm_sdk::sdk::connect::grant::scopes_from_wire` | `dsm_sdk::sdk::connect::grant::tests::a_contacts_request_runs_without_the_player_only_under_a_contacts_scope` | DSM Amendment A16 (§6.82). |
+| MR-DSM-0320 | Met | `dsm_sdk::sdk::connect::wallet::contacts_to_share` | `dsm_sdk::sdk::connect::wallet::tests::a_contacts_answer_shares_device_ids_only_and_never_an_application` | DSM Amendment A16 (§6.82). |
+| MR-DSM-0321 | Met | `dsm_sdk::handlers::connect_routes` | `dsm_sdk::handlers::connect_e2e_tests::the_game_sees_the_wallets_contacts_as_device_ids_and_never_itself` | DSM Amendment A16 (§6.82). The answer establishes `ConnectFact::None`. |
 
 ### 8.2 SoFi settlement specification
 

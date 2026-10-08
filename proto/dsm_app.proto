@@ -4636,6 +4636,7 @@ enum ConnectScopeKind {
   CONNECT_SCOPE_KIND_HOLDINGS      = 4; // prove holdings of the application's tokens
   CONNECT_SCOPE_KIND_ESCROW        = 5; // lock stakes in matches the application referees, and collect results (DSM Amendment A12)
   CONNECT_SCOPE_KIND_DUEL          = 6; // stake in matches a pinned program decides, play their moves, settle and collect (SoFi Amendment S22)
+  CONNECT_SCOPE_KIND_CONTACTS      = 7; // read the DSM identities of the wallet's contacts, nothing more (DSM Amendment A16)
 }
 
 // A cap on one token a scope may spend, in that token's base units.
@@ -4714,6 +4715,19 @@ message ConnectSwapV1 {
 }
 message ConnectHoldingsV1 {
   repeated bytes policy_commits = 1 [(dsm_fixed_len)=32];
+}
+// Which of the wallet's contacts are who (DSM Amendment A16): asks for their
+// DSM identities. Nothing else about a contact leaves the wallet.
+message ConnectContactsV1 {
+}
+// One contact of the wallet, as an application may see it: its device id.
+message ConnectContactV1 {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+}
+// The wallet's contacts, excluding the accounts of the applications it is
+// connected to (DSM Amendment A16). The wallet's word: no other evidence.
+message ConnectContactsResultV1 {
+  repeated ConnectContactV1 contacts = 1;
 }
 // Lock a stake for a match the application referees (DSM Amendment A12). The
 // wallet builds the escrow terms itself from one fixed outcome table: a-wins
@@ -4866,6 +4880,7 @@ message AppRequestBodyV1 {
     ConnectDuelSignV1       duel_sign        = 21;
     ConnectDuelSettleV1     duel_settle      = 22;
     ConnectDuelCollectV1    duel_collect     = 23;
+    ConnectContactsV1       contacts         = 24;
   }
 }
 message AppRequestV1 {
@@ -4989,6 +5004,7 @@ message AppResponseBodyV1 {
     ConnectDuelReadyResultV1      duel_ready       = 17;
     ConnectDuelCellsV1            duel_cells       = 18; // a withdraw's or a settle's
     ConnectDuelSignResultV1       duel_sign        = 19;
+    ConnectContactsResultV1       contacts         = 20;
   }
 }
 message AppResponseV1 {
@@ -5115,6 +5131,7 @@ message ConnectAppRequestIntentV1 {
     ConnectDuelSignV1       duel_sign        = 21;
     ConnectDuelSettleV1     duel_settle      = 22;
     ConnectDuelCollectV1    duel_collect     = 23;
+    ConnectContactsV1       contacts         = 24;
   }
 }
 message ConnectAppRequestsQueryV1 {

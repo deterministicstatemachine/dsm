@@ -28,6 +28,9 @@ pub enum ScopeKind {
     /// settle and collect (SoFi Amendment S22). Capped as a payment scope
     /// is, and only for the programs it names.
     Duel,
+    /// Read the DSM identities of this wallet's contacts, and nothing more
+    /// about them (DSM Amendment A16).
+    Contacts,
 }
 
 /// A cap on one token, in its base units.
@@ -70,6 +73,7 @@ fn kind_from_wire(kind: i32) -> Result<ScopeKind, String> {
         Ok(generated::ConnectScopeKind::Holdings) => Ok(ScopeKind::Holdings),
         Ok(generated::ConnectScopeKind::Escrow) => Ok(ScopeKind::Escrow),
         Ok(generated::ConnectScopeKind::Duel) => Ok(ScopeKind::Duel),
+        Ok(generated::ConnectScopeKind::Contacts) => Ok(ScopeKind::Contacts),
         _ => Err(format!("scope kind {kind} is not one this wallet knows")),
     }
 }
@@ -82,6 +86,7 @@ fn kind_to_wire(kind: ScopeKind) -> generated::ConnectScopeKind {
         ScopeKind::Holdings => generated::ConnectScopeKind::Holdings,
         ScopeKind::Escrow => generated::ConnectScopeKind::Escrow,
         ScopeKind::Duel => generated::ConnectScopeKind::Duel,
+        ScopeKind::Contacts => generated::ConnectScopeKind::Contacts,
     }
 }
 
@@ -91,8 +96,8 @@ fn kind_to_wire(kind: ScopeKind) -> generated::ConnectScopeKind {
 ///   `0 < per_request ≤ total`, and only a SWAP names a pair;
 /// - a DUEL names at least one program, each once, and only a DUEL names
 ///   programs;
-/// - ACCEPT_ISSUED and HOLDINGS carry no caps, and only HOLDINGS and SWAP
-///   name tokens;
+/// - ACCEPT_ISSUED, HOLDINGS and CONTACTS carry no caps, and only HOLDINGS
+///   and SWAP name tokens;
 /// - no two scopes cover the same thing (one of each kind, one SWAP per pair).
 pub fn scopes_from_wire(wire: &[generated::ConnectScopeV1]) -> Result<Vec<Scope>, String> {
     let mut scopes: Vec<Scope> = Vec::with_capacity(wire.len());
@@ -147,6 +152,11 @@ pub fn scopes_from_wire(wire: &[generated::ConnectScopeV1]) -> Result<Vec<Scope>
             ScopeKind::Holdings => {
                 if !scope.caps.is_empty() {
                     return Err("a holdings scope spends nothing".into());
+                }
+            }
+            ScopeKind::Contacts => {
+                if !scope.policy_commits.is_empty() || !scope.caps.is_empty() {
+                    return Err("a contacts scope names no tokens and no caps".into());
                 }
             }
             ScopeKind::Pay => {
@@ -436,6 +446,8 @@ pub enum Request {
     DuelCollect {
         vault_ids: Vec<[u8; 32]>,
     },
+    /// The DSM identities of this wallet's contacts (DSM Amendment A16).
+    Contacts,
 }
 
 /// The longest setup a duel lock carries.
@@ -623,6 +635,7 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
             Ok(Request::Holdings { policy_commits })
         }
         Some(Kind::EscrowLock(r)) => Ok(Request::EscrowLock(escrow_lock_from_wire(r)?)),
+        Some(Kind::Contacts(..)) => Ok(Request::Contacts),
         Some(Kind::EscrowRelease(r)) => Ok(Request::EscrowRelease {
             vault_ids: vault_list(&r.vault_ids)?,
         }),
@@ -714,6 +727,10 @@ pub fn decide(
         Request::AcceptIssued { .. } => match of_kind(ScopeKind::AcceptIssued).next() {
             Some(..) => Decision::InScope { spend: None },
             None => Decision::Outside("the grant does not accept issued objects".into()),
+        },
+        Request::Contacts => match of_kind(ScopeKind::Contacts).next() {
+            Some(..) => Decision::InScope { spend: None },
+            None => Decision::Outside("the grant does not let it see your contacts".into()),
         },
         Request::Pay {
             policy_commit,
@@ -1329,5 +1346,61 @@ mod tests {
             "{line}"
         );
         assert!(line.ends_with("and play your moves"), "{line}");
+    }
+
+    // ── the contacts scope (DSM Amendment A16) ────────────────────────────
+
+    fn contacts_scope() -> Scope {
+        Scope {
+            kind: ScopeKind::Contacts,
+            policy_commits: vec![],
+            caps: vec![],
+            programs: vec![],
+        }
+    }
+
+    #[test]
+    fn a_contacts_request_runs_without_the_player_only_under_a_contacts_scope() {
+        let issued = BTreeSet::new();
+        let mut with = grant();
+        with.push(contacts_scope());
+        let wire = scopes_to_wire(&with);
+        assert_eq!(scopes_from_wire(&wire).as_ref(), Ok(&with));
+        assert_eq!(
+            decide(&with, &Request::Contacts, &nothing_spent, &issued),
+            Decision::InScope { spend: None }
+        );
+        assert!(matches!(
+            decide(&grant(), &Request::Contacts, &nothing_spent, &issued),
+            Decision::Outside(..)
+        ));
+        let body = generated::AppRequestBodyV1 {
+            session_id: vec![9; 32],
+            seq: 1,
+            kind: Some(generated::app_request_body_v1::Kind::Contacts(
+                generated::ConnectContactsV1 {},
+            )),
+        };
+        assert_eq!(request_from_wire(&body), Ok(Request::Contacts));
+    }
+
+    #[test]
+    fn a_contacts_scope_names_no_token_and_no_cap() {
+        let mut with = grant();
+        with.push(contacts_scope());
+        let mut w = scopes_to_wire(&with);
+        let last = w.len() - 1;
+        w[last].policy_commits.push(WILD.to_vec());
+        scopes_from_wire(&w).expect_err("a contacts scope naming a token");
+        let mut w = scopes_to_wire(&with);
+        w[last].caps.push(generated::ConnectCapV1 {
+            policy_commit: WILD.to_vec(),
+            per_request: 1,
+            total: 1,
+        });
+        scopes_from_wire(&w).expect_err("a contacts scope with a cap");
+        let mut w = scopes_to_wire(&with);
+        w.push(w[last].clone());
+        scopes_from_wire(&w).expect_err("two contacts scopes");
     }
 }

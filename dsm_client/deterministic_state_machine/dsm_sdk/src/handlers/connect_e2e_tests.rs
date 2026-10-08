@@ -178,7 +178,8 @@ fn cap(token: &[u8; 32], per_request: u64, total: u64) -> generated::ConnectCapV
 }
 
 /// The scopes a game asks for: accept the objects it issues, take payment in
-/// its coin, swap the coin against ERA spending ERA, see the coin.
+/// its coin, swap the coin against ERA spending ERA, see the coin, and see
+/// which of the wallet's contacts play (DSM Amendment A16).
 fn game_scopes(wild: &[u8; 32]) -> Vec<generated::ConnectScopeV1> {
     vec![
         generated::ConnectScopeV1 {
@@ -199,6 +200,10 @@ fn game_scopes(wild: &[u8; 32]) -> Vec<generated::ConnectScopeV1> {
         generated::ConnectScopeV1 {
             kind: generated::ConnectScopeKind::Holdings as i32,
             policy_commits: vec![wild.to_vec()],
+            ..Default::default()
+        },
+        generated::ConnectScopeV1 {
+            kind: generated::ConnectScopeKind::Contacts as i32,
             ..Default::default()
         },
     ]
@@ -835,6 +840,53 @@ async fn holdings_of_an_object_never_held_are_covered_only_if_the_game_issued_it
         waiting.reason
     );
     assert_eq!(fact(&waiting), generated::ConnectFact::None);
+}
+
+/// DSM Amendment A16, end to end: the game asks the wallet which of its
+/// contacts are who, and the wallet, under the grant's contacts scope and
+/// without asking its player, answers with each contact's device id and
+/// nothing else — never the game's own account, which it keeps as a contact
+/// since it connected. The answer is the wallet's word: it establishes no
+/// fact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_game_sees_the_wallets_contacts_as_device_ids_and_never_itself() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    p.b.add_contact(&c).await;
+
+    let asked = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Contacts(generated::ConnectContactsV1 {}),
+    )
+    .await;
+    sync_clean(&p, &relay).await;
+    let answered = status(&p.a, &session, asked).await;
+    assert_eq!(
+        outcome(&answered),
+        generated::ConnectOutcome::CarriedOut,
+        "{}",
+        answered.reason
+    );
+    assert_eq!(fact(&answered), generated::ConnectFact::None);
+    let body = generated::AppResponseBodyV1::decode(answered.answer_body.as_slice())
+        .expect("the wallet's answer");
+    let Some(generated::app_response_body_v1::Result::Contacts(shared)) = body.result else {
+        panic!("the wallet answered another result: {:?}", body.result);
+    };
+    let ids: Vec<Vec<u8>> = shared.contacts.into_iter().map(|c| c.device_id).collect();
+    assert!(ids.contains(&c.device_id.to_vec()), "C is shared: {ids:?}");
+    assert!(
+        !ids.contains(&p.a.device_id.to_vec()),
+        "the game's own account is never shared back to it"
+    );
 }
 
 /// The answers the relay holds, each delivered to A once.
