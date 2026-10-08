@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! An offline send ends one of three ways, and the screen says which.
-//!
-//! When the screen stopped waiting, it used to report "did not complete in
-//! time" as a failed send, while the step stayed open on both appliances and
-//! completed when they met again: a lost link fails no step.
+//! Offline sending is under construction (owner ruling 2026-10-08): the
+//! Offline switch says so in a pop-up, and the send stays online.
 
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -26,76 +23,27 @@ import SendTab from '../SendTab';
 
 const D3 = { deviceId: 'NJ2C7P4CXGNY59', alias: 'nj2c7p4c' } as any;
 
-function sendOffline(props: { setError: jest.Mock; onSendComplete: jest.Mock }) {
-  render(
-    <SendTab
-      contacts={[D3]}
-      balances={[{ tokenId: 'RIGB', symbol: 'RIGB', tokenName: 'RIGB', baseUnits: 1000n, displayAmount: '1000', decimals: 0, protocolDefined: false }]}
-      onCancel={jest.fn()}
-      loadWalletData={jest.fn().mockResolvedValue(undefined)}
-      {...props}
-    />,
-  );
-  fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
-  fireEvent.change(screen.getByLabelText(/recipient/i), { target: { value: D3.deviceId } });
-  fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '5' } });
-  fireEvent.click(screen.getByRole('button', { name: /^send$/i }));
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-}
-
 describe('SendTab offline outcome', () => {
   beforeEach(() => mockPlay.mockReset());
 
-  it('reports a step still open as open, not as a failed send', async () => {
-    (dsmClient.sendOfflineTransfer as jest.Mock).mockResolvedValue({
-      accepted: false,
-      open: true,
-      result: 'The transfer is still open.',
-    });
-    const setError = jest.fn();
-    const onSendComplete = jest.fn();
-
-    sendOffline({ setError, onSendComplete });
-
-    await waitFor(() => expect(mockPlay).toHaveBeenCalled());
-    expect(mockPlay).toHaveBeenCalledWith(
-      expect.objectContaining({ anim: 'trace', title: 'Not finished yet', tone: 'neutral' }),
+  it('Offline says it is under construction, and the send stays online', async () => {
+    render(
+      <SendTab
+        contacts={[D3]}
+        balances={[]}
+        onCancel={() => undefined}
+        loadWalletData={async () => undefined}
+        setError={() => undefined}
+        onSendComplete={() => undefined}
+      />,
     );
-    expect(mockPlay).not.toHaveBeenCalledWith(expect.objectContaining({ anim: 'fail' }));
-    expect(setError).not.toHaveBeenCalledWith(expect.any(String));
-    expect(onSendComplete).toHaveBeenCalled();
-    expect(dsmClient.sendOfflineTransfer).toHaveBeenCalledWith(
-      expect.objectContaining({ tokenId: 'RIGB', to: D3.deviceId, amount: '5' }),
-    );
+    fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
+    expect(screen.getByRole('alertdialog', { name: 'Offline' })).toHaveTextContent('Under construction, check back soon.');
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Online' })).toHaveClass('active');
+    expect(screen.getByRole('button', { name: 'Offline' })).not.toHaveClass('active');
+    expect(dsmClient.sendOfflineTransfer).not.toHaveBeenCalled();
   });
 
-  // Where the recipient's appliance is over BLE is Rust's to know. The form used
-  // to resolve an address itself and refuse a contact it found none for,
-  // before Rust was asked.
-  it('asks Rust to send and names no address itself; an appliance Rust has not met is its refusal', async () => {
-    const refusal = 'wallet.sendOffline: no BLE address is known for the counterparty: the appliances have not met over BLE';
-    (dsmClient.sendOfflineTransfer as jest.Mock).mockResolvedValue({ accepted: false, result: refusal });
-    const setError = jest.fn();
-
-    sendOffline({ setError, onSendComplete: jest.fn() });
-
-    await waitFor(() => expect(setError).toHaveBeenCalledWith(refusal));
-    const [params] = (dsmClient.sendOfflineTransfer as jest.Mock).mock.calls.at(-1);
-    expect(params).toEqual({ tokenId: 'RIGB', to: D3.deviceId, amount: '5', memo: undefined });
-  });
-
-  it("reports a refused send as failed, in the SDK's words", async () => {
-    (dsmClient.sendOfflineTransfer as jest.Mock).mockResolvedValue({
-      accepted: false,
-      result: 'Bilateral transfer rejected',
-    });
-    const setError = jest.fn();
-    const onSendComplete = jest.fn();
-
-    sendOffline({ setError, onSendComplete });
-
-    await waitFor(() => expect(setError).toHaveBeenCalledWith('Bilateral transfer rejected'));
-    expect(mockPlay).toHaveBeenCalledWith(expect.objectContaining({ anim: 'fail' }));
-    expect(onSendComplete).not.toHaveBeenCalled();
-  });
 });

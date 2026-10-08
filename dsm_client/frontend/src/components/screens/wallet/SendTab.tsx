@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { dsmClient } from '../../../services/dsmClient';
 import { failureReasonMessage } from '../../../domain/bilateral';
 import ConfirmModal from '../../ConfirmModal';
+import UnderConstructionModal from '../../UnderConstructionModal';
 import { TokenMark } from '../../TokenMark';
 import { TokenSelect } from '../../common/TokenSelect';
 import { Notice } from '../../common/ScreenFrame';
@@ -47,6 +48,8 @@ function SendTabInner({
     note: '',
   });
   const [txMode, setTxMode] = useState<'online' | 'offline'>('online');
+  // Offline sending is not open yet: choosing it says so and the send stays online.
+  const [notice, setNotice] = useState<string | null>(null);
   const [sendingTx, setSendingTx] = useState(false);
   const [showSendConfirm, setShowSendConfirm] = useState(false);
   const [fundingOpen, setFundingOpen] = useState(false);
@@ -243,7 +246,7 @@ function SendTabInner({
         </span>
         <div className="sb-seg sb-seg--block" role="group" aria-label="Transaction mode">
           <button type="button" className={`sb-seg__opt${txMode === 'online' ? ' active' : ''}`} onClick={() => setTxMode('online')}>Online</button>
-          <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
+          <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setNotice('Under construction, check back soon.')}>Offline</button>
         </div>
         {txMode === 'offline' && (
           <>
@@ -351,6 +354,7 @@ function SendTabInner({
           </button>
         </div>
       </form>
+      <UnderConstructionModal title="Offline" message={notice} onClose={() => setNotice(null)} />
       <ConfirmModal
         visible={showSendConfirm}
         title="Send"
