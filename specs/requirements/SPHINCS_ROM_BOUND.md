@@ -384,14 +384,58 @@ As in the provenance invariant, *learning* a protected value is excluded
 by the invariant, and *computing* a request equal to a hidden one is a
 disagreement step.
 
-Still open, and needed before any of this enters a number:
+**Coverage transfer and the assembled count** (`RomCover.lean`, claim
+trace C54). H1''s table answers every draw of H1 as H1's table does
+(`fin_agree`). Every request the covered event reads was drawn in H1:
 
-* bounding `anyDis` for H1' with `hidden_bound`: its step bound, its
-  pair-count budget, and its wild-guess and unopened-collision term,
-  for the extended game;
-* transferring coverage from H1''s table to H1's table, where the ITSR
-  bound (C50, C51) is stated. The two tables agree on H1's draws;
-* the canonical-collision bound;
+* the forgery's digest request is in an accepting verifier's log
+  (`verify_log_hmsg`);
+* for each signed message, its PRF-msg key derivation, randomizer and
+  signing requests are in the signing run's log (`sign_log_dReq`,
+  `sign_log_rReq`, `sign_log_mem`), all of which is drawn (`game_signlog`).
+
+So coverage on H1''s table is coverage on H1's (`cov_transfer`). With
+`rom_extract_sec`, on every tape on which H1 is won (`rom_win_split`), one
+of these holds:
+
+* a canonical collision on H1''s table;
+* `CovG`;
+* `anyDis` of H1'.
+
+Summed over tapes, with `itsr_game_hid_128f` / `_256f` and the inclusion
+of H1's disagreement steps in H1''s (`anyDis_ext`), this gives
+`rom_win_128f` / `rom_win_256f`, as counts of tapes scaled by `2^128` /
+`2^255`:
+
+    #won · 2^128 ≤ #canon-collision(H1') · 2^128 + JA · R^N
+                   + 2 · #anyDis(H1') · 2^128
+
+This is conditional on the three budget hypotheses of the ITSR theorem:
+at most `N` draws, at most `q ≤ 2^64` challenger `h_msg` draws, and at
+most `JA` adversary `h_msg` draws, on every tape.
+
+`hidden_bound` is generic in the symbolic program, so it applies to H1' as
+it stands (`rom_ext_hidden`). With `256^n = 2^128` for SPX128f, this gives
+`rom_win_hidden_128f`:
+
+    #won · 2^128 ≤ #canon-collision(H1') · 2^128 + JA · R^N
+                   + 2 · R^N · B + 2 · #wildColl(H1') · 2^128
+
+`rom_win_hidden_256f` is the same against `2^256`, with the ITSR term
+doubled. Both are conditional on the ITSR budget hypotheses and on two
+hypotheses of `hidden_bound` for H1':
+
+* a step bound `S` on its symbolic traces;
+* a pair-count budget `B`.
+
+Still open, and needed before this is a number:
+
+* the step bound and a pair-count budget `B` for H1' small enough to
+  matter. The trivial budget `S^2` is far too large; the intended one is
+  per adversary request, using tweak single use;
+* the wild-guess and unopened-collision term `#wildColl(H1')`;
+* the canonical-collision bound on H1''s table;
+* deriving the budget hypotheses from the adversary's query budget;
 * the seed hop;
 * the final composition.
 
