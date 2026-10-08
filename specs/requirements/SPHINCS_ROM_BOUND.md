@@ -476,10 +476,48 @@ collisions among the honest values are expected at DSM's scale. It also
 needs `Φ` at intermediate states, so the judgment must cover every
 pre-step state of a disagreement-free prefix, not only end states.
 
+**The structural invariant of H1'** (`RomStruct.lean`, claim trace C57).
+This is the request-level dataflow invariant described above, proved for the
+whole extended game. It is stated about the symbolic dataflow, not about
+values, and it holds at every pre-step state of every disagreement-free
+prefix, on every tape. The judgment is `JS`:
+
+* It is prefix-closed. Every pre-step state reached without an earlier
+  disagreement satisfies the invariant `InvS`. That includes the states
+  inside WOTS chains, the XMSS and FORS authentication walks, the hypertree
+  layers, signing, the forgery's verification and the extension.
+* Each step meets its obligation (`StepOK`). A challenger request belongs to
+  one of DSM's families (`FamOK`): the three key derivations, a PRF request,
+  the randomizer, the signing request, or a *structured* thash request. A
+  structured thash request has an in-range address literal, the tweak-key
+  entry as its key, and as its k-th input the handle of the k-th canonical
+  child of its address (`kids`), to any depth.
+* A revealed handle is never protected, i.e. never an entry that mentions
+  SK.seed or SK.prf.
+
+`InvS` also keeps DistK (distinct resolutions past the coins), so
+structured requests are unique per address (`struct_unique`). As a
+consequence, two handles that resolve to the same canonical node are one
+handle (`kidOK_unique_th`). Verification uses this to match the
+recomputed layer roots with the signer's. The game-level statement is
+`game_struct`.
+
+This is the input from which `Φ` is to be derived; it does not yet bound
+`B_lo`. The intended counting from it (to be proved, not yet checked):
+
+* At an adversary step, a narrow pin is charged only against an entry
+  whose literal skeleton the query determines. Given `struct_unique`,
+  that is at most a constant number of entries.
+* At a fresh challenger step, a narrow pin is charged only against an
+  adversary entry. Freshness and the family shapes make this at most once
+  per adversary entry.
+* PRF and randomizer requests pin their 32-byte key, so they fall in the
+  wide class.
+
 Still open, and needed before this is a number:
 
-* the step bound, and `Φ` with the counting `B_lo ≤ 2c · A` for H1', as
-  above;
+* the step bound, and deriving `Φ` from `game_struct` with the counting
+  `B_lo ≤ c · A` for H1', as above;
 * the wild-guess and unopened-collision term `#wildColl(H1')`;
 * the canonical-collision bound on H1''s table;
 * deriving the budget hypotheses from the adversary's query budget;
