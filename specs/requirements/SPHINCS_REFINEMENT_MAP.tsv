@@ -75,10 +75,10 @@ dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	42	derive
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	121	derive_ek_cert_hash	ekCertInput / cert_preimage_binding	0c72673052df00fa8cc5cfcf328e198b89500860
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	130	sign_ek_cert	sign(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	141	verify_ek_cert	verify(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	146	derive_ak_seed	authority-policy-bound KDF; unproved	6f4b6e2b19815c6011383b5ba152f0b02e8fa1e0
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	157	derive_device_ak_keypair	seed-to-AK call path; unproved	6f4b6e2b19815c6011383b5ba152f0b02e8fa1e0
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	172	derive_devid	devidInput / devid_preimage_binding	6f4b6e2b19815c6011383b5ba152f0b02e8fa1e0
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	196	derive_smaster	master seed KDF; unproved	6f4b6e2b19815c6011383b5ba152f0b02e8fa1e0
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	120	derive_ak_seed	KS1 Expand under PRK_d: akInfo_inj (C68); refinement unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	131	derive_device_ak_keypair	seed-to-AK call path; unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	146	derive_devid	devidInput / devid_preimage_binding	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	167	derive_smaster	KS1 Expand under PRK_s0: snode_info_inj (C68), modeled in ks1_forge_256f (C69), vectors executed by KeyScheduleChecks; refinement unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
 dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	19	binding_digest	identityBindingInput / identity_preimage_binding	0aa0f212cfa0c7a82277da2d1df5b1e9366c3462
 dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	33	verify_kyber_identity_binding	key width + verify; tested by existing suite, not proved	0aa0f212cfa0c7a82277da2d1df5b1e9366c3462
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	174	setup_signing_digest	domainInput + opaque CCB; unproved CCB refinement	07fe92cca3943a843c8f6f829d418112d15cb2fb
