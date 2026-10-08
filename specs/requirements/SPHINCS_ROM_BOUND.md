@@ -156,8 +156,13 @@ against the honest key under that table, so `forgery_extract_exp` yields one
 of the four events on the run's own table, with every request of the
 verifier's log drawn in the run (`rom_extract`, claim trace C47). Bounding
 those four events in the run (canonical collision, WOTS preimage, unrevealed
-FORS secret, ITSR covered) is what remains of (f). Until (b) to (f) are checked, the
-numbers above remain conditional on link 3.
+FORS secret, ITSR covered) is what remains of (f). The WOTS-preimage and
+FORS-secret events are now charged to a disagreement step of an extended
+game (claim trace C52, C53; see "Secrecy of chain values and FORS secrets"
+below), whose probability is again a hidden-value event, but the hypotheses
+of that hidden-value bound are not yet discharged for the extended game.
+Until (b) to (f) are checked, the numbers above remain conditional on
+link 3.
 
 ## What is argued, not machine-checked
 
@@ -183,9 +188,13 @@ experiment is argued here and not formalized:
    unless such a request collides with one the adversary made (itself a
    counted event). Resampling it therefore leaves the view unchanged, and
    naming it is a guess. The resampling argument is now kernel-checked for
-   any challenger written as a symbolic program (phase 3 below); its
-   instantiation for DSM's signer is not, so for DSM this link is still
-   argued.
+   any challenger written as a symbolic program (phase 3 below). For DSM's
+   signer it is instantiated for the WOTS chain values below the signed
+   digit and the unrevealed FORS secrets (claim trace C53): a forgery
+   hashing one of them is a disagreement step of the extended game. What
+   is still argued is the size of that event for the extended game: the
+   step and pair-count budgets of `hidden_bound` and its wild-guess and
+   unopened-collision term.
 4. **ITSR with adaptive signing.** `itsr_static` fixes the `q_s` signature
    leaves as independent uniform draws. In the run they are fresh oracle
    answers on distinct inputs (distinct messages), chosen adaptively but each
@@ -276,9 +285,115 @@ The judgment separates the adversary *learning* a protected value from
 `Inv`. The second is a disagreement step, i.e. an event of the
 hidden-value bound.
 
-Not yet covered by this invariant: the WOTS-preimage and FORS-secret
-extraction events. These still need the same treatment, with the chain
+This invariant does not cover the WOTS-preimage and FORS-secret
+extraction events. A second invariant, below, treats them, with the chain
 values and FORS secrets as the protected handles.
+
+## Secrecy of chain values and FORS secrets (phase 3, checked)
+
+Three steps, kernel-checked, Lean core, core axioms only. Nothing here
+bounds a probability yet; the result is an inclusion of events on every
+tape.
+
+**Path-located extraction** (`RomPath.lean`, claim trace C52). A verifying
+forgery under the honest key gives a canonical collision in the verifier's
+log, or `WotsPath`, or `ForsPath`, or ITSR coverage (`forgery_extract_path`).
+`WotsPath` locates the WOTS event on the verifier's path. At hypertree layer
+`k`, at the position the forged digest selects, the verifier's log contains
+the thash request on the honest chain value at a step below the digit the
+honest key signs there. `ForsPath` locates the FORS event the same way. The
+verifier's log contains the leaf request on the honest FORS secret at an
+index no signed message selects.
+
+**The extended game H1'** (`RomExt.lean`, claim trace C52). After H1 ends,
+the challenger recomputes two things:
+
+* the honest WOTS public keys on the hypertree path of the forged digest,
+  which draws every honest chain value up to the top;
+* the honest FORS leaves at the forged digest's indices.
+
+The forged digest is recomputed with an adversary-side `h_msg` request. The
+extension runs after the adversary has stopped, so it does not change the
+adversary's view. It only appends draws: the main game's draws are a prefix
+of H1' (`pre_ext`), and the output and the key are those of H1 (`out_ext`,
+`finKey_ext`). The four events are read on H1''s final table (`finO'`), and
+`rom_extract_ext` gives them on every tape on which H1 is won.
+
+**Secrecy invariant** (`RomSecrecy.lean`, `RomSecGame.lean`, claim trace
+C53). The judgment `J2 P Pre Q` works over disagreement-free symbolic runs
+of H1' whose final table extends a fixed table `D`. Its invariant `Inv2` has
+four parts:
+
+* **Origin.** As in `Inv`.
+* **Distinctness.** Two entries past the coins never resolve to the same
+  request. On a disagreement-free run a new entry is appended only when no
+  entry, opened or not, has its resolution. So every entry's value is the
+  final table's answer to it (`agree`).
+* **Protection and disclosure.** A revealed handle never mentions SK.seed
+  or SK.prf, as before. In addition, it is never:
+  * a *low* WOTS chain value, meaning the honest value at a step below the
+    digit the honest key signs at that position (`LowChain`; the honest
+    messages are those of the final table);
+  * a FORS secret, unless some challenger signing request's digest selects
+    its index (`SigD`, `Sel`).
+* **Signing requests.** Every challenger `h_msg` entry is the signing
+  request of a message signed in the run, with its randomizer's PRF-msg
+  entry.
+
+The step lemmas and the per-request lemmas cover every operation of
+DSM's H1'. Each item names its lemmas:
+
+* the step lemmas `step_askC2`, `step_askA2`, `step_reveal2`;
+* the key derivations, the randomizer and the signing request (`dTk_ask`,
+  `dPrf_ask`, `dReq_ask`, `rq_ask`, `hq_ask`);
+* thash and PRF;
+* the signer's twins, checked relationally against the `Id` model on the
+  final table: chains, WOTS, XMSS, FORS, hypertree (`jr_*`);
+* key generation (`j2_kgTail`);
+* signing (`j2_sign`);
+* the play loop (`j2_play`). Its precondition is the condition, on the
+  rest of the run, that every message it will sign is in the final signed
+  list;
+* the adversary's verification (`ja_verify`). Every request in the Id
+  model's verifier log ends with an *open* entry, i.e. one all of whose
+  handles are revealed;
+* the extension (`j2_ext`). It leaves the honest chain entries up to each
+  digit on the path and the honest FORS leaf entries at the digest.
+
+`sec_game` collects these for the whole run. The final step (`no_wotsPath`,
+`no_forsPath`) runs as follows:
+
+1. The verifier's request on a low chain value has the resolution of the
+   extension's chain entry one step above it.
+2. Distinctness makes them one entry.
+3. That entry is open, so the low value is revealed, which `Inv2` excludes.
+
+The FORS case is the same, with the leaf entry. A revealed FORS secret
+has a selecting signing request, which via the final table and the
+signing-request clause gives `RevealedBy` for a signed message.
+
+`no_paths` transports this to the real run through `coupling` and
+`sim_game'`. `rom_extract_sec` then shows that on every tape on which H1 is
+won, one of three things holds on H1''s table:
+
+* a canonical collision in the verifier's log;
+* the forged digest is ITSR-covered by the signed messages;
+* `anyDis` holds for H1' (a disagreement step of its symbolic run).
+
+As in the provenance invariant, *learning* a protected value is excluded
+by the invariant, and *computing* a request equal to a hidden one is a
+disagreement step.
+
+Still open, and needed before any of this enters a number:
+
+* bounding `anyDis` for H1' with `hidden_bound`: its step bound, its
+  pair-count budget, and its wild-guess and unopened-collision term,
+  for the extended game;
+* transferring coverage from H1''s table to H1's table, where the ITSR
+  bound (C50, C51) is stated. The two tables agree on H1's draws;
+* the canonical-collision bound;
+* the seed hop;
+* the final composition.
 
 ## Assumptions, stated plainly
 
