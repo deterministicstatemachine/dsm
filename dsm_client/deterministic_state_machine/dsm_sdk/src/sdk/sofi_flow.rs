@@ -267,7 +267,6 @@ pub async fn create_vault(
     set: &StorageSet,
     intent: &CreateVaultIntent,
 ) -> Result<VaultCreated, DsmError> {
-    let mut timing = crate::util::phase_timing::PhaseTimer::start("sofi.createVault");
     let (genesis, device_id) = identity(core)?;
     let validated = validated_root_or_activate(core)?;
     let create_position = next_position(validated.economic_position()).map_err(refuse)?;
@@ -346,7 +345,6 @@ pub async fn create_vault(
             return Err(refuse("a vault object was stored at another address"));
         }
     }
-    timing.phase("publish");
 
     let operation = produced
         .operation
@@ -377,7 +375,6 @@ pub async fn create_vault(
         Some(BuiltOn::of(&validated)),
     )
     .await?;
-    timing.phase("admission");
     let vault_id = preimage.vault_id();
     let moved: Vec<Moved> = deltas
         .iter()
@@ -1954,7 +1951,6 @@ pub(crate) async fn exercise_draft_at_head(
     draft: UncheckedDraft,
     accepted: &AcceptedGeneses,
 ) -> Result<Drafted, DsmError> {
-    let mut timing = crate::util::phase_timing::PhaseTimer::start("sofi.exercise");
     // Stage 3.
     let verifier = ctx.verifier();
     let evidence = match verifier
@@ -1971,7 +1967,6 @@ pub(crate) async fn exercise_draft_at_head(
     };
     let checked = check_draft(draft, &evidence).map_err(refuse)?;
     let precommit_signature = sign(&checked.precommit_signing_digest())?;
-    timing.phase("evidence");
 
     // Stage 6: each leg's live attempt, from the walk at its parent.
     let mut chains = BTreeMap::new();
@@ -1992,13 +1987,11 @@ pub(crate) async fn exercise_draft_at_head(
     let produced = build_fulfillment(&checked, precommit_signature.clone(), &attempts, att_a)
         .map_err(refuse)?;
     let fulfillment_signature = sign(produced.signs.bytes())?;
-    timing.phase("attempts");
 
     // Stages 4 and 5.
     for published in publish_produced(set, &produced, &fulfillment_signature).await? {
         require_stored("route object", &published)?;
     }
-    timing.phase("publish");
     let fulfillment = produced
         .publish
         .iter()
@@ -2029,9 +2022,7 @@ pub(crate) async fn exercise_draft_at_head(
         },
     )
     .await?;
-    timing.phase("fulfill");
     let settled = complete_and_settle(core, set, accepted).await;
-    timing.phase("settle");
     settled.map(Drafted::Position)
 }
 
@@ -2150,7 +2141,6 @@ pub async fn trade(
 ) -> Result<PositionOutcome, DsmError> {
     // One memo for the whole operation: the check, the setups, the plan at
     // the heads and the settle each read a vault's genesis from it.
-    let mut timing = crate::util::phase_timing::PhaseTimer::start("sofi.trade");
     let accepted = &AcceptedGeneses::default();
     // And one store of what its contexts read and keep: the check's, the
     // walk at the heads' and the draft's.
@@ -2165,9 +2155,7 @@ pub async fn trade(
             check_route(core, set, &standing, intent, accepted, kept).await?;
         }
     }
-    timing.phase("check");
     set_up_with(core, set, &intent.vault_ids, accepted).await?;
-    timing.phase("setup");
     // Each stage logs where it ends; the log's own timestamps time it.
     log::info!(
         "[sofi] trade: set up with each of {} vaults",
@@ -2202,7 +2190,6 @@ pub async fn trade(
             heads.push(at_head?.0);
         }
         log::info!("[sofi] trade: walked {} vault heads", heads.len());
-        timing.phase("heads");
         // A chain, or a split across two vaults of the pair (Amendment S19),
         // planned again at the heads walked now.
         let refs: Vec<&VaultAtHead> = heads.iter().collect();
@@ -2236,7 +2223,6 @@ pub async fn trade(
         let ctx = context(&standing, set, &public_key, trader)?;
         let draft = draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)?;
         log::info!("[sofi] trade: drafted {} hops", planned.len());
-        timing.phase("draft");
         match exercise_draft_at_head(core, set, &verifying, draft, accepted).await? {
             Drafted::Position(outcome) => return Ok(outcome),
             Drafted::HeadMoved(why) => {
