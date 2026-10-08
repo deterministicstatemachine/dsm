@@ -404,7 +404,7 @@ pub async fn create(
             amount: intent.amount,
         }],
     );
-    let progress = DuelProgress::start(&intent.setup).map_err(|e| refuse(e.0))?;
+    let progress = DuelProgress::start(&intent.setup).map_err(|e| refuse(e.reason))?;
     store::insert_match(&DuelMatchRow {
         match_cell,
         side: side_byte(intent.side),
@@ -836,7 +836,7 @@ impl Applying {
                     return Err(refuse("a commitment while the side's last one is unopened"));
                 }
                 self.progress.may_commit().map_err(|why| {
-                    refuse(format!("a commitment the program refuses: {}", why.0))
+                    refuse(format!("a commitment the program refuses: {}", why.reason))
                 })?;
                 self.open[at] = Some((index, *commitment));
             }
@@ -856,7 +856,7 @@ impl Applying {
                             played: played.clone(),
                         },
                     })
-                    .map_err(|why| refuse(format!("a move the program refuses: {}", why.0)))?;
+                    .map_err(|why| refuse(format!("a move the program refuses: {}", why.reason)))?;
             }
             EntryKind::Resign => {
                 self.progress
@@ -866,7 +866,7 @@ impl Applying {
                         kind: OpenedKind::Resign,
                     })
                     .map_err(|why| {
-                        refuse(format!("a resignation the program refuses: {}", why.0))
+                        refuse(format!("a resignation the program refuses: {}", why.reason))
                     })?;
             }
         }

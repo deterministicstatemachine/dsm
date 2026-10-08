@@ -41,7 +41,9 @@ use wildstate_duel::{DuelMoveV1, DuelOpenedTurnV1, DuelSetupV1, DuelState, DuelT
 type D32 = [u8; 32];
 
 fn fault(what: impl Into<String>) -> ProgramFault {
-    ProgramFault(what.into())
+    ProgramFault {
+        reason: what.into(),
+    }
 }
 
 fn slot(side: MatchSide) -> usize {
@@ -343,7 +345,7 @@ pub fn read_setup(setup: &[u8]) -> Result<MatchSetup, String> {
             dsm::utils::text_id::encode_base32_crockford(&decoded.program)
         ));
     }
-    DuelProgress::start(setup).map_err(|e| e.0)?;
+    DuelProgress::start(setup).map_err(|e| e.reason)?;
     let body = &decoded.body;
     let seed = wildstate_duel::tiebreak_seed(
         body.match_nonce(),
