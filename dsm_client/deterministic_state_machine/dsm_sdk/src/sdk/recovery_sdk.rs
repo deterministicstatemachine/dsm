@@ -1202,8 +1202,7 @@ impl RecoverySDK {
     /// Cold-start unlock: if the wallet seed is not cached in memory, load the sealed
     /// bundle and re-cache it (rebuilding the signer without the mnemonic). Returns
     /// `Ok(true)` if the seed is now cached, `Ok(false)` if no sealed bundle exists.
-    /// On a biometric/PIN-gated Keystore key, `seed_vault::open` triggers the platform
-    /// auth prompt; a denied/absent auth surfaces as `Err` (fail closed → locked UI).
+    /// A vault that cannot be opened surfaces as `Err`.
     pub fn load_and_cache_wallet_seed() -> Result<bool, DsmError> {
         if Self::get_cached_wallet_seed().is_some() {
             return Ok(true);

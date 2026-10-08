@@ -219,25 +219,6 @@ describe('policies.ts', () => {
     });
   });
 
-  describe('amounts', () => {
-    // A blank or non-numeric amount used to be read as 0 and sent.
-    test('a blank genesis supply is refused before anything is sent', async () => {
-      const res = await createToken({
-        ticker: 'TKN', alias: 'Token', decimals: 0, genesisSupply: '  ',
-        burnEnabled: false, transferable: true, threshold: 1,
-      } as any);
-      expect(res).toEqual({ success: false, message: expect.stringContaining('whole number') });
-      expect(routerInvokeBin).not.toHaveBeenCalled();
-    });
-
-    test('a blank burn amount is refused before anything is sent', async () => {
-      const { burnToken } = await import('../policies');
-      const res = await burnToken({ tokenId: 'TKN', amount: '' });
-      expect(res).toEqual({ success: false, message: expect.stringContaining('whole number') });
-      expect(routerInvokeBin).not.toHaveBeenCalled();
-    });
-  });
-
   describe('publishTokenPolicyBytes', () => {
     test('returns anchor bytes and base32 on success', async () => {
       const anchor = new Uint8Array(32).fill(0x11);

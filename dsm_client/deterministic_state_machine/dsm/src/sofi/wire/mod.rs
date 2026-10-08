@@ -174,6 +174,25 @@
 //! 3 `create_position` u64 · 4 `state` nested `0x004B`.
 //! `0x005B VaultCreation`: 1 `vault_id` · 2 `genesis_root` digest32 (`R_0`) ·
 //! 3 `amount_a` u64 · 4 `amount_b` u64.
+//!
+//! Escrow vaults (SoFi Amendment S21, §19.9):
+//! `0x0063 EscrowTerms`: 1 `token` digest32 (the held token's policy commit)
+//! · 2 `external_commitment` digest32 (`Y`) · 3 `branches` `seq<branch>`,
+//! 1..=16, strictly ascending by outcome bytes. A branch is 1 `outcome`
+//! `u32 len ‖ bytes`, 1..=64 · 2 `signers` `seq<(signature_alg u16 ‖ key
+//! u32 len ‖ bytes)>`, 1..=4, strictly ascending by those bytes · 3
+//! `recipient_genesis` · 4 `recipient_device_id`.
+//! `0x0064 EscrowVerdict`: 1 `external_commitment` · 2 `table`
+//! `seq<(outcome ‖ signers)>`, the outcome table, under the same bounds and
+//! order · 3 `outcome` · 4 `signatures` `seq<(signer ‖ signature u32 len ‖
+//! bytes)>`, 1..=4, strictly ascending by signer. A verdict holding only some
+//! of its outcome's signatures encodes; it occupies no cell.
+//! `0x0065 SettlementRelease` (`B°`, Release branch): 1 `vault_id` ·
+//! 2 `parent_root` · 3 `setup_ref` · 4 `verdict_cell` · 5 `outcome` `u32 len ‖
+//! bytes`, 1..=64 · 6 `amount` u64 · 7 `trader_core` · 8 `dlv_core` ·
+//! 9 `closure`. One leg.
+//! `0x0066 RouteDigestRelease`: 1 `vault_id` · 2 `parent_root` · 3 `setup_ref`
+//! · 4 `verdict_cell` · 5 `outcome` · 6 `amount` u64.
 
 pub mod objects;
 
@@ -289,6 +308,10 @@ pub enum SofiWireError {
     /// its state commits: the vault would be indexed under tokens it does
     /// not trade (SoFi Amendment S16).
     MarketNotCommitted,
+    /// An escrow vault genesis published with terms that are not the object
+    /// all three of its state's slots name: it would be indexed under a
+    /// verdict cell it is not bound to (SoFi Amendment S21).
+    EscrowTermsNotCommitted,
 }
 
 impl core::fmt::Display for SofiWireError {
@@ -355,6 +378,10 @@ impl core::fmt::Display for SofiWireError {
             Self::MarketNotCommitted => write!(
                 f,
                 "the market policy is not the one the vault genesis commits"
+            ),
+            Self::EscrowTermsNotCommitted => write!(
+                f,
+                "the escrow terms are not the object all three of the vault genesis's slots name"
             ),
         }
     }

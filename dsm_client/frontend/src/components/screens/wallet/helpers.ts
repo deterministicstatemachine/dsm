@@ -15,6 +15,8 @@ export function txTypeLabel(txType: DomainTxType): string {
     case 'sofi_setup': return 'SETUP';
     case 'sofi_trade': return 'TRADE';
     case 'sofi_close': return 'CLOSE';
+    case 'escrow_lock': return 'LOCK';
+    case 'escrow_release': return 'RELEASE';
   }
 }
 
@@ -31,6 +33,8 @@ export function txTypeDetail(txType: DomainTxType): string {
     case 'sofi_setup': return 'Set up with a liquidity vault';
     case 'sofi_trade': return 'Trade';
     case 'sofi_close': return 'Liquidity vault closed';
+    case 'escrow_lock': return 'Stake locked in an escrow vault';
+    case 'escrow_release': return 'Escrow vault released';
   }
 }
 

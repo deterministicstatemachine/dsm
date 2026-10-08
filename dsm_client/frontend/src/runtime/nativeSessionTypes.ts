@@ -7,13 +7,23 @@ export type NativeSessionEnvConfigStatus = 'loading' | 'ready' | 'error';
 // `backup_phrase` is the frontend's own: the recovery phrase is on the screen
 // before any wallet exists, so the native session never reports it.
 export type NativeSessionPhase = Exclude<AppState, 'loading' | 'backup_phrase'>;
-export type NativeSessionLockMethod = 'none' | 'pin' | 'combo' | 'biometric';
+export type NativeSessionLockMethod = 'none' | 'pin' | 'combo';
+
+/** The tries Rust's app lock reports (sdk::app_lock). */
+export type NativeSessionLockTries = {
+  /** Wrong PINs or patterns left before only the recovery phrase opens it. */
+  misses_left: number;
+  /** Only the recovery phrase opens it: the tries are used up, or nothing is enrolled. */
+  phrase_required: boolean;
+};
 
 export type NativeSessionLockStatus = {
   enabled: boolean;
   locked: boolean;
   method: NativeSessionLockMethod;
   lock_on_pause: boolean;
+  /** Null until Rust has reported them. */
+  tries: NativeSessionLockTries | null;
 };
 
 export type NativeSessionBleHardwareStatus = {
@@ -46,6 +56,9 @@ export type NativeSessionSnapshot = {
   wallet_refresh_hint: number;
 };
 
+/** A snapshot as Rust sends it; the store adds that one has arrived. */
+export type NativeSessionReport = Omit<NativeSessionSnapshot, 'received'>;
+
 export const DEFAULT_NATIVE_SESSION: NativeSessionSnapshot = {
   received: false,
   phase: 'runtime_loading',
@@ -56,6 +69,7 @@ export const DEFAULT_NATIVE_SESSION: NativeSessionSnapshot = {
     locked: false,
     method: 'none',
     lock_on_pause: true,
+    tries: null,
   },
   hardware_status: {
     app_foreground: true,

@@ -169,7 +169,7 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
           <span>Security</span>
           <InfoTip title="Wallet lock">
             <p>A lock asks for a PIN or a sequence of the shell&apos;s buttons before the wallet opens.</p>
-            <p>It locks after the idle time you pick, and on leaving the app if you choose so. Too many wrong tries wait out a cooldown that survives a restart.</p>
+            <p>It locks on leaving the app if you choose so. After three wrong tries only the wallet&apos;s recovery phrase opens it, and neither a wait nor a restart gives a try back.</p>
           </InfoTip>
         </div>
         <p className="sb-hint">Protect your wallet with a PIN or a button combo.</p>

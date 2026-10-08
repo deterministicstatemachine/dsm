@@ -736,6 +736,27 @@ pub enum Operation {
         /// exactly this digest on the bare object.
         signature: Vec<u8>,
     },
+    /// An escrow vault's creation at `p_create` (SoFi Amendment S21). It
+    /// debits the held amount of the terms' token and inserts the creation
+    /// record, as `SofiVaultCreate` does for a market; the vault's genesis
+    /// lives in its tree, not in this operation.
+    EscrowVaultCreate {
+        /// Canonical `VaultGenesisPreimage` bytes (class `0x005A`), whose
+        /// state's three policy slots all name `terms`.
+        genesis_preimage: Vec<u8>,
+        /// Canonical `VaultCreation` bytes (class `0x005B`).
+        creation: Vec<u8>,
+        /// Canonical `EscrowTerms` bytes (class `0x0063`): the EXACT object
+        /// the genesis state's slots name, carried for the reason
+        /// `SofiVaultCreate` carries its market policy, so acceptance is a
+        /// function of the operation's bytes. Core re-addresses them under the
+        /// terms namespace and refuses unless the address is the one the state
+        /// commits; the token they name is the one debited.
+        terms: Vec<u8>,
+        /// SPHINCS+ over the operation's canonical unsigned bytes, as for
+        /// `SofiVaultCreate`: a creation has no object digest of its own.
+        signature: Vec<u8>,
+    },
     DlvInvalidate {
         /// 32-byte vault identifier.
         vault_id: Vec<u8>,
@@ -815,6 +836,9 @@ impl Operation {
             // writes a relationship leaf and nothing else.
             | SofiVaultCreate { .. }
             | SofiFulfill { .. }
+            // An escrow vault's creation moves the stake out of the owner's
+            // spendable balance (SoFi Amendment S21).
+            | EscrowVaultCreate { .. }
             // Token creation DESTROYS ERA to pay its fee, so it moves the
             // owner's existing funds outward — egress, despite also issuing a
             // new asset. Classifying it as ingress (as it was while nothing
@@ -939,7 +963,9 @@ impl Operation {
             // spend gate therefore cannot name them here, and saying
             // otherwise would be inventing a token id the operation does not
             // carry.
-            SofiVaultCreate { .. } | SofiFulfill { .. } => EgressAsset::Unidentified,
+            SofiVaultCreate { .. } | SofiFulfill { .. } | EscrowVaultCreate { .. } => {
+                EgressAsset::Unidentified
+            }
 
             // Token creation: the asset that LEAVES is ERA (the burned fee) —
             // NOT the new token, which is issued, not spent. Naming the new
@@ -1037,6 +1063,18 @@ impl Operation {
                 put_u8(&mut out, 36);
                 put_bytes(&mut out, fulfillment_body);
                 put_bytes(&mut out, precommit_id);
+                put_bytes(&mut out, signature);
+            }
+            EscrowVaultCreate {
+                genesis_preimage,
+                creation,
+                terms,
+                signature,
+            } => {
+                put_u8(&mut out, 38);
+                put_bytes(&mut out, genesis_preimage);
+                put_bytes(&mut out, creation);
+                put_bytes(&mut out, terms);
                 put_bytes(&mut out, signature);
             }
             Genesis => {
@@ -2111,6 +2149,12 @@ impl Operation {
                 precommit_id: get_bytes(&mut input)?,
                 signature: get_bytes(&mut input)?,
             },
+            38 => EscrowVaultCreate {
+                genesis_preimage: get_bytes(&mut input)?,
+                creation: get_bytes(&mut input)?,
+                terms: get_bytes(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
         };
         // Canonical decode requires full byte exhaustion: a valid operation must
@@ -2145,6 +2189,7 @@ impl Operation {
             | Operation::SofiSetup { signature, .. }
             | Operation::SofiVaultCreate { signature, .. }
             | Operation::SofiFulfill { signature, .. }
+            | Operation::EscrowVaultCreate { signature, .. }
                 if !signature.is_empty() =>
             {
                 Some(signature.clone())
@@ -2186,6 +2231,7 @@ impl Operation {
             Operation::SofiSetup { .. } => "sofi_setup",
             Operation::SofiVaultCreate { .. } => "sofi_vault_create",
             Operation::SofiFulfill { .. } => "sofi_fulfill",
+            Operation::EscrowVaultCreate { .. } => "escrow_vault_create",
         }
     }
 
@@ -2219,7 +2265,8 @@ impl Operation {
             | Operation::DlvInvalidate { signature, .. }
             | Operation::SofiSetup { signature, .. }
             | Operation::SofiVaultCreate { signature, .. }
-            | Operation::SofiFulfill { signature, .. } => {
+            | Operation::SofiFulfill { signature, .. }
+            | Operation::EscrowVaultCreate { signature, .. } => {
                 signature.clear();
             }
             _ => {}
@@ -2248,7 +2295,8 @@ impl Operation {
             | Operation::DlvInvalidate { signature, .. }
             | Operation::SofiSetup { signature, .. }
             | Operation::SofiVaultCreate { signature, .. }
-            | Operation::SofiFulfill { signature, .. } => {
+            | Operation::SofiFulfill { signature, .. }
+            | Operation::EscrowVaultCreate { signature, .. } => {
                 *signature = sig;
             }
             _ => {}

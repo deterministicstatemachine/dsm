@@ -871,6 +871,7 @@ pub async fn resolve_pending_position(
             let what = match facts.preimage().settlement() {
                 SettlementBody::Close { .. } => Realized::Close,
                 SettlementBody::Swap { .. } => Realized::Trade,
+                SettlementBody::Release { .. } => Realized::EscrowRelease,
             };
             let mut moved = Vec::new();
             for change in trader_balance_changes(&precommit, facts.preimage(), facts.evidence())

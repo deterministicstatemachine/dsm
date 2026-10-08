@@ -7,7 +7,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { TokenCoin } from './TokenCoin';
 import { encodeCoinSource, silhouetteFromRgba } from '../utils/coinArtwork';
 import { readImageRgba } from '../utils/imageRgba';
-import { createToken, getTokenCreationFee, type TokenCreationFee } from '@/dsm/policies';
+import { checkToken, createToken, getTokenCreationFee, type TokenCreateDetails, type TokenCreationFee } from '@/dsm/policies';
 import { useBackButton } from '../hooks/useBackButton';
 
 /** The creation fee and this device's standing as Rust reported them, the failure of asking, or not asked yet. */
@@ -51,19 +51,17 @@ const DEFAULT: WizardState = {
   allowlistData: '',
 };
 
-// ── Validation ───────────────────────────────────────────────────────────────
-function validateStep1(s: WizardState): string | null {
-  const t = s.ticker.trim().toUpperCase();
-  if (!t || t.length < 2 || t.length > 8) return 'Ticker must be 2–8 letters';
-  if (!/^[A-Z0-9]+$/.test(t)) return 'Ticker: letters and digits only';
-  if (!s.alias.trim()) return 'Display name is required';
-  return null;
-}
+// ── Checking ─────────────────────────────────────────────────────────────────
+// Rust checks every field (token.check, as token.create checks them). A step
+// moves on once Rust refuses none of the fields it asks for, named as the
+// request names them.
+const STEP_FIELDS: Record<number, readonly string[]> = {
+  1: ['ticker', 'alias'],
+  2: ['decimals', 'genesis_supply_entered'],
+};
 
-function validateStep2(s: WizardState): string | null {
-  const raw = s.genesisSupply.trim();
-  if (!/^[0-9]+$/.test(raw) || /^0+$/.test(raw)) return 'Total supply must be a positive integer';
-  return null;
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 // ── Sub-component: the step strip ────────────────────────────────────────────
@@ -606,58 +604,60 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
     else onClose();
   });
 
-  const handleNext = useCallback(() => {
-    if (step === 1) {
-      const e = validateStep1(stateRef.current);
-      if (e) { setError(e); return; }
-    }
-    if (step === 2) {
-      const e = validateStep2(stateRef.current);
-      if (e) { setError(e); return; }
+  /** What the user entered, as entered: Rust trims, capitalises and checks it. */
+  const details = useCallback((): TokenCreateDetails => {
+    const s = stateRef.current;
+    return {
+      ticker:             s.ticker,
+      alias:              s.alias,
+      decimals:           effectiveDecimals,
+      genesisSupply:      s.genesisSupply,
+      burnEnabled:        s.burnEnabled,
+      // The policy's signer set is this device alone (Rust fills it in),
+      // so 1-of-1 is the only threshold it can satisfy.
+      threshold:          1,
+      description:        s.description,
+      iconUrl:            s.iconUrl,
+      transferable:       effectiveTransferable,
+      allowlistKind:      s.allowlistKind,
+      allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,
+    };
+  }, [effectiveDecimals, effectiveTransferable]);
+
+  const [checking, setChecking] = useState<number | null>(null);
+
+  const handleNext = useCallback(async () => {
+    const fields = STEP_FIELDS[step];
+    if (fields !== undefined) {
+      setChecking(step);
+      setError(null);
+      try {
+        const refused = (await checkToken(details())).filter((r) => fields.includes(r.field));
+        if (refused.length > 0) {
+          setError(refused.map((r) => r.reason).join('; '));
+          return;
+        }
+      } catch (e) {
+        setError(messageOf(e));
+        return;
+      } finally {
+        setChecking(null);
+      }
     }
     navigate(step + 1);
-  }, [step, navigate]);
+  }, [step, navigate, details]);
 
   const handleCreate = useCallback(async () => {
     setError(null);
     setCreating(true);
     try {
-      const s = stateRef.current;
-      const res = await createToken({
-        ticker:             s.ticker.trim().toUpperCase(),
-        alias:              s.alias.trim(),
-        decimals:           effectiveDecimals,
-        genesisSupply:      s.genesisSupply,
-        burnEnabled:        s.burnEnabled,
-        // The policy's signer set is this device alone (Rust fills it in),
-        // so 1-of-1 is the only threshold it can satisfy.
-        threshold:          1,
-        description:        s.description.trim() || undefined,
-        iconUrl:            s.iconUrl.trim()      || undefined,
-        transferable:       effectiveTransferable,
-        allowlistKind:      s.allowlistKind,
-        allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,
-      });
-      const ok = typeof res === 'boolean'
-        ? res
-        : (typeof res === 'object' && res !== null && 'success' in res)
-          ? Boolean((res as { success?: boolean }).success)
-          : false;
-      if (ok) {
-        // `createToken` returns a FLAT result. The old code reached for a
-        // `.result` wrapper that only the (now deleted, unreachable) DsmClient
-        // method produced, so `created` was always {} and the success screen
-        // rendered neither the token id nor the anchor.
-        const r = (typeof res === 'object' && res !== null)
-          ? (res as { tokenId?: string; anchorBase32?: string })
-          : {};
-        setCreated({ tokenId: r.tokenId, anchorBase32: r.anchorBase32 });
+      const res = await createToken(details());
+      if (res.success) {
+        setCreated({ tokenId: res.tokenId, anchorBase32: res.anchorBase32 });
         if (onSuccess) onSuccess();
       } else {
-        const msg = (typeof res === 'object' && res !== null && 'error' in res)
-          ? String((res as { error?: unknown }).error)
-          : 'Token creation failed';
-        setError(msg);
+        // Rust's reason, as it gave it.
+        setError(res.message ?? 'token.create gave no reason');
         setCreating(false);
       }
     } catch (e) {
@@ -676,30 +676,12 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
       // verdict is Rust's; this only renders it.
       setResolving(true);
       try {
-        const s = stateRef.current;
-        const again = await createToken({
-          ticker:             s.ticker.trim().toUpperCase(),
-          alias:              s.alias.trim(),
-          decimals:           effectiveDecimals,
-          genesisSupply:      s.genesisSupply,
-          burnEnabled:        s.burnEnabled,
-          // The policy's signer set is this device alone (Rust fills it in),
-          // so 1-of-1 is the only threshold it can satisfy.
-          threshold:          1,
-          description:        s.description.trim() || undefined,
-          iconUrl:            s.iconUrl.trim()      || undefined,
-          transferable:       effectiveTransferable,
-          allowlistKind:      s.allowlistKind,
-          allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,
-        });
-        const r = (typeof again === 'object' && again !== null)
-          ? (again as { success?: boolean; tokenId?: string; anchorBase32?: string; error?: unknown })
-          : {};
-        if (r.success) {
-          setCreated({ tokenId: r.tokenId, anchorBase32: r.anchorBase32 });
+        const again = await createToken(details());
+        if (again.success) {
+          setCreated({ tokenId: again.tokenId, anchorBase32: again.anchorBase32 });
           if (onSuccess) onSuccess();
         } else {
-          setError(r.error ? String(r.error) : String(e));
+          setError(again.message ?? String(e));
           setCreating(false);
         }
       } catch (e2) {
@@ -714,7 +696,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
         setResolving(false);
       }
     }
-  }, [effectiveDecimals, effectiveTransferable, onSuccess]);
+  }, [details, onSuccess]);
 
   // ── Success screen ───────────────────────────────────────────────────────
   if (created) {
@@ -773,8 +755,8 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
             </button>
           )}
           {step < 3 ? (
-            <button type="button" className="sb-btn sb-btn--primary" onClick={handleNext}>
-              Continue
+            <button type="button" className="sb-btn sb-btn--primary" onClick={handleNext} disabled={checking !== null}>
+              {checking !== null ? 'Checking' : 'Continue'}
             </button>
           ) : (
             <button

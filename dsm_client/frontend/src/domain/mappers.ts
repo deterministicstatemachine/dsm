@@ -96,6 +96,8 @@ const TX_TYPES: Record<number, DomainTxType> = {
   [TransactionType.TX_TYPE_SOFI_SETUP]: 'sofi_setup',
   [TransactionType.TX_TYPE_SOFI_TRADE]: 'sofi_trade',
   [TransactionType.TX_TYPE_SOFI_CLOSE]: 'sofi_close',
+  [TransactionType.TX_TYPE_ESCROW_LOCK]: 'escrow_lock',
+  [TransactionType.TX_TYPE_ESCROW_RELEASE]: 'escrow_release',
 };
 
 /** The token and SoFi events: rows that name every token they moved. */
@@ -105,6 +107,8 @@ const EVENT_TYPES: ReadonlySet<DomainTxType> = new Set<DomainTxType>([
   'sofi_setup',
   'sofi_trade',
   'sofi_close',
+  'escrow_lock',
+  'escrow_release',
 ]);
 
 function txBytes32(t: TransactionInfo, field: string, bytes: Uint8Array): string {
