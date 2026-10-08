@@ -559,11 +559,30 @@ What this does not establish. The events and advantages are not bounded: they
 are exactly the assumptions on the primitives (BLAKE3 `derive_key` output
 pseudorandom, keyed BLAKE3 a PRF under a secret key, keyed BLAKE3 under the
 public-seed key resisting tweak collisions and chain/leaf preimages, the
-BLAKE3 XOF resisting the ITSR event, ChaCha20 a PRG). The `Strategy` interface
+BLAKE3 XOF resisting the ITSR event, ChaCha20 a PRG); numbers exist only in the
+random-oracle model (section below). The `Strategy` interface
 has no runtime or hash-query cost model: the adversary's own computation is
 not counted (only the challenger's, above), so no numerical bound is claimed,
 and no quantum (QROM) statement. `SPHINCS_BLAKE3_ROLE_MAP.md`
 records which assumption each term is.
+
+## Random-oracle security level (phase 2, 2026-10-07)
+
+After the frozen tag `audit-freeze-2026-10-07`, `RomTape.lean`, `RomOracle.lean`,
+`RomRoles.lean`, `RomItsr.lean` and `RomBound.lean` add an explicit
+random-oracle model:
+- one lazily sampled oracle for every BLAKE3 role and the ChaCha expansion;
+- an adversary as a query tree with a query budget;
+- kernel-checked role bounds: tweak collision, secret guessing, and ITSR with
+  exact numbers for SPX128f and SPX256f;
+- the summed level: ε ≤ q_h·2^-125 (SPX128f, `rom_level_128f`) and
+  ε ≤ q_h·2^-252 (SPX256f, `rom_level_256f`).
+
+The step identifying each reduction term with its role game is argued, not
+machine-checked. `SPHINCS_ROM_BOUND.md` states the model, the assumptions and
+exactly which steps are argued. The quantum picture is a narrative,
+`SPHINCS_QROM_NARRATIVE.md`, marked not machine-checked. `RomChecks.lean`
+runs the ROM controls.
 
 ## Remaining trusted computing base and review obligations
 

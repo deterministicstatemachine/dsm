@@ -330,3 +330,9 @@ Reduction overhead: the challenger's primitive requests are bounded
 q_s·signCost + verifyCost, evaluated for SPX128f and SPX256f. Executable
 controls: QueryCostChecks.lean. The adversary's own cost is not modeled.
 
+Random-oracle level (phase 2): kernel-checked role bounds (`rom_tweak_collision`,
+`rom_secret_guess`, `itsr_spx128f`, `itsr_spx256f`) and the summed levels
+(`rom_level_128f`: q_h·2^-125; `rom_level_256f`: q_h·2^-252); claim trace rows
+C42–C44. The identification of the reduction's terms with these role games is
+argued in SPHINCS_ROM_BOUND.md, not machine-checked. Quantum: narrative only
+(SPHINCS_QROM_NARRATIVE.md, not machine-checked). Controls: RomChecks.lean.
