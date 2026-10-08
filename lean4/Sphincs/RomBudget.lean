@@ -682,4 +682,95 @@ theorem rom_win_budget_128f (limits : Limits) (A : Bytes → RAdv) (c qh qs : Na
     (budget_A .spx128f limits A qh qs hB _ (by omega))
     (by omega) (by omega)
 
+/-! SPHINCS+-256f: the same composition. Here every handle is 32 bytes, so the
+    narrow/wide split brings nothing: all pin and collision terms are against
+    `2^256`, and the bound keeps the quadratic terms `2·S^2 + 3·N^2`. -/
+
+theorem arith256 (w a b d d0 e r JA AA S2 N2 K H : Nat) (hK : K = 2 * H) (hH : 0 < H)
+    (h1 : w * K ≤ a * K + b * K + d * K) (h2 : b * H ≤ JA * r + d0 * H) (h3 : d0 ≤ d)
+    (h4 : d * K ≤ r * (5 * AA) * 1 + r * S2 + e * K) (h5 : e * (K * K) ≤ r * 3 * K + r * N2 * K)
+    (h6 : a * (K * K) ≤ r * AA * K + r * N2 * K) :
+    w * K ≤ r * (2 * JA + 11 * AA + 6 + 2 * S2 + 3 * N2) := by
+  have hKp : 0 < K := by omega
+  have h5' : e * K ≤ r * 3 + r * N2 :=
+    Nat.le_of_mul_le_mul_right (by rw [Nat.add_mul, Nat.mul_assoc]; exact h5) hKp
+  have h6' : a * K ≤ r * AA + r * N2 :=
+    Nat.le_of_mul_le_mul_right (by rw [Nat.add_mul, Nat.mul_assoc]; exact h6) hKp
+  have hd0 : d0 * K ≤ d * K := Nat.mul_le_mul_right K h3
+  have e1 : b * K = 2 * (b * H) := by rw [hK, Nat.mul_left_comm]
+  have e2 : d0 * K = 2 * (d0 * H) := by rw [hK, Nat.mul_left_comm]
+  have e3 : r * (5 * AA) * 1 = 5 * (r * AA) := by rw [Nat.mul_one, Nat.mul_left_comm]
+  have e4 : r * (2 * JA + 11 * AA + 6 + 2 * S2 + 3 * N2) =
+      2 * (JA * r) + 11 * (r * AA) + 6 * r + 2 * (r * S2) + 3 * (r * N2) := by
+    rw [Nat.mul_add, Nat.mul_add, Nat.mul_add, Nat.mul_add, Nat.mul_left_comm r 2 JA, Nat.mul_comm r JA,
+      Nat.mul_left_comm r 11, Nat.mul_comm r 6, Nat.mul_left_comm r 2 S2, Nat.mul_left_comm r 3]
+  rw [e3] at h4
+  rw [e4]
+  omega
+
+/-- SPHINCS+-256f, H1: `Pr[won] ≤ (2·JA + 11·AA + 6 + 2·S^2 + 3·N^2)/2^256`, under the
+    same hypotheses as `rom_win_full_128f`. -/
+theorem rom_win_full_256f (limits : Limits) (A : Bytes → RAdv) (c N q JA S AA : Nat) (hc : 0 < c)
+    (hq : q ≤ 2^64)
+    (hN : ∀ t : List Nat, t.length = N → (runG .spx256f limits A t).2.length ≤ N)
+    (hC : ∀ t : List Nat, t.length = N → ((runG .spx256f limits A t).2.filter isC).length ≤ q)
+    (hJ : ∀ t : List Nat, t.length = N → ((runG .spx256f limits A t).2.filter isA).length ≤ JA)
+    (hS : ∀ t s stp, (strace t (gameS' .spx256f limits A (coinEx (params .spx256f).n))
+      (coinSt (params .spx256f).n))[s]? = some stp → s < S ∧ stp.1.ents.length ≤ S)
+    (hA : ∀ t, ((strace t (gameS' .spx256f limits A (coinEx (params .spx256f).n))
+      (coinSt (params .spx256f).n)).filter isAev).length ≤ AA)
+    (hSN : S < N) (h3N : 3 ≤ N) :
+    tsum (c * 256^(params .spx256f).m) N (fun t => ind ((runG .spx256f limits A t).1.win = true)) * 256^32 ≤
+      (c * 256^(params .spx256f).m)^N * (2 * JA + 11 * AA + 6 + 2 * (S * S) + 3 * (N * N)) := by
+  have hR : 256^32 ∣ c * 256^(params .spx256f).m :=
+    Nat.dvd_mul_left_of_dvd (Nat.pow_dvd_pow 256 (by decide)) c
+  have h1 := rom_win_sum' .spx256f limits A (c * 256^(params .spx256f).m) N (256^32)
+  have h2 := itsr_game_hid_256f limits A c N q JA hc hq hN hC hJ
+  have h3 := anyDis_sum .spx256f limits A (c * 256^(params .spx256f).m) N
+  have h4 := rom_ext_structP .spx256f limits A (c * 256^(params .spx256f).m) N S AA (by decide) hR hS hA
+  have h5 := tape_coll (c * 256^(params .spx256f).m) N (256^32) (256^32) (Nat.pow_pos (by decide))
+    (Nat.pow_pos (by decide)) hR hR h3N _ (coll_event .spx256f limits A N S hS (Nat.le_of_lt hSN))
+  have h6 := canon_count .spx256f limits A (c * 256^(params .spx256f).m) N S AA hR hR hS hSN h3N hA
+  rw [show 32 - (params .spx256f).n = 0 by decide, Nat.pow_zero] at h4
+  rw [show (256:Nat)^(params .spx256f).n = 256^32 by decide] at h6
+  generalize tsum (c * 256^(params .spx256f).m) N (fun t => if anyDis (gameS' .spx256f limits A
+    (coinEx (params .spx256f).n)) (coinSt (params .spx256f).n) t then 1 else 0) = D at h1 h3 h4
+  generalize tsum (c * 256^(params .spx256f).m) N (fun t => if anyDis (gameS .spx256f limits A
+    (coinEx (params .spx256f).n)) (coinSt (params .spx256f).n) t then 1 else 0) = D0 at h2 h3
+  exact arith256 _ _ _ D D0 _ _ JA AA (S * S) (N * N) (256^32) (2^255) (by decide) (Nat.pow_pos (by decide))
+    h1 h2 h3 h4 h5 h6
+
+theorem verC_256f : verC (params .spx256f) = 17523 := by decide
+theorem signC_256f : signC (params .spx256f) + 1 = 1704962 := by decide
+theorem kgC_256f : kgC (params .spx256f) = 17185 := by decide
+theorem extC_256f : extC (params .spx256f) = 364152 := by decide
+
+theorem stepB_256f (qh qs : Nat) : stepB (params .spx256f) qh qs = qh + 1704962 * qs + 398861 := by
+  simp only [stepB, playK, verC_256f, signC_256f, kgC_256f, extC_256f]
+  omega
+
+/-- The forgery bound for SPHINCS+-256f from the query budget: with tape length
+    `N = qh + 1704962 qs + 398865` and `S = N - 1`,
+      Pr[won] ≤ (13·qh + 227816 + 2·S^2 + 3·N^2) / 2^256
+    (`JA = qh + 17523`, `AA = qh + 17524`). -/
+theorem rom_win_budget_256f (limits : Limits) (A : Bytes → RAdv) (c qh qs : Nat) (hc : 0 < c)
+    (hqs : qs ≤ 2^64) (hB : ∀ pk, Budget (A pk) qh qs) :
+    tsum (c * 256^(params .spx256f).m) (qh + 1704962 * qs + 398865)
+        (fun t => ind ((runG .spx256f limits A t).1.win = true)) * 256^32 ≤
+      (c * 256^(params .spx256f).m)^(qh + 1704962 * qs + 398865) *
+        (13 * qh + 227816 + 2 * ((qh + 1704962 * qs + 398864) * (qh + 1704962 * qs + 398864)) +
+          3 * ((qh + 1704962 * qs + 398865) * (qh + 1704962 * qs + 398865))) := by
+  have e := stepB_256f qh qs
+  have hv := verC_256f
+  have h := rom_win_full_256f limits A c (qh + 1704962 * qs + 398865) qs (qh + 17523)
+    (qh + 1704962 * qs + 398864) (qh + 17524) hc hqs
+    (fun t _ => budget_N .spx256f limits A qh qs hB _ (by omega) t)
+    (fun t _ => budget_C .spx256f limits A qh qs hB _ (Nat.le_refl _) t)
+    (fun t _ => budget_J .spx256f limits A qh qs hB _ (by omega) t)
+    (budget_S .spx256f limits A qh qs hB _ (by omega))
+    (budget_A .spx256f limits A qh qs hB _ (by omega))
+    (by omega) (by omega)
+  refine Nat.le_trans h (Nat.mul_le_mul_left _ (Nat.le_of_eq ?_))
+  omega
+
 end DSM.Rom
