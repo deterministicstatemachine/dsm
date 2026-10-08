@@ -1416,7 +1416,7 @@ through Argon2id of the phrase text but through `PRK_w`.
   under the same assumption. This argument is the standard PRF step and is
   not machine-checked here; it is part of the hybrids below.
 
-Not covered yet (the next hop, from KS1 to C67's uniform `K`):
+Not covered by C68 (C69 below composes the hop from KS1 to C67's uniform `K`):
 
 * *Extract.* That `PRK_w` is close to uniform when `wallet_seed` is the
   BIP39 seed (PBKDF2-HMAC-SHA512) of a 256-bit mnemonic. This is an
@@ -1434,6 +1434,92 @@ Not covered yet (the next hop, from KS1 to C67's uniform `K`):
 * *Compatibility.* The same phrase derives a different identity under KS1
   than under the earlier schedule, and 12-word wallets cannot be restored.
   Identities from the earlier schedule are outside this claim.
+
+**From KS1 to C67** (`KeyScheduleHop.lean`, `KeyScheduleChecks.lean`, claim
+trace C69).
+
+The model defines HMAC-BLAKE3 and HKDF as DSM computes them (`hmacB3`,
+`hkdfExtract`, `expand32`). `KeyScheduleChecks.lean` runs these
+definitions on the inputs of `key_schedule::tests::ks1_test_vectors` and
+gets the same twelve values as the Rust code. That is an executed check,
+not a proof.
+
+*The game* (`fromWallet`, H0). The entropy `e` is uniform in `[0, 2^256)`,
+and the wallet seed is `bip e` for an arbitrary function `bip` (BIP39's
+PBKDF2 is not modeled). Smaster is derived by KS1, and C67's DSM game is
+played under it. The adversary is also given `pubOf` of the seven siblings
+of `s0` under `PRK_w` (the genesis nonce, GRK seed, AttA, device seed, SDK
+entropy and both recovery keys, all in full) and of the at-rest key, for an
+arbitrary `pubOf`. `G` and `DevID` are arbitrary functions of earlier
+outputs (`WCtx`).
+
+*Hybrids.* Each is the real or ideal world of a named distinguisher:
+
+* H1: `PRK_w` uniform. The distinguisher is `fromW`, the game given
+  `PRK_w`.
+* H2: Expand under `PRK_w` is a lazily sampled random function. The
+  distinguisher is `distW`, which makes eight requests.
+* H3: `PRK_s0` uniform. The distinguisher is `fromS0`, the game given
+  `PRK_s0` and the siblings.
+* H4: Expand under `PRK_s0` is a random function. The distinguisher is
+  `distS`, which makes two requests.
+
+*Kernel-checked:*
+
+* `resL_kprog`: against a lazily sampled random function, every request of
+  a straight-line derivation with distinct KS1 labels is fresh, however its
+  fields depend on earlier outputs. Its outputs are therefore the next
+  entries of the uniform vector.
+* `idealW_eq`: the ideal world of `distW` is the real world of the Extract
+  of `s0`. The siblings and `s0` are independent uniform values, and `s0`
+  is used only as the input of that Extract.
+* `idealS_eq`: the ideal world of `distS` makes Smaster and the at-rest key
+  independent uniform values. Then H4 is C67's real game with a uniform
+  Smaster that is independent of everything the adversary is given, and
+  there is no auxiliary input.
+* `ks1_forge_256f`:
+
+      Pr[H0] ≤ ΔExt_w + ΔPRF_w + ΔExt_s0 + ΔPRF_s0 + E[Adv_C67]
+               + qn·(27·Q + 368023)/2^256
+
+  with `Q = qh + 17186·qn + 1704961·qs + 17523`. The terms are:
+  * `ΔExt_w`: the advantage of `fromW` between `Extract(saltW, bip e)` and
+    a uniform PRK.
+  * `ΔPRF_w`: the advantage of `distW` between Expand under a uniform PRK
+    and a random function.
+  * `ΔExt_s0`: the advantage of `fromS0` between `Extract(saltS0, u)` for a
+    uniform `u` and a uniform PRK, averaged over the siblings.
+  * `ΔPRF_s0`: the advantage of `distS`, as for `ΔPRF_w`.
+  * `E[Adv_C67]`: C67's PRF advantage of keyed BLAKE3 under a uniform
+    Smaster, with no auxiliary input, averaged over the disclosed values.
+
+  The bound is stated in counts over Nat, as in C67.
+
+What this covers and does not:
+
+* *Every advantage is defined, not bounded.* `ΔExt_w` is where the
+  mnemonic's entropy enters. It compares the Extract of the BIP39 seed of a
+  uniform 256-bit entropy with a uniform key. For a mnemonic with less
+  entropy, or a BIP39 seed far from uniform, this term is large and the
+  bound says nothing.
+* *`ΔExt_s0` needs more than a PRF keyed by its key input.* HMAC-BLAKE3 is
+  keyed by the public salt, and the secret `s0` is its message. Small
+  `ΔExt_s0` is an extractor (or dual-PRF) property, assumed here and not
+  implied by the Expand assumptions.
+* *The at-rest key is disclosed in the bound.* The adversary is given it,
+  and the bound still holds. So, under these assumptions, leaking the
+  at-rest key does not help to forge, and neither `s0` nor Smaster can be
+  computed from it. Knowing either would let the adversary compute Smaster,
+  and in H4 Smaster is uniform and independent of the at-rest key.
+* *The device branch is not hybridized.* The device seed is disclosed in
+  full, so the AK and DevID, computed from it, need no assumption about
+  `PRK_d`.
+* *Two idealizations side by side*, as in C67. HMAC-BLAKE3 and keyed BLAKE3
+  are concrete functions, next to the random oracle for SPHINCS+ hashing,
+  although all of them share BLAKE3. The ChaCha20 boundary of C65 still
+  applies.
+* *The number.* At `qh = qs = 2^64` and `qn = 2^20`, the last term is about
+  2^-146.5, as in C66 and C67.
 
 ## Assumptions, stated plainly
 
@@ -1455,8 +1541,13 @@ Not covered yet (the next hop, from KS1 to C67's uniform `K`):
 * Key schedule KS1 (C68): the injectivity and domain separation of every
   derivation input are proved. That `PRK_w` is close to uniform for a
   256-bit mnemonic, and that HMAC-BLAKE3 Expand is a PRF under each PRK, are
-  assumptions not yet composed into the bound; under KS1 the PRF assumption
+  assumptions, composed into the bound in C69; under KS1 the PRF assumption
   of C67 needs no auxiliary input.
+* From KS1 to C67 (C69): the Extract of the BIP39 seed of a uniform 256-bit
+  entropy, Expand under a uniform `PRK_w`, the Extract of a uniform `s0`
+  under a public salt, and Expand under a uniform `PRK_s0` are each close
+  to uniform or random for the named distinguishers; not proved, and the
+  bound carries each advantage.
 * Adversary cost is counted in oracle queries only; local computation is free.
 * Classical adversaries only. The quantum picture is in
   `SPHINCS_QROM_NARRATIVE.md` and is not machine-checked.
