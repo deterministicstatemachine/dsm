@@ -1,20 +1,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Freezes the rules-version-1 conformance vectors into
-//! `tests/vectors/v1/vectors.ccb`.
-//!
-//! Run once when a rules version is cut:
-//! `cargo run -p wildstate-duel --example freeze_vectors`. The vectors' digest
-//! is part of `P`, so re-running it against changed rules makes a different
-//! program; the pinned-hash test then fails until the new `P` is pinned on
-//! purpose. Every vector also replays through the game's TypeScript engine
+//! The rules-version-1 conformance vectors, built from the rules as they are
+//! today. `tests/vectors/v1/vectors.ccb` holds them frozen, and
+//! `golden::the_frozen_vectors_are_what_the_rules_build` fails whenever the
+//! two differ, writing the set built today beside the test's output so a
+//! rules version is cut by copying it over on purpose. The vectors' digest
+//! is part of `P`, so a new file makes a different program, and the
+//! pinned-hash test then fails until the new `P` is pinned too. Every vector
+//! also replays through the game's TypeScript engine
 //! (`dsm-creatures/test/duel-equivalence.test.ts`), which is the evidence
 //! that the frozen results are the game's rules and not only this crate's.
 
-#[path = "../tests/support/mod.rs"]
-mod support;
-
-use support::{creature, duel, mv, random_match, random_move, side, turn, Play, Rng, R};
+use crate::support::{creature, duel, mv, random_match, random_move, side, turn, Play, Rng, R};
 use wildstate_duel::vectors::{DuelVectorSetV1, DuelVectorV1};
 use wildstate_duel::{DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelState, DuelTurnV1, Side};
 
@@ -78,14 +75,8 @@ fn opened_scripted(
     Ok(DuelVectorV1::freeze(label, m, turns)?)
 }
 
-fn main() -> R {
-    let out = match std::env::args().nth(1) {
-        Some(path) => path,
-        None => format!(
-            "{}/tests/vectors/v1/vectors.ccb",
-            env!("CARGO_MANIFEST_DIR")
-        ),
-    };
+/// The vector set the rules build today.
+pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
     let s = |idx: u8| mv(idx);
     let mut vectors = vec![
         scripted(
@@ -459,13 +450,5 @@ fn main() -> R {
             Fill::Random(seed, play),
         )?);
     }
-    let set = DuelVectorSetV1 { vectors };
-    let bytes = set.encode();
-    std::fs::write(&out, &bytes)?;
-    println!(
-        "{} vectors, {} bytes -> {out}",
-        set.vectors.len(),
-        bytes.len()
-    );
-    Ok(())
+    Ok(DuelVectorSetV1 { vectors })
 }

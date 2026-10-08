@@ -32,6 +32,25 @@ fn setup_bytes(body: &DuelMatchV1) -> Vec<u8> {
     .encode()
 }
 
+/// The frozen file is exactly what the rules build today. When it is not,
+/// the set built today is written to the test's scratch directory, and
+/// copying it over the frozen file is the deliberate act of cutting a rules
+/// version.
+#[test]
+fn the_frozen_vectors_are_what_the_rules_build() -> R {
+    let built = crate::freeze::vector_set()?.encode();
+    if built != VECTORS_V1 {
+        let fresh = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("vectors.ccb");
+        std::fs::write(&fresh, &built)?;
+        panic!(
+            "the rules build vectors other than the frozen ones; the set built today is at {} \
+             and replaces tests/vectors/v1/vectors.ccb only when a rules version is cut",
+            fresh.display()
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn the_program_reproduces_its_frozen_vectors() -> R {
     let n = verify_conformance()?;

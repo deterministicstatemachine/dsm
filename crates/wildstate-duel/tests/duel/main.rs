@@ -8,5 +8,6 @@ mod support;
 
 mod codec;
 mod creatures;
+mod freeze;
 mod golden;
 mod rules;

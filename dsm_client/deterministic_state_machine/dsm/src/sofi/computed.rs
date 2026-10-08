@@ -195,7 +195,10 @@ pub enum ProgramOutcome {
 /// A transcript the program refuses: a move its rules do not allow, or an
 /// entry after the match ended. The transcript proves nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProgramFault(pub String);
+pub struct ProgramFault {
+    /// What the program refuses, in its own words.
+    pub reason: String,
+}
 
 /// A deterministic outcome program `P` (SoFi §19.10; Explainer Amendment
 /// A13). It is a total function of the committed setup and the opened
@@ -1176,12 +1179,16 @@ mod tests {
         }
 
         fn outcome(&self, setup: &[u8], opened: &[Opened]) -> Result<ProgramOutcome, ProgramFault> {
-            let rounds = usize::from(*setup.first().ok_or(ProgramFault("no setup".into()))?);
+            let rounds = usize::from(*setup.first().ok_or(ProgramFault {
+                reason: "no setup".into(),
+            })?);
             let mut moves: BTreeMap<MatchSide, Vec<(u32, u32, u8)>> = BTreeMap::new();
             for (at, entry) in opened.iter().enumerate() {
                 let ended = at > 0 && ended_by(rounds, &opened[..at]).is_some();
                 if ended {
-                    return Err(ProgramFault("an entry after the end".into()));
+                    return Err(ProgramFault {
+                        reason: "an entry after the end".into(),
+                    });
                 }
                 match &entry.kind {
                     OpenedKind::Resign => {}
@@ -1191,7 +1198,11 @@ mod tests {
                     } => {
                         let byte = match played.as_slice() {
                             [b] => *b,
-                            _ => return Err(ProgramFault("a move is one byte".into())),
+                            _ => {
+                                return Err(ProgramFault {
+                                    reason: "a move is one byte".into(),
+                                })
+                            }
                         };
                         moves.entry(entry.side).or_default().push((
                             *committed_at,
@@ -1210,7 +1221,9 @@ mod tests {
             };
             for ((ca, ra, _), (cb, rb, _)) in made(MatchSide::A).iter().zip(made(MatchSide::B)) {
                 if ca.max(cb) > ra.min(rb) {
-                    return Err(ProgramFault("a move revealed before both committed".into()));
+                    return Err(ProgramFault {
+                        reason: "a move revealed before both committed".into(),
+                    });
                 }
             }
             Ok(match ended_by(rounds, opened) {
