@@ -22,25 +22,33 @@ inductive RAdv where
   | sq (m : Bytes) (k : Option Bytes → RAdv)
   | out (m s : Bytes)
 
+/-- The game's result: the win bit and the transcript the analysis reads. -/
+structure Out where
+  win : Bool
+  msg : Bytes
+  sig : Bytes
+  signed : List Bytes
+
 def advQ : Oracle QT := fun r => .ask true r .done
 def advP : Oracle Prog := fun r => .askA r .done
 
 /-- The game after key generation, as a query tree. -/
-def playQT (v : Variant) (limits : Limits) (pk sk : Bytes) : RAdv → List Bytes → QT Bool
+def playQT (v : Variant) (limits : Limits) (pk sk : Bytes) : RAdv → List Bytes → QT Out
   | .hq r k, signed => .ask true r (fun b => playQT v limits pk sk (k b) signed)
   | .sq m k, signed =>
     if legal limits m then
       QT.bind (sign challengerOracle v sk m) (fun s => playQT v limits pk sk (k s) (signed ++ [m]))
     else playQT v limits pk sk (k none) signed
   | .out m s, signed =>
-    QT.bind (verify advQ v pk m s) (fun ok => .done (legal limits m && !signed.contains m && ok.getD false))
+    QT.bind (verify advQ v pk m s)
+      (fun ok => .done ⟨legal limits m && !signed.contains m && ok.getD false, m, s, signed⟩)
 
 /-- The H1 game as a query tree, from the seed expansion `ex`. -/
-def gameQT (v : Variant) (limits : Limits) (A : Bytes → RAdv) (ex : Bytes) : QT Bool :=
+def gameQT (v : Variant) (limits : Limits) (A : Bytes → RAdv) (ex : Bytes) : QT Out :=
   QT.bind (kgTail challengerOracle v ex) (fun ks => playQT v limits ks.1 ks.2 (A ks.1) [])
 
 /-- The game after key generation, symbolically: signatures are revealed. -/
-def playS (v : Variant) (limits : Limits) (pk : Bytes) (sk : SB) : RAdv → List Bytes → Prog Bool
+def playS (v : Variant) (limits : Limits) (pk : Bytes) (sk : SB) : RAdv → List Bytes → Prog Out
   | .hq r k, signed => .askA r (fun b => playS v limits pk sk (k b) signed)
   | .sq m k, signed =>
     if legal limits m then
@@ -49,9 +57,10 @@ def playS (v : Variant) (limits : Limits) (pk : Bytes) (sk : SB) : RAdv → List
         | some sg => .reveal sg (fun sb => playS v limits pk sk (k (some sb)) (signed ++ [m])))
     else playS v limits pk sk (k none) signed
   | .out m s, signed =>
-    Prog.bind (verify advP v pk m s) (fun ok => .done (legal limits m && !signed.contains m && ok.getD false))
+    Prog.bind (verify advP v pk m s)
+      (fun ok => .done ⟨legal limits m && !signed.contains m && ok.getD false, m, s, signed⟩)
 
-def gameS (v : Variant) (limits : Limits) (A : Bytes → RAdv) (ex : SB) : Prog Bool :=
+def gameS (v : Variant) (limits : Limits) (A : Bytes → RAdv) (ex : SB) : Prog Out :=
   Prog.bind (sKgTail v ex) (fun ks => .reveal ks.1 (fun pk => playS v limits pk ks.2 (A pk) []))
 
 /-- Coin entries: tape entries 0-2 under a request shape no DSM function issues. -/
@@ -193,22 +202,22 @@ theorem rom_game_hidden (v : Variant) (limits : Limits) (A : Bytes → RAdv) (R 
       s < S ∧ stp.1.ents.length ≤ S)
     (hB : ∀ t, pairCount (params v).n (gameS v limits A (coinEx (params v).n)) (coinSt (params v).n) S t ≤ B) :
     tsum R N (fun t => if (run t (gameQT v limits A (sres t (coinEx (params v).n)))
-        (resD t (coinSt (params v).n))).1 then 1 else 0) * 256^(params v).n ≤
+        (resD t (coinSt (params v).n))).1.win then 1 else 0) * 256^(params v).n ≤
       tsum R N (fun t => if (xrun false t (gameS v limits A (coinEx (params v).n))
-        (coinSt (params v).n)).1 then 1 else 0) * 256^(params v).n +
+        (coinSt (params v).n)).1.win then 1 else 0) * 256^(params v).n +
       R^N * B +
       tsum R N (fun t => if wildColl (params v).n (gameS v limits A (coinEx (params v).n))
         (coinSt (params v).n) N t then 1 else 0) * 256^(params v).n := by
   have heq : ∀ t, (run t (gameQT v limits A (sres t (coinEx (params v).n)))
-      (resD t (coinSt (params v).n))).1 =
-      (xrun true t (gameS v limits A (coinEx (params v).n)) (coinSt (params v).n)).1 :=
-    fun t => ((sim_game (t := t) v limits A (coinSt (params v).n)).1).symm
-  have h1 := real_le_sym (gameS v limits A (coinEx (params v).n)) (coinSt (params v).n) R N (fun _ r => r.1)
+      (resD t (coinSt (params v).n))).1.win =
+      (xrun true t (gameS v limits A (coinEx (params v).n)) (coinSt (params v).n)).1.win :=
+    fun t => congrArg Out.win ((sim_game (t := t) v limits A (coinSt (params v).n)).1).symm
+  have h1 := real_le_sym (gameS v limits A (coinEx (params v).n)) (coinSt (params v).n) R N (fun _ r => r.1.win)
   have h2 := hidden_bound (params v).n (gameS v limits A (coinEx (params v).n)) (coinSt (params v).n)
     R N S B hR hS hB
   simp only [heq]
   calc _ ≤ (tsum R N (fun t => if (xrun false t (gameS v limits A (coinEx (params v).n))
-            (coinSt (params v).n)).1 then 1 else 0) +
+            (coinSt (params v).n)).1.win then 1 else 0) +
           tsum R N (fun t => if anyDis (gameS v limits A (coinEx (params v).n))
             (coinSt (params v).n) t then 1 else 0)) * 256^(params v).n :=
         Nat.mul_le_mul_right _ h1
