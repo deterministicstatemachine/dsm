@@ -29,7 +29,8 @@ use dsm::sofi::resolve::{
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
 use dsm::sofi::wire::{
-    ParentClaimRef, TraderFulfillmentBody, TraderPrecommitBody, VaultGenesisPreimage,
+    ParentClaimRef, SettlementPreimage, TraderFulfillmentBody, TraderPrecommitBody,
+    VaultGenesisPreimage,
 };
 use dsm::types::error::DsmError;
 
@@ -128,6 +129,7 @@ struct ReadOnce {
     fetched: std::sync::Mutex<BTreeMap<(Vec<u8>, D32), Vec<u8>>>,
     precommits: std::sync::Mutex<BTreeMap<D32, Resolved<Signed<TraderPrecommitBody>>>>,
     fulfillments: std::sync::Mutex<BTreeMap<D32, Resolved<Signed<TraderFulfillmentBody>>>>,
+    preimages: std::sync::Mutex<BTreeMap<D32, Resolved<SettlementPreimage>>>,
     setups: std::sync::Mutex<BTreeMap<D32, Resolved<Vec<u8>>>>,
     geneses: std::sync::Mutex<BTreeMap<D32, Discovered<(VaultGenesisPreimage, Vec<u8>)>>>,
 }
@@ -382,6 +384,23 @@ impl SofiReads for LiveSofiReads<'_> {
             &self.once.precommits,
             *id,
             || self.read("precommit", fetch_precommit(self.set, id)),
+            |read| matches!(read, Resolved::Kept(..)),
+        )
+    }
+
+    fn preimage(
+        &self,
+        external_commitment: &D32,
+    ) -> Result<Resolved<SettlementPreimage>, ReadFailure> {
+        read_once(
+            &self.once.preimages,
+            *external_commitment,
+            || {
+                self.read(
+                    "preimage",
+                    crate::sdk::sofi_publish::fetch_preimage(self.set, external_commitment),
+                )
+            },
             |read| matches!(read, Resolved::Kept(..)),
         )
     }

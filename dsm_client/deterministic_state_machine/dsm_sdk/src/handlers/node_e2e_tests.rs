@@ -1990,8 +1990,9 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
         .expect("B signs its own C_q")
         .encode()
     };
-    let exercise = crate::sdk::sofi_exercise::build_exercise(&request, &claim, &evidence)
-        .expect("B's exercise");
+    let exercise =
+        dsm::sofi::exercise::exercise_from_objects(&request.objects(), &claim, &evidence)
+            .expect("B's exercise");
     let recognized = recognize_exercise(&exercise.encode()).expect("it is B's exercise");
     let legs = write_exercise(&set, &exercise, &recognized)
         .await
@@ -2861,8 +2862,11 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
 /// exercise is written; A trades on the same head and its exercise takes the
 /// vault's first key. B's exercise then names a key another exercise holds:
 /// its position resolves Void — nothing moved, nothing pending — and B's
-/// next trade, built on the vault's new head, realizes. Before, B's
-/// resolution read the other exercise back as its own and never resolved.
+/// next trade, built on the vault's new head, realizes. Then A, holding
+/// nothing of the vault, walks it past B's next trade: that needs B's lost
+/// position resolved by a peer, from public objects (SoFi Amendment S25).
+/// Before, B's resolution read the other exercise back as its own and never
+/// resolved, and no peer could resolve it either.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realizes() {
@@ -2921,6 +2925,61 @@ async fn a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realiz
     // B trades again, on the vault's new head, and realizes.
     realized_trade(&p, &m, 10).await;
     assert_eq!(balance(&p.b, &m.era), b_era - 10);
+
+    // Anyone can prove B's lost position Void from public objects (SoFi
+    // Amendment S25). B's last trade names it as its parent, so A — holding
+    // nothing of the vault — establishes B's last trade only by resolving
+    // B's lost position as a peer: the vault's whole chain, A's trade and
+    // B's, from the genesis.
+    forget_the_vault(&p.a, &m.vault_id);
+    let (own_a, parents_a) = standing_of(&p.a);
+    let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
+    let walked = ctx.verifier().chain(&m.vault_id).expect("A's chain");
+    assert_eq!(
+        walked.head().map(|(generation, _)| generation),
+        Some(2),
+        "A's trade and B's trade after its lost one, established by A"
+    );
+
+    // The race again, now with B's parent a realized SoFi position: its
+    // claim is the conditional one final at B's own K_root, which a peer
+    // reads from storage to rebuild B's lost exercise (as on the phones).
+    let head = walked.head().expect("the head").1;
+    let attempt = attempt_cell(&set, &m.vault_id, &head, 0).expect("the next key");
+    let attempt_leader = member_name(attempt.routed().route().leader());
+    p.nodes
+        .refuse_cell_writes(&attempt_leader, &[*attempt.routed().key()])
+        .await;
+    let q = admitted_position(&p.b) + 1;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    p.nodes.accept_cell_writes(&attempt_leader).await;
+    realized_through(
+        &p.a,
+        "sofi.trade",
+        args(&generated::SofiTradeRequest {
+            vault_id: m.vault_id.to_vec(),
+            token_in_policy_commit: m.era.to_vec(),
+            amount_in_entered: entered(&p.a, &m.era, 7),
+            min_amount_out_entered: entered(&p.a, &m.tkn, 1),
+            token_out_policy_commit: m.tkn.to_vec(),
+        }),
+    )
+    .await;
+    assert_eq!(resolve(&p).await, (q, void));
+    realized_trade(&p, &m, 10).await;
+    forget_the_vault(&p.a, &m.vault_id);
+    let (own_a, parents_a) = standing_of(&p.a);
+    let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
+    assert_eq!(
+        ctx.verifier()
+            .chain(&m.vault_id)
+            .expect("A's chain")
+            .head()
+            .map(|(generation, _)| generation),
+        Some(4),
+        "past B's second lost trade, whose parent is a conditional SoFi position"
+    );
 }
 
 /// SoFi §30, Amendment S16 and storage §4: a route search over vaults the
@@ -4207,6 +4266,15 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         dsm::sofi::resolve::ReadFailure,
     > {
         self.live.precommit(id)
+    }
+    fn preimage(
+        &self,
+        external_commitment: &[u8; 32],
+    ) -> Result<
+        dsm::sofi::storage::Resolved<dsm::sofi::wire::SettlementPreimage>,
+        dsm::sofi::resolve::ReadFailure,
+    > {
+        self.live.preimage(external_commitment)
     }
     fn fulfillment(
         &self,
