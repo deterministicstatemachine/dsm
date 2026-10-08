@@ -1521,6 +1521,98 @@ What this covers and does not:
 * *The number.* At `qh = qs = 2^64` and `qn = 2^20`, the last term is about
   2^-146.5, as in C66 and C67.
 
+**C69's assumptions, named** (`KeyScheduleNamed.lean`, claim trace C70).
+
+`ks1_forge_256f_named` restates C69 with each of its five advantages as a
+hypothesis with an explicit bound:
+
+* (A1) Extract of the wallet seed: `ΔExt_w ≤ ε₁/2^256`;
+* (A2) Expand under `PRK_w`: `ΔPRF_w ≤ ε₂/2^256`;
+* (A3) Extract of `s0`: `ΔExt_s0 ≤ ε₃/2^256`;
+* (A4) Expand under `PRK_s0`: `ΔPRF_s0 ≤ ε₄/2^256`;
+* (A5) C67's keyed-BLAKE3 PRF under Smaster, for every disclosed value:
+  `Adv_C67 ≤ ε₅/2^256`.
+
+The conclusion is one number:
+
+    Pr[forgery] ≤ (ε₁ + ε₂ + ε₃ + ε₄ + ε₅ + qn·(27·Q + 368023))/2^256
+
+Each advantage is in counts at its own scale, exactly as C69 defines it.
+This adds no proof content to C69; it states plainly what C69 assumes.
+
+**The key derivation in the random-oracle model** (`RomKdf.lean`, claim
+trace C71).
+
+The model treats HMAC-BLAKE3 and keyed BLAKE3 as one random oracle, the KDF
+oracle. Its inputs are domain-separated: `hmIn k m` for HMAC under key `k`,
+and `kbIn k x` for keyed BLAKE3 under key `k`. The KDF oracle is independent
+of the random oracle for SPHINCS+ hashing. Under this model all five
+assumptions of C70 are proved, not assumed.
+
+*The game* (`romGame`):
+
+* The entropy `e` is uniform in `[0, 2^256)`, and the wallet seed is
+  `bip e`. BIP39 is not modeled: `bip` is any function, and `β` bounds how
+  many entropies share one seed (`β = 1` if `bip` is injective).
+* KS1 runs as twelve requests to the KDF oracle (`ks1Rom`): the Extract of
+  the wallet seed, eight Expands under `PRK_w`, the Extract of `s0`, and
+  Smaster and the at-rest key under `PRK_s0`.
+* C67's DSM game (`dplay`, unchanged) is then played under the derived
+  Smaster. The adversary is given any function of the seven siblings, in
+  full, and of the at-rest key.
+* Each derivation request `x` of that game is the KDF-oracle request
+  `kbIn Smaster x`: per-step seeds, ML-KEM coins and the ML-KEM identity
+  seed.
+* A request `0xff ‖ z` is instead the adversary's own query of the KDF
+  oracle at `z`. So the adversary computes HMAC-BLAKE3 and keyed BLAKE3 at
+  any input it likes, through C67's `leak`, interleaved with the rest of the
+  game. These queries count in `ql`. DSM's own derivation inputs begin with
+  `DSM/`, so none of them is read as a query.
+
+*Kernel-checked:*
+
+* `resL_ks1Rom`: the twelve challenger requests are always fresh, whatever
+  values came before. Their classes (the HMAC key length, and for a 32-byte
+  key the Expand label) are distinct. So they take the first twelve uniform
+  values, and the table then holds only those twelve requests.
+* `couple`: identical until bad. The game agrees with C67's ideal game,
+  where every derivation request is answered by one lazily sampled
+  function, unless one of the game's requests, mapped to the KDF oracle,
+  lands on a challenger request or coincides with another.
+* `bad_hits`: that happens only if one of the adversary's own queries:
+  * is the Extract input of the wallet seed or of `s0`; or
+  * is keyed by `PRK_w`, `PRK_s0` or Smaster.
+* `e_family`, `coord_family`, `href_bound`: C67's ideal game reads none of
+  those five values. Each query therefore hits the wallet-seed input with
+  probability at most `β/2^256`, and each of the other four with
+  probability at most `1/2^256`. C67's `dsm_ideal_256f` bounds the ideal
+  game.
+* `rom_forge_256f`:
+
+      Pr[forge under some per-step key] ≤ (qn·(27·Q + 368023) + (qn + ql)·(β + 4)) / 2^256
+
+  with `Q = qh + 17186·qn + 1704961·qs + 17523`.
+
+What this covers and does not:
+
+* *No computational assumption on the key derivation is left*: the four KS1
+  steps and C67's keyed BLAKE3 are all covered. What remains is the model.
+  * HMAC-BLAKE3 is a random oracle. This is a modeling choice; it is not
+    derived from BLAKE3 being one.
+  * Keyed BLAKE3 is the same oracle, separated by the input tag.
+  * Both are independent of the SPHINCS+ oracle, as in C67, although all
+    of them share BLAKE3.
+* *The mnemonic.* The bound holds for a uniform 256-bit entropy, and β
+  enters only through the wallet-seed term. A generated DSM mnemonic carries
+  32 bytes from the OS random generator; that this is uniform is an
+  assumption about the platform.
+* *Disclosure.* The adversary sees all seven siblings in full and the
+  at-rest key, and still learns nothing about Smaster beyond the bound.
+* *The ChaCha20 boundary of C65 still applies* inside SPHINCS+.
+* *The number.* At `qh = qs = 2^64`, `qn = 2^20`, `ql = 2^64` and `β = 1`,
+  the second term is about `5·2^64/2^256 = 2^-189.7`. The first is C66's,
+  about 2^-146.5.
+
 ## Assumptions, stated plainly
 
 * Every BLAKE3 role, and ChaCha20 seed expansion, is an independent random
@@ -1548,6 +1640,10 @@ What this covers and does not:
   under a public salt, and Expand under a uniform `PRK_s0` are each close
   to uniform or random for the named distinguishers; not proved, and the
   bound carries each advantage.
+* In the random-oracle model for the key derivation (C71), HMAC-BLAKE3 and
+  keyed BLAKE3 are one random oracle with domain-separated inputs,
+  independent of the SPHINCS+ oracle. Under it, C69's five assumptions are
+  proved. Without that model, C70 states them as named hypotheses.
 * Adversary cost is counted in oracle queries only; local computation is free.
 * Classical adversaries only. The quantum picture is in
   `SPHINCS_QROM_NARRATIVE.md` and is not machine-checked.
