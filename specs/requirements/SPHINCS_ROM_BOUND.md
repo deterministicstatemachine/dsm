@@ -1030,12 +1030,21 @@ the per-key game with the model's own `generateKeypair`, `sign` and `verify`.
 
 What this covers and does not:
 
-* *ChaCha20 as an oracle.* The expansion is idealized as one random-oracle
-  request on `(seed32, 3n)`. Real ChaCha20 is prefix-consistent across
-  output lengths, while the model answers each length independently. The two
-  differ only on queries whose input is the true seed, and every mode-3 query
-  is already in the seed-guess term. That last step is an argument, not part
-  of the Lean statement.
+* *ChaCha20 as an oracle: two separate claims.*
+  1. *Within the formal model* (proved): the seed hop charges every
+     adversarial query on the secret seed (`qh/2^256`), and
+     `expand_slices_sum` gives the three coins their independent uniform
+     distribution.
+  2. *Against actual ChaCha20* (not proved, not implied): the model's oracle
+     answers each `(seed, length)` request independently, while ChaCha20's
+     stream is prefix-consistent. That difference can be detected with any
+     *known* seed, with no guess of the secret one. So the `qh/2^256` term
+     does not justify replacing actual ChaCha20 with this oracle.
+  Replacing the implemented expansion by the model's is a separate
+  computational assumption about ChaCha20 (for example, that its output on a
+  uniform secret key, independent of every other request, is indistinguishable
+  from uniform `3n` bytes). Any implementation-level security claim must
+  state and keep it.
 * *Independent domains.* BLAKE3's compression is built from the ChaCha
   quarter-round. The model treats mode 3 and BLAKE3's modes 0–2 as
   independent domains of one oracle, and that stays an assumption.
@@ -1057,7 +1066,11 @@ Still open, and needed before this is a number for DSM:
 ## Assumptions, stated plainly
 
 * Every BLAKE3 role, and ChaCha20 seed expansion, is an independent random
-  oracle (one oracle, distinct requests). Keyed BLAKE3 under different keys,
+  oracle (one oracle, distinct requests). For ChaCha20 this is not a
+  faithful model of the stream (prefix consistency is visible with any known
+  seed). The implementation-level claim needs a separate assumption that
+  the expansion of a uniform secret seed is indistinguishable from uniform
+  bytes (see C65). Keyed BLAKE3 under different keys,
   `derive_key` under different contexts and the XOF are treated as unrelated
   functions even though they share BLAKE3's compression function.
 * At most 2^64 signatures per key (the ITSR bound is monotone in q_s; the
