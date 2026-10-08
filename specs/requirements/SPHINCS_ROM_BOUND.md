@@ -1328,6 +1328,113 @@ Still open, and needed before this is a number for DSM:
   (C67). The multi-key accounting is C66, and the per-step derivation hop to
   `Pr ≤ Adv + qn·(27Q + 368023)/2^256` is C67.
 
+**Key schedule KS1** (`KeySchedule.lean`, claim trace C68).
+
+The schedule C67 describes above, in which every node is
+`kdf32(secret, tag, …)` (HKDF with the domain tag as the Extract salt), is
+the schedule C67 was stated against, and that description stays as its
+historical boundary. DSM now derives its identity secrets with KS1
+(`core::identity::key_schedule`, genesis profile `MnemonicV3-KS1`, client
+schema 30, no migration): one Extract per secret root under a fixed protocol
+salt, and domain separation only in the Expand `info`. HMAC is HMAC-BLAKE3
+(RFC 2104, 64-byte block), Extract and Expand are RFC 5869.
+
+    mnemonic (24 words) -> wallet_seed = BIP39 seed (empty passphrase)
+    PRK_w  = Extract("DSM/kdf/wallet-root/v1" 0x00, wallet_seed)
+      genesis nonce  = Expand(PRK_w, "DSM/genesis-public-nonce/v3"   0x00 lp(net) idx)   public
+      GRK seed       = Expand(PRK_w, "DSM/genesis-root-authority/v2" 0x00 lp(net) idx ver)
+      AttA           = Expand(PRK_w, "DSM/atta/v3"                   0x00 G slot)        public
+      device seed    = Expand(PRK_w, "DSM/device-seed/v3"            0x00 G slot)
+      s0             = Expand(PRK_w, "DSM/s0/v3"                     0x00 G slot aph)
+      SDK entropy    = Expand(PRK_w, "DSM/sdk-entropy/v3"            0x00 DevID G)
+      recovery AEAD  = Expand(PRK_w, "DSM/recovery-aead/v2"          0x00)
+      recovery auth. = Expand(PRK_w, "DSM/recovery-authority/v2"     0x00)
+    PRK_d  = Extract("DSM/kdf/device-root/v1" 0x00, device seed)
+      AK seed        = Expand(PRK_d, "DSM/device-ak/v3" 0x00 aph)
+    PRK_s0 = Extract("DSM/kdf/s0-root/v1" 0x00, s0)
+      Smaster        = Expand(PRK_s0, "DSM/Smaster/v3"            0x00 G DevID aph)
+      at-rest key    = Expand(PRK_s0, "DSM/chain-head-at-rest/v3" 0x00 G DevID)
+    keyed-BLAKE3 under Smaster:
+      per-step seed  "DSM/ek/v1" 0x00 …           (C67)
+      ML-KEM coins   "DSM/kyber-coins/v1" 0x00 …  (C67)
+      ML-KEM seed    "DSM/ml-kem-identity/v1" 0x00 "ML-KEM-768"
+
+`lp(x)` is `|x|` as u32 little-endian followed by `x`; `idx`, `ver` and
+`slot` are u32 little-endian; `G`, `DevID` and `aph` are 32 bytes. Compared
+with the earlier schedule: sibling outputs are Expands of one PRK rather
+than HMACs of one secret under different public salts; the at-rest key no
+longer uses `s0` directly as a keyed-BLAKE3 key; the published ML-KEM key no
+longer comes from an unkeyed hash of Smaster; the recovery keys no longer go
+through Argon2id of the phrase text but through `PRK_w`.
+
+*Kernel-checked (C68):*
+
+* `ks_salts_nodup`: the three Extract salts are distinct.
+  `ksLabels_nul_free`, `ksLabels_nodup`: the eleven Expand labels contain no
+  0x00 and are distinct, so `label ‖ 0x00` determines the label
+  (`ksInfo_split`).
+* `wnode_info_inj`: under `PRK_w`, the `info` string determines the node and
+  its whole context, for u32 integers and network ids shorter than 2^32
+  bytes (as the Rust types guarantee). Distinct (node, context) pairs are
+  HMAC queries at distinct inputs; the same pair is recomputation, not a new
+  output.
+* `snode_info_inj`: under `PRK_s0`, Smaster and the at-rest key are Expands
+  at distinct inputs for every context. `akInfo_inj`: the AK seed's input
+  determines `aph`.
+* `smaster_inputs_distinct`, `ekDom_mlkem`: the three keyed-BLAKE3 inputs
+  under Smaster are pairwise distinct, and the ML-KEM identity input is
+  outside the per-step domain.
+* `dsm_forge_256f_ks1`: C67's `dsm_forge_256f` with no auxiliary input
+  (`aux := []`). Under KS1 the ML-KEM identity seed is one more keyed-BLAKE3
+  output under Smaster, at an input outside the per-step domain, so in
+  C67's game it is one of the `ql` revealed derivations and the adversary
+  computes the public key itself. `Adv` is then the ordinary PRF advantage
+  of keyed BLAKE3 under Smaster with at most `qn + ql` queries. This is an
+  instance of C67; C67 itself is unchanged.
+
+*Implementation checks (tests, not proofs):*
+
+* `key_schedule::tests::ks1_test_vectors` fixes twelve outputs, one per
+  node. An independent implementation written from the description above
+  (`scripts/ks1_reference.py`, HMAC and HKDF over the `blake3` Python
+  package) prints the same twelve values byte for byte.
+* *Mnemonic.* Every path from a phrase to a wallet seed
+  (`parse_wallet_mnemonic`) refuses any phrase that is not a valid 24-word
+  English BIP39 phrase; a 12-word phrase is refused, not reinterpreted.
+  Length says nothing about entropy, so wallet creation
+  (`system.createGenesisV2`) also requires the phrase
+  `system.generateMnemonic` produced in the same process, which is 32 bytes
+  from the OS CSPRNG encoded as 24 words. Restore accepts any valid 24-word
+  phrase: its entropy was fixed when the wallet was created. That the OS
+  CSPRNG gives 256 bits of min-entropy is an assumption about the platform.
+* *The at-rest key.* `s0` has exactly two uses in the code, as the Extract
+  input of `PRK_s0` for Smaster and for the at-rest key. If `PRK_s0` is
+  uniform and HMAC-BLAKE3 keyed by it is a PRF, the at-rest key (an output
+  at one input, `snode_info_inj`) gives no advantage beyond the PRF
+  advantage in computing Smaster (an output at another input). Recovering
+  `s0` or `PRK_s0` would compute Smaster, so neither is exposed either,
+  under the same assumption. This argument is the standard PRF step and is
+  not machine-checked here; it is part of the hybrids below.
+
+Not covered yet (the next hop, from KS1 to C67's uniform `K`):
+
+* *Extract.* That `PRK_w` is close to uniform when `wallet_seed` is the
+  BIP39 seed (PBKDF2-HMAC-SHA512) of a 256-bit mnemonic. This is an
+  assumption on HMAC-BLAKE3 as an extractor (or a random oracle) and is not
+  proved; the final bound must carry the mnemonic's entropy.
+* *Expand hybrids.* HMAC-BLAKE3 as a PRF under `PRK_w`, `PRK_d` and
+  `PRK_s0`, with the public siblings disclosed (the genesis nonce, AttA, and
+  the AK, GRK and recovery-authority public keys, which are functions of
+  sibling outputs), and the Extracts of `PRK_d` and `PRK_s0` from uniform
+  outputs. Then Smaster is uniform up to those advantages, which is C67's
+  `K`.
+* *Two idealizations side by side*, as in C67: HMAC-BLAKE3 and keyed BLAKE3
+  are concrete functions next to the random oracle for SPHINCS+ hashing,
+  although all share BLAKE3. The ChaCha20 boundary of C65 still applies.
+* *Compatibility.* The same phrase derives a different identity under KS1
+  than under the earlier schedule, and 12-word wallets cannot be restored.
+  Identities from the earlier schedule are outside this claim.
+
 ## Assumptions, stated plainly
 
 * Every BLAKE3 role, and ChaCha20 seed expansion, is an independent random
@@ -1345,6 +1452,11 @@ Still open, and needed before this is a number for DSM:
 * Per-step seeds (C67): keyed BLAKE3 under Smaster is a PRF even given the
   ML-KEM public key DSM derives from Smaster by an unkeyed hash, and Smaster
   is uniform apart from that. Not proved; the bound carries its advantage.
+* Key schedule KS1 (C68): the injectivity and domain separation of every
+  derivation input are proved. That `PRK_w` is close to uniform for a
+  256-bit mnemonic, and that HMAC-BLAKE3 Expand is a PRF under each PRK, are
+  assumptions not yet composed into the bound; under KS1 the PRF assumption
+  of C67 needs no auxiliary input.
 * Adversary cost is counted in oracle queries only; local computation is free.
 * Classical adversaries only. The quantum picture is in
   `SPHINCS_QROM_NARRATIVE.md` and is not machine-checked.

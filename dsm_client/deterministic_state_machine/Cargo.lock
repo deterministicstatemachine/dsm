@@ -1097,7 +1097,6 @@ version = "0.1.0-beta.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "argon2",
  "arrayref",
  "async-trait",
  "base32",

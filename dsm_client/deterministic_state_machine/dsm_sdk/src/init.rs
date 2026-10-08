@@ -99,7 +99,8 @@ pub fn current_smaster() -> Result<[u8; 32], dsm::types::error::DsmError> {
 
 /// Derive the AEAD key for per-relationship chain-head SK storage at rest.
 ///
-/// `K_at-rest = keyed-BLAKE3(s0, "DSM/chain-head-at-rest/v2" || G || DevID)`. Rooted in `s0`
+/// `K_at-rest = Expand(Extract("DSM/kdf/s0-root/v1", s0), "DSM/chain-head-at-rest/v3" ‖ G ‖ DevID)`
+/// (key schedule KS1), a sibling of `Smaster` under `s0`'s Extract. Rooted in `s0`
 /// (the recovery path) and domain-separated from authorship (`Smaster`): a copied database is
 /// undecryptable without the wallet seed, and a leak of the at-rest key does not expose the
 /// authorship root. Replaces the former C-DBRW binding key for SK-at-rest. Fails closed when
@@ -122,13 +123,9 @@ pub fn current_chain_head_at_rest_key() -> Result<[u8; 32], dsm::types::error::D
         })?;
     let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
     let s0 = derive_s0(&wallet_seed, &g, 0, &aph);
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher_keyed(
-        dsm::common::domain_tags::TAG_DSM_CHAIN_HEAD_AT_REST_V2,
-        &s0,
-    );
-    hasher.update(&g);
-    hasher.update(&devid);
-    Ok(*hasher.finalize().as_bytes())
+    Ok(dsm::core::identity::key_schedule::at_rest_key(
+        &s0, &g, &devid,
+    ))
 }
 
 #[derive(Debug, Clone)]

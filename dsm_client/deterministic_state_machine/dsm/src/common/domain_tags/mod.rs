@@ -178,7 +178,10 @@ mod tests {
     // response. The endpoint's certificate pin is the TLS certificate hash.
     // +9 with escrow vaults (SoFi Amendment S21): `DSM/external/v1` and the
     // eight `DSM/escrow/*` domains.
-    const EXPECTED_TAG_COUNT: usize = 368;
+    // +6 with key schedule KS1 (Extract-then-Expand): the three Extract salts
+    // and twelve Expand / keyed labels replace the six v2 key-tree tags,
+    // the v2 genesis nonce, the v1 GRK seed and the SDK entropy hash.
+    const EXPECTED_TAG_COUNT: usize = 374;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

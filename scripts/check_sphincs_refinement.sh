@@ -77,6 +77,7 @@ lean -DwarningAsError=true --run lean4/Sphincs/WrapperReductionChecks.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Transcript.olean lean4/Sphincs/Transcript.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Blake3.olean lean4/Sphincs/Blake3.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/RomDerive.olean lean4/Sphincs/RomDerive.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/KeySchedule.olean lean4/Sphincs/KeySchedule.lean
 lean -DwarningAsError=true lean4/Sphincs/Blake3Proofs.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Blake3Vectors.olean lean4/Sphincs/Blake3Vectors.lean
 lean -DwarningAsError=true lean4/Sphincs/CrossCheck.lean
