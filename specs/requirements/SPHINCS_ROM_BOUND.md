@@ -190,8 +190,17 @@ experiment is argued here and not formalized:
    leaves as independent uniform draws. In the run they are fresh oracle
    answers on distinct inputs (distinct messages), chosen adaptively but each
    uniform when drawn; the forged digest is a fresh answer for a message
-   never signed. That the adaptive selection preserves the static bound is
-   argued.
+   never signed. That an adaptive selection preserves the static bound is
+   now kernel-checked in generic form (`RomSample.lean`: `sample`;
+   `RomItsrA.lean`: `itsr_gen`, `itsr_adaptive`, claim trace C48): if a run
+   decides from the entries already read which tape entry is the target and
+   which are (at most `q`) signature digests, and digests decode to a leaf
+   and indices with equal fibers, the covered probability is at most the
+   static ITSR numerator over `(G+1)! L^(G+1) T^k`. Still argued for DSM:
+   the equal-fiber property of `splitDigest` on uniform h_msg outputs, and
+   that in the game the signed digests are fresh challenger draws (an
+   adversary h_msg query equal to a later signing request is a guess of the
+   hidden randomizer R).
 5. **Model functions as query trees.** `Model.lean` is monad-generic, so its
    functions run unchanged as query trees; that this run equals the Id-model
    run against the final oracle is proved for logging (`verify_sim`,
