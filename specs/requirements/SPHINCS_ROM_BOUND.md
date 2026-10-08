@@ -959,16 +959,100 @@ What this does not yet cover:
 * the bound is per key;
 * the random-oracle and tape assumptions of C54–C60 still apply.
 
+**The seed hop and the real 256f game** (`RomSeed.lean`, claim trace C65).
+
+*The expansion.* The implementation (`crates/dsm-sphincs`
+`generate_keypair_from_seed`) runs
+`ChaCha20Rng::from_seed(seed32).fill_bytes(sk[..3n])` and splits the output
+as SK.seed ‖ SK.prf ‖ PK.seed. The model's `generateKeypair` is the same, with
+one request `⟨3, "ChaCha20Rng", [], seed32, 3n⟩`. Mode 3 is used by no BLAKE3
+role. On tape coordinate `x` the answer is `be (3n) x`. It is uniform over
+`3n` bytes only if `256^(3n)` divides the tape range `R`. The real-game
+theorem therefore takes `R = c·256^(3n)·256^m`, which H1 allows since it only
+needs `c > 0`. Given that, the three slices are exactly three independent
+uniform `n`-byte values (`expand_slices_sum`, `be_split3`). No PRG or
+"ChaCha is random" step is used beyond the oracle model itself.
+
+*A dependency H1 did not model.* H1's coins are oracle-table entries with
+requests `⟨999, "DSM/rom/coin", [], coin, n⟩`, and the adversary may query
+any request. Coin 2 is PK.seed, which is public. So in H1 the query
+`⟨999, "DSM/rom/coin", [], PK.seed, n⟩` returns PK.seed, while in the real
+game it returns fresh bytes: H1 is distinguishable from the real game. The hop
+handles this by renaming, not by a bad event:
+
+* the real adversary `A` is mapped to `renA A`, which shifts every request of
+  mode ≥ 999 up by one mode (`ren`);
+* `ren` is injective and preserves output lengths;
+* it is the identity on DSM's modes 0–3 and never produces a mode-999 (coin)
+  request;
+* the budget is preserved (`budget_ren`).
+
+The honest routines and the verifier never ask a request of mode above 2
+(`m_kgTail`, `m_sign`, `m_verify`), so the renaming leaves them unchanged
+(`RenR.refl`, `play_ren`).
+
+*Coupling* (`run_couple`, `win_couple`). Take a real tape `x :: rest` and an
+H1 tape `a :: b :: c :: rest` with `x = (a·M + b)·M + c` (`M = 256^n`). The
+real run, with the expansion entry first, and H1 with `renA A`, with the
+three coin entries first, run identically:
+
+* the tables agree after the first entries, with a table offset of 2 and
+  adversary requests renamed;
+* each answer is the same tape coordinate.
+
+This holds until H1's table holds the expansion request of the seed
+(`SeedBad`). One oracle serves every mode, so cross-domain queries are part
+of the coupling: a request matches an entry only if the whole request is
+equal.
+
+*Seed guess* (`seedBad_guess`, `seedGuess_qh`). On a fixed tape, H1 does not
+depend on the seed. `SeedBad` makes the seed one of the inputs of H1's mode-3
+entries. Those entries come only from the adversary's hash queries (`play_m3`,
+`game_m3`, `run_cnt`), so there are at most `qh`. Over `2^256` seeds this
+costs `qh/2^256` (`guess_bound`). The guess list holds every mode-3 input,
+whatever its context or output length.
+
+*The hop* (`seed_hop`):
+
+    Pr[real won] ≤ Pr[H1 won by renA A] + qh/2^256
+
+Real tapes have `K+1` coordinates and H1 tapes `K+3`. The reindexing is
+`runR_mod`, `runG_mod`, `sum_mod_eq` and `sum_cube`.
+
+*SPHINCS+-256f, real key generation* (`real_win_256f`). Composed with
+`rom_win_budget_lin_256f` for `renA A`:
+
+    Pr[won] ≤ (22·qh + 368023)/2^256
+
+This holds for every adversary with `Budget A qh qs` and `qs ≤ 2^64`. The
+probability is over a uniform 32-byte seed and the lazily sampled oracle, in
+the per-key game with the model's own `generateKeypair`, `sign` and `verify`.
+
+What this covers and does not:
+
+* *ChaCha20 as an oracle.* The expansion is idealized as one random-oracle
+  request on `(seed32, 3n)`. Real ChaCha20 is prefix-consistent across
+  output lengths, while the model answers each length independently. The two
+  differ only on queries whose input is the true seed, and every mode-3 query
+  is already in the seed-guess term. That last step is an argument, not part
+  of the Lean statement.
+* *Independent domains.* BLAKE3's compression is built from the ChaCha
+  quarter-round. The model treats mode 3 and BLAKE3's modes 0–2 as
+  independent domains of one oracle, and that stays an assumption.
+* *Tape range.* An answer of `L` bytes is uniform only when `256^L` divides
+  `R`. The theorem holds for every `c > 0`, so `c` can be chosen to cover the
+  adversary's longest request.
+* *The seed itself.* The per-step seed must be uniform. DSM derives it as
+  keyed-BLAKE3(S_master, "DSM/ek/v1\0" ‖ …) (`derive_ephemeral_seed`). That
+  derivation is a separate DSM-layer hop and is not covered here.
+* *Per key.* The bound is per key (see the multi-key note below).
+* *128f.* SPHINCS+-128f's real-game composition (C61 plus `seed_hop`) is not
+  stated. DSM's ephemeral keys use SPHINCS+-256f.
+
 Still open, and needed before this is a number for DSM:
 
-* the seed hop. H1 starts from three independent coin entries, while the
-  implementation expands a 32-byte seed with ChaCha20, idealized as a random
-  oracle. That expansion is one `3n`-byte output of one request, so its three
-  parts being independent and uniform must follow from the modeled interface
-  (output length, domain separation, adversary access to the expansion
-  oracle), not be assumed. The final statement must keep the idealization
-  visible and pay for the hop explicitly, including any seed-guessing term;
-* the final composition.
+* the DSM-layer composition: the seed derivation from S_master, the per-step
+  multi-key accounting, and the final statement.
 
 ## Assumptions, stated plainly
 
