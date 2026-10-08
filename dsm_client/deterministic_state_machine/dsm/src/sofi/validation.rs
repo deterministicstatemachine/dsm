@@ -1620,7 +1620,7 @@ fn leaf_value_of_balance(state: &EconomicBalanceState) -> Result<D32, Refusal> {
 }
 
 /// A core entry's stated pre and post, as the fold will read them.
-fn stated(entry: &CoreEntry) -> (Option<D32>, Option<D32>) {
+pub(crate) fn stated(entry: &CoreEntry) -> (Option<D32>, Option<D32>) {
     match entry {
         CoreEntry::Mutation { pre, post, .. } => (absent_or(pre), absent_or(post)),
         CoreEntry::Read { value, .. } => (absent_or(value), absent_or(value)),

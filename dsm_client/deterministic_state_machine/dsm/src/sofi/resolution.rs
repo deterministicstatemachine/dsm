@@ -36,6 +36,7 @@
 //! R12), so a registered `F` that never conformed is Invalid — never Void,
 //! never Realized.
 
+use std::collections::BTreeMap;
 use crate::route_chain::{CellFact, ChainState};
 use super::conformance::Validation;
 use super::registration::PairStanding;
@@ -189,9 +190,12 @@ pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> Paren
 pub struct VaultChain {
     /// The generation `roots[0]` is at: zero for a chain from the genesis,
     /// the baseline's for a chain from an owner baseline (SoFi Amendment
-    /// S24). Nothing below it is established.
+    /// S24). Below it, only what `proven` holds is established.
     base: u64,
     roots: Vec<[u8; 32]>,
+    /// Roots below `base`, each proven under the baseline's authenticated
+    /// history root (SoFi Amendment S26), by generation.
+    proven: BTreeMap<u64, [u8; 32]>,
 }
 
 /// One generation as this device recorded it (`VaultChain::from_recorded`):
@@ -248,6 +252,7 @@ impl VaultChain {
         Self {
             base: 0,
             roots: vec![*genesis.genesis_root()],
+            proven: BTreeMap::new(),
         }
     }
 
@@ -265,6 +270,7 @@ impl VaultChain {
         let mut chain = Self {
             base: frontier.generation,
             roots: vec![frontier.root],
+            proven: BTreeMap::new(),
         };
         let Some((first, later)) = rows.split_first() else {
             return Ok(chain);
@@ -384,11 +390,27 @@ impl VaultChain {
     /// A chain stated for a test of what reads it; in-crate only.
     #[cfg(test)]
     pub(crate) fn of_roots_for_test(roots: Vec<[u8; 32]>) -> Self {
-        Self { base: 0, roots }
+        Self {
+            base: 0,
+            roots,
+            proven: BTreeMap::new(),
+        }
+    }
+
+    /// Admit `R_g` below this chain's baseline, as a path under the
+    /// baseline's history root proved it (SoFi Amendment S26). A root at or
+    /// above the baseline is the chain's own to establish, and is left to it.
+    pub(crate) fn admit_proven(&mut self, proven: &super::history::ProvenRoot) {
+        if proven.generation() < self.base {
+            self.proven.insert(proven.generation(), *proven.root());
+        }
     }
 
     /// `R*_g`, when this chain established generation `g`.
     fn root_at(&self, generation: u64) -> Option<[u8; 32]> {
+        if generation < self.base {
+            return self.proven.get(&generation).copied();
+        }
         let offset = generation.checked_sub(self.base)?;
         usize::try_from(offset)
             .ok()
@@ -410,7 +432,7 @@ impl VaultChain {
     /// use this where a root has to be established before something else can
     /// proceed, never to refute one.
     pub fn names(&self, root: &[u8; 32]) -> bool {
-        self.roots.contains(root)
+        self.generation_of(root).is_some()
     }
 
     /// The generation `root` sits at, when this chain names it.
@@ -419,6 +441,12 @@ impl VaultChain {
             .iter()
             .position(|r| r == root)
             .map(|g| self.base + g as u64)
+            .or_else(|| {
+                self.proven
+                    .iter()
+                    .find(|(.., r)| *r == root)
+                    .map(|(g, ..)| *g)
+            })
     }
 
     /// The highest generation this chain established.

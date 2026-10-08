@@ -473,6 +473,7 @@ async fn create_vault(
         reserve_a_entered: a.1,
         reserve_b_entered: b.1,
         fee_bps: 30,
+        label: String::new(),
     };
     match game
         .call(Route::Invoke, "sofi.createVault", request.encode_to_vec())
@@ -976,6 +977,51 @@ async fn connect_over_the_real_relay() {
             .contains("published the baseline at generation"),
         "the account signed and published its baseline for the second swap"
     );
+
+    // Two wallets swap through the one vault at once. Both read its head and
+    // can race for its next key: the loser's position resolves Void, provable
+    // by anyone (SoFi Amendment S25), and its wallet quotes and trades again,
+    // so both swaps are carried out and neither wallet is left pending.
+    let mut rival = Host::new("rival", &root, &config);
+    rival.start().await;
+    rival.claim_faucet().await;
+    let rival_session = connect(&game, &rival, &wild).await;
+    let swap_kind = || {
+        Kind::Swap(pb::ConnectSwapV1 {
+            token_in: era().to_vec(),
+            token_out: wild.to_vec(),
+            amount_in: 100,
+            min_amount_out: 1,
+            vault_witnesses: Vec::new(),
+        })
+    };
+    let (mine, theirs) = futures::future::join(
+        ask(&game, &session, swap_kind()),
+        ask(&game, &rival_session, swap_kind()),
+    )
+    .await;
+    let (mine, theirs) = futures::future::join(
+        answered(&game, &session, mine, "the wallet's racing swap runs"),
+        answered(
+            &game,
+            &rival_session,
+            theirs,
+            "the rival's racing swap runs",
+        ),
+    )
+    .await;
+    for (who, swapped) in [("wallet", &mine), ("rival", &theirs)] {
+        assert_eq!(
+            outcome(swapped),
+            pb::ConnectOutcome::CarriedOut,
+            "{who}: {}",
+            swapped.reason
+        );
+    }
+    let raced = [&wallet, &rival]
+        .iter()
+        .any(|host| host.logged().contains("lost its vault's key"));
+    println!("the two swaps raced for one key: {raced}");
 
     // Outside the grant: ERA was never payable to the game. It waits for the
     // player, who declines it on the wallet.

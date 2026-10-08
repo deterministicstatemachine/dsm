@@ -423,4 +423,42 @@ if [[ "$baseline_callers" != "$expected_memo" ]]; then
 fi
 echo "  ✓ one authentication builds a verified frontier; one chain walk starts from it"
 
+# [8] A vault's history (SoFi Amendment S26). A root below a chain's
+#     baseline enters the chain only as a `ProvenRoot`, which only the
+#     history proof builds, and only the verifier's chain walk admits one.
+echo "[8] Vault history: one proof builds a proven root; one walk admits it..."
+history="$core/dsm/src/sofi/history/mod.rs"
+[[ -f "$history" ]] || { echo "[FAIL] $history is not where this gate expects it"; exit 1; }
+body=$(awk '/^pub struct ProvenRoot \{/{f=1} f{print} f&&/^\}/{exit}' "$history")
+[[ -n "$body" ]] || { echo "[FAIL] ProvenRoot is not defined in $history"; exit 1; }
+if grep -qE '^\s+pub' <<<"$body"; then
+  echo "[FAIL] ProvenRoot has a field visible outside its module:"
+  grep -nE '^\s+pub' <<<"$body"
+  exit 1
+fi
+prod=$(python3 ci/production_text.py "$history")
+literals=$(grep -E 'ProvenRoot \{' <<<"$prod" | grep -vE '^(pub struct|impl) ' | wc -l | tr -d ' ')
+if [[ "$literals" -ne 1 ]]; then
+  echo "[FAIL] ProvenRoot is stated $literals times in $history; only prove builds one"
+  exit 1
+fi
+prove_body=$(awk '/^pub fn prove</{f=1} f{print} f&&/^\}/{exit}' "$history")
+if ! grep -q 'Ok(Ok(ProvenRoot {' <<<"$prove_body"; then
+  echo "[FAIL] the one ProvenRoot construction is not inside prove"
+  exit 1
+fi
+admitters=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  p=$(python3 ci/production_text.py "$f")
+  grep -q 'admit_proven(' <<<"$p" && admitters="$admitters$f"$'\n'
+done < <(grep -rln 'admit_proven(' "$core/dsm/src" "$core/dsm_sdk/src" 2>/dev/null | grep -v "sofi/resolution.rs" | sort)
+admitters=${admitters%$'\n'}
+if [[ "$admitters" != "$core/dsm/src/sofi/resolve.rs" ]]; then
+  echo "[FAIL] VaultChain::admit_proven must be called only from the chain walk in resolve.rs"
+  echo "       callers found: ${admitters:-none}"
+  exit 1
+fi
+echo "  ✓ one proof builds a proven root; one chain walk admits it"
+
 echo "✓ raw envelope -> verified claim -> registered root: every arrow is opaque"

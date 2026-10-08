@@ -24,8 +24,13 @@ use prost::Message;
 
 use dsm::common::domain_tags::{
     TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR, TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
+    TAG_DSM_SOFI_VAULT_HISTORY_HEAD, TAG_DSM_SOFI_VAULT_HISTORY_LEAF,
+    TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR, TAG_DSM_SOFI_VAULT_HISTORY_NODE,
+    TAG_DSM_SOFI_VAULT_LEAF_STATE,
 };
+use dsm::crypto::domain::TaggedHashDomain;
 use dsm::sofi::derive;
+use dsm::sofi::history::{history_locator, HistoryBuilder};
 use dsm::sofi::frontier::{
     authenticate_frontier_owner, baseline_commitment, frontier_commitment, witness_from_tree,
     VaultWitness, VerifiedFrontier,
@@ -267,10 +272,14 @@ async fn offer_one(
         .map_err(|e| failure("baseline", e))?
         .is_none()
     {
+        // The history first: a baseline commits it, and a reader proves a
+        // root below the baseline from it (SoFi Amendment S26).
+        let history_root = publish_history(set, vault_id, head.generation).await?;
         let frontier = VaultFrontierV1 {
             vault_id: *vault_id,
             generation: head.generation,
             root: head.root,
+            history_root,
         };
         let network = crate::sdk::economic_admission_flow::committed_network_id()?;
         let bundle = sign(&network, own_g, &frontier)?;
@@ -297,6 +306,114 @@ async fn offer_one(
         generation: head.generation,
         witness_ccb: witness.encode().map_err(|e| failure("witness", e))?,
     }))
+}
+
+/// How many objects of a history are put at once.
+const HISTORY_PUTS_AT_ONCE: usize = 16;
+
+/// Publish `vault_id`'s history up to `generation` (SoFi Amendment S26), from
+/// this device's record of the vault from its genesis: for every generation
+/// not published yet, its leaf, indexed under its root, the interior nodes
+/// it completed and the state leaf at its root; then the head. Returns the
+/// history root a frontier at `generation` commits. Every object must reach
+/// a member, or nothing is recorded as published and no baseline is signed.
+pub(crate) async fn publish_history(
+    set: &StorageSet,
+    vault_id: &D32,
+    generation: u64,
+) -> Result<D32, DsmError> {
+    let rows =
+        sofi_vault_head::recorded_generations(vault_id).map_err(|e| failure("history", e))?;
+    match rows.first() {
+        Some(first) if first.generation == 0 => {}
+        Some(..) | None => {
+            return Err(failure(
+                "history",
+                "this device holds no record of the vault from its genesis",
+            ))
+        }
+    }
+    let published =
+        sofi_vault_head::history_published(vault_id).map_err(|e| failure("history", e))?;
+    let mut builder = HistoryBuilder::new(*vault_id);
+    let mut objects: Vec<(TaggedHashDomain<'static>, Vec<u8>)> = Vec::new();
+    let mut index: Vec<(D32, D32)> = Vec::new();
+    for row in rows.iter().take_while(|row| row.generation <= generation) {
+        let appended = builder.append(&row.root);
+        if published.is_some_and(|published| row.generation <= published) {
+            continue;
+        }
+        index.push((
+            history_locator(vault_id, &row.root),
+            dsm::storage_object::immutable_addr(TAG_DSM_SOFI_VAULT_HISTORY_LEAF, &appended.leaf),
+        ));
+        objects.push((TAG_DSM_SOFI_VAULT_HISTORY_LEAF, appended.leaf));
+        for (.., node) in appended.nodes {
+            objects.push((TAG_DSM_SOFI_VAULT_HISTORY_NODE, node));
+        }
+        // The genesis state is the genesis preimage's own.
+        if row.generation > 0 {
+            let state = sofi_vault_head::state_at(vault_id, &row.root)
+                .map_err(|e| failure("history", e))?
+                .ok_or_else(|| {
+                    failure(
+                        "history",
+                        format!("no state recorded at generation {}", row.generation),
+                    )
+                })?;
+            objects.push((
+                TAG_DSM_SOFI_VAULT_LEAF_STATE,
+                state.encode().map_err(|e| failure("history", e))?,
+            ));
+        }
+    }
+    let head = builder
+        .head()
+        .filter(|head| head.generation == generation)
+        .ok_or_else(|| {
+            failure(
+                "history",
+                format!("this device's record does not reach generation {generation}"),
+            )
+        })?;
+    objects.push((
+        TAG_DSM_SOFI_VAULT_HISTORY_HEAD,
+        head.encode().map_err(|e| failure("history", e))?,
+    ));
+    for some in objects.chunks(HISTORY_PUTS_AT_ONCE) {
+        let puts = futures::future::join_all(some.iter().map(|(namespace, bytes)| {
+            crate::sdk::storage_io::put_immutable(set, *namespace, bytes)
+        }))
+        .await;
+        for put in puts {
+            let (.., took) = put?;
+            if took == 0 {
+                return Err(failure("history", "no member took a history object"));
+            }
+        }
+    }
+    for some in index.chunks(HISTORY_PUTS_AT_ONCE) {
+        let appends = futures::future::join_all(some.iter().map(|(locator, addr)| {
+            crate::sdk::storage_io::append_to_index(
+                set,
+                TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR.source_bytes(),
+                locator,
+                addr,
+            )
+        }))
+        .await;
+        for appended in appends {
+            if appended? == 0 {
+                return Err(failure(
+                    "history",
+                    "no member took a history locator append",
+                ));
+            }
+        }
+    }
+    sofi_vault_head::put_history_published(vault_id, generation)
+        .map_err(|e| failure("history", e))?;
+    dsm::sofi::history::history_root(&head).map_err(|e| failure("history", e))
 }
 
 /// Store a baseline at every member and append it under its locator. Both

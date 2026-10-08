@@ -1514,13 +1514,16 @@ impl VaultRelationshipLeaf {
 
 // ── 0x0071 VaultFrontierV1 ─────────────────────────────────────────────────
 
-/// A vault's frontier: its root at one generation (SoFi Amendment S24).
-/// Economic state only — nothing about the owner's authority is in it.
+/// A vault's frontier: its root at one generation (SoFi Amendment S24), and
+/// the root of its history to that generation (SoFi Amendment S26), the
+/// commitment of a [`VaultHistoryHeadV1`]. Economic state only — nothing
+/// about the owner's authority is in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VaultFrontierV1 {
     pub vault_id: D32,
     pub generation: u64,
     pub root: D32,
+    pub history_root: D32,
 }
 
 impl VaultFrontierV1 {
@@ -1530,6 +1533,7 @@ impl VaultFrontierV1 {
         push_digest32(&mut out, &self.vault_id);
         push_u64(&mut out, self.generation);
         push_digest32(&mut out, &self.root);
+        push_digest32(&mut out, &self.history_root);
         out
     }
 
@@ -1540,8 +1544,79 @@ impl VaultFrontierV1 {
             vault_id: c.digest32()?,
             generation: c.u64()?,
             root: c.digest32()?,
+            history_root: c.digest32()?,
         };
         finish(&c, v)
+    }
+}
+
+// ── 0x0074 VaultHistoryHeadV1 ──────────────────────────────────────────────
+
+/// The head of a vault's history at `generation` (SoFi Amendment S26): the
+/// peaks of the append-only tree whose leaf at position `g` is `R_g`, for
+/// `g` from zero to `generation`, left to right — one per set bit of
+/// `generation + 1`, highest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultHistoryHeadV1 {
+    pub vault_id: D32,
+    pub generation: u64,
+    pub peaks: Vec<D32>,
+}
+
+impl VaultHistoryHeadV1 {
+    /// How many peaks a history of `generation + 1` leaves has, or `None`
+    /// past the last generation a history can hold.
+    pub fn peak_count(generation: u64) -> Option<usize> {
+        generation
+            .checked_add(1)
+            .map(|leaves| leaves.count_ones() as usize)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let expected = Self::peak_count(self.generation).ok_or(SofiWireError::Cardinality {
+            field: "history peaks",
+            min: 1,
+            max: 64,
+            got: self.peaks.len(),
+        })?;
+        check_count("history peaks", expected, expected, self.peaks.len())?;
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_HISTORY_HEAD);
+        push_digest32(&mut out, &self.vault_id);
+        push_u64(&mut out, self.generation);
+        push_u32(&mut out, self.peaks.len() as u32);
+        for peak in &self.peaks {
+            push_digest32(&mut out, peak);
+        }
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_HISTORY_HEAD, SCHEMA_V1)?;
+        let vault_id = c.digest32()?;
+        let generation = c.u64()?;
+        let expected = Self::peak_count(generation).ok_or_else(|| {
+            wire_invalid(SofiWireError::Cardinality {
+                field: "history peaks",
+                min: 1,
+                max: 64,
+                got: 0,
+            })
+        })?;
+        let n = read_count(&mut c, "history peaks", expected, expected)?;
+        let mut peaks = Vec::with_capacity(n);
+        for _ in 0..n {
+            peaks.push(c.digest32()?);
+        }
+        finish(
+            &c,
+            Self {
+                vault_id,
+                generation,
+                peaks,
+            },
+        )
     }
 }
 

@@ -2859,6 +2859,10 @@ message SofiCreateVaultRequest {
   uint32 fee_bps               = 5;                      // < 10000
   string reserve_a_entered     = 6;                      // token units, > 0
   string reserve_b_entered     = 7;                      // token units, > 0
+  // A name the creating account keeps for the vault in its own store (owner
+  // bookkeeping: carried nowhere, never read for validity), returned by
+  // sofi.vaults. Empty for none. At most 128 bytes.
+  string label                 = 8;
 }
 message SofiVaultCreatedResponse {
   bytes  vault_id = 1 [(dsm_fixed_len)=32];
@@ -2965,6 +2969,7 @@ message SofiOwnedVaultV1 {
   uint32          fee_bps               = 10;
   uint64          generation            = 11; // trades and closes the vault has taken
   SofiVaultStatus status                = 12;
+  string          label                 = 13; // the creator's own name for it, empty for none
 }
 message SofiVaultsResponse {
   repeated SofiOwnedVaultV1 vaults = 1;

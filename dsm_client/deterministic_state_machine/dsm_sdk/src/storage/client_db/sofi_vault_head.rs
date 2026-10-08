@@ -31,7 +31,7 @@ use dsm::sofi::derive;
 use dsm::sofi::frontier::VaultWitness;
 use dsm::sofi::resolve::RecordedGenerationRow;
 use dsm::sofi::validation::VaultPostState;
-use dsm::sofi::wire::{VaultFrontierWitnessV1, VaultStateLeaf};
+use dsm::sofi::wire::{VaultFrontierV1, VaultFrontierWitnessV1, VaultStateLeaf};
 
 use super::get_connection;
 
@@ -692,6 +692,135 @@ pub fn put_owner_baseline(vault_id: &D32, generation: u64, bundle: &[u8]) -> Res
         ],
     )?;
     Ok(())
+}
+
+/// How far this device, as `vault_id`'s owner, published its history (SoFi
+/// Amendment S26): every leaf, node and state leaf up to that generation.
+pub fn history_published(vault_id: &D32) -> Result<Option<u64>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    conn.query_row(
+        "SELECT generation FROM sofi_vault_history_published WHERE vault_id = ?1",
+        params![vault_id.as_slice()],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()?
+    .map(|g| u64::try_from(g).map_err(|e| anyhow!("history generation: {e}")))
+    .transpose()
+}
+
+/// Record that `vault_id`'s history is published up to `generation`.
+pub fn put_history_published(vault_id: &D32, generation: u64) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    conn.execute(
+        "INSERT INTO sofi_vault_history_published (vault_id, generation) VALUES (?1, ?2)
+         ON CONFLICT(vault_id) DO UPDATE SET generation = max(generation, excluded.generation)",
+        params![
+            vault_id.as_slice(),
+            i64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?
+        ],
+    )?;
+    Ok(())
+}
+
+/// The frontier a stored `VaultBaselineV1` carries, or why this build does
+/// not decode it.
+fn stored_frontier(bundle: &[u8]) -> std::result::Result<VaultFrontierV1, String> {
+    use prost::Message;
+    crate::generated::VaultBaselineV1::decode(bundle)
+        .map_err(|e| e.to_string())
+        .and_then(|baseline| {
+            VaultFrontierV1::decode(&baseline.frontier_ccb).map_err(|e| e.to_string())
+        })
+}
+
+/// SoFi Amendment S26 put a history root in the frontier, so a baseline
+/// signed before it no longer decodes. A record this device started at such
+/// a baseline is dropped whole — its rows, leaves, witness and baseline —
+/// and the vault is adopted again from a current baseline; a baseline this
+/// device signed as owner is dropped and signed again when next offered.
+/// Nothing else is touched.
+pub(crate) fn drop_superseded_baselines(conn: &rusqlite::Connection) -> Result<()> {
+    let adopted: Vec<(Vec<u8>, Vec<u8>)> = {
+        let mut stmt = conn.prepare("SELECT vault_id, bundle FROM sofi_vault_baseline")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (vault_id, bundle) in adopted {
+        let Err(why) = stored_frontier(&bundle) else {
+            continue;
+        };
+        for table in [
+            "sofi_vault_leaf",
+            "sofi_vault_root",
+            "sofi_vault_witness",
+            "sofi_vault_baseline",
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE vault_id = ?1"),
+                params![vault_id],
+            )?;
+        }
+        log::info!("[vault head] a record started at a superseded baseline was dropped: {why}");
+    }
+    let signed: Vec<(Vec<u8>, i64, Vec<u8>)> = {
+        let mut stmt =
+            conn.prepare("SELECT vault_id, generation, bundle FROM sofi_vault_owner_baseline")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (vault_id, generation, bundle) in signed {
+        let Err(why) = stored_frontier(&bundle) else {
+            continue;
+        };
+        conn.execute(
+            "DELETE FROM sofi_vault_owner_baseline WHERE vault_id = ?1 AND generation = ?2",
+            params![vault_id, generation],
+        )?;
+        log::info!("[vault head] a superseded owner baseline was dropped: {why}");
+    }
+    Ok(())
+}
+
+/// The longest name an account keeps for one of its vaults.
+pub const LABEL_MAX: usize = 128;
+
+/// Keep `label` as this account's own name for the vault it created (owner
+/// bookkeeping: carried nowhere, never read for validity). A vault keeps the
+/// name it was given first.
+pub fn put_label(vault_id: &D32, label: &str) -> Result<()> {
+    if label.len() > LABEL_MAX {
+        return Err(anyhow!("a vault label is at most {LABEL_MAX} bytes"));
+    }
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO sofi_vault_label (vault_id, label) VALUES (?1, ?2)",
+        params![vault_id.as_slice(), label],
+    )?;
+    Ok(())
+}
+
+/// This account's own name for `vault_id`, if it gave one.
+pub fn label(vault_id: &D32) -> Result<Option<String>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT label FROM sofi_vault_label WHERE vault_id = ?1",
+            params![vault_id.as_slice()],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?)
 }
 
 /// Why `vault_id` is quarantined for this device, if it is.

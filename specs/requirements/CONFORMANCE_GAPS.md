@@ -3066,16 +3066,28 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 |---|---|---|---|
 | MR-SOFI-0412 to MR-SOFI-0414 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
 
+### 6.81 A reader at a baseline could not reach a root below it (`feat/computed-escrow-sdk`, SoFi Amendment S26, 2026-10-08)
+
+**The finding.** The host test with two wallets: the second wallet adopted the owner's baseline at generation 1 and judged the first wallet's trade above it. Rung 1 needs that trader's root at its parent, and the trader's first trade was built on the genesis root, below the baseline. A chain from a baseline names nothing below it, so `chain_until` extended the chain it was already extending, the judgement asked again, and the wallet aborted with a stack overflow (macOS crash report: 58 levels of `trader_root_at → resolve_conditional → chain_to_depth → walk_chain`). Reproduced in process by the e2e test below, on the code before.
+
+**The ruling.** Owner, 2026-10-08: no replay, not even as a fallback. A per-vault history tree keyed by generation, its root committed in the frontier, its nodes content-addressed in storage so the owner is never in the read path; a baseline plus bounded proofs validates every historical root.
+
+**Built.** `sofi::history` (`HistoryBuilder`, `prove`, `ProvenRoot`); `VaultHistoryHeadV1` (`0x0074`); `VaultFrontierV1.history_root`; `VaultChain::admit_proven`; `Verifier::prove_below_baseline` and `published_state`; the per-thread `Extending` guard in `chain_to_depth`; `SofiReads::immutable_object` and `history_leaf_candidates`; the owner's `vault_baseline::publish_history` before every new baseline; `sofi_vault_head::drop_superseded_baselines` when the database opens.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-SOFI-0415 to MR-SOFI-0420 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
 | DSM high-level (MR-DSM) | 318 | 129 | 97 | 41 | 0 | 33 | 18 |
-| SoFi (MR-SOFI) | 414 | 283 | 91 | 19 | 4 | 17 | 0 |
+| SoFi (MR-SOFI) | 420 | 289 | 91 | 19 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **1036** | **486** | **207** | **117** | **4** | **68** | **154** |
+| **All** | **1042** | **492** | **207** | **117** | **4** | **68** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3820,6 +3832,12 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-SOFI-0412 | Met | `dsm::sofi::exercise::exercise_from_objects`; `dsm::sofi::resolve::Verifier::rebuild_exercise` | `dsm_sdk::handlers::node_e2e_tests::a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realizes` | SoFi Amendment S25 (§6.80). |
 | MR-SOFI-0413 | Met | `dsm::sofi::resolve::PeerPositionResolver::peer_position` | `dsm_sdk::handlers::node_e2e_tests::a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realizes` | SoFi Amendment S25 (§6.80). |
 | MR-SOFI-0414 | Met | `dsm::sofi::resolve::Verifier::rebuild_exercise` | `dsm_sdk::handlers::node_e2e_tests::a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realizes` | SoFi Amendment S25 (§6.80). |
+| MR-SOFI-0415 | Met | `dsm::sofi::history::HistoryBuilder`; `dsm::sofi::history::prove` | `dsm::sofi::history::tests::every_root_is_proven_under_every_later_head` | SoFi Amendment S26 (§6.81). |
+| MR-SOFI-0416 | Met | `dsm::sofi::wire::objects::VaultFrontierV1` | `dsm_sdk::handlers::node_e2e_tests::an_owner_that_signed_two_frontiers_at_one_generation_is_quarantined` | SoFi Amendment S26 (§6.81). |
+| MR-SOFI-0417 | Met | `dsm_sdk::sdk::vault_baseline::publish_history` | `dsm_sdk::handlers::node_e2e_tests::a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history` | SoFi Amendment S26 (§6.81). |
+| MR-SOFI-0418 | Met | `dsm::sofi::resolve::Verifier::prove_below_baseline` | `dsm_sdk::handlers::node_e2e_tests::a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history` | SoFi Amendment S26 (§6.81). |
+| MR-SOFI-0419 | Met | `dsm::sofi::resolve::Verifier::chain_to_depth` | `dsm_sdk::handlers::node_e2e_tests::a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history` | SoFi Amendment S26 (§6.81). Nothing below the baseline is recorded. |
+| MR-SOFI-0420 | Met | `dsm::sofi::resolve::Verifier::published_state` | `dsm_sdk::handlers::node_e2e_tests::a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history` | SoFi Amendment S26 (§6.81). |
 
 ### 8.3 dBTC native specification
 

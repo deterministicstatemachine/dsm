@@ -19,6 +19,7 @@ use crate::crypto::signatures::SignatureKeyPair;
 use crate::crypto::sphincs::sphincs_sign;
 use crate::dlv::vault_state_anchor_v3::sign_vault_state_anchor_v3;
 use crate::merkle::batch_fold::FoldEntry;
+use crate::sofi::history::{history_root, HistoryBuilder};
 use crate::sofi::wire::{VaultGenesisPreimage, VAULT_STATUS_ACTIVE};
 
 const NET: &[u8] = b"dsm-test";
@@ -179,12 +180,40 @@ struct Vault {
     tree: EconomicSmt,
     state: VaultStateLeaf,
     relationships: BTreeMap<D32, VaultRelationshipLeaf>,
+    /// Every root the reference had, generation by generation (SoFi
+    /// Amendment S26).
+    history: HistoryBuilder,
 }
 
 impl Vault {
     /// The vault at generation `generation`, with traders `0..traders`
-    /// already holding relationship leaves.
+    /// already holding relationship leaves; its history is the root its
+    /// tree had at each generation before.
     fn at(genesis: &AcceptedVaultGenesis, generation: u64, traders: u8) -> Self {
+        let mut history = HistoryBuilder::new(*genesis.vault_id());
+        for earlier in 0..generation {
+            history.append(&Self::tree_at(genesis, earlier, traders).0.root());
+        }
+        let (tree, state, relationships) = Self::tree_at(genesis, generation, traders);
+        history.append(&tree.root());
+        Self {
+            id: *genesis.vault_id(),
+            tree,
+            state,
+            relationships,
+            history,
+        }
+    }
+
+    fn tree_at(
+        genesis: &AcceptedVaultGenesis,
+        generation: u64,
+        traders: u8,
+    ) -> (
+        EconomicSmt,
+        VaultStateLeaf,
+        BTreeMap<D32, VaultRelationshipLeaf>,
+    ) {
         let id = *genesis.vault_id();
         let state = state_of(owner(), generation, 10_000 + generation);
         let mut tree = EconomicSmt::new();
@@ -204,19 +233,17 @@ impl Vault {
             tree.insert(key, derive::vault_relationship_leaf_value(&leaf));
             relationships.insert(key, leaf);
         }
-        Self {
-            id,
-            tree,
-            state,
-            relationships,
-        }
+        (tree, state, relationships)
     }
 
     fn frontier(&self) -> VaultFrontierV1 {
+        let head = self.history.head().expect("a vault has a history");
+        assert_eq!(head.generation, self.state.generation);
         VaultFrontierV1 {
             vault_id: self.id,
             generation: self.state.generation,
             root: self.tree.root(),
+            history_root: history_root(&head).expect("the head encodes"),
         }
     }
 
@@ -283,6 +310,7 @@ impl Vault {
         }
         self.state = post_state;
         self.relationships.insert(rel_key, leaf);
+        self.history.append(&self.tree.root());
         post
     }
 

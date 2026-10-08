@@ -1398,6 +1398,7 @@ async fn a_creation_built_on_a_predecessor_the_device_no_longer_stands_on_is_ref
         reserve_a_entered: entered(&token_a, reserve_a),
         reserve_b_entered: entered(&token_b, reserve_b),
         fee_bps: 30,
+        label: String::new(),
     };
 
     // Built on position 1, the admitted predecessor when the genesis was
