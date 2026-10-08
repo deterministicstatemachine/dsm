@@ -1213,11 +1213,116 @@ What this covers and does not:
 * *SPX256f only* for the composed numbers; `reorder`, `ov_count` and the
   reduction are stated for every variant.
 
+**DSM's per-step seed derivation and the PRF hop** (`RomDerive.lean`, claim
+trace C67).
+
+DSM derives each per-step key's seed as (`derive_ephemeral_seed`, model
+`ekSeedInput`):
+
+    E = keyed-BLAKE3(Smaster, "DSM/ek/v1" ‖ 0x00 ‖ alg_id ‖ chain_id ‖ h_n ‖ C_pre ‖ k_step)
+
+The production callers (`derive_per_step_ek`, the step fixture) all pass
+`ALG_ID_SPX256F`. CrossCheck replays this encoding against the Rust vectors
+(not run here).
+
+*Context injectivity* (`ekSeedInput_inj`). Distinct
+`(alg_id, chain_id, h_n, C_pre, k_step)` give distinct inputs, for *any*
+algorithm identifiers, including ones of different lengths. The four context
+fields are 32 bytes each, so the total length fixes `|alg_id|`; the fields
+then follow by fixed-width binding. This generalizes the existing
+fixed-width `ek_seed_preimage_binding`.
+
+*Domain separation* (`ekDom_coins`). Smaster also keys the ML-KEM coins
+derivation, `"DSM/kyber-coins/v1" ‖ 0x00 ‖ …`. Its first ten bytes differ
+from `"DSM/ek/v1" ‖ 0x00`, so no coins input is a per-step input.
+
+*Repeated contexts.* The game identifies keys by context. Asking again for a
+context returns the existing key and creates no new one. In the code this is
+recomputation: the seed is a function of `(Smaster, context)`, and key
+generation is deterministic. Distinct contexts are distinct inputs of the
+derivation function (by injectivity), and the proof uses exactly this
+(`dsim`).
+
+*The DSM game* (`dplay`, `DAdv`, `DBudget A qh qn ql qs`):
+
+* the adversary gets `aux K`, a function of Smaster, at the start (see the
+  ML-KEM point below);
+* it asks for the per-step key of any context it chooses, adaptively, from
+  everything it has seen (`newKey`, at most `qn` requests, repeats included);
+* it asks for any other Smaster-keyed derivation outside the per-step domain
+  and gets the full output (`leak`, at most `ql`). This covers the ML-KEM
+  coins, which the encapsulation's recipient recovers;
+* it makes hash queries (`qh`) and signing queries under any per-step key
+  (`qs`), and claims a forgery.
+
+The derivation is a request to a function: `FQT` query trees ask the random
+oracle and the derivation function.
+
+* *Real world* (`resF (dsmF K)`): keyed BLAKE3 under `K = Smaster`, the
+  model's `Blake3.keyedHash`. Its output has 32 bytes and is the key
+  generation seed unchanged (`dsmF_length`, `seedOf_dsmF`).
+* *Ideal world* (`resL`): a lazily sampled random function. It is one
+  function, sampled from one vector of `qn + ql` uniform 32-byte values,
+  answering every input, per-step or not.
+
+*Steps:*
+
+1. `split_rf`: a lazily sampled random function on two disjoint domains is
+   two independent lazily sampled random functions. This is exact on every
+   oracle tape, by induction over the query tree with a single-table/two-table
+   invariant (`TabInv`), so the adaptive choice of inputs is part of the
+   statement, not a fixed list of seeds.
+2. `dsim`: the ideal DSM game, with the per-step domain answered from vector
+   `ss1`, is literally the multi-key game of C66 with seeds `ss1` in creation
+   order, against the adversary `trans`. `trans` asks for a new key only for
+   a new context and answers the other derivations from its own random
+   function. Its budget is `MBudget qh qn qs` (`mbudget_trans`). The
+   derivation requests are counted by `fc_dplay`.
+3. `dsm_ideal_256f`, from C66's `forge_any_256f` for every leak vector and
+   every Smaster:
+
+       Pr_ideal[forge under some per-step key] ≤ qn·(27·Q + 368023)/2^256
+
+   with `Q = qh + 17186·qn + 1704961·qs + 17523`.
+4. `dsm_forge_256f`: the real game, as a distinguisher with at most `qn + ql`
+   derivation queries that is given `aux K`, satisfies
+
+       Pr_real[DSM forgery] ≤ Adv + qn·(27·Q + 368023)/2^256
+
+   where `Adv = Pr_real − Pr_ideal` is that distinguisher's PRF advantage.
+
+That is the target composition, with `B` constructed: `B` is the DSM game
+itself, simulating the SPHINCS+ random oracle with its own coins. `Adv` is
+defined, not bounded: it is the computational assumption.
+
+What this covers and does not:
+
+* *The PRF assumption is stated with auxiliary input.* DSM also derives the
+  published ML-KEM key from Smaster through an *unkeyed* BLAKE3 hash,
+  `generate_kyber_keypair_from_entropy(Smaster, "DSM/kyber\0")` (in
+  `genesis.rs` and `b0x_sdk.rs`). So the assumption needed is that keyed
+  BLAKE3 under Smaster is a PRF *even given* that public key (`aux`). This is
+  not the standard PRF assumption. Deriving the ML-KEM entropy as another
+  keyed-BLAKE3 output under Smaster would put every use of Smaster behind the
+  one PRF and remove the auxiliary input.
+* *Smaster itself.* `K` is uniform and independent of everything except
+  `aux K`. DSM derives Smaster from `s0` (`kdf32(s0, "DSM/Smaster/v2", …)`),
+  and the device's AK also comes from `s0`. That derivation is a separate
+  hop and is not covered.
+* *Two idealizations side by side.* In the real world the derivation is
+  concrete keyed BLAKE3, while SPHINCS+'s hashing is the random oracle of
+  C54–C66. As before, the model treats them as unrelated functions,
+  although they share BLAKE3.
+* *The ChaCha20 boundary of C65 still applies.*
+* *The number.* At `qh = qs = 2^64` and `qn = 2^20`, the second term is
+  about 2^-146.5 (C66).
+
 Still open, and needed before this is a number for DSM:
 
-* the DSM-layer composition: the seed derivation from S_master and the
-  final statement. The multi-key accounting for independent uniform seeds is
-  C66.
+* the derivation of Smaster from `s0`, and a PRF assumption for keyed
+  BLAKE3 under Smaster that allows the ML-KEM public key as auxiliary input
+  (C67). The multi-key accounting is C66, and the per-step derivation hop to
+  `Pr ≤ Adv + qn·(27Q + 368023)/2^256` is C67.
 
 ## Assumptions, stated plainly
 
@@ -1233,6 +1338,9 @@ Still open, and needed before this is a number for DSM:
   check is at 2^64). Multi-key (one ephemeral key per step): for independent
   uniform seeds, `qk` keys cost a factor `qk` and the reduction's budget
   grows with every simulated key generation and signature (C66).
+* Per-step seeds (C67): keyed BLAKE3 under Smaster is a PRF even given the
+  ML-KEM public key DSM derives from Smaster by an unkeyed hash, and Smaster
+  is uniform apart from that. Not proved; the bound carries its advantage.
 * Adversary cost is counted in oracle queries only; local computation is free.
 * Classical adversaries only. The quantum picture is in
   `SPHINCS_QROM_NARRATIVE.md` and is not machine-checked.
