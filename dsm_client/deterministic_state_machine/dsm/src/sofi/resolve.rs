@@ -38,7 +38,14 @@ use super::conformance::{
     Validation,
 };
 use super::derive;
-use super::escrow::{verdict_completion, verdict_resolution, VerdictCell, VerdictCellRead};
+use super::history;
+use super::computed::{
+    match_completion, match_resolution, start_completion, start_resolution, ComputedCellRead,
+    ComputedCells, MatchUnread, ProgramRegistry,
+};
+use super::escrow::{
+    verdict_completion, verdict_resolution, EscrowCellRead, VerdictCell, VerdictCellRead,
+};
 use super::exercise::{
     attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
 };
@@ -48,8 +55,8 @@ use super::facts::{
     TraderAtParent,
 };
 use super::lineage::{
-    advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted, genesis_root,
-    vault_leaves_at_genesis, AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
+    advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted,
+    AcceptedVaultGenesis, GenesisInvalid, GenesisMissing, GenesisRefusal,
 };
 use super::publication::{recognize_setup, Signed};
 use super::registration::{
@@ -61,14 +68,18 @@ use super::resolution::{
 };
 use super::storage::{Discovered, Resolved};
 use super::validation::{
-    route_validation, setup_lineage, vault_post_states, Evidence, EvidenceNeeds, Missing,
-    SetupLineage, VaultLeafPre, VaultPostState,
+    route_validation, setup_lineage, vault_leaves_from_core, vault_post_states, Evidence,
+    EvidenceNeeds, Missing, SetupLineage, VaultLeafPre, VaultPostState,
 };
 use super::wire::{
-    CoreEntry, ParentClaimRef, SettlementBody, SettlementPreimage, SofiResolutionClaim, TraderCore,
-    TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, ValidationRef,
-    VaultGenesisPreimage, VaultStateLeaf,
+    CoreEntry, DlvCore, ParentClaimRef, SettlementBody, SettlementPreimage, SofiResolutionClaim,
+    TraderCore, TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, ValidationRef,
+    VaultGenesisPreimage, VaultHistoryHeadV1, VaultStateLeaf,
 };
+use crate::common::domain_tags::{
+    TAG_DSM_SOFI_VAULT_HISTORY_HEAD, TAG_DSM_SOFI_VAULT_HISTORY_NODE, TAG_DSM_SOFI_VAULT_LEAF_STATE,
+};
+use crate::crypto::domain::TaggedHashDomain;
 
 type D32 = [u8; 32];
 
@@ -102,6 +113,67 @@ pub const SIBLING_DEPTH: usize = 2;
 
 /// Acquisition rounds before the evidence is `Exhausted`.
 pub const ACQUIRE_ROUNDS: usize = 3;
+
+std::thread_local! {
+    /// The vaults whose chains this thread is extending now
+    /// ([`Extending`]).
+    static EXTENDING: std::cell::RefCell<BTreeSet<D32>> =
+        const { std::cell::RefCell::new(BTreeSet::new()) };
+}
+
+/// What proving a root below a chain's baseline came to (SoFi Amendment
+/// S26). Only `Proven` establishes anything; the rest leave the root
+/// unestablished, and refute nothing.
+enum BelowBaseline {
+    /// Admitted to the chain at this generation.
+    Proven(u64),
+    /// The chain starts at no baseline this device holds.
+    NoBaseline,
+    /// The history head the baseline commits is not in hand.
+    HeadNotInHand,
+    /// No candidate the locator gave is proven: each, and why.
+    NotProven(Vec<(u64, history::NotProven)>),
+}
+
+impl core::fmt::Display for BelowBaseline {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Proven(generation) => {
+                write!(
+                    f,
+                    "proven at generation {generation} under the baseline's history"
+                )
+            }
+            Self::NoBaseline => write!(f, "the chain starts at no baseline this device holds"),
+            Self::HeadNotInHand => {
+                write!(f, "the history head the baseline commits is not in hand")
+            }
+            Self::NotProven(unproven) => write!(f, "no candidate is proven: {unproven:?}"),
+        }
+    }
+}
+
+/// This thread extends `vault`'s chain while the value lives. A chain's
+/// extension judges each consumption, and a judgement reaches other
+/// traders' lineages, which can ask for this vault's chain again on the
+/// same thread: that request is answered from what is recorded, never by a
+/// second extension of the chain the first is extending.
+struct Extending(D32);
+
+impl Extending {
+    /// `None` when this thread is extending `vault`'s chain already.
+    fn enter(vault: D32) -> Option<Self> {
+        EXTENDING
+            .with(|extending| extending.borrow_mut().insert(vault))
+            .then_some(Self(vault))
+    }
+}
+
+impl Drop for Extending {
+    fn drop(&mut self) {
+        EXTENDING.with(|extending| extending.borrow_mut().remove(&self.0));
+    }
+}
 
 /// A read that could not be made: a member did not answer, a local store
 /// failed. A network status, never a verdict, and never a fact about the
@@ -167,6 +239,13 @@ pub trait SofiReads {
     /// `F` by `FulfillmentId`.
     fn fulfillment(&self, id: &D32)
         -> Result<Resolved<Signed<TraderFulfillmentBody>>, ReadFailure>;
+    /// `P(E)` by `E`: the one preimage published under its locator whose
+    /// bytes re-derive `E` (SoFi Amendment S25: an exercise is rebuilt from
+    /// its public objects).
+    fn preimage(
+        &self,
+        external_commitment: &D32,
+    ) -> Result<Resolved<SettlementPreimage>, ReadFailure>;
     /// The exact stored envelope bytes of the setup at `ρ`.
     fn setup_bytes(&self, setup_ref: &D32) -> Result<Resolved<Vec<u8>>, ReadFailure>;
     /// The exact bytes at a content address once `Stored` holds for them;
@@ -201,15 +280,40 @@ pub trait SofiReads {
         device_id: &D32,
         position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure>;
-    /// This device's own record of vault `vault_id`'s leaves at the
-    /// generation it established `root` at, for `keys` — a record that
-    /// reproduces `root`, or `None`.
-    fn vault_leaves_at(
+    /// This device's own record of vault `vault_id`'s state leaf at the
+    /// generation it established `root` at, or `None` when it established no
+    /// generation there. Every other leaf an operation reads is proven by
+    /// its core's own path against that root (SoFi Amendment S24).
+    fn vault_state_at(
         &self,
         vault_id: &D32,
         root: &D32,
-        keys: &BTreeSet<D32>,
-    ) -> Result<Option<VaultLeaves>, ReadFailure>;
+    ) -> Result<Option<VaultStateLeaf>, ReadFailure>;
+    /// The bytes the immutable store holds under `namespace` at the inner
+    /// digest `inner`, or `None` when no member serves them. Core checks
+    /// what it reads against the digest it asked for (SoFi Amendment S26:
+    /// a history's nodes and head, a vault's state leaf by its value).
+    fn immutable_object(
+        &self,
+        namespace: TaggedHashDomain<'static>,
+        inner: &D32,
+    ) -> Result<Option<Vec<u8>>, ReadFailure>;
+    /// The bytes of every history leaf indexed under
+    /// `history_locator(vault_id, root)` (SoFi Amendment S26). Discovery
+    /// only: a candidate stands only as a proof under an authenticated
+    /// history root.
+    fn history_leaf_candidates(
+        &self,
+        vault_id: &D32,
+        root: &D32,
+    ) -> Result<Vec<Vec<u8>>, ReadFailure>;
+    /// The owner baseline this device adopted for `genesis`'s vault, as Core
+    /// authenticates it from this device's record now (SoFi Amendment
+    /// S24), or `None` when it adopted none.
+    fn recorded_baseline(
+        &self,
+        genesis: &AcceptedVaultGenesis,
+    ) -> Result<Option<crate::sofi::frontier::VerifiedFrontier>, ReadFailure>;
     /// The root trader `(genesis, device_id)`'s lineage selected AT
     /// `position`, and the reference a later `P` names it by, by
     /// frontier-relative verification of that lineage (DSM Amendment A8;
@@ -253,7 +357,59 @@ pub trait SofiReads {
         evidence: &CellEvidence,
         proof: &CompletionProof,
     ) -> Result<(), ReadFailure>;
+    /// The judgement an earlier walk kept for `key` ([`Self::keep_judgement`]),
+    /// or `None`.
+    fn kept_judgement(&self, key: &JudgedKey) -> Result<Option<KeptJudgement>, ReadFailure>;
+    /// Keep the judgement of a key a walk skipped. The walk keeps one only
+    /// when the key's cell is final on the exercise it holds and the walk
+    /// classified that exercise `Skipped` there: a key that can never consume
+    /// its parent, on facts each of which is permanent (a final cell, and an
+    /// arm of `RouteImpossible`, a conformance verdict or a lost position, all
+    /// monotone). The judgement answers for the key again for as long as the
+    /// reads keep it; nothing else a walk establishes is kept.
+    fn keep_judgement(&self, key: JudgedKey, judgement: KeptJudgement) -> Result<(), ReadFailure>;
 }
+
+/// An attempt key as a walk judged it: the pinned set its cell is routed
+/// over, the vault, the parent root and the attempt, and the exact bytes of
+/// the exercise holding the cell, final. Another exercise's bytes at the
+/// same key are another key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct JudgedKey {
+    set_id: D32,
+    vault_id: D32,
+    parent_root: D32,
+    attempt: u64,
+    exercise: Vec<u8>,
+}
+
+impl JudgedKey {
+    /// The key `read` was read at, when an exercise holds its cell finally:
+    /// the only reads whose judgement can stand for good.
+    fn of(set_id: D32, read: &AttemptCellRead) -> Option<Self> {
+        let CellFact::Held {
+            state: ChainState::Final,
+            ..
+        } = read.fact()
+        else {
+            return None;
+        };
+        Some(Self {
+            set_id,
+            vault_id: *read.vault_id(),
+            parent_root: *read.parent_root(),
+            attempt: read.attempt(),
+            exercise: read.value()?.to_vec(),
+        })
+    }
+}
+
+/// A walk's judgement of one attempt key that can never consume its parent:
+/// the read that found the exercise holding it, and what the walk knew of
+/// that exercise ([`SofiReads::keep_judgement`]). Built by the walk and by
+/// nothing else; the reads only keep it and hand it back.
+#[derive(Debug, Clone)]
+pub struct KeptJudgement(KeyKnown);
 
 /// This device's own `R_econ` leaves, checked against the root they claim to
 /// form. Built from the device's leaf cache for its validated root, or by a
@@ -424,6 +580,22 @@ pub enum Acquired<T, M> {
 /// `SingleRootClaim` names, the final claim bytes at `K_root(p)` a
 /// `ConditionalClaim` names. Core re-derives every reference from the
 /// bytes; nothing here is trusted.
+/// Why a position's exercise is not rebuilt yet from its public objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebuildMissing {
+    /// `P(E)` is not established under its locator.
+    Preimage,
+    /// No claim is final at `K_root(q)`.
+    ResolutionClaim,
+    /// What conformance reads is not in hand.
+    Evidence(Vec<ConformanceMissing>),
+    /// The objects do not build an exercise.
+    Build(super::exercise::ExerciseBuildError),
+    /// The built exercise does not recognize: its objects are not one
+    /// operation's.
+    Unrecognized,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ExerciseObjects<'a> {
     pub precommit: &'a TraderPrecommitBody,
@@ -459,6 +631,11 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     /// each token's discovery, each chain and each head. Only an acceptance
     /// is kept; anything not established is read again.
     accepted: AcceptedGeneses,
+    /// The outcome programs this verifier runs (SoFi Amendment S22), by the
+    /// hash each is pinned by. Registered by the verifier's own caller
+    /// ([`Verifier::with_programs`]); a computed escrow vault whose program
+    /// is not here has no established outcome.
+    programs: ProgramRegistry,
 }
 
 /// Vault geneses one operation accepted from the network, keyed by the vault
@@ -509,7 +686,21 @@ impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
             network_id,
             parent,
             accepted,
+            programs: ProgramRegistry::new(),
         }
+    }
+
+    /// This verifier, running the outcome programs `programs` holds (SoFi
+    /// Amendment S22). Registration is the verifier's own act: nothing a
+    /// party sends adds a program.
+    pub fn with_programs(mut self, programs: ProgramRegistry) -> Self {
+        self.programs = programs;
+        self
+    }
+
+    /// The outcome programs this verifier runs.
+    pub fn programs(&self) -> &ProgramRegistry {
+        &self.programs
     }
 }
 
@@ -527,10 +718,34 @@ pub struct Walked {
     pub consumed: Option<RecognizedExercise>,
     pub not_established: Option<NotEstablished>,
     known: BTreeMap<u64, KeyKnown>,
+    /// The reading of the key the walk stopped on unresolved when it read
+    /// that key and classified nothing there: an open cell, or an exercise
+    /// whose facts are not established.
+    stopped_on: Option<AttemptCellRead>,
+}
+
+impl Walked {
+    /// The reading this walk made of the key it stopped on unresolved, when
+    /// it read one: the key's cell as the walk saw it, so a caller asking what
+    /// holds that key has the answer of this very walk in hand and need not
+    /// read it again. `None` past any other stop, and when the reads did not
+    /// decide the key.
+    pub fn unresolved_reading(&self) -> Option<&AttemptCellRead> {
+        let WalkOutcome::Unresolved { attempt } = self.outcome else {
+            return None;
+        };
+        match self.known.get(&attempt) {
+            Some(key) => Some(&key.read),
+            None => self
+                .stopped_on
+                .as_ref()
+                .filter(|read| read.attempt() == attempt),
+        }
+    }
 }
 
 /// What this verifier knows about one exercise.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Known {
     /// Refuted by its own bytes: nothing else was read.
     RefutedInHand(InHandRefutation),
@@ -543,13 +758,30 @@ enum Known {
 
 /// One key the walk classified: the read that found the exercise holding
 /// it, and what is known about that exercise.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct KeyKnown {
     read: AttemptCellRead,
     known: Known,
 }
 
 impl KeyKnown {
+    /// Whether a walk skips this key on what is known of it: the key can
+    /// never consume its parent ([`AttemptClass::Skipped`]). A walk of this
+    /// one key moves past it exactly when it is skipped.
+    fn skipped(&self) -> bool {
+        matches!(
+            walk(
+                self.read.vault_id(),
+                self.read.parent_root(),
+                self.read.attempt(),
+                1,
+                |_| self.key_facts(),
+            )
+            .outcome(),
+            WalkOutcome::Continue { .. } | WalkOutcome::CounterExhausted { .. }
+        )
+    }
+
     /// The facts of this key as Core binds them to it: the exercise the read
     /// holds, and the facts established for that exercise.
     fn key_facts(&self) -> Option<KeyFacts<'_>> {
@@ -568,8 +800,10 @@ struct LegsRead {
     registration: RegistrationRead,
     cells: Vec<AttemptCellRead>,
     walks: Vec<Option<AttemptWalk>>,
-    /// For a Release, its verdict cell (SoFi Amendment S21).
-    verdict: Option<VerdictCellRead>,
+    /// For a Release, the cell its vault's kind binds it to: the verdict
+    /// cell (SoFi Amendment S21) or the start and match cells (Amendment
+    /// S22).
+    verdict: Option<EscrowCellRead>,
 }
 
 impl LegsRead {
@@ -680,6 +914,126 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 .keep_completion(cell.routed(), &evidence, &proof)?;
         }
         Ok(Ok(read))
+    }
+
+    /// The start and match cells of a computed escrow vault as a Release
+    /// reads them (SoFi Amendment S22): the start cell first, and the match
+    /// cell only once a Start holds it. A Start, a Withdraw or an occupant
+    /// final at its cell has its completion proof kept (Amendment S10).
+    /// Reads that do not decide a cell yet, and a program this verifier has
+    /// not registered, are the inner `Err`: nothing is established.
+    pub fn read_computed_cells(
+        &self,
+        terms: &super::wire::ComputedEscrowTerms,
+    ) -> Result<Result<ComputedCellRead, NotEstablished>, VerifierFailure> {
+        let cells = ComputedCells::new(terms, self.members, &self.set_id)
+            .map_err(|e| VerifierFailure::Refused(format!("computed cells: {e:?}")))?;
+        let start_evidence = self.reads.cell(cells.start_routed())?;
+        let start = match start_resolution(&cells, &start_evidence) {
+            Ok(read) => read,
+            Err(missing) => {
+                return Ok(Err(NotEstablished::StartCell {
+                    start_cell: *cells.start_key(),
+                    missing,
+                }))
+            }
+        };
+        if let CellFact::Held {
+            state: ChainState::Final,
+            ..
+        } = start.fact()
+        {
+            let proof = start_completion(&cells, &start, &start_evidence)
+                .map_err(|missing| VerifierFailure::Read(format!("start completion: {missing:?}")))?
+                .ok_or_else(|| {
+                    VerifierFailure::Read(
+                        "start completion: a final Start or Withdraw has no completion proof"
+                            .to_string(),
+                    )
+                })?;
+            self.reads
+                .keep_completion(cells.start_routed(), &start_evidence, &proof)?;
+        }
+        // The match cell counts for nothing until a Start holds the start
+        // cell, and is not read before.
+        let started = matches!(
+            (start.held(), start.fact()),
+            (Some(super::wire::StartKind::Start), CellFact::Held { .. })
+        );
+        let matched = if started {
+            let evidence = self.reads.cell(cells.match_routed())?;
+            let read = match match_resolution(&cells, &evidence, &self.programs) {
+                Ok(read) => read,
+                Err(MatchUnread::ProgramNotRegistered { program }) => {
+                    return Ok(Err(NotEstablished::OutcomeProgramNotRegistered { program }))
+                }
+                Err(MatchUnread::Missing(missing)) => {
+                    return Ok(Err(NotEstablished::VerdictCell {
+                        verdict_cell: *cells.match_key(),
+                        missing,
+                    }))
+                }
+            };
+            if let CellFact::Held {
+                state: ChainState::Final,
+                ..
+            } = read.fact()
+            {
+                let proof = match_completion(&cells, &read, &evidence)
+                    .map_err(|missing| {
+                        VerifierFailure::Read(format!("match completion: {missing:?}"))
+                    })?
+                    .ok_or_else(|| {
+                        VerifierFailure::Read(
+                            "match completion: a final occupant has no completion proof"
+                                .to_string(),
+                        )
+                    })?;
+                self.reads
+                    .keep_completion(cells.match_routed(), &evidence, &proof)?;
+            }
+            Some(read)
+        } else {
+            None
+        };
+        ComputedCellRead::of(start, matched)
+            .map(Ok)
+            .map_err(|e| VerifierFailure::Refused(format!("computed cells: {e:?}")))
+    }
+
+    /// What a Release against `vault_id` stands on (SoFi Amendments S21,
+    /// S22): the computed cells when the vault's accepted genesis commits
+    /// computed terms, and otherwise the verdict cell the release names. A
+    /// release against a vault that is not an accepted computed escrow vault
+    /// reads the cell it names, as before: whatever it names, RouteValidation
+    /// decides whether it is that vault's.
+    fn read_release_cells(
+        &self,
+        vault_id: &D32,
+        verdict_cell: &D32,
+    ) -> Result<Result<EscrowCellRead, NotEstablished>, VerifierFailure> {
+        let computed = match self.vault_genesis(vault_id) {
+            Ok(VaultGenesis::Accepted(accepted)) => accepted.computed().cloned(),
+            Ok(
+                VaultGenesis::NotPublished
+                | VaultGenesis::OwnerUnresolved(_)
+                | VaultGenesis::Refused(_),
+            )
+            | Err(VerifierFailure::Refused(_)) => None,
+            Err(failure @ VerifierFailure::Read(_)) => return Err(failure),
+        };
+        Ok(match computed {
+            Some(terms) => self
+                .read_computed_cells(&terms)?
+                .map(EscrowCellRead::Computed),
+            None => match self.read_verdict_cell(verdict_cell)? {
+                Ok(read) => Ok(EscrowCellRead::Signed(read)),
+                Err(missing) => Err(NotEstablished::VerdictCell {
+                    verdict_cell: *verdict_cell,
+                    missing,
+                }),
+            },
+        })
     }
 
     /// `SuccessorResolution(K^(attempt))` of `vault_id` at `parent_root`, as
@@ -816,6 +1170,44 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(cells)
     }
 
+    /// The exact bytes final at `K_root(position)` of trader
+    /// `(genesis, device_id)`, routed by the root its lineage holds at the
+    /// position before: what anyone reads where the trader carries its own
+    /// claim (SoFi Amendment S25). `None` while that root or the cell is not
+    /// established; the caller's predicate checks what the bytes are.
+    fn final_root_claim(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<Option<Vec<u8>>, VerifierFailure> {
+        let Some(before) = position.checked_sub(1) else {
+            return Ok(None);
+        };
+        let routing = match self.reads.trader_root_at(genesis, device_id, before) {
+            Ok((root, ..)) => root.economic_root(),
+            Err(failure) => {
+                log::info!(
+                    "[sofi verifier] the root before position {position} is not established: \
+                     {failure:?}"
+                );
+                return Ok(None);
+            }
+        };
+        let cells = self.position_cells(genesis, device_id, position, &routing)?;
+        let evidence = self.reads.cell(cells.root().routed())?;
+        Ok(
+            match crate::economic::register::read_root_cell(cells.root(), &evidence) {
+                Ok(crate::route_chain::CellReading::Held {
+                    value,
+                    state: ChainState::Final,
+                    ..
+                }) => Some(value),
+                Ok(..) | Err(..) => None,
+            },
+        )
+    }
+
     /// One round of reading what `FulfillmentConformance(F)` reads: `P` and
     /// `P(E)` from the objects, every leg's setup under its `ρ` (R8), the
     /// closure objects by the rule of each reference kind, and item 5's
@@ -842,9 +1234,26 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     Resolved::Kept(bytes) => Some(bytes),
                     Resolved::None | Resolved::Unavailable => None,
                 },
-                ValidationRef::SingleRootClaim { .. } | ValidationRef::ConditionalClaim { .. } => {
-                    objects.own_objects.get(reference).cloned()
-                }
+                // The parent claim: carried by its trader, or the bytes final
+                // at the trader's K_root of that position, which anyone reads
+                // (SoFi Amendment S25). Conformance checks them either way.
+                ValidationRef::SingleRootClaim { .. } => match objects.own_objects.get(reference) {
+                    Some(bytes) => Some(bytes.clone()),
+                    None => self.final_root_claim(
+                        objects.precommit.genesis(),
+                        objects.precommit.device_id(),
+                        objects.precommit.position(),
+                    )?,
+                },
+                ValidationRef::ConditionalClaim {
+                    genesis,
+                    device_id,
+                    position,
+                    ..
+                } => match objects.own_objects.get(reference) {
+                    Some(bytes) => Some(bytes.clone()),
+                    None => self.final_root_claim(genesis, device_id, *position)?,
+                },
             };
             if let Some(bytes) = bytes {
                 closure.insert(*reference, bytes);
@@ -872,6 +1281,49 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             prior_attempts: self.acquire_prior_attempts(objects.precommit, objects.fulfillment)?,
             parent_fulfillment,
         })
+    }
+
+    /// A position's exercise, rebuilt from its public objects (SoFi
+    /// Amendment S25): `P` and `F` as the registration and the store hold
+    /// them, `P(E)` under its locator, the `C_q` final at `K_root(q)`, and the
+    /// closure every verifier acquires — nothing carried by the trader. What
+    /// the ladder then decides over it is what it decides over the exercise in
+    /// hand, so a position whose key another exercise holds resolves for
+    /// anyone, Void or Invalid alike. Anything not yet in hand is `Err`: the
+    /// position waits, and nothing is decided.
+    pub fn rebuild_exercise(
+        &self,
+        precommit: &Signed<TraderPrecommitBody>,
+        fulfillment: &Signed<TraderFulfillmentBody>,
+        registration: &RegistrationRead,
+    ) -> Result<Result<RecognizedExercise, RebuildMissing>, VerifierFailure> {
+        let preimage = match self.reads.preimage(precommit.body.external_commitment())? {
+            Resolved::Kept(preimage) => preimage,
+            Resolved::None | Resolved::Unavailable => return Ok(Err(RebuildMissing::Preimage)),
+        };
+        let Some(resolution_claim) = registration.root_claim_final() else {
+            return Ok(Err(RebuildMissing::ResolutionClaim));
+        };
+        let carried = BTreeMap::new();
+        let objects = ExerciseObjects {
+            precommit: &precommit.body,
+            precommit_signature: &precommit.signature,
+            preimage: &preimage,
+            fulfillment: &fulfillment.body,
+            fulfillment_signature: &fulfillment.signature,
+            own_objects: &carried,
+        };
+        let evidence = match self.acquire_conformance_evidence(&objects)? {
+            Acquired::Complete(evidence) => evidence,
+            Acquired::Exhausted(missing) => return Ok(Err(RebuildMissing::Evidence(missing))),
+        };
+        let exercise =
+            match super::exercise::exercise_from_objects(&objects, resolution_claim, &evidence) {
+                Ok(exercise) => exercise,
+                Err(why) => return Ok(Err(RebuildMissing::Build(why))),
+            };
+        Ok(super::exercise::recognize_exercise(&exercise.encode())
+            .ok_or(RebuildMissing::Unrecognized))
     }
 
     /// Acquire what `FulfillmentConformance(F)` reads, and ask the predicate
@@ -977,8 +1429,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
 
         let mut vault_leaves: VaultLeaves = BTreeMap::new();
         let mut token_policies: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
-        for (vault_id, keys) in &needs.vaults {
-            let Some(state) = self.vault_pre(preimage, vault_id, keys, &mut vault_leaves)? else {
+        for vault_id in needs.vaults.keys() {
+            let Some(state) = self.vault_pre(preimage, vault_id, &mut vault_leaves)? else {
                 continue;
             };
             for (class, addr) in EvidenceNeeds::policies_of(&state) {
@@ -1056,25 +1508,26 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     }
 
     /// The pre values of vault `v`'s leaves at the root the operation's core
-    /// names, into `vault_leaves`, and the vault state they hold. At `R_0`
-    /// they are the accepted genesis; past it, the generation this device
-    /// established at the root the core was built on, which must reproduce
-    /// that root. `None` when they are not in hand.
+    /// names, into `vault_leaves`, and the vault state they hold (SoFi
+    /// Amendment S24, the authenticated-root mode). The state is the accepted
+    /// genesis's at `R_0`, and past it the one this device established at
+    /// that root; every other leaf is proven by the core's own path against
+    /// the root ([`vault_leaves_from_core`]). `None` when the state is not in
+    /// hand.
     fn vault_pre(
         &self,
         preimage: &SettlementPreimage,
         vault_id: &D32,
-        keys: &BTreeSet<D32>,
         vault_leaves: &mut VaultLeaves,
     ) -> Result<Option<VaultStateLeaf>, VerifierFailure> {
-        let Some(pre_root) = preimage
+        let Some(core) = preimage
             .dlv_cores()
             .iter()
             .find(|core| core.vault_id() == vault_id)
-            .map(|core| *core.pre_root())
         else {
             return Ok(None);
         };
+        let pre_root = *core.pre_root();
         let genesis = match self.vault_genesis(vault_id)? {
             VaultGenesis::Accepted(genesis) => genesis,
             VaultGenesis::NotPublished | VaultGenesis::OwnerUnresolved(..) => return Ok(None),
@@ -1085,19 +1538,51 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
-        if genesis_root(vault_id, genesis.state()).ok() == Some(pre_root) {
-            vault_leaves.extend(vault_leaves_at_genesis(vault_id, genesis.state(), keys));
-            return Ok(Some(genesis.state().clone()));
-        }
-        let Some(leaves) = self.reads.vault_leaves_at(vault_id, &pre_root, keys)? else {
-            return Ok(None);
+        let state = if *genesis.genesis_root() == pre_root {
+            genesis.state().clone()
+        } else {
+            match self.reads.vault_state_at(vault_id, &pre_root)? {
+                Some(state) => state,
+                // A root this device did not establish a generation at: the
+                // state leaf the core states there, read by its value
+                // (SoFi Amendment S26). The core's path binds that value to
+                // the root, which validation folds.
+                None => match self.published_state(core)? {
+                    Some(state) => state,
+                    None => return Ok(None),
+                },
+            }
         };
-        let state_key = derive::vault_state_key(vault_id);
-        let Some(VaultLeafPre::State(state)) = leaves.get(&(*vault_id, state_key)).cloned() else {
-            return Ok(None);
-        };
-        vault_leaves.extend(leaves);
+        vault_leaves.extend(vault_leaves_from_core(core, &state));
         Ok(Some(state))
+    }
+
+    /// The state leaf a vault core states at its pre-root, read from the
+    /// immutable store by the value the core names (SoFi Amendment S26),
+    /// when those bytes re-derive that value.
+    fn published_state(&self, core: &DlvCore) -> Result<Option<VaultStateLeaf>, VerifierFailure> {
+        let state_key = derive::vault_state_key(core.vault_id());
+        let Some(value) = core
+            .entries()
+            .iter()
+            .find(|entry| entry.key() == state_key)
+            .and_then(|entry| super::validation::stated(entry).0)
+        else {
+            return Ok(None);
+        };
+        let Some(bytes) = self
+            .reads
+            .immutable_object(TAG_DSM_SOFI_VAULT_LEAF_STATE, &value)?
+        else {
+            return Ok(None);
+        };
+        Ok(match VaultStateLeaf::decode(&bytes) {
+            Ok(state) => match derive::vault_state_leaf_value(&state) {
+                Ok(derived) if derived == value => Some(state),
+                Ok(..) | Err(..) => None,
+            },
+            Err(..) => None,
+        })
     }
 
     /// Vault `v`'s genesis as this verifier accepts it: every preimage
@@ -1255,10 +1740,19 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             }
             match self.vault_genesis(&vault_id) {
                 Ok(VaultGenesis::Accepted(accepted)) => {
-                    if let Some(terms) = accepted.escrow() {
-                        if super::escrow::verdict_cell_of(terms) == *verdict_cell {
-                            vaults.push(*accepted);
+                    // The cell the vault's kind binds it to: `K_verdict` or
+                    // `K_match` (SoFi Amendment S22).
+                    let bound_to = match accepted.terms() {
+                        super::lineage::GenesisTerms::Escrow(terms) => {
+                            Some(super::escrow::verdict_cell_of(terms))
                         }
+                        super::lineage::GenesisTerms::Computed(terms) => {
+                            Some(super::computed::match_cell_of(terms))
+                        }
+                        super::lineage::GenesisTerms::Market(..) => None,
+                    };
+                    if bound_to == Some(*verdict_cell) {
+                        vaults.push(*accepted);
                     }
                 }
                 // Not a vault anyone created, or a genesis refused: not a
@@ -1352,9 +1846,113 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
+        let mut chain = self.recorded_chain(&vault_id, &genesis)?;
+        // Extending a chain judges each consumption, and a judgement can ask
+        // for a root of this same vault: the parent of a position some
+        // trader's lineage holds. On this thread that chain is being
+        // extended already, so the root asked for is one it names, or one
+        // below its baseline that extending it never reaches — and
+        // extending it again would ask again, without end.
+        let extending = Extending::enter(vault_id);
+        if extending.is_some() {
+            self.extend_chain(&vault_id, &mut chain, depth, until)?;
+        }
+        // A root below the baseline the chain starts at: proven under the
+        // baseline's history root, never reached by replaying the vault
+        // (SoFi Amendment S26).
+        if let Some(root) = until {
+            if chain.base() > 0 && !chain.names(root) {
+                let below = self.prove_below_baseline(&vault_id, &genesis, root, &mut chain)?;
+                log::info!(
+                    "[sofi verifier] vault {}: a root below the baseline: {below}",
+                    short_id(&vault_id)
+                );
+            }
+        }
+        Ok(chain)
+    }
+
+    /// Prove `root` of `vault_id` at a generation below the baseline
+    /// `chain` starts at (SoFi Amendment S26): the history head the
+    /// baseline's frontier commits, read by that commitment; the history
+    /// leaves indexed under `root`, each a candidate generation; and the
+    /// path from the head's peak down to the leaf, each node read by its
+    /// hash. The first candidate the path proves is admitted to the chain.
+    /// Anything not in hand leaves the root unestablished, never refuted.
+    fn prove_below_baseline(
+        &self,
+        vault_id: &D32,
+        genesis: &AcceptedVaultGenesis,
+        root: &D32,
+        chain: &mut VaultChain,
+    ) -> Result<BelowBaseline, VerifierFailure> {
+        let Some(baseline) = self.reads.recorded_baseline(genesis)? else {
+            return Ok(BelowBaseline::NoBaseline);
+        };
+        let frontier = baseline.frontier();
+        let Some(bytes) = self
+            .reads
+            .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_HEAD, &frontier.history_root)?
+        else {
+            return Ok(BelowBaseline::HeadNotInHand);
+        };
+        let head = VaultHistoryHeadV1::decode(&bytes).map_err(|e| {
+            VerifierFailure::Refused(format!(
+                "vault {}: the history head the baseline commits does not decode: {e}",
+                short_id(vault_id)
+            ))
+        })?;
+        match history::history_root(&head) {
+            Ok(committed) if committed == frontier.history_root => {}
+            Ok(..) | Err(..) => {
+                return Err(VerifierFailure::Refused(format!(
+                    "vault {}: the history head read is not the one the baseline commits",
+                    short_id(vault_id)
+                )))
+            }
+        }
+        if head.generation != frontier.generation {
+            return Err(VerifierFailure::Refused(format!(
+                "vault {}: the baseline at generation {} commits a history to generation {}",
+                short_id(vault_id),
+                frontier.generation,
+                head.generation
+            )));
+        }
+        let mut unproven = Vec::new();
+        for candidate in self.reads.history_leaf_candidates(vault_id, root)? {
+            let Some((named, generation, leaf_root)) = history::decode_leaf(&candidate) else {
+                continue;
+            };
+            if named != *vault_id || leaf_root != *root || generation >= chain.base() {
+                continue;
+            }
+            match history::prove(&head, vault_id, generation, root, |node| {
+                self.reads
+                    .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_NODE, node)
+            })? {
+                Ok(proven) => {
+                    chain.admit_proven(&proven);
+                    return Ok(BelowBaseline::Proven(generation));
+                }
+                Err(why) => unproven.push((generation, why)),
+            }
+        }
+        Ok(BelowBaseline::NotProven(unproven))
+    }
+
+    /// The chain this device recorded of `vault_id`, anchored and linked
+    /// before anything stands on it: at the accepted genesis when the
+    /// record starts at zero, and at the owner baseline it adopted (SoFi
+    /// Amendment S24), authenticated again now, when it starts above.
+    fn recorded_chain(
+        &self,
+        vault_id: &D32,
+        genesis: &AcceptedVaultGenesis,
+    ) -> Result<VaultChain, VerifierFailure> {
         let recorded: Vec<RecordedGeneration> = self
             .reads
-            .recorded_generations(&vault_id)?
+            .recorded_generations(vault_id)?
             .into_iter()
             .map(|row| RecordedGeneration {
                 generation: row.generation,
@@ -1363,19 +1961,45 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 consumed_by: row.consumed_by,
             })
             .collect();
-        let mut chain = VaultChain::from_recorded(&genesis, &recorded).map_err(|e| {
+        let anchored = match recorded.first() {
+            Some(first) if first.generation > 0 => match self.reads.recorded_baseline(genesis)? {
+                Some(baseline) => VaultChain::from_baseline(&baseline, &recorded),
+                None => {
+                    return Err(VerifierFailure::Refused(format!(
+                        "chain: this device's record of vault {} starts at generation {} with \
+                         no baseline it authenticates",
+                        short_id(vault_id),
+                        first.generation
+                    )))
+                }
+            },
+            _ => VaultChain::from_recorded(genesis, &recorded),
+        };
+        anchored.map_err(|e| {
             VerifierFailure::Refused(format!(
                 "chain: this device's record of vault {}: {e}",
-                short_id(&vault_id)
+                short_id(vault_id)
             ))
-        })?;
+        })
+    }
+
+    /// Extend `chain` from its head, one realized consumption at a time,
+    /// recording each generation, until it names `until`, or by
+    /// [`GENERATION_BUDGET`] generations.
+    fn extend_chain(
+        &self,
+        vault_id: &D32,
+        chain: &mut VaultChain,
+        depth: usize,
+        until: Option<&D32>,
+    ) -> Result<(), VerifierFailure> {
         // What the resolver is told while this chain is being extended:
         // this vault's chain SO FAR, plus any sibling chain a multi-leg
         // consumption forced us to establish. The chain so far is not an
         // assumption — it is the induction, from a genesis nobody
         // resolved through one realized consumption per step.
         let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
-        chains.insert(vault_id, chain.clone());
+        chains.insert(*vault_id, chain.clone());
         let mut extended = 0;
         while extended < GENERATION_BUDGET {
             if until.is_some_and(|root| chain.names(root)) {
@@ -1388,13 +2012,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             let Some((.., current)) = chain.head() else {
                 break;
             };
-            let Some(post) = self.next_generation(&vault_id, &current, &mut chains, depth)? else {
+            let Some(post) = self.next_generation(vault_id, &current, &mut chains, depth)? else {
                 break;
             };
             self.reads.record_generation(&post)?;
             log::info!(
                 "[sofi verifier] vault {}: generation {} established",
-                short_id(&vault_id),
+                short_id(vault_id),
                 post.generation()
             );
             chain.extend(&post).map_err(|e| {
@@ -1402,9 +2026,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     "chain: the consumption does not extend the chain: {e}"
                 ))
             })?;
-            chains.insert(vault_id, chain.clone());
+            chains.insert(*vault_id, chain.clone());
         }
-        Ok(chain)
+        Ok(())
     }
 
     /// The post state of the exercise that consumed `current`, or `None` when
@@ -1444,7 +2068,10 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     return self.post_state_of(vault_id, current, &exercise);
                 }
                 WalkOutcome::Unresolved { attempt } if pass == 0 && depth > 0 => {
-                    if !self.establish_siblings(vault_id, current, attempt, chains, depth)? {
+                    let in_hand = walked.unresolved_reading();
+                    if !self
+                        .establish_siblings(vault_id, current, attempt, in_hand, chains, depth)?
+                    {
                         return Ok(None);
                     }
                 }
@@ -1504,15 +2131,22 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         vault_id: &D32,
         current: &D32,
         attempt: u64,
+        in_hand: Option<&AttemptCellRead>,
         chains: &mut BTreeMap<D32, VaultChain>,
         depth: usize,
     ) -> Result<bool, VerifierFailure> {
-        let exercise = match self.read_attempt_cell(vault_id, current, attempt)? {
-            Ok(read) => read.into_exercise(),
-            Err(missing) => {
-                log::info!("[sofi chain] attempt {attempt} is not decided yet: {missing:?}");
-                None
-            }
+        // The walk that stopped here read the key: its reading is what holds
+        // the key now, as this pass knows it. Only a key the walk could not
+        // decide is read again.
+        let exercise = match in_hand {
+            Some(read) => read.exercise().cloned(),
+            None => match self.read_attempt_cell(vault_id, current, attempt)? {
+                Ok(read) => read.into_exercise(),
+                Err(missing) => {
+                    log::info!("[sofi chain] attempt {attempt} is not decided yet: {missing:?}");
+                    None
+                }
+            },
         };
         let Some(exercise) = exercise else {
             return Ok(false);
@@ -1639,12 +2273,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 known.get(&attempt).and_then(KeyKnown::key_facts)
             });
             let outcome = walked.outcome();
-            let done = |consumed, not_established, known| Walked {
+            let done = |consumed, not_established, known, stopped_on| Walked {
                 outcome,
                 walk: walked,
                 consumed,
                 not_established,
                 known,
+                stopped_on,
             };
             match outcome {
                 WalkOutcome::Unresolved { attempt } if !known.contains_key(&attempt) => {
@@ -1659,14 +2294,26 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                                     missing,
                                 }),
                                 known,
+                                None,
                             ))
                         }
                     };
                     // An open key is unresolved, never a skip: no key is ever
                     // dead.
                     let Some(exercise) = read.exercise().cloned() else {
-                        return Ok(done(None, None, known));
+                        return Ok(done(None, None, known, Some(read)));
                     };
+                    // A key an earlier walk skipped, held finally by these
+                    // very bytes, can never consume its parent: its
+                    // judgement stands, and nothing about its exercise is
+                    // read or judged again.
+                    let judged = JudgedKey::of(self.set_id, &read);
+                    if let Some(key) = &judged {
+                        if let Some(KeptJudgement(kept)) = self.reads.kept_judgement(key)? {
+                            known.insert(attempt, kept);
+                            continue;
+                        }
+                    }
                     // The walk reached this key by skipping every one before
                     // it. That liveness is stated as the walk over them, for
                     // the facts to read, never as a flag.
@@ -1683,20 +2330,29 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     };
                     match self.facts_of(chains, &exercise, key, depth)? {
                         Ok(facts) => {
-                            known.insert(attempt, KeyKnown { read, known: facts });
+                            let judgement = KeyKnown { read, known: facts };
+                            // Kept only when the cell is final on the
+                            // exercise and the key is skipped: every skip
+                            // stands on permanent facts. Anything else, a
+                            // consumption included, is judged again.
+                            if let Some(key) = judged.filter(|_| judgement.skipped()) {
+                                self.reads
+                                    .keep_judgement(key, KeptJudgement(judgement.clone()))?;
+                            }
+                            known.insert(attempt, judgement);
                         }
-                        Err(why) => return Ok(done(None, Some(why), known)),
+                        Err(why) => return Ok(done(None, Some(why), known, Some(read))),
                     }
                 }
                 WalkOutcome::Consumed { attempt } => {
                     let consumed = known
                         .get(&attempt)
                         .and_then(|key| key.read.exercise().cloned());
-                    return Ok(done(consumed, None, known));
+                    return Ok(done(consumed, None, known, None));
                 }
                 WalkOutcome::Unresolved { .. }
                 | WalkOutcome::CounterExhausted { .. }
-                | WalkOutcome::Continue { .. } => return Ok(done(None, None, known)),
+                | WalkOutcome::Continue { .. } => return Ok(done(None, None, known, None)),
             }
         }
     }
@@ -1887,21 +2543,18 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             cells.push(cell);
             walks.push(walk);
         }
-        // A Release stands on the verdict its cell holds (SoFi Amendment S21):
-        // the cell is read like any other, and nothing is read for any other
-        // operation.
+        // A Release stands on the cell its vault's kind binds it to (SoFi
+        // Amendments S21, S22): the verdict cell, or the start and match
+        // cells. Nothing is read for any other operation.
         let verdict = match exercise.preimage().settlement() {
-            SettlementBody::Release { verdict_cell, .. } => {
-                match self.read_verdict_cell(verdict_cell)? {
-                    Ok(read) => Some(read),
-                    Err(missing) => {
-                        return Ok(Err(NotEstablished::VerdictCell {
-                            verdict_cell: *verdict_cell,
-                            missing,
-                        }))
-                    }
-                }
-            }
+            SettlementBody::Release {
+                vault_id,
+                verdict_cell,
+                ..
+            } => match self.read_release_cells(vault_id, verdict_cell)? {
+                Ok(read) => Some(read),
+                Err(why) => return Ok(Err(why)),
+            },
             SettlementBody::Swap { .. } | SettlementBody::Close { .. } => None,
         };
         Ok(Ok(LegsRead {
@@ -2041,6 +2694,10 @@ pub struct PeerPositionResolver<'a, R: SofiReads + ?Sized> {
     pub members: &'a StorageSetMembers,
     pub set_id: D32,
     pub network_id: &'a [u8],
+    /// The outcome programs the verifier walking the lineage runs (SoFi
+    /// Amendment S22): a position whose leg releases a computed escrow vault
+    /// is resolved under the same registry, never under an empty one.
+    pub programs: &'a ProgramRegistry,
 }
 
 impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionResolver
@@ -2074,7 +2731,8 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
             self.network_id,
             resolved,
             AcceptedGeneses::default(),
-        );
+        )
+        .with_programs(self.programs.clone());
         let advanced = verifier.peer_position(previous, parent, held)?;
         Ok((advanced.root, advanced.claim))
     }
@@ -2129,18 +2787,19 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
-        let precommit = match self
+        let signed_precommit = match self
             .reads
             .precommit(fulfillment.body.precommit_id())
             .map_err(|e| read(e.into()))?
         {
-            Resolved::Kept(signed) => signed.body,
+            Resolved::Kept(signed) => signed,
             Resolved::None | Resolved::Unavailable => {
                 return Err(Incomplete(format!(
                     "position {q}: the precommit the fulfillment names is not in hand"
                 )))
             }
         };
+        let precommit = signed_precommit.body.clone();
         // `held` counts only as the claim (P, F) derive (Amendment S15).
         // Registration pairs the cells by `FulfillmentId(F)` from their bytes
         // alone (Amendment S20), so the body is compared here, where `P` is in
@@ -2171,18 +2830,36 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     "position {q}: F names no attempt for P's first leg"
                 ))
             })?;
-        let exercise = self
+        let in_cell = self
             .read_attempt_cell(&first.vault_id, &first.parent_root, attempt)
             .map_err(read)?
             .map_err(|missing| {
                 Incomplete(format!("position {q}: the first leg's cell: {missing:?}"))
             })?
-            .into_exercise()
-            .ok_or_else(|| {
-                Unresolved(format!(
-                    "position {q}: no exercise holds the first leg's cell yet"
-                ))
-            })?;
+            .into_exercise();
+        let exercise = match in_cell {
+            Some(exercise)
+                if derive::fulfillment_id(&exercise.fulfillment().body) == held.fulfillment_id =>
+            {
+                exercise
+            }
+            // Another exercise holds the key F names, or none does yet: the
+            // position's own exercise is rebuilt from its public objects, and
+            // the ladder decides over it exactly as over the exercise in hand
+            // (SoFi Amendment S25).
+            Some(..) | None => match self
+                .rebuild_exercise(&signed_precommit, &fulfillment, &registration)
+                .map_err(read)?
+            {
+                Ok(rebuilt) => rebuilt,
+                Err(missing) => {
+                    return Err(Incomplete(format!(
+                        "position {q}: its exercise is not rebuilt from public objects yet: \
+                         {missing:?}"
+                    )))
+                }
+            },
+        };
 
         // Each vault's canonical chain as far as the parent the leg names,
         // and the facts over them.
@@ -2203,11 +2880,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 | NotEstablished::ConformanceEvidence(..)
                 | NotEstablished::RouteEvidence(..)
                 | NotEstablished::AttemptCell { .. }
-                | NotEstablished::VerdictCell { .. } => {
+                | NotEstablished::VerdictCell { .. }
+                | NotEstablished::StartCell { .. } => {
                     Incomplete(format!("position {q}: the facts: {why:?}"))
                 }
                 NotEstablished::ParentUnresolved { .. }
                 | NotEstablished::AttemptLiveness { .. }
+                | NotEstablished::OutcomeProgramNotRegistered { .. }
                 | NotEstablished::NotThisExercise(..) => {
                     Unresolved(format!("position {q}: the facts: {why:?}"))
                 }

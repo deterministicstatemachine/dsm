@@ -375,6 +375,16 @@ impl ProvenanceResolver for OneTicket {
         )))
     }
 
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no relationship in this fixture: {signer:?} step {addr:?}"
+        )))
+    }
+
     fn anchored_policy_bytes(
         &self,
         policy_commit: &[u8; 32],
@@ -419,6 +429,14 @@ impl ProvenanceResolver for NoRegisterSet {
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         self.0.immutable_evidence(namespace, addr)
+    }
+
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.0.held_ek_step(signer, addr)
     }
     fn anchored_policy_bytes(
         &self,

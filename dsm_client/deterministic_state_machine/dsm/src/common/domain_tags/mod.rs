@@ -178,7 +178,18 @@ mod tests {
     // response. The endpoint's certificate pin is the TLS certificate hash.
     // +9 with escrow vaults (SoFi Amendment S21): `DSM/external/v1` and the
     // eight `DSM/escrow/*` domains.
-    const EXPECTED_TAG_COUNT: usize = 368;
+    // +12 with computed escrow vaults (SoFi Amendment S22): the computed
+    // table, the match and start cells and their seeds, the start statement,
+    // the setup, the occupant id, the transcript head chain and statement,
+    // and the move commitment.
+    // +1 for the ready handshake (owner ruling 2026-10-06): `m_ready`.
+    // +6 with shared lineages (SoFi Amendment S23): the genesis and generation
+    // digests, the vault step digest, the checkpoint digest, the epoch locator
+    // and the object namespace.
+    // +1 for the route lane (client routing policy, owner 2026-10-07).
+    // +4 with a vault's history (SoFi Amendment S26): its leaf, node, head
+    // and locator.
+    const EXPECTED_TAG_COUNT: usize = 396;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

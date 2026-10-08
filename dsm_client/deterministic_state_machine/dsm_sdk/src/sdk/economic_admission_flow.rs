@@ -846,7 +846,17 @@ async fn finish_locked(
     // (storage spec §5 rule 6) before the claim is registered: a root whose
     // evidence nobody holds would be registered but unwalkable. The sweep
     // carries the EXACT frozen bytes. Anything not yet `Stored` holds the
-    // admission for resume; the next pass re-runs the sweep.
+    // admission for resume; the next pass re-runs the sweep. This
+    // admission's own evidence, frozen with its manifest, goes first and by
+    // key: the sweep takes the oldest rows, and a backlog older than the
+    // admission would otherwise leave its own evidence for a later pass.
+    let manifest_key = crate::sdk::economic_registers::immutable_object_key_for_inner(
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+        &coords.admission_manifest_addr,
+    );
+    crate::handlers::artifact_republish::republish_frozen_with(&manifest_key)
+        .await
+        .map_err(|e| storage_err("publish admission evidence", e))?;
     crate::handlers::artifact_republish::republish_unpublished_artifacts()
         .await
         .map_err(|e| storage_err("publish admission evidence", e))?;
@@ -939,7 +949,9 @@ async fn finish_locked(
     // The position is this device's only once its claim is FINAL at the
     // cell. Another claim holding the leader link — this trader's own SoFi
     // `C_q`, for one — takes the position, and this admission never lands.
-    match crate::sdk::economic_registers::root_claim_settlement(set, &cell, &frozen_root).await? {
+    let settled =
+        crate::sdk::economic_registers::root_claim_settlement(set, &cell, &frozen_root).await?;
+    match settled {
         crate::sdk::economic_registers::RootClaimSettlement::Final => {}
         crate::sdk::economic_registers::RootClaimSettlement::Lost { holder } => {
             let taken_by = match holder.single_root() {
@@ -1363,15 +1375,6 @@ pub(crate) struct RecipientAdmissionPrereqs {
     /// The wire's exact unsigned canonical operation bytes — the closure's
     /// verified transfer must be byte-identical to what was prevalidated.
     pub pinned_canonical_bytes: Vec<u8>,
-    /// The sender's coordinate this prevalidation verified: this device's
-    /// frontier for the sender once the transfer is accepted (DSM Amendment
-    /// A8), recorded in the accept transaction and never before it.
-    pub sender_frontier: dsm::economic::peer_lineage::PeerFrontier,
-    /// The frontier each of the sender's credit sources reached in this
-    /// prevalidation, each at a step whose whole segment passed: recorded in
-    /// the same accept transaction, so a later credit from that source
-    /// validates only the suffix (DSM Amendment A8).
-    pub source_frontiers: Vec<dsm::economic::peer_lineage::PeerFrontier>,
 }
 
 /// Prevalidate an inbound online transfer BEFORE any durable local state
@@ -1438,22 +1441,21 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         expected_network_id: network_id.clone(),
     };
     let recorder = crate::sdk::economic_registers::RecordingResolver::new(&live);
-    // DSM Amendment A8: the sender's lineage is verified from this device's
-    // frontier for it, every step from there validated one hop deep, so the
-    // recorder observes exactly the closure this acceptance depends on. A
-    // conditional position on the way is resolved from SoFi's public objects
-    // for that position (SoFi Amendment S15).
-    let walk = {
+    // DSM Amendment A14: the sender's step is validated from its own parent,
+    // one hop, and each of its credits' sources the same way, so the recorder
+    // observes exactly the closure this acceptance depends on. Nothing behind
+    // the parent is read.
+    let checked = {
         let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
             .map_err(|e| incomplete(format!("SoFi reads: {e}")))?;
-        recorder.validated_peer_lineage(
+        recorder.validated_peer_step(
             peer_genesis,
             peer_devid,
             sender_economic_position,
             &sofi.peer_position_resolver(),
         )
     };
-    let lineage = walk.map_err(|e| match e {
+    let checked = checked.map_err(|e| match e {
         dsm::economic::provenance::PeerLineageFailure::Invalid(m) => {
             terminal(format!("sender lineage INVALID: {m}"))
         }
@@ -1472,7 +1474,17 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
             incomplete(format!("sender lineage is undecided: {m}"))
         }
     })?;
-    let (peer, source_frontiers) = lineage.into_parts();
+    let cost = checked.cost();
+    log::info!(
+        "[acceptance] peer_step_position={sender_economic_position} register_probe_count={} \
+         routed_probe_count={} source_step_count={} conditional_extra_hops={} history_steps=0 \
+         frontier_reads=0",
+        cost.register_probes,
+        cost.routed_reads,
+        cost.source_steps,
+        cost.conditional_hops,
+    );
+    let peer = checked.into_answer();
 
     // ── The sender-side conjuncts — the SAME implementation the verifier's
     // credit arm runs post-accept, so the two can never drift ──────────────
@@ -1484,12 +1496,6 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         &devid,
     )
     .map_err(|e| terminal(format!("sender debit prevalidation: {e}")))?;
-    // An eligible debit is a single-root transition, so it names the claim
-    // it accepted and reaches a frontier.
-    let sender_frontier =
-        dsm::economic::peer_lineage::PeerFrontier::reached_by(&peer).ok_or_else(|| {
-            terminal("the sender's debit is not a single-root transition".to_string())
-        })?;
 
     // ── Wire ↔ validated-operation binding ─────────────────────────────────
     if peer
@@ -1575,8 +1581,6 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         authority,
         prepared,
         pinned_canonical_bytes: canonical_operation_bytes.to_vec(),
-        sender_frontier,
-        source_frontiers,
     })
 }
 

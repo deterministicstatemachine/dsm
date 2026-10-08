@@ -1655,26 +1655,6 @@ impl AppRouterImpl {
                                             None::<std::convert::Infallible>,
                                         )
                                     })?;
-                                // The sender's coordinate this acceptance
-                                // verified is this device's frontier for it
-                                // from now on (DSM Amendment A8), and so is
-                                // each coordinate its credits' sources
-                                // reached, every one at the end of a segment
-                                // that passed whole: recorded with the
-                                // acceptance and never before it.
-                                for frontier in std::iter::once(&prereqs.sender_frontier)
-                                    .chain(&prereqs.source_frontiers)
-                                {
-                                    crate::storage::client_db::economic_lineage::record_frontier_in_tx(
-                                        tx, frontier,
-                                    )
-                                    .map_err(|e| {
-                                        dsm::types::error::DsmError::internal(
-                                            format!("in-tx peer frontier failed: {e}"),
-                                            None::<std::convert::Infallible>,
-                                        )
-                                    })?;
-                                }
                                 Ok(())
                             },
                             Some(crate::sdk::core_sdk::AdmissionPlan {

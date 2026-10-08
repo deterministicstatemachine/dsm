@@ -147,6 +147,9 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
     };
     match scope.kind {
         ScopeKind::AcceptIssued => "Receive objects this app issues".to_string(),
+        ScopeKind::Contacts => {
+            "See which of your contacts are here: their DSM IDs, not their names".to_string()
+        }
         ScopeKind::Pay => format!("Pay this app: {}", caps(scope)),
         ScopeKind::Swap => match scope.policy_commits.as_slice() {
             [a, b] => format!(
@@ -161,6 +164,19 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
                 caps(scope)
             ),
         },
+        ScopeKind::Escrow => format!("Lock stakes for matches: {}", caps(scope)),
+        ScopeKind::Duel => {
+            let programs: Vec<String> = scope
+                .programs
+                .iter()
+                .map(crate::sdk::outcome_programs::program_text)
+                .collect();
+            format!(
+                "Stake {}, in battles decided by program {}, and play your moves",
+                caps(scope),
+                programs.join(" or ")
+            )
+        }
         ScopeKind::Holdings => {
             let named: Vec<String> = scope
                 .policy_commits
@@ -176,6 +192,42 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
                 )
             }
         }
+    }
+}
+
+/// The most contacts one answer shares.
+pub const MAX_SHARED_CONTACTS: usize = 1024;
+
+/// What a CONTACTS request shares (DSM Amendment A16): each contact's device
+/// id, once, in the order the wallet keeps them, without the accounts of the
+/// applications this wallet connected to. Nothing else about a contact
+/// leaves the wallet: no alias, key, chain tip or balance.
+pub fn contacts_to_share(
+    device_ids: impl IntoIterator<Item = Vec<u8>>,
+    apps: &BTreeSet<[u8; 32]>,
+) -> generated::ConnectContactsResultV1 {
+    let mut shared: Vec<[u8; 32]> = Vec::new();
+    for id in device_ids {
+        let id: [u8; 32] = match id.as_slice().try_into() {
+            Ok(id) => id,
+            // Not a device id: no identity to share.
+            Err(..) => continue,
+        };
+        if apps.contains(&id) || shared.contains(&id) {
+            continue;
+        }
+        shared.push(id);
+        if shared.len() == MAX_SHARED_CONTACTS {
+            break;
+        }
+    }
+    generated::ConnectContactsResultV1 {
+        contacts: shared
+            .into_iter()
+            .map(|device_id| generated::ConnectContactV1 {
+                device_id: device_id.to_vec(),
+            })
+            .collect(),
     }
 }
 
@@ -200,6 +252,7 @@ pub fn describe_request(request: &Request) -> String {
             token_in,
             token_out,
             amount_in,
+            ..
         } => format!(
             "Quote {} for {}",
             amount_of(token_in, *amount_in, &none),
@@ -210,6 +263,7 @@ pub fn describe_request(request: &Request) -> String {
             token_out,
             amount_in,
             min_amount_out,
+            ..
         } => format!(
             "Swap {} for at least {}",
             amount_of(token_in, *amount_in, &none),
@@ -223,6 +277,43 @@ pub fn describe_request(request: &Request) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Request::EscrowLock(lock) => {
+            let staked = amount_of(&lock.policy_commit, lock.amount, &none);
+            match lock.memo.trim() {
+                "" => format!("Lock {staked} for a match"),
+                memo => format!("Lock {staked} for a match ({memo})"),
+            }
+        }
+        Request::EscrowRelease { vault_ids } => match vault_ids.len() {
+            1 => "Collect a match result".to_string(),
+            n => format!("Collect a match result ({n} stakes)"),
+        },
+        Request::DuelSessionKey { .. } => "Name your key for a battle".to_string(),
+        Request::DuelLock(lock) => {
+            let staked = amount_of(&lock.policy_commit, lock.amount, &none);
+            let by = crate::sdk::outcome_programs::program_text(&lock.program);
+            match lock.memo.trim() {
+                "" => format!("Stake {staked} in a battle decided by program {by}"),
+                memo => format!("Stake {staked} in a battle decided by program {by} ({memo})"),
+            }
+        }
+        Request::DuelReady { match_cell, .. } => {
+            format!("Ready for battle {}", short(match_cell))
+        }
+        Request::DuelWithdraw { match_cell } => {
+            format!("Withdraw from battle {}", short(match_cell))
+        }
+        Request::DuelSign { match_cell, .. } => {
+            format!("Play a move in battle {}", short(match_cell))
+        }
+        Request::DuelSettle { match_cell, .. } => {
+            format!("Settle battle {}", short(match_cell))
+        }
+        Request::DuelCollect { vault_ids } => match vault_ids.len() {
+            1 => "Collect a battle result".to_string(),
+            n => format!("Collect a battle result ({n} stakes)"),
+        },
+        Request::Contacts => "Share your contacts' DSM IDs".to_string(),
     }
 }
 
@@ -286,14 +377,18 @@ pub fn start_listener() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether any application is connected: its requests can arrive at any time.
+pub fn any_connected() -> Result<bool, String> {
+    Ok(crate::storage::client_db::connect::sessions()
+        .map_err(|e| format!("the connected applications: {e}"))?
+        .iter()
+        .any(|s| s.connected == crate::storage::client_db::connect::SessionStatus::Connected))
+}
+
 /// Start the listener when the wallet starts again with an application still
 /// connected: approving or answering one starts it otherwise.
 pub fn resume_listener() -> Result<(), String> {
-    let connected = crate::storage::client_db::connect::sessions()
-        .map_err(|e| format!("the connected applications: {e}"))?
-        .iter()
-        .any(|s| s.connected == crate::storage::client_db::connect::SessionStatus::Connected);
-    if connected {
+    if any_connected()? {
         start_listener()?;
     }
     Ok(())
@@ -364,5 +459,38 @@ mod tests {
         assert!(memo.ends_with("1 capsule"));
         assert_ne!(payment_ref(&session, 7), payment_ref(&session, 8));
         assert_eq!(payment_memo(&session, 7, "  "), payment_ref(&session, 7));
+    }
+
+    /// DSM Amendment A16: a contacts answer is each contact's device id,
+    /// once, without the connected applications' accounts, never anything
+    /// that is not a device id, and never more than MAX_SHARED_CONTACTS.
+    #[test]
+    fn a_contacts_answer_shares_device_ids_only_and_never_an_application() {
+        let ann = vec![0xA1; 32];
+        let bob = vec![0xB2; 32];
+        let game = [0x9A; 32];
+        let apps: BTreeSet<[u8; 32]> = [game].into_iter().collect();
+        let shared = contacts_to_share(
+            [
+                ann.clone(),
+                game.to_vec(),
+                vec![0xC3; 5],
+                bob.clone(),
+                ann.clone(),
+            ],
+            &apps,
+        );
+        let ids: Vec<Vec<u8>> = shared.contacts.into_iter().map(|c| c.device_id).collect();
+        assert_eq!(ids, vec![ann, bob]);
+
+        let many = (0..MAX_SHARED_CONTACTS + 5).map(|i| {
+            let mut id = vec![0; 30];
+            id.extend_from_slice(&(i as u16).to_be_bytes());
+            id
+        });
+        assert_eq!(
+            contacts_to_share(many, &BTreeSet::new()).contacts.len(),
+            MAX_SHARED_CONTACTS
+        );
     }
 }

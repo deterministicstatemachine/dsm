@@ -181,6 +181,11 @@ pub(crate) async fn verify(
     let set = crate::sdk::storage_set::canonical_set(&network)
         .map_err(|e| Refusal::Incomplete(format!("the pinned storage set: {e}")))?;
     let position = proof.position;
+    // The holder's root at `position` is final once walked, and the process
+    // keeps it (`economic_registers::resolve_peer_root`): a status polled
+    // again walks nothing. Whether the proof is still current is read below
+    // on every call, never kept: the next root cell is open until the holder
+    // moves on.
     let validated: ValidatedEconomicRoot = tokio::task::block_in_place(|| {
         let reads = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None)
             .map_err(|e| Refusal::Incomplete(format!("the verifier's reads: {e}")))?;

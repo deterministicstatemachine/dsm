@@ -109,6 +109,33 @@ struct AcceptanceFixture {
     child_tip: [u8; 32],
     b_pair: ([u8; 32], [u8; 32]),
     steps: std::collections::HashMap<[u8; 32], Vec<u8>>,
+    /// Steps the verifier holds as a party: `(signer, addr)` to its key.
+    held: std::collections::HashMap<([u8; 32], [u8; 32]), Vec<u8>>,
+}
+
+/// The fixture's EK steps, with every fetch recorded.
+struct FixtureSteps<'f> {
+    fx: &'f AcceptanceFixture,
+    fetched: std::cell::RefCell<Vec<[u8; 32]>>,
+}
+
+impl dsm::economic::peer_acceptance::EkSteps for FixtureSteps<'_> {
+    fn held(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        Ok(self.fx.held.get(&(*signer, *addr)).cloned())
+    }
+
+    fn fetch(&self, addr: &[u8; 32]) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.fetched.borrow_mut().push(*addr);
+        self.fx
+            .steps
+            .get(addr)
+            .cloned()
+            .ok_or_else(|| PeerLineageFailure::Incomplete("no such EK step in this fixture".into()))
+    }
 }
 
 /// The sender's receipt of its first step toward the recipient: its faucet
@@ -227,6 +254,7 @@ fn acceptance_fixture() -> AcceptanceFixture {
         child_tip,
         b_pair: (b_parent, b_child),
         steps: std::collections::HashMap::new(),
+        held: std::collections::HashMap::new(),
     }
 }
 
@@ -236,14 +264,24 @@ fn verify_fixture(
     expected_transfer: &[u8],
     expected_child: &[u8; 32],
 ) -> Result<dsm::economic::peer_acceptance::VerifiedAcceptance, PeerLineageFailure> {
-    let steps = fx.steps.clone();
-    let mut fetch = move |addr: &[u8; 32]| {
-        steps
-            .get(addr)
-            .cloned()
-            .ok_or_else(|| PeerLineageFailure::Incomplete("no such EK step in this fixture".into()))
+    verify_fixture_counting(fx, recipient_devid, expected_transfer, expected_child).0
+}
+
+/// The verdict, and the EK step addresses the check fetched.
+fn verify_fixture_counting(
+    fx: &AcceptanceFixture,
+    recipient_devid: [u8; 32],
+    expected_transfer: &[u8],
+    expected_child: &[u8; 32],
+) -> (
+    Result<dsm::economic::peer_acceptance::VerifiedAcceptance, PeerLineageFailure>,
+    Vec<[u8; 32]>,
+) {
+    let steps = FixtureSteps {
+        fx,
+        fetched: std::cell::RefCell::new(Vec::new()),
     };
-    verify_peer_transfer_acceptance(
+    let verdict = verify_peer_transfer_acceptance(
         &fx.bundle_bytes,
         &AcceptanceParty {
             devid: DEV_SENDER,
@@ -256,8 +294,9 @@ fn verify_fixture(
         expected_transfer,
         expected_child,
         &fx.b_pair,
-        &mut fetch,
-    )
+        &steps,
+    );
+    (verdict, steps.fetched.into_inner())
 }
 
 #[test]
@@ -321,6 +360,7 @@ fn acceptance_clone(fx: &AcceptanceFixture) -> AcceptanceFixture {
         child_tip: fx.child_tip,
         b_pair: fx.b_pair,
         steps: fx.steps.clone(),
+        held: fx.held.clone(),
     }
 }
 
@@ -386,6 +426,83 @@ fn ek_ancestry_walks_one_step_and_refuses_unhashed_substitution() {
         verify_fixture(&bad, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip),
         Err(PeerLineageFailure::Invalid(_))
     ));
+}
+
+/// The recipient's countersign under an EK certified by `prior_sk`, with the
+/// bundle naming `prior_addr` as the recipient's predecessor step.
+fn countersigned_after(
+    fx: &AcceptanceFixture,
+    prior_addr: [u8; 32],
+    prior_sk: &[u8],
+) -> AcceptanceFixture {
+    let (ek_pk_b, ek_sk_b) = generate_sphincs_keypair().unwrap();
+    let mut bundle =
+        generated::PeerTransferAcceptanceEvidenceV1::decode(fx.bundle_bytes.as_slice()).unwrap();
+    let receipt =
+        StitchedReceiptV2::from_canonical_protobuf(&bundle.receipt_evidence_a_bytes).unwrap();
+    let commitment = receipt.compute_commitment().unwrap();
+    let (b_parent, b_child) = fx.b_pair;
+    let b_target =
+        compute_receipt_b_canonical_target(&commitment, &commitment, &b_parent, &b_child);
+    let countersign = generated::ReceiptCountersignB {
+        commitment: commitment.to_vec(),
+        receipt_evidence_digest_a: dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
+            &bundle.receipt_evidence_a_bytes,
+        )
+        .to_vec(),
+        sig_b: sphincs_sign(&ek_sk_b, &b_target).unwrap(),
+        ek_cert_b: sign_ek_cert(prior_sk, &ek_pk_b, &receipt.parent_tip).unwrap(),
+        ek_pk_b,
+        kyber_ct_b: vec![0x0B; 32],
+        b_parent_tip: b_parent.to_vec(),
+        b_child_tip: b_child.to_vec(),
+        recipient_economic_release_addr: Vec::new(),
+    };
+    bundle.receipt_countersign_b_bytes = countersign.encode_to_vec();
+    bundle.b_prior_step_addr = Some(prior_addr.to_vec());
+    let mut after = acceptance_clone(fx);
+    after.bundle_bytes = bundle.encode_to_vec();
+    after
+}
+
+#[test]
+fn a_party_to_the_relationship_checks_one_certificate_from_the_step_it_holds() {
+    // Deep in the relationship: the recipient's predecessor step is one the
+    // verifier holds as a party. Nothing behind it is in any store here, so
+    // a check that went looking for the relationship's history could not
+    // complete — this one fetches nothing and verifies the one certificate.
+    let fx = acceptance_fixture();
+    let (prior_pk, prior_sk) = generate_sphincs_keypair().unwrap();
+    let prior_addr = [0x5A; 32];
+    let mut deep = countersigned_after(&fx, prior_addr, &prior_sk);
+    deep.held.insert((DEV_RECIP, prior_addr), prior_pk.clone());
+    let (verdict, fetched) =
+        verify_fixture_counting(&deep, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    verdict.expect("the step after a held step verifies from it");
+    assert!(fetched.is_empty(), "fetched {} EK steps", fetched.len());
+
+    // The held key must be the one that certified the current EK.
+    let (other_pk, _) = generate_sphincs_keypair().unwrap();
+    let mut wrong = acceptance_clone(&deep);
+    wrong.held.insert((DEV_RECIP, prior_addr), other_pk);
+    assert!(matches!(
+        verify_fixture(&wrong, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip),
+        Err(PeerLineageFailure::Invalid(_))
+    ));
+
+    // A step held in another signer's chain is not this signer's: the check
+    // goes looking for the step and, finding none, cannot complete.
+    let mut other_signer = acceptance_clone(&deep);
+    other_signer.held.clear();
+    other_signer.held.insert((DEV_SENDER, prior_addr), prior_pk);
+    let (verdict, fetched) =
+        verify_fixture_counting(&other_signer, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    assert!(
+        matches!(verdict, Err(PeerLineageFailure::Incomplete(_))),
+        "got: {verdict:?}"
+    );
+    assert_eq!(fetched, vec![prior_addr]);
 }
 
 // ── The exact peer-debit predicate's refusal clauses ───────────────────────

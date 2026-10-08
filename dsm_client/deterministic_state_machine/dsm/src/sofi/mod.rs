@@ -35,12 +35,15 @@
 //! economics; this layer gives them exact bytes and exact keys, nothing more.
 
 pub mod admission;
+pub mod computed;
 pub mod conformance;
 pub mod derive;
 pub mod escrow;
 pub mod exercise;
 pub mod facts;
 pub mod fisher_yates;
+pub mod frontier;
+pub mod history;
 pub mod lineage;
 pub mod publication;
 pub mod registration;

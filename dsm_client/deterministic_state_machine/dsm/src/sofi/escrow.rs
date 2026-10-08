@@ -16,6 +16,10 @@
 //!
 //! Nothing here knows what an application's commitment means: `X` is never
 //! read, only `Y`.
+//!
+//! A computed escrow vault (SoFi Amendment S22) has no verdict cell: its
+//! outcome is what a pinned program computes, read by `sofi::computed`.
+//! [`EscrowCellRead`] is what a Release stands on for either kind.
 
 use crate::common::domain_tags::{
     TAG_DSM_ESCROW_CELL_LOCATOR, TAG_DSM_ESCROW_OUTCOME_TABLE, TAG_DSM_ESCROW_STATEMENT,
@@ -402,6 +406,35 @@ impl VerdictCellRead {
                 }
             }
             (None, _) | (Some(..), CellFact::Open) => VerdictStanding::Unsettled,
+        }
+    }
+}
+
+/// What a Release stands on, by the kind of its vault's terms (SoFi §19.10,
+/// "The kind is the class"): the verdict cell of a signed escrow vault, or
+/// the start and match cells of a computed one. Either gives the same
+/// [`VerdictStanding`], so the facts and the ladder read both alike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EscrowCellRead {
+    Signed(VerdictCellRead),
+    Computed(super::computed::ComputedCellRead),
+}
+
+impl EscrowCellRead {
+    /// The cell a Release against the vault names: `K_verdict` or
+    /// `K_match`.
+    pub fn key(&self) -> D32 {
+        match self {
+            Self::Signed(read) => read.key,
+            Self::Computed(read) => read.key(),
+        }
+    }
+
+    /// Where a release naming `outcome` stands.
+    pub fn standing_for(&self, outcome: &[u8]) -> VerdictStanding {
+        match self {
+            Self::Signed(read) => read.standing_for(outcome),
+            Self::Computed(read) => read.standing_for(outcome),
         }
     }
 }

@@ -643,6 +643,8 @@ impl AppRouterImpl {
                         // policy commit, which native BTC does not have: no
                         // such leaf can exist, so there is nothing to state.
                         offline_allocation: None,
+                        // Bitcoin on its own chain: a currency.
+                        holding: generated::BalanceHolding::Currency as i32,
                     },
                 ))
             }

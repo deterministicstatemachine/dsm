@@ -142,6 +142,11 @@ pub struct RegistrationRead {
     /// conditional claim (SoFi Amendment S20). `None` while the leader holds
     /// no claim.
     root_claim: Option<D32>,
+    /// The exact bytes final at `K_root(q)`: the trader's signed `C_q` when
+    /// the position is registered, which a position's exercise carries and a
+    /// verifier rebuilding it takes from here (SoFi Amendment S25). `None`
+    /// while no claim is final there.
+    root_claim_final: Option<Vec<u8>>,
 }
 
 impl RegistrationRead {
@@ -172,6 +177,11 @@ impl RegistrationRead {
     /// The id of the claim holding `K_root(q)`'s leader link, if any.
     pub fn root_claim(&self) -> Option<&D32> {
         self.root_claim.as_ref()
+    }
+
+    /// The exact bytes final at `K_root(q)`, if a claim is final there.
+    pub fn root_claim_final(&self) -> Option<&[u8]> {
+        self.root_claim_final.as_deref()
     }
 
     /// Whether this read is of the position `fulfillment` claims for
@@ -348,9 +358,14 @@ pub fn fulfillment_registered(
     root_evidence: &CellEvidence,
 ) -> Result<RegistrationRead, Missing> {
     let root = read_root_cell(&cells.root, root_evidence)?;
-    let root_claim = match &root {
-        CellReading::Held { id, .. } => Some(*id),
-        CellReading::Open => None,
+    let (root_claim, root_claim_final) = match &root {
+        CellReading::Held {
+            id, value, state, ..
+        } => (
+            Some(*id),
+            matches!(state, ChainState::Final).then(|| value.clone()),
+        ),
+        CellReading::Open => (None, None),
     };
     let registration = match evaluate(
         &cells.fulfillment,
@@ -393,6 +408,7 @@ pub fn fulfillment_registered(
         parent_root: cells.parent_root,
         registration,
         root_claim,
+        root_claim_final,
     })
 }
 
