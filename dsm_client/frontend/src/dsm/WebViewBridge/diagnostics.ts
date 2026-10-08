@@ -69,3 +69,14 @@ export async function getDeviceIdBinBridgeAsync(): Promise<Uint8Array> {
   }
   return hdr.deviceId;
 }
+
+/**
+ * After the player approves a connect code that a link from another app on
+ * this phone brought: the wallet steps back to that app. Answers whether it
+ * did (no link opened the wallet, or it already stepped back once).
+ */
+export async function returnToConnectCaller(): Promise<boolean> {
+  const bytes = await callBin("returnToConnectCaller", new Uint8Array(0));
+  if (bytes.length !== 1) throw new Error(`returnToConnectCaller answered ${bytes.length} bytes, not one`);
+  return bytes[0] === 1;
+}

@@ -34,6 +34,7 @@ pub(super) fn all_tags() -> Vec<TaggedHashDomain<'static>> {
     tags.extend_from_slice(misc::TAGS);
     tags.extend_from_slice(misc::sofi_tags());
     tags.extend_from_slice(misc::escrow_tags());
+    tags.extend_from_slice(misc::shared_lineage_tags());
     tags.extend_from_slice(policy_registry::TAGS);
     tags.extend_from_slice(recovery::TAGS);
     tags.extend_from_slice(vault_dbtc::TAGS);

@@ -34,7 +34,7 @@ use super::conformance::{
     Validation,
 };
 use super::derive;
-use super::escrow::VerdictCellRead;
+use super::escrow::EscrowCellRead;
 use super::exercise::{AttemptCellRead, RecognizedExercise};
 use super::registration::{PairStanding, RegistrationRead};
 use super::resolution::{
@@ -122,6 +122,16 @@ pub enum NotEstablished {
         verdict_cell: D32,
         missing: CellMissing,
     },
+    /// A computed Release's start cell is not decided by its reads yet (SoFi
+    /// Amendment S22).
+    StartCell {
+        start_cell: D32,
+        missing: CellMissing,
+    },
+    /// The outcome program a computed Release's terms pin is not registered
+    /// with this verifier (SoFi Amendment S22): nothing at its match cell is
+    /// established, and nothing is guessed.
+    OutcomeProgramNotRegistered { program: D32 },
     /// The reads handed over are not about this exercise: a registration of
     /// another position, a cell of another key, evidence of another
     /// operation. Not a network status — the caller mis-assembled them —
@@ -162,7 +172,7 @@ pub struct ExerciseReads<'a> {
     pub legs: &'a [LegReads<'a>],
     /// For a Release, its verdict cell as Core read it (SoFi Amendment S21);
     /// `None` for every other operation.
-    pub verdict: Option<&'a VerdictCellRead>,
+    pub verdict: Option<&'a EscrowCellRead>,
 }
 
 /// What this verifier established about the trader's lineage at `p`: the
@@ -235,7 +245,7 @@ pub struct GroundReads<'a> {
     pub parent: Option<TraderAtParent>,
     pub legs: &'a [LegReads<'a>],
     /// For a Release, its verdict cell (SoFi Amendment S21).
-    pub verdict: Option<&'a VerdictCellRead>,
+    pub verdict: Option<&'a EscrowCellRead>,
 }
 
 /// The facts of one exercise that stand without its validation evidence:
@@ -666,7 +676,7 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
             let read = reads.verdict.ok_or(NotEstablished::NotThisExercise(
                 "a release is read with its verdict cell",
             ))?;
-            if read.key() != verdict_cell {
+            if read.key() != *verdict_cell {
                 return Err(NotEstablished::NotThisExercise(
                     "the verdict cell read is not the one the release names",
                 ));

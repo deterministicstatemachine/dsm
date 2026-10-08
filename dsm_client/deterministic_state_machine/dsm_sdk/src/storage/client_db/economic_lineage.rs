@@ -363,76 +363,6 @@ pub fn load_leaf_cache() -> Result<Vec<([u8; 32], [u8; 32], Vec<u8>)>> {
     Ok(out)
 }
 
-/// This receiver's latest frontier for a peer strictly below `position`
-/// (DSM Amendment A8): a coordinate it authenticated on the way to a step it
-/// accepted from the peer, with the claim it accepted there.
-pub fn frontier_below(
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    position: u64,
-) -> Result<Option<dsm::economic::peer_lineage::PeerFrontier>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let row = conn
-        .query_row(
-            "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
-             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND economic_position < ?3
-             ORDER BY economic_position DESC LIMIT 1",
-            params![
-                peer_genesis.as_slice(),
-                peer_devid.as_slice(),
-                i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?
-            ],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    row.map(|(recorded, root, accepted)| {
-        Ok(
-            dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
-                *peer_genesis,
-                *peer_devid,
-                u64::try_from(recorded)
-                    .map_err(|e| anyhow!("frontier position {recorded}: {e}"))?,
-                digest32(root, "frontier root")?,
-                dsm::sofi::wire::ParentClaimRef::decode(&accepted)
-                    .map_err(|e| anyhow!("frontier claim at {recorded}: {e:?}"))?,
-            ),
-        )
-    })
-    .transpose()
-}
-
-/// Record, inside the transaction that accepts a step from the peer, the
-/// frontier that step's verification reached. The activation root is every
-/// receiver's frontier and is never recorded.
-pub fn record_frontier_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    frontier: &dsm::economic::peer_lineage::PeerFrontier,
-) -> Result<()> {
-    let (position, root, accepted) = frontier.recorded().ok_or_else(|| {
-        anyhow!("the activation root is every receiver's frontier and is never recorded")
-    })?;
-    tx.execute(
-        "INSERT OR IGNORE INTO peer_frontier(
-             peer_genesis, peer_devid, economic_position, economic_root, accepted_claim)
-         VALUES(?1, ?2, ?3, ?4, ?5)",
-        params![
-            frontier.genesis().as_slice(),
-            frontier.device_id().as_slice(),
-            i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?,
-            root.as_slice(),
-            accepted.encode()
-        ],
-    )?;
-    Ok(())
-}
-
 // ── q-durability memos (3.5b PR4) ──────────────────────────────────────────
 
 /// Whether ONE exact immutable object is known Stored on the canonical
@@ -505,6 +435,23 @@ pub fn latest_ek_step_with_conn(
         )),
         None => None,
     })
+}
+
+/// The key the step at `step_addr` in `signer_devid`'s chain certified, when
+/// this device holds that step: a step of one of its own relationships,
+/// recorded as the bilateral step completed. `None` when it does not.
+pub fn held_ek_step(signer_devid: &[u8; 32], step_addr: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(conn
+        .query_row(
+            "SELECT ek_pk FROM ek_cert_step_chain
+             WHERE signer_devid = ?1 AND step_addr = ?2
+             LIMIT 1",
+            params![signer_devid.as_slice(), step_addr.as_slice()],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?)
 }
 
 /// Append one signer-chain step inside the caller's transaction. Idempotent
@@ -804,5 +751,33 @@ mod admitted_row_tests {
 
         // An unknown kind is refused rather than defaulted.
         assert!(admitted_from_row(row(3, SINGLE)).is_err());
+    }
+
+    /// A step this device recorded in one of its relationships is held, in
+    /// its signer's chain only, with the key it certified.
+    #[test]
+    #[serial_test::serial]
+    fn a_recorded_step_is_held_in_its_signers_chain_only() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let (rel, signer, other) = ([0x31; 32], [0x32; 32], [0x33; 32]);
+        let (first, second) = ([0x41; 32], [0x42; 32]);
+        {
+            let binding = get_connection().expect("connection");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            append_ek_step_with_conn(&conn, &rel, &signer, &first, b"first key").expect("append");
+            append_ek_step_with_conn(&conn, &rel, &signer, &second, b"second key").expect("append");
+        }
+        assert_eq!(
+            held_ek_step(&signer, &first).expect("read"),
+            Some(b"first key".to_vec())
+        );
+        assert_eq!(
+            held_ek_step(&signer, &second).expect("read"),
+            Some(b"second key".to_vec())
+        );
+        assert_eq!(held_ek_step(&other, &second).expect("read"), None);
+        assert_eq!(held_ek_step(&signer, &[0x43; 32]).expect("read"), None);
     }
 }

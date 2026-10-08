@@ -11,7 +11,7 @@
 //! states — a hop's price, a vault's post state, `R_realize` — comes from the
 //! Core function the verifier checks it with.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use dsm::ccb::state::{FeePolicy, MarketPolicy, ReleasePolicy};
 use dsm::dlv::route_commit::{constant_product_output_classified, ConstantProductRefusal};
@@ -21,6 +21,7 @@ use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
 use dsm::economic::tree::{EconomicSmt, ABSENT_LEAF};
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::sofi::derive;
+use dsm::sofi::frontier::VaultWitness;
 use dsm::sofi::publication::{Publication, VaultPolicyClass};
 use dsm::sofi::registration::{PairStanding, Registration};
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
@@ -49,7 +50,7 @@ use crate::sdk::sofi_advance::{
     resolve_pending_position, Advanced, Completion, FulfillRequest,
 };
 use crate::sdk::sofi_reads::{
-    local_leaves_of_validated, verifier_error, LiveSofiReads, VerifierContext,
+    local_leaves_of_validated, verifier_error, KeptReadings, LiveSofiReads, VerifierContext,
 };
 use crate::sdk::sofi_publish::{fetch_setup_for, publish, publish_produced, Published};
 use crate::sdk::sofi_relay::relay_fulfillment;
@@ -224,6 +225,15 @@ pub(crate) fn sign(message: &[u8]) -> Result<Vec<u8>, DsmError> {
 
 /// The published object must be `Stored`, read back from the members, before
 /// anything is built on it.
+/// The address `object` is stored at: its bytes under its namespace.
+pub(crate) fn publication_addr(object: &Publication<'_>) -> Result<D32, DsmError> {
+    let bytes = object.object_bytes().map_err(refuse)?;
+    Ok(dsm::storage_object::immutable_addr(
+        object.namespace(),
+        &bytes,
+    ))
+}
+
 pub(crate) fn require_stored(what: &str, published: &Published) -> Result<(), DsmError> {
     if published.stored {
         Ok(())
@@ -274,12 +284,17 @@ pub async fn create_vault(
         (VaultPolicyClass::Fee, &fee),
         (VaultPolicyClass::Release, &release),
     ];
+    // The genesis names each policy by its address, which its bytes fix: the
+    // addresses are derived here, and the policies and the genesis that
+    // names them are published together below, every one read back Stored
+    // before the admission.
     let mut addresses = BTreeMap::new();
-    for (class, bytes) in policies {
-        let publication = Publication::VaultPolicy { class, bytes };
-        let published = publish(set, &publication).await?;
-        require_stored("vault policy", &published)?;
-        addresses.insert(class.class(), published.addr);
+    for (class, bytes) in &policies {
+        let publication = Publication::VaultPolicy {
+            class: *class,
+            bytes,
+        };
+        addresses.insert(class.class(), publication_addr(&publication)?);
     }
     let address = |class: u16| {
         addresses
@@ -307,17 +322,29 @@ pub async fn create_vault(
         state,
     };
     let produced = build_vault_create(&preimage, &market).map_err(refuse)?;
-    // Indexed under its genesis locator and under each token of its pair, so
-    // any trader finds it by the tokens it trades (Amendment S16).
-    let published = publish(
-        set,
-        &Publication::VaultGenesis {
-            preimage: &preimage,
-            market: &pair,
-        },
-    )
-    .await?;
-    require_stored("vault genesis", &published)?;
+    // The genesis is indexed under its genesis locator and under each token
+    // of its pair, so any trader finds it by the tokens it trades (Amendment
+    // S16). None of the four objects waits on another's answer.
+    let mut publications: Vec<Publication<'_>> = policies
+        .iter()
+        .map(|(class, bytes)| Publication::VaultPolicy {
+            class: *class,
+            bytes,
+        })
+        .collect();
+    publications.push(Publication::VaultGenesis {
+        preimage: &preimage,
+        market: &pair,
+    });
+    let published =
+        futures::future::try_join_all(publications.iter().map(|object| publish(set, object)))
+            .await?;
+    for (object, published) in publications.iter().zip(&published) {
+        require_stored("vault object", published)?;
+        if published.addr != publication_addr(object)? {
+            return Err(refuse("a vault object was stored at another address"));
+        }
+    }
 
     let operation = produced
         .operation
@@ -488,14 +515,15 @@ async fn setup(
 
 // ── §30 Finding the head of a vault ────────────────────────────────────────
 
-/// A vault at its walked head: the root the next hop is built on, the whole
-/// tree there, its state, and its terms: a market's policies, or an escrow
-/// vault's terms (SoFi Amendment S21).
+/// A vault at its walked head: the root the next hop is built on, its state,
+/// this device's witness there — the state leaf and this device's
+/// relationship leaf with their paths (SoFi Amendment S24) — and its terms: a
+/// market's policies, or an escrow vault's terms (SoFi Amendment S21).
 pub(crate) struct VaultAtHead {
     pub(crate) vault_id: D32,
     pub(crate) root: D32,
     pub(crate) state: VaultStateLeaf,
-    pub(crate) tree: EconomicSmt,
+    pub(crate) witness: VaultWitness,
     pub(crate) terms: VaultTerms,
 }
 
@@ -504,7 +532,9 @@ impl VaultAtHead {
     fn market(&self) -> Result<&Policies, DsmError> {
         match &self.terms {
             VaultTerms::Market(policies) => Ok(policies),
-            VaultTerms::Escrow(..) => Err(refuse("an escrow vault has no market")),
+            VaultTerms::Escrow(..) | VaultTerms::Computed(..) => {
+                Err(refuse("an escrow vault has no market"))
+            }
         }
     }
 }
@@ -553,19 +583,25 @@ pub(crate) fn standing(core: &CoreSDK) -> Result<Standing, DsmError> {
 /// The terms `state` commits — a market's three policies, or an escrow
 /// vault's terms — fetched by the addresses it names and decoded by Core,
 /// which re-addresses each first.
+///
+/// The objects are content-addressed and none names another: they are read
+/// at once, and an object once read `Stored` is kept by the process.
 async fn vault_terms(set: &StorageSet, state: &VaultStateLeaf) -> Result<VaultTerms, DsmError> {
-    let mut objects = BTreeMap::new();
-    for (class, addr) in EvidenceNeeds::policies_of(state) {
-        let bytes = crate::sdk::storage_io::read_stored_bytes(set, &addr)
-            .await?
-            .ok_or_else(|| {
-                storage(
-                    "vault policy",
-                    format!("the class {class:#06x} object the vault commits is not Stored"),
-                )
-            })?;
-        objects.insert(addr, bytes);
-    }
+    let read = futures::future::try_join_all(EvidenceNeeds::policies_of(state).into_iter().map(
+        |(class, addr)| async move {
+            let bytes = crate::sdk::storage_io::read_stored_bytes_kept(set, &addr)
+                .await?
+                .ok_or_else(|| {
+                    storage(
+                        "vault policy",
+                        format!("the class {class:#06x} object the vault commits is not Stored"),
+                    )
+                })?;
+            Ok::<_, DsmError>((addr, bytes))
+        },
+    ))
+    .await?;
+    let objects: BTreeMap<_, _> = read.into_iter().collect();
     let evidence = Evidence::acquired(
         objects,
         BTreeMap::new(),
@@ -576,16 +612,40 @@ async fn vault_terms(set: &StorageSet, state: &VaultStateLeaf) -> Result<VaultTe
     VaultTerms::resolve(&evidence, state).map_err(|refusal| refuse(format!("{refusal:?}")))
 }
 
-/// §30: walk `vault_id` from its accepted genesis to its head. At generation
-/// zero the tree is the genesis state leaf alone; past it, the head store the
-/// walk wrote must reproduce the head's root.
+/// §30: walk `vault_id` to its head — from the genesis, or from the owner
+/// baseline this device started its record at — and witness it there.
 pub(crate) async fn vault_at_head(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
-    let chain = verifier.chain(vault_id).map_err(verifier_error)?;
+    // The history others published is read ahead of the walk (SoFi
+    // Amendment S23); the walk establishes the chain exactly as before.
+    let history = crate::sdk::vault_history::discover(set, vault_id).await?;
+    let chain =
+        tokio::task::block_in_place(|| crate::sdk::vault_history::walk(set, verifier, &history))?;
     head_of(set, verifier, vault_id, chain).await
+}
+
+/// Start the record of each vault `offered` that this device holds nothing
+/// of at the owner baseline offered for it (SoFi Amendment S24): what a
+/// quote and a swap do before they walk the vaults' heads.
+pub(crate) async fn adopt_offered(
+    core: &CoreSDK,
+    set: &StorageSet,
+    offered: &[dsm::types::proto::ConnectVaultWitnessV1],
+) -> Result<(), DsmError> {
+    let accepted = &AcceptedGeneses::default();
+    let standing = standing(core)?;
+    let ctx = standing.context(set, accepted)?;
+    let verifier = ctx.verifier();
+    crate::sdk::vault_baseline::adopt(
+        set,
+        &verifier,
+        offered,
+        (standing.genesis, standing.device_id),
+    )
+    .await
 }
 
 /// Each of `vault_ids`' chains, walked at once, in the order given. A vault's
@@ -593,16 +653,26 @@ pub(crate) async fn vault_at_head(
 /// another vault's walk finds first, so each runs on a thread of its own over
 /// the one verifier: the reads it keeps are shared, and each read blocks only
 /// its own walk.
-fn chains_at_once(
+async fn chains_at_once(
+    set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_ids: &[D32],
 ) -> Vec<Result<VaultChain, DsmError>> {
+    // Each vault's history is read from the epoch index first, at once
+    // (SoFi Amendment S23), and read ahead of its walk.
+    let histories = crate::sdk::vault_history::discover_all(set, vault_ids).await;
     tokio::task::block_in_place(|| {
         std::thread::scope(|scope| {
-            let walks: Vec<_> = vault_ids
+            let walks: Vec<_> = histories
                 .iter()
-                .map(|vault_id| {
-                    scope.spawn(move || verifier.chain(vault_id).map_err(verifier_error))
+                .map(|history| {
+                    scope.spawn(move || match history {
+                        Ok(history) => crate::sdk::vault_history::walk(set, verifier, history),
+                        Err(e) => Err(DsmError::storage(
+                            format!("vault history: {e}"),
+                            None::<std::io::Error>,
+                        )),
+                    })
                 })
                 .collect();
             // A walk that panicked panics here, as it would have in line.
@@ -617,68 +687,133 @@ fn chains_at_once(
     })
 }
 
-/// `vault_id` at the head of its walked `chain`.
+/// Each of `vault_ids` at its walked head, in the order given: the chains
+/// walked at once ([`chains_at_once`]), then each head's leaves and terms
+/// taken at once. A vault's walk and head need nothing another vault's find
+/// first, and nothing here writes to storage.
+async fn heads_at_once(
+    set: &StorageSet,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_ids: &[D32],
+) -> Vec<Result<(VaultAtHead, VaultChain), DsmError>> {
+    let chains = chains_at_once(set, verifier, vault_ids).await;
+    futures::future::join_all(
+        vault_ids
+            .iter()
+            .zip(chains)
+            .map(|(vault_id, chain)| async move { head_of(set, verifier, vault_id, chain?).await }),
+    )
+    .await
+}
+
+/// `vault_id` at the head of its walked `chain`, witnessed for this device.
 pub(crate) async fn head_of(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     vault_id: &D32,
     chain: VaultChain,
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
-    let (generation, root) = chain
+    if let Some(why) =
+        sofi_vault_head::quarantined(vault_id).map_err(|e| storage("vault quarantine", e))?
+    {
+        return Err(refuse(format!("the vault is quarantined: {why}")));
+    }
+    let (.., root) = chain
         .head()
         .ok_or_else(|| refuse("no head of this vault is established"))?;
-    let (state, tree) = if generation == 0 {
-        let accepted = match verifier.vault_genesis(vault_id).map_err(verifier_error)? {
-            VaultGenesis::Accepted(accepted) => accepted,
-            VaultGenesis::NotPublished => {
-                return Err(refuse(
-                    "no genesis the owner's creation carried is published",
-                ))
-            }
-            VaultGenesis::OwnerUnresolved(why) => {
-                return Err(refuse(format!(
-                    "the vault owner's lineage is unresolved: {why}"
-                )))
-            }
-            VaultGenesis::Refused(why) => {
-                return Err(refuse(format!("vault genesis refused: {why}")))
-            }
-        };
-        let state = accepted.state().clone();
-        let mut tree = EconomicSmt::new();
-        tree.insert(
-            derive::vault_state_key(vault_id),
-            derive::vault_state_leaf_value(&state).map_err(refuse)?,
-        );
-        (state, tree)
-    } else {
-        let (head, tree, state) = sofi_vault_head::tree_at_head(vault_id)
-            .map_err(|e| storage("vault head", e))?
-            .ok_or_else(|| refuse("this device's record of the vault cannot reproduce its head"))?;
-        if head.generation != generation {
-            return Err(refuse(format!(
-                "the recorded head is generation {}, the walk reached {generation}",
-                head.generation
-            )));
-        }
-        (state, tree)
-    };
-    if tree.root() != root {
-        return Err(refuse(
-            "the vault's leaves do not recompute its walked head",
-        ));
-    }
+    let own = verifier.reads.own().ok_or_else(|| {
+        refuse("a vault's head is witnessed for a trader, and this context is none")
+    })?;
+    let witness = head_witness(verifier, vault_id, &chain, own)?;
+    let state = witness.state().clone();
     let terms = vault_terms(set, &state).await?;
     Ok((
         VaultAtHead {
             vault_id: *vault_id,
             root,
             state,
-            tree,
+            witness,
             terms,
         },
         chain,
     ))
+}
+
+/// This device's witness of `vault_id` at the head of `chain`: the one it
+/// recorded and advanced to that head; at the genesis, the genesis's; or,
+/// where this device holds the whole tree at the head (it walked every
+/// generation), one stated from that tree. Each is checked by Core against
+/// the chain's head before it is stood on, and kept, so the generations
+/// recorded next advance it.
+fn head_witness(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_id: &D32,
+    chain: &VaultChain,
+    own: (D32, D32),
+) -> Result<VaultWitness, DsmError> {
+    let (generation, root) = chain
+        .head()
+        .ok_or_else(|| refuse("no head of this vault is established"))?;
+    let recorded = sofi_vault_head::witness(vault_id).map_err(|e| storage("vault witness", e))?;
+    let witness = match recorded {
+        Some(held)
+            if held.generation == generation
+                && held.root == root
+                && (held.trader_genesis, held.trader_device_id) == own =>
+        {
+            match VaultWitness::recorded(chain, vault_id, &held.witness, own.0, own.1) {
+                Ok(witness) => witness,
+                Err(refused) => {
+                    // This device's witness at the head it recorded does not
+                    // fold to that head: two of its own conclusions disagree.
+                    let why =
+                        format!("the recorded witness at the head does not fold to it: {refused}");
+                    sofi_vault_head::quarantine(vault_id, &why)
+                        .map_err(|e| storage("vault quarantine", e))?;
+                    return Err(refuse(why));
+                }
+            }
+        }
+        _ if generation == 0 => {
+            let accepted = match verifier.vault_genesis(vault_id).map_err(verifier_error)? {
+                VaultGenesis::Accepted(accepted) => accepted,
+                VaultGenesis::NotPublished => {
+                    return Err(refuse(
+                        "no genesis the owner's creation carried is published",
+                    ))
+                }
+                VaultGenesis::OwnerUnresolved(why) => {
+                    return Err(refuse(format!(
+                        "the vault owner's lineage is unresolved: {why}"
+                    )))
+                }
+                VaultGenesis::Refused(why) => {
+                    return Err(refuse(format!("vault genesis refused: {why}")))
+                }
+            };
+            VaultWitness::at_genesis(&accepted, own.0, own.1).map_err(refuse)?
+        }
+        _ => {
+            let (tree, state, relationships) = crate::sdk::vault_baseline::tree_at(
+                vault_id, generation, &root,
+            )?
+            .ok_or_else(|| {
+                refuse("this device holds no witness of the vault's head, and not its whole tree")
+            })?;
+            let rel_key = derive::relationship_key(&own.0, &own.1, vault_id);
+            let wire = dsm::sofi::frontier::witness_from_tree(
+                &tree,
+                vault_id,
+                &state,
+                relationships.get(&rel_key).copied(),
+                &own.0,
+                &own.1,
+            );
+            VaultWitness::recorded(chain, vault_id, &wire, own.0, own.1).map_err(refuse)?
+        }
+    };
+    sofi_vault_head::put_witness(&witness).map_err(|e| storage("vault witness", e))?;
+    Ok(witness)
 }
 
 impl Standing {
@@ -689,11 +824,23 @@ impl Standing {
         set: &'a StorageSet,
         accepted: &AcceptedGeneses,
     ) -> Result<VerifierContext<'a>, DsmError> {
-        VerifierContext::sharing(
+        self.context_kept(set, accepted, &KeptReadings::default())
+    }
+
+    /// [`Self::context`], keeping what it reads in `kept`, which the other
+    /// contexts of the same operation share.
+    pub(crate) fn context_kept<'a>(
+        &'a self,
+        set: &'a StorageSet,
+        accepted: &AcceptedGeneses,
+        kept: &KeptReadings,
+    ) -> Result<VerifierContext<'a>, DsmError> {
+        VerifierContext::sharing_kept(
             set,
             Some((self.genesis, self.device_id)),
             Some(&self.admitted),
             accepted,
+            kept,
         )
     }
 }
@@ -964,6 +1111,135 @@ fn route_ends(hops: &[Hop]) -> Result<Option<RouteEnds>, DsmError> {
     }))
 }
 
+/// Geneses accepted at once.
+const GENESES_AT_ONCE: usize = 16;
+
+/// What accepting the vaults of a route's tokens ahead came to: a report
+/// only. What a vault of a token is, is decided by `vaults_of_token`.
+struct AcceptedAhead {
+    candidates: usize,
+    accepted: usize,
+    not_accepted: Vec<String>,
+}
+
+impl core::fmt::Display for AcceptedAhead {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} candidate vaults, {} geneses accepted at once, {} not",
+            self.candidates,
+            self.accepted,
+            self.not_accepted.len()
+        )?;
+        if let Some(first) = self.not_accepted.first() {
+            write!(f, " (first: {first})")?;
+        }
+        Ok(())
+    }
+}
+
+/// Accept the genesis of every vault published under `tokens`' indexes at
+/// once, through the verifier's own `vault_genesis`, which keeps each one it
+/// accepts for the rest of the operation. Each acceptance reads its owner's
+/// creation; one at a time, a token with many vaults cost a round trip per
+/// vault before a quote. Call from a thread that may block.
+fn accept_ahead(verifier: &Verifier<'_, LiveSofiReads<'_>>, tokens: &[D32]) -> AcceptedAhead {
+    use dsm::sofi::resolve::SofiReads as _;
+    let mut report = AcceptedAhead {
+        candidates: 0,
+        accepted: 0,
+        not_accepted: Vec::new(),
+    };
+    let mut vault_ids: Vec<D32> = Vec::new();
+    for token in tokens {
+        match verifier.reads.vault_token_candidates(token) {
+            Ok(Discovered::Complete(found) | Discovered::Partial(found)) => {
+                for vault_id in found {
+                    if !vault_ids.contains(&vault_id) {
+                        vault_ids.push(vault_id);
+                    }
+                }
+            }
+            Err(failure) => report
+                .not_accepted
+                .push(format!("the token index: {failure}")),
+        }
+    }
+    report.candidates = vault_ids.len();
+    for chunk in vault_ids.chunks(GENESES_AT_ONCE) {
+        let outcomes: Vec<Result<VaultGenesis, String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|vault_id| {
+                    scope.spawn(move || {
+                        verifier
+                            .vault_genesis(vault_id)
+                            .map_err(|failure| failure.to_string())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| match handle.join() {
+                    Ok(outcome) => outcome,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                })
+                .collect()
+        });
+        for outcome in outcomes {
+            match outcome {
+                Ok(VaultGenesis::Accepted(..)) => report.accepted += 1,
+                Ok(VaultGenesis::NotPublished) => report.not_accepted.push("not published".into()),
+                Ok(VaultGenesis::OwnerUnresolved(why) | VaultGenesis::Refused(why)) => {
+                    report.not_accepted.push(why)
+                }
+                Err(why) => report.not_accepted.push(why),
+            }
+        }
+    }
+    report
+}
+
+/// How far below the best quote, in basis points, a route still counts as
+/// near-equal to it. CLIENT POLICY, never validity: a route is valid or not
+/// whatever this says. Wider spreads trades across more of a pair's vaults
+/// (fewer races for one vault's key) at the cost of up to this much output;
+/// tune it from the measured collision rate against the output given up.
+pub(crate) const ROUTE_TOLERANCE_BPS: u64 = 300;
+
+/// Which of a search's priced routes `(output, vault ids in hop order)` the
+/// trader takes (client policy): among those within
+/// [`ROUTE_TOLERANCE_BPS`] of the best output, the fewest legs, then the
+/// order the trader's own identity gives the routes' vaults —
+/// `H(DSM/sofi/route-lane/v1; G ‖ DevID ‖ sorted vault ids)` — then the
+/// lowest vault ids. Deterministic: the same candidates give one trader the
+/// same route, and different traders different vaults of a pair, so small
+/// trades spread across the pair's vaults instead of piling into the first;
+/// a split wins only when it beats every single vault by more than the
+/// tolerance. `None` for no route.
+fn choose_route(routes: &[(u64, Vec<D32>)], trader: (&D32, &D32)) -> Option<usize> {
+    let best = routes.iter().map(|(out, ..)| *out).max()?;
+    let floor = u128::from(best) * u128::from(10_000 - ROUTE_TOLERANCE_BPS);
+    routes
+        .iter()
+        .enumerate()
+        .filter(|(_, (out, ..))| u128::from(*out) * 10_000 >= floor)
+        .min_by_key(|(_, (_, vaults))| {
+            let mut sorted = vaults.clone();
+            sorted.sort();
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                dsm::common::domain_tags::TAG_DSM_SOFI_ROUTE_LANE,
+            );
+            h.update(trader.0);
+            h.update(trader.1);
+            for vault in &sorted {
+                h.update(vault);
+            }
+            (vaults.len(), *h.finalize().as_bytes(), sorted)
+        })
+        .map(|(index, ..)| index)
+}
+
 /// The vaults whose market pairs `token`, from its token index (Amendment
 /// S16): accepted by Core, never taken from the index. A discovery that is
 /// not complete marks the search partial.
@@ -971,7 +1247,7 @@ fn vaults_of(
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     token: &D32,
     search: &mut Search,
-) -> Result<Vec<D32>, DsmError> {
+) -> Result<Vec<Paired>, DsmError> {
     let vaults = match verifier.vaults_of_token(token).map_err(verifier_error)? {
         Discovered::Complete(vaults) => vaults,
         Discovered::Partial(vaults) => {
@@ -979,7 +1255,71 @@ fn vaults_of(
             vaults
         }
     };
-    Ok(vaults.iter().map(|accepted| *accepted.vault_id()).collect())
+    Ok(vaults
+        .iter()
+        .filter_map(|accepted| {
+            accepted.market().map(|market| Paired {
+                vault_id: *accepted.vault_id(),
+                tokens: (*market.token_a(), *market.token_b()),
+            })
+        })
+        .collect())
+}
+
+/// The vaults a route search walks to their heads: only those that can be in
+/// a candidate route of `find_route`, in the order found. One pairs the two
+/// tokens; or it is a leg of a chain whose middle token both legs pair. Every
+/// other vault of either token takes no part in any route, so walking its
+/// chain would decide nothing (and on a shared network, every vault of the
+/// native token is a vault of either token).
+fn route_legs(firsts: &[Paired], seconds: &[Paired], token_in: &D32, token_out: &D32) -> Vec<D32> {
+    let middles: BTreeSet<D32> = firsts
+        .iter()
+        .filter_map(|v| v.other(token_in))
+        .filter(|middle| middle != token_out)
+        .collect();
+    let second_legs: Vec<&Paired> = seconds
+        .iter()
+        .filter(|v| v.other(token_out).is_some_and(|m| middles.contains(&m)))
+        .collect();
+    let reached: BTreeSet<D32> = second_legs
+        .iter()
+        .filter_map(|v| v.other(token_out))
+        .collect();
+    let mut walked: Vec<D32> = firsts
+        .iter()
+        .filter(|v| {
+            v.other(token_in)
+                .is_some_and(|o| &o == token_out || reached.contains(&o))
+        })
+        .map(|v| v.vault_id)
+        .collect();
+    for v in second_legs {
+        if !walked.contains(&v.vault_id) {
+            walked.push(v.vault_id);
+        }
+    }
+    walked
+}
+
+/// A vault of a token, with the two tokens its accepted genesis commits its
+/// market to: known before its chain is walked.
+struct Paired {
+    vault_id: D32,
+    tokens: (D32, D32),
+}
+
+impl Paired {
+    /// The token this vault's market pairs with `token`, if it pairs `token`.
+    fn other(&self, token: &D32) -> Option<D32> {
+        if &self.tokens.0 == token {
+            Some(self.tokens.1)
+        } else if &self.tokens.1 == token {
+            Some(self.tokens.0)
+        } else {
+            None
+        }
+    }
 }
 
 /// §30 and the path search of `sofi.findRoute` (Amendment S16): the best
@@ -1000,14 +1340,37 @@ pub async fn find_route(
     let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let mut search = Search::Complete;
+    // Every vault of either token is accepted at once, so the discovery
+    // below finds each one already accepted for this operation.
+    let ahead = tokio::task::block_in_place(|| {
+        accept_ahead(
+            &verifier,
+            &[
+                intent.token_in_policy_commit,
+                intent.token_out_policy_commit,
+            ],
+        )
+    });
+    log::info!("[sofi] route search: {ahead}");
     let firsts = vaults_of(&verifier, &intent.token_in_policy_commit, &mut search)?;
     let seconds = vaults_of(&verifier, &intent.token_out_policy_commit, &mut search)?;
+    let (token_in, token_out) = (
+        intent.token_in_policy_commit,
+        intent.token_out_policy_commit,
+    );
+    let walked = route_legs(&firsts, &seconds, &token_in, &token_out);
+    let firsts: Vec<D32> = firsts.iter().map(|v| v.vault_id).collect();
+    let seconds: Vec<D32> = seconds.iter().map(|v| v.vault_id).collect();
     let mut heads: BTreeMap<D32, VaultAtHead> = BTreeMap::new();
-    for vault_id in firsts.iter().chain(seconds.iter()) {
-        if heads.contains_key(vault_id) {
-            continue;
+    let mut unique: Vec<D32> = Vec::with_capacity(walked.len());
+    for vault_id in &walked {
+        if !unique.contains(vault_id) {
+            unique.push(*vault_id);
         }
-        match vault_at_head(set, &verifier, vault_id).await {
+    }
+    let at_heads = heads_at_once(set, &verifier, &unique).await;
+    for (vault_id, at_head) in unique.iter().zip(at_heads) {
+        match at_head {
             Ok((head, ..)) => {
                 if head.state.status == VAULT_STATUS_ACTIVE {
                     heads.insert(*vault_id, head);
@@ -1022,10 +1385,6 @@ pub async fn find_route(
     // Every candidate route over the established heads: each vault of the
     // input token alone, each chain through a vault of each token, and each
     // split across two vaults of the pair (Amendment S19).
-    let (token_in, token_out) = (
-        intent.token_in_policy_commit,
-        intent.token_out_policy_commit,
-    );
     let mut candidates: Vec<Vec<&VaultAtHead>> = Vec::new();
     let direct: Vec<&VaultAtHead> = firsts
         .iter()
@@ -1055,18 +1414,15 @@ pub async fn find_route(
             }
         }
     }
-    // The route that gives the most; a candidate that cannot carry the
-    // amount is not a route, and no route leaves the list empty.
-    let mut best: Option<(u64, Vec<Hop>)> = None;
+    // Every candidate that carries the amount, priced; a candidate that
+    // cannot is not a route, and no route leaves the list empty.
+    let mut priced: Vec<(u64, Vec<Hop>)> = Vec::new();
     for vaults in candidates {
         let Ok(planned) = plan(&vaults, token_in, intent.amount_in) else {
             continue;
         };
         let (gives, out) = planned_out(&planned)?;
         if gives != token_out {
-            continue;
-        }
-        if best.as_ref().is_some_and(|(most, ..)| *most >= out) {
             continue;
         }
         let hops = vaults
@@ -1081,10 +1437,14 @@ pub async fn find_route(
                 amount_out: p.amount_out,
             })
             .collect();
-        best = Some((out, hops));
+        priced.push((out, hops));
     }
-    let hops = match best {
-        Some((.., hops)) => hops,
+    let routes: Vec<(u64, Vec<D32>)> = priced
+        .iter()
+        .map(|(out, hops)| (*out, hops.iter().map(|hop| hop.vault_id).collect()))
+        .collect();
+    let hops = match choose_route(&routes, (&standing.genesis, &standing.device_id)) {
+        Some(chosen) => priced.swap_remove(chosen).1,
         None => Vec::new(),
     };
     let ends = route_ends(&hops)?;
@@ -1175,6 +1535,10 @@ pub(crate) async fn own_setup_ref(
     }
 }
 
+/// How many times a trade is planned again when the vault moves under its
+/// draft before anything is published.
+const TRADE_REPLANS: usize = 3;
+
 /// What the walk at a parent found for a new attempt.
 enum Walked {
     /// The live attempt: the walk's first unresolved key, advanced past keys
@@ -1184,6 +1548,10 @@ enum Walked {
     /// its trader withheld, and that pair is now registered from the
     /// exercise. The walk is run again.
     Registered,
+    /// The vault moved under the draft: its parent was consumed, or every
+    /// nearby key is held by an exercise still in flight. Nothing is
+    /// published; the trade re-plans at the vault's new head.
+    Moved(String),
 }
 
 /// The walk at `parent_root` of `vault_id` (§31 stage 6): its first
@@ -1216,7 +1584,7 @@ async fn walk_for_attempt(
                     .map_err(verifier_error)?
             }
             WalkOutcome::Consumed { attempt } => {
-                return Err(refuse(format!(
+                return Ok(Walked::Moved(format!(
                     "the vault's parent was consumed at attempt {attempt}: its head moved"
                 )))
             }
@@ -1228,12 +1596,18 @@ async fn walk_for_attempt(
         }
     };
     let mut attempt = first;
+    // The walk read the key it stopped on: that reading is what holds the key
+    // as this attempt knows it, and the key is not read again to learn it.
+    let mut in_hand = walked.unresolved_reading().cloned();
     let mut advanced = 0;
     while advanced <= ATTEMPT_ADVANCE {
-        let read = match verifier
-            .read_attempt_cell(vault_id, parent_root, attempt)
-            .map_err(verifier_error)?
-        {
+        let held = match in_hand.take() {
+            Some(read) => Ok(read),
+            None => verifier
+                .read_attempt_cell(vault_id, parent_root, attempt)
+                .map_err(verifier_error)?,
+        };
+        let read = match held {
             Ok(read) => read,
             Err(missing) => {
                 return Err(storage(
@@ -1266,8 +1640,8 @@ async fn walk_for_attempt(
         attempt = next_attempt(attempt).map_err(refuse)?;
         advanced += 1;
     }
-    Err(refuse(
-        "every nearby attempt key is held by an exercise in flight",
+    Ok(Walked::Moved(
+        "every nearby attempt key is held by an exercise in flight".to_string(),
     ))
 }
 
@@ -1303,20 +1677,22 @@ fn pair_withheld(
 }
 
 /// The live attempt of a leg at `parent_root` (§31 stage 6), every withheld
-/// pair the walk meets registered first. A registration can consume the
-/// parent: the walk run again then says the head moved.
+/// pair the walk meets registered first, or why the vault moved under the
+/// draft (`Err`). A registration can consume the parent: the walk run again
+/// then says the head moved.
 async fn live_attempt(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     chains: &mut BTreeMap<D32, VaultChain>,
     vault_id: &D32,
     parent_root: &D32,
-) -> Result<u64, DsmError> {
+) -> Result<Result<u64, String>, DsmError> {
     // Each round registers a pair the walk met at one of the keys it
     // examines, at most ATTEMPT_ADVANCE + 1 of them.
     for _ in 0..=ATTEMPT_ADVANCE {
         match walk_for_attempt(set, verifier, chains, vault_id, parent_root).await? {
-            Walked::Live(attempt) => return Ok(attempt),
+            Walked::Live(attempt) => return Ok(Ok(attempt)),
+            Walked::Moved(why) => return Ok(Err(why)),
             Walked::Registered => {
                 chains.insert(*vault_id, verifier.chain(vault_id).map_err(verifier_error)?);
             }
@@ -1350,7 +1726,9 @@ pub(crate) async fn chain_past_withheld_pairs(
                     .remove(vault_id)
                     .ok_or_else(|| refuse("the vault's chain is not in hand"))
             }
-            Walked::Registered => {
+            // The head the chain named was consumed while it was walked:
+            // the chain is walked again, from where it stands.
+            Walked::Moved(..) | Walked::Registered => {
                 chains.insert(*vault_id, verifier.chain(vault_id).map_err(verifier_error)?);
             }
         }
@@ -1361,28 +1739,33 @@ pub(crate) async fn chain_past_withheld_pairs(
 }
 
 /// `V°` of one vault: its state mutation to `post_state`, and this trader's
-/// relationship advancement from `base`, against the vault's tree at its head.
+/// relationship advancement from `base`, by the paths of this device's
+/// witness at the vault's head.
 pub(crate) fn vault_core(
     standing: &Standing,
     vault: &VaultAtHead,
     post_state: &VaultStateLeaf,
     base: D32,
 ) -> Result<DlvCore, DsmError> {
+    // The paths are this device's witness at the head: the vault's state
+    // leaf's, and this device's own relationship leaf's.
+    if vault.witness.trader() != (&standing.genesis, &standing.device_id) {
+        return Err(refuse("the vault's witness is another trader's"));
+    }
     let state_key = derive::vault_state_key(&vault.vault_id);
-    let rel_key = derive::relationship_key(&standing.genesis, &standing.device_id, &vault.vault_id);
     let mut entries = vec![
         CoreEntry::Mutation {
             key: state_key,
             pre: derive::vault_state_leaf_value(&vault.state).map_err(refuse)?,
             post: derive::vault_state_leaf_value(post_state).map_err(refuse)?,
-            path: vault.tree.siblings(&state_key).to_vec(),
+            path: vault.witness.state_path().to_vec(),
         },
         CoreEntry::Relationship {
             genesis: standing.genesis,
             device_id: standing.device_id,
             vault_id: vault.vault_id,
             base,
-            path: vault.tree.siblings(&rel_key).to_vec(),
+            path: vault.witness.relationship_path().to_vec(),
         },
     ];
     entries.sort_by_key(CoreEntry::key);
@@ -1536,15 +1919,39 @@ async fn settle(
 
 /// Stages 3 to 10 of §31 for a draft: validate over acquired evidence, sign
 /// and publish, fulfill through the Core transition, complete, resolve.
+///
+/// `ctx` is the context the caller drafted over, built from the same
+/// standing: what it read and kept is not read again here.
 pub(crate) async fn exercise_draft(
     core: &CoreSDK,
     set: &StorageSet,
-    standing: &Standing,
+    ctx: &VerifierContext<'_>,
     draft: UncheckedDraft,
     accepted: &AcceptedGeneses,
 ) -> Result<PositionOutcome, DsmError> {
+    match exercise_draft_at_head(core, set, ctx, draft, accepted).await? {
+        Drafted::Position(outcome) => Ok(outcome),
+        Drafted::HeadMoved(why) => Err(refuse(why)),
+    }
+}
+
+/// What a draft came to: a position, or a vault that moved under it before
+/// anything was published.
+pub(crate) enum Drafted {
+    Position(PositionOutcome),
+    HeadMoved(String),
+}
+
+/// [`exercise_draft`], with a vault that moved under the draft before
+/// anything was published returned as such, for a trade to re-plan.
+pub(crate) async fn exercise_draft_at_head(
+    core: &CoreSDK,
+    set: &StorageSet,
+    ctx: &VerifierContext<'_>,
+    draft: UncheckedDraft,
+    accepted: &AcceptedGeneses,
+) -> Result<Drafted, DsmError> {
     // Stage 3.
-    let ctx = standing.context(set, accepted)?;
     let verifier = ctx.verifier();
     let evidence = match verifier
         .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
@@ -1571,10 +1978,10 @@ pub(crate) async fn exercise_draft(
     }
     let mut attempts = Vec::new();
     for leg in checked.precommit().legs() {
-        attempts.push((
-            leg.vault_id,
-            live_attempt(set, &verifier, &mut chains, &leg.vault_id, &leg.parent_root).await?,
-        ));
+        match live_attempt(set, &verifier, &mut chains, &leg.vault_id, &leg.parent_root).await? {
+            Ok(attempt) => attempts.push((leg.vault_id, attempt)),
+            Err(why) => return Ok(Drafted::HeadMoved(why)),
+        }
     }
     let att_a = crate::sdk::signing_authority::current_att_a()?;
     let produced = build_fulfillment(&checked, precommit_signature.clone(), &attempts, att_a)
@@ -1615,7 +2022,8 @@ pub(crate) async fn exercise_draft(
         },
     )
     .await?;
-    complete_and_settle(core, set, accepted).await
+    let settled = complete_and_settle(core, set, accepted).await;
+    settled.map(Drafted::Position)
 }
 
 /// Stages 7 to 10 for the pending position: the install and the exercise
@@ -1678,12 +2086,13 @@ async fn check_route(
     standing: &Standing,
     intent: &TradeIntent,
     accepted: &AcceptedGeneses,
+    kept: &KeptReadings,
 ) -> Result<(), DsmError> {
-    let ctx = standing.context(set, accepted)?;
+    let ctx = standing.context_kept(set, accepted, kept)?;
     let verifier = ctx.verifier();
     let mut vaults = Vec::with_capacity(intent.vault_ids.len());
-    for vault_id in &intent.vault_ids {
-        vaults.push(vault_at_head(set, &verifier, vault_id).await?.0);
+    for at_head in heads_at_once(set, &verifier, &intent.vault_ids).await {
+        vaults.push(at_head?.0);
     }
     let refs: Vec<&VaultAtHead> = vaults.iter().collect();
     let (token, amount) = planned_out(&plan(
@@ -1733,6 +2142,9 @@ pub async fn trade(
     // One memo for the whole operation: the check, the setups, the plan at
     // the heads and the settle each read a vault's genesis from it.
     let accepted = &AcceptedGeneses::default();
+    // And one store of what its contexts read and keep: the check's, the
+    // walk at the heads' and the draft's.
+    let kept = &KeptReadings::default();
     {
         let standing = standing(core)?;
         let unset = intent
@@ -1740,7 +2152,7 @@ pub async fn trade(
             .iter()
             .any(|vault_id| standing.local.relationship(vault_id).is_none());
         if unset {
-            check_route(core, set, &standing, intent, accepted).await?;
+            check_route(core, set, &standing, intent, accepted, kept).await?;
         }
     }
     set_up_with(core, set, &intent.vault_ids, accepted).await?;
@@ -1749,47 +2161,79 @@ pub async fn trade(
         "[sofi] trade: set up with each of {} vaults",
         intent.vault_ids.len()
     );
-    let standing = standing(core)?;
-    let ctx = standing.context(set, accepted)?;
-    let verifier = ctx.verifier();
-    let mut heads = Vec::with_capacity(intent.vault_ids.len());
-    for (vault_id, chain) in intent
-        .vault_ids
-        .iter()
-        .zip(chains_at_once(&verifier, &intent.vault_ids))
-    {
-        let chain = chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?;
-        heads.push(head_of(set, &verifier, vault_id, chain).await?.0);
+    // The vault can move under the draft — another trade consumes the head
+    // the plan was priced at — before anything is published: the trade is
+    // re-planned at the new head, up to TRADE_REPLANS times.
+    let mut moved = String::new();
+    for round in 1..=TRADE_REPLANS {
+        let standing = standing(core)?;
+        let verifying = standing.context_kept(set, accepted, kept)?;
+        let verifier = verifying.verifier();
+        // Each vault walked past its withheld pairs in turn: two vaults' walks
+        // can meet one exercise of a split route and would each register its
+        // pair. Each head's leaves and terms are then taken at once.
+        let mut chains = Vec::with_capacity(intent.vault_ids.len());
+        for (vault_id, chain) in intent
+            .vault_ids
+            .iter()
+            .zip(chains_at_once(set, &verifier, &intent.vault_ids).await)
+        {
+            chains.push(chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?);
+        }
+        let verifier_ref = &verifier;
+        let mut heads = Vec::with_capacity(intent.vault_ids.len());
+        for at_head in futures::future::join_all(intent.vault_ids.iter().zip(chains).map(
+            |(vault_id, chain)| async move { head_of(set, verifier_ref, vault_id, chain).await },
+        ))
+        .await
+        {
+            heads.push(at_head?.0);
+        }
+        log::info!("[sofi] trade: walked {} vault heads", heads.len());
+        // A chain, or a split across two vaults of the pair (Amendment S19),
+        // planned again at the heads walked now.
+        let refs: Vec<&VaultAtHead> = heads.iter().collect();
+        let planned = plan(&refs, intent.token_in_policy_commit, intent.amount_in)?;
+        let (token, amount) = planned_out(&planned)?;
+        received(core, intent, &token, amount)?;
+        // Each vault's setup is found by its own index scan: all at once, in
+        // hop order.
+        let setup_refs = futures::future::try_join_all(heads.iter().map(|vault| {
+            own_setup_ref(set, &standing.genesis, &standing.device_id, &vault.vault_id)
+        }))
+        .await?;
+        let mut hops = Vec::new();
+        let mut cores = Vec::new();
+        let mut vaults = Vec::new();
+        for (index, ((vault, p), setup_ref)) in
+            heads.iter().zip(&planned).zip(setup_refs).enumerate()
+        {
+            let base = relationship_base(&standing, &vault.vault_id)?;
+            let (hop, post) = price_hop(vault, p.token_in, p.amount_in, setup_ref, index)?;
+            cores.push(vault_core(&standing, vault, &post, base)?);
+            vaults.push((vault.vault_id, base));
+            hops.push(hop);
+        }
+        let movements = [
+            (token, amount, 0),
+            (intent.token_in_policy_commit, 0, intent.amount_in),
+        ];
+        let trader = trader_core(&standing, &movements, &vaults)?;
+        let public_key = crate::sdk::signing_authority::current_public_key()?;
+        let ctx = context(&standing, set, &public_key, trader)?;
+        let draft = draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)?;
+        log::info!("[sofi] trade: drafted {} hops", planned.len());
+        match exercise_draft_at_head(core, set, &verifying, draft, accepted).await? {
+            Drafted::Position(outcome) => return Ok(outcome),
+            Drafted::HeadMoved(why) => {
+                log::info!("[sofi] trade: re-planning ({round}/{TRADE_REPLANS}): {why}");
+                moved = why;
+            }
+        }
     }
-    log::info!("[sofi] trade: walked {} vault heads", heads.len());
-    // A chain, or a split across two vaults of the pair (Amendment S19),
-    // planned again at the heads walked now.
-    let refs: Vec<&VaultAtHead> = heads.iter().collect();
-    let planned = plan(&refs, intent.token_in_policy_commit, intent.amount_in)?;
-    let (token, amount) = planned_out(&planned)?;
-    received(core, intent, &token, amount)?;
-    let mut hops = Vec::new();
-    let mut cores = Vec::new();
-    let mut vaults = Vec::new();
-    for (index, (vault, p)) in heads.iter().zip(&planned).enumerate() {
-        let setup_ref =
-            own_setup_ref(set, &standing.genesis, &standing.device_id, &vault.vault_id).await?;
-        let base = relationship_base(&standing, &vault.vault_id)?;
-        let (hop, post) = price_hop(vault, p.token_in, p.amount_in, setup_ref, index)?;
-        cores.push(vault_core(&standing, vault, &post, base)?);
-        vaults.push((vault.vault_id, base));
-        hops.push(hop);
-    }
-    let movements = [
-        (token, amount, 0),
-        (intent.token_in_policy_commit, 0, intent.amount_in),
-    ];
-    let trader = trader_core(&standing, &movements, &vaults)?;
-    let public_key = crate::sdk::signing_authority::current_public_key()?;
-    let ctx = context(&standing, set, &public_key, trader)?;
-    let draft = draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)?;
-    log::info!("[sofi] trade: drafted {} hops", planned.len());
-    exercise_draft(core, set, &standing, draft, accepted).await
+    Err(refuse(format!(
+        "the vault moved under the trade {TRADE_REPLANS} times: {moved}"
+    )))
 }
 
 // ── §32 Closing a vault ────────────────────────────────────────────────────
@@ -1824,8 +2268,8 @@ pub async fn close(
     }
     set_up_with(core, set, &[intent.vault_id], accepted).await?;
     let standing = standing(core)?;
-    let ctx = standing.context(set, accepted)?;
-    let verifier = ctx.verifier();
+    let verifying = standing.context(set, accepted)?;
+    let verifier = verifying.verifier();
     let chain = chain_past_withheld_pairs(
         set,
         &verifier,
@@ -1874,7 +2318,7 @@ pub async fn close(
         &standing.local,
     )
     .map_err(refuse)?;
-    exercise_draft(core, set, &standing, draft, accepted).await
+    exercise_draft(core, set, &verifying, draft, accepted).await
 }
 
 // ── §33 Relaying ───────────────────────────────────────────────────────────
@@ -1957,6 +2401,116 @@ mod tests {
     use crate::sdk::storage_node_sdk::SetClient;
     use dsm::common::domain_tags::TAG_DSM_SOFI_REL_INDEX;
     use dsm::crypto::domain::TaggedHashDomain;
+
+    /// A route search walks only the vaults that can be in a route: the one
+    /// pairing ERA and WILD, and the two legs of the chain WILD→TKN→ERA.
+    fn lane(i: u8) -> [u8; 32] {
+        [0x30 + i; 32]
+    }
+
+    fn trader(i: u16) -> ([u8; 32], [u8; 32]) {
+        let mut g = [0x51; 32];
+        g[..2].copy_from_slice(&i.to_be_bytes());
+        (g, [0x52; 32])
+    }
+
+    /// Five equal vaults of a pair, each alone or split in two: a small
+    /// trade's split is within the tolerance of a single vault, so each
+    /// trader takes one vault alone — the same one every time — and traders
+    /// spread over all five instead of piling into the first.
+    #[test]
+    fn near_equal_routes_spread_traders_over_a_pairs_vaults() {
+        let mut routes: Vec<(u64, Vec<[u8; 32]>)> =
+            (0..5).map(|i| (1_000, vec![lane(i)])).collect();
+        for i in 0..5 {
+            for j in i + 1..5 {
+                routes.push((1_020, vec![lane(i), lane(j)]));
+            }
+        }
+        let mut chosen = std::collections::BTreeSet::new();
+        for t in 0..60 {
+            let (g, d) = trader(t);
+            let pick = choose_route(&routes, (&g, &d)).expect("a route");
+            assert_eq!(
+                routes[pick].1.len(),
+                1,
+                "a single vault within the tolerance"
+            );
+            assert_eq!(
+                choose_route(&routes, (&g, &d)),
+                Some(pick),
+                "one trader, one route"
+            );
+            chosen.insert(routes[pick].1[0]);
+        }
+        assert_eq!(chosen.len(), 5, "the traders spread over every vault");
+    }
+
+    /// Both sides of the tolerance band, to the base unit: a single vault
+    /// exactly `ROUTE_TOLERANCE_BPS` below a split is inside the band
+    /// (inclusive) and wins on fewer legs; one base unit lower is outside it,
+    /// and the economically better split wins.
+    #[test]
+    fn the_tolerance_band_is_inclusive_to_the_base_unit() {
+        let (g, d) = trader(3);
+        let best = 10_000u64;
+        let at_band = best * (10_000 - ROUTE_TOLERANCE_BPS) / 10_000;
+        let inside = vec![(at_band, vec![lane(0)]), (best, vec![lane(0), lane(1)])];
+        assert_eq!(
+            choose_route(&inside, (&g, &d)),
+            Some(0),
+            "inside: fewer legs win"
+        );
+        let outside = vec![(at_band - 1, vec![lane(0)]), (best, vec![lane(0), lane(1)])];
+        assert_eq!(
+            choose_route(&outside, (&g, &d)),
+            Some(1),
+            "outside: the split wins"
+        );
+    }
+
+    /// A split that beats every single vault by more than the tolerance is
+    /// taken; a single vault far below the best is never; no routes, none.
+    #[test]
+    fn a_materially_better_route_wins_and_a_poor_one_never_does() {
+        let (g, d) = trader(7);
+        let big = vec![
+            (1_000, vec![lane(0)]),
+            (1_000, vec![lane(1)]),
+            (1_100, vec![lane(0), lane(1)]),
+        ];
+        assert_eq!(choose_route(&big, (&g, &d)), Some(2));
+        let poor = vec![(900, vec![lane(0)]), (1_000, vec![lane(1)])];
+        assert_eq!(choose_route(&poor, (&g, &d)), Some(1));
+        assert_eq!(choose_route(&[], (&g, &d)), None);
+    }
+
+    /// An ERA vault of an unrelated pair, and a chain whose second leg is
+    /// missing, take no part in any route and are never walked.
+    #[test]
+    fn a_route_search_walks_only_the_vaults_a_route_can_use() {
+        let (wild, era, tkn, other, lone) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32]);
+        let vault = |id: u8, a: D32, b: D32| Paired {
+            vault_id: [id; 32],
+            tokens: (a, b),
+        };
+        let firsts = [
+            vault(10, wild, era),
+            vault(11, tkn, wild),
+            vault(12, wild, lone),
+        ];
+        let seconds = [
+            vault(10, wild, era),
+            vault(20, era, tkn),
+            vault(21, other, era),
+        ];
+        assert_eq!(
+            route_legs(&firsts, &seconds, &wild, &era),
+            vec![[10; 32], [11; 32], [20; 32]],
+            "the direct vault and the WILD→TKN→ERA legs; not ERA/OTHER, not WILD/LONE"
+        );
+        assert!(route_legs(&[vault(12, wild, lone)], &seconds, &wild, &era).is_empty());
+    }
 
     /// MR-STOR-0021 (storage §4): a setup candidate whose bytes no member
     /// holds may be this device's setup, so a relationship-index scan that

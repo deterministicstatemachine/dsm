@@ -49,6 +49,7 @@ export const {
   getArchitectureInfo,
   getDeviceIdBinBridgeAsync,
   getDiagnosticsLog,
+  returnToConnectCaller,
   shareDiagnosticsReport,
 } = diagnostics;
 

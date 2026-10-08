@@ -305,7 +305,7 @@ async fn bytecommits_close_link_and_prove_on_this_backend() {
     let member = b"dsm-node-props";
     let key = unique_key(0x3C);
     // Other tests share this store: first flush whatever they left pending.
-    let closing = tokio::sync::Mutex::new(());
+    let closing = db::CommittedCells::default();
     let base = db::close_cycle(&pool, &closing, member)
         .await
         .expect("flush");
@@ -319,7 +319,7 @@ async fn bytecommits_close_link_and_prove_on_this_backend() {
         assert!(c1.follows(b), "the new cycle links to the one before");
     }
     let values = db::get_cell_values(&pool, NS, &key).await.expect("read");
-    let p1 = db::cell_commit_proof(&pool, NS, &key, c1.cycle_index)
+    let p1 = db::cell_commit_proof(&pool, &closing, NS, &key, c1.cycle_index)
         .await
         .expect("proof")
         .expect("committed");
@@ -391,4 +391,253 @@ async fn opposite_order_batches_over_the_same_keys_all_complete() {
         let entries = db::get_cell_entries(&pool, NS, &k).await.expect("read");
         assert_eq!(entries.len(), 16);
     }
+}
+
+// ── what a node keeps of its closed cycles ─────────────────────────────────
+//
+// A close applies only the entries it stamps to the leaf set it kept, and a
+// proof reads a kept tree. Each is checked against the computation it
+// replaced: every cell's latest committed entry read whole from the store,
+// the tree built from all of them, and the bytes summed over every row.
+
+/// The root and bytes a close computed before it kept anything: the tree
+/// over every cell's latest entry stamped at or before `cycle`, and every
+/// byte the store holds.
+async fn rebuilt_root_and_bytes(pool: &db::DBPool, cycle: u64) -> ([u8; 32], u64) {
+    let client = pool.get().await.expect("connection");
+    let rows = client
+        .query(
+            "SELECT DISTINCT ON (namespace, cell_key)
+                    namespace, cell_key, arrival_index, running_hash
+             FROM cells WHERE committed_cycle <= $1
+             ORDER BY namespace, cell_key, arrival_index DESC",
+            &[&i64::try_from(cycle).expect("cycle")],
+        )
+        .await
+        .expect("leaves");
+    let leaves: Vec<super::committed::CellLeaf> = rows
+        .iter()
+        .map(|r| {
+            let key: Vec<u8> = r.get(1);
+            let hash: Vec<u8> = r.get(3);
+            (
+                r.get(0),
+                key.try_into().expect("32-byte key"),
+                u64::try_from(r.get::<_, i64>(2)).expect("index"),
+                hash.try_into().expect("32-byte hash"),
+            )
+        })
+        .collect();
+    let root =
+        *dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)))
+            .root();
+    let bytes: i64 = client
+        .query_one(
+            "SELECT COALESCE((SELECT SUM(LENGTH(value)) FROM cells), 0)::BIGINT
+                  + COALESCE((SELECT SUM(LENGTH(payload)) FROM immutable_objects), 0)::BIGINT",
+            &[],
+        )
+        .await
+        .expect("bytes")
+        .get(0);
+    (root, u64::try_from(bytes).expect("bytes"))
+}
+
+/// A proof's wire bytes, as the proof route answers them.
+async fn proof_bytes(
+    pool: &db::DBPool,
+    node: &db::CommittedCells,
+    namespace: &[u8],
+    key: &[u8; 32],
+    cycle: u64,
+) -> Option<Vec<u8>> {
+    use prost::Message;
+    db::cell_commit_proof(pool, node, namespace, key, cycle)
+        .await
+        .expect("proof")
+        .map(|p| p.to_proto().encode_to_vec())
+}
+
+/// Close with `node` and check the ByteCommit against the full rebuild.
+async fn close_and_check(
+    pool: &db::DBPool,
+    node: &db::CommittedCells,
+    member: &[u8],
+) -> dsm::storage_cell::ByteCommit {
+    let commit = db::close_cycle(pool, node, member)
+        .await
+        .expect("close")
+        .expect("a cycle");
+    let (root, bytes) = rebuilt_root_and_bytes(pool, commit.cycle_index).await;
+    assert_eq!(
+        commit.smt_root, root,
+        "cycle {}: the root is the full rebuild's",
+        commit.cycle_index
+    );
+    assert_eq!(
+        commit.bytes_used, bytes,
+        "cycle {}: the bytes are every row's",
+        commit.cycle_index
+    );
+    commit
+}
+
+/// Over cycles that add cells, overwrite them (one twice within a cycle),
+/// use a second namespace and add immutable objects, every ByteCommit a
+/// node closes from the leaf set it kept has the root and bytes the full
+/// rebuild computes, from the first cycle on, and every proof it answers
+/// from a kept tree, for every cycle closed so far, is byte for byte the
+/// proof built from the store.
+#[tokio::test]
+async fn a_kept_leaf_set_closes_and_proves_exactly_what_a_full_rebuild_does() {
+    let (pool, admin, schema) = super::schema_properties::isolated_schema(0x3F).await;
+    db::init_db(&pool).await.expect("init");
+    const OTHER: &[u8] = b"DSM/cell-properties-other";
+    let node = db::CommittedCells::default();
+    let keys: Vec<[u8; 32]> = (0..24).map(|_| unique_key(0x3F)).collect();
+    let never_put = unique_key(0x3F);
+    let mut closed = Vec::new();
+    for round in 0..6usize {
+        if round == 0 {
+            for (i, k) in keys.iter().enumerate() {
+                db::put_cell(&pool, NS, k, &vec![i as u8; 10 + i])
+                    .await
+                    .expect("put");
+            }
+        } else {
+            for (i, k) in keys.iter().enumerate().filter(|(i, _)| i % 5 == round % 5) {
+                db::put_cell(&pool, NS, k, &vec![round as u8; round * 7 + i])
+                    .await
+                    .expect("overwrite");
+            }
+            for v in [b"first of two".as_slice(), b"second of two"] {
+                db::put_cell(&pool, NS, &keys[round], v)
+                    .await
+                    .expect("twice");
+            }
+            db::put_cell(&pool, OTHER, &keys[round], b"other namespace")
+                .await
+                .expect("put");
+            db::insert_immutable_object_if_absent(
+                &pool,
+                &super::test_store::unique_name(0x3F),
+                NS,
+                &vec![round as u8; 100 * round],
+            )
+            .await
+            .expect("immutable");
+        }
+        let commit = close_and_check(&pool, &node, b"dsm-node-kept").await;
+        assert_eq!(commit.cycle_index, round as u64 + 1);
+        assert!(
+            node.kept_cycles().contains(&commit.cycle_index),
+            "the node keeps the tree it closed"
+        );
+        closed.push(commit.cycle_index);
+        for cycle in &closed {
+            for k in keys[..7].iter().chain([&never_put]) {
+                for ns in [NS, OTHER] {
+                    let kept = proof_bytes(&pool, &node, ns, k, *cycle).await;
+                    let rebuilt =
+                        proof_bytes(&pool, &db::CommittedCells::default(), ns, k, *cycle).await;
+                    assert_eq!(kept, rebuilt, "cycle {cycle}: the kept tree's proof");
+                }
+            }
+        }
+    }
+    assert_eq!(
+        proof_bytes(&pool, &node, NS, &keys[0], 7).await,
+        None,
+        "a cycle that never closed has no proof"
+    );
+    super::schema_properties::drop_schema(&admin, &schema).await;
+}
+
+/// Two processes closing on one database: a node whose kept leaf set is as
+/// of a ByteCommit that is no longer the latest reads the store again, so
+/// each close — the second process's first (a restart's) included — has the
+/// root and bytes of the full rebuild.
+#[tokio::test]
+async fn a_closer_reads_the_store_again_when_another_closed_since() {
+    let (pool, admin, schema) = super::schema_properties::isolated_schema(0x40).await;
+    db::init_db(&pool).await.expect("init");
+    let (a, b) = (db::CommittedCells::default(), db::CommittedCells::default());
+    let keys: Vec<[u8; 32]> = (0..8).map(|_| unique_key(0x40)).collect();
+    // a, a, b, a, b, b, a: each closer both continues its own leaf set and
+    // finds the other's cycles.
+    for (round, node) in [&a, &a, &b, &a, &b, &b, &a].into_iter().enumerate() {
+        for k in keys.iter().skip(round % 3).step_by(2) {
+            db::put_cell(&pool, NS, k, format!("round {round}").as_bytes())
+                .await
+                .expect("put");
+        }
+        let commit = close_and_check(&pool, node, b"dsm-node-shared").await;
+        assert_eq!(commit.cycle_index, round as u64 + 1);
+    }
+    super::schema_properties::drop_schema(&admin, &schema).await;
+}
+
+/// A kept tree answers only for the ByteCommit it was kept for: when the
+/// store's ByteCommit at that cycle is another (the database was
+/// reprovisioned under a running process), the proof is built from the
+/// store, as it was before anything was kept.
+#[tokio::test]
+async fn a_kept_tree_answers_only_for_the_byte_commit_it_was_kept_for() {
+    let (pool, admin, schema) = super::schema_properties::isolated_schema(0x41).await;
+    db::init_db(&pool).await.expect("init");
+    let key = unique_key(0x41);
+    let a = db::CommittedCells::default();
+    db::put_cell(&pool, NS, &key, b"before").await.expect("put");
+    let first = close_and_check(&pool, &a, b"dsm-node-reset").await;
+    assert!(proof_bytes(&pool, &a, NS, &key, 1).await.is_some());
+
+    pool.get()
+        .await
+        .expect("connection")
+        .batch_execute("DELETE FROM own_bytecommits; DELETE FROM cells;")
+        .await
+        .expect("reprovision");
+    db::put_cell(&pool, NS, &key, b"after").await.expect("put");
+    let b = db::CommittedCells::default();
+    let second = close_and_check(&pool, &b, b"dsm-node-reset").await;
+    assert_eq!(second.cycle_index, first.cycle_index);
+    assert_ne!(second, first);
+
+    assert_eq!(
+        proof_bytes(&pool, &a, NS, &key, 1).await,
+        proof_bytes(&pool, &db::CommittedCells::default(), NS, &key, 1).await,
+        "the tree kept for the first cycle 1 does not answer for the second"
+    );
+    db::put_cell(&pool, NS, &key, b"later").await.expect("put");
+    close_and_check(&pool, &a, b"dsm-node-reset").await;
+    super::schema_properties::drop_schema(&admin, &schema).await;
+}
+
+/// A node keeps the newest cycles' trees within both bounds, and always the
+/// newest, however large.
+#[test]
+fn kept_trees_are_the_newest_within_the_bounds() {
+    use std::sync::Arc;
+    let tree = |leaves: u8| {
+        Arc::new(
+            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::from_leaves(
+                (0..leaves).map(|i| ([i; 32], [i; 32])),
+            ),
+        )
+    };
+    let by_cycles = db::CommittedCells::bounded(4, 100);
+    let by_leaves = db::CommittedCells::bounded(4, 10);
+    for cycle in 1..=6u64 {
+        by_cycles.keep(cycle, [cycle as u8; 32], tree(3));
+        by_leaves.keep(cycle, [cycle as u8; 32], tree(3));
+    }
+    assert_eq!(by_cycles.kept_cycles(), vec![3, 4, 5, 6]);
+    assert_eq!(by_leaves.kept_cycles(), vec![4, 5, 6], "9 leaves, not 12");
+    by_leaves.keep(7, [7; 32], tree(20));
+    assert_eq!(by_leaves.kept_cycles(), vec![7], "the newest stays");
+    assert!(by_leaves.tree_at(7, &[7; 32]).is_some());
+    assert!(
+        by_leaves.tree_at(7, &[8; 32]).is_none(),
+        "kept for another ByteCommit"
+    );
 }

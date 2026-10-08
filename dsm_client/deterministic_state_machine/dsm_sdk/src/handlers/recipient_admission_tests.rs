@@ -153,22 +153,6 @@ async fn a_transfer_admits_on_both_sides_with_a_register_backed_release() {
     assert_eq!(facts.recipient_economic_position, 1);
     assert_eq!(facts.recipient_devid, p.b.device_id);
 
-    // The sender's coordinate this acceptance verified is B's frontier for A
-    // from now on (DSM Amendment A8).
-    let sender_position = facts_sender_position(&p);
-    let frontier = client_db::economic_lineage::frontier_below(
-        &p.a.genesis,
-        &p.a.device_id,
-        sender_position + 1,
-    )
-    .unwrap()
-    .expect("the accepted sender coordinate is B's frontier for A");
-    assert_eq!(
-        frontier.economic_position(),
-        sender_position,
-        "B's frontier for A is the coordinate its acceptance verified"
-    );
-
     // Sender side: finalized on the release (generation semantics), and its
     // own debit admitted.
     p.a.enter();
@@ -176,15 +160,6 @@ async fn a_transfer_admits_on_both_sides_with_a_register_backed_release() {
         .unwrap()
         .expect("sender admitted");
     assert_eq!(a_pos, 2, "faucet claim (1) + debit (2)");
-}
-
-fn facts_sender_position(p: &Pair) -> u64 {
-    p.a.enter();
-    let (pos, _) = client_db::economic_lineage::get_admitted_coordinate()
-        .unwrap()
-        .expect("sender admitted");
-    p.b.enter();
-    pos
 }
 
 /// THE correction-3 control: hostile sender coordinates are refused BEFORE
@@ -410,12 +385,6 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
         0,
         "no journal row during the hold"
     );
-    assert!(
-        client_db::economic_lineage::frontier_below(&p.a.genesis, &p.a.device_id, EVERY_POSITION)
-            .unwrap()
-            .is_none(),
-        "no frontier for A from a walk the outage cut short"
-    );
 
     // Fleet back: the SAME row proceeds through the full admission.
     p.nodes.bring_up(&down).await;
@@ -431,13 +400,4 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
         1,
         "the credit admitted"
     );
-    assert!(
-        client_db::economic_lineage::frontier_below(&p.a.genesis, &p.a.device_id, EVERY_POSITION)
-            .unwrap()
-            .is_some(),
-        "the frontier for A recorded with the acceptance"
-    );
 }
-
-/// Every position a frontier can be recorded at lies below this one.
-const EVERY_POSITION: u64 = i64::MAX as u64;

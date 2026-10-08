@@ -215,6 +215,29 @@ pub fn find_current_payload_with_prefix_and_purpose(
         .optional()?)
 }
 
+/// Every artifact not yet read back `Stored` that was frozen with the
+/// artifact at `object_key`, in the same advance: bound to the same root, for
+/// the same set. Oldest first.
+pub fn list_unpublished_frozen_with(object_key: &str) -> Result<Vec<FrozenArtifact>> {
+    let binding = get_connection()?;
+    // A panic elsewhere while the connection was held leaves it usable: every
+    // write here is one statement.
+    let conn = match binding.lock() {
+        Ok(conn) => conn,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM frozen_publication_artifact
+          WHERE state IN ('frozen', 'publication_pending')
+            AND (bound_root, storage_set_id) IN
+                (SELECT bound_root, storage_set_id FROM frozen_publication_artifact
+                  WHERE object_key = ?1)
+          ORDER BY insertion_ordinal ASC"
+    ))?;
+    let rows = stmt.query_map(params![object_key], row_to_artifact)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Every artifact not yet read back `Stored`, oldest first, at most `limit`.
 pub fn list_unpublished_artifacts(limit: u32) -> Result<Vec<FrozenArtifact>> {
     let binding = get_connection()?;
@@ -226,6 +249,23 @@ pub fn list_unpublished_artifacts(limit: u32) -> Result<Vec<FrozenArtifact>> {
           LIMIT ?1"
     ))?;
     let rows = stmt.query_map(params![i64::from(limit)], row_to_artifact)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Every artifact frozen under `purpose` not yet read back `Stored`, oldest
+/// first, at most `limit`.
+pub fn list_unpublished_with_purpose(purpose: &str, limit: u32) -> Result<Vec<FrozenArtifact>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("frozen artifacts: the store is poisoned: {e}"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM frozen_publication_artifact
+          WHERE state IN ('frozen', 'publication_pending') AND purpose = ?1
+          ORDER BY insertion_ordinal ASC
+          LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![purpose, i64::from(limit)], row_to_artifact)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

@@ -229,6 +229,146 @@ pub fn verify_batch<H: SmtHashes>(
     Ok(folded.post_root)
 }
 
+/// The root a path folds to from one leaf position, under `H`.
+pub fn fold_path<H: SmtHashes>(
+    key: &[u8; 32],
+    value: Option<&[u8; 32]>,
+    path: &[[u8; 32]; FOLD_HEIGHT],
+) -> [u8; 32] {
+    let mut current = H::leaf(key, value);
+    for level in (0..FOLD_HEIGHT).rev() {
+        let sibling = path[FOLD_HEIGHT - 1 - level];
+        current = if get_bit(key, level) == 0 {
+            H::node(&current, &sibling)
+        } else {
+            H::node(&sibling, &current)
+        };
+    }
+    current
+}
+
+/// A held leaf, with its path, after one write set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advanced {
+    /// The leaf's value under the post-root: the write set's post-value when
+    /// it wrote this key, the held value otherwise.
+    pub value: Option<[u8; 32]>,
+    /// Leaf-to-root siblings against the post-root.
+    pub path: Box<[[u8; 32]; FOLD_HEIGHT]>,
+}
+
+/// Why a held path does not advance through a write set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvanceError {
+    /// The held leaf and path do not fold to the write set's pre-root.
+    NotUnderPreRoot,
+    /// The write set's entries are not one tree's worth of paths, or one of
+    /// the subtrees they write contradicts the held path.
+    Fold(FoldError),
+    /// The write set wrote the held key from a value other than the one held.
+    HeldValueDiffers,
+    /// The advanced leaf and path do not fold to the claimed post-root.
+    NotUnderPostRoot,
+}
+
+impl core::fmt::Display for AdvanceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotUnderPreRoot => write!(f, "the held path is not under the pre-root"),
+            Self::Fold(e) => write!(f, "{e}"),
+            Self::HeldValueDiffers => {
+                write!(f, "the write set wrote the held key from another value")
+            }
+            Self::NotUnderPostRoot => {
+                write!(f, "the advanced path does not fold to the post-root")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdvanceError {}
+
+impl From<FoldError> for AdvanceError {
+    fn from(e: FoldError) -> Self {
+        Self::Fold(e)
+    }
+}
+
+/// Advance one held leaf's path from `pre_root` to `post_root` through a
+/// write set, without the tree.
+///
+/// A path is specific to its root. At each depth of the held key, the sibling
+/// is the root of the subtree the key does not descend into; when the write
+/// set wrote into that subtree, its new root is folded from the write set's
+/// own entries there ([`subtree`]), and their pre side must be the sibling the
+/// held path names — the held path folds to `pre_root`, so that sibling is
+/// the tree's. Where the write set wrote nothing, the sibling is unchanged.
+/// The write set must fold from `pre_root` to `post_root`, and the advanced
+/// leaf and path must fold to `post_root`.
+pub fn advance_path<H: SmtHashes>(
+    pre_root: &[u8; 32],
+    post_root: &[u8; 32],
+    entries: &[FoldEntry],
+    key: &[u8; 32],
+    held: Option<&[u8; 32]>,
+    path: &[[u8; 32]; FOLD_HEIGHT],
+) -> Result<Advanced, AdvanceError> {
+    if fold_path::<H>(key, held, path) != *pre_root {
+        return Err(AdvanceError::NotUnderPreRoot);
+    }
+    // The whole write set is checked, so every sibling it carries is the
+    // tree's, including those no held path reads.
+    let folded = batch_fold::<H>(entries)?;
+    if folded.pre_root != *pre_root {
+        return Err(FoldError::PreRootMismatch {
+            claimed: *pre_root,
+            computed: folded.pre_root,
+        }
+        .into());
+    }
+    if folded.post_root != *post_root {
+        return Err(AdvanceError::NotUnderPostRoot);
+    }
+    let mut advanced = Box::new(*path);
+    // The entries still on the held key's side of every depth so far.
+    let mut beside: Vec<&FoldEntry> = entries.iter().collect();
+    for depth in 0..FOLD_HEIGHT {
+        if beside.is_empty() {
+            break;
+        }
+        let bit = get_bit(key, depth);
+        let (same, other): (Vec<&FoldEntry>, Vec<&FoldEntry>) = beside
+            .into_iter()
+            .partition(|e| get_bit(&e.key, depth) == bit);
+        if !other.is_empty() {
+            let (pre, post) = subtree::<H>(depth + 1, &other)?;
+            let at = FOLD_HEIGHT - 1 - depth;
+            if pre != path[at] {
+                return Err(FoldError::InconsistentPath { depth }.into());
+            }
+            advanced[at] = post;
+        }
+        beside = same;
+    }
+    // Ascending keys leave at most one entry at the held key itself.
+    let value = match beside.first() {
+        Some(written) => {
+            if written.pre.as_ref() != held {
+                return Err(AdvanceError::HeldValueDiffers);
+            }
+            written.post
+        }
+        None => held.copied(),
+    };
+    if fold_path::<H>(key, value.as_ref(), &advanced) != *post_root {
+        return Err(AdvanceError::NotUnderPostRoot);
+    }
+    Ok(Advanced {
+        value,
+        path: advanced,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {

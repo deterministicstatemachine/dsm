@@ -1290,6 +1290,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "wildstate-duel",
  "zeroize",
 ]
 
@@ -4909,6 +4910,22 @@ dependencies = [
  "objc2-system-configuration",
  "wasite",
  "web-sys",
+]
+
+[[package]]
+name = "wildstate-duel"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
+name = "wildstate-duel-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "wildstate-duel",
 ]
 
 [[package]]

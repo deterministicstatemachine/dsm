@@ -94,9 +94,20 @@ function VaultCard({ vault, verdict, busy, onVerdict, onSign, onDecide, onReleas
         <span className="sb-kv__v sb-kv__v--mono">{middleTruncate(id, 8, 6)}</span>
       </div>
       <div className="sb-kv">
-        <span className="sb-kv__k">Verdict cell</span>
+        <span className="sb-kv__k">{vault.decidedByProgram === undefined ? 'Verdict cell' : 'Match cell'}</span>
         <span className="sb-kv__v sb-kv__v--mono">{middleTruncate(cell, 8, 6)}</span>
       </div>
+      {vault.decidedByProgram !== undefined && (
+        <>
+          <div className="sb-kv">
+            <span className="sb-kv__k">Decided by</span>
+            <span className="sb-kv__v">program {vault.decidedByProgram}</span>
+          </div>
+          <p className="sb-hint sb-hint--tight">
+            No referee: the outcome is computed from both players&apos; signed moves.
+          </p>
+        </>
+      )}
       {vault.outcomes.map((o) => {
         const text = outcomeText(o.outcome);
         return (

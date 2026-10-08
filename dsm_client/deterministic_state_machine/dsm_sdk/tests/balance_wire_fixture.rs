@@ -57,6 +57,8 @@ fn emit_balances_list_fixture() {
         // Cash in hand under the attached appliance's bundle, rendered by Rust:
         // 2_500 base units at 2 decimals is 25.00. Present, because absent means
         // unknown, and the wallet then prints no offline figure at all.
+        // A token of supply 100_000_000 base units is a currency, not a state object.
+        holding: dsm_sdk::generated::BalanceHolding::Currency as i32,
         offline_allocation: Some(dsm_sdk::generated::OfflineAllocationView {
             base_units: 2_500,
             display_amount: crate_format(2_500, 2),

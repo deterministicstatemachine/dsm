@@ -116,53 +116,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     });
   });
 
-  test('offline send submits through sendOfflineTransfer', async () => {
-    const contact = contactDto('Receiver', 0x0a, 'AA:BB:CC:DD:EE:FF');
-
-    (dsmClient.getIdentity as any) = jest
-      .fn()
-      .mockResolvedValue({ genesisHash: 'G'.repeat(32), deviceId: 'D'.repeat(32) });
-    (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [contact] });
-    (dsmClient.getAllBalances as any) = jest
-      .fn()
-      .mockResolvedValue([{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
-    (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
-    (dsmClient.sendOfflineTransfer as any) = jest.fn().mockResolvedValue({ success: true });
-
-    await renderWallet();
-
-    await waitFor(() => expect(screen.getByText('DSM Wallet')).toBeInTheDocument());
-
-    fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
-    // The form no longer pre-selects a recipient: pick one, as a user must.
-    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: encodeBase32Crockford(contact.deviceId) } });
-    fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
-    fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '1' } });
-    // The token picker is a listbox, not a native select: it shows each
-    // token's coin, which an <option> cannot render. The one token on offer
-    // DISPLAYS as "ERA" while its id is "ROOT", which is what this test is
-    // about, so take it by position and let the assertion below check that the
-    // identity, not the label, is what gets sent.
-    fireEvent.click(screen.getByRole('button', { name: 'Token' }));
-    fireEvent.click(within(screen.getByRole('listbox', { name: 'Token' })).getAllByRole('option')[0]);
-    fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-
-    await waitFor(() => {
-      expect(dsmClient.sendOfflineTransfer).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tokenId: 'ROOT',
-          to: encodeBase32Crockford(contact.deviceId),
-          amount: '1',
-        })
-      );
-    });
-    // Where the recipient's appliance is over BLE is Rust's to know: the screen names no address.
-    expect((dsmClient.sendOfflineTransfer as jest.Mock).mock.calls[0][0]).not.toHaveProperty('bleAddress');
-  });
-
   test('online sender updates visible balance in the UI after send completes', async () => {
     const contact = contactDto('Receiver', 0x0a);
 
@@ -201,57 +154,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       );
       expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();
       expect(screen.getAllByText('75').length).toBeGreaterThanOrEqual(1);
-      expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();
-    });
-  });
-
-  test('offline sender updates visible balance in the UI after send completes', async () => {
-    const contact = contactDto('Receiver', 0x0a, 'AA:BB:CC:DD:EE:FF');
-
-    installStandardWalletMocks([contact]);
-
-    let balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 80n, displayAmount: '80', decimals: 0 }];
-    let historyState: any[] = [];
-
-    (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
-    (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
-    (dsmClient.sendOfflineTransfer as any) = jest.fn().mockImplementation(async () => {
-      balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', baseUnits: 55n, displayAmount: '55', decimals: 0 }];
-      historyState = [{ txId: 'tx-offline-sender', txHash: 'TXOFFLINESENDERHASH', txType: 'bilateral_offline', type: 'offline', amount: -25n, displayAmount: '-25', tokenId: 'ERA', recipient: 'Receiver', status: 'confirmed', fromDeviceId: 'FROM', toDeviceId: 'TO', receiptVerified: false }];
-      return { accepted: true, result: 'Bilateral transfer complete' };
-    });
-
-    await renderWallet();
-
-    await waitFor(() => expect(screen.getByText('80')).toBeInTheDocument());
-
-    fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
-    // The form no longer pre-selects a recipient: pick one, as a user must.
-    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: encodeBase32Crockford(contact.deviceId) } });
-    fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
-    fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
-    // The token picker is a listbox, not a native select: it shows each
-    // token's coin, which an <option> cannot render. The one token on offer
-    // DISPLAYS as "ERA" while its id is "ROOT", which is what this test is
-    // about, so take it by position and let the assertion below check that the
-    // identity, not the label, is what gets sent.
-    fireEvent.click(screen.getByRole('button', { name: 'Token' }));
-    fireEvent.click(within(screen.getByRole('listbox', { name: 'Token' })).getAllByRole('option')[0]);
-    fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-
-    await waitFor(() => {
-      expect(dsmClient.sendOfflineTransfer).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tokenId: 'ROOT',
-          to: encodeBase32Crockford(contact.deviceId),
-          amount: '25',
-        })
-      );
-      expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();
-      expect(screen.getAllByText('55').length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();
     });
   });
@@ -468,5 +370,17 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
       bridge.sendMessageBin = answer;
     }
     expect(methods).not.toContain('nativeHostRequest');
+  });
+
+  test('the Bitcoin tab says it is under construction, and the wallet stays where it was', async () => {
+    await renderWallet();
+    const overview = screen.getByRole('button', { name: 'Overview' });
+    expect(overview).toHaveClass('active');
+    fireEvent.click(screen.getByRole('button', { name: 'Bitcoin' }));
+    expect(screen.getByRole('alertdialog', { name: 'Bitcoin' })).toHaveTextContent('Under construction.');
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(overview).toHaveClass('active');
+    expect(screen.getByRole('button', { name: 'Bitcoin' })).not.toHaveClass('active');
   });
 });

@@ -69,6 +69,16 @@ impl ProvenanceResolver for NoPeers {
         )))
     }
 
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no relationship in this fixture: {signer:?} step {addr:?}"
+        )))
+    }
+
     fn anchored_policy_bytes(
         &self,
         policy_commit: &[u8; 32],
@@ -223,6 +233,14 @@ impl ProvenanceResolver for Anchors {
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         NoPeers.immutable_evidence(namespace, addr)
+    }
+
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        NoPeers.held_ek_step(signer, addr)
     }
     fn anchored_policy_bytes(
         &self,
@@ -452,6 +470,14 @@ fn policy_bytes_that_are_not_the_commit_establish_nothing() {
             addr: &[u8; 32],
         ) -> Result<Vec<u8>, PeerLineageFailure> {
             NoPeers.immutable_evidence(namespace, addr)
+        }
+
+        fn held_ek_step(
+            &self,
+            signer: &[u8; 32],
+            addr: &[u8; 32],
+        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+            NoPeers.held_ek_step(signer, addr)
         }
         fn anchored_policy_bytes(
             &self,

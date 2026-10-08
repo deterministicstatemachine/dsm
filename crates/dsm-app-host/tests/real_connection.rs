@@ -167,6 +167,19 @@ impl Host {
         }
     }
 
+    /// Everything this host's processes logged, every start's log in order.
+    fn logged(&self) -> String {
+        (1..=self.starts)
+            .map(|start| {
+                let path = self.dir.join(format!("{}-{start}.log", self.name));
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(e) => panic!("the process log {}: {e}", path.display()),
+                }
+            })
+            .collect()
+    }
+
     /// Start the process (again, on the same account, after `stop`) and wait
     /// until its ingress answers. Each start logs to a file of its own.
     async fn start(&mut self) {
@@ -460,6 +473,7 @@ async fn create_vault(
         reserve_a_entered: a.1,
         reserve_b_entered: b.1,
         fee_bps: 30,
+        label: String::new(),
     };
     match game
         .call(Route::Invoke, "sofi.createVault", request.encode_to_vec())
@@ -539,6 +553,7 @@ fn game_scopes(wild: &[u8; 32]) -> Vec<pb::ConnectScopeV1> {
             kind: pb::ConnectScopeKind::Swap as i32,
             policy_commits: vec![wild.to_vec(), era().to_vec()],
             caps: vec![cap(&era(), 1_000, 2_000)],
+            programs: Vec::new(),
         },
         pb::ConnectScopeV1 {
             kind: pb::ConnectScopeKind::Holdings as i32,
@@ -883,6 +898,9 @@ async fn connect_over_the_real_relay() {
             token_out: wild.to_vec(),
             amount_in: 500,
             min_amount_out: 1,
+            // The account fills in its vaults' witnesses as it signs the
+            // request (SoFi Amendment S24); the application asks for none.
+            vault_witnesses: Vec::new(),
         }),
     )
     .await;
@@ -927,6 +945,83 @@ async fn connect_over_the_real_relay() {
         },
     )
     .await;
+
+    // A second swap, now that the vault has moved: the account signs and
+    // publishes its baseline at the generation it established and hands the
+    // wallet its witness inside the request (SoFi Amendment S24). The wallet
+    // already holds the vault, so it walks on from what it holds; the
+    // request still carries, signs and decodes as it must.
+    let era_before = wallet.holds("ERA").await;
+    let again = ask(
+        &game,
+        &session,
+        Kind::Swap(pb::ConnectSwapV1 {
+            token_in: era().to_vec(),
+            token_out: wild.to_vec(),
+            amount_in: 100,
+            min_amount_out: 1,
+            vault_witnesses: Vec::new(),
+        }),
+    )
+    .await;
+    let swapped = answered(&game, &session, again, "the second swap runs").await;
+    assert_eq!(
+        outcome(&swapped),
+        pb::ConnectOutcome::CarriedOut,
+        "{}",
+        swapped.reason
+    );
+    assert_eq!(wallet.holds("ERA").await, era_before - 100);
+    assert!(
+        game.logged()
+            .contains("published the baseline at generation"),
+        "the account signed and published its baseline for the second swap"
+    );
+
+    // Two wallets swap through the one vault at once. Both read its head and
+    // can race for its next key: the loser's position resolves Void, provable
+    // by anyone (SoFi Amendment S25), and its wallet quotes and trades again,
+    // so both swaps are carried out and neither wallet is left pending.
+    let mut rival = Host::new("rival", &root, &config);
+    rival.start().await;
+    rival.claim_faucet().await;
+    let rival_session = connect(&game, &rival, &wild).await;
+    let swap_kind = || {
+        Kind::Swap(pb::ConnectSwapV1 {
+            token_in: era().to_vec(),
+            token_out: wild.to_vec(),
+            amount_in: 100,
+            min_amount_out: 1,
+            vault_witnesses: Vec::new(),
+        })
+    };
+    let (mine, theirs) = futures::future::join(
+        ask(&game, &session, swap_kind()),
+        ask(&game, &rival_session, swap_kind()),
+    )
+    .await;
+    let (mine, theirs) = futures::future::join(
+        answered(&game, &session, mine, "the wallet's racing swap runs"),
+        answered(
+            &game,
+            &rival_session,
+            theirs,
+            "the rival's racing swap runs",
+        ),
+    )
+    .await;
+    for (who, swapped) in [("wallet", &mine), ("rival", &theirs)] {
+        assert_eq!(
+            outcome(swapped),
+            pb::ConnectOutcome::CarriedOut,
+            "{who}: {}",
+            swapped.reason
+        );
+    }
+    let raced = [&wallet, &rival]
+        .iter()
+        .any(|host| host.logged().contains("lost its vault's key"));
+    println!("the two swaps raced for one key: {raced}");
 
     // Outside the grant: ERA was never payable to the game. It waits for the
     // player, who declines it on the wallet.

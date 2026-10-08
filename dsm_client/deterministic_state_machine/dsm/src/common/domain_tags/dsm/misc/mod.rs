@@ -12,6 +12,7 @@ mod connect;
 mod economic;
 mod escrow;
 mod protocol;
+mod shared_lineage;
 mod sofi;
 mod testing;
 mod token_ops;
@@ -21,6 +22,7 @@ pub use connect::*;
 pub use economic::*;
 pub use escrow::*;
 pub use protocol::*;
+pub use shared_lineage::*;
 pub use sofi::*;
 pub use testing::*;
 pub use token_ops::*;
@@ -36,6 +38,12 @@ pub(super) fn sofi_tags() -> &'static [TaggedHashDomain<'static>] {
 #[cfg(test)]
 pub(super) fn escrow_tags() -> &'static [TaggedHashDomain<'static>] {
     escrow::ESCROW_TAGS
+}
+
+/// The shared-lineage tags (SoFi Amendment S23), collected the same way.
+#[cfg(test)]
+pub(super) fn shared_lineage_tags() -> &'static [TaggedHashDomain<'static>] {
+    shared_lineage::SHARED_LINEAGE_TAGS
 }
 
 #[cfg(test)]

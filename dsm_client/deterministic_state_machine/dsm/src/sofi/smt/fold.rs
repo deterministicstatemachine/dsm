@@ -11,7 +11,7 @@
 use crate::economic::tree::{default_node, econ_node, leaf_node, ECONOMIC_SMT_HEIGHT};
 use crate::merkle::batch_fold::{self, SmtHashes, FOLD_HEIGHT};
 
-pub use crate::merkle::batch_fold::{FoldEntry, FoldError, Folded};
+pub use crate::merkle::batch_fold::{AdvanceError, Advanced, FoldEntry, FoldError, Folded};
 
 // The economic tree is a 256-level tree; the fold's paths are exactly its paths.
 const _: () = assert!(ECONOMIC_SMT_HEIGHT == FOLD_HEIGHT);
@@ -35,6 +35,19 @@ impl SmtHashes for EconomicHashes {
 /// Fold against a claimed pre-root, returning the post-root.
 pub fn verify_batch(pre_root: &[u8; 32], entries: &[FoldEntry]) -> Result<[u8; 32], FoldError> {
     batch_fold::verify_batch::<EconomicHashes>(pre_root, entries)
+}
+
+/// Advance one held economic leaf and its path from `pre_root` to
+/// `post_root` through a write set ([`batch_fold::advance_path`]).
+pub fn advance_path(
+    pre_root: &[u8; 32],
+    post_root: &[u8; 32],
+    entries: &[FoldEntry],
+    key: &[u8; 32],
+    held: Option<&[u8; 32]>,
+    path: &[[u8; 32]; FOLD_HEIGHT],
+) -> Result<Advanced, AdvanceError> {
+    batch_fold::advance_path::<EconomicHashes>(pre_root, post_root, entries, key, held, path)
 }
 
 #[cfg(test)]
@@ -322,6 +335,230 @@ mod tests {
             batch_fold(&[lo.clone(), lo]),
             Err(FoldError::KeysNotAscending { index: 1 })
         ));
+    }
+
+    /// Writes to apply in one set: each key and the value it is left
+    /// holding, `None` for a removal.
+    type Writes = Vec<([u8; 32], Option<[u8; 32]>)>;
+
+    /// The write set that moves `tree` by `writes`, each stated against the
+    /// tree before them, sorted.
+    fn write_set(tree: &EconomicSmt, writes: &[([u8; 32], Option<[u8; 32]>)]) -> Vec<FoldEntry> {
+        sorted(writes.iter().map(|(k, v)| entry(tree, *k, *v)).collect())
+    }
+
+    fn apply(tree: &mut EconomicSmt, entries: &[FoldEntry]) {
+        for e in entries {
+            match e.post {
+                Some(v) => tree.insert(e.key, v),
+                None => tree.remove(&e.key),
+            }
+        }
+    }
+
+    /// Advance the held `(k, value, path)` through `rounds` write sets, and
+    /// after every one compare it with what the reference tree holds.
+    fn advance_through(mut tree: EconomicSmt, held_key: [u8; 32], rounds: &[Writes]) {
+        let mut value = tree.get(&held_key).copied();
+        let mut path = Box::new(tree.siblings(&held_key));
+        for writes in rounds {
+            let pre_root = tree.root();
+            let entries = write_set(&tree, writes);
+            let post_root = verify_batch(&pre_root, &entries).unwrap();
+            let advanced = advance_path(
+                &pre_root,
+                &post_root,
+                &entries,
+                &held_key,
+                value.as_ref(),
+                &path,
+            )
+            .unwrap();
+            apply(&mut tree, &entries);
+            assert_eq!(post_root, tree.root());
+            assert_eq!(advanced.value, tree.get(&held_key).copied());
+            assert_eq!(*advanced.path, tree.siblings(&held_key));
+            value = advanced.value;
+            path = advanced.path;
+        }
+    }
+
+    /// A leaf held at a baseline ten write sets back, none of which wrote it,
+    /// advances to exactly the reference tree's path after each.
+    #[test]
+    fn a_held_leaf_advances_through_ten_write_sets_it_is_not_in() {
+        let mut tree = EconomicSmt::new();
+        for i in 0..40u64 {
+            tree.insert(key(i), value(i));
+        }
+        let rounds: Vec<_> = (0..10u64)
+            .map(|r| {
+                vec![
+                    (key(100 + r), Some(value(100 + r))),
+                    (key(r), Some(value(500 + r))),
+                ]
+            })
+            .collect();
+        advance_through(tree, key(37), &rounds);
+    }
+
+    /// The same from an absent leaf: its non-inclusion path advances, and the
+    /// leaf stays absent.
+    #[test]
+    fn an_absent_leaf_advances_through_ten_write_sets() {
+        let mut tree = EconomicSmt::new();
+        for i in 0..40u64 {
+            tree.insert(key(i), value(i));
+        }
+        let rounds: Vec<_> = (0..10u64)
+            .map(|r| vec![(key(100 + r), Some(value(100 + r)))])
+            .collect();
+        advance_through(tree, key(9_999), &rounds);
+    }
+
+    /// A write set that writes the held leaf itself — first inserting it,
+    /// then changing it beside other writes — carries its post-value forward.
+    #[test]
+    fn a_write_to_the_held_leaf_becomes_its_value() {
+        let mut tree = EconomicSmt::new();
+        for i in 0..24u64 {
+            tree.insert(key(i), value(i));
+        }
+        let held = key(7_777);
+        advance_through(
+            tree,
+            held,
+            &[
+                vec![(key(1), Some(value(901)))],
+                vec![(held, Some(value(7_777))), (key(2), Some(value(902)))],
+                vec![
+                    (key(3), None),
+                    (held, Some(value(7_778))),
+                    (key(4_000), Some(value(4))),
+                ],
+                vec![(key(5), Some(value(905)))],
+            ],
+        );
+    }
+
+    /// Many writes in one set, on both sides of the held key at many depths.
+    #[test]
+    fn many_writes_in_one_set_advance_the_held_path() {
+        let mut tree = EconomicSmt::new();
+        for i in 0..64u64 {
+            tree.insert(key(i), value(i));
+        }
+        let writes: Vec<_> = (0..30u64)
+            .map(|i| match i % 3 {
+                0 => (key(i), None),
+                1 => (key(i), Some(value(2_000 + i))),
+                _ => (key(3_000 + i), Some(value(i))),
+            })
+            .collect();
+        advance_through(tree, key(31), &[writes]);
+    }
+
+    /// One corrupted sibling in a write set's entry is refused, never
+    /// advanced past. The control: the same write set, intact, advances.
+    #[test]
+    fn a_corrupted_write_set_sibling_is_refused() {
+        let mut tree = EconomicSmt::new();
+        for i in 0..32u64 {
+            tree.insert(key(i), value(i));
+        }
+        let held = key(4);
+        let pre_root = tree.root();
+        let mut entries = write_set(&tree, &[(key(9), Some(value(909))), (key(17), None)]);
+        let post_root = verify_batch(&pre_root, &entries).unwrap();
+        let path = tree.siblings(&held);
+        let held_value = tree.get(&held).copied();
+        let intact = advance_path(
+            &pre_root,
+            &post_root,
+            &entries,
+            &held,
+            held_value.as_ref(),
+            &path,
+        )
+        .expect("the intact write set advances the held path");
+        assert_eq!(intact.value, held_value);
+        for at in [0usize, 128, ECONOMIC_SMT_HEIGHT - 1] {
+            let original = entries[0].path[at];
+            entries[0].path[at][3] ^= 0x40;
+            let refused = advance_path(
+                &pre_root,
+                &post_root,
+                &entries,
+                &held,
+                held_value.as_ref(),
+                &path,
+            )
+            .expect_err("a corrupted sibling is refused");
+            assert!(matches!(
+                refused,
+                AdvanceError::Fold(
+                    FoldError::InconsistentPath { .. } | FoldError::PreRootMismatch { .. }
+                )
+            ));
+            entries[0].path[at] = original;
+        }
+    }
+
+    /// A held path that is not under the pre-root, a write set whose pre-value
+    /// at the held key is not the held one, and a post-root the write set does
+    /// not reach are each refused.
+    #[test]
+    fn an_advance_off_its_roots_is_refused() {
+        let mut tree = EconomicSmt::new();
+        for i in 0..16u64 {
+            tree.insert(key(i), value(i));
+        }
+        let held = key(6);
+        let pre_root = tree.root();
+        let path = tree.siblings(&held);
+        let entries = write_set(&tree, &[(held, Some(value(606))), (key(1), None)]);
+        let post_root = verify_batch(&pre_root, &entries).unwrap();
+        let held_value = value(6);
+        assert_eq!(
+            advance_path(&pre_root, &post_root, &entries, &held, None, &path),
+            Err(AdvanceError::NotUnderPreRoot)
+        );
+        let mut lying = entries.clone();
+        let mine = lying.iter_mut().find(|e| e.key == held).unwrap();
+        mine.pre = Some(value(66));
+        // The lying pre-value is not the tree's, so the write set is no
+        // longer one tree's worth of paths under the pre-root.
+        let refused = advance_path(
+            &pre_root,
+            &post_root,
+            &lying,
+            &held,
+            Some(&held_value),
+            &path,
+        )
+        .expect_err("a write set that lies about the held leaf is refused");
+        assert!(matches!(refused, AdvanceError::Fold(..)));
+        assert_eq!(
+            advance_path(
+                &pre_root,
+                &pre_root,
+                &entries,
+                &held,
+                Some(&held_value),
+                &path
+            ),
+            Err(AdvanceError::NotUnderPostRoot)
+        );
+        let advanced = advance_path(
+            &pre_root,
+            &post_root,
+            &entries,
+            &held,
+            Some(&held_value),
+            &path,
+        )
+        .expect("the honest advance");
+        assert_eq!(advanced.value, Some(value(606)));
     }
 
     /// The order entries are folded in does not change either root: one batch,

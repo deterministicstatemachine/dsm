@@ -99,4 +99,9 @@ impl Fleet {
     pub async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
         self.nodes.tls_for(member_id).await
     }
+
+    /// The running nodes, for what each was asked.
+    pub fn nodes(&self) -> &NodeSet {
+        &self.nodes
+    }
 }
