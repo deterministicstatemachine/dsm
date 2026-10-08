@@ -64,6 +64,7 @@ lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/RomStruct.olean lean4/
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/RomPhi.olean lean4/Sphincs/RomPhi.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/RomColl.olean lean4/Sphincs/RomColl.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/RomCanon.olean lean4/Sphincs/RomCanon.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/RomBudget.olean lean4/Sphincs/RomBudget.lean
 lean -DwarningAsError=true --run lean4/Sphincs/RomChecks.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/WrapperReduction.olean lean4/Sphincs/WrapperReduction.lean
 lean -DwarningAsError=true --run lean4/Sphincs/WrapperReductionChecks.lean
