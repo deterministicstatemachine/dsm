@@ -336,3 +336,11 @@ Random-oracle level (phase 2): kernel-checked role bounds (`rom_tweak_collision`
 C42–C44. The identification of the reduction's terms with these role games is
 argued in SPHINCS_ROM_BOUND.md, not machine-checked. Quantum: narrative only
 (SPHINCS_QROM_NARRATIVE.md, not machine-checked). Controls: RomChecks.lean.
+
+Hidden-value bridge (phase 3, generic): for any challenger written as a
+symbolic program, the symbolic run never reads an unrevealed answer
+(`strace_inv`), equals the real run when no lookup disagrees (`coupling`), and
+disagreement is bounded by compatible guesses plus wild guesses and unopened
+collisions (`hidden_bound`, `real_le_sym`); claim trace row C45. Its
+instantiation for DSM's signer is not yet checked, so link 3 of
+SPHINCS_ROM_BOUND.md remains argued for DSM.

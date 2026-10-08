@@ -1,7 +1,8 @@
 # DSM BLAKE3 SPHINCS+: classical security level in the random-oracle model
 
-Status: phase 2 of audit-prep, 2026-10-07, after the frozen tag
-`audit-freeze-2026-10-07` (which this does not change). Lean 4 core only, no
+Status: phases 2 and 3 of audit-prep, 2026-10-07, after the frozen tags
+`audit-freeze-2026-10-07` and `audit-freeze-2026-10-07-rom` (which this does
+not change). Lean 4 core only, no
 `sorry`, no `axiom`, no `native_decide`; every theorem named here is in
 `LEAN_AXIOM_LEDGER.tsv` on core axioms.
 
@@ -82,6 +83,47 @@ arguments have gone wrong before: Hülsing and Kudinov (ePrint 2022/346)
 corrected an earlier WOTS argument. The next phase should close these links
 in Lean rather than add arithmetic.
 
+## Phase 3: the hidden-value bridge (kernel-checked, generic)
+
+`RomSym.lean`, `RomHidden.lean`, `RomCoord.lean`. A game is a program whose
+challenger requests may contain handles for oracle answers it has not
+revealed (`hid i w`: tape entry `i` truncated to `w` bytes); adversary
+requests are concrete bytes; `reveal` resolves bytes to the adversary and
+marks their handles revealed. Two runs on the same tape:
+
+* real (`xrun true`): the lazy random oracle on resolved requests, as in
+  `RomOracle`;
+* symbolic (`xrun false`): a request with an unrevealed handle is answered
+  from an entry only if the two are syntactically identical; open requests
+  (every handle revealed) are compared by their resolutions.
+
+| Statement | Theorem |
+|---|---|
+| While handle `h` is unrevealed, the symbolic run is the same on every tape that differs only at entry `h` | `strace_inv` |
+| If no step's real and symbolic lookups disagree, the two runs are equal | `coupling` |
+| A disagreement is either a guess (a request with an unrevealed handle resolves to bytes the run had already fixed) or a collision between two distinct unopened challenger requests | `dis_entry` |
+| A guess pins the tape entry of its first unrevealed handle to the bytes at that handle's offset | `guess_pins` |
+| Pr[some disagreement] · 2^(8·wmin) ≤ B + Pr[wild guess or unopened collision] · 2^(8·wmin), where B bounds the compatible guess pairs on every tape and "wild" is a guess at a handle narrower than `wmin` bytes or beyond the tape | `hidden_bound` (by `hits_sum`, `coord_hit`) |
+| Pr_real[E] ≤ Pr_symbolic[E] + Pr[some disagreement], for every event E | `real_le_sym` |
+
+Controls (`RomChecks.lean`): a correct guess of a hidden value separates the
+two runs and is pinned at the right tape entry; a wrong guess leaves them
+equal and is still counted as a compatible pair.
+
+What this closes. The resampling step of link 3, as a theorem about every
+such program: the symbolic run never reads an unrevealed answer, so a hidden
+value is independent of everything the run did until it is revealed, and
+the real run departs from the symbolic one only through counted guesses or
+collisions. What it does not close yet, for DSM: (a) DSM's key generation
+and signer written as such a program and proved to resolve to `Model.lean`'s
+functions, with the forger's verification as adversary steps; (b) B for DSM
+(each adversary request is compatible with at most one unopened challenger
+request at its address, by tweak single use); (c) that wild guesses and
+unopened collisions do not occur in DSM's run (output widths are at least n
+bytes, the budget bounds the tape, and distinct challenger requests carry
+distinct addresses). Until (a) to (c) are checked, the numbers above remain
+conditional on link 3.
+
 ## What is argued, not machine-checked
 
 The role bounds and the arithmetic are kernel-checked. The step that each
@@ -105,7 +147,10 @@ experiment is argued here and not formalized:
    oracle answers to requests containing it, which are independent of it
    unless such a request collides with one the adversary made (itself a
    counted event). Resampling it therefore leaves the view unchanged, and
-   naming it is a guess. The resampling argument is not formalized.
+   naming it is a guess. The resampling argument is now kernel-checked for
+   any challenger written as a symbolic program (phase 3 below); its
+   instantiation for DSM's signer is not, so for DSM this link is still
+   argued.
 4. **ITSR with adaptive signing.** `itsr_static` fixes the `q_s` signature
    leaves as independent uniform draws. In the run they are fresh oracle
    answers on distinct inputs (distinct messages), chosen adaptively but each

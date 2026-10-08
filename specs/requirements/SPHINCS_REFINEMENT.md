@@ -584,6 +584,17 @@ exactly which steps are argued. The quantum picture is a narrative,
 `SPHINCS_QROM_NARRATIVE.md`, marked not machine-checked. `RomChecks.lean`
 runs the ROM controls.
 
+## Hidden-value bridge (phase 3, in progress)
+
+`RomCoord.lean`, `RomSym.lean` and `RomHidden.lean` formalize the resampling
+argument behind the WOTS and FORS hidden-value events for any challenger
+written as a symbolic program: the symbolic run never reads an unrevealed
+oracle answer (`strace_inv`); real and symbolic runs agree unless a lookup
+disagrees (`coupling`); a disagreement is a counted guess or an unopened
+collision (`dis_entry`), and its probability is bounded (`hidden_bound`,
+`real_le_sym`). DSM's signer is not yet instantiated as such a program, so
+for DSM the link remains argued (`SPHINCS_ROM_BOUND.md`, phase 3).
+
 ## Remaining trusted computing base and review obligations
 
 1. Lean kernel, core library, toolchain and logical axioms; executable-checker
