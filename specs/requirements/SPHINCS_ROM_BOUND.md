@@ -146,9 +146,17 @@ in literal bytes at the same offset. Where they differ only in unrevealed
 handles (two hidden inputs, or the thash and PRF keys), equal resolutions are
 a collision of random-oracle outputs, and that needs its own bound (of the
 order of pairs/2^(8n)); it is not yet checked; (e) the step bound S of the
-symbolic game from the query budget; (f) the symbolic game's win
-probability, i.e. transporting the forgery extraction to the symbolic run,
-where hidden values are never read. Until (b) to (f) are checked, the
+symbolic game from the query budget; (f) the probability of the four
+extracted events in the run. The extraction itself is now transported to
+the ROM game: `RomEval.lean` reads the lazy oracle's final table as an
+oracle function (`oracleOf`) and proves, with a query-tree/logging
+correspondence (`QL`, `ql_kgTail`, `ql_verify`) and the model's own logging
+lemmas, that on every tape on which the H1 game is won the forgery verifies
+against the honest key under that table, so `forgery_extract_exp` yields one
+of the four events on the run's own table, with every request of the
+verifier's log drawn in the run (`rom_extract`, claim trace C47). Bounding
+those four events in the run (canonical collision, WOTS preimage, unrevealed
+FORS secret, ITSR covered) is what remains of (f). Until (b) to (f) are checked, the
 numbers above remain conditional on link 3.
 
 ## What is argued, not machine-checked
