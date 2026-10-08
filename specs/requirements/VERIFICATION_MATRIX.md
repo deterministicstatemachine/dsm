@@ -344,3 +344,8 @@ disagreement is bounded by compatible guesses plus wild guesses and unopened
 collisions (`hidden_bound`, `real_le_sym`); claim trace row C45. Its
 instantiation for DSM's signer is not yet checked, so link 3 of
 SPHINCS_ROM_BOUND.md remains argued for DSM.
+Instantiated for DSM's signer (game H1): `sim_sign`, `sim_kgTail`, `sim_game`
+(the model's game as a query tree equals the real run of the symbolic game)
+and `rom_game_hidden` (claim trace row C46); B, the step bound, the
+unopened-collision bound and the symbolic win probability for DSM remain
+open, and `RomSample.lean` (`sample`) is the groundwork for adaptive ITSR.
