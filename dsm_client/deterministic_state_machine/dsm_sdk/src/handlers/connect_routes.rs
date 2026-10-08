@@ -235,6 +235,10 @@ fn wallet_player(session: &store::AppSession) -> Result<Player, String> {
     })
 }
 
+/// How many times a swap is traded when it keeps losing its vault's key to
+/// another trade (each loss resolves Void, moving nothing).
+const SWAP_ATTEMPTS: usize = 3;
+
 /// The prefix of a recorded FACT_ESCROW_RELEASED in this account's facts.
 const RELEASED_FACT: &[u8] = b"DSM/connect/escrow-released/v1";
 
@@ -1362,12 +1366,43 @@ impl AppRouterImpl {
         min_amount_out: u64,
         witnesses: &[crate::sdk::connect::grant::OfferedWitness],
     ) -> Executed {
+        // A trade that lost its vault's key to another resolves Void: nothing
+        // moved, and the swap is quoted and traded again at the vault's new
+        // head (SoFi Amendment S25 makes the loss provable to everyone, so
+        // nothing waits on it). Invalid and a pending position never retry.
+        let mut attempt = 1;
+        loop {
+            let (state, executed) = self
+                .swap_once(token_in, token_out, amount_in, min_amount_out, witnesses)
+                .await;
+            if state != Some(crate::sdk::sofi_flow::PositionState::Void) || attempt >= SWAP_ATTEMPTS
+            {
+                return executed;
+            }
+            log::info!(
+                "[connect] swap attempt {attempt}/{SWAP_ATTEMPTS} lost its vault's key: Void, \
+                 trading again"
+            );
+            attempt += 1;
+        }
+    }
+
+    /// One quote and trade of a swap, and the state its position resolved
+    /// to, when it took one.
+    async fn swap_once(
+        &self,
+        token_in: &[u8; 32],
+        token_out: &[u8; 32],
+        amount_in: u64,
+        min_amount_out: u64,
+        witnesses: &[crate::sdk::connect::grant::OfferedWitness],
+    ) -> (Option<crate::sdk::sofi_flow::PositionState>, Executed) {
         let found = match self.quote(token_in, token_out, amount_in, witnesses).await {
             Ok(found) => found,
-            Err(e) => return Executed::failed(e),
+            Err(e) => return (None, Executed::failed(e)),
         };
         if found.hops.is_empty() {
-            return Executed::failed("no route among the vaults searched");
+            return (None, Executed::failed("no route among the vaults searched"));
         }
         let mut vault_ids: Vec<[u8; 32]> = Vec::with_capacity(found.hops.len());
         for hop in &found.hops {
@@ -1377,7 +1412,7 @@ impl AppRouterImpl {
         }
         let set = match own_set() {
             Ok(set) => set,
-            Err(e) => return Executed::failed(e),
+            Err(e) => return (None, Executed::failed(e)),
         };
         let traded = crate::sdk::sofi_flow::trade(
             &self.core_sdk,
@@ -1393,7 +1428,7 @@ impl AppRouterImpl {
         .await;
         let outcome = match traded {
             Ok(outcome) => outcome,
-            Err(e) => return Executed::failed(format!("sofi trade: {e}")),
+            Err(e) => return (None, Executed::failed(format!("sofi trade: {e}"))),
         };
         let state = position_state(outcome.state);
         let result = Some(generated::app_response_body_v1::Result::Swap(
@@ -1403,7 +1438,7 @@ impl AppRouterImpl {
                 vault_ids: vault_ids.iter().map(|v| v.to_vec()).collect(),
             },
         ));
-        match outcome.state {
+        let executed = match outcome.state {
             crate::sdk::sofi_flow::PositionState::Realized => Executed::carried_out(result),
             other => Executed {
                 outcome: generated::ConnectOutcome::Failed,
@@ -1413,7 +1448,8 @@ impl AppRouterImpl {
                 ),
                 result,
             },
-        }
+        };
+        (Some(outcome.state), executed)
     }
 
     // ------------------------- the application account -------------------------

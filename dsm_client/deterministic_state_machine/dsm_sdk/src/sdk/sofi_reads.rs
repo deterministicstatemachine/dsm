@@ -12,7 +12,10 @@ use std::collections::BTreeMap;
 use std::future::Future;
 
 use dsm::ccb::StorageSetMembers;
-use dsm::common::domain_tags::{TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR};
+use dsm::common::domain_tags::{
+    TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR,
+    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
+};
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::crypto::domain::TaggedHashDomain;
 use dsm::economic::peer_lineage::PeerEvidenceFetcher;
@@ -41,7 +44,7 @@ use crate::sdk::economic_registers::{
 };
 use crate::sdk::route_seats::{keep_completion, read_cell, NodeSeats};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes, LOCATOR_BUDGET};
-use crate::sdk::storage_io::{read_stored_bytes_kept, resolve_locator_all};
+use crate::sdk::storage_io::{fetch_immutable, read_stored_bytes_kept, resolve_locator_all};
 use crate::sdk::storage_set::{as_ccb_members, StorageSet};
 use crate::storage::client_db::{economic_lineage, sofi_vault_head};
 
@@ -433,6 +436,46 @@ impl SofiReads for LiveSofiReads<'_> {
             || self.read("stored bytes", read_stored_bytes_kept(self.set, addr)),
             Option::is_some,
         )
+    }
+
+    fn immutable_object(
+        &self,
+        namespace: TaggedHashDomain<'static>,
+        inner: &D32,
+    ) -> Result<Option<Vec<u8>>, ReadFailure> {
+        // The process keeps an object once a member served bytes that
+        // re-hash to its address (`fetch_immutable`).
+        self.read(
+            "immutable object",
+            fetch_immutable(self.set, namespace, inner),
+        )
+    }
+
+    fn history_leaf_candidates(
+        &self,
+        vault_id: &D32,
+        root: &D32,
+    ) -> Result<Vec<Vec<u8>>, ReadFailure> {
+        let found = self.read(
+            "history leaf candidates",
+            resolve_locator_all(
+                self.set,
+                TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR.source_bytes(),
+                &dsm::sofi::history::history_locator(vault_id, root),
+                LOCATOR_BUDGET,
+                |bytes| {
+                    dsm::sofi::history::decode_leaf(bytes).map(|(named, .., leaf_root)| {
+                        (
+                            dsm::sofi::history::history_locator(&named, &leaf_root),
+                            bytes.to_vec(),
+                        )
+                    })
+                },
+            ),
+        )?;
+        Ok(match found {
+            Discovered::Complete(leaves) | Discovered::Partial(leaves) => leaves,
+        })
     }
 
     fn token_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, ReadFailure> {

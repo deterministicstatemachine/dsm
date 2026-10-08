@@ -192,6 +192,7 @@ pub fn init_database() -> Result<()> {
         conn.execute_batch("PRAGMA synchronous = FULL;")?;
         info!("[DSM_SDK] Database journal mode: {journal}");
         create_schema(&conn)?;
+        sofi_vault_head::drop_superseded_baselines(&conn)?;
         {
             let mut guard = DB_CONNECTION
                 .write()
@@ -500,6 +501,11 @@ fn get_database_path() -> Result<PathBuf> {
 /// Still 29: the owner baseline (SoFi Amendment S24) adds
 /// `sofi_vault_witness`, `sofi_vault_baseline`, `sofi_vault_owner_baseline`
 /// and `sofi_vault_quarantine`, created on open; no existing table changes.
+/// The same for `sofi_vault_label`, an account's own names for its vaults,
+/// and for `sofi_vault_history_published`, how far an owner published a
+/// vault's history (SoFi Amendment S26). A baseline record whose frontier
+/// predates S26 is dropped when the database opens, and adopted or signed
+/// again (`sofi_vault_head::drop_superseded_baselines`).
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 29;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -715,6 +721,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
         ) WITHOUT ROWID;
         -- v25: a vault whose owner signed two frontiers at one generation
         -- (Req 6.3): quarantined for this device, never chosen between.
+        -- Still 29: a name this account keeps for a vault it created (owner
+        -- bookkeeping, never read for validity).
+        CREATE TABLE IF NOT EXISTS sofi_vault_label(
+            vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            label    TEXT NOT NULL
+        ) WITHOUT ROWID;
+        -- SoFi Amendment S26: the highest generation of a vault's history
+        -- its owner published, with every node, leaf and state leaf below.
+        CREATE TABLE IF NOT EXISTS sofi_vault_history_published(
+            vault_id   BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation >= 0)
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS sofi_vault_quarantine(
             vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
             why      TEXT NOT NULL

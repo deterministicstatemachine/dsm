@@ -741,6 +741,17 @@ pub(super) async fn create_vault(
     x: ([u8; 32], u64),
     y: ([u8; 32], u64),
 ) -> [u8; 32] {
+    create_labelled_vault(d, x, y, "").await
+}
+
+/// [`create_vault`], keeping `label` as the owner's own name for the vault
+/// (empty for none).
+pub(super) async fn create_labelled_vault(
+    d: &TestDevice,
+    x: ([u8; 32], u64),
+    y: ([u8; 32], u64),
+    label: &str,
+) -> [u8; 32] {
     let ((token_a, reserve_a), (token_b, reserve_b)) = (x, y);
     let request = generated::SofiCreateVaultRequest {
         token_a_policy_commit: token_a.to_vec(),
@@ -748,6 +759,7 @@ pub(super) async fn create_vault(
         reserve_a_entered: entered(d, &token_a, reserve_a),
         reserve_b_entered: entered(d, &token_b, reserve_b),
         fee_bps: 30,
+        label: label.to_string(),
     };
     let vault_id = match payload(&invoke(d, "sofi.createVault", args(&request)).await) {
         Payload::SofiVaultCreatedResponse(v) => v.vault_id,
@@ -2982,6 +2994,93 @@ async fn a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realiz
     );
 }
 
+/// An owner's own names for its vaults: a vault created with a label lists
+/// it, and one created without lists none. Bookkeeping only — what the game
+/// recognizes its own market's vaults by.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_vault_keeps_the_name_its_owner_gave_it() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market_unset(&p).await;
+    let lane =
+        create_labelled_vault(&p.a, (m.era, 50), (m.tkn, 500), "wildstate:pool:lane:1").await;
+    let listed =
+        match payload(&invoke(&p.a, "sofi.vaults", args(&generated::SofiVaultsRequest {})).await) {
+            Payload::SofiVaultsResponse(r) => r.vaults,
+            other => panic!("sofi.vaults answered {other:?}"),
+        };
+    let label_of = |id: &[u8; 32]| {
+        listed
+            .iter()
+            .find(|v| v.vault_id == id.to_vec())
+            .map(|v| v.label.clone())
+            .expect("the vault is listed")
+    };
+    assert_eq!(label_of(&lane), "wildstate:pool:lane:1");
+    assert_eq!(
+        label_of(&m.vault_id),
+        "",
+        "a vault never named lists no name"
+    );
+}
+
+/// Five equal vaults of one pair (owner direction, 2026-10-07): a small
+/// trade takes one vault alone — a split is within the routing tolerance —
+/// and the same trader is quoted the same vault again; a large trade, which a
+/// split beats by more than the tolerance, splits across two vaults
+/// atomically.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn small_trades_take_one_of_five_equal_vaults_and_large_ones_split() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market_unset(&p).await;
+    for _ in 0..4 {
+        create_vault(&p.a, (m.era, 100), (m.tkn, 1_000)).await;
+    }
+    let quote = |amount: u64| {
+        let p = &p;
+        let m = &m;
+        async move {
+            match payload(
+                &invoke(
+                    &p.b,
+                    "sofi.findRoute",
+                    args(&generated::SofiFindRouteRequest {
+                        token_in_policy_commit: m.era.to_vec(),
+                        token_out_policy_commit: m.tkn.to_vec(),
+                        amount_in_entered: entered(&p.b, &m.era, amount),
+                    }),
+                )
+                .await,
+            ) {
+                Payload::SofiFindRouteResponse(r) => r,
+                other => panic!("sofi.findRoute answered {other:?}"),
+            }
+        }
+    };
+    // 5 ERA against 100 ERA lanes: a split gives 2.1% more, within the
+    // tolerance, so one vault alone.
+    let small = quote(5).await;
+    assert_eq!(small.hops.len(), 1, "a small trade takes one vault alone");
+    assert_eq!(
+        quote(5).await.hops[0].vault_id,
+        small.hops[0].vault_id,
+        "the same trader, the same vault"
+    );
+    // 6 ERA: a split gives 3.6% more, beyond the tolerance, so it splits.
+    assert_eq!(
+        quote(6).await.hops.len(),
+        2,
+        "just past the tolerance, the better split wins"
+    );
+    let large = quote(60).await;
+    assert_eq!(
+        large.hops.len(),
+        2,
+        "a large trade splits across two vaults"
+    );
+}
+
 /// SoFi §30, Amendment S16 and storage §4: a route search over vaults the
 /// reads do not establish says so. B, never set up with A's vault, is quoted
 /// one hop ERA→TKN, found through the two tokens' indexes, the search
@@ -3301,6 +3400,85 @@ async fn a_wallet_that_holds_nothing_starts_at_the_owners_baseline_and_trades() 
     );
 }
 
+/// A reader at an owner baseline that meets a trader whose lineage reaches
+/// below it (the host's race test, 2026-10-08; SoFi Amendment S26). B trades
+/// twice; A, the owner, publishes its baseline at generation 2 with the
+/// vault's history, forgets the vault and adopts that baseline; B trades
+/// again. A's walk to the head judges B's third trade, whose parent is B's
+/// second — a SoFi position built on `R_1`, below A's baseline, whose own
+/// parent was built on `R_0`. A proves both roots under the baseline's
+/// history root, reading the head, the leaves and one path of nodes, and
+/// records nothing below its baseline: it never replays the vault. Before,
+/// the walk asked for those roots by extending the very chain it was
+/// extending, and recursed until its stack overflowed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 5).await;
+    realized_trade(&p, &m, 5).await;
+
+    invoke(&p.a, "sofi.vaults", args(&generated::SofiVaultsRequest {})).await;
+    p.a.enter();
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let offered = crate::sdk::vault_baseline::offer(
+        &p.a.router().core_sdk,
+        &set,
+        &[m.era, m.tkn],
+        (p.a.genesis, p.a.device_id),
+    )
+    .await;
+    assert_eq!(
+        offered
+            .witnesses
+            .iter()
+            .map(|w| w.generation)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "{:?}",
+        offered.not_offered
+    );
+    forget_the_vault(&p.a, &m.vault_id);
+    p.a.enter();
+    crate::sdk::sofi_flow::adopt_offered(&p.a.router().core_sdk, &set, &offered.witnesses)
+        .await
+        .expect("A adopts its baseline");
+    let chain_at_a = || {
+        let (own, parents) = standing_of(&p.a);
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        let chain = ctx.verifier().chain(&m.vault_id).expect("A's chain");
+        chain
+    };
+    assert_eq!(chain_at_a().base(), 2, "A's chain starts at the baseline");
+
+    realized_trade(&p, &m, 5).await;
+    // The tests' devices share one process: what B's trade left in the
+    // process's memory is not A's.
+    crate::sdk::economic_registers::validated_peers().forget();
+    crate::sdk::final_reads::forget_everything();
+    crate::sdk::sofi_reads::forget_judgements();
+    let chain = chain_at_a();
+    assert_eq!(
+        (chain.base(), chain.head().map(|h| h.0)),
+        (2, Some(3)),
+        "A established B's third trade from its baseline"
+    );
+    p.a.enter();
+    let rows = crate::storage::client_db::sofi_vault_head::recorded_generations(&m.vault_id)
+        .expect("A's record");
+    assert_eq!(
+        rows.iter().map(|r| r.generation).collect::<Vec<_>>(),
+        vec![2, 3],
+        "nothing below the baseline is replayed or recorded"
+    );
+    assert_eq!(
+        chain_at_b(&p, &m).head(),
+        chain.head(),
+        "B's walk and A's agree"
+    );
+}
+
 /// What a wallet holding nothing reads to stand at the vault's head does not
 /// grow with the vault: after two trades and after four, B adopts the
 /// baseline at the head and walks it with the same number of storage reads,
@@ -3359,13 +3537,21 @@ async fn an_owner_that_signed_two_frontiers_at_one_generation_is_quarantined() {
         realized_trade(&p, &m, 5).await;
     }
     let offered = offered_to_b(&p, &m).await;
-    // A signs and publishes a second frontier at the same generation.
+    // A signs and publishes a second frontier at the same generation: the
+    // same root, another history (SoFi Amendment S26) — the history is part
+    // of the frontier, so this is two frontiers.
     p.a.enter();
     let set = canonical_set(NETWORK).expect("the pinned set");
     let other = dsm::sofi::wire::VaultFrontierV1 {
         vault_id: m.vault_id,
         generation: offered[0].generation,
-        root: [0x44; 32],
+        root: crate::storage::client_db::sofi_vault_head::root_at(
+            &m.vault_id,
+            offered[0].generation,
+        )
+        .expect("A's record")
+        .expect("A's root at the baseline"),
+        history_root: [0x44; 32],
     };
     let bundle = crate::sdk::vault_baseline::sign(NETWORK, &p.a.genesis, &other)
         .expect("A signs a second frontier");
@@ -4299,6 +4485,20 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
     ) -> Result<Option<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
         self.live.stored_bytes(addr)
     }
+    fn immutable_object(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        inner: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
+        self.live.immutable_object(namespace, inner)
+    }
+    fn history_leaf_candidates(
+        &self,
+        vault_id: &[u8; 32],
+        root: &[u8; 32],
+    ) -> Result<Vec<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
+        self.live.history_leaf_candidates(vault_id, root)
+    }
     fn token_policy_bytes(
         &self,
         policy_commit: &[u8; 32],
@@ -4725,6 +4925,7 @@ async fn a_pair_named_in_either_order_holds_each_reserve_against_its_own_token()
             reserve_a_entered: entered(&p.a, &era, 100),
             reserve_b_entered: entered(&p.a, &era, 100),
             fee_bps: 30,
+            label: String::new(),
         }),
     )
     .await;

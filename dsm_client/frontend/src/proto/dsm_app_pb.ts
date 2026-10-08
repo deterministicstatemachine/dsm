@@ -18600,6 +18600,15 @@ export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
    */
   reserveBEntered = "";
 
+  /**
+   * A name the creating account keeps for the vault in its own store (owner
+   * bookkeeping: carried nowhere, never read for validity), returned by
+   * sofi.vaults. Empty for none. At most 128 bytes.
+   *
+   * @generated from field: string label = 8;
+   */
+  label = "";
+
   constructor(data?: PartialMessage<SofiCreateVaultRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -18613,6 +18622,7 @@ export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
     { no: 5, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 6, name: "reserve_a_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 7, name: "reserve_b_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "label", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiCreateVaultRequest {
@@ -19185,6 +19195,13 @@ export class SofiOwnedVaultV1 extends Message<SofiOwnedVaultV1> {
    */
   status = SofiVaultStatus.UNSPECIFIED;
 
+  /**
+   * the creator's own name for it, empty for none
+   *
+   * @generated from field: string label = 13;
+   */
+  label = "";
+
   constructor(data?: PartialMessage<SofiOwnedVaultV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -19205,6 +19222,7 @@ export class SofiOwnedVaultV1 extends Message<SofiOwnedVaultV1> {
     { no: 10, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 11, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 12, name: "status", kind: "enum", T: proto3.getEnumType(SofiVaultStatus) },
+    { no: 13, name: "label", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiOwnedVaultV1 {

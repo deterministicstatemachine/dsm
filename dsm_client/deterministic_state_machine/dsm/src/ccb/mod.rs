@@ -302,6 +302,10 @@ pub mod class {
     /// `0x0073` — a frontier commitment and the owner-authority position the
     /// baseline's signer is proven at (SoFi Amendment S24).
     pub const SOFI_OWNER_BASELINE_AUTH: u16 = 0x0073;
+    /// `0x0074` — the head of a vault's history: its generation and the
+    /// peaks of the append-only tree whose leaf `g` is `R_g` (SoFi
+    /// Amendment S26).
+    pub const SOFI_VAULT_HISTORY_HEAD: u16 = 0x0074;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

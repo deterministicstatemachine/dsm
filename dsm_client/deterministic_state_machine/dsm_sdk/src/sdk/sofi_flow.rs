@@ -1203,6 +1203,46 @@ fn accept_ahead(verifier: &Verifier<'_, LiveSofiReads<'_>>, tokens: &[D32]) -> A
     report
 }
 
+/// How far below the best quote, in basis points, a route still counts as
+/// near-equal to it. CLIENT POLICY, never validity: a route is valid or not
+/// whatever this says. Wider spreads trades across more of a pair's vaults
+/// (fewer races for one vault's key) at the cost of up to this much output;
+/// tune it from the measured collision rate against the output given up.
+pub(crate) const ROUTE_TOLERANCE_BPS: u64 = 300;
+
+/// Which of a search's priced routes `(output, vault ids in hop order)` the
+/// trader takes (client policy): among those within
+/// [`ROUTE_TOLERANCE_BPS`] of the best output, the fewest legs, then the
+/// order the trader's own identity gives the routes' vaults —
+/// `H(DSM/sofi/route-lane/v1; G ‖ DevID ‖ sorted vault ids)` — then the
+/// lowest vault ids. Deterministic: the same candidates give one trader the
+/// same route, and different traders different vaults of a pair, so small
+/// trades spread across the pair's vaults instead of piling into the first;
+/// a split wins only when it beats every single vault by more than the
+/// tolerance. `None` for no route.
+fn choose_route(routes: &[(u64, Vec<D32>)], trader: (&D32, &D32)) -> Option<usize> {
+    let best = routes.iter().map(|(out, ..)| *out).max()?;
+    let floor = u128::from(best) * u128::from(10_000 - ROUTE_TOLERANCE_BPS);
+    routes
+        .iter()
+        .enumerate()
+        .filter(|(_, (out, ..))| u128::from(*out) * 10_000 >= floor)
+        .min_by_key(|(_, (_, vaults))| {
+            let mut sorted = vaults.clone();
+            sorted.sort();
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                dsm::common::domain_tags::TAG_DSM_SOFI_ROUTE_LANE,
+            );
+            h.update(trader.0);
+            h.update(trader.1);
+            for vault in &sorted {
+                h.update(vault);
+            }
+            (vaults.len(), *h.finalize().as_bytes(), sorted)
+        })
+        .map(|(index, ..)| index)
+}
+
 /// The vaults whose market pairs `token`, from its token index (Amendment
 /// S16): accepted by Core, never taken from the index. A discovery that is
 /// not complete marks the search partial.
@@ -1377,18 +1417,15 @@ pub async fn find_route(
             }
         }
     }
-    // The route that gives the most; a candidate that cannot carry the
-    // amount is not a route, and no route leaves the list empty.
-    let mut best: Option<(u64, Vec<Hop>)> = None;
+    // Every candidate that carries the amount, priced; a candidate that
+    // cannot is not a route, and no route leaves the list empty.
+    let mut priced: Vec<(u64, Vec<Hop>)> = Vec::new();
     for vaults in candidates {
         let Ok(planned) = plan(&vaults, token_in, intent.amount_in) else {
             continue;
         };
         let (gives, out) = planned_out(&planned)?;
         if gives != token_out {
-            continue;
-        }
-        if best.as_ref().is_some_and(|(most, ..)| *most >= out) {
             continue;
         }
         let hops = vaults
@@ -1403,10 +1440,14 @@ pub async fn find_route(
                 amount_out: p.amount_out,
             })
             .collect();
-        best = Some((out, hops));
+        priced.push((out, hops));
     }
-    let hops = match best {
-        Some((.., hops)) => hops,
+    let routes: Vec<(u64, Vec<D32>)> = priced
+        .iter()
+        .map(|(out, hops)| (*out, hops.iter().map(|hop| hop.vault_id).collect()))
+        .collect();
+    let hops = match choose_route(&routes, (&standing.genesis, &standing.device_id)) {
+        Some(chosen) => priced.swap_remove(chosen).1,
         None => Vec::new(),
     };
     let ends = route_ends(&hops)?;
@@ -1497,6 +1538,10 @@ pub(crate) async fn own_setup_ref(
     }
 }
 
+/// How many times a trade is planned again when the vault moves under its
+/// draft before anything is published.
+const TRADE_REPLANS: usize = 3;
+
 /// What the walk at a parent found for a new attempt.
 enum Walked {
     /// The live attempt: the walk's first unresolved key, advanced past keys
@@ -1506,6 +1551,10 @@ enum Walked {
     /// its trader withheld, and that pair is now registered from the
     /// exercise. The walk is run again.
     Registered,
+    /// The vault moved under the draft: its parent was consumed, or every
+    /// nearby key is held by an exercise still in flight. Nothing is
+    /// published; the trade re-plans at the vault's new head.
+    Moved(String),
 }
 
 /// The walk at `parent_root` of `vault_id` (§31 stage 6): its first
@@ -1538,7 +1587,7 @@ async fn walk_for_attempt(
                     .map_err(verifier_error)?
             }
             WalkOutcome::Consumed { attempt } => {
-                return Err(refuse(format!(
+                return Ok(Walked::Moved(format!(
                     "the vault's parent was consumed at attempt {attempt}: its head moved"
                 )))
             }
@@ -1594,8 +1643,8 @@ async fn walk_for_attempt(
         attempt = next_attempt(attempt).map_err(refuse)?;
         advanced += 1;
     }
-    Err(refuse(
-        "every nearby attempt key is held by an exercise in flight",
+    Ok(Walked::Moved(
+        "every nearby attempt key is held by an exercise in flight".to_string(),
     ))
 }
 
@@ -1631,20 +1680,22 @@ fn pair_withheld(
 }
 
 /// The live attempt of a leg at `parent_root` (§31 stage 6), every withheld
-/// pair the walk meets registered first. A registration can consume the
-/// parent: the walk run again then says the head moved.
+/// pair the walk meets registered first, or why the vault moved under the
+/// draft (`Err`). A registration can consume the parent: the walk run again
+/// then says the head moved.
 async fn live_attempt(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     chains: &mut BTreeMap<D32, VaultChain>,
     vault_id: &D32,
     parent_root: &D32,
-) -> Result<u64, DsmError> {
+) -> Result<Result<u64, String>, DsmError> {
     // Each round registers a pair the walk met at one of the keys it
     // examines, at most ATTEMPT_ADVANCE + 1 of them.
     for _ in 0..=ATTEMPT_ADVANCE {
         match walk_for_attempt(set, verifier, chains, vault_id, parent_root).await? {
-            Walked::Live(attempt) => return Ok(attempt),
+            Walked::Live(attempt) => return Ok(Ok(attempt)),
+            Walked::Moved(why) => return Ok(Err(why)),
             Walked::Registered => {
                 chains.insert(*vault_id, verifier.chain(vault_id).map_err(verifier_error)?);
             }
@@ -1678,7 +1729,9 @@ pub(crate) async fn chain_past_withheld_pairs(
                     .remove(vault_id)
                     .ok_or_else(|| refuse("the vault's chain is not in hand"))
             }
-            Walked::Registered => {
+            // The head the chain named was consumed while it was walked:
+            // the chain is walked again, from where it stands.
+            Walked::Moved(..) | Walked::Registered => {
                 chains.insert(*vault_id, verifier.chain(vault_id).map_err(verifier_error)?);
             }
         }
@@ -1879,6 +1932,28 @@ pub(crate) async fn exercise_draft(
     draft: UncheckedDraft,
     accepted: &AcceptedGeneses,
 ) -> Result<PositionOutcome, DsmError> {
+    match exercise_draft_at_head(core, set, ctx, draft, accepted).await? {
+        Drafted::Position(outcome) => Ok(outcome),
+        Drafted::HeadMoved(why) => Err(refuse(why)),
+    }
+}
+
+/// What a draft came to: a position, or a vault that moved under it before
+/// anything was published.
+pub(crate) enum Drafted {
+    Position(PositionOutcome),
+    HeadMoved(String),
+}
+
+/// [`exercise_draft`], with a vault that moved under the draft before
+/// anything was published returned as such, for a trade to re-plan.
+pub(crate) async fn exercise_draft_at_head(
+    core: &CoreSDK,
+    set: &StorageSet,
+    ctx: &VerifierContext<'_>,
+    draft: UncheckedDraft,
+    accepted: &AcceptedGeneses,
+) -> Result<Drafted, DsmError> {
     let mut timing = crate::util::phase_timing::PhaseTimer::start("sofi.exercise");
     // Stage 3.
     let verifier = ctx.verifier();
@@ -1908,10 +1983,10 @@ pub(crate) async fn exercise_draft(
     }
     let mut attempts = Vec::new();
     for leg in checked.precommit().legs() {
-        attempts.push((
-            leg.vault_id,
-            live_attempt(set, &verifier, &mut chains, &leg.vault_id, &leg.parent_root).await?,
-        ));
+        match live_attempt(set, &verifier, &mut chains, &leg.vault_id, &leg.parent_root).await? {
+            Ok(attempt) => attempts.push((leg.vault_id, attempt)),
+            Err(why) => return Ok(Drafted::HeadMoved(why)),
+        }
     }
     let att_a = crate::sdk::signing_authority::current_att_a()?;
     let produced = build_fulfillment(&checked, precommit_signature.clone(), &attempts, att_a)
@@ -1957,7 +2032,7 @@ pub(crate) async fn exercise_draft(
     timing.phase("fulfill");
     let settled = complete_and_settle(core, set, accepted).await;
     timing.phase("settle");
-    settled
+    settled.map(Drafted::Position)
 }
 
 /// Stages 7 to 10 for the pending position: the install and the exercise
@@ -2098,66 +2173,81 @@ pub async fn trade(
         "[sofi] trade: set up with each of {} vaults",
         intent.vault_ids.len()
     );
-    let standing = standing(core)?;
-    let verifying = standing.context_kept(set, accepted, kept)?;
-    let verifier = verifying.verifier();
-    // Each vault walked past its withheld pairs in turn: two vaults' walks
-    // can meet one exercise of a split route and would each register its
-    // pair. Each head's leaves and terms are then taken at once.
-    let mut chains = Vec::with_capacity(intent.vault_ids.len());
-    for (vault_id, chain) in intent
-        .vault_ids
-        .iter()
-        .zip(chains_at_once(set, &verifier, &intent.vault_ids).await)
-    {
-        chains.push(chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?);
-    }
-    let verifier_ref = &verifier;
-    let mut heads = Vec::with_capacity(intent.vault_ids.len());
-    for at_head in
-        futures::future::join_all(intent.vault_ids.iter().zip(chains).map(
+    // The vault can move under the draft — another trade consumes the head
+    // the plan was priced at — before anything is published: the trade is
+    // re-planned at the new head, up to TRADE_REPLANS times.
+    let mut moved = String::new();
+    for round in 1..=TRADE_REPLANS {
+        let standing = standing(core)?;
+        let verifying = standing.context_kept(set, accepted, kept)?;
+        let verifier = verifying.verifier();
+        // Each vault walked past its withheld pairs in turn: two vaults' walks
+        // can meet one exercise of a split route and would each register its
+        // pair. Each head's leaves and terms are then taken at once.
+        let mut chains = Vec::with_capacity(intent.vault_ids.len());
+        for (vault_id, chain) in intent
+            .vault_ids
+            .iter()
+            .zip(chains_at_once(set, &verifier, &intent.vault_ids).await)
+        {
+            chains.push(chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?);
+        }
+        let verifier_ref = &verifier;
+        let mut heads = Vec::with_capacity(intent.vault_ids.len());
+        for at_head in futures::future::join_all(intent.vault_ids.iter().zip(chains).map(
             |(vault_id, chain)| async move { head_of(set, verifier_ref, vault_id, chain).await },
         ))
         .await
-    {
-        heads.push(at_head?.0);
-    }
-    log::info!("[sofi] trade: walked {} vault heads", heads.len());
-    timing.phase("heads");
-    // A chain, or a split across two vaults of the pair (Amendment S19),
-    // planned again at the heads walked now.
-    let refs: Vec<&VaultAtHead> = heads.iter().collect();
-    let planned = plan(&refs, intent.token_in_policy_commit, intent.amount_in)?;
-    let (token, amount) = planned_out(&planned)?;
-    received(core, intent, &token, amount)?;
-    // Each vault's setup is found by its own index scan: all at once, in
-    // hop order.
-    let setup_refs =
-        futures::future::try_join_all(heads.iter().map(|vault| {
+        {
+            heads.push(at_head?.0);
+        }
+        log::info!("[sofi] trade: walked {} vault heads", heads.len());
+        timing.phase("heads");
+        // A chain, or a split across two vaults of the pair (Amendment S19),
+        // planned again at the heads walked now.
+        let refs: Vec<&VaultAtHead> = heads.iter().collect();
+        let planned = plan(&refs, intent.token_in_policy_commit, intent.amount_in)?;
+        let (token, amount) = planned_out(&planned)?;
+        received(core, intent, &token, amount)?;
+        // Each vault's setup is found by its own index scan: all at once, in
+        // hop order.
+        let setup_refs = futures::future::try_join_all(heads.iter().map(|vault| {
             own_setup_ref(set, &standing.genesis, &standing.device_id, &vault.vault_id)
         }))
         .await?;
-    let mut hops = Vec::new();
-    let mut cores = Vec::new();
-    let mut vaults = Vec::new();
-    for (index, ((vault, p), setup_ref)) in heads.iter().zip(&planned).zip(setup_refs).enumerate() {
-        let base = relationship_base(&standing, &vault.vault_id)?;
-        let (hop, post) = price_hop(vault, p.token_in, p.amount_in, setup_ref, index)?;
-        cores.push(vault_core(&standing, vault, &post, base)?);
-        vaults.push((vault.vault_id, base));
-        hops.push(hop);
+        let mut hops = Vec::new();
+        let mut cores = Vec::new();
+        let mut vaults = Vec::new();
+        for (index, ((vault, p), setup_ref)) in
+            heads.iter().zip(&planned).zip(setup_refs).enumerate()
+        {
+            let base = relationship_base(&standing, &vault.vault_id)?;
+            let (hop, post) = price_hop(vault, p.token_in, p.amount_in, setup_ref, index)?;
+            cores.push(vault_core(&standing, vault, &post, base)?);
+            vaults.push((vault.vault_id, base));
+            hops.push(hop);
+        }
+        let movements = [
+            (token, amount, 0),
+            (intent.token_in_policy_commit, 0, intent.amount_in),
+        ];
+        let trader = trader_core(&standing, &movements, &vaults)?;
+        let public_key = crate::sdk::signing_authority::current_public_key()?;
+        let ctx = context(&standing, set, &public_key, trader)?;
+        let draft = draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)?;
+        log::info!("[sofi] trade: drafted {} hops", planned.len());
+        timing.phase("draft");
+        match exercise_draft_at_head(core, set, &verifying, draft, accepted).await? {
+            Drafted::Position(outcome) => return Ok(outcome),
+            Drafted::HeadMoved(why) => {
+                log::info!("[sofi] trade: re-planning ({round}/{TRADE_REPLANS}): {why}");
+                moved = why;
+            }
+        }
     }
-    let movements = [
-        (token, amount, 0),
-        (intent.token_in_policy_commit, 0, intent.amount_in),
-    ];
-    let trader = trader_core(&standing, &movements, &vaults)?;
-    let public_key = crate::sdk::signing_authority::current_public_key()?;
-    let ctx = context(&standing, set, &public_key, trader)?;
-    let draft = draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)?;
-    log::info!("[sofi] trade: drafted {} hops", planned.len());
-    timing.phase("draft");
-    exercise_draft(core, set, &verifying, draft, accepted).await
+    Err(refuse(format!(
+        "the vault moved under the trade {TRADE_REPLANS} times: {moved}"
+    )))
 }
 
 // ── §32 Closing a vault ────────────────────────────────────────────────────
@@ -2328,6 +2418,87 @@ mod tests {
 
     /// A route search walks only the vaults that can be in a route: the one
     /// pairing ERA and WILD, and the two legs of the chain WILD→TKN→ERA.
+    fn lane(i: u8) -> [u8; 32] {
+        [0x30 + i; 32]
+    }
+
+    fn trader(i: u16) -> ([u8; 32], [u8; 32]) {
+        let mut g = [0x51; 32];
+        g[..2].copy_from_slice(&i.to_be_bytes());
+        (g, [0x52; 32])
+    }
+
+    /// Five equal vaults of a pair, each alone or split in two: a small
+    /// trade's split is within the tolerance of a single vault, so each
+    /// trader takes one vault alone — the same one every time — and traders
+    /// spread over all five instead of piling into the first.
+    #[test]
+    fn near_equal_routes_spread_traders_over_a_pairs_vaults() {
+        let mut routes: Vec<(u64, Vec<[u8; 32]>)> =
+            (0..5).map(|i| (1_000, vec![lane(i)])).collect();
+        for i in 0..5 {
+            for j in i + 1..5 {
+                routes.push((1_020, vec![lane(i), lane(j)]));
+            }
+        }
+        let mut chosen = std::collections::BTreeSet::new();
+        for t in 0..60 {
+            let (g, d) = trader(t);
+            let pick = choose_route(&routes, (&g, &d)).expect("a route");
+            assert_eq!(
+                routes[pick].1.len(),
+                1,
+                "a single vault within the tolerance"
+            );
+            assert_eq!(
+                choose_route(&routes, (&g, &d)),
+                Some(pick),
+                "one trader, one route"
+            );
+            chosen.insert(routes[pick].1[0]);
+        }
+        assert_eq!(chosen.len(), 5, "the traders spread over every vault");
+    }
+
+    /// Both sides of the tolerance band, to the base unit: a single vault
+    /// exactly `ROUTE_TOLERANCE_BPS` below a split is inside the band
+    /// (inclusive) and wins on fewer legs; one base unit lower is outside it,
+    /// and the economically better split wins.
+    #[test]
+    fn the_tolerance_band_is_inclusive_to_the_base_unit() {
+        let (g, d) = trader(3);
+        let best = 10_000u64;
+        let at_band = best * (10_000 - ROUTE_TOLERANCE_BPS) / 10_000;
+        let inside = vec![(at_band, vec![lane(0)]), (best, vec![lane(0), lane(1)])];
+        assert_eq!(
+            choose_route(&inside, (&g, &d)),
+            Some(0),
+            "inside: fewer legs win"
+        );
+        let outside = vec![(at_band - 1, vec![lane(0)]), (best, vec![lane(0), lane(1)])];
+        assert_eq!(
+            choose_route(&outside, (&g, &d)),
+            Some(1),
+            "outside: the split wins"
+        );
+    }
+
+    /// A split that beats every single vault by more than the tolerance is
+    /// taken; a single vault far below the best is never; no routes, none.
+    #[test]
+    fn a_materially_better_route_wins_and_a_poor_one_never_does() {
+        let (g, d) = trader(7);
+        let big = vec![
+            (1_000, vec![lane(0)]),
+            (1_000, vec![lane(1)]),
+            (1_100, vec![lane(0), lane(1)]),
+        ];
+        assert_eq!(choose_route(&big, (&g, &d)), Some(2));
+        let poor = vec![(900, vec![lane(0)]), (1_000, vec![lane(1)])];
+        assert_eq!(choose_route(&poor, (&g, &d)), Some(1));
+        assert_eq!(choose_route(&[], (&g, &d)), None);
+    }
+
     /// An ERA vault of an unrelated pair, and a chain whose second leg is
     /// missing, take no part in any route and are never walked.
     #[test]

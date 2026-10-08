@@ -71,10 +71,14 @@ use super::validation::{
     EvidenceNeeds, Missing, SetupLineage, VaultLeafPre, VaultPostState,
 };
 use super::wire::{
-    CoreEntry, ParentClaimRef, SettlementBody, SettlementPreimage, SofiResolutionClaim, TraderCore,
-    TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, ValidationRef,
-    VaultGenesisPreimage, VaultStateLeaf,
+    CoreEntry, DlvCore, ParentClaimRef, SettlementBody, SettlementPreimage, SofiResolutionClaim,
+    TraderCore, TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, ValidationRef,
+    VaultGenesisPreimage, VaultHistoryHeadV1, VaultStateLeaf,
 };
+use crate::common::domain_tags::{
+    TAG_DSM_SOFI_VAULT_HISTORY_HEAD, TAG_DSM_SOFI_VAULT_HISTORY_NODE, TAG_DSM_SOFI_VAULT_LEAF_STATE,
+};
+use crate::crypto::domain::TaggedHashDomain;
 
 type D32 = [u8; 32];
 
@@ -108,6 +112,67 @@ pub const SIBLING_DEPTH: usize = 2;
 
 /// Acquisition rounds before the evidence is `Exhausted`.
 pub const ACQUIRE_ROUNDS: usize = 3;
+
+std::thread_local! {
+    /// The vaults whose chains this thread is extending now
+    /// ([`Extending`]).
+    static EXTENDING: std::cell::RefCell<BTreeSet<D32>> =
+        const { std::cell::RefCell::new(BTreeSet::new()) };
+}
+
+/// What proving a root below a chain's baseline came to (SoFi Amendment
+/// S26). Only `Proven` establishes anything; the rest leave the root
+/// unestablished, and refute nothing.
+enum BelowBaseline {
+    /// Admitted to the chain at this generation.
+    Proven(u64),
+    /// The chain starts at no baseline this device holds.
+    NoBaseline,
+    /// The history head the baseline commits is not in hand.
+    HeadNotInHand,
+    /// No candidate the locator gave is proven: each, and why.
+    NotProven(Vec<(u64, super::history::NotProven)>),
+}
+
+impl core::fmt::Display for BelowBaseline {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Proven(generation) => {
+                write!(
+                    f,
+                    "proven at generation {generation} under the baseline's history"
+                )
+            }
+            Self::NoBaseline => write!(f, "the chain starts at no baseline this device holds"),
+            Self::HeadNotInHand => {
+                write!(f, "the history head the baseline commits is not in hand")
+            }
+            Self::NotProven(unproven) => write!(f, "no candidate is proven: {unproven:?}"),
+        }
+    }
+}
+
+/// This thread extends `vault`'s chain while the value lives. A chain's
+/// extension judges each consumption, and a judgement reaches other
+/// traders' lineages, which can ask for this vault's chain again on the
+/// same thread: that request is answered from what is recorded, never by a
+/// second extension of the chain the first is extending.
+struct Extending(D32);
+
+impl Extending {
+    /// `None` when this thread is extending `vault`'s chain already.
+    fn enter(vault: D32) -> Option<Self> {
+        EXTENDING
+            .with(|extending| extending.borrow_mut().insert(vault))
+            .then_some(Self(vault))
+    }
+}
+
+impl Drop for Extending {
+    fn drop(&mut self) {
+        EXTENDING.with(|extending| extending.borrow_mut().remove(&self.0));
+    }
+}
 
 /// A read that could not be made: a member did not answer, a local store
 /// failed. A network status, never a verdict, and never a fact about the
@@ -223,6 +288,24 @@ pub trait SofiReads {
         vault_id: &D32,
         root: &D32,
     ) -> Result<Option<VaultStateLeaf>, ReadFailure>;
+    /// The bytes the immutable store holds under `namespace` at the inner
+    /// digest `inner`, or `None` when no member serves them. Core checks
+    /// what it reads against the digest it asked for (SoFi Amendment S26:
+    /// a history's nodes and head, a vault's state leaf by its value).
+    fn immutable_object(
+        &self,
+        namespace: TaggedHashDomain<'static>,
+        inner: &D32,
+    ) -> Result<Option<Vec<u8>>, ReadFailure>;
+    /// The bytes of every history leaf indexed under
+    /// `history_locator(vault_id, root)` (SoFi Amendment S26). Discovery
+    /// only: a candidate stands only as a proof under an authenticated
+    /// history root.
+    fn history_leaf_candidates(
+        &self,
+        vault_id: &D32,
+        root: &D32,
+    ) -> Result<Vec<Vec<u8>>, ReadFailure>;
     /// The owner baseline this device adopted for `genesis`'s vault, as Core
     /// authenticates it from this device's record now (SoFi Amendment
     /// S24), or `None` when it adopted none.
@@ -1459,11 +1542,46 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         } else {
             match self.reads.vault_state_at(vault_id, &pre_root)? {
                 Some(state) => state,
-                None => return Ok(None),
+                // A root this device did not establish a generation at: the
+                // state leaf the core states there, read by its value
+                // (SoFi Amendment S26). The core's path binds that value to
+                // the root, which validation folds.
+                None => match self.published_state(core)? {
+                    Some(state) => state,
+                    None => return Ok(None),
+                },
             }
         };
         vault_leaves.extend(vault_leaves_from_core(core, &state));
         Ok(Some(state))
+    }
+
+    /// The state leaf a vault core states at its pre-root, read from the
+    /// immutable store by the value the core names (SoFi Amendment S26),
+    /// when those bytes re-derive that value.
+    fn published_state(&self, core: &DlvCore) -> Result<Option<VaultStateLeaf>, VerifierFailure> {
+        let state_key = derive::vault_state_key(core.vault_id());
+        let Some(value) = core
+            .entries()
+            .iter()
+            .find(|entry| entry.key() == state_key)
+            .and_then(|entry| super::validation::stated(entry).0)
+        else {
+            return Ok(None);
+        };
+        let Some(bytes) = self
+            .reads
+            .immutable_object(TAG_DSM_SOFI_VAULT_LEAF_STATE, &value)?
+        else {
+            return Ok(None);
+        };
+        Ok(match VaultStateLeaf::decode(&bytes) {
+            Ok(state) => match derive::vault_state_leaf_value(&state) {
+                Ok(derived) if derived == value => Some(state),
+                Ok(..) | Err(..) => None,
+            },
+            Err(..) => None,
+        })
     }
 
     /// Vault `v`'s genesis as this verifier accepts it: every preimage
@@ -1727,9 +1845,114 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
+        let mut chain = self.recorded_chain(&vault_id, &genesis)?;
+        // Extending a chain judges each consumption, and a judgement can ask
+        // for a root of this same vault: the parent of a position some
+        // trader's lineage holds. On this thread that chain is being
+        // extended already, so the root asked for is one it names, or one
+        // below its baseline that extending it never reaches — and
+        // extending it again would ask again, without end.
+        let extending = Extending::enter(vault_id);
+        if extending.is_some() {
+            self.extend_chain(&vault_id, &mut chain, depth, until)?;
+        }
+        // A root below the baseline the chain starts at: proven under the
+        // baseline's history root, never reached by replaying the vault
+        // (SoFi Amendment S26).
+        if let Some(root) = until {
+            if chain.base() > 0 && !chain.names(root) {
+                let below = self.prove_below_baseline(&vault_id, &genesis, root, &mut chain)?;
+                log::info!(
+                    "[sofi verifier] vault {}: a root below the baseline: {below}",
+                    short_id(&vault_id)
+                );
+            }
+        }
+        Ok(chain)
+    }
+
+    /// Prove `root` of `vault_id` at a generation below the baseline
+    /// `chain` starts at (SoFi Amendment S26): the history head the
+    /// baseline's frontier commits, read by that commitment; the history
+    /// leaves indexed under `root`, each a candidate generation; and the
+    /// path from the head's peak down to the leaf, each node read by its
+    /// hash. The first candidate the path proves is admitted to the chain.
+    /// Anything not in hand leaves the root unestablished, never refuted.
+    fn prove_below_baseline(
+        &self,
+        vault_id: &D32,
+        genesis: &AcceptedVaultGenesis,
+        root: &D32,
+        chain: &mut VaultChain,
+    ) -> Result<BelowBaseline, VerifierFailure> {
+        let Some(baseline) = self.reads.recorded_baseline(genesis)? else {
+            return Ok(BelowBaseline::NoBaseline);
+        };
+        let frontier = baseline.frontier();
+        let Some(bytes) = self
+            .reads
+            .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_HEAD, &frontier.history_root)?
+        else {
+            return Ok(BelowBaseline::HeadNotInHand);
+        };
+        let head = VaultHistoryHeadV1::decode(&bytes).map_err(|e| {
+            VerifierFailure::Refused(format!(
+                "vault {}: the history head the baseline commits does not decode: {e}",
+                short_id(vault_id)
+            ))
+        })?;
+        match super::history::history_root(&head) {
+            Ok(committed) if committed == frontier.history_root => {}
+            Ok(..) | Err(..) => {
+                return Err(VerifierFailure::Refused(format!(
+                    "vault {}: the history head read is not the one the baseline commits",
+                    short_id(vault_id)
+                )))
+            }
+        }
+        if head.generation != frontier.generation {
+            return Err(VerifierFailure::Refused(format!(
+                "vault {}: the baseline at generation {} commits a history to generation {}",
+                short_id(vault_id),
+                frontier.generation,
+                head.generation
+            )));
+        }
+        let mut unproven = Vec::new();
+        for candidate in self.reads.history_leaf_candidates(vault_id, root)? {
+            let Some((named, generation, leaf_root)) = super::history::decode_leaf(&candidate)
+            else {
+                continue;
+            };
+            if named != *vault_id || leaf_root != *root || generation >= chain.base() {
+                continue;
+            }
+            match super::history::prove(&head, vault_id, generation, root, |node| {
+                self.reads
+                    .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_NODE, node)
+            })? {
+                Ok(proven) => {
+                    chain.admit_proven(&proven);
+                    return Ok(BelowBaseline::Proven(generation));
+                }
+                Err(why) => unproven.push((generation, why)),
+            }
+        }
+        Ok(BelowBaseline::NotProven(unproven))
+    }
+
+    /// The chain this device recorded of `vault_id`, anchored and linked
+    /// before anything stands on it: at the accepted genesis when the
+    /// record starts at zero, and at the owner baseline it adopted (SoFi
+    /// Amendment S24), authenticated again now, when it starts above.
+    fn recorded_chain(
+        &self,
+        vault_id: &D32,
+        genesis: &AcceptedVaultGenesis,
+    ) -> Result<VaultChain, VerifierFailure> {
         let recorded: Vec<RecordedGeneration> = self
             .reads
-            .recorded_generations(&vault_id)?
+            .recorded_generations(vault_id)?
             .into_iter()
             .map(|row| RecordedGeneration {
                 generation: row.generation,
@@ -1738,36 +1961,45 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 consumed_by: row.consumed_by,
             })
             .collect();
-        // A record that starts above the genesis starts at the owner
-        // baseline this device adopted (SoFi Amendment S24), authenticated
-        // again now; one that starts at zero starts at the genesis.
         let anchored = match recorded.first() {
-            Some(first) if first.generation > 0 => match self.reads.recorded_baseline(&genesis)? {
+            Some(first) if first.generation > 0 => match self.reads.recorded_baseline(genesis)? {
                 Some(baseline) => VaultChain::from_baseline(&baseline, &recorded),
                 None => {
                     return Err(VerifierFailure::Refused(format!(
                         "chain: this device's record of vault {} starts at generation {} with \
                          no baseline it authenticates",
-                        short_id(&vault_id),
+                        short_id(vault_id),
                         first.generation
                     )))
                 }
             },
-            _ => VaultChain::from_recorded(&genesis, &recorded),
+            _ => VaultChain::from_recorded(genesis, &recorded),
         };
-        let mut chain = anchored.map_err(|e| {
+        anchored.map_err(|e| {
             VerifierFailure::Refused(format!(
                 "chain: this device's record of vault {}: {e}",
-                short_id(&vault_id)
+                short_id(vault_id)
             ))
-        })?;
+        })
+    }
+
+    /// Extend `chain` from its head, one realized consumption at a time,
+    /// recording each generation, until it names `until`, or by
+    /// [`GENERATION_BUDGET`] generations.
+    fn extend_chain(
+        &self,
+        vault_id: &D32,
+        chain: &mut VaultChain,
+        depth: usize,
+        until: Option<&D32>,
+    ) -> Result<(), VerifierFailure> {
         // What the resolver is told while this chain is being extended:
         // this vault's chain SO FAR, plus any sibling chain a multi-leg
         // consumption forced us to establish. The chain so far is not an
         // assumption — it is the induction, from a genesis nobody
         // resolved through one realized consumption per step.
         let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
-        chains.insert(vault_id, chain.clone());
+        chains.insert(*vault_id, chain.clone());
         let mut extended = 0;
         while extended < GENERATION_BUDGET {
             if until.is_some_and(|root| chain.names(root)) {
@@ -1780,13 +2012,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             let Some((.., current)) = chain.head() else {
                 break;
             };
-            let Some(post) = self.next_generation(&vault_id, &current, &mut chains, depth)? else {
+            let Some(post) = self.next_generation(vault_id, &current, &mut chains, depth)? else {
                 break;
             };
             self.reads.record_generation(&post)?;
             log::info!(
                 "[sofi verifier] vault {}: generation {} established",
-                short_id(&vault_id),
+                short_id(vault_id),
                 post.generation()
             );
             chain.extend(&post).map_err(|e| {
@@ -1794,9 +2026,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     "chain: the consumption does not extend the chain: {e}"
                 ))
             })?;
-            chains.insert(vault_id, chain.clone());
+            chains.insert(*vault_id, chain.clone());
         }
-        Ok(chain)
+        Ok(())
     }
 
     /// The post state of the exercise that consumed `current`, or `None` when
