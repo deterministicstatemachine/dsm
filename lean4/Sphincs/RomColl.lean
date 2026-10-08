@@ -17,7 +17,8 @@ import Sphincs.RomPhi
 
    So the event is contained in a tape collision: two of the first three tape
    entries agree modulo `256^n`, or two entries below `N` agree modulo
-   `256^32`. -/
+   `256^32`. `collC_key` names those two entries as key entries (`KeyEnts`);
+   `RomKey.lean` counts them as such, without the `N^2` factor. -/
 namespace DSM.Rom
 open DSM.Sphincs DSM.Sphincs.Security
 
@@ -376,11 +377,22 @@ theorem famOK_mode1 {st : St} {r : SReq} (hF : FamOK c st r) (hm : r.mode = 1) :
 theorem sres_key32 (t : List Nat) (k : Nat) : sres t [.hid k 32] = be 32 (t.getD k 0) := by
   simp [sres, SV.res]
 
+/-- The three 32-byte key derivations: the tweak key, the PRF key, the PRF-msg key. -/
+def keyReqs (n : Nat) : List SReq := [dTk n, dPrf n, dReq n]
+
+theorem dTk_key (n : Nat) : dTk n ∈ keyReqs n := by simp [keyReqs]
+theorem dPrf_key (n : Nat) : dPrf n ∈ keyReqs n := by simp [keyReqs]
+theorem dReq_key (n : Nat) : dReq n ∈ keyReqs n := by simp [keyReqs]
+
+/-- Entries `a < b` of `st` are challenger key-derivation entries. -/
+def KeyEnts (n : Nat) (st : St) (a b : Nat) : Prop :=
+  a < b ∧ (∃ x ∈ keyReqs n, st.ents[a]? = some (false, x)) ∧ (∃ y ∈ keyReqs n, st.ents[b]? = some (false, y))
+
 /-- At a step of H1' with no earlier disagreement, an unopened collision of two distinct
-    challenger requests is a collision of two 32-byte key values. -/
+    challenger requests is a collision of two of the three 32-byte key entries. -/
 theorem collC_key (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) {st : St} {r : SReq} (hI : InvS c st)
     (hS : StepOK c (st, .c r)) {x : Bool × SReq} (hx : x ∈ st.ents) (hcol : collC c.t st (.c r) x = true) :
-    ∃ a b, a < b ∧ b < st.ents.length ∧ c.t.getD a 0 % 256^32 = c.t.getD b 0 % 256^32 := by
+    ∃ a b, KeyEnts c.n st a b ∧ c.t.getD a 0 % 256^32 = c.t.getD b 0 % 256^32 := by
   have hn := params_n_pos c.v
   have hF : FamOK c st r := hS
   simp only [collC, Bool.and_eq_true, Bool.not_eq_true', decide_eq_true_eq, decide_eq_false_iff_not] at hcol
@@ -421,10 +433,12 @@ theorem collC_key (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) {st : St} {r : SRe
           have := congrArg Request.key hres
           simp only [SReq.res, hk1, hk2, sres_key32] at this
           exact be_eq_mod this
-        have hl1 : k1 < st.ents.length := by rcases he1 with ⟨h, _⟩ | ⟨h, _⟩ | ⟨h, _⟩ <;> exact lt_entry h
-        have hl2 : k2 < st.ents.length := by rcases he2 with ⟨h, _⟩ | ⟨h, _⟩ | ⟨h, _⟩ <;> exact lt_entry h
+        have kx1 : ∃ x ∈ keyReqs c.n, st.ents[k1]? = some (false, x) := by
+          rcases he1 with ⟨h, _⟩ | ⟨h, _⟩ | ⟨h, _⟩ <;> exact ⟨_, by simp [keyReqs], h⟩
+        have kx2 : ∃ x ∈ keyReqs c.n, st.ents[k2]? = some (false, x) := by
+          rcases he2 with ⟨h, _⟩ | ⟨h, _⟩ | ⟨h, _⟩ <;> exact ⟨_, by simp [keyReqs], h⟩
         rcases Nat.lt_trichotomy k1 k2 with hlt | heq | hgt
-        · exact ⟨k1, k2, hlt, hl2, hkey⟩
+        · exact ⟨k1, k2, ⟨hlt, kx1, kx2⟩, hkey⟩
         · exfalso
           subst heq
           rcases he1 with ⟨h1, d1, A1, hs1⟩ | ⟨h1, A1, rfl, hA1⟩ | ⟨h1, m1, rfl⟩ <;>
@@ -448,7 +462,7 @@ theorem collC_key (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) {st : St} {r : SRe
             have := congrArg Request.input hres
             simp [SReq.res, rqOf, sres, SV.res] at this
             rw [this]
-        · exact ⟨k2, k1, hgt, hl1, hkey.symm⟩
+        · exact ⟨k2, k1, ⟨hgt, kx2, kx1⟩, hkey.symm⟩
 
 end
 
@@ -501,8 +515,8 @@ theorem coll_event (N S : Nat) (hS : ∀ t s stp, (strace t (gameS' v limits A (
       · obtain ⟨st, ev⟩ := stp
         cases ev with
         | c r =>
-          obtain ⟨a, b, hab, hb, he⟩ := collC_key (c := structCtx t v) ρ hρ hI hSt hx hc
-          have hb' : b < st.ents.length := hb
+          obtain ⟨a, b, ⟨hab, -, ⟨_, -, hb⟩⟩, he⟩ := collC_key (c := structCtx t v) ρ hρ hI hSt hx hc
+          have hb' : b < st.ents.length := lt_entry hb
           have hlen' : st.ents.length ≤ S := hlen
           exact ⟨a, b, hab, by omega, he⟩
         | a q => simp [collC] at hc

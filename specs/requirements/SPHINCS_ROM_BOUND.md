@@ -567,7 +567,7 @@ Two caveats:
   nothing, and the wide term `S^2/2^256` is not small against the 256f
   target. 256f needs a wide-class count of the same kind, and also a
   refinement of the `N^2/2^256` key-collision terms of C59 and C60, which are
-  of the same order (see C62).
+  of the same order (see C62). Both are done in C63 and C64.
 
 **Collisions of independently sampled values** (`RomColl.lean`, claim
 trace C59). The wild/collision event is needed only at the first
@@ -782,7 +782,8 @@ What this does not yet cover:
 * the bound is per key (see the multi-key note below);
 * the random-oracle and tape assumptions of C54–C60 still apply.
 
-**SPHINCS+-256f, as composed today** (`RomBudget.lean`, claim trace C62).
+**SPHINCS+-256f, first composition** (`RomBudget.lean`, claim trace C62;
+superseded for 256f by C64).
 The same ingredients compose for 256f (`rom_win_full_256f`). There `n = 32`,
 so every pin and collision term is against `2^256`, and the ITSR term is
 `JA/2^255`:
@@ -819,23 +820,154 @@ order:
 * `N^2`: the 32-byte key coincidence of C60 (`canon_split`).
 
 The last two are collisions among the three 32-byte key entries (tweak key,
-PRF key, PRF-msg key), but the current events forget which entries they are,
-and are counted as any two of `N` tape entries. A linear 256f bound needs all
-three refined:
+PRF key, PRF-msg key), but the C59 and C60 events forgot which entries they
+are, and were counted as any two of `N` tape entries. A wide-pin count alone
+would change only the constant. These evaluations are arithmetic outside Lean.
+C63 and C64 remove all three quadratic terms.
 
-* a wide-pin count `B_hi = O(AA)`;
-* the key collisions charged as at most three pairs of key entries.
+**Key collisions** (`RomKey.lean`, claim trace C63). This is one shared event
+for C59 and C60.
 
-A wide-pin count alone changes only the constant. These evaluations are
-arithmetic outside Lean.
+*Event inclusion.* Both events now name the colliding entries.
+
+* `collC_key` (C59) returns two *key entries* (`KeyEnts`): challenger entries
+  whose requests are among the three key derivations (`keyReqs`). The other
+  branches do not survive:
+  * two narrow-shaped requests are skeleton-unique;
+  * two requests keyed by the same entry coincide.
+* `canon_split` (C60) does the same for its 32-byte branch. That branch was a
+  PRF or randomizer entry whose key value equals the tweak key's; the
+  structured branch contradicts `struct_unique`.
+
+No case of either event leaves a collision between other 32-byte values.
+
+*The event* (`KeyColl`). A step appends a challenger key entry at an
+unrevealed position. Its coordinate agrees, modulo `256^32`, with an existing
+challenger key entry. Two lemmas lift the inclusions from key entries of a
+disagreement-free prefix to `KeyColl`:
+
+* `keyColl_of_fin`: the later entry's creation step has an unrevealed
+  position, by `InvS`;
+* `coll_event_key` and `canon_split_key` then give the C59 and C60
+  inclusions.
+
+*Count* (`key_count`). The pair is charged at the later key's creation. That
+creation is a fresh tape coordinate; the earlier key's coordinate is fixed by
+the prefix (`keyW_inv` and `keyTg_inv`, via `strace_inv`). The PRF-msg key's
+creation position varies with the run, but it is selected by the prefix,
+without its own draw.
+
+There are at most three charged pairs per tape (`keyW_total`):
+
+* a request is appended at most once (`keyW_unique`, `ch_once`);
+* a key is never charged against itself (`keyW_diag`);
+* of two keys only the later is charged (`keyW_anti`).
+
+So `#KeyColl · 256^32 ≤ 3·R^N`. The refined counts are:
+
+* `coll_count_key`: `#(wildColl ∨ initColl)(H1') · 256^(n+32) ≤
+  3·R^N·256^32 + 3·R^N·256^n`, with coin collisions counted separately;
+* `canon_count_key`: `#(canon ∧ ¬anyDis) · 256^(n+32) ≤ R^N·AA·256^32 +
+  3·R^N·256^n`.
+
+**The wide-pin count and the linear 256f bound** (`RomWide.lean`, claim trace
+C64).
+
+*The obstacle.* A probe at a challenger step can compare a hidden PRF or
+randomizer entry with an *open* thash request, or the reverse. The two shapes
+agree in mode, context and output length, so they are syntactically
+compatible whenever the thash input ends in the PRF literal. For example, the
+adversary can sign a message equal to the tail of a revealed thash input. In
+the worst case over tapes there are `O(S)` such probes, so they cannot be
+charged to adversary steps.
+
+Each such probe pins the hidden PRF or PRF-msg key against the tweak key's
+value, which is legitimately disclosed. A hit is therefore a key collision.
+
+*Filtered hidden-value bound* (`hidden_bound_Q`). The bound takes a
+tape-free probe filter `Ψ` in one width class:
+
+* filtered probes are not counted;
+* a filtered probe that hits is charged to an event `E` (`dis_pointQ`).
+
+Probes still pin the first *unrevealed* handle of the hidden request. Disclosed
+values (the tweak key once revealed, adversary bytes) are never pinned. They
+are only the targets.
+
+For H1':
+
+* `Ψ = psiB` (`KeyTh`): a challenger step pairing a PRF-shaped request with a
+  thash-shaped one;
+* `E = KeyColl` (`game_keyTh`, from `InvS`): the PRF-shaped request is keyed
+  by the PRF or PRF-msg key, and the thash-shaped one by the tweak key;
+* `Φ = phiW` (`PhiW`, from `InvS` via `game_phiW`): `PhiP`, plus literal
+  uniqueness of challenger entries past the coins, plus PRF-shaped requests
+  keyed by the PRF or PRF-msg key.
+
+*Classification* (`pin_class_w`, exhaustive). Every counted probe falls into
+one of two cases:
+
+* *An adversary step against a challenger entry.* The entry is a coin, a
+  narrow-shaped entry compatible with the query, or a PRF-shaped entry
+  compatible with the query.
+* *A challenger step against an adversary entry.* The request is narrow-shaped
+  or PRF-shaped.
+
+All other combinations are impossible or filtered:
+
+* skeleton uniqueness rules out narrow-vs-narrow;
+* mode mismatch rules out PRF against a key derivation or the signing request;
+* `Ψ` filters PRF against thash.
+
+*Count* (`wide_count`). At most nine probes per adversary step:
+
+* per adversary step, at most six (`adv_step_w`): three coins, one
+  narrow-shaped entry (its skeleton is fixed by the query), and one
+  PRF-shaped entry per key (its literal is fixed by the query);
+* per adversary entry, at most three fresh challenger steps
+  (`chal_entry_w`): one narrow-shaped and one PRF-shaped per key, since a
+  request is fresh only once.
+
+So:
+
+    #anyDis(H1') · 2^256 ≤ R^N·9·AA + #(wildColl ∨ initColl)·2^256 + #KeyColl·2^256
+
+(`rom_ext_wide`, for any variant, all pins against `256^n`).
+
+*Composed for SPHINCS+-256f* (`rom_win_lin_256f`):
+
+    Pr[won] ≤ (2·JA + 19·AA + 21)/2^256
+
+There is no `S^2` or `N^2` term: `S` and `N` enter only as the step bound and
+the tape length. With the query budget (`rom_win_budget_lin_256f`):
+
+    Pr[won] ≤ (21·qh + 368023)/2^256
+
+This holds for every adversary with `Budget A qh qs` and `qs ≤ 2^64`. At
+`qh = 2^64` it is about 2^-187.6, for any `qs ≤ 2^64`, evaluated outside
+Lean. It is linear in the hash-query budget and independent of `qs`, apart
+from the ITSR condition `qs ≤ 2^64` and the tape length.
+
+For SPHINCS+-128f the C61 bound is kept. The filtered bound would price every
+pin at `2^-128` and raise the `AA` coefficient there, while the quadratic
+terms of C61 are already about 2^-88.7 at `qh = qs = 2^64`.
+
+What this does not yet cover:
+
+* this is game H1: honest key generation from three independent coin entries,
+  not from the 32-byte seed;
+* the bound is per key;
+* the random-oracle and tape assumptions of C54–C60 still apply.
 
 Still open, and needed before this is a number for DSM:
 
-* the 256f refinements above (wide pins and the two key-collision events);
 * the seed hop. H1 starts from three independent coin entries, while the
   implementation expands a 32-byte seed with ChaCha20, idealized as a random
-  oracle. The final statement must keep that idealization visible and pay
-  for the hop explicitly;
+  oracle. That expansion is one `3n`-byte output of one request, so its three
+  parts being independent and uniform must follow from the modeled interface
+  (output length, domain separation, adversary access to the expansion
+  oracle), not be assumed. The final statement must keep the idealization
+  visible and pay for the hop explicitly, including any seed-guessing term;
 * the final composition.
 
 ## Assumptions, stated plainly
