@@ -762,6 +762,37 @@ theorem j2_forsLeaf0 {tk pk : SB} {tk' pk' : Bytes} (K : Keys c tk pk tk' pk') (
   simp only [sForsNode, sForsSecret]
   exact J2.conseq (jr_forsLeaf K tree leaf gi hs h) (fun _ _ h => h) (fun _ _ h => h.2)
 
+/-- The extension's tail keeps any stable precondition. -/
+theorem j2_extTail {tk pk : SB} {tk' pk' : Bytes} (K : Keys c tk pk tk' pk') (I : Indices)
+    (htI : I.tree < 256^8) (hlI : I.leaf < 2^(params c.v).hp) {P0 : St → Prop} (hs : Stable2 c P0)
+    (h : ∀ st, Inv2 c st → P0 st → TKh c st tk ∧ PKh c st pk) :
+    J2 c (sExtTail (params c.v) tk pk [.hid 2 c.n] I) P0 (fun _ st => P0 st) := by
+  obtain ⟨_, hH, hd, _⟩ := variant_bounds c.v
+  simp only [sExtTail]
+  refine J2.bind (J2.loop' _ _ (fun r st => RG c r (sres c.t r) st) hs (fun r => stable_RG r _) []
+    (fun st _ _ => RG_nil st) (fun i _ r => ?_)) (fun roots => ?_) hs
+  · have hs1 := stable2_and hs (stable_RG (c := c) r (sres c.t r))
+    refine J2.bind (jr_forsNode K I.tree I.leaf (params c.v).a i hs1 (fun st hI hp => h st hI hp.1))
+      (fun x => ?_) hs1
+    refine J2.bind J2.unit (fun _ => J2.pure' (fun st _ hp => ?_))
+      (stable2_and hs1 (stable_R1 (c := c) c.n x _))
+    have := RG_append hp.1.1.2 (RG_of_R1 hp.1.2)
+    exact ⟨this.1, rfl, this.2.2⟩
+  have hs2 := stable2_and hs (stable_RG (c := c) roots (sres c.t roots))
+  refine J2.bind0 (J2.frame (jr_thash (params c.v) tk _ roots tk' (sres c.t roots) (by simp [forsAdrs, Adrs.setType])
+    (by simp [forsAdrs, Adrs.setType]) K.htk (fun _ _ _ => rfl)
+    (fun st hI hp => hids_tk_gd hI (h st hI hp.1).1 hp.2.1)) hs2)
+    (fun z => J2.conseq (P0 := fun st => P0 st ∧ RG c roots (sres c.t roots) st) ?_ (fun _ _ h => h.1)
+      (fun _ _ h => h))
+  refine J2.bind (J2.loop' _ _ (fun _ _ => True) hs2 (fun _ => stable2_true) PUnit.unit (fun _ _ _ => trivial)
+    (fun l hl u => ?_)) (fun _ => J2.pure' (fun st _ hp => hp.1.1)) hs2
+  have hl' := List.mem_range.mp hl
+  have hs4 := stable2_and hs2 (stable2_true (c := c))
+  refine J2.bind0 (J2.frame (jr_xmssNode K l (pathT (params c.v) I l) (by omega)
+    (Nat.lt_of_le_of_lt (ext_tree_le c.v I.tree I.leaf l hlI) htI) (params c.v).hp 0 hs4 (by simp)
+    (fun st hI hp => h st hI hp.1.1)) hs4) (fun _ => ?_)
+  exact J2.bind0 J2.unit (fun _ => J2.pure' (fun _ _ _ => trivial))
+
 theorem j2_ext (ρ : Nat) (msg sig : Bytes) {P0 : St → Prop} (hs : Stable2 c P0)
     (h : ∀ st, Inv2 c st → P0 st → PP c ρ st) :
     J2 c (sExtW c.v (coinEx c.n ++ [.hid ρ c.n]) msg sig) P0
@@ -814,7 +845,11 @@ theorem j2_ext (ρ : Nat) (msg sig : Bytes) {P0 : St → Prop} (hs : Stable2 c P
   refine J2.bind (J2.loopAll _ _ (fun l st => ∀ ci ∈ List.range (params c.v).len, ∀ s',
       s' ≤ c.dgt l (extT c.v I l) (extF c.v I l) ci → ∃ j, LowAt c.n st j l (extT c.v I l) (extF c.v I l) ci s')
       sF (fun l => stable_lowAll _ _ _) (fun l hl u => ?_) PUnit.unit)
-    (fun _ => J2.pure' (fun st _ hp => ⟨hp.1.2, hp.2⟩)) sF
+    (fun _ => J2.conseq (j2_extTail K I htI hlI (stable2_and sF (show Stable2 c (fun st =>
+        ∀ l ∈ List.range (params c.v).d, ∀ ci ∈ List.range (params c.v).len, ∀ s',
+          s' ≤ c.dgt l (extT c.v I l) (extF c.v I l) ci → ∃ j, LowAt c.n st j l (extT c.v I l) (extF c.v I l) ci s')
+        from fun st st' hI' hg h l hl => stable_lowAll _ _ _ st st' hI' hg (h l hl))) (fun st _ hp => hp.1.1.1))
+      (fun _ _ h => h) (fun _ _ hp => ⟨hp.1.2, hp.2⟩)) sF
   have hl' := List.mem_range.mp hl
   refine J2.bind (J2.conseq (jr_wotsPkgen K l (extT c.v I l) (extF c.v I l) (by omega)
     (Nat.lt_of_le_of_lt (ext_tree_le c.v I.tree I.leaf l hlI) htI)
