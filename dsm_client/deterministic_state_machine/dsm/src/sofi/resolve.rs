@@ -173,6 +173,13 @@ pub trait SofiReads {
     /// `F` by `FulfillmentId`.
     fn fulfillment(&self, id: &D32)
         -> Result<Resolved<Signed<TraderFulfillmentBody>>, ReadFailure>;
+    /// `P(E)` by `E`: the one preimage published under its locator whose
+    /// bytes re-derive `E` (SoFi Amendment S25: an exercise is rebuilt from
+    /// its public objects).
+    fn preimage(
+        &self,
+        external_commitment: &D32,
+    ) -> Result<Resolved<SettlementPreimage>, ReadFailure>;
     /// The exact stored envelope bytes of the setup at `ρ`.
     fn setup_bytes(&self, setup_ref: &D32) -> Result<Resolved<Vec<u8>>, ReadFailure>;
     /// The exact bytes at a content address once `Stored` holds for them;
@@ -489,6 +496,22 @@ pub enum Acquired<T, M> {
 /// `SingleRootClaim` names, the final claim bytes at `K_root(p)` a
 /// `ConditionalClaim` names. Core re-derives every reference from the
 /// bytes; nothing here is trusted.
+/// Why a position's exercise is not rebuilt yet from its public objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebuildMissing {
+    /// `P(E)` is not established under its locator.
+    Preimage,
+    /// No claim is final at `K_root(q)`.
+    ResolutionClaim,
+    /// What conformance reads is not in hand.
+    Evidence(Vec<ConformanceMissing>),
+    /// The objects do not build an exercise.
+    Build(super::exercise::ExerciseBuildError),
+    /// The built exercise does not recognize: its objects are not one
+    /// operation's.
+    Unrecognized,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ExerciseObjects<'a> {
     pub precommit: &'a TraderPrecommitBody,
@@ -1063,6 +1086,44 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(cells)
     }
 
+    /// The exact bytes final at `K_root(position)` of trader
+    /// `(genesis, device_id)`, routed by the root its lineage holds at the
+    /// position before: what anyone reads where the trader carries its own
+    /// claim (SoFi Amendment S25). `None` while that root or the cell is not
+    /// established; the caller's predicate checks what the bytes are.
+    fn final_root_claim(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<Option<Vec<u8>>, VerifierFailure> {
+        let Some(before) = position.checked_sub(1) else {
+            return Ok(None);
+        };
+        let routing = match self.reads.trader_root_at(genesis, device_id, before) {
+            Ok((root, ..)) => root.economic_root(),
+            Err(failure) => {
+                log::info!(
+                    "[sofi verifier] the root before position {position} is not established: \
+                     {failure:?}"
+                );
+                return Ok(None);
+            }
+        };
+        let cells = self.position_cells(genesis, device_id, position, &routing)?;
+        let evidence = self.reads.cell(cells.root().routed())?;
+        Ok(
+            match crate::economic::register::read_root_cell(cells.root(), &evidence) {
+                Ok(crate::route_chain::CellReading::Held {
+                    value,
+                    state: ChainState::Final,
+                    ..
+                }) => Some(value),
+                Ok(..) | Err(..) => None,
+            },
+        )
+    }
+
     /// One round of reading what `FulfillmentConformance(F)` reads: `P` and
     /// `P(E)` from the objects, every leg's setup under its `ρ` (R8), the
     /// closure objects by the rule of each reference kind, and item 5's
@@ -1089,9 +1150,26 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     Resolved::Kept(bytes) => Some(bytes),
                     Resolved::None | Resolved::Unavailable => None,
                 },
-                ValidationRef::SingleRootClaim { .. } | ValidationRef::ConditionalClaim { .. } => {
-                    objects.own_objects.get(reference).cloned()
-                }
+                // The parent claim: carried by its trader, or the bytes final
+                // at the trader's K_root of that position, which anyone reads
+                // (SoFi Amendment S25). Conformance checks them either way.
+                ValidationRef::SingleRootClaim { .. } => match objects.own_objects.get(reference) {
+                    Some(bytes) => Some(bytes.clone()),
+                    None => self.final_root_claim(
+                        objects.precommit.genesis(),
+                        objects.precommit.device_id(),
+                        objects.precommit.position(),
+                    )?,
+                },
+                ValidationRef::ConditionalClaim {
+                    genesis,
+                    device_id,
+                    position,
+                    ..
+                } => match objects.own_objects.get(reference) {
+                    Some(bytes) => Some(bytes.clone()),
+                    None => self.final_root_claim(genesis, device_id, *position)?,
+                },
             };
             if let Some(bytes) = bytes {
                 closure.insert(*reference, bytes);
@@ -1119,6 +1197,49 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             prior_attempts: self.acquire_prior_attempts(objects.precommit, objects.fulfillment)?,
             parent_fulfillment,
         })
+    }
+
+    /// A position's exercise, rebuilt from its public objects (SoFi
+    /// Amendment S25): `P` and `F` as the registration and the store hold
+    /// them, `P(E)` under its locator, the `C_q` final at `K_root(q)`, and the
+    /// closure every verifier acquires — nothing carried by the trader. What
+    /// the ladder then decides over it is what it decides over the exercise in
+    /// hand, so a position whose key another exercise holds resolves for
+    /// anyone, Void or Invalid alike. Anything not yet in hand is `Err`: the
+    /// position waits, and nothing is decided.
+    pub fn rebuild_exercise(
+        &self,
+        precommit: &Signed<TraderPrecommitBody>,
+        fulfillment: &Signed<TraderFulfillmentBody>,
+        registration: &RegistrationRead,
+    ) -> Result<Result<RecognizedExercise, RebuildMissing>, VerifierFailure> {
+        let preimage = match self.reads.preimage(precommit.body.external_commitment())? {
+            Resolved::Kept(preimage) => preimage,
+            Resolved::None | Resolved::Unavailable => return Ok(Err(RebuildMissing::Preimage)),
+        };
+        let Some(resolution_claim) = registration.root_claim_final() else {
+            return Ok(Err(RebuildMissing::ResolutionClaim));
+        };
+        let carried = BTreeMap::new();
+        let objects = ExerciseObjects {
+            precommit: &precommit.body,
+            precommit_signature: &precommit.signature,
+            preimage: &preimage,
+            fulfillment: &fulfillment.body,
+            fulfillment_signature: &fulfillment.signature,
+            own_objects: &carried,
+        };
+        let evidence = match self.acquire_conformance_evidence(&objects)? {
+            Acquired::Complete(evidence) => evidence,
+            Acquired::Exhausted(missing) => return Ok(Err(RebuildMissing::Evidence(missing))),
+        };
+        let exercise =
+            match super::exercise::exercise_from_objects(&objects, resolution_claim, &evidence) {
+                Ok(exercise) => exercise,
+                Err(why) => return Ok(Err(RebuildMissing::Build(why))),
+            };
+        Ok(super::exercise::recognize_exercise(&exercise.encode())
+            .ok_or(RebuildMissing::Unrecognized))
     }
 
     /// Acquire what `FulfillmentConformance(F)` reads, and ask the predicate
@@ -2434,18 +2555,19 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
-        let precommit = match self
+        let signed_precommit = match self
             .reads
             .precommit(fulfillment.body.precommit_id())
             .map_err(|e| read(e.into()))?
         {
-            Resolved::Kept(signed) => signed.body,
+            Resolved::Kept(signed) => signed,
             Resolved::None | Resolved::Unavailable => {
                 return Err(Incomplete(format!(
                     "position {q}: the precommit the fulfillment names is not in hand"
                 )))
             }
         };
+        let precommit = signed_precommit.body.clone();
         // `held` counts only as the claim (P, F) derive (Amendment S15).
         // Registration pairs the cells by `FulfillmentId(F)` from their bytes
         // alone (Amendment S20), so the body is compared here, where `P` is in
@@ -2476,18 +2598,36 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     "position {q}: F names no attempt for P's first leg"
                 ))
             })?;
-        let exercise = self
+        let in_cell = self
             .read_attempt_cell(&first.vault_id, &first.parent_root, attempt)
             .map_err(read)?
             .map_err(|missing| {
                 Incomplete(format!("position {q}: the first leg's cell: {missing:?}"))
             })?
-            .into_exercise()
-            .ok_or_else(|| {
-                Unresolved(format!(
-                    "position {q}: no exercise holds the first leg's cell yet"
-                ))
-            })?;
+            .into_exercise();
+        let exercise = match in_cell {
+            Some(exercise)
+                if derive::fulfillment_id(&exercise.fulfillment().body) == held.fulfillment_id =>
+            {
+                exercise
+            }
+            // Another exercise holds the key F names, or none does yet: the
+            // position's own exercise is rebuilt from its public objects, and
+            // the ladder decides over it exactly as over the exercise in hand
+            // (SoFi Amendment S25).
+            Some(..) | None => match self
+                .rebuild_exercise(&signed_precommit, &fulfillment, &registration)
+                .map_err(read)?
+            {
+                Ok(rebuilt) => rebuilt,
+                Err(missing) => {
+                    return Err(Incomplete(format!(
+                        "position {q}: its exercise is not rebuilt from public objects yet: \
+                         {missing:?}"
+                    )))
+                }
+            },
+        };
 
         // Each vault's canonical chain as far as the parent the leg names,
         // and the facts over them.
