@@ -74,7 +74,7 @@ def FamOK (st : St) (r : SReq) : Prop :=
   (∃ ipk A, r = prfReq c.n ipk A ∧ st.ents[ipk]? = some (false, dPrf c.n) ∧ A.InRange ∧ (A.kind = 5 ∨ A.kind = 6)) ∨
   (∃ dk m, r = rqOf c.n dk m ∧ st.ents[dk]? = some (false, dReq c.n)) ∨
   (∃ iR m, r = hqOf c.n c.pm c.root iR m ∧ ∃ dk, st.ents[iR]? = some (false, rqOf c.n dk m) ∧
-    st.ents[dk]? = some (false, dReq c.n) ∧ ∀ i ∈ shids c.root, 3 ≤ i) ∨
+    st.ents[dk]? = some (false, dReq c.n) ∧ ∀ i ∈ shids c.root, 3 ≤ i ∧ i < st.ents.length) ∨
   (∃ d A, StructReq c st d r A)
 
 /-- The structural invariant. -/
@@ -155,7 +155,8 @@ theorem famOK_mono {st st' : St} (hg : Grow2 st st') {r : SReq} (h : FamOK c st 
   · exact Or.inr (Or.inr (Or.inl h))
   · exact Or.inr (Or.inr (Or.inr (Or.inl ⟨ipk, A, h1, grow_get hg h2, h3⟩)))
   · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨dk, m, h1, grow_get hg h2⟩))))
-  · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨iR, m, h1, dk, grow_get hg h2, grow_get hg h3, h4⟩)))))
+  · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨iR, m, h1, dk, grow_get hg h2, grow_get hg h3,
+      fun i hi => ⟨(h4 i hi).1, by obtain ⟨⟨L, hL⟩, _⟩ := hg; rw [hL]; simp; have := (h4 i hi).2; omega⟩⟩)))))
   · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ⟨d, A, structReq_mono hg d _ A h1⟩)))))
 
 theorem prot_mono {st st' : St} (hg : Grow2 st st') {i : Nat} (hi : i < st.ents.length) :
@@ -1308,7 +1309,7 @@ theorem famOK_hids {st : St} (hI : InvS c st) {r : SReq} (hF : FamOK c st r) (h0
     rcases hi with rfl | rfl | hi
     · omega
     · omega
-    · have := hroot i hi; omega
+    · have := (hroot i hi).1; omega
   · cases d with
     | zero => exact hs.elim
     | succ d =>
@@ -2154,7 +2155,7 @@ theorem js_sign (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (msg : Bytes) {P0 : 
     obtain ⟨e, he, hm⟩ := kidAt_mode hk
     have h3 := ge3_of_res hI he (by rw [hm]; decide)
     refine Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨iR, msg, rfl, dk, hp.2, hp.1.2, ?_⟩)))))
-    rw [hroot]; intro i hi; simp [shids] at hi; omega
+    rw [hroot]; intro i hi; simp [shids] at hi; subst hi; exact ⟨h3, lt_entry he⟩
   · obtain ⟨e, he, hres, _⟩ := ask_res (c := c) st (hqOf c.n c.pm c.root iR msg)
     exact ⟨_, rfl, e, he, by rw [hres]; rfl⟩
   refine JS.obtain (X := fun i st => ∃ e, st.ents[i]? = some e ∧ (e.2.res c.t).mode = 2) (fun k hk => ?_)
