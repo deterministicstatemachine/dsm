@@ -24,9 +24,7 @@
 //! generation's write set ([`VaultWitness::advance`]): a path is specific to
 //! its root, and the receipt's own paths recompute every sibling it wrote.
 
-use crate::common::domain_tags::{
-    TAG_DSM_SOFI_VAULT_BASELINE, TAG_DSM_SOFI_VAULT_FRONTIER, TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
-};
+use crate::common::domain_tags::{TAG_DSM_SOFI_VAULT_BASELINE, TAG_DSM_SOFI_VAULT_FRONTIER};
 use crate::core::identity::authority_resolver::{
     resolve_owner_authority_at_position, OwnerAuthorityAtPosition, PresentedIdentity,
     ResolveFailure,
@@ -62,12 +60,6 @@ pub fn frontier_commitment(frontier: &VaultFrontierV1) -> D32 {
 /// anchor signs.
 pub fn baseline_commitment(auth: &OwnerBaselineAuthV1) -> D32 {
     tagged(TAG_DSM_SOFI_VAULT_BASELINE, &auth.encode())
-}
-
-/// The immutable-store address of a frontier, a baseline's authentication
-/// object, a frontier witness or a baseline's presentation.
-pub fn frontier_object_addr(bytes: &[u8]) -> D32 {
-    crate::storage_object::immutable_addr(TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT, bytes)
 }
 
 /// A frontier whose root the vault's owner signed, as Core authenticated it.

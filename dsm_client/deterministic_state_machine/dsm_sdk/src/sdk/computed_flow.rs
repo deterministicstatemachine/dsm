@@ -26,7 +26,8 @@
 use dsm::crypto::SignatureKeyPair;
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::route_chain::{CellFact, ChainState};
-use dsm::sofi::computed::{self, ComputedCellRead, ComputedCells, MatchOccupant, Opened, OpenedKind};
+use dsm::sofi::computed;
+use dsm::sofi::computed::{ComputedCellRead, ComputedCells, MatchOccupant, Opened, OpenedKind};
 use dsm::sofi::escrow;
 use dsm::sofi::publication::Publication;
 use dsm::sofi::resolve::{AcceptedGeneses, VaultGenesis, Verifier};

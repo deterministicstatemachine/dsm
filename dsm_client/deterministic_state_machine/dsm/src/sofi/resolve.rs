@@ -38,6 +38,7 @@ use super::conformance::{
     Validation,
 };
 use super::derive;
+use super::history;
 use super::computed::{
     match_completion, match_resolution, start_completion, start_resolution, ComputedCellRead,
     ComputedCells, MatchUnread, ProgramRegistry,
@@ -131,7 +132,7 @@ enum BelowBaseline {
     /// The history head the baseline commits is not in hand.
     HeadNotInHand,
     /// No candidate the locator gave is proven: each, and why.
-    NotProven(Vec<(u64, super::history::NotProven)>),
+    NotProven(Vec<(u64, history::NotProven)>),
 }
 
 impl core::fmt::Display for BelowBaseline {
@@ -1901,7 +1902,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 short_id(vault_id)
             ))
         })?;
-        match super::history::history_root(&head) {
+        match history::history_root(&head) {
             Ok(committed) if committed == frontier.history_root => {}
             Ok(..) | Err(..) => {
                 return Err(VerifierFailure::Refused(format!(
@@ -1920,14 +1921,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         }
         let mut unproven = Vec::new();
         for candidate in self.reads.history_leaf_candidates(vault_id, root)? {
-            let Some((named, generation, leaf_root)) = super::history::decode_leaf(&candidate)
-            else {
+            let Some((named, generation, leaf_root)) = history::decode_leaf(&candidate) else {
                 continue;
             };
             if named != *vault_id || leaf_root != *root || generation >= chain.base() {
                 continue;
             }
-            match super::history::prove(&head, vault_id, generation, root, |node| {
+            match history::prove(&head, vault_id, generation, root, |node| {
                 self.reads
                     .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_NODE, node)
             })? {
