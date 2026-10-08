@@ -1306,9 +1306,13 @@ What this covers and does not:
   keyed-BLAKE3 output under Smaster would put every use of Smaster behind the
   one PRF and remove the auxiliary input.
 * *Smaster itself.* `K` is uniform and independent of everything except
-  `aux K`. DSM derives Smaster from `s0` (`kdf32(s0, "DSM/Smaster/v2", …)`),
-  and the device's AK also comes from `s0`. That derivation is a separate
-  hop and is not covered.
+  `aux K`. DSM derives Smaster as `kdf32(s0, "DSM/Smaster/v2", G ‖ DevID ‖
+  aph)`, with `s0 = kdf32(wallet_seed, "DSM/s0/v2", …)`. The device's AK is
+  not derived from `s0`: it comes from a sibling,
+  `kdf32(kdf32(wallet_seed, "DSM/device-seed/v2", …), "DSM/device-ak/v2", …)`.
+  Public values derived from `wallet_seed` (genesis nonce, AttA, the AK and
+  GRK public keys, DevID) sit beside Smaster in the tree. That derivation is a
+  separate hop and is not covered.
 * *Two idealizations side by side.* In the real world the derivation is
   concrete keyed BLAKE3, while SPHINCS+'s hashing is the random oracle of
   C54–C66. As before, the model treats them as unrelated functions,
