@@ -64,11 +64,23 @@ Summed and checked (`RomBound.lean`):
 * **SPX256f** (n = 32, V = 17,523): ε ≤ (10 q_h + 3V + 2)/2^256,
   hence **ε ≤ q_h · 2^-252 for q_h ≥ 2^14** (`rom_level_256f`).
 
-Read as a security level: an adversary needs about 2^125 (SPX128f) or 2^252
-(SPX256f) oracle queries for constant success probability, with up to 2^64
-signatures per key, in the random-oracle model. This is in line with the
-NIST categories the standard parameter sets target (1 and 5); it is a
-statement about DSM's own instantiation in the model above.
+How to read these numbers. They are query-dependent upper bounds, and they are
+conditional twice: on the random-oracle model, and on the five argued steps
+below. Together they say that an adversary in that model would need on the
+order of 2^125 (SPX128f) or 2^252 (SPX256f) oracle queries for constant success
+probability, with up to 2^64 signatures per key. **They are not a proved
+security level for DSM's SPHINCS+**: the inequalities are machine-checked, but
+the claim that they bound the real scheme's forging probability is not.
+
+Where the residual risk sits. The step "a forgery yields one of the four
+events" is machine-checked (`final_forge_events`, for every oracle). What is
+not machine-checked is the probability of those events in the random-oracle
+run: the five links below. The two that matter most are the hidden-value
+independence behind the WOTS and FORS events (link 3) and ITSR under adaptive
+signing (link 4). This is the kind of step where published SPHINCS+ tightness
+arguments have gone wrong before: Hülsing and Kudinov (ePrint 2022/346)
+corrected an earlier WOTS argument. The next phase should close these links
+in Lean rather than add arithmetic.
 
 ## What is argued, not machine-checked
 

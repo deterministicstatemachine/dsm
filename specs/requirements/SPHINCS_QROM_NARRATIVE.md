@@ -46,9 +46,12 @@ roughly:
 
 * **SPX128f:** success becomes constant at about `q ≈ 2^61–2^64` quantum
   queries (the `(q+1)²·2^-128` terms dominate, and the PRF hops on 128-bit
-  secrets give the same order). This is the NIST category 1 level: Grover
-  search on a 128-bit key.
-* **SPX256f:** about `q ≈ 2^124–2^128` quantum queries, NIST category 5.
+  secrets give the same order). That is the same order as Grover search on a
+  128-bit key, the yardstick of NIST category 1.
+* **SPX256f:** about `q ≈ 2^124–2^128` quantum queries, the order of the
+  category 5 yardstick.
+
+These estimates do not establish a NIST category for DSM's instantiation.
 
 These are order-of-magnitude readings with the constants from the cited
 papers, not theorems about DSM.
