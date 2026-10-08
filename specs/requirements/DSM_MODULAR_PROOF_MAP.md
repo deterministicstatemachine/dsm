@@ -2,11 +2,13 @@
 
 Status: Milestone 1 of the modular-proof plan, audit-prep, 2026-10-08,
 revised after review (§2a, §5a, §5b and §7 are new; I1 and §6 are corrected).
-This document maps the published, EasyCrypt-verified SPHINCS+ reduction onto DSM's
-actual construction and existing Lean evidence, lists every interface
-mismatch, specifies the first modular theorem, and orders the proof
-obligations. **No new theorem is claimed here.** C57–C71, the Rust code and
-every existing security statement are unchanged.
+Milestone 2 (the game interfaces, obligations 1–5) is implemented: §11 and
+claims C72–C75. This document maps the published, EasyCrypt-verified SPHINCS+
+reduction onto DSM's actual construction and existing Lean evidence, lists
+every interface mismatch, specifies the first modular theorem, and orders the
+proof obligations. **No reduction or bound of the modular proof is claimed
+yet.** C57–C71, the Rust code and every existing security statement are
+unchanged.
 
 The goal is a second machine-checked security result, beside C71:
 
@@ -151,7 +153,9 @@ EasyCrypt admits `log2 w ∈ {2, 4, 8}`; DSM's 4 is in range.
 ## 4. Security properties: games, DSM instance, Lean status
 
 "Lean definition" means a game in DSM's computational framework
-(`SecurityGames.lean`); none of these exists yet except as noted.
+(`SecurityGames.lean`). Since Milestone 2 every game in this table is defined
+in `CompGames.lean` and instantiated with DSM's functions (C73; §11). The
+right-hand column is unchanged: no theorem in it is proved yet.
 
 | Property | Game (EasyCrypt) | DSM instance | Existing DSM Lean | Theorem still required |
 | --- | --- | --- | --- | --- |
@@ -558,8 +562,75 @@ no axioms.
 
 ## 10. Not claimed
 
-No reduction, bound or game is proved by this document. It does not assert
+No reduction or bound is proved by this document; Milestone 2's games (§11) are definitions. It does not assert
 that keyed BLAKE3 under a public key, or BLAKE3's XOF, satisfies any listed
 property, and it does not transfer EasyCrypt's QROM or ROM bounds. The
 EasyCrypt artifact was read, not replayed. The target counts in §6 follow
 EasyCrypt's formulas with DSM's parameters and will be re-derived in Lean.
+
+## 11. Milestone 2: the game interfaces (implemented)
+
+Five new modules, all built with warnings as errors, no `sorry`, no axiom,
+recorded in the axiom ledger and the claim trace (C72–C75). They define and
+restate; they bound nothing.
+
+| Obligation | Module | What is proved | Claim |
+| --- | --- | --- | --- |
+| 1. Game type with stateful oracles | `CompGames` | `OT`, oracle interaction trees: `run` (stateful oracle), `eval`, `trace`, `Within q` (query bound); `trace_length`, `run_log` | C73 |
+| 2. The games, with DSM instances | `CompGames` | PRG; PRF with a domain mask; ITSR (fresh key per query); SM-DT-TCR, -PRE, -OpenPRE, -DSPR / -SPprob, -UD, each with the collection oracle. DSM: tweak = the 32 ADRS bytes, `thc` = keyed BLAKE3 under `derive_key("…/thash", pp)` on `ADRS ‖ x` and equal to the model's `thash` (`thc_thash`); members F, TRH, PKCO, TRCO by input length (`in_collection` holds by definition); `spexists` decided by enumeration (`thfSp_decides`); `MCO_DSM` equal to the verifier's computation (`mco_verifier`); EasyCrypt's ITSR index map `g` with all five shape facts proved (`itsrG_size`, `_eqiks`, `_neqisvs`, `_rng_iks`, `_rng_sv`) | C73 |
+| 3. Address map (I6) | `CompAddress` | `ecIdx` / `ofEc` bijection; EasyCrypt's five validity predicates for DSM's parameters (`EcValid`); every valid address is in range for DSM's encoding (`ec_valid_in_range`, all six variants), so distinct valid addresses are distinct tweaks (`ec_valid_tweak_injective`); `dist_adrstypes`; one validity lemma per address shape | C74 |
+| 4. Fixed-prefix random function (I3) | `CompProb` | for every `pp` of n bytes, `x ↦ F(pp ‖ x)` of a uniformly random function on (n+w)-byte inputs is uniform on w-byte inputs (`rf_prefix_sum`), also jointly with a uniform `pp` (`rf_prefix_joint`) | C72 |
+| 5. C11 / C15 / C16 as advantages | `CompPrfDomain`, `CompRestate` | each hop's real and ideal probabilities are **equal** to a PRG or PRF game's, for the hop's own distinguisher with its other randomness moved into its coins (`c11_adv` … `c16b_adv`); C31 restated with these five named primitive advantages (`euf_cma_named`) | C75 |
+
+The probability algebra the restatements need (ticket sums, Fubini for
+independent products, reordering, splitting a uniform string, challenger
+tapes) is in `CompProb` (C72). `CompGamesChecks.lean` runs every game on a
+deliberately insecure toy function: each positive control wins with the exact
+expected probability, and each negative control loses because of the rule it
+breaks (repeated tweak, collection tweak equal to a target tweak, target
+bound, `x' = x`, queried ITSR pair, query budget, opened target, and a query
+outside the PRF domain).
+
+### Findings while implementing
+
+* **PRF domain.** C15 hop 2b and C16 hop 3b compare keyed BLAKE3 with a
+  random function that is defined only on the PRF domain (`randomFunction`:
+  `PK.seed ‖ ADRS`, n+32 bytes; `randomFunctionUpTo`: `PK.seed ‖ M`) and
+  answers `[]` elsewhere. Read as a PRF game, that comparison is trivially
+  lost by one query of another shape, so it is not a PRF advantage as it
+  stands. The PRF game here masks the real oracle to the same domain, and
+  `function_distinguisher_dom` / `msg_function_distinguisher_dom` prove that
+  the hop distinguishers never read their challenge outside it (for hop 3b,
+  because the signing oracle signs legal messages only). With that, the
+  hops are exact PRF advantages. No existing statement changes.
+* **What the restatement does not do.** It names the five primitive
+  advantages; it does not bound them. They are the PRG assumption on
+  ChaCha20, the PRG (KDF) assumption on `derive_key`, and the PRF assumption
+  on keyed BLAKE3, each for the specific distinguisher constructed, and the
+  final theorem keeps them as terms, as the review requires.
+* **Query budgets (obligation 14).** `QueryBounded q d` states that a
+  function-access distinguisher is a `q`-query tree. It is not yet proved for
+  the C15/C16 distinguishers: C41 counts the signer's requests, but does not
+  give the tree. Owed with the resource obligations.
+* **Addresses (obligation 3).** Proved: EasyCrypt-valid ⇒ in range ⇒ distinct
+  tweaks, and each address shape is valid under its index ranges. Owed: that
+  each address DSM's signer issues meets the ranges of its type (C18 proves
+  only `InRange`). It belongs to the reductions that enumerate the honest
+  addresses (obligations 6 and 9).
+* **Game details that differ in form, not in meaning.** Challenger
+  randomness is a tape drawn up front (`FiniteExperiment.tape`) rather than
+  sampled lazily; each entry is used once, so the distribution is the same,
+  but a reduction that simulates lazily must prove the equivalence. DSM's
+  ITSR game bounds the adversary to `q` queries (the tape length); EasyCrypt's
+  game has no bound, and the two agree for adversaries making at most `q`
+  queries. `spexists` is decided by enumerating all inputs: definable, never
+  run, and used only in the winning condition, as in EasyCrypt.
+
+### Still open after Milestone 2
+
+Obligations 6–15 (§9). In particular no reduction is proved, the composition
+equalities O6b and O9b are not proved, and the resource obligations 14 and
+15 are not discharged. Nothing in Milestone 2 establishes the modular
+reduction or any bound on DSM's forgery probability beyond what C31, C66,
+C67 and C71 already state.
+
