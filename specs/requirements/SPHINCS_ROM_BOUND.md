@@ -500,9 +500,15 @@ prefix, on every tape. The judgment is `JS`:
   the randomizer, the signing request, or a *structured* thash request. A
   structured thash request has an in-range address literal, the tweak-key
   entry as its key, and as its k-th input the handle of the k-th canonical
-  child of its address (`kids`), to any depth.
+  child of its address (`kids`), to any depth. That handle *is* the
+  challenger entry of the child request (not merely an entry with the same
+  resolution), and every canonical child has the address as its DSM parent
+  (`DSMOK`, `par`).
 * A revealed handle is never protected, i.e. never an entry that mentions
   SK.seed or SK.prf.
+* A revealed handle has *provenance* (`AncOK`): if it is a challenger thash
+  or PRF entry, every DSM ancestor of its address already has a structured
+  challenger entry. See C60 below.
 
 `InvS` also keeps DistK (distinct resolutions past the coins), so
 structured requests are unique per address (`struct_unique`). As a
@@ -598,12 +604,92 @@ This is conditional on:
 * the step bound `S ≤ N`, with `3 ≤ N`;
 * the adversary-step bound `AA` of H1'.
 
+**The canonical-collision count** (`RomStruct.lean`, `RomCanon.lean`, claim
+trace C60). This removes the last event term of H1 that was not a count.
+
+*Provenance.* `InvS` now also requires `AncOK` for every revealed handle (see
+C57). Reveals discharge it as follows:
+
+* The signer reveals a signature only after recomputing its root from it
+  (`js_xmssPkFromSigC`, `js_forsPkFromSigC`). The root's structure covers
+  every handle of the signature (`cov_xsig`, `cov_slots`), by descent along
+  the canonical children (`ancCov_reach`).
+* The message it signs, the recomputed roots and the public root are roots
+  (`par = none`): XMSS tree tops and the FORS roots compression.
+* An adversary lookup that opens a challenger thash entry inherits provenance
+  from the entry's revealed first child (`ancOK_open`). A PRF entry is never
+  open, since its key is protected.
+
+*Consequence* (`ask_struct`). A structured challenger request is always
+answered by its own challenger entry. If it has an unrevealed handle, no
+adversary entry matches it. If it is open, its first child is revealed, so by
+provenance the challenger already holds a structured request at its address.
+That request is this one (`struct_unique`). So the canonical value at every
+address is a challenger draw, never an adversary draw.
+
+*Value canonicity* (`struct_val`). On the final table, a structured request at
+`b` is the canonical request `thashReq tk b (canon b)`. This is by induction,
+from `canon_kids`: the canonical input is the concatenation of the canonical
+children's honest values. It needs FORS height at least one, and XMSS nodes
+with keypair 0 (`struct_kp2`).
+
+*Path* (`verifyLog_path`). Every thash request in the verifier's log is at an
+address of the forged path that the verifier's digest selects: a root (the
+FORS roots compression, a layer's tree top) or a canonical descendant of one.
+The extension's digest is the verifier's (`ExtF`, `dig_eq`). `ExtS` gives a
+structured challenger entry at every root, and by descent (`kidAt_reach`) at
+every path address.
+
+*Event inclusion* (`canon_split`). On a disagreement-free run of H1', a
+canonical collision gives one of two things:
+
+* an adversary entry and a structured challenger entry at one address
+  literal, with equal truncated values. The verifier's request is an entry
+  (it is opened). It is not a challenger thash entry, since the only one at
+  that address is canonical (`struct_unique`).
+* a 32-byte key coincidence. The verifier's request is answered by a PRF or
+  randomizer entry whose key equals the tweak key.
+
+*Charging* (`pairW`, `pair_hit`). The pair is charged at the later of its two
+creations, whose value is a fresh tape coordinate:
+
+* an adversary request appends an entry at an address that already has a
+  challenger thash entry. It is pinned against that entry's value.
+* the first challenger thash entry at an address appears after an adversary
+  entry there. It is pinned against the adversary entry's value.
+
+The earlier value is fixed by the prefix, whatever its visibility. It may be
+drawn before the adversary request, drawn but hidden, or already observed:
+the later draw is fresh in all three cases, so no hidden-target argument is
+needed. The case that would need one is the adversary drawing the canonical
+request itself before the challenger. Provenance excludes it: the children of
+an open canonical request were revealed only after its challenger entry
+existed. The pair weight and target do not depend on the pinned coordinate
+(`pairW_inv`, `pairTg_inv`, via `strace_inv`).
+
+*Count* (`pair_count`). There is at most one pair per adversary step, since an
+address gets at most one fresh challenger thash entry. So:
+
+    #(canon ∧ ¬anyDis)(H1') · 256^(n+32) ≤ R^N · AA · 256^32 + R^N · N^2 · 256^n
+
+(`canon_count`). Disagreement tapes are already counted, so the split
+`rom_win_split'` keeps the factor 2 on `anyDis`. Composed for SPHINCS+-128f
+(`rom_win_full_128f`):
+
+    Pr[won] ≤ (JA + 11·AA + 6)/2^128 + (2·S^2 + 3·N^2)/2^256
+
+This is conditional on:
+
+* the ITSR budget hypotheses;
+* the step bound `S < N`, with `3 ≤ N`;
+* the adversary-step bound `AA` of H1'.
+
 Still open, and needed before this is a number:
 
 * the step bound `S` and the adversary-step bound `AA` for H1', derived from
-  the query budget;
+  the query budget; `N` must include the extension's draws (at most 117,605
+  for SPHINCS+-128f);
 * a wide-class count for SPHINCS+-256f;
-* the canonical-collision bound on H1''s table;
 * deriving the budget hypotheses from the adversary's query budget;
 * the seed hop;
 * the final composition.

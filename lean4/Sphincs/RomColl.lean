@@ -260,7 +260,7 @@ theorem famOK_hidsW (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) {st : St} (hI : 
   · cases d with
     | zero => exact hs.elim
     | succ d =>
-      obtain ⟨_, _, itk, hs', rfl, hitk, _, hh⟩ := hs
+      obtain ⟨_, _, _, itk, hs', rfl, hitk, _, hh⟩ := hs
       simp only [List.mem_cons, SV.hid.injEq, List.not_mem_nil, or_false,
         reduceCtorEq, false_or] at hm
       rcases hm with ⟨rfl, rfl⟩ | hm
@@ -370,7 +370,7 @@ theorem famOK_mode1 {st : St} {r : SReq} (hF : FamOK c st r) (hm : r.mode = 1) :
     | zero => exact hs.elim
     | succ d =>
       have hs' := hs
-      obtain ⟨_, _, itk, hs'', rfl, hitk, _⟩ := hs
+      obtain ⟨_, _, _, itk, hs'', rfl, hitk, _⟩ := hs
       exact ⟨itk, rfl, Or.inl ⟨hitk, d+1, A, hs'⟩⟩
 
 theorem sres_key32 (t : List Nat) (k : Nat) : sres t [.hid k 32] = be 32 (t.getD k 0) := by
