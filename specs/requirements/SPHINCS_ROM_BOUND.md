@@ -196,9 +196,13 @@ experiment is argued here and not formalized:
    decides from the entries already read which tape entry is the target and
    which are (at most `q`) signature digests, and digests decode to a leaf
    and indices with equal fibers, the covered probability is at most the
-   static ITSR numerator over `(G+1)! L^(G+1) T^k`. Still argued for DSM:
-   the equal-fiber property of `splitDigest` on uniform h_msg outputs, and
-   that in the game the signed digests are fresh challenger draws (an
+   static ITSR numerator over `(G+1)! L^(G+1) T^k`. For DSM's digests the
+   equal-fiber property is checked (`RomDigest.lean`: `digest_fiber`, from
+   the byte layout of `splitDigest` and the bit order of `base2b`), giving
+   `itsr_dsm_128f` (≤ 2^-128) and `itsr_dsm_256f` (≤ 2^-255) per target
+   under any adaptive selection of at most 2^64 signature digests (claim
+   trace C49). Still argued: that in the game the signed digests are fresh
+   challenger draws (an
    adversary h_msg query equal to a later signing request is a guess of the
    hidden randomizer R).
 5. **Model functions as query trees.** `Model.lean` is monad-generic, so its
