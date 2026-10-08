@@ -201,10 +201,30 @@ experiment is argued here and not formalized:
    the byte layout of `splitDigest` and the bit order of `base2b`), giving
    `itsr_dsm_128f` (≤ 2^-128) and `itsr_dsm_256f` (≤ 2^-255) per target
    under any adaptive selection of at most 2^64 signature digests (claim
-   trace C49). Still argued: that in the game the signed digests are fresh
-   challenger draws (an
-   adversary h_msg query equal to a later signing request is a guess of the
-   hidden randomizer R).
+   trace C49). The game-level selection is now checked as well
+   (`RomItsrGame.lean`, claim trace C50). On every tape on which H1 is won
+   and the ITSR event holds on the run's table, the forgery is charged to a
+   unique candidate: the first draw of the verifier's `h_msg` request. That
+   draw is adversary-side (the verification runs with the adversary's
+   oracle), because a challenger-side `h_msg` draw is the signing request of
+   a signed message, and the request encoding binds the message: its prefix
+   `R ‖ PK.seed ‖ PK.root` has fixed width `3n`, so equal requests have equal
+   messages (`hreqR_msg`; no collision term is needed for this step). The
+   candidate index `j` counts adversary-side `h_msg` draws, so there are at
+   most `JA` candidates (`JA ≤ q_h + 1`, repeated queries counted once since
+   only first draws are candidates). The signature digests are the
+   challenger-side `h_msg` draws, at most `q`; the selection of slots is
+   decided from the tape prefix (`slotJ_pred`). `itsr_game_128f` /
+   `itsr_game_256f` then bound the won-and-covered tapes by `JA · 2^-128` /
+   `JA · 2^-255`. These theorems are conditional on three budget
+   hypotheses (at most `N` draws, at most `q ≤ 2^64` challenger `h_msg`
+   draws, at most `JA` adversary `h_msg` draws, on every tape) and are
+   restricted to the event `NoRG`: no signing request was first drawn by
+   the adversary. Still argued: that the complement of `NoRG` (an adversary
+   `h_msg` query equal to a later signing request, i.e. a query containing
+   the hidden randomizer `R`) is a disagreement event bounded by the
+   hidden-value theorem, and that the budget hypotheses follow from the
+   adversary's query budget.
 5. **Model functions as query trees.** `Model.lean` is monad-generic, so its
    functions run unchanged as query trees; that this run equals the Id-model
    run against the final oracle is proved for logging (`verify_sim`,
