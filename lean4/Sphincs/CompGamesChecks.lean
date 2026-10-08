@@ -1,5 +1,6 @@
 -- SPDX-License-Identifier: MIT OR Apache-2.0
 import Sphincs.CompAddress
+import Sphincs.CompOpenPre
 open DSM.Sphincs DSM.Sphincs.Security DSM.Sphincs.Comp
 
 /- Controls for the computational games (milestone 2). Each game is run on a
@@ -117,4 +118,15 @@ def main : IO Unit := do
   -- EasyCrypt address map round trip.
   let a : Adrs := {layer := 3, tree := 5, kind := 2, chain := 1, hash := 4}
   check (ofEc (ecIdx a) == a && ecIdx a == [4, 1, 0, 2, 5, 3]) "EasyCrypt address map"
-  IO.println "Computational game controls passed: TCR(-C), ITSR, PRF (with domain mask), PRE, OpenPRE, UD, DSPR/SPprob, and the DSM instances on an insecure oracle."
+  -- Theorem 2 on toys: counts satisfy #OpenPRE + #SPprob ≤ #DSPR + 3·#TCR, and
+  -- the TCR reduction wins whenever A inverts a constant function with x' ≠ x.
+  let guess0 : OpenPreAdv Bool Nat Bool Empty Bool Unit := ⟨.done ((), [0, 1]), fun _ _ _ => .done (0, false)⟩
+  for (fn, spn, name) in [(constf, spConst, "constant"), (idf, spId, "identity")] do
+    let op := (openPreProb coin coin false fn noCol 2 (single guess0)).numerator
+    let d := (dsprProb coin fn noCol spn 2 (dsprRedCoins 2 false (single guess0) coin)).numerator
+    let sp := (spProb coin fn noCol spn 2 (dsprRedCoins 2 false (single guess0) coin)).numerator
+    let tc := (tcrProb coin fn noCol 2 (tcrRedCoins 2 false (single guess0) coin)).numerator
+    check (op + sp ≤ d + 3 * tc) s!"Theorem 2 count inequality fails on the {name} control"
+    if name == "constant" then
+      check (op == 8 && tc == 4) s!"Theorem 2 constant control: op={op} tc={tc}"
+  IO.println "Computational game controls passed: TCR(-C), ITSR, PRF (with domain mask), PRE, OpenPRE, UD, DSPR/SPprob, Theorem 2's reductions, and the DSM instances on an insecure oracle."

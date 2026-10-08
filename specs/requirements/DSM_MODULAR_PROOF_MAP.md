@@ -478,6 +478,44 @@ Memory is separable from time. After `find(pp)` the reduction can recompute
 honest nodes from stored secrets, so only the secrets (2^87.1 B), or a PRF key
 under (c), need keeping.
 
+### Decision (review after Milestone 2)
+
+**(a) is the baseline; (c) is a separately proved memory optimization; (b)
+is deferred.**
+
+* Milestone 3 uses the published games unchanged, including the
+  target-before-`pp` ordering. Every reduction states its full costs,
+  including the up-front construction of the whole structure.
+* (c) is its own hybrid, with its own PRF advantage and query budget. That
+  budget counts every derived value. The hybrid shrinks the stored secrets
+  to a key, but it does not remove the ≈ 2^83.2 `thash` evaluations or the
+  2^68 hypertree messages committed in advance.
+* (b) changes the assumption; it does not prove the same theorem more
+  efficiently. If it is pursued later, it is a separate theorem that names
+  the stronger post-`pp` target-selection assumption and includes its own
+  reduction loss.
+* The time bottleneck is the up-front construction, not memory. (a) and
+  (c) may yield a correct reduction without a practically meaningful
+  concrete bound, and that limitation stays explicit.
+* No statement calls a reduction polynomial-time unless a theorem over a
+  parameterized family proves it. No numerical DSM security level is
+  inferred from these reductions while their concrete costs remain
+  prohibitive.
+
+**Resource accounting used by every Milestone 3 reduction.** Lean has no
+runtime model, so costs are stated in counted units, each backed by a
+theorem or read off the reduction's definition:
+
+* adversary phases run (each phase of the original adversary, once);
+* target-oracle and collection-oracle queries (`OT.Within` bounds);
+* hash evaluations the reduction performs itself;
+* fresh values it samples (its coins);
+* values it stores;
+* the loss factor.
+
+A reduction whose type has no access to the hash performs no hash
+evaluations, and that is checked by its type.
+
 ## 8. Reuse of existing DSM results
 
 | Claims | Content | Oracle-independent? | Use |
@@ -633,4 +671,52 @@ equalities O6b and O9b are not proved, and the resource obligations 14 and
 15 are not discharged. Nothing in Milestone 2 establishes the modular
 reduction or any bound on DSM's forgery probability beyond what C31, C66,
 C67 and C71 already state.
+
+## 12. Milestone 3 (in progress)
+
+Authorized under the §7 decision: published games, target-before-`pp`
+ordering, full costs stated, no polynomial-time wording, no numerical DSM
+security level.
+
+### Obligation 7: Theorem 2 for DSM's F (done, C76)
+
+`CompOpenPre.lean` proves EasyCrypt's `OpenPRE_From_DSPR_TCR` on DSM's
+framework, generically (collection variants included) and for DSM's F:
+
+    #OpenPRE(A) + #SPprob(B_dspr) ≤ #DSPR(B_dspr) + 3 · #TCR(B_tcr)
+
+over one common ticket count (`openpre_from_dspr_tcr`, `openpre_denominators`).
+Equivalently, Pr[OpenPRE] ≤ max(0, Pr[DSPR] − Pr[SPprob]) + 3 · Pr[TCR]
+(`openpre_bound`; DSM's F: `dsm_openpre_bound`, `dsm_openpre_frac`). It holds
+for every adversary A, with no restriction. The reductions are EasyCrypt's
+`R_TCR_OpenPRE` and `R_DSPR_OpenPRE`, built explicitly (`tcrRed`, `dsprRed`).
+
+The proof is exact counting over the same tickets (pp, inputs, A's coins).
+A pointwise inequality covers every case but one. That case is: a second
+preimage exists, A answered with the target's own input, and the target is
+unopened. It is handled by a swap argument. Replacing the target's input by
+another preimage leaves A's whole run unchanged (`opFind_swap`), and the
+replacement is a TCR win. At most one ticket in each such class has
+`x' = x_i`, so those tickets are no more than the TCR wins (`slice_bound`,
+`swap_bound`).
+
+Hypotheses, as in EasyCrypt: the input distribution lists every input
+exactly once (`din` uniform and full; `uniformBytes_bijective` for DSM), and
+`sp` decides `spexists` (`thfSp_decides`).
+
+**Costs of both reductions:**
+
+| Resource | B_tcr / B_dspr |
+| --- | --- |
+| Adversary phases | `A.pick` once, `A.find` once |
+| Target-oracle queries | ≤ t (`tcrRed_within`: A's queries + t) |
+| Collection-oracle queries | A's own, forwarded unchanged |
+| Own hash evaluations | 0 (the reductions' definitions take no hash function) |
+| Fresh samples | t inputs |
+| Stored values | A's state, ≤ t inputs, ≤ t images |
+| Loss | DSPR 1, TCR 3 |
+
+The theorem is about the games. It does not reduce the target count: for
+FORS, t = t_f = 35 · 2^77 (§6), and the up-front cost of the M-FORS
+reduction that produces this adversary remains as stated in §7.
 
