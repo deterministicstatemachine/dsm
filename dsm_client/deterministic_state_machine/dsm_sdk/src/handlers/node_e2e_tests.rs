@@ -2856,6 +2856,73 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
     );
 }
 
+/// Two trades built on one head, and the slower loses the key (phones,
+/// 2026-10-07). B's trade is cut short after its pair lands and before its
+/// exercise is written; A trades on the same head and its exercise takes the
+/// vault's first key. B's exercise then names a key another exercise holds:
+/// its position resolves Void — nothing moved, nothing pending — and B's
+/// next trade, built on the vault's new head, realizes. Before, B's
+/// resolution read the other exercise back as its own and never resolved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realizes() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let void = generated::SofiPositionState::Void as i32;
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    // The vault's first key at its genesis root, refused at its leader.
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let chain = ctx
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain");
+    let attempt =
+        attempt_cell(&set, &m.vault_id, &chain.roots()[0], 0).expect("the first attempt key");
+    let attempt_leader = member_name(attempt.routed().route().leader());
+    p.nodes
+        .refuse_cell_writes(&attempt_leader, &[*attempt.routed().key()])
+        .await;
+
+    // B's trade is cut short: its pair lands, its exercise does not.
+    let q = admitted_position(&p.b) + 1;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    let b_era = balance(&p.b, &m.era);
+
+    // A trades on the same head, and its exercise takes the key.
+    p.nodes.accept_cell_writes(&attempt_leader).await;
+    realized_through(
+        &p.a,
+        "sofi.trade",
+        args(&generated::SofiTradeRequest {
+            vault_id: m.vault_id.to_vec(),
+            token_in_policy_commit: m.era.to_vec(),
+            amount_in_entered: entered(&p.a, &m.era, 7),
+            min_amount_out_entered: entered(&p.a, &m.tkn, 1),
+            token_out_policy_commit: m.tkn.to_vec(),
+        }),
+    )
+    .await;
+
+    // B's position names a key another exercise holds: Void.
+    assert_eq!(resolve(&p).await, (q, void));
+    assert_eq!(pending_position(&p.b), None);
+    assert_eq!(admitted_position(&p.b), q);
+    assert_eq!(
+        balance(&p.b, &m.era),
+        b_era,
+        "a Void position moves nothing"
+    );
+
+    // B trades again, on the vault's new head, and realizes.
+    realized_trade(&p, &m, 10).await;
+    assert_eq!(balance(&p.b, &m.era), b_era - 10);
+}
+
 /// SoFi §30, Amendment S16 and storage §4: a route search over vaults the
 /// reads do not establish says so. B, never set up with A's vault, is quoted
 /// one hop ERA→TKN, found through the two tokens' indexes, the search

@@ -582,6 +582,57 @@ pub async fn complete_pending_fulfillment(
     })))
 }
 
+/// This device's own exercise for its pending `F`, rebuilt exactly as
+/// stage 8 builds it — its own `P`, `F` and `P(E)`, the evidence their
+/// conformance is decided on, and the signed `C_q` final at its own
+/// `K_root(q)` — for a resolution whose key another exercise holds. Nothing
+/// is written.
+async fn own_exercise(
+    ctx: &VerifierContext<'_>,
+    set: &StorageSet,
+    fulfillment_id: &D32,
+    registration: &dsm::sofi::registration::RegistrationRead,
+) -> Result<Result<dsm::sofi::exercise::RecognizedExercise, NotResolved>, DsmError> {
+    let not_built = |what: String| Ok(Err(NotResolved::OwnExerciseNotBuilt(what)));
+    let (fulfillment, precommit, preimage) = match pending_objects(set, fulfillment_id).await? {
+        Ok(objects) => objects,
+        Err(what) => return not_built(what.to_string()),
+    };
+    let Some(resolution_claim) = final_root_cell(
+        set,
+        registration.genesis(),
+        registration.device_id(),
+        registration.position(),
+        registration.parent_root(),
+    )
+    .await?
+    else {
+        return not_built("the claim at K_root(q)".to_string());
+    };
+    let own = own_closure_objects(set, &precommit.body, &preimage).await?;
+    let request = FulfillRequest {
+        precommit: &precommit.body,
+        precommit_signature: &precommit.signature,
+        preimage: &preimage,
+        fulfillment: &fulfillment.body,
+        fulfillment_signature: &fulfillment.signature,
+        own_objects: &own,
+    };
+    let install = install_request(&request);
+    let evidence = match ctx
+        .verifier()
+        .acquire_conformance_evidence(&install.objects())
+        .map_err(verifier_error)?
+    {
+        Acquired::Complete(evidence) => evidence,
+        Acquired::Exhausted(missing) => return not_built(format!("evidence: {missing:?}")),
+    };
+    let exercise = build_exercise(&install, &resolution_claim, &evidence)?;
+    dsm::sofi::exercise::recognize_exercise(&exercise.encode())
+        .map(Ok)
+        .ok_or_else(|| refuse("this device's own exercise does not recognize"))
+}
+
 /// Why the pending position is not resolved yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotResolved {
@@ -594,6 +645,10 @@ pub enum NotResolved {
     /// The first leg's cell does not hold the exercise yet, or its reads do
     /// not decide it.
     ExerciseNotRead,
+    /// Another exercise holds the first leg's key, and this device's own
+    /// exercise cannot be rebuilt yet: the named object or evidence is not in
+    /// hand.
+    OwnExerciseNotBuilt(String),
     /// The facts are complete and the ladder, run inside the advance, does
     /// not resolve the position yet (Amendment S7).
     Ladder(Incomplete),
@@ -793,7 +848,20 @@ pub async fn resolve_pending_position(
         .map_err(verifier_error)?
     {
         Ok(read) => match read.into_exercise() {
-            Some(exercise) => exercise,
+            Some(exercise)
+                if derive::fulfillment_id(&exercise.fulfillment().body) == fulfillment_id =>
+            {
+                exercise
+            }
+            // Another trader's exercise holds the key this F names: two
+            // trades were built on one head and this one lost the key. What
+            // is resolved is still this device's own exercise, rebuilt from
+            // its own objects; Core reads the key held by the other, and a
+            // key final on another commitment is never this one's (Void).
+            Some(..) => match own_exercise(&ctx, set, &fulfillment_id, &registration).await? {
+                Ok(own) => own,
+                Err(why) => return not_yet(why),
+            },
             None => return not_yet(NotResolved::ExerciseNotRead),
         },
         Err(missing) => {
