@@ -428,11 +428,58 @@ hypotheses of `hidden_bound` for H1':
 * a step bound `S` on its symbolic traces;
 * a pair-count budget `B`.
 
+**Why `B` is not yet useful, and the fresh-step bound** (`RomFresh.lean`,
+claim trace C56). `pairCount` charges every (step, compatible entry) pair.
+Every signature recomputes shared hypertree nodes, so one closed challenger
+request is asked once per signature. Each of those asks is charged again
+against every adversary entry at its address. For DSM, `B` therefore grows
+like (signing steps) × (adversary entries per address), far above `2^128`.
+Tweak single use alone does not change that.
+
+`RomFresh.lean` bounds the same event, `anyDis`, while charging fewer
+steps. Each item names its lemmas:
+
+* Before the first disagreement step, entries past the initial ones
+  resolve to distinct requests (`trace_distK`).
+* So the first disagreement step is an adversary step, or a challenger
+  step whose symbolic lookup appends a new entry (a fresh step). The only
+  exception is when two initial entries collide: event `initColl`
+  (`first_dis_elig`). A fresh challenger step occurs at most once per
+  distinct challenger request.
+* `hidden_bound_split` charges only eligible steps that also satisfy a
+  tape-independent predicate `Φ`. `Φ` is assumed to hold at every step
+  with no earlier disagreement, so nothing is narrowed without proof.
+* It splits the probes by the width of the pinned handle. Pins narrower
+  than `W` cost `1/256^wmin` each; pins of width at least `W` (the 32-byte
+  keys) cost `1/256^W`:
+
+      #anyDis · 256^W ≤ R^N · B_lo · 256^(W-wmin) + R^N · B_hi
+                        + #(wildColl ∨ initColl) · 256^W
+
+  `B_hi ≤ S^2` always (`pairCountF_le_sq`), which costs `S^2 / 2^256`.
+
+What remains for a useful `B_lo` is to discharge `Φ` for H1'. The intended
+`Φ` has three parts:
+
+* *canonical uniqueness*: two challenger entries with the same literal
+  skeleton are one entry;
+* *freshness*: a fresh challenger request's skeleton is new;
+* *shape families*: every challenger request belongs to one of a few
+  families.
+
+With `Φ`, narrow pins occur only in pairs involving an adversary draw,
+each charged once, so `B_lo ≤ 2c · A` (c ≈ 10 families, A adversary
+draws). Discharging `Φ` needs a request-level dataflow invariant: each
+input handle of a challenger thash request is the entry of its canonical
+child request. Resolution-level canonicity is not enough, because output
+collisions among the honest values are expected at DSM's scale. It also
+needs `Φ` at intermediate states, so the judgment must cover every
+pre-step state of a disagreement-free prefix, not only end states.
+
 Still open, and needed before this is a number:
 
-* the step bound and a pair-count budget `B` for H1' small enough to
-  matter. The trivial budget `S^2` is far too large; the intended one is
-  per adversary request, using tweak single use;
+* the step bound, and `Φ` with the counting `B_lo ≤ 2c · A` for H1', as
+  above;
 * the wild-guess and unopened-collision term `#wildColl(H1')`;
 * the canonical-collision bound on H1''s table;
 * deriving the budget hypotheses from the adversary's query budget;
