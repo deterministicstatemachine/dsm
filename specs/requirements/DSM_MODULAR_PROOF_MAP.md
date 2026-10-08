@@ -1,7 +1,8 @@
 # DSM modular (computational) SPHINCS+ proof: interface map
 
-Status: Milestone 1 of the modular-proof plan, audit-prep, 2026-10-08. This
-document maps the published, EasyCrypt-verified SPHINCS+ reduction onto DSM's
+Status: Milestone 1 of the modular-proof plan, audit-prep, 2026-10-08,
+revised after review (§2a, §5a, §5b and §7 are new; I1 and §6 are corrected).
+This document maps the published, EasyCrypt-verified SPHINCS+ reduction onto DSM's
 actual construction and existing Lean evidence, lists every interface
 mismatch, specifies the first modular theorem, and orders the proof
 obligations. **No new theorem is claimed here.** C57–C71, the Rust code and
@@ -78,6 +79,50 @@ the collection oracle's tweaks must be disjoint from the targets'. ITSR
 adversary wins with a new `(k, x)` whose index set `g(f k x)` is covered by the
 queried ones.
 
+## 2a. DSM's exact sequence (key generation, message hashing, FORS selection, hypertree)
+
+Every line is the Rust function at `crates/dsm-sphincs/src/lib.rs` (audit-prep)
+and its Lean model in `lean4/Sphincs/Model.lean`.
+
+**Key generation** (`generate_keypair_from_seed`, lib.rs 767; `generateKeypair`):
+
+1. `ChaCha20Rng::from_seed(seed32)` fills 3n bytes:
+   `SK.seed = [0, n)`, `SK.prf = [n, 2n)`, `PK.seed = [2n, 3n)`.
+2. `PublicCtx`: `K_th = derive_key("DSM/sphincs/v2/thash", PK.seed)`.
+   `SecretCtx`: `K_prf = derive_key("DSM/sphincs/v2/prf", SK.seed)`.
+3. `PK.root = xmss_node(i = 0, z = h', layer = d − 1)`: the root of the **top
+   XMSS tree only**. Its leaves are the `2^h'` top-layer WOTS public keys, from
+   `prf(K_prf, PK.seed ‖ ADRS)` secrets at layer `d − 1` and `thash` under
+   `K_th`. It depends on `SK.seed` and `PK.seed` and on **no** FORS key and no
+   lower layer.
+4. `pk = PK.seed ‖ PK.root`; `sk = SK.seed ‖ SK.prf ‖ PK.seed ‖ PK.root`.
+
+**Signing** (`sign`, lib.rs 804; `sign`):
+
+1. `R = prf_msg(SK.prf, opt_rand = PK.seed, M)`: keyed BLAKE3 under
+   `derive_key("…/prf-msg", SK.prf)` on `PK.seed ‖ M`, n bytes.
+2. `D = h_msg(R, PK.seed, PK.root, M)`: derive-mode XOF, m = 49 bytes for 256f
+   (lib.rs 357).
+3. `(md, idx_tree, idx_leaf) = split_digest(D)` (lib.rs 723). `md` is
+   `ceil(k·a/8)` bytes; `idx_tree = toInt(next ceil((h − h')/8) bytes) mod 2^(h−h')`;
+   `idx_leaf = toInt(next ceil(h'/8) bytes) mod 2^h'`.
+4. FORS selection: address `{layer 0, tree = idx_tree, type FORS_TREE, keypair =
+   idx_leaf}` (`fors_adrs`, lib.rs 739). `SIG_FORS = fors_sign(md)`; then
+   `PK_FORS = fors_pk_from_sig(SIG_FORS, md)`.
+5. Hypertree: `SIG_HT = ht_sign(PK_FORS, idx_tree, idx_leaf)`. Layer 0's WOTS key
+   at `(idx_tree, idx_leaf)` signs `PK_FORS`; each layer `j ≥ 1` signs the root of
+   layer `j − 1`'s tree.
+6. Self-check `ht_verify(PK_FORS, SIG_HT, …) = PK.root`, then output
+   `R ‖ SIG_FORS ‖ SIG_HT`.
+
+**Verification** (`verify`, lib.rs 851) recomputes 2–5 from `(R, M, pk)` and
+compares the hypertree root with `PK.root`.
+
+So `PK.root` enters the message hash, and through it the choice of FORS
+instance and the FORS message. It is not computed from FORS keys. This
+dependency, root into digest, is standard: FIPS 205's `H_msg` binds
+`PK.root` too. The EasyCrypt model omits it (`mco mk m`).
+
 ## 3. Interface correspondence
 
 DSM parameters for the composed result: SPX256f, `n = 32`, `h = 68`, `d = 17`,
@@ -119,24 +164,20 @@ EasyCrypt admits `log2 w ∈ {2, 4, 8}`; DSM's 4 is in range.
 | SM-DT-OpenPRE | `SM_DT_OpenPRE` | F at FORS leaves | event `forsSecretEvent` (C31) | game; FORS reduction |
 | SM-DT-PRE(-C) | `SM_DT_PRE(_C)` | F at WOTS chain positions | event `wotsPreimageEvent` (C31) is **not** a PRE event (I9) | game; WOTS-TW reduction |
 | SM-DT-UD(-C) | `SM_DT_UD(_C)` | F on uniform n-byte inputs | none | game; WOTS-TW hybrids, factor (w−2) |
-| EUF-CMA (M-FORS$) | `EUF_CMA_MFORSTWESNPRF` | DSM FORS layer, 2^68 instances, with committed context (I1) | extraction `ForsExtraction` (C26) | DSM game; Theorem 1 analogue (§6) |
+| EUF-CMA (M-FORS$) | `EUF_CMA_MFORSTWESNPRF` | DSM FORS layer, 2^68 instances, with a once-only context (§5b) | extraction `ForsExtraction` (C26) | DSM game; Theorem 1 analogue (§6) |
 | EUF-NAGCMA (hypertree) | `EUF_NAGCMA_FLSLXMSSMTTWESNPRF` | DSM hypertree, d = 17, all 2^68 leaves signed once | `HtExtraction`, `XmssExtraction` (C24, C25) | DSM game; Theorem 3 analogue |
 | M-EUF-GCMA (WOTS-TW$) | `WOTS_TW_ES.ec` | DSM WOTS, one message per instance | `WotsExtraction` (C23), checksum (C22) | DSM game; WOTS-TW reduction |
 
 ## 5. Mismatches and incompatibilities
 
-**I1. `h_msg` binds `PK.root`; EasyCrypt's `mco mk m` does not.** DSM (like
-standard SPHINCS+) hashes `R ‖ PK.seed ‖ PK.root ‖ M`. The root depends on every
-FORS public key through the hypertree, so the FORS component cannot be
-separated from the hypertree with EasyCrypt's game as written. DSM's `PRF_msg`
-input is `PK.seed ‖ M` (no root). If the M-FORS game took `(seed, root, M)` as
-its message, `mkg` would have to ignore `root`, which breaks the game's
-assumption that `mkg` is a PRF on the whole message. **Handling:** a DSM M-FORS
-game in which the adversary commits one context `ctx = PK.seed ‖ PK.root` after
-receiving the FORS public keys and before any signing query. Signing then uses
-`R = MKG(M)` and `mco(R, ctx ‖ M)`. The ITSR game needs no change, since its
-input type takes `ctx ‖ M`. *Interface change to the component split;
-not blocking.*
+**I1. `h_msg` binds `PK.seed` and `PK.root`; EasyCrypt's `mco mk m` does not.**
+(Corrected. An earlier version of this map said the root depends on every FORS
+public key. That was wrong: see §2a. The root is the top XMSS tree's.) DSM, like
+FIPS 205, hashes `R ‖ PK.seed ‖ PK.root ‖ M`, while `PRF_msg` takes only
+`PK.seed ‖ M`. The message-compression interface therefore needs the public
+key as an input (§5a). Whether the published component games still compose
+without restricting the forger is settled in §5b: they do, with one interface
+change to the M-FORS game. *Not blocking.*
 
 **I2. One master seed.** EasyCrypt samples `ms`, `ss`, `ps` independently; DSM
 expands one 32-byte seed with ChaCha20. **Handling:** C11's exact hop, restated
@@ -231,7 +272,7 @@ plan.*
 **I12. Plan table correction.** The oracle-independent extraction is
 **C17–C30**, not C57–C60. C57–C64 are ROM-game lemmas: H1′ dataflow
 (`RomStruct`), pin counts (`RomPhi`, `RomWide`), collision counts (`RomColl`)
-and budgets (`RomBudget`). §7 has the full classification.
+and budgets (`RomBudget`). §8 has the full classification.
 
 **I13. Pinned EasyCrypt axioms.** Its development relies on parameter axioms
 that DSM must hold as theorems, since DSM admits no axioms:
@@ -245,6 +286,87 @@ that DSM must hold as theorems, since DSM admits no axioms:
 | `in_collection` | each THF is a member of the collection | by definition (I5) |
 | ITSR `size_g`, `rng_*`, `eqiks_g`, `neqisvs_g` | shape of the index map | owed for `splitDigest`/`base2b` (structure in `RomDigest`, C49) |
 
+## 5a. Context-aware message compression
+
+The DSM interfaces, with every actual input:
+
+* `ctx = PK.seed ‖ PK.root` (2n bytes): the public key.
+* `MKG_DSM(SK.prf, M) = keyed-BLAKE3(derive_key("…/prf-msg", SK.prf), PK.seed ‖ M)[0, n)`.
+  The randomizer reads `PK.seed`, which is part of `ctx`, but not `PK.root`.
+* `MCO_DSM(R, ctx, M) = split_digest(h_msg(R, PK.seed, PK.root, M))`, giving
+  `(md, idx_tree, idx_leaf)` with `idx = idx_tree·2^h' + idx_leaf ∈ [0, 2^h)`.
+* The ITSR index map `g`: for `i < k`, the triple
+  `(idx, i, base_2b(md, a, k)[i])`, i.e. one FORS leaf in each of the k trees of
+  instance `idx`. This is EasyCrypt's `g` shape (`size_g = k`, one set per
+  tree), stated for DSM's `split_digest`. Its shape lemmas are owed (I13).
+
+As an ITSR instance: `key = R` (n bytes) and `input = ctx ‖ M`. EasyCrypt's
+ITSR game is unchanged: its input type is arbitrary and each query gets a
+fresh key.
+
+## 5b. Composition with the published games, without restricting the forger
+
+The question is whether EasyCrypt's split (M-FORS game + non-adaptive hypertree
+game) still covers DSM's original EUF-CMA forger once `MCO` reads `ctx`. Read
+against EasyCrypt's two reductions (`SPHINCS_PLUS.ec` lines 1363–1461 and
+1462–1631), with DSM's sequence substituted:
+
+**Reduction to M-FORS** (`R_MFORSTWESNPRFEUFCMA_EUFCMA`).
+* It receives the M-FORS public key (all FORS public keys and `ps = PK.seed`).
+* It samples the hypertree's WOTS secrets itself and computes the top tree's
+  root from them and `ps`. That is exactly DSM's `PK.root` (§2a step 3).
+* It gives `A` the public key `(ps, root)` and forwards each signing query to
+  the M-FORS oracle.
+
+So `ctx` is fixed, and known to the reduction, before `A`'s first query. A
+DSM M-FORS game in which `MCO` reads a context that the M-FORS adversary
+supplies once, after receiving the M-FORS public key and before its first
+signing query, is played by this reduction with `ctx = ps ‖ root`. The
+simulation of `A`'s view is exact: the same key distribution, signatures and
+verification. That equality is a proof obligation (O6b).
+
+The once-only context is a property of the **component** game's adversary,
+which the composition reduction meets by construction. `A`, the original
+EUF-CMA forger, is not restricted. The final theorem quantifies over every `A`.
+
+A context per query would need a different ITSR game. `R = MKG(M)` does not
+read the root, so two queries with the same `M` and different roots would
+share `R`, while EasyCrypt's ITSR oracle gives every query a fresh key. The
+once-only context avoids that, and the composition never needs more.
+
+**Reduction to the hypertree** (`R_FLSLXMSSMTTWESNPRFEUFNAGCMA_EUFCMA`).
+* In `choose`, it samples every FORS secret and computes all `2^h` FORS public
+  keys through the collection oracle. These are the messages it submits. They
+  depend on no root and on no message of `A`.
+* The game then generates the hypertree key and signs all `2^h` messages, one
+  per leaf.
+* In `forge(pk, sigl)` it learns `root` and `ps`, runs `A` on `(ps, root)`, and
+  answers each signing query:
+  * `R = MKG(M)` (lazily sampled);
+  * `D = h_msg(R, ps, root, M)` (root now known);
+  * the FORS signature from its own secrets;
+  * the hypertree signature `sigl[idx]`.
+
+So DSM's root-binding `h_msg` is used only after the root is known. The
+published non-adaptive game composes unchanged, and `A` is not restricted.
+Address separation holds: the FORS types 3 and 4 are disjoint from the
+hypertree's 0, 1 and 2, as Theorem 3 requires of the collection oracle.
+
+**The split itself.** After the PRF hops, a valid forgery either:
+* uses, at `idx'`, the honest FORS public key, which is an M-FORS forgery
+  (fresh `M'`); or
+* uses a different one, which is a hypertree forgery: a fresh message at `idx'`.
+
+Neither case reads how `ctx` was formed.
+
+**Conclusion.** No alternative hypertree game and no extra reduction is needed
+for the root dependency. What is needed:
+* MCO, MKG and ITSR stated with DSM's inputs (§5a);
+* the M-FORS game with a once-only context;
+* the two simulation equalities (O6b, O9b).
+
+The real obstacle is cost, not the root (§7).
+
 ## 6. The first modular theorem: DSM-T1 (M-FORS)
 
 **Statement (target).** For every adversary `A` against the DSM M-FORS game:
@@ -256,19 +378,20 @@ with the composition `Adv^OpenPRE ≤ Adv^DSPR + 3·Adv^TCR` (Theorem 2 for DSM'
 as a separate theorem.
 
 **The DSM M-FORS game** (`M_FORS_DSM`). Its inputs and outputs:
-1. Sample `pp = PK.seed` uniform in n bytes, the FORS secrets as a random
-   function on FORS_PRF addresses, and `MKG` as a random function on messages
-   (I3).
-2. Compute all `2^68` FORS public keys at addresses
-   `{layer 0, tree, type 3, keypair = leaf}` with DSM's `thash`.
-3. The adversary receives `(pp, all FORS public keys)` and commits
-   `ctx` (I1).
-4. Signing oracle, at most `q_s` legal fresh messages:
-   * `R = MKG(M)` and `(md, tree, leaf) = splitDigest(h_msg(R, ctx ‖ M))`;
-   * return `(R, forsSign(md))` at `(tree, leaf)`.
-5. The adversary outputs `(M', R', σ')`. It wins if `M'` is fresh and
-   `forsPkFromSig(σ', md')` equals the honest FORS public key at
-   `(tree', leaf')` from `splitDigest(h_msg(R', ctx ‖ M'))`.
+1. Sample `ps = PK.seed` uniform in n bytes, the FORS secrets as a random
+   function on FORS_PRF addresses, and `MKG` as a random function on
+   `ps ‖ M` (I3).
+2. Compute the `2^h = 2^68` FORS public keys at
+   `{layer 0, tree, type 3, keypair = leaf}` with DSM's `thash` under `ps`.
+3. The adversary receives `(ps, FORS public keys)`, then supplies `ctx` once,
+   before its first signing query (§5b). Any value is allowed; the
+   composition reduction supplies `ps ‖ PK.root`.
+4. Signing oracle, for legal messages (at most `q_s`):
+   * `R = MKG(M)` and `(md, idx) = MCO_DSM(R, ctx, M)`;
+   * return `(R, fors_sign(md))` at instance `idx`.
+5. The adversary outputs `(M', R', σ')`. It wins if `M'` was never queried and
+   `fors_pk_from_sig(σ', md')` equals the honest FORS public key at `idx'`,
+   where `(md', idx') = MCO_DSM(R', ctx, M')`.
 
 **Reduction adversaries** (each runs `A` and simulates the game exactly unless
 its own event occurs):
@@ -288,10 +411,70 @@ hand `A` its public key in the `find` phase, after all honest values are known.
 **Plugging in.** The DSM Theorem-4 analogue (Milestone 5) is:
 * C11/C15/C16 restated as PRG / KDF / PRF advantages;
 * DSM-T1 for FORS;
-* the hypertree theorem (Milestone 4), with the reduction to M-FORS committing
-  `ctx` once it has computed the root.
+* the hypertree theorem (Milestone 4).
 
-## 7. Reuse of existing DSM results
+It is joined by the two reductions of §5b. Their costs are in §7.
+
+## 7. Resource accounting (symbolic, per reduction)
+
+Each row is read off EasyCrypt's module for that term, with DSM's SPX256f
+parameters. A full structure means:
+* `N_F = 2^68` FORS instances, each with `k·t = 17,920` leaves, `k·(t−1) = 17,885`
+  internal nodes and one root list;
+* `N_W = 16(2^68 − 1)/15 ≈ 2^68.09` WOTS instances, each with
+  `len·(w−1) = 1,005` chain steps and one compression;
+* `2^68 − 1` XMSS internal nodes.
+
+In total that is about **2^83.2 `thash` evaluations** (FORS ≈ 2^83.1,
+hypertree ≈ 2^78.1) and **2^82.1 secret elements** (2^87.1 bytes if stored).
+The per-operation costs are C41's request counts:
+* `kgC + 1 = 17,186` per key generation;
+* `signC = 1,704,961` per signature;
+* `verC = 17,523` per verification.
+
+| Term | Reduction (EasyCrypt) | Targets / oracle queries | Time | Memory | Loss | Lazy possible? |
+| --- | --- | --- | --- | --- | --- | --- |
+| PRG (DSM) | `seedDistinguisher` (C11) | one challenge | T_A + kgC + q_s·signC + verC | key material | 1 | yes, already lazy |
+| KDF, PRF (SKG) (DSM 2a, 2b) | `keyDistinguisher`, `functionDistinguisher` (C15) | PRF queries ≤ kgC + q_s·signC | T_A + kgC + q_s·signC + verC | O(queries) | 1 each | yes, already lazy |
+| KDF, PRF (MKG) (DSM 3a, 3b) | C16 distinguishers | ≤ q_s | T_A + q_s·signC + verC | O(q_s) | 1 each | yes, already lazy |
+| ITSR (MCO) | `R_ITSR_EUFCMA` | ≤ q_s ITSR queries | EasyCrypt: full M-FORS key generation (≈ 2^83.1); lazily: T_A + q_s·signC + verC | as time | 1 | **yes**: it samples `ps` itself |
+| DSPR + 3·TCR (F, FORS leaves) | `R_DSPR_OpenPRE`, `R_TCR_OpenPRE` ∘ `R_FSMDTOpenPRE_EUFCMA` | t_f = 35·2^77 targets | ≈ 2^83.1 | stored secrets ≈ 2^87.1 B (a PRF key under option (c)); node values can be recomputed after `pp` | 1 and 3 | **no** (below) |
+| TCR-C (TRH, FORS) | `R_TRHSMDTTCRC_EUFCMA` | 35·511·2^68 targets + 35·2^77 collection queries | ≈ 2^83.1 | as above | 1 | **no** |
+| TCR-C (TRCO) | `R_TRCOSMDTTCRC_EUFCMA` | 2^68 targets + FORS collection queries | ≈ 2^83.1 | as above | 1 | **no** |
+| (w−2)·UD-C, TCR-C, PRE-C (F, WOTS) | `R_SMDTUDC_Game23…`, `R_SMDTTCRC_Game34…`, `R_SMDTPREC_Game4…` | up to 1,005·N_W ≈ 2^78.1 targets | ≈ 2^83.2 (the hypertree reduction's `choose` computes every FORS key) | as above | 14, 1, 1 | **no** |
+| TCR-C (PKCO), TCR-C (TRH, XMSS) | `R_SMDTTCRCPKCO_…`, `R_SMDTTCRCTRH_…` | N_W and 2^68 − 1 targets | ≈ 2^83.2 | as above | 1 | **no** |
+| M-FORS split | `R_MFORSTWESNPRFEUFCMA_EUFCMA` | — | EasyCrypt samples all 67·N_W WOTS secrets; lazily: T_A + q_s·signC + verC (top tree: kgC) | — | 1 | yes |
+| Hypertree split | `R_FLSLXMSSMTTWESNPRFEUFNAGCMA_EUFCMA` | 2^68 messages, ≈ 2^83.1 collection queries | ≈ 2^83.1 | 2^68 messages | 1 | **no**: the game takes all `2^h` messages at once |
+
+**Finding.** The paper states that each reduction runs in "approximately the
+same running time as A". The EasyCrypt modules do not exhibit that for the
+rows marked **no**. In every SM-DT game the adversary must commit its targets
+before it receives `pp`. A SPHINCS+ forger needs its public key, which
+contains `pp = PK.seed`, before its first signing query, and it then chooses
+which instances its digests touch. So a reduction must commit every target the
+forger could make relevant, which is the whole structure. The non-adaptive
+hypertree game needs all `2^h` messages up front for the same reason. Neither
+the paper nor the artifact gives a lazy alternative. I have not found one
+within these game definitions. This is an observation about the formal games,
+not a claim that no tighter proof exists.
+
+Consequence for DSM. The modular theorem, proved with these games, bounds
+forgery by the advantages of adversaries that make about `2^83` hash
+evaluations. Each SM-DT assumption must be stated for adversaries of that
+size, which is far beyond `T_A` for a realistic forger, so it cannot inherit a
+polynomial-time guarantee. Options for Milestones 3–5, to decide there and
+not here:
+* (a) keep the published games and state the resource terms explicitly;
+* (b) use THF games in which `pp` is known before targets are chosen. This
+  allows lazy embedding, but it is a stronger assumption on the hash;
+* (c) keep the games but replace stored random secrets with a PRF-derived
+  stream to cut memory (one more PRF hop).
+
+Memory is separable from time. After `find(pp)` the reduction can recompute
+honest nodes from stored secrets, so only the secrets (2^87.1 B), or a PRF key
+under (c), need keeping.
+
+## 8. Reuse of existing DSM results
 
 | Claims | Content | Oracle-independent? | Use |
 | --- | --- | --- | --- |
@@ -307,7 +490,7 @@ hand `A` its public key in the `find` phase, after all honest values are known.
 | C68 | KS1 encodings | yes | Milestone 6 |
 | C42–C67, C69–C71 | ROM games, counts, ROM multi-key, ROM KS1 hop | **no** (ROM-specific statements) | not used as assumptions; generic lemmas (`hop_chain`, `resL_kprog`, tape sums) may be reused where they make no ROM claim |
 
-## 8. Ordered proof obligations
+## 9. Ordered proof obligations
 
 Milestone 2: games, no bounds.
 1. `CompGames`: a game type with stateful challenge oracles (pick / find phases,
@@ -322,7 +505,9 @@ Milestone 2: games, no bounds.
 
 Milestone 3: FORS and WOTS.
 
-6. DSM M-FORS game with committed context (I1); reductions B0–B3; DSM-T1.
+6. DSM M-FORS game with the once-only context (§5b); reductions B0–B3; DSM-T1.
+   (6b) The simulation equality for the reduction to M-FORS: `A`'s view equals its
+   view in the real game, with `ctx = ps ‖ PK.root`.
 7. Theorem 2 for DSM's F (OpenPRE ≤ DSPR + 3·TCR).
 8. DSM WOTS-TW multi-instance game; the UD hybrids ((w−2)), TCR-C and PRE-C
    reductions; chain lemmas `ch0`, `chS`.
@@ -332,6 +517,8 @@ Milestone 4: hypertree.
 9. DSM FL-SL-XMSS-MT game (all 2^68 leaves, non-adaptive, address
    restriction on the collection oracle); reduction to WOTS-TW + TCR-C(PKCO) +
    TCR-C(TRH).
+   (9b) The simulation equality for the reduction to the hypertree: answers
+   computed after `pk` is known, with DSM's root-binding `h_msg`.
 
 Milestone 5: single-key composition.
 
@@ -350,11 +537,26 @@ Milestone 6: multi-key and hierarchy.
 13. Final computational DSM forgery theorem. Re-run the KS1 and SPHINCS+
     vectors and the refinement checks.
 
+Cost obligations, carried through every milestone (§7):
+
+14. Each reduction's theorem states its resources next to its advantage:
+    * target count;
+    * collection and challenge queries;
+    * time in `thash` evaluations plus `T_A`;
+    * memory;
+    * loss factor.
+
+    Lean has no runtime model, so time is stated as request counts with C41's
+    machinery (`Cost`), and memory as the size of the reduction's state.
+15. Decide among options (a)–(c) of §7 before Milestone 3's TCR/PRE/UD
+    reductions are written. Until then, no statement may say "polynomial-time
+    reduction" or "approximately the running time of A".
+
 Every milestone must pass the Lean build with warnings as errors, the axiom
 audit, the refinement script and the claim-trace check, with no `sorry` and
 no axioms.
 
-## 9. Not claimed
+## 10. Not claimed
 
 No reduction, bound or game is proved by this document. It does not assert
 that keyed BLAKE3 under a public key, or BLAKE3's XOF, satisfies any listed
