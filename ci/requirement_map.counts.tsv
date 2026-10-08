@@ -7,19 +7,19 @@
 # (OUTSIDE_SYMBOL), and the workspace's generated or macro-written code
 # (WORKSPACE_SYMBOL), which no check can read; a jump in either fails too.
 artifact	state	code	count
-android	dead	DEAD_NO_ROOT_PATH	1572
+android	dead	DEAD_NO_ROOT_PATH	1641
 android	indeterminate	IND_AMBIGUOUS_SELF_TYPE	14
 android	indeterminate	IND_DISPATCH_SELF_TYPE	8
 android	indeterminate	IND_NOT_CONSTRUCTED	2
-android	indeterminate	IND_NOT_DISPATCHED	10
+android	indeterminate	IND_NOT_DISPATCHED	12
 android	indeterminate	IND_UNINDEXED_ARTIFACT	34
 android	indeterminate	IND_UNLINKED_IMPL	12
-android	indeterminate	IND_UNRESOLVED_CALL	64
-android	no-definition	OUTSIDE_SYMBOL	2081
-android	no-definition	WORKSPACE_SYMBOL	2478
-android	not-in-artifact	NOT_IN_ARTIFACT	4062
-android	reached	REACHED	3314
-android	reached	REACHED_VIA_DISPATCH	6343
+android	indeterminate	IND_UNRESOLVED_CALL	65
+android	no-definition	OUTSIDE_SYMBOL	2181
+android	no-definition	WORKSPACE_SYMBOL	2823
+android	not-in-artifact	NOT_IN_ARTIFACT	4596
+android	reached	REACHED	3450
+android	reached	REACHED_VIA_DISPATCH	8322
 node	dead	DEAD_NO_ROOT_PATH	5655
 node	indeterminate	IND_AMBIGUOUS_SELF_TYPE	10
 node	indeterminate	IND_UNLINKED_IMPL	291
