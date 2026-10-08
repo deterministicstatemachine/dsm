@@ -220,15 +220,65 @@ experiment is argued here and not formalized:
    hypotheses (at most `N` draws, at most `q ≤ 2^64` challenger `h_msg`
    draws, at most `JA` adversary `h_msg` draws, on every tape) and are
    restricted to the event `NoRG`: no signing request was first drawn by
-   the adversary. Still argued: that the complement of `NoRG` (an adversary
-   `h_msg` query equal to a later signing request, i.e. a query containing
-   the hidden randomizer `R`) is a disagreement event bounded by the
-   hidden-value theorem, and that the budget hypotheses follow from the
-   adversary's query budget.
+   the adversary. The complement of `NoRG` is now charged to the
+   hidden-value event (`RomProv.lean`, claim trace C51): on every tape whose
+   symbolic run of DSM's game has no disagreement step, `NoRG` holds
+   (`norg_of_nodis`), so `itsr_game_hid_128f` / `itsr_game_hid_256f` bound
+   the won-and-covered tapes by `JA · 2^-128` / `JA · 2^-255` plus the
+   `anyDis` tapes, which `rom_game_hidden`'s hidden-value bound already
+   counts. The proof is a Hoare-style invariant over the symbolic run
+   (origin, protection/disclosure, order), discharged once per request
+   constructor DSM's signer issues; see "Provenance invariant" below. Still
+   argued: that the budget hypotheses follow from the adversary's query
+   budget.
 5. **Model functions as query trees.** `Model.lean` is monad-generic, so its
    functions run unchanged as query trees; that this run equals the Id-model
    run against the final oracle is proved for logging (`verify_sim`,
    `sign_good`, `keygen_good`) but not for the query-tree monad.
+
+## Provenance invariant (phase 3, checked)
+
+`RomProv.lean` defines a judgment `J P Pre Q` over the symbolic run: from a
+state satisfying the invariant `Inv` and `Pre`, if no step of `P` is a
+disagreement step, the final state satisfies `Inv`, its entries extend the
+initial ones, and `Q` holds. `Inv` has three parts.
+
+* **Origin.** Entries 0-2 are the coins SK.seed, SK.prf and PK.seed. Every
+  handle in an entry refers to an existing entry. Adversary entries carry
+  no handles.
+* **Protection and disclosure.** Every revealed handle is `Safe`: its entry
+  does not mention SK.seed or SK.prf, so neither coin nor a key derived
+  from them (the WOTS/FORS PRF key, the PRF-msg key) is ever revealed. A
+  revealed message randomizer R has its signing request h_msg(R, PK.seed,
+  root, m) already drawn challenger-side. Disclosure is checked for every
+  legitimate challenger operation: revealing the public key, the digest,
+  the intermediate roots and the signature, and every adversary query.
+  The latter can only open an entry whose handles are all revealed.
+* **Order.** No adversary entry precedes a challenger h_msg entry with the
+  same resolution.
+
+The step lemmas (`step_askC`, `step_askA`, `step_reveal`) preserve `Inv` on
+a disagreement-free trace. The request-level lemmas cover:
+
+* `ask_tk`, `ask_dPrf`, `ask_dReq`, `ask_rq` for the key derivations and the
+  randomizer;
+* `J.hmsg` for the signing request;
+* `j_thash`, `j_prf` for the hash and PRF calls.
+
+Each twin of the signer, and the adversary's verification, is then checked
+by structure. Together they give `sym_game`: on a disagreement-free run,
+every signed message's signing request has a challenger entry.
+`norg_of_nodis` transports this to the real run through `coupling` and
+`sim_game`.
+
+The judgment separates the adversary *learning* a protected value from
+*computing* a request equal to a hidden one. The first is excluded by
+`Inv`. The second is a disagreement step, i.e. an event of the
+hidden-value bound.
+
+Not yet covered by this invariant: the WOTS-preimage and FORS-secret
+extraction events. These still need the same treatment, with the chain
+values and FORS secrets as the protected handles.
 
 ## Assumptions, stated plainly
 
