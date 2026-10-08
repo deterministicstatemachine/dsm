@@ -3442,6 +3442,15 @@ an ordinary Web2 application. It gains an account, and a way to ask the player's
 >
 > This amends A11's list of request kinds (lock a stake; collect a result) and its scoped grant (the escrow scope).
 
+> **Amendment A16 (owner, 2026-10-08) — a contacts scope: an application sees which of the wallet's contacts play.** Owner direction, from the phones: "any friends that are in your actual contacts should just show up under friends in a list, and you don't have to find them every time. It should just say if they're online or offline", and, asked whether the list comes from the game or the wallet, "both game member friends and wallet." The wallet's contacts never left it before: no A11 scope covered them. This extends A11.
+>
+> - **What the application may ask.** A grant may hold a contacts scope. It names no token, caps nothing and names no program; one per grant. Under it the application may ask one thing, signed under `DSM/connect/request` like every request (A11): *which of your contacts are who*. The request carries nothing.
+> - **What the wallet shares.** The device id of each of its contacts, once each, and nothing else about a contact: no alias, key, chain tip, balance or history. It leaves out the accounts of the applications it connected to, the asking application's own among them, and shares at most 1,024. The application matches a device id to its own players by the identity their connected sessions carry; a contact that never connected to it matches no one.
+> - **The grant.** A contacts request inside a grant that holds a contacts scope is carried out without asking; outside one it waits for the player, as every request outside its grant does (A11). It spends nothing and admits no position, so it never waits on the wallet's admission.
+> - **The wallet's word.** The answer is information, like a quote: it establishes no fact and grants nothing. Which of the shared identities are online, and anything else the application shows about them, is the application's own record.
+>
+> This amends A11's list of request kinds (which of your contacts are who) and its scoped grant (the contacts scope).
+
 
 <!-- Source PDF page 68 -->
 

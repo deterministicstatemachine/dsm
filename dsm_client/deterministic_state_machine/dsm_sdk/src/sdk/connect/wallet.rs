@@ -147,6 +147,9 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
     };
     match scope.kind {
         ScopeKind::AcceptIssued => "Receive objects this app issues".to_string(),
+        ScopeKind::Contacts => {
+            "See which of your contacts are here: their DSM IDs, not their names".to_string()
+        }
         ScopeKind::Pay => format!("Pay this app: {}", caps(scope)),
         ScopeKind::Swap => match scope.policy_commits.as_slice() {
             [a, b] => format!(
@@ -189,6 +192,42 @@ pub fn describe_scope(scope: &Scope, names: &Names) -> String {
                 )
             }
         }
+    }
+}
+
+/// The most contacts one answer shares.
+pub const MAX_SHARED_CONTACTS: usize = 1024;
+
+/// What a CONTACTS request shares (DSM Amendment A16): each contact's device
+/// id, once, in the order the wallet keeps them, without the accounts of the
+/// applications this wallet connected to. Nothing else about a contact
+/// leaves the wallet: no alias, key, chain tip or balance.
+pub fn contacts_to_share(
+    device_ids: impl IntoIterator<Item = Vec<u8>>,
+    apps: &BTreeSet<[u8; 32]>,
+) -> generated::ConnectContactsResultV1 {
+    let mut shared: Vec<[u8; 32]> = Vec::new();
+    for id in device_ids {
+        let id: [u8; 32] = match id.as_slice().try_into() {
+            Ok(id) => id,
+            // Not a device id: no identity to share.
+            Err(..) => continue,
+        };
+        if apps.contains(&id) || shared.contains(&id) {
+            continue;
+        }
+        shared.push(id);
+        if shared.len() == MAX_SHARED_CONTACTS {
+            break;
+        }
+    }
+    generated::ConnectContactsResultV1 {
+        contacts: shared
+            .into_iter()
+            .map(|device_id| generated::ConnectContactV1 {
+                device_id: device_id.to_vec(),
+            })
+            .collect(),
     }
 }
 
@@ -274,6 +313,7 @@ pub fn describe_request(request: &Request) -> String {
             1 => "Collect a battle result".to_string(),
             n => format!("Collect a battle result ({n} stakes)"),
         },
+        Request::Contacts => "Share your contacts' DSM IDs".to_string(),
     }
 }
 
@@ -419,5 +459,38 @@ mod tests {
         assert!(memo.ends_with("1 capsule"));
         assert_ne!(payment_ref(&session, 7), payment_ref(&session, 8));
         assert_eq!(payment_memo(&session, 7, "  "), payment_ref(&session, 7));
+    }
+
+    /// DSM Amendment A16: a contacts answer is each contact's device id,
+    /// once, without the connected applications' accounts, never anything
+    /// that is not a device id, and never more than MAX_SHARED_CONTACTS.
+    #[test]
+    fn a_contacts_answer_shares_device_ids_only_and_never_an_application() {
+        let ann = vec![0xA1; 32];
+        let bob = vec![0xB2; 32];
+        let game = [0x9A; 32];
+        let apps: BTreeSet<[u8; 32]> = [game].into_iter().collect();
+        let shared = contacts_to_share(
+            [
+                ann.clone(),
+                game.to_vec(),
+                vec![0xC3; 5],
+                bob.clone(),
+                ann.clone(),
+            ],
+            &apps,
+        );
+        let ids: Vec<Vec<u8>> = shared.contacts.into_iter().map(|c| c.device_id).collect();
+        assert_eq!(ids, vec![ann, bob]);
+
+        let many = (0..MAX_SHARED_CONTACTS + 5).map(|i| {
+            let mut id = vec![0; 30];
+            id.extend_from_slice(&(i as u16).to_be_bytes());
+            id
+        });
+        assert_eq!(
+            contacts_to_share(many, &BTreeSet::new()).contacts.len(),
+            MAX_SHARED_CONTACTS
+        );
     }
 }

@@ -1386,6 +1386,13 @@ export enum ConnectScopeKind {
    * @generated from enum value: CONNECT_SCOPE_KIND_DUEL = 6;
    */
   DUEL = 6,
+
+  /**
+   * read the DSM identities of the wallet's contacts, nothing more (DSM Amendment A16)
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_CONTACTS = 7;
+   */
+  CONTACTS = 7,
 }
 // Retrieve enum metadata with: proto3.getEnumType(ConnectScopeKind)
 proto3.util.setEnumType(ConnectScopeKind, "dsm.ConnectScopeKind", [
@@ -1396,6 +1403,7 @@ proto3.util.setEnumType(ConnectScopeKind, "dsm.ConnectScopeKind", [
   { no: 4, name: "CONNECT_SCOPE_KIND_HOLDINGS" },
   { no: 5, name: "CONNECT_SCOPE_KIND_ESCROW" },
   { no: 6, name: "CONNECT_SCOPE_KIND_DUEL" },
+  { no: 7, name: "CONNECT_SCOPE_KIND_CONTACTS" },
 ]);
 
 /**
@@ -29124,6 +29132,119 @@ export class ConnectHoldingsV1 extends Message<ConnectHoldingsV1> {
 }
 
 /**
+ * Which of the wallet's contacts are who (DSM Amendment A16): asks for their
+ * DSM identities. Nothing else about a contact leaves the wallet.
+ *
+ * @generated from message dsm.ConnectContactsV1
+ */
+export class ConnectContactsV1 extends Message<ConnectContactsV1> {
+  constructor(data?: PartialMessage<ConnectContactsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectContactsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectContactsV1 {
+    return new ConnectContactsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectContactsV1 {
+    return new ConnectContactsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectContactsV1 {
+    return new ConnectContactsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectContactsV1 | PlainMessage<ConnectContactsV1> | undefined, b: ConnectContactsV1 | PlainMessage<ConnectContactsV1> | undefined): boolean {
+    return proto3.util.equals(ConnectContactsV1, a, b);
+  }
+}
+
+/**
+ * One contact of the wallet, as an application may see it: its device id.
+ *
+ * @generated from message dsm.ConnectContactV1
+ */
+export class ConnectContactV1 extends Message<ConnectContactV1> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectContactV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectContactV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectContactV1 {
+    return new ConnectContactV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectContactV1 {
+    return new ConnectContactV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectContactV1 {
+    return new ConnectContactV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectContactV1 | PlainMessage<ConnectContactV1> | undefined, b: ConnectContactV1 | PlainMessage<ConnectContactV1> | undefined): boolean {
+    return proto3.util.equals(ConnectContactV1, a, b);
+  }
+}
+
+/**
+ * The wallet's contacts, excluding the accounts of the applications it is
+ * connected to (DSM Amendment A16). The wallet's word: no other evidence.
+ *
+ * @generated from message dsm.ConnectContactsResultV1
+ */
+export class ConnectContactsResultV1 extends Message<ConnectContactsResultV1> {
+  /**
+   * @generated from field: repeated dsm.ConnectContactV1 contacts = 1;
+   */
+  contacts: ConnectContactV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectContactsResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectContactsResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "contacts", kind: "message", T: ConnectContactV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectContactsResultV1 {
+    return new ConnectContactsResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectContactsResultV1 {
+    return new ConnectContactsResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectContactsResultV1 {
+    return new ConnectContactsResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectContactsResultV1 | PlainMessage<ConnectContactsResultV1> | undefined, b: ConnectContactsResultV1 | PlainMessage<ConnectContactsResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectContactsResultV1, a, b);
+  }
+}
+
+/**
  * Lock a stake for a match the application referees (DSM Amendment A12). The
  * wallet builds the escrow terms itself from one fixed outcome table: a-wins
  * and b-wins, decided by the application's key, pay A and B; cancel, decided
@@ -30150,6 +30271,12 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
      */
     value: ConnectDuelCollectV1;
     case: "duelCollect";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectContactsV1 contacts = 24;
+     */
+    value: ConnectContactsV1;
+    case: "contacts";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppRequestBodyV1>) {
@@ -30176,6 +30303,7 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
     { no: 21, name: "duel_sign", kind: "message", T: ConnectDuelSignV1, oneof: "kind" },
     { no: 22, name: "duel_settle", kind: "message", T: ConnectDuelSettleV1, oneof: "kind" },
     { no: 23, name: "duel_collect", kind: "message", T: ConnectDuelCollectV1, oneof: "kind" },
+    { no: 24, name: "contacts", kind: "message", T: ConnectContactsV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestBodyV1 {
@@ -31045,6 +31173,12 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
      */
     value: ConnectDuelSignResultV1;
     case: "duelSign";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectContactsResultV1 contacts = 20;
+     */
+    value: ConnectContactsResultV1;
+    case: "contacts";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppResponseBodyV1>) {
@@ -31069,6 +31203,7 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
     { no: 17, name: "duel_ready", kind: "message", T: ConnectDuelReadyResultV1, oneof: "result" },
     { no: 18, name: "duel_cells", kind: "message", T: ConnectDuelCellsV1, oneof: "result" },
     { no: 19, name: "duel_sign", kind: "message", T: ConnectDuelSignResultV1, oneof: "result" },
+    { no: 20, name: "contacts", kind: "message", T: ConnectContactsResultV1, oneof: "result" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppResponseBodyV1 {
@@ -32016,6 +32151,12 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
      */
     value: ConnectDuelCollectV1;
     case: "duelCollect";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectContactsV1 contacts = 24;
+     */
+    value: ConnectContactsV1;
+    case: "contacts";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectAppRequestIntentV1>) {
@@ -32041,6 +32182,7 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
     { no: 21, name: "duel_sign", kind: "message", T: ConnectDuelSignV1, oneof: "kind" },
     { no: 22, name: "duel_settle", kind: "message", T: ConnectDuelSettleV1, oneof: "kind" },
     { no: 23, name: "duel_collect", kind: "message", T: ConnectDuelCollectV1, oneof: "kind" },
+    { no: 24, name: "contacts", kind: "message", T: ConnectContactsV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestIntentV1 {

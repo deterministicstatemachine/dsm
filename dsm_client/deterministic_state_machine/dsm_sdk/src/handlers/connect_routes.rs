@@ -178,12 +178,29 @@ fn waits(
         // The other steps of a match admit no position: they sign, or write
         // a match's own cells.
         Request::AcceptIssued { .. }
+        | Request::Contacts
         | Request::DuelSessionKey { .. }
         | Request::DuelReady { .. }
         | Request::DuelWithdraw { .. }
         | Request::DuelSign { .. }
         | Request::DuelSettle { .. } => Ok(None),
     }
+}
+
+/// This wallet's contacts as a CONTACTS request shares them (DSM Amendment
+/// A16): their device ids, without the applications it connected to.
+fn shared_contacts() -> Result<generated::ConnectContactsResultV1, String> {
+    let contacts = crate::storage::client_db::get_all_contacts()
+        .map_err(|e| format!("the wallet's contacts: {e}"))?;
+    let apps: BTreeSet<[u8; 32]> = store::sessions()
+        .map_err(|e| format!("the wallet's connected applications: {e}"))?
+        .into_iter()
+        .map(|s| s.app_device_id)
+        .collect();
+    Ok(crate::sdk::connect::wallet::contacts_to_share(
+        contacts.into_iter().map(|c| c.device_id),
+        &apps,
+    ))
 }
 
 /// This device as a player of a match: the identity a branch pays and the
@@ -947,6 +964,12 @@ impl AppRouterImpl {
                     Err(e) => Executed::failed(e),
                 }
             }
+            Request::Contacts => match shared_contacts() {
+                Ok(shared) => Executed::carried_out(Some(
+                    generated::app_response_body_v1::Result::Contacts(shared),
+                )),
+                Err(e) => Executed::failed(e),
+            },
             Request::EscrowLock(lock) => match self.lock_stake(session, lock).await {
                 Ok(locked) => Executed::carried_out(Some(
                     generated::app_response_body_v1::Result::EscrowLock(locked),
@@ -1629,6 +1652,11 @@ impl AppRouterImpl {
             Request::Quote { .. } => {
                 status.fact_detail = "a quote is information and carries no authority".into();
             }
+            Request::Contacts => {
+                status.fact_detail =
+                    "contacts are the wallet's word: who its owner keeps, never proof of anything"
+                        .into();
+            }
             Request::AcceptIssued { .. } => {
                 status.fact_detail =
                     "whether the wallet holds the object shows in a holdings proof".into();
@@ -2097,6 +2125,7 @@ impl AppRouterImpl {
                 Body::Swap(k)
             }
             Some(Intent::Holdings(k)) => Body::Holdings(k),
+            Some(Intent::Contacts(k)) => Body::Contacts(k),
             Some(Intent::EscrowLock(k)) => Body::EscrowLock(k),
             Some(Intent::EscrowRelease(k)) => Body::EscrowRelease(k),
             Some(Intent::DuelSessionKey(k)) => Body::DuelSessionKey(k),

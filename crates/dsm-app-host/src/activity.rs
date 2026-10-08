@@ -141,6 +141,9 @@ pub fn describe_call(method: &str, args: &[u8]) -> String {
                     "ask the wallet to prove holdings of {} tokens",
                     k.policy_commits.len()
                 ),
+                Some(pb::connect_app_request_intent_v1::Kind::Contacts(..)) => {
+                    "ask the wallet which of its contacts are here".to_string()
+                }
                 Some(pb::connect_app_request_intent_v1::Kind::EscrowLock(k)) => format!(
                     "ask the wallet to lock {} of {} as side {} against {} ({})",
                     k.amount,
