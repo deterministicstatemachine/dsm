@@ -7,14 +7,18 @@ import Sphincs.RomCover
    Every challenger request of the extended game H1' belongs to one of DSM's
    request families, and each thash request is *structured*: its address
    literal is in range, its key is the tweak-key entry, and its k-th input
-   handle resolves to the k-th canonical child of its address (a structured
-   thash request one level down, or the PRF request at the base of a WOTS
-   chain or a FORS leaf). Structure is a statement about the symbolic dataflow
-   (which request produced each input handle), not about values, so it holds
-   at every step of the symbolic run on every tape: no disagreement-freedom is
-   assumed. The judgment `JS` records it for every pre-step state of a trace
-   and for the end state; it also records that no protected entry (one
-   mentioning SK.seed or SK.prf) is ever revealed. -/
+   handle is the challenger entry of the k-th canonical child of its address
+   (a structured thash request one level down, or the PRF request at the base
+   of a WOTS chain or a FORS leaf), each child having the address as its DSM
+   parent. Structure is a statement about the symbolic dataflow (which request
+   produced each input handle), not about values, so it holds at every step of
+   the symbolic run on every tape: no disagreement-freedom is assumed. The
+   judgment `JS` records it for every pre-step state of a trace and for the end
+   state; it also records that no protected entry (one mentioning SK.seed or
+   SK.prf) is ever revealed, and that every revealed canonical entry has its
+   DSM ancestors materialized as structured challenger entries (provenance,
+   `AncOK`). Provenance is what makes a structured request's answer its own
+   challenger entry (`ask_struct`), never an adversary entry. -/
 namespace DSM.Rom
 open DSM.Sphincs DSM.Sphincs.Security
 
@@ -44,26 +48,60 @@ def kids (p : Params) (A : Adrs) : List Kid :=
     (List.range p.k).map (fun i => .th {A.setType 3 with keypair := A.keypair, chain := p.a, hash := i})
   else []
 
+/-- The address a canonical child lives at. -/
+def Kid.adr : Kid → Adrs
+  | .th A => A
+  | .pf A => A
+
+/-- DSM's parent of an address: the thash node whose canonical children include it
+    (`none`: a root, i.e. an XMSS tree top or a FORS roots compression). -/
+def par (p : Params) (A : Adrs) : Option Adrs :=
+  if A.kind = 0 then
+    (if A.hash < 14 then some {A with hash := A.hash + 1} else some {A.setType 1 with keypair := A.keypair})
+  else if A.kind = 1 then some {A.setType 2 with chain := 1, hash := A.keypair / 2}
+  else if A.kind = 2 then
+    (if A.chain < p.hp then some {A with chain := A.chain + 1, hash := A.hash / 2} else none)
+  else if A.kind = 3 then
+    (if A.chain < p.a then some {A with chain := A.chain + 1, hash := A.hash / 2}
+     else some {A.setType 4 with keypair := A.keypair})
+  else if A.kind = 5 then some {A.setType 0 with keypair := A.keypair, chain := A.chain}
+  else if A.kind = 6 then some {A.setType 3 with keypair := A.keypair, hash := A.hash}
+  else none
+
+/-- `A`'s canonical children all have `A` as their parent. -/
+def DSMOK (p : Params) (A : Adrs) : Prop := ∀ K ∈ kids p A, par p K.adr = some A
+
+/-- `B` is a strict ancestor of `A`. -/
+inductive AncOf (p : Params) : Adrs → Adrs → Prop
+  | one {A B : Adrs} : par p A = some B → AncOf p A B
+  | up {A B C : Adrs} : par p A = some B → AncOf p B C → AncOf p A C
+
+/-- `K` lies below `A` in the canonical-children relation. -/
+inductive Reach (p : Params) : Adrs → Kid → Prop
+  | kid {A : Adrs} {K : Kid} : K ∈ kids p A → Reach p A K
+  | down {A B : Adrs} {K : Kid} : Kid.th B ∈ kids p A → Reach p B K → Reach p A K
+
 section
 variable (c : Ctx)
 
 /-- `r` is a structured thash request at `A`, to depth `d`. -/
 def StructReq (st : St) : Nat → SReq → Adrs → Prop
   | 0, _, _ => False
-  | d+1, r, A => A.InRange ∧ kids (params c.v) A ≠ [] ∧ ∃ itk hs, r = ⟨1, "", [.hid itk 32], .lit A.bytes :: hs, c.n⟩ ∧
+  | d+1, r, A => A.InRange ∧ kids (params c.v) A ≠ [] ∧ DSMOK (params c.v) A ∧
+      ∃ itk hs, r = ⟨1, "", [.hid itk 32], .lit A.bytes :: hs, c.n⟩ ∧
       st.ents[itk]? = some (false, dTk c.n) ∧ hs.length = (kids (params c.v) A).length ∧
       ∀ k, k < hs.length → ∃ h, hs[k]? = some (.hid h c.n) ∧
         match (kids (params c.v) A)[k]? with
-        | some (.th B) => ∃ r' e, StructReq st d r' B ∧ st.ents[h]? = some e ∧ e.2.res c.t = r'.res c.t
-        | some (.pf B) => ∃ ipk e, st.ents[ipk]? = some (false, dPrf c.n) ∧ st.ents[h]? = some e ∧
-            e.2.res c.t = (prfReq c.n ipk B).res c.t ∧ B.InRange
+        | some (.th B) => ∃ r', StructReq st d r' B ∧ st.ents[h]? = some (false, r')
+        | some (.pf B) => ∃ ipk, st.ents[ipk]? = some (false, dPrf c.n) ∧
+            st.ents[h]? = some (false, prfReq c.n ipk B) ∧ B.InRange
         | none => False
 
-/-- Handle `h` resolves to the canonical child `K`, to depth `d`. -/
+/-- Handle `h` is the challenger entry of the canonical child `K`, to depth `d`. -/
 def KidAt (st : St) (d : Nat) (h : Nat) : Kid → Prop
-  | .th B => ∃ r' e, StructReq c st d r' B ∧ st.ents[h]? = some e ∧ e.2.res c.t = r'.res c.t
-  | .pf B => ∃ ipk e, st.ents[ipk]? = some (false, dPrf c.n) ∧ st.ents[h]? = some e ∧
-      e.2.res c.t = (prfReq c.n ipk B).res c.t ∧ B.InRange
+  | .th B => ∃ r', StructReq c st d r' B ∧ st.ents[h]? = some (false, r')
+  | .pf B => ∃ ipk, st.ents[ipk]? = some (false, dPrf c.n) ∧ st.ents[h]? = some (false, prfReq c.n ipk B) ∧
+      B.InRange
 
 /-- Handle `h` resolves to the canonical child `K`. -/
 def KidOK (st : St) (h : Nat) (K : Kid) : Prop := ∃ d, KidAt c st d h K
@@ -77,6 +115,26 @@ def FamOK (st : St) (r : SReq) : Prop :=
     st.ents[dk]? = some (false, dReq c.n) ∧ ∀ i ∈ shids c.root, 3 ≤ i ∧ i < st.ents.length) ∨
   (∃ d A, StructReq c st d r A)
 
+/-- A thash request at the address `A` (a statement about its shape only). -/
+def ThAt (r : SReq) (A : Adrs) : Prop :=
+  A.InRange ∧ ∃ itk hs, r = ⟨1, "", [.hid itk 32], .lit A.bytes :: hs, c.n⟩
+
+/-- Handle `h` is a challenger entry for a thash request at `A`, or for a PRF request
+    at `A` under SK.seed. -/
+def EntAt (st : St) (h : Nat) (A : Adrs) : Prop :=
+  ∃ r, st.ents[h]? = some (false, r) ∧
+    (ThAt c r A ∨ (A.InRange ∧ ∃ ipk, r = prfReq c.n ipk A ∧ st.ents[ipk]? = some (false, dPrf c.n)))
+
+/-- A structured challenger entry at `b`. -/
+def HasS (st : St) (b : Adrs) : Prop := ∃ (d : Nat) (r : SReq) (j : Nat), StructReq c st d r b ∧ st.ents[j]? = some (false, r)
+
+/-- Every ancestor of `A` has a structured challenger entry. -/
+def AncCov (st : St) (A : Adrs) : Prop := ∀ b, AncOf (params c.v) A b → HasS c st b
+
+/-- Provenance of a handle: if it is a canonical challenger entry, every ancestor of its
+    address has already been materialized by the challenger. -/
+def AncOK (st : St) (h : Nat) : Prop := ∀ A, EntAt c st h A → AncCov c st A
+
 /-- The structural invariant. -/
 def InvS (st : St) : Prop :=
   (st.ents[0]? = some (false, coin c.n 0) ∧ st.ents[1]? = some (false, coin c.n 1) ∧
@@ -84,13 +142,14 @@ def InvS (st : St) : Prop :=
   (∀ (a : Nat) (qa : SReq), st.ents[a]? = some (true, qa) → qa.hids = []) ∧
   (∀ i ∈ st.rev, i < st.ents.length ∧ ¬ Prot st i) ∧
   (∀ (i : Nat) (r : SReq), st.ents[i]? = some (false, r) → i < 3 ∨ FamOK c st r) ∧
-  DistK 3 c.t st
+  DistK 3 c.t st ∧
+  (∀ i ∈ st.rev, AncOK c st i)
 
 /-- What a single step needs. -/
 def StepOK (stp : St × Ev) : Prop :=
   match stp.2 with
   | .c r => FamOK c stp.1 r
-  | .r x => ∀ h ∈ shids x, h < stp.1.ents.length ∧ ¬ Prot stp.1 h
+  | .r x => ∀ h ∈ shids x, h < stp.1.ents.length ∧ ¬ Prot stp.1 h ∧ AncOK c stp.1 h
   | .a _ => True
 
 def StableS (P : St → Prop) : Prop := ∀ st st', InvS c st → Grow2 st st' → P st → P st'
@@ -119,8 +178,8 @@ variable {c : Ctx}
 theorem structReq_mono {st st' : St} (hg : Grow2 st st') :
     ∀ (d : Nat) (r : SReq) (A : Adrs), StructReq c st d r A → StructReq c st' d r A
   | 0, _, _, h => h
-  | d+1, r, A, ⟨hA, hk, itk, hs, hr, hitk, hl, hh⟩ => by
-    refine ⟨hA, hk, itk, hs, hr, grow_get hg hitk, hl, fun k hk' => ?_⟩
+  | d+1, r, A, ⟨hA, hk, hD, itk, hs, hr, hitk, hl, hh⟩ => by
+    refine ⟨hA, hk, hD, itk, hs, hr, grow_get hg hitk, hl, fun k hk' => ?_⟩
     obtain ⟨h, hhk, hK⟩ := hh k hk'
     refine ⟨h, hhk, ?_⟩
     revert hK
@@ -129,21 +188,21 @@ theorem structReq_mono {st st' : St} (hg : Grow2 st st') :
     | some K =>
       cases K with
       | th B =>
-        rintro ⟨r', e, h1, h2, h3⟩
-        exact ⟨r', e, structReq_mono hg d r' B h1, grow_get hg h2, h3⟩
+        rintro ⟨r', h1, h2⟩
+        exact ⟨r', structReq_mono hg d r' B h1, grow_get hg h2⟩
       | pf B =>
-        rintro ⟨ipk, e, h1, h2, h3, h4⟩
-        exact ⟨ipk, e, grow_get hg h1, grow_get hg h2, h3, h4⟩
+        rintro ⟨ipk, h1, h2, h3⟩
+        exact ⟨ipk, grow_get hg h1, grow_get hg h2, h3⟩
 
 theorem kidAt_mono {st st' : St} (hg : Grow2 st st') {d h : Nat} {K : Kid} (hk : KidAt c st d h K) :
     KidAt c st' d h K := by
   cases K with
   | th B =>
-    obtain ⟨r', e, h1, h2, h3⟩ := hk
-    exact ⟨r', e, structReq_mono hg d r' B h1, grow_get hg h2, h3⟩
+    obtain ⟨r', h1, h2⟩ := hk
+    exact ⟨r', structReq_mono hg d r' B h1, grow_get hg h2⟩
   | pf B =>
-    obtain ⟨ipk, e, h1, h2, h3, h4⟩ := hk
-    exact ⟨ipk, e, grow_get hg h1, grow_get hg h2, h3, h4⟩
+    obtain ⟨ipk, h1, h2, h3⟩ := hk
+    exact ⟨ipk, grow_get hg h1, grow_get hg h2, h3⟩
 
 theorem kidOK_mono {st st' : St} (hg : Grow2 st st') {h : Nat} {K : Kid} (hk : KidOK c st h K) :
     KidOK c st' h K := let ⟨d, hd⟩ := hk; ⟨d, kidAt_mono hg hd⟩
@@ -165,6 +224,107 @@ theorem prot_mono {st st' : St} (hg : Grow2 st st') {i : Nat} (hi : i < st.ents.
   have e : st'.ents[i]? = st.ents[i]? := by rw [hL, List.getElem?_append_left hi]
   simp only [Prot, e]
 
+theorem hasS_mono {st st' : St} (hg : Grow2 st st') {b : Adrs} (h : HasS c st b) : HasS c st' b :=
+  let ⟨d, r, j, h1, h2⟩ := h; ⟨d, r, j, structReq_mono hg d r b h1, grow_get hg h2⟩
+
+theorem ancCov_mono {st st' : St} (hg : Grow2 st st') {A : Adrs} (h : AncCov c st A) : AncCov c st' A :=
+  fun b hb => hasS_mono hg (h b hb)
+
+/-- A PRF-shaped challenger request is keyed by SK.prf's entry or by the message-PRF key's. -/
+theorem famOK_prf_key {st : St} {ipk : Nat} {A : Adrs} (hF : FamOK c st (prfReq c.n ipk A)) :
+    st.ents[ipk]? = some (false, dPrf c.n) ∨ st.ents[ipk]? = some (false, dReq c.n) := by
+  rcases hF with h | h | h | ⟨ipk', A', h1, h2, _⟩ | ⟨dk, m, h1, h2⟩ | ⟨iR, m, h1, _⟩ | ⟨d, B, h1⟩
+  · simp [prfReq, dTk] at h
+  · simp [prfReq, dPrf] at h
+  · simp [prfReq, dReq] at h
+  · have := congrArg SReq.key h1
+    simp [prfReq] at this
+    subst this; exact Or.inl h2
+  · have := congrArg SReq.key h1
+    simp [prfReq, rqOf] at this
+    subst this; exact Or.inr h2
+  · simp [prfReq, hqOf] at h1
+  · cases d with
+    | zero => exact h1.elim
+    | succ d =>
+      obtain ⟨_, _, _, _, _, hr, _⟩ := h1
+      have := congrArg SReq.input hr
+      simp [prfReq] at this
+
+/-- Entries below the length keep their address shape. -/
+theorem entAt_down {st st' : St} (hI : InvS c st) (hg : Grow2 st st') {h : Nat} (hh : h < st.ents.length)
+    {A : Adrs} (he : EntAt c st' h A) : EntAt c st h A := by
+  obtain ⟨⟨L, hL⟩, _⟩ := hg
+  have e : st'.ents[h]? = st.ents[h]? := by rw [hL, List.getElem?_append_left hh]
+  obtain ⟨r, hr, hA⟩ := he
+  rw [e] at hr
+  refine ⟨r, hr, ?_⟩
+  rcases hA with hA | ⟨hA, ipk, rfl, hk⟩
+  · exact Or.inl hA
+  · refine Or.inr ⟨hA, ipk, rfl, ?_⟩
+    rcases hI.2.2.2.1 h _ hr with h3 | hF
+    · exfalso
+      rcases h with _ | _ | _ | h
+      · rw [hI.1.1] at hr; simp [coin, prfReq] at hr
+      · rw [hI.1.2.1] at hr; simp [coin, prfReq] at hr
+      · rw [hI.1.2.2] at hr; simp [coin, prfReq] at hr
+      · omega
+    · rcases famOK_prf_key hF with h1 | h1
+      · exact h1
+      · exfalso
+        rw [hL, List.getElem?_append_left (lt_entry h1), h1] at hk
+        simp [dReq, dPrf] at hk
+
+theorem ancOK_mono {st st' : St} (hI : InvS c st) (hg : Grow2 st st') {h : Nat} (hh : h < st.ents.length)
+    (ha : AncOK c st h) : AncOK c st' h :=
+  fun A he => ancCov_mono hg (ha A (entAt_down hI hg hh he))
+
+theorem thAt_of_struct {st : St} : ∀ {d : Nat} {r : SReq} {A : Adrs}, StructReq c st d r A → ThAt c r A
+  | 0, _, _, h => h.elim
+  | _+1, _, _, ⟨hA, _, _, itk, hs, hr, _⟩ => ⟨hA, itk, hs, hr⟩
+
+theorem entAt_of_kidAt {st : St} {d h : Nat} {K : Kid} (hk : KidAt c st d h K) : EntAt c st h K.adr := by
+  cases K with
+  | th B => obtain ⟨r', h1, h2⟩ := hk; exact ⟨r', h2, Or.inl (thAt_of_struct h1)⟩
+  | pf B => obtain ⟨ipk, h1, h2, h3⟩ := hk; exact ⟨_, h2, Or.inr ⟨h3, ipk, rfl, h1⟩⟩
+
+theorem hid_shids : ∀ {x : List SV} {k h w : Nat}, x[k]? = some (.hid h w) → h ∈ shids x
+  | [], _, _, _, hx => by simp at hx
+  | v :: x, 0, h, w, hx => by
+    simp at hx; subst hx; simp [shids]
+  | v :: x, k+1, h, w, hx => by
+    simp at hx
+    have := hid_shids hx
+    cases v <;> simp [shids, this]
+
+/-- An open structured request is covered: its first child is a revealed handle, so by
+    provenance the child's ancestors, the request's own address first, are materialized. -/
+theorem struct_open_cov {st : St} (hI : InvS c st) {d : Nat} {r : SReq} {A : Adrs}
+    (hS : StructReq c st d r A) (hom : ∀ h ∈ r.hids, h ∈ st.rev) : HasS c st A ∧ AncCov c st A := by
+  cases d with
+  | zero => exact hS.elim
+  | succ d =>
+  obtain ⟨_, hkn, hD, itk, hs, rfl, _, hl, hh⟩ := hS
+  obtain ⟨K, hK0⟩ : ∃ K, (kids (params c.v) A)[0]? = some K := by
+    cases hkk : kids (params c.v) A with
+    | nil => exact absurd hkk hkn
+    | cons K _ => exact ⟨K, rfl⟩
+  have hmem : K ∈ kids (params c.v) A := List.mem_of_getElem? hK0
+  have h0 : 0 < hs.length := by rw [hl]; exact (List.getElem?_eq_some_iff.mp hK0).1
+  obtain ⟨h0', hx0, hK⟩ := hh 0 h0
+  rw [hK0] at hK
+  have hrev0 : h0' ∈ st.rev := hom h0' (by
+    show h0' ∈ shids [SV.hid itk 32] ++ shids (SV.lit A.bytes :: hs)
+    simp only [shids, List.mem_append]
+    exact Or.inr (hid_shids hx0))
+  have hent : EntAt c st h0' K.adr := by
+    cases K with
+    | th B => obtain ⟨r', h1, h2⟩ := hK; exact ⟨r', h2, Or.inl (thAt_of_struct h1)⟩
+    | pf B => obtain ⟨ipk, h1, h2, h3⟩ := hK; exact ⟨_, h2, Or.inr ⟨h3, ipk, rfl, h1⟩⟩
+  have hcov := hI.2.2.2.2.2 h0' hrev0 K.adr hent
+  have hpar := hD K hmem
+  exact ⟨hcov A (AncOf.one hpar), fun b hb => hcov b (AncOf.up hpar hb)⟩
+
 end
 
 /-! Steps. -/
@@ -178,9 +338,46 @@ theorem coin_prot {st : St} (h0 : st.ents[0]? = some (false, coin c.n 0)) : Prot
 theorem coin1_prot {st : St} (h1 : st.ents[1]? = some (false, coin c.n 1)) : Prot st 1 :=
   ⟨_, h1, Or.inr (by simp [coin, SReq.hids, shids])⟩
 
+/-- An adversary lookup that answers from an open challenger entry keeps provenance:
+    a thash entry is structured, hence covered (`struct_open_cov`); a PRF entry is never open. -/
+theorem ancOK_open {st : St} (hI : InvS c st) {i : Nat} {e : Bool × SReq} (he : st.ents[i]? = some e)
+    (ho : isOpen st.rev e.2 = true) : AncOK c st i := by
+  intro A ⟨r, hr, hA⟩
+  rw [he] at hr
+  obtain rfl := Option.some.inj hr
+  have hom := open_mem ho
+  rcases hA with ⟨hR, itk, hs, rfl⟩ | ⟨_, ipk, rfl, hk⟩
+  · rcases hI.2.2.2.1 i _ he with h3 | hF
+    · exfalso
+      rcases i with _ | _ | _ | i
+      · rw [hI.1.1] at he; simp [coin] at he
+      · rw [hI.1.2.1] at he; simp [coin] at he
+      · rw [hI.1.2.2] at he; simp [coin] at he
+      · omega
+    rcases hF with h | h | h | ⟨_, _, h, _⟩ | ⟨_, _, h, _⟩ | ⟨_, _, h, _⟩ | ⟨d, A', hS⟩
+    · simp [dTk] at h
+    · simp [dPrf] at h
+    · simp [dReq] at h
+    · have := congrArg SReq.input h; simp [prfReq] at this
+    · have := congrArg SReq.input h; simp [rqOf] at this
+    · simp [hqOf] at h
+    have hA' : A' = A := by
+      cases d with
+      | zero => exact hS.elim
+      | succ d =>
+        obtain ⟨hA', _, _, itk', hs', hr', _⟩ := hS
+        have := congrArg SReq.input hr'
+        simp only [List.cons.injEq, SV.lit.injEq] at this
+        exact adrs_bytes_injective A' A hA' hR this.1.symm
+    subst hA'
+    exact (struct_open_cov hI hS hom).2
+  · exfalso
+    have hP : Prot st ipk := ⟨_, hk, Or.inl (by simp [dPrf, SReq.hids, shids])⟩
+    exact (hI.2.2.1 ipk (hom ipk (by simp [prfReq, SReq.hids, shids]))).2 hP
+
 theorem stepS_askC (st : St) (r : SReq) (hI : InvS c st) (hF : FamOK c st r) (hd : dis c.t (st, .c r) = false) :
     InvS c (addC st (firstIdx (mC false c.t st.rev r) st.ents) r) := by
-  have hD' := distK_askC hI.2.2.2.2 hd
+  have hD' := distK_askC hI.2.2.2.2.1 hd
   generalize hi : firstIdx (mC false c.t st.rev r) st.ents = i at hD'
   by_cases hl : i < st.ents.length
   · have : addC st i r = st := by simp [addC, hl]
@@ -188,8 +385,9 @@ theorem stepS_askC (st : St) (r : SReq) (hI : InvS c st) (hF : FamOK c st r) (hd
   · have ha : addC st i r = ⟨st.ents ++ [(false, r)], st.rev⟩ := by simp [addC, hl]
     rw [ha] at hD' ⊢
     have hx : Grow2 st ⟨st.ents ++ [(false, r)], st.rev⟩ := ⟨⟨_, rfl⟩, fun _ h => h⟩
-    obtain ⟨hc, hadv, hrev, hfam, -⟩ := hI
-    refine ⟨⟨grow_get hx hc.1, grow_get hx hc.2.1, grow_get hx hc.2.2⟩, ?_, ?_, ?_, hD'⟩
+    obtain ⟨hc, hadv, hrev, hfam, -, hanc⟩ := id hI
+    refine ⟨⟨grow_get hx hc.1, grow_get hx hc.2.1, grow_get hx hc.2.2⟩, ?_, ?_, ?_, hD',
+      fun j hj => ancOK_mono hI hx (hrev j hj).1 (hanc j hj)⟩
     · intro a qa he
       rcases fr_snoc he with ⟨_, he⟩ | ⟨_, he⟩
       · exact hadv a qa he
@@ -207,21 +405,27 @@ theorem stepS_askC (st : St) (r : SReq) (hI : InvS c st) (hF : FamOK c st r) (hd
 
 theorem stepS_askA (st : St) (q : Request) (hI : InvS c st) (hd : dis c.t (st, .a q) = false) :
     InvS c (addA st (firstIdx (mA false c.t st.rev q) st.ents) q) := by
-  have hD' := distK_askA hI.2.2.2.2 hd
+  have hD' := distK_askA hI.2.2.2.2.1 hd
   generalize hi : firstIdx (mA false c.t st.rev q) st.ents = i at hD'
-  obtain ⟨hc, hadv, hrev, hfam, -⟩ := hI
+  obtain ⟨hc, hadv, hrev, hfam, -, hanc⟩ := id hI
   by_cases hl : i < st.ents.length
   · have ha : addA st i q = ⟨st.ents, i :: st.rev⟩ := by simp [addA, hl]
     rw [ha] at hD' ⊢
     have hx : Grow2 st ⟨st.ents, i :: st.rev⟩ := ⟨⟨[], by simp⟩, fun _ h => List.mem_cons_of_mem _ h⟩
-    refine ⟨hc, hadv, ?_, fun j r' he => (hfam j r' he).imp id (famOK_mono hx), hD'⟩
+    obtain ⟨e, he, hp⟩ := fr_hit _ st.ents (hi ▸ hl)
+    rw [hi] at he
+    simp only [mA, Bool.false_eq_true, if_false, Bool.and_eq_true] at hp
+    refine ⟨hc, hadv, ?_, fun j r' he => (hfam j r' he).imp id (famOK_mono hx), hD', ?_⟩
+    rotate_left
+    · intro j hj
+      simp only [List.mem_cons] at hj
+      rcases hj with rfl | hj
+      · exact ancOK_mono hI hx hl (ancOK_open hI he hp.1)
+      · exact ancOK_mono hI hx (hrev j hj).1 (hanc j hj)
     intro j hj
     simp only [List.mem_cons] at hj
     rcases hj with rfl | hj
     · refine ⟨hl, ?_⟩
-      obtain ⟨e, he, hp⟩ := fr_hit _ st.ents (hi ▸ hl)
-      rw [hi] at he
-      simp only [mA, Bool.false_eq_true, if_false, Bool.and_eq_true] at hp
       rintro ⟨e2, h2, h3⟩
       simp only at h2
       obtain rfl : e = e2 := Option.some.inj (he.symm.trans h2)
@@ -237,7 +441,15 @@ theorem stepS_askA (st : St) (q : Request) (hI : InvS c st) (hd : dis c.t (st, .
     rw [ha] at hD' ⊢
     have hx : Grow2 st ⟨st.ents ++ [(true, lift q)], st.ents.length :: st.rev⟩ :=
       ⟨⟨_, rfl⟩, fun _ h => List.mem_cons_of_mem _ h⟩
-    refine ⟨⟨grow_get hx hc.1, grow_get hx hc.2.1, grow_get hx hc.2.2⟩, ?_, ?_, ?_, hD'⟩
+    refine ⟨⟨grow_get hx hc.1, grow_get hx hc.2.1, grow_get hx hc.2.2⟩, ?_, ?_, ?_, hD', ?_⟩
+    rotate_left 3
+    · intro j hj
+      simp only [List.mem_cons] at hj
+      rcases hj with rfl | hj
+      · rintro A ⟨r, hr, -⟩
+        rw [List.getElem?_append_right (Nat.le_refl _)] at hr
+        simp at hr
+      · exact ancOK_mono hI hx (hrev j hj).1 (hanc j hj)
     · intro a qa he
       rcases fr_snoc he with ⟨_, he⟩ | ⟨_, he⟩
       · exact hadv a qa he
@@ -258,14 +470,19 @@ theorem stepS_askA (st : St) (q : Request) (hI : InvS c st) (hd : dis c.t (st, .
       · cases (Prod.mk.inj he).1
 
 theorem stepS_reveal (st : St) (x : List SV) (hI : InvS c st)
-    (hx : ∀ h ∈ shids x, h < st.ents.length ∧ ¬ Prot st h) : InvS c ⟨st.ents, shids x ++ st.rev⟩ := by
-  obtain ⟨hc, hadv, hrev, hfam, hD⟩ := hI
+    (hx : ∀ h ∈ shids x, h < st.ents.length ∧ ¬ Prot st h ∧ AncOK c st h) :
+    InvS c ⟨st.ents, shids x ++ st.rev⟩ := by
+  obtain ⟨hc, hadv, hrev, hfam, hD, hanc⟩ := id hI
   have hg : Grow2 st ⟨st.ents, shids x ++ st.rev⟩ := ⟨⟨[], by simp⟩, fun _ h => List.mem_append_right _ h⟩
-  refine ⟨hc, hadv, ?_, fun j r' he => (hfam j r' he).imp id (famOK_mono hg), hD⟩
-  intro j hj
-  rcases List.mem_append.mp hj with h | h
-  · exact hx j h
-  · exact hrev j h
+  refine ⟨hc, hadv, ?_, fun j r' he => (hfam j r' he).imp id (famOK_mono hg), hD, ?_⟩
+  · intro j hj
+    rcases List.mem_append.mp hj with h | h
+    · exact ⟨(hx j h).1, (hx j h).2.1⟩
+    · exact hrev j h
+  · intro j hj
+    rcases List.mem_append.mp hj with h | h
+    · exact ancOK_mono hI hg (hx j h).1 (hx j h).2.2
+    · exact ancOK_mono hI hg (hrev j h).1 (hanc j h)
 
 end
 
@@ -346,7 +563,7 @@ theorem JS.ite {α : Type} {b : Prop} [Decidable b] {P₁ P₂ : Prog α} {P0 : 
   · simp only [h, if_false]; exact h₂ h
 
 theorem JS.reveal {α : Type} {x : List SV} {k : Bytes → Prog α} {P0 : St → Prop} {Q : α → St → Prop}
-    (hx : ∀ st, InvS c st → P0 st → ∀ h ∈ shids x, h < st.ents.length ∧ ¬ Prot st h)
+    (hx : ∀ st, InvS c st → P0 st → ∀ h ∈ shids x, h < st.ents.length ∧ ¬ Prot st h ∧ AncOK c st h)
     (hk : JS c (k (sres c.t x)) P0 Q) (hs : StableS c P0) : JS c (.reveal x k) P0 Q := by
   intro st hI hp
   have hI1 := stepS_reveal st x hI (hx st hI hp)
@@ -461,8 +678,8 @@ variable {c : Ctx}
 theorem structReq_fuel {st : St} : ∀ (d d' : Nat) (r : SReq) (A : Adrs), d ≤ d' →
     StructReq c st d r A → StructReq c st d' r A
   | 0, _, _, _, _, h => h.elim
-  | d+1, d'+1, r, A, hle, ⟨hA, hk, itk, hs, hr, hitk, hl, hh⟩ => by
-    refine ⟨hA, hk, itk, hs, hr, hitk, hl, fun k hk' => ?_⟩
+  | d+1, d'+1, r, A, hle, ⟨hA, hk, hD, itk, hs, hr, hitk, hl, hh⟩ => by
+    refine ⟨hA, hk, hD, itk, hs, hr, hitk, hl, fun k hk' => ?_⟩
     obtain ⟨h, hhk, hK⟩ := hh k hk'
     refine ⟨h, hhk, ?_⟩
     revert hK
@@ -471,8 +688,8 @@ theorem structReq_fuel {st : St} : ∀ (d d' : Nat) (r : SReq) (A : Adrs), d ≤
     | some K =>
       cases K with
       | th B =>
-        rintro ⟨r', e, h1, h2, h3⟩
-        exact ⟨r', e, structReq_fuel d d' r' B (by omega) h1, h2, h3⟩
+        rintro ⟨r', h1, h2⟩
+        exact ⟨r', structReq_fuel d d' r' B (by omega) h1, h2⟩
       | pf B => exact id
   | d+1, 0, _, _, hle, _ => absurd hle (by omega)
 
@@ -480,8 +697,8 @@ theorem kidAt_fuel {st : St} {d d' h : Nat} {K : Kid} (hle : d ≤ d') (hk : Kid
     KidAt c st d' h K := by
   cases K with
   | th B =>
-    obtain ⟨r', e, h1, h2, h3⟩ := hk
-    exact ⟨r', e, structReq_fuel d d' r' B hle h1, h2, h3⟩
+    obtain ⟨r', h1, h2⟩ := hk
+    exact ⟨r', structReq_fuel d d' r' B hle h1, h2⟩
   | pf B => exact hk
 
 theorem coin_res_mode {st : St} (hI : InvS c st) {i : Nat} {e : Bool × SReq} (hi : i < 3)
@@ -498,11 +715,11 @@ theorem idx_eq_of_res {st : St} (hI : InvS c st) {a b : Nat} {ea eb : Bool × SR
     (hm : (ea.2.res c.t).mode ≠ 999) : a = b := by
   rcases Nat.lt_trichotomy a b with h | h | h
   · by_cases h3 : 3 ≤ b
-    · exact absurd hres (hI.2.2.2.2 a b ea eb h h3 ha hb)
+    · exact absurd hres (hI.2.2.2.2.1 a b ea eb h h3 ha hb)
     · exact absurd (hres ▸ coin_res_mode hI (by omega) hb) hm
   · exact h
   · by_cases h3 : 3 ≤ a
-    · exact absurd hres.symm (hI.2.2.2.2 b a eb ea h h3 hb ha)
+    · exact absurd hres.symm (hI.2.2.2.2.1 b a eb ea h h3 hb ha)
     · exact absurd (coin_res_mode hI (by omega) ha) hm
 
 theorem dTk_unique {st : St} (hI : InvS c st) {a b : Nat} (ha : st.ents[a]? = some (false, dTk c.n))
@@ -518,7 +735,7 @@ theorem struct_unique {st : St} (hI : InvS c st) : ∀ (d d' : Nat) (r r' : SReq
     StructReq c st d r A → StructReq c st d' r' A → r = r'
   | 0, _, _, _, _, h, _ => h.elim
   | _, 0, _, _, _, _, h => h.elim
-  | d+1, d'+1, r, r', A, ⟨_, _, itk, hs, hr, hitk, hl, hh⟩, ⟨_, _, itk', hs', hr', hitk', hl', hh'⟩ => by
+  | d+1, d'+1, r, r', A, ⟨_, _, _, itk, hs, hr, hitk, hl, hh⟩, ⟨_, _, _, itk', hs', hr', hitk', hl', hh'⟩ => by
     subst hr hr'
     have hk : itk = itk' := dTk_unique hI hitk hitk'
     subst hk
@@ -537,26 +754,77 @@ theorem struct_unique {st : St} (hI : InvS c st) : ∀ (d d' : Nat) (r r' : SReq
         | some K =>
           cases K with
           | th B =>
-            rintro ⟨r1, e, h1, h2, h3⟩ ⟨r1', e', h1', h2', h3'⟩
+            rintro ⟨r1, h1, h2⟩ ⟨r1', h1', h2'⟩
             have := struct_unique hI d d' r1 r1' B h1 h1'
             subst this
-            have hm : (e.2.res c.t).mode ≠ 999 := by
-              rw [h3]
+            have hm : ((false, r1).2.res c.t).mode ≠ 999 := by
               cases d with
               | zero => exact h1.elim
-              | succ d => obtain ⟨_, _, _, _, hrr, _⟩ := h1; subst hrr; simp [SReq.res]
-            rw [idx_eq_of_res hI h2 h2' (h3.trans h3'.symm) hm]
+              | succ d => obtain ⟨_, _, _, _, _, hrr, _⟩ := h1; subst hrr; simp [SReq.res]
+            rw [idx_eq_of_res hI h2 h2' rfl hm]
           | pf B =>
-            rintro ⟨ipk, e, h1, h2, h3, _⟩ ⟨ipk', e', h1', h2', h3', _⟩
+            rintro ⟨ipk, h1, h2, _⟩ ⟨ipk', h1', h2', _⟩
             have := dPrf_unique hI h1 h1'
             subst this
-            have hm : (e.2.res c.t).mode ≠ 999 := by rw [h3]; simp [prfReq, SReq.res]
-            rw [idx_eq_of_res hI h2 h2' (h3.trans h3'.symm) hm]
+            rw [idx_eq_of_res hI h2 h2' rfl (by simp [prfReq, SReq.res])]
       · rw [List.getElem?_eq_none (by omega), List.getElem?_eq_none (by omega)]
     rw [hseq]
 
 end
 
+
+section
+variable {c : Ctx}
+
+theorem ge3_of_res {st : St} (hI : InvS c st) {h : Nat} {e : Bool × SReq} (he : st.ents[h]? = some e)
+    (hm : (e.2.res c.t).mode ≠ 999) : 3 ≤ h := by
+  by_cases h3 : h < 3
+  · exact absurd (coin_res_mode hI h3 he) hm
+  · omega
+
+theorem ge3_of_ent {st : St} (hI : InvS c st) {h : Nat} {r : SReq} (he : st.ents[h]? = some (false, r))
+    (hm : r.mode ≠ 999) : 3 ≤ h := ge3_of_res hI he hm
+
+theorem askS_closed (st : St) (r : SReq) (hI : InvS c st) (hc : ∃ h ∈ r.hids, h ∉ st.rev) :
+    (addC st (firstIdx (mC false c.t st.rev r) st.ents) r).ents[firstIdx (mC false c.t st.rev r) st.ents]? =
+      some (false, r) := by
+  obtain ⟨e, he, _, ho⟩ := ask_res (c := c) st r
+  obtain ⟨h, hm, hnr⟩ := hc
+  rcases ho with ho | ho
+  · obtain ⟨g, r'⟩ := e
+    simp only at ho
+    subst ho
+    cases g
+    · exact he
+    · exfalso
+      generalize hi : firstIdx (mC false c.t st.rev r') st.ents = i at he
+      by_cases hl : i < st.ents.length
+      · have : addC st i r' = st := by simp [addC, hl]
+        rw [this] at he
+        have := hI.2.1 i r' he
+        rw [this] at hm; cases hm
+      · have ha : addC st i r' = ⟨st.ents ++ [(false, r')], st.rev⟩ := by simp [addC, hl]
+        rw [ha] at he
+        rcases fr_snoc he with ⟨hh, _⟩ | ⟨_, he'⟩
+        · exact hl hh
+        · cases he'
+  · exact absurd (open_mem ho.2 h hm) hnr
+
+theorem askS_known {st : St} (hI : InvS c st) {r : SReq} (hr : r.mode ≠ 999) {j : Nat}
+    (hj : st.ents[j]? = some (false, r)) : firstIdx (mC false c.t st.rev r) st.ents = j := by
+  have h3 : 3 ≤ j := ge3_of_ent hI hj hr
+  have hm : mC false c.t st.rev r (false, r) = true := by simp [mC]
+  have hle : firstIdx (mC false c.t st.rev r) st.ents ≤ j := by
+    refine Nat.le_of_not_lt (fun hlt => ?_)
+    have := fr_before _ _ j _ hj hlt
+    rw [hm] at this; cases this
+  rcases Nat.lt_or_eq_of_le hle with hlt | heq
+  · exfalso
+    obtain ⟨e, he, hp⟩ := fr_hit (mC false c.t st.rev r) st.ents (Nat.lt_trans hlt (lt_entry hj))
+    exact hI.2.2.2.2.1 _ j e (false, r) hlt h3 he hj (mC_false_true hp)
+  · exact heq
+
+end
 
 /-! Requests: thash and PRF. -/
 
@@ -575,24 +843,42 @@ variable {c : Ctx}
 
 theorem kidOK_unique_th {st : St} (hI : InvS c st) {h h' : Nat} {A : Adrs}
     (hk : KidOK c st h (.th A)) (hk' : KidOK c st h' (.th A)) : h = h' := by
-  obtain ⟨d, r, e, h1, h2, h3⟩ := hk
-  obtain ⟨d', r', e', h1', h2', h3'⟩ := hk'
+  obtain ⟨d, r, h1, h2⟩ := hk
+  obtain ⟨d', r', h1', h2'⟩ := hk'
   have := struct_unique hI d d' r r' A h1 h1'
   subst this
-  have hm : (e.2.res c.t).mode ≠ 999 := by
-    rw [h3]
+  have hm : ((false, r).2.res c.t).mode ≠ 999 := by
     cases d with
     | zero => exact h1.elim
-    | succ d => obtain ⟨_, _, _, _, hrr, _⟩ := h1; subst hrr; simp [SReq.res]
-  exact idx_eq_of_res hI h2 h2' (h3.trans h3'.symm) hm
+    | succ d => obtain ⟨_, _, _, _, _, hrr, _⟩ := h1; subst hrr; simp [SReq.res]
+  exact idx_eq_of_res hI h2 h2' rfl hm
 
-theorem js_thash (A : Adrs) (x : SB) (itk : Nat) {P0 : St → Prop}
+/-- A structured request's answer is its own challenger entry. With a closed handle the
+    request is new or already held; open, its address is covered (`struct_open_cov`), so the
+    challenger already holds a structured request there, which is this one (`struct_unique`). -/
+theorem ask_struct {st : St} (hI : InvS c st) {d : Nat} {r : SReq} {A : Adrs} (hS : StructReq c st d r A) :
+    (addC st (firstIdx (mC false c.t st.rev r) st.ents) r).ents[firstIdx (mC false c.t st.rev r) st.ents]? =
+      some (false, r) := by
+  by_cases ho : ∃ h ∈ r.hids, h ∉ st.rev
+  · exact askS_closed st r hI ho
+  · have hom : ∀ h ∈ r.hids, h ∈ st.rev := fun h hh => Classical.byContradiction (fun hn => ho ⟨h, hh, hn⟩)
+    obtain ⟨d', r', j, hS', hj⟩ := (struct_open_cov hI hS hom).1
+    obtain rfl := struct_unique hI d' d r' r A hS' hS
+    have hm : r'.mode ≠ 999 := by
+      cases d' with
+      | zero => exact hS'.elim
+      | succ d' => obtain ⟨_, _, _, _, _, hrr, _⟩ := hS'; subst hrr; simp
+    rw [askS_known hI hm hj]
+    have : addC st j r' = st := by simp [addC, lt_entry hj]
+    rw [this]; exact hj
+
+theorem js_thash (A : Adrs) (x : SB) (itk : Nat) (hD : DSMOK (params c.v) A) {P0 : St → Prop}
     (h : ∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧ ∃ d, InputAt c st d A x) :
     JS c (sThash (params c.v) [.hid itk 32] A x) P0 (fun v st => ∃ i, v = [.hid i c.n] ∧ KidOK c st i (.th A)) := by
   have hstruct : ∀ st, InvS c st → P0 st → ∃ d, StructReq c st (d+1) ⟨1, "", [.hid itk 32], .lit A.bytes :: x, c.n⟩ A := by
     intro st hI hp
     obtain ⟨hitk, d, hA, hk, hl, hx⟩ := h st hI hp
-    refine ⟨d, hA, hk, itk, x, rfl, hitk, hl, fun k hk' => ?_⟩
+    refine ⟨d, hA, hk, hD, itk, x, rfl, hitk, hl, fun k hk' => ?_⟩
     obtain ⟨hh, hxk, hK⟩ := hx k hk'
     refine ⟨hh, hxk, ?_⟩
     have hkk : k < (kids (params c.v) A).length := by omega
@@ -607,8 +893,7 @@ theorem js_thash (A : Adrs) (x : SB) (itk : Nat) {P0 : St → Prop}
   · obtain ⟨d, hd⟩ := hstruct st hI hp
     exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ⟨d+1, A, hd⟩)))))
   · obtain ⟨d, hd⟩ := hstruct st hI hp
-    obtain ⟨e, he, hres, _⟩ := ask_res (c := c) st ⟨1, "", [.hid itk 32], .lit A.bytes :: x, c.n⟩
-    exact ⟨_, rfl, d+1, _, e, structReq_mono (grow_addC st _) (d+1) _ A hd, he, hres⟩
+    exact ⟨_, rfl, d+1, _, structReq_mono (grow_addC st _) (d+1) _ A hd, ask_struct hI hd⟩
 
 theorem js_prf (B : Adrs) (hB : B.InRange) (hk : B.kind = 5 ∨ B.kind = 6) (ipk : Nat) {P0 : St → Prop}
     (h : ∀ st, InvS c st → P0 st → st.ents[ipk]? = some (false, dPrf c.n)) :
@@ -616,8 +901,9 @@ theorem js_prf (B : Adrs) (hB : B.InRange) (hk : B.kind = 5 ∨ B.kind = 6) (ipk
       (fun v st => ∃ i, v = [.hid i c.n] ∧ KidOK c st i (.pf B)) := by
   refine JS.ask (prfReq c.n ipk B) (fun st hI hp => ?_) (fun st hI hp _ => ?_)
   · exact Or.inr (Or.inr (Or.inr (Or.inl ⟨ipk, B, rfl, h st hI hp, hB, hk⟩)))
-  · obtain ⟨e, he, hres, _⟩ := ask_res (c := c) st (prfReq c.n ipk B)
-    exact ⟨_, rfl, 0, ipk, e, grow_get (grow_addC st _) (h st hI hp), he, hres, hB⟩
+  · have hk := h st hI hp
+    refine ⟨_, rfl, 0, ipk, grow_get (grow_addC st _) hk, askS_closed st _ hI ⟨ipk,
+      by simp [prfReq, SReq.hids, shids], fun hr => (hI.2.2.1 ipk hr).2 ⟨_, hk, Or.inl (by simp [dPrf, SReq.hids, shids])⟩⟩, hB⟩
 
 /-! WOTS chains. -/
 
@@ -632,11 +918,24 @@ theorem kids_chain (p : Params) (a : Adrs) (ha : a.kind = 0) (s : Nat) :
   | zero => simp [ha, Adrs.setType]
   | succ s => simp [ha]
 
+theorem dsmOK_chain (p : Params) (a : Adrs) (ha : a.kind = 0) (s : Nat) (hs : s < 15) :
+    DSMOK p {a with hash := s} := by
+  intro K hK
+  rw [kids_chain p a ha s] at hK
+  simp only [List.mem_singleton] at hK
+  subst hK
+  unfold chainKid
+  cases s with
+  | zero => cases a; simp_all [Kid.adr, par, Adrs.setType]
+  | succ s =>
+    have h14 : s < 14 := by omega
+    cases a; simp_all [Kid.adr, par]
+
 /-- Chain-address coordinates in range. -/
 def ChainR (a : Adrs) : Prop := a.kind = 0 ∧ a.layer < 256^4 ∧ a.tree < 256^8 ∧ a.keypair < 256^4 ∧ a.chain < 256^4
 
 theorem js_chain (itk : Nat) (a : Adrs) (ha : ChainR a) : ∀ (steps start : Nat) (x : SB) {P0 : St → Prop},
-    StableS c P0 → start + steps ≤ 16 →
+    StableS c P0 → start + steps ≤ 15 →
     (∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧
       ∃ d xh, x = [.hid xh c.n] ∧ KidAt c st d xh (chainKid a start)) →
     JS c (sChain (params c.v) [.hid itk 32] a x start steps) P0
@@ -645,7 +944,8 @@ theorem js_chain (itk : Nat) (a : Adrs) (ha : ChainR a) : ∀ (steps start : Nat
   | steps+1, start, x, P0, hs, hb, h => by
     simp only [sChain]
     obtain ⟨hk0, hl, ht, hkp, hc⟩ := ha
-    refine JS.bind (js_thash {a with hash := start} x itk (fun st hI hp => ?_)) (fun y => ?_) hs
+    refine JS.bind (js_thash {a with hash := start} x itk (dsmOK_chain _ a hk0 start (by omega))
+      (fun st hI hp => ?_)) (fun y => ?_) hs
     · obtain ⟨hitk, d, xh, hx, hK⟩ := h st hI hp
       refine ⟨hitk, d, ⟨hl, ht, by simp [hk0], hkp, hc, by simp; omega⟩, by simp [kids_chain _ a hk0],
         by simp [hx, kids_chain _ a hk0], fun k hk => ?_⟩
@@ -796,6 +1096,12 @@ theorem kids_compA (wa : Adrs) (hw : WotsR wa) (j : Nat) (hj : j < (params c.v).
   simp [List.getElem?_map, List.getElem?_range hj, compA, Adrs.setType]
   cases wa; simp_all
 
+theorem dsmOK_comp (p : Params) (wa : Adrs) : DSMOK p (compA wa) := by
+  intro K hK
+  simp [kids, compA, Adrs.setType] at hK
+  obtain ⟨ci, _, rfl⟩ := hK
+  simp [Kid.adr, par, compA, Adrs.setType]
+
 theorem compA_inRange {wa : Adrs} (hw : WotsR wa) : (compA wa).InRange := by
   obtain ⟨_, _, _, h4, h5, h6⟩ := hw
   refine ⟨h4, h5, ?_, h6, ?_, ?_⟩ <;> simp [compA, Adrs.setType]
@@ -807,7 +1113,7 @@ theorem js_compress (itk : Nat) (wa : Adrs) (hw : WotsR wa) (tops : SB) {P0 : St
       (fun v st => ∃ i, v = [.hid i c.n] ∧ KidOK c st i (.th (compA wa))) := by
   obtain ⟨hlen, _⟩ := variant_bounds c.v
   have hpos : 0 < (params c.v).len := by cases c.v <;> decide
-  refine js_thash (compA wa) tops itk (fun st hI hp => ?_)
+  refine js_thash (compA wa) tops itk (dsmOK_comp _ wa) (fun st hI hp => ?_)
   obtain ⟨hitk, d, hl, hv⟩ := h st hI hp
   have hkl : (kids (params c.v) (compA wa)).length = (params c.v).len := by
     have : (compA wa).kind = 1 := rfl
@@ -967,6 +1273,18 @@ theorem kids_node (p : Params) (a : Adrs) (h idx : Nat) :
   | zero => simp [Adrs.setType, compA]
   | succ h => simp [Adrs.setType]
 
+theorem dsmOK_node (p : Params) (a : Adrs) (h idx : Nat) (hh : h + 1 ≤ p.hp) :
+    DSMOK p (nodeA a (h+1) idx) := by
+  intro K hK
+  rw [kids_node] at hK
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hK
+  cases h with
+  | zero =>
+    rcases hK with rfl | rfl <;> simp [Kid.adr, par, nodeA, compA, Adrs.setType] <;> omega
+  | succ h =>
+    have hlt : h + 1 < p.hp := by omega
+    rcases hK with rfl | rfl <;> simp [Kid.adr, par, nodeA, Adrs.setType, hlt] <;> omega
+
 theorem nodeA_inRange (a : Adrs) (hl : a.layer < 256^4) (ht : a.tree < 256^8) {h idx : Nat}
     (hh : h < 256^4) (hi : idx < 256^4) : (nodeA a h idx).InRange := by
   unfold nodeA
@@ -1018,7 +1336,7 @@ theorem js_xmssNode (itk ipk : Nat) (a : Adrs) (hl : a.layer < 256^4) (ht : a.tr
     have hA : ({a.setType 2 with chain := height+1, hash := idx} : Adrs) = nodeA a (height+1) idx := by
       simp [nodeA]
     rw [hA]
-    refine js_thash _ _ itk (fun st hI hp => ⟨(h st hI hp.1.1).1, ?_⟩)
+    refine js_thash _ _ itk (dsmOK_node _ a height idx hhp) (fun st hI hp => ⟨(h st hI hp.1.1).1, ?_⟩)
     obtain ⟨d1, hd1⟩ := hp.1.2
     obtain ⟨d2, hd2⟩ := hp.2
     refine ⟨max d1 d2, nodeA_inRange a hl ht (by omega) ?_, by rw [kids_node]; simp, by rw [kids_node]; rfl,
@@ -1051,6 +1369,7 @@ theorem js_authWalk (itk : Nat) (a2 : Adrs) (N : Nat → Nat → Adrs) (T g0 l0 
     (hK : ∀ ℓ, ℓ < T → kids (params c.v) (N (ℓ+1) (g0 / 2^(ℓ+1))) =
       [.th (N ℓ (2*(g0 / 2^(ℓ+1)))), .th (N ℓ (2*(g0 / 2^(ℓ+1))+1))])
     (hR : ∀ ℓ, ℓ < T → (N (ℓ+1) (g0 / 2^(ℓ+1))).InRange)
+    (hD : ∀ ℓ, ℓ < T → DSMOK (params c.v) (N (ℓ+1) (g0 / 2^(ℓ+1))))
     (hpar : ∀ ℓ, ℓ < T → (l0 / 2^ℓ) % 2 = (g0 / 2^ℓ) % 2) (auth : SB) :
     ∀ (r level : Nat) (node : SB) {P0 : St → Prop}, StableS c P0 → level + r = T →
     (∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧
@@ -1075,7 +1394,7 @@ theorem js_authWalk (itk : Nat) (a2 : Adrs) (N : Nat → Nat → Adrs) (T g0 l0 
       exact ⟨hs', hn, hnode, hauth⟩
     subst hnode
     rw [sSlice_one_get hauth]
-    refine JS.bind (js_thash _ _ itk (fun st hI hp => ⟨(h st hI hp).1, ?_⟩)) (fun next => ?_) hs
+    refine JS.bind (js_thash _ _ itk (hD level hlT) (fun st hI hp => ⟨(h st hI hp).1, ?_⟩)) (fun next => ?_) hs
     · obtain ⟨_, ⟨hn', hnode', ⟨d1, hd1⟩⟩, ha⟩ := h st hI hp
       obtain rfl : hn = hn' := by simpa using hnode'
       obtain ⟨hs'', hauth', ⟨d2, hd2⟩⟩ := ha level (Nat.le_refl _) hlT
@@ -1120,7 +1439,7 @@ theorem js_authWalk (itk : Nat) (a2 : Adrs) (N : Nat → Nat → Adrs) (T g0 l0 
       subst hi
       have hs1 := stableS_and hs (stableS_kid (c := c) i (.th (N (level+1) (g0 / 2^(level+1)))))
       rw [div_pow_succ l0 level]
-      exact js_authWalk itk a2 N T g0 l0 hN hK hR hpar auth r (level+1) [.hid i c.n] hs1 (by omega)
+      exact js_authWalk itk a2 N T g0 l0 hN hK hR hD hpar auth r (level+1) [.hid i c.n] hs1 (by omega)
         (fun st hI hp => ⟨(h st hI hp.1).1, ⟨i, rfl, hp.2⟩,
           fun ℓ h1 h2 => (h st hI hp.1).2.2 ℓ (by omega) h2⟩)
 
@@ -1227,6 +1546,7 @@ theorem js_xmssPkFromSig (itk : Nat) (a : Adrs) (hl : a.layer < 256^4) (ht : a.t
     (fun ℓ hℓ => kids_node _ a ℓ _)
     (fun ℓ hℓ => nodeA_inRange a hl ht (by omega)
       (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) (Nat.lt_of_lt_of_le hidx hH)))
+    (fun ℓ hℓ => dsmOK_node _ a ℓ _ (by omega))
     (fun _ _ => rfl) (sig.drop (params c.v).len) (params c.v).hp 0 node
     (stableS_and hs (fun st st' _ hg (h : ∃ i, node = [.hid i c.n] ∧ KidOK c st i (.th (compA {a.setType 0 with keypair := idx}))) =>
       let ⟨i, h1, h2⟩ := h; ⟨i, h1, kidOK_mono hg h2⟩)) (by omega)
@@ -1270,28 +1590,18 @@ theorem revOK_append {st : St} {x y : List SV} (hx : RevOK st x) (hy : RevOK st 
 
 theorem revOK_nil {st : St} : RevOK st [] := fun i hi => by simp [shids] at hi
 
-theorem ge3_of_res {st : St} (hI : InvS c st) {h : Nat} {e : Bool × SReq} (he : st.ents[h]? = some e)
-    (hm : (e.2.res c.t).mode ≠ 999) : 3 ≤ h := by
-  by_cases h3 : h < 3
-  · exact absurd (coin_res_mode hI h3 he) hm
-  · omega
-
-theorem ge3_of_ent {st : St} (hI : InvS c st) {h : Nat} {r : SReq} (he : st.ents[h]? = some (false, r))
-    (hm : r.mode ≠ 999) : 3 ≤ h := ge3_of_res hI he hm
-
 theorem kidAt_mode {st : St} {d h : Nat} {K : Kid} (hk : KidAt c st d h K) :
     ∃ e, st.ents[h]? = some e ∧ (e.2.res c.t).mode = 1 := by
   cases K with
   | th B =>
-    obtain ⟨r', e, h1, h2, h3⟩ := hk
-    refine ⟨e, h2, ?_⟩
-    rw [h3]
+    obtain ⟨r', h1, h2⟩ := hk
+    refine ⟨_, h2, ?_⟩
     cases d with
     | zero => exact h1.elim
-    | succ d => obtain ⟨_, _, _, _, hrr, _⟩ := h1; subst hrr; rfl
+    | succ d => obtain ⟨_, _, _, _, _, hrr, _⟩ := h1; subst hrr; rfl
   | pf B =>
-    obtain ⟨ipk, e, _, h2, h3, _⟩ := hk
-    exact ⟨e, h2, by rw [h3]; rfl⟩
+    obtain ⟨ipk, _, h2, _⟩ := hk
+    exact ⟨_, h2, rfl⟩
 
 theorem famOK_hids {st : St} (hI : InvS c st) {r : SReq} (hF : FamOK c st r) (h0 : r ≠ dPrf c.n)
     (h1 : r ≠ dReq c.n) : ∀ i ∈ r.hids, 2 ≤ i := by
@@ -1313,7 +1623,7 @@ theorem famOK_hids {st : St} (hI : InvS c st) {r : SReq} (hF : FamOK c st r) (h0
   · cases d with
     | zero => exact hs.elim
     | succ d =>
-      obtain ⟨_, _, itk, hs', rfl, hitk, hl, hh⟩ := hs
+      obtain ⟨_, _, _, itk, hs', rfl, hitk, hl, hh⟩ := hs
       have h3 := ge3_of_ent hI hitk (by simp [dTk])
       intro i hi
       simp [SReq.hids, shids] at hi
@@ -1405,6 +1715,255 @@ theorem xsig_len {st : St} {a : Adrs} {idx : Nat} {msg : Bytes} {v : SB} (h : XS
 
 end
 
+/-! Provenance of revealed handles: every revealed canonical entry has its ancestors
+    materialized. The signer reveals a signature only after recomputing its root, whose
+    structure covers every handle of the signature. -/
+
+/-- Every handle of `v` exists and has its ancestors materialized. -/
+def Cov (c : Ctx) (st : St) (v : List SV) : Prop := ∀ h ∈ shids v, h < st.ents.length ∧ AncOK c st h
+
+section
+variable {c : Ctx}
+
+theorem stable_cov (v : List SV) : StableS c (fun st => Cov c st v) := by
+  intro st st' hI hg h i hi
+  obtain ⟨h1, h2⟩ := h i hi
+  refine ⟨?_, ancOK_mono hI hg h1 h2⟩
+  obtain ⟨⟨L, hL⟩, _⟩ := hg
+  rw [hL]; simp; omega
+
+theorem cov_append {st : St} {x y : List SV} (hx : Cov c st x) (hy : Cov c st y) : Cov c st (x ++ y) := by
+  intro i hi
+  rw [shids_append, List.mem_append] at hi
+  rcases hi with hi | hi
+  · exact hx i hi
+  · exact hy i hi
+
+theorem cov_nil {st : St} : Cov c st [] := fun i hi => by simp [shids] at hi
+
+theorem reveal_ok {st : St} {v : List SV} (h1 : RevOK st v) (h2 : Cov c st v) :
+    ∀ h ∈ shids v, h < st.ents.length ∧ ¬ Prot st h ∧ AncOK c st h :=
+  fun h hh => ⟨(h1 h hh).1, (h1 h hh).2, (h2 h hh).2⟩
+
+theorem stable_rc (v : List SV) : StableS c (fun st => RevOK st v ∧ Cov c st v) :=
+  stableS_and (stable_revOK v) (stable_cov v)
+
+/-- A handle's address shape determines its address. -/
+theorem entAt_kid_eq {st : St} {d h : Nat} {K : Kid} (hk : KidAt c st d h K) {A : Adrs}
+    (he : EntAt c st h A) : A = K.adr := by
+  obtain ⟨r, hr, hA⟩ := he
+  cases K with
+  | th B =>
+    obtain ⟨r', h1, h2⟩ := hk
+    rw [h2] at hr
+    obtain rfl : r' = r := by simpa using hr
+    cases d with
+    | zero => exact h1.elim
+    | succ d =>
+      obtain ⟨hR, _, _, itk, hs, rfl, _⟩ := h1
+      rcases hA with ⟨hR', itk', hs', hr'⟩ | ⟨_, ipk, hr', _⟩
+      · have := congrArg SReq.input hr'
+        simp only [List.cons.injEq, SV.lit.injEq] at this
+        exact adrs_bytes_injective A B hR' hR this.1.symm
+      · have := congrArg SReq.input hr'
+        simp [prfReq] at this
+  | pf B =>
+    obtain ⟨ipk, _, h2, hB⟩ := hk
+    rw [h2] at hr
+    obtain rfl : prfReq c.n ipk B = r := by simpa using hr
+    rcases hA with ⟨hR', itk', hs', hr'⟩ | ⟨hR', ipk', hr', _⟩
+    · have := congrArg SReq.input hr'
+      simp [prfReq] at this
+    · have := congrArg SReq.input hr'
+      simp only [prfReq, List.cons.injEq, SV.lit.injEq, and_true, true_and] at this
+      exact adrs_bytes_injective A B hR' hB this.symm
+
+theorem ancOK_kid {st : St} {d h : Nat} {K : Kid} (hk : KidAt c st d h K) (hc : AncCov c st K.adr) :
+    AncOK c st h := fun A he => by rw [entAt_kid_eq hk he]; exact hc
+
+theorem ancCov_root {st : St} {A : Adrs} (hA : par (params c.v) A = none) : AncCov c st A := by
+  intro b hb
+  cases hb with
+  | one h => rw [hA] at h; cases h
+  | up h _ => rw [hA] at h; cases h
+
+/-- A handle whose entry is not a thash or PRF request is trivially covered. -/
+theorem ancOK_mode {st : St} {h : Nat} {e : Bool × SReq} (he : st.ents[h]? = some e)
+    (hm : (e.2.res c.t).mode ≠ 1) : AncOK c st h := by
+  intro A ⟨r, hr, hA⟩
+  rw [he] at hr
+  obtain rfl := Option.some.inj hr
+  exfalso; apply hm
+  rcases hA with ⟨_, itk, hs, rfl⟩ | ⟨_, ipk, rfl, _⟩ <;> rfl
+
+theorem cov_one {st : St} {h w : Nat} (hl : h < st.ents.length) (ha : AncOK c st h) : Cov c st [.hid h w] := by
+  intro i hi; simp [shids] at hi; subst hi; exact ⟨hl, ha⟩
+
+/-- The children of a covered structured entry are covered, and its thash children have
+    structured entries of their own. -/
+theorem ancCov_kid {st : St} {d j : Nat} {T : Adrs} (hk : KidAt c st d j (.th T)) (hc : AncCov c st T)
+    {K : Kid} (hK : K ∈ kids (params c.v) T) :
+    AncCov c st K.adr ∧ ∀ B, K = .th B → ∃ d' h, KidAt c st d' h (.th B) := by
+  obtain ⟨r, hS, hj⟩ := hk
+  cases d with
+  | zero => exact hS.elim
+  | succ d =>
+  obtain ⟨_, _, hD, itk, hs, _, _, hl, hh⟩ := id hS
+  have hpar := hD K hK
+  refine ⟨fun b hb => ?_, fun B hB => ?_⟩
+  · cases hb with
+    | one h =>
+      rw [hpar] at h
+      obtain rfl := Option.some.inj h
+      exact ⟨d+1, r, j, hS, hj⟩
+    | up h h' =>
+      rw [hpar] at h
+      obtain rfl := Option.some.inj h
+      exact hc b h'
+  · subst hB
+    obtain ⟨k, hk⟩ := List.mem_iff_getElem?.mp hK
+    have hkl := (List.getElem?_eq_some_iff.mp hk).1
+    obtain ⟨h', _, hm⟩ := hh k (by omega)
+    rw [hk] at hm
+    obtain ⟨r', h1, h2⟩ := hm
+    exact ⟨d, h', r', h1, h2⟩
+
+/-- Coverage descends along the canonical-children relation from a covered structured entry. -/
+theorem ancCov_reach {st : St} {T : Adrs} {K : Kid} (hR : Reach (params c.v) T K) :
+    ∀ {d j : Nat}, KidAt c st d j (.th T) → AncCov c st T → AncCov c st K.adr := by
+  induction hR with
+  | kid hK => intro d j hk hc; exact (ancCov_kid hk hc hK).1
+  | down hB _ ih =>
+    intro d j hk hc
+    obtain ⟨d', h', hk'⟩ := (ancCov_kid hk hc hB).2 _ rfl
+    exact ih hk' (ancCov_kid hk hc hB).1
+
+theorem cov_idx {st : St} {v : List SV}
+    (h : ∀ j, j < v.length → ∃ i w d K, v[j]? = some (.hid i w) ∧ KidAt c st d i K ∧ AncCov c st K.adr) :
+    Cov c st v := by
+  intro i hi
+  obtain ⟨w, hw⟩ := mem_shids v i hi
+  obtain ⟨j, hj⟩ := List.mem_iff_getElem?.mp hw
+  obtain ⟨i', w', d, K, hj', h1, h2⟩ := h j (List.getElem?_eq_some_iff.mp hj).1
+  rw [hj] at hj'
+  obtain ⟨rfl, -⟩ := SV.hid.inj (Option.some.inj hj')
+  obtain ⟨e, he, _⟩ := kidAt_mode h1
+  exact ⟨lt_entry he, ancOK_kid h1 h2⟩
+
+end
+
+/-! Reachability of signature positions from their roots. -/
+
+theorem reach_trans {p : Params} {X Y : Adrs} {K : Kid} (h1 : Reach p X (.th Y)) (h2 : Reach p Y K) :
+    Reach p X K := by
+  generalize hY : (Kid.th Y) = KY at h1
+  induction h1 with
+  | kid hK => subst hY; exact Reach.down hK h2
+  | down hB _ ih => exact Reach.down hB (ih hY)
+
+theorem xor1_div (x m : Nat) (hm : 1 ≤ m) : Nat.xor x 1 / 2^m = x / 2^m := by
+  obtain ⟨m', rfl⟩ : ∃ m', m = m' + 1 := ⟨m - 1, by omega⟩
+  rw [Nat.pow_succ', ← Nat.div_div_eq_div_mul, ← Nat.div_div_eq_div_mul, xor_one]
+  congr 1
+  split <;> omega
+
+theorem mem_kids_node (p : Params) (a : Adrs) (h i : Nat) :
+    Kid.th (nodeA a h i) ∈ kids p (nodeA a (h+1) (i/2)) := by
+  rw [kids_node]
+  rcases Nat.mod_two_eq_zero_or_one i with h0 | h1
+  · rw [show 2 * (i/2) = i by omega]; simp
+  · rw [show 2 * (i/2) + 1 = i by omega]; simp
+
+theorem reach_node (p : Params) (a : Adrs) :
+    ∀ k h i, Reach p (nodeA a (h+k+1) (i / 2^(k+1))) (.th (nodeA a h i))
+  | 0, h, i => Reach.kid (by simpa using mem_kids_node p a h i)
+  | k+1, h, i => by
+    have ih := reach_node p a k (h+1) (i/2)
+    rw [Nat.div_div_eq_div_mul, ← Nat.pow_succ', show h + 1 + k + 1 = h + (k+1) + 1 by omega] at ih
+    exact reach_trans ih (Reach.kid (mem_kids_node p a h i))
+
+theorem reach_top (p : Params) (a : Adrs) {h i : Nat} (hh : h < p.hp) (hi : i < 2^(p.hp - h)) :
+    Reach p (nodeA a p.hp 0) (.th (nodeA a h i)) := by
+  have := reach_node p a (p.hp - h - 1) h i
+  rwa [show h + (p.hp - h - 1) + 1 = p.hp by omega, show p.hp - h - 1 + 1 = p.hp - h by omega,
+    Nat.div_eq_of_lt hi] at this
+
+theorem par_top (p : Params) (a : Adrs) (hp : 1 ≤ p.hp) : par p (nodeA a p.hp 0) = none := by
+  unfold nodeA
+  rw [if_neg (by omega)]
+  simp [par, Adrs.setType]
+
+section
+variable {c : Ctx}
+
+theorem reach_chain (wa : Adrs) (hw : WotsR wa) (j : Nat) (hj : j < (params c.v).len) :
+    ∀ m D, D + m = 15 → Reach (params c.v) (compA wa) (chainKid {wa with chain := j} D)
+  | 0, D, hD => by
+    rw [show D = 15 by omega]
+    exact Reach.kid (List.mem_of_getElem? (kids_compA (c := c) wa hw j hj))
+  | m+1, D, hD => by
+    have ih := reach_chain wa hw j hj m (D+1) (by omega)
+    have hk : kids (params c.v) {wa with chain := j, hash := D} = [chainKid {wa with chain := j} D] :=
+      kids_chain _ {wa with chain := j} hw.1 D
+    have e : chainKid {wa with chain := j} (D+1) = .th {wa with chain := j, hash := D} := by
+      simp [chainKid]
+    rw [e] at ih
+    refine reach_trans ih (Reach.kid ?_)
+    rw [hk]; simp
+
+/-- Every handle of an XMSS signature lies under the tree's top. -/
+theorem cov_xsig {st : St} {a : Adrs} {idx : Nat} {msg : Bytes} {v : SB}
+    (hw : WotsR {a.setType 0 with keypair := idx}) (hidx : idx < 2^(params c.v).hp)
+    (hx : XSig c a idx msg v st) {j d : Nat} (ht : KidAt c st d j (.th (nodeA a (params c.v).hp 0))) :
+    Cov c st v := by
+  have hp1 : 1 ≤ (params c.v).hp := by cases c.v <;> decide
+  have hc := ancCov_root (c := c) (st := st) (par_top (params c.v) a hp1)
+  have hcomp : Reach (params c.v) (nodeA a (params c.v).hp 0) (.th (compA {a.setType 0 with keypair := idx})) := by
+    have := reach_top (params c.v) a (h := 0) (i := idx) (by omega) (by simpa using hidx)
+    simpa [nodeA] using this
+  obtain ⟨⟨d1, hl1, hv1⟩, ⟨d2, hl2, hv2⟩⟩ := hx
+  have h1 : Cov c st (v.take (params c.v).len) := by
+    refine cov_idx (fun k hk => ?_)
+    obtain ⟨i, hi, hki⟩ := hv1 k (by omega)
+    have h15 : (fun j => (wotsDigits (params c.v) msg).getD j 0) k ≤ 15 := digits_le15 (params c.v) msg k
+    exact ⟨i, c.n, d1, _, hi, hki, ancCov_reach (reach_trans hcomp
+      (reach_chain (c := c) _ hw k (by omega) (15 - (fun j => (wotsDigits (params c.v) msg).getD j 0) k) _
+        (by omega))) ht hc⟩
+  have h2 : Cov c st (v.drop (params c.v).len) := by
+    refine cov_idx (fun k hk => ?_)
+    obtain ⟨i, hi, hki⟩ := hv2 k (by omega)
+    have hkp : k < (params c.v).hp := by omega
+    have hsb := sib_bound _ idx k hidx hkp
+    have hlt : Nat.xor (idx / 2^k) 1 < 2^((params c.v).hp - k) := by
+      have hM : 2^(params c.v).hp = 2^((params c.v).hp - k) * 2^k := by rw [← Nat.pow_add]; congr 1; omega
+      rw [hM] at hsb
+      exact Nat.lt_of_succ_le (Nat.le_of_mul_le_mul_right hsb (Nat.two_pow_pos k))
+    exact ⟨i, c.n, d2, _, hi, hki, ancCov_reach (reach_top (params c.v) a hkp hlt) ht hc⟩
+  have := cov_append h1 h2
+  rwa [List.take_append_drop] at this
+
+theorem reveal_root {st : St} (hI : InvS c st) {g : Nat} {A : Adrs} (hk : KidOK c st g (.th A))
+    (hA : par (params c.v) A = none) (w : Nat) :
+    ∀ h ∈ shids [SV.hid g w], h < st.ents.length ∧ ¬ Prot st h ∧ AncOK c st h :=
+  let ⟨_, hd⟩ := hk
+  reveal_ok (revOK_one hI hd w) (cov_one (kidAt_rev hI hd).1 (ancOK_kid hd (ancCov_root hA)))
+
+/-- `js_xmssPkFromSig`, recording that the recomputed top covers the signature. -/
+theorem js_xmssPkFromSigC (itk : Nat) (a : Adrs) (hl : a.layer < 256^4) (ht : a.tree < 256^8) (idx : Nat)
+    (hidx : idx < 2^(params c.v).hp) (sig : SB) (msg : Bytes) {P0 : St → Prop} (hs : StableS c P0)
+    (h : ∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧ XSig c a idx msg sig st) :
+    JS c (sXmssPkFromSig (params c.v) [.hid itk 32] a idx sig msg) P0
+      (fun v st => ∃ i, v = [.hid i c.n] ∧ KidOK c st i (.th (nodeA a (params c.v).hp 0)) ∧ Cov c st sig) := by
+  obtain ⟨_, hH, _⟩ := variant_bounds c.v
+  have hw : WotsR {a.setType 0 with keypair := idx} := wotsR_node a hl ht (Nat.lt_of_lt_of_le hidx hH)
+  have hs' := stableS_and hs (stable_xsig (c := c) a idx msg sig)
+  refine JS.conseq (JS.frame (js_xmssPkFromSig itk a hl ht idx hidx sig msg hs' (fun st hI hp => h st hI hp.1)) hs')
+    (fun st hI hp => ⟨hp, (h st hI hp).2⟩) (fun v st hq => ?_)
+  obtain ⟨⟨_, hx⟩, i, hv, d, hk⟩ := hq
+  exact ⟨i, hv, ⟨d, hk⟩, cov_xsig hw hidx hx hk⟩
+
+end
+
 /-! Hypertree. -/
 
 /-- The layer-`layer` tree above tree index `tree`, and the leaf in it. -/
@@ -1447,7 +2006,7 @@ theorem htA_tree (p : Params) (layer tree : Nat) : (htA p layer tree).tree = tre
 theorem js_htSignTail (itk ipk : Nat) : ∀ (r layer tree : Nat) (node : SB) {P0 : St → Prop},
     StableS c P0 → layer + r ≤ 256^4 → tree < 256^8 →
     (∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧ st.ents[ipk]? = some (false, dPrf c.n) ∧
-      ∃ g A, node = [.hid g c.n] ∧ KidOK c st g (.th A)) →
+      ∃ g A, node = [.hid g c.n] ∧ KidOK c st g (.th A) ∧ par (params c.v) A = none) →
     JS c (sHtSignTail (params c.v) [.hid itk 32] [.hid ipk 32] [.hid 2 c.n] layer tree node r) P0
       (fun v st => ∃ g, node = [.hid g c.n] ∧ HTS c st layer tree g r v)
   | 0, layer, tree, node, P0, _, _, _, h => by
@@ -1460,9 +2019,10 @@ theorem js_htSignTail (itk ipk : Nat) : ∀ (r layer tree : Nat) (node : SB) {P0
     subst hn
     simp only [sHtSignTail]
     refine JS.reveal (fun st hI hp => ?_) ?_ hs
-    · obtain ⟨_, _, g', A, hn, d, hk⟩ := h st hI hp
+    · obtain ⟨_, _, g', A, hn, hk, hA⟩ := h st hI hp
       obtain rfl : g = g' := by simpa using hn
-      exact revOK_one hI hk c.n
+      exact reveal_root hI hk hA c.n
+    have hp1 : 1 ≤ (params c.v).hp := by cases c.v <;> decide
     have hleaf : tree % 2^(params c.v).hp < 2^(params c.v).hp := Nat.mod_lt _ (Nat.two_pow_pos _)
     have htr : tree / 2^(params c.v).hp < 256^8 := Nat.lt_of_le_of_lt (Nat.div_le_self _ _) ht
     have hla : layer < 256^4 := by omega
@@ -1492,7 +2052,8 @@ theorem js_htSignTail (itk ipk : Nat) : ∀ (r layer tree : Nat) (node : SB) {P0
     subst hg'
     have hs3 := stableS_and hs2 (stableS_kid (c := c) g' (.th (nodeA (htA (params c.v) layer tree) (params c.v).hp 0)))
     refine JS.bind (js_htSignTail itk ipk r (layer+1) (tree / 2^(params c.v).hp) [.hid g' c.n] hs3 (by omega) htr
-      (fun st hI hp => ⟨(h st hI hp.1.1.1).1, (h st hI hp.1.1.1).2.1, g', _, rfl, hp.2⟩)) (fun tail => ?_) hs3
+      (fun st hI hp => ⟨(h st hI hp.1.1.1).1, (h st hI hp.1.1.1).2.1, g', _, rfl, hp.2, par_top _ _ hp1⟩))
+      (fun tail => ?_) hs3
     refine JS.pure' (fun st _ hp => ⟨g, rfl, part, tail, rfl, hp.1.1.1.2, fun h' => absurd h' hr, fun _ => ?_⟩)
     obtain ⟨g'', hg'', hh⟩ := hp.2
     obtain rfl : g' = g'' := by simpa using hg''
@@ -1520,7 +2081,7 @@ theorem revOK_hsig {st : St} (hI : InvS c st) {g tree leaf : Nat} {v : SB} (h : 
 theorem js_htSign (itk ipk : Nat) (msg : SB) (idxTree idxLeaf : Nat) (ht : idxTree < 256^8)
     (hleaf : idxLeaf < 2^(params c.v).hp) {P0 : St → Prop} (hs : StableS c P0)
     (h : ∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧ st.ents[ipk]? = some (false, dPrf c.n) ∧
-      ∃ g A, msg = [.hid g c.n] ∧ KidOK c st g (.th A)) :
+      ∃ g A, msg = [.hid g c.n] ∧ KidOK c st g (.th A) ∧ par (params c.v) A = none) :
     JS c (sHtSign (params c.v) [.hid itk 32] [.hid ipk 32] [.hid 2 c.n] msg idxTree idxLeaf) P0
       (fun v st => ∃ g, msg = [.hid g c.n] ∧ HSig c st g idxTree idxLeaf v) := by
   obtain ⟨_, hH, hd, _⟩ := variant_bounds c.v
@@ -1529,9 +2090,10 @@ theorem js_htSign (itk ipk : Nat) (msg : SB) (idxTree idxLeaf : Nat) (ht : idxTr
   subst hn
   simp only [sHtSign]
   refine JS.reveal (fun st hI hp => ?_) ?_ hs
-  · obtain ⟨_, _, g', A, hn, d, hk⟩ := h st hI hp
+  · obtain ⟨_, _, g', A, hn, hk, hA⟩ := h st hI hp
     obtain rfl : g = g' := by simpa using hn
-    exact revOK_one hI hk c.n
+    exact reveal_root hI hk hA c.n
+  have hp1 : 1 ≤ (params c.v).hp := by cases c.v <;> decide
   have hl0 : ({tree := idxTree} : Adrs).layer < 256^4 := by show 0 < 256^4; decide
   refine JS.bind (js_xmssSign itk ipk {tree := idxTree} hl0 ht idxLeaf hleaf _ hs
     (fun st hI hp => let ⟨h1, h2, _⟩ := h st hI hp; ⟨h1, h2⟩)) (fun first => ?_) hs
@@ -1543,7 +2105,8 @@ theorem js_htSign (itk ipk : Nat) (msg : SB) (idxTree idxLeaf : Nat) (ht : idxTr
   subst hg'
   have hs2 := stableS_and hs1 (stableS_kid (c := c) g' (.th (nodeA {tree := idxTree} (params c.v).hp 0)))
   refine JS.bind (js_htSignTail itk ipk ((params c.v).d - 1) 1 idxTree [.hid g' c.n] hs2 (by omega) ht
-    (fun st hI hp => ⟨(h st hI hp.1.1).1, (h st hI hp.1.1).2.1, g', _, rfl, hp.2⟩)) (fun tail => ?_) hs2
+    (fun st hI hp => ⟨(h st hI hp.1.1).1, (h st hI hp.1.1).2.1, g', _, rfl, hp.2, par_top _ _ hp1⟩))
+    (fun tail => ?_) hs2
   refine JS.pure' (fun st _ hp => ⟨g, rfl, first, tail, g', rfl, hp.1.1.2, hp.1.2, ?_⟩)
   obtain ⟨g'', hg'', hh⟩ := hp.2
   obtain rfl : g' = g'' := by simpa using hg''
@@ -1552,14 +2115,19 @@ theorem js_htSign (itk ipk : Nat) (msg : SB) (idxTree idxLeaf : Nat) (ht : idxTr
 theorem js_htRootTail (itk : Nat) : ∀ (r layer tree g : Nat) (sig : SB) {P0 : St → Prop},
     StableS c P0 → layer + r ≤ 256^4 → tree < 256^8 →
     (∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧ HTS c st layer tree g r sig ∧
-      ∃ A, KidOK c st g (.th A)) →
+      ∃ A, KidOK c st g (.th A) ∧ par (params c.v) A = none) →
     JS c (sHtRootTail (params c.v) [.hid itk 32] layer tree [.hid g c.n] sig r) P0
-      (fun v st => ∃ i A, v = [.hid i c.n] ∧ KidOK c st i (.th A))
+      (fun v st => (∃ i A, v = [.hid i c.n] ∧ KidOK c st i (.th A) ∧ par (params c.v) A = none) ∧ Cov c st sig)
   | 0, layer, tree, g, sig, P0, _, _, _, h => by
     simp only [sHtRootTail]
-    exact JS.pure' (fun st hI hp => let ⟨_, _, A, hk⟩ := h st hI hp; ⟨g, A, rfl, hk⟩)
+    refine JS.pure' (fun st hI hp => ?_)
+    obtain ⟨_, hh, A, hk, hA⟩ := h st hI hp
+    simp only [HTS] at hh
+    subst hh
+    exact ⟨⟨g, A, rfl, hk, hA⟩, cov_nil⟩
   | r+1, layer, tree, g, sig, P0, hs, hl, ht, h => by
     obtain ⟨_, hH, _⟩ := variant_bounds c.v
+    have hp1 : 1 ≤ (params c.v).hp := by cases c.v <;> decide
     have hleaf : tree % 2^(params c.v).hp < 2^(params c.v).hp := Nat.mod_lt _ (Nat.two_pow_pos _)
     have htr : tree / 2^(params c.v).hp < 256^8 := Nat.lt_of_le_of_lt (Nat.div_le_self _ _) ht
     have hla : layer < 256^4 := by omega
@@ -1582,31 +2150,38 @@ theorem js_htRootTail (itk : Nat) : ∀ (r layer tree g : Nat) (sig : SB) {P0 : 
       sHtRootTail (params c.v) [.hid itk 32] (layer+1) (tree / 2^(params c.v).hp) root
         (sig.drop ((params c.v).len + (params c.v).hp)) r) P0 _
     refine JS.bind (Q := fun v st => ∃ i, v = [.hid i c.n] ∧
-        KidOK c st i (.th (nodeA (htA (params c.v) layer tree) (params c.v).hp 0)))
+        (KidOK c st i (.th (nodeA (htA (params c.v) layer tree) (params c.v).hp 0)) ∧
+          Cov c st (sig.take ((params c.v).len + (params c.v).hp))))
       (JS.reveal (fun st hI hp => ?_) ?_ hs) (fun root => ?_) hs
-    · obtain ⟨_, _, A, d, hk⟩ := h st hI hp
-      exact revOK_one hI hk c.n
-    · exact js_xmssPkFromSig itk (htA (params c.v) layer tree) hla htr _ hleaf _ _ hs
+    · obtain ⟨_, _, A, hk, hA⟩ := h st hI hp
+      exact reveal_root hI hk hA c.n
+    · exact js_xmssPkFromSigC itk (htA (params c.v) layer tree) hla htr _ hleaf _ _ hs
         (fun st hI hp => ⟨(h st hI hp).1, (hsplit st hI hp).1⟩)
-    refine JS.obtain (X := fun i st => KidOK c st i (.th (nodeA (htA (params c.v) layer tree) (params c.v).hp 0)))
-      (fun i hi => ?_)
+    refine JS.obtain (X := fun i st => KidOK c st i (.th (nodeA (htA (params c.v) layer tree) (params c.v).hp 0)) ∧
+      Cov c st (sig.take ((params c.v).len + (params c.v).hp))) (fun i hi => ?_)
     subst hi
-    have hs1 := stableS_and hs (stableS_kid (c := c) i (.th (nodeA (htA (params c.v) layer tree) (params c.v).hp 0)))
-    refine js_htRootTail itk r (layer+1) _ i _ hs1 (by omega) htr (fun st hI hp => ⟨(h st hI hp.1).1, ?_, _, hp.2⟩)
+    have hs1 := stableS_and hs (stableS_and (stableS_kid (c := c) i (.th (nodeA (htA (params c.v) layer tree) (params c.v).hp 0)))
+      (stable_cov (c := c) (sig.take ((params c.v).len + (params c.v).hp))))
+    refine JS.conseq (JS.frame (js_htRootTail itk r (layer+1) _ i _ hs1 (by omega) htr
+      (fun st hI hp => ⟨(h st hI hp.1).1, ?_, _, hp.2.1, par_top _ _ hp1⟩)) hs1) (fun _ _ hp => hp)
+      (fun v st hq => ⟨hq.2.1, by have := cov_append hq.1.2.2 hq.2.2; rwa [List.take_append_drop] at this⟩)
     obtain ⟨_, h3, h4⟩ := hsplit st hI hp.1
     by_cases hr : r = 0
     · subst hr; exact h3 rfl
     · obtain ⟨g', hk', hh⟩ := h4 hr
-      rw [kidOK_unique_th hI hp.2 hk']
+      rw [kidOK_unique_th hI hp.2.1 hk']
       exact hh
 
 theorem js_htRoot (itk : Nat) (sig msg : SB) (idxTree idxLeaf : Nat) (ht : idxTree < 256^8)
     (hleaf : idxLeaf < 2^(params c.v).hp) {P0 : St → Prop} (hs : StableS c P0)
     (h : ∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧
-      ∃ g A, msg = [.hid g c.n] ∧ KidOK c st g (.th A) ∧ HSig c st g idxTree idxLeaf sig) :
+      ∃ g A, msg = [.hid g c.n] ∧ KidOK c st g (.th A) ∧ par (params c.v) A = none ∧
+        HSig c st g idxTree idxLeaf sig) :
     JS c (sHtRoot (params c.v) [.hid itk 32] sig msg idxTree idxLeaf) P0
-      (fun v st => ∃ i A, v = [.hid i c.n] ∧ KidOK c st i (.th A)) := by
+      (fun v st => (∃ i A, v = [.hid i c.n] ∧ KidOK c st i (.th A) ∧ par (params c.v) A = none) ∧
+        Cov c st sig) := by
   obtain ⟨_, hH, hd, _⟩ := variant_bounds c.v
+  have hp1 : 1 ≤ (params c.v).hp := by cases c.v <;> decide
   refine JS.assume (X := ∃ g, msg = [.hid g c.n]) (fun st hI hp => let ⟨_, g, _, hn, _⟩ := h st hI hp; ⟨g, hn⟩)
     (fun ⟨g, hn⟩ => ?_)
   subst hn
@@ -1616,27 +2191,31 @@ theorem js_htRoot (itk : Nat) (sig msg : SB) (idxTree idxLeaf : Nat) (ht : idxTr
       ∃ g', KidOK c st g' (.th (nodeA {tree := idxTree} (params c.v).hp 0)) ∧
         HTS c st 1 idxTree g' ((params c.v).d - 1) (sig.drop ((params c.v).len + (params c.v).hp)) := by
     intro st hI hp
-    obtain ⟨_, g', A, hn, _, first, tail, g'', rfl, h2, h3, h4⟩ := h st hI hp
+    obtain ⟨_, g', A, hn, _, _, first, tail, g'', rfl, h2, h3, h4⟩ := h st hI hp
     obtain rfl : g = g' := by simpa using hn
     have hlen := xsig_len h2
     rw [List.take_left' hlen, List.drop_left' hlen]
     exact ⟨h2, g'', h3, h4⟩
   simp only [sHtRoot]
   refine JS.bind (Q := fun v st => ∃ i, v = [.hid i c.n] ∧
-      KidOK c st i (.th (nodeA {tree := idxTree} (params c.v).hp 0)))
+      (KidOK c st i (.th (nodeA {tree := idxTree} (params c.v).hp 0)) ∧
+        Cov c st (sig.take ((params c.v).len + (params c.v).hp))))
     (JS.reveal (fun st hI hp => ?_) ?_ hs) (fun node => ?_) hs
-  · obtain ⟨_, g', A, hn, ⟨d, hk⟩, _⟩ := h st hI hp
+  · obtain ⟨_, g', A, hn, hk, hA, _⟩ := h st hI hp
     obtain rfl : g = g' := by simpa using hn
-    exact revOK_one hI hk c.n
-  · exact js_xmssPkFromSig itk {tree := idxTree} hl0 ht _ hleaf _ _ hs
+    exact reveal_root hI hk hA c.n
+  · exact js_xmssPkFromSigC itk {tree := idxTree} hl0 ht _ hleaf _ _ hs
       (fun st hI hp => ⟨(h st hI hp).1, (hsplit st hI hp).1⟩)
-  refine JS.obtain (X := fun i st => KidOK c st i (.th (nodeA {tree := idxTree} (params c.v).hp 0)))
-    (fun i hi => ?_)
+  refine JS.obtain (X := fun i st => KidOK c st i (.th (nodeA {tree := idxTree} (params c.v).hp 0)) ∧
+    Cov c st (sig.take ((params c.v).len + (params c.v).hp))) (fun i hi => ?_)
   subst hi
-  have hs1 := stableS_and hs (stableS_kid (c := c) i (.th (nodeA {tree := idxTree} (params c.v).hp 0)))
-  refine js_htRootTail itk _ 1 idxTree i _ hs1 (by omega) ht (fun st hI hp => ⟨(h st hI hp.1).1, ?_, _, hp.2⟩)
+  have hs1 := stableS_and hs (stableS_and (stableS_kid (c := c) i (.th (nodeA {tree := idxTree} (params c.v).hp 0)))
+    (stable_cov (c := c) (sig.take ((params c.v).len + (params c.v).hp))))
+  refine JS.conseq (JS.frame (js_htRootTail itk _ 1 idxTree i _ hs1 (by omega) ht
+    (fun st hI hp => ⟨(h st hI hp.1).1, ?_, _, hp.2.1, par_top _ _ hp1⟩)) hs1) (fun _ _ hp => hp)
+    (fun v st hq => ⟨hq.2.1, by have := cov_append hq.1.2.2 hq.2.2; rwa [List.take_append_drop] at this⟩)
   obtain ⟨_, g', hk', hh⟩ := hsplit st hI hp.1
-  rw [kidOK_unique_th hI hp.2 hk']
+  rw [kidOK_unique_th hI hp.2.1 hk']
   exact hh
 
 end
@@ -1702,6 +2281,28 @@ theorem kids_frA (p : Params) (a : Adrs) (ha : a.kind = 3) :
   simp
   cases a; simp_all
 
+theorem dsmOK_fA_succ (p : Params) (a : Adrs) (ha : a.kind = 3) (h idx : Nat) (hh : h + 1 ≤ p.a) :
+    DSMOK p (fA a (h+1) idx) := by
+  intro K hK
+  rw [kids_fA_succ p a ha] at hK
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hK
+  have hlt : h < p.a := by omega
+  rcases hK with rfl | rfl <;> cases a <;> simp_all [Kid.adr, par, fA] <;> omega
+
+theorem dsmOK_fA_zero (p : Params) (a : Adrs) (ha : a.kind = 3) (idx : Nat) : DSMOK p (fA a 0 idx) := by
+  intro K hK
+  rw [kids_fA_zero p a ha] at hK
+  simp only [List.mem_singleton] at hK
+  subst hK
+  cases a; simp_all [Kid.adr, par, fkA, fA, Adrs.setType]
+
+theorem dsmOK_frA (p : Params) (a : Adrs) (ha : a.kind = 3) : DSMOK p (frA a) := by
+  intro K hK
+  rw [kids_frA p a ha] at hK
+  simp only [List.mem_map, List.mem_range] at hK
+  obtain ⟨i, _, rfl⟩ := hK
+  cases a; simp_all [Kid.adr, par, fA, frA, Adrs.setType]
+
 theorem fA_inRange {a : Adrs} (ha : ForsR a) {h idx : Nat} (hh : h < 256^4) (hi : idx < 256^4) :
     (fA a h idx).InRange := by
   obtain ⟨h1, h2, h3, h4⟩ := ha
@@ -1735,7 +2336,7 @@ theorem js_forsNode (itk ipk : Nat) (a : Adrs) (ha : ForsR a) :
       (fun st hI hp => (h st hI hp).2)) (fun sk => ?_) hs
     refine JS.obtain (X := fun i st => KidOK c st i (.pf (fkA a idx))) (fun i hi' => ?_)
     subst hi'
-    refine js_thash _ _ itk (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩)
+    refine js_thash _ _ itk (dsmOK_fA_zero _ a ha.1 idx) (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩)
     obtain ⟨d, hd⟩ := hp.2
     refine ⟨d, fA_inRange ha (by omega) hi, by rw [kids_fA_zero _ a ha.1]; simp,
       by rw [kids_fA_zero _ a ha.1]; rfl, fun k hk => ?_⟩
@@ -1762,7 +2363,7 @@ theorem js_forsNode (itk ipk : Nat) (a : Adrs) (ha : ForsR a) :
         _ ≤ _ := hb) (fun st hI hp => h st hI hp.1)) (fun right => ?_) hs1
     refine JS.obtain (X := fun i st => KidOK c st i (.th (fA a height (2*idx+1)))) (fun ir hir => ?_)
     subst hir
-    refine js_thash _ _ itk (fun st hI hp => ⟨(h st hI hp.1.1).1, ?_⟩)
+    refine js_thash _ _ itk (dsmOK_fA_succ _ a ha.1 height idx hh) (fun st hI hp => ⟨(h st hI hp.1.1).1, ?_⟩)
     obtain ⟨d1, hd1⟩ := hp.1.2
     obtain ⟨d2, hd2⟩ := hp.2
     refine ⟨max d1 d2, fA_inRange ha (by omega) hi, by rw [kids_fA_succ _ a ha.1]; simp,
@@ -1966,7 +2567,8 @@ theorem js_forsPkFromSig (itk : Nat) (a : Adrs) (ha : ForsR a) (sig : SB) (md : 
       pure PUnit.unit
       pure (ForInStep.yield (v ++ root))) _ _
     rw [sSlice_take1 _ _ _ (by omega), sSlice_one_get (by rw [Nat.add_zero] at hsig ⊢; exact hsig)]
-    refine JS.bind (js_thash (fA a 0 (fG (params c.v) md i)) [.hid hs0 c.n] itk (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩))
+    refine JS.bind (js_thash (fA a 0 (fG (params c.v) md i)) [.hid hs0 c.n] itk (dsmOK_fA_zero _ a ha.1 _)
+      (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩))
       (fun leaf => ?_) hP
     · obtain ⟨d, _, hv⟩ := (h st hI hp.1).2
       obtain ⟨hh, h1, h2⟩ := hv _ hpos
@@ -1987,6 +2589,7 @@ theorem js_forsPkFromSig (itk : Nat) (a : Adrs) (ha : ForsR a) (sig : SB) (md : 
       (fun ℓ j => rfl)
       (fun ℓ hℓ => kids_fA_succ _ a ha.1 ℓ _)
       (fun ℓ hℓ => fA_inRange ha (by omega) (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) (by omega)))
+      (fun ℓ hℓ => dsmOK_fA_succ _ a ha.1 ℓ _ (by omega))
       (fun ℓ hℓ => by
         obtain ⟨e1, e2⟩ := fors_div (params c.v).a i (fdig (params c.v) md i) ℓ hℓ
         unfold fG; rw [e1]; omega)
@@ -2018,7 +2621,7 @@ theorem js_forsPkFromSig (itk : Nat) (a : Adrs) (ha : ForsR a) (sig : SB) (md : 
   · rw [hl]
     have hfr : ({a.setType 4 with keypair := a.keypair} : Adrs) = frA a := rfl
     rw [hfr]
-    refine js_thash (frA a) roots itk (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩)
+    refine js_thash (frA a) roots itk (dsmOK_frA _ a ha.1) (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩)
     obtain ⟨d, hlen, hv⟩ := hp.2
     have hkl : (kids (params c.v) (frA a)).length = (params c.v).k := by rw [kids_frA _ a ha.1]; simp
     refine ⟨d, frA_inRange ha, by rw [← List.length_pos_iff, hkl]; exact hkpos, by rw [hlen, hkl], fun k hk => ?_⟩
@@ -2029,49 +2632,103 @@ theorem js_forsPkFromSig (itk : Nat) (a : Adrs) (ha : ForsR a) (sig : SB) (md : 
 
 end
 
+section
+variable {c : Ctx}
+
+theorem mem_kids_fA (p : Params) (a : Adrs) (ha : a.kind = 3) (h i : Nat) :
+    Kid.th (fA a h i) ∈ kids p (fA a (h+1) (i/2)) := by
+  rw [kids_fA_succ p a ha]
+  rcases Nat.mod_two_eq_zero_or_one i with h0 | h1
+  · rw [show 2 * (i/2) = i by omega]; simp
+  · rw [show 2 * (i/2) + 1 = i by omega]; simp
+
+theorem reach_fA (p : Params) (a : Adrs) (ha : a.kind = 3) :
+    ∀ k h i, Reach p (fA a (h+k+1) (i / 2^(k+1))) (.th (fA a h i))
+  | 0, h, i => Reach.kid (by simpa using mem_kids_fA p a ha h i)
+  | k+1, h, i => by
+    have ih := reach_fA p a ha k (h+1) (i/2)
+    rw [Nat.div_div_eq_div_mul, ← Nat.pow_succ', show h + 1 + k + 1 = h + (k+1) + 1 by omega] at ih
+    exact reach_trans ih (Reach.kid (mem_kids_fA p a ha h i))
+
+/-- Every position of a FORS signature lies under the FORS roots compression. -/
+theorem reach_fslot (a : Adrs) (ha : a.kind = 3) (md : Bytes) {q : Nat}
+    (hq : q < (params c.v).k * ((params c.v).a + 1)) :
+    Reach (params c.v) (frA a) (fslot (params c.v) a md q) := by
+  have hA1 : 1 ≤ (params c.v).a := by cases c.v <;> decide
+  have hi : q / ((params c.v).a + 1) < (params c.v).k :=
+    Nat.div_lt_of_lt_mul (by rw [Nat.mul_comm]; exact hq)
+  have hdig := fdig_lt (params c.v) md _ hi
+  have hG : fG (params c.v) md (q / ((params c.v).a + 1)) / 2^(params c.v).a = q / ((params c.v).a + 1) := by
+    unfold fG
+    rw [Nat.add_comm, Nat.mul_comm, Nat.add_mul_div_left _ _ (Nat.two_pow_pos _), Nat.div_eq_of_lt hdig]
+    omega
+  have hroot : Reach (params c.v) (frA a) (.th (fA a (params c.v).a (q / ((params c.v).a + 1)))) := by
+    apply Reach.kid
+    rw [kids_frA _ a ha]
+    simp only [List.mem_map, List.mem_range]
+    exact ⟨_, hi, rfl⟩
+  have hdown : ∀ h x, h < (params c.v).a → x / 2^((params c.v).a - h) = q / ((params c.v).a + 1) →
+      Reach (params c.v) (frA a) (.th (fA a h x)) := by
+    intro h x hh hx
+    have := reach_fA (params c.v) a ha ((params c.v).a - h - 1) h x
+    rw [show h + ((params c.v).a - h - 1) + 1 = (params c.v).a by omega,
+      show (params c.v).a - h - 1 + 1 = (params c.v).a - h by omega, hx] at this
+    exact reach_trans hroot this
+  unfold fslot
+  split
+  · have hleaf := hdown 0 (fG (params c.v) md (q / ((params c.v).a + 1))) (by omega) (by simpa using hG)
+    exact reach_trans hleaf (Reach.kid (by rw [kids_fA_zero _ a ha]; simp))
+  · have hl : q % ((params c.v).a + 1) - 1 < (params c.v).a := by
+      have := Nat.mod_lt q (show 0 < (params c.v).a + 1 by omega); omega
+    refine hdown _ _ hl ?_
+    rw [xor1_div _ _ (by omega), Nat.div_div_eq_div_mul, ← Nat.pow_add,
+      show q % ((params c.v).a + 1) - 1 + ((params c.v).a - (q % ((params c.v).a + 1) - 1)) = (params c.v).a by omega]
+    exact hG
+
+theorem par_frA (p : Params) (a : Adrs) : par p (frA a) = none := by simp [par, frA, Adrs.setType]
+
+theorem cov_slots {st : St} {a : Adrs} (ha : a.kind = 3) {md : Bytes} {v : SB}
+    (hv : SlotsAt c (fslot (params c.v) a md) ((params c.v).k * ((params c.v).a + 1)) v st)
+    {j d : Nat} (ht : KidAt c st d j (.th (frA a))) : Cov c st v := by
+  have hc := ancCov_root (c := c) (st := st) (par_frA (params c.v) a)
+  obtain ⟨d0, hl, hv⟩ := hv
+  refine cov_idx (fun k hk => ?_)
+  obtain ⟨i, hi, hki⟩ := hv k (by omega)
+  exact ⟨i, c.n, d0, _, hi, hki, ancCov_reach (reach_fslot a ha md (by omega)) ht hc⟩
+
+/-- `js_forsPkFromSig`, recording that the recomputed roots compression covers the signature. -/
+theorem js_forsPkFromSigC (itk : Nat) (a : Adrs) (ha : ForsR a) (sig : SB) (md : Bytes) {P0 : St → Prop}
+    (hs : StableS c P0)
+    (h : ∀ st, InvS c st → P0 st → st.ents[itk]? = some (false, dTk c.n) ∧
+      SlotsAt c (fslot (params c.v) a md) ((params c.v).k * ((params c.v).a + 1)) sig st) :
+    JS c (sForsPkFromSig (params c.v) [.hid itk 32] a sig md) P0
+      (fun v st => ∃ i, v = [.hid i c.n] ∧ KidOK c st i (.th (frA a)) ∧ Cov c st sig) := by
+  have hs' := stableS_and hs (stable_slotsAt (c := c) (fslot (params c.v) a md)
+    ((params c.v).k * ((params c.v).a + 1)) sig)
+  refine JS.conseq (JS.frame (js_forsPkFromSig itk a ha sig md hs' (fun st hI hp => h st hI hp.1)) hs')
+    (fun st hI hp => ⟨hp, (h st hI hp).2⟩) (fun v st hq => ?_)
+  obtain ⟨⟨_, hx⟩, i, hv, d, hk⟩ := hq
+  exact ⟨i, hv, ⟨d, hk⟩, cov_slots ha.1 hx hk⟩
+
+theorem ancOK_rq {st : St} {iR dk : Nat} {m : Bytes} (he : st.ents[iR]? = some (false, rqOf c.n dk m))
+    (hk : st.ents[dk]? = some (false, dReq c.n)) : AncOK c st iR := by
+  intro A ⟨r, hr, hA⟩
+  rw [he] at hr
+  obtain rfl : rqOf c.n dk m = r := by simpa using hr
+  exfalso
+  rcases hA with ⟨_, itk, hs, hr'⟩ | ⟨_, ipk, hr', hk'⟩
+  · have := congrArg SReq.input hr'; simp [rqOf] at this
+  · have := congrArg SReq.key hr'
+    simp [rqOf, prfReq] at this
+    subst this
+    rw [hk] at hk'; simp [dReq, dPrf] at hk'
+
+end
+
 /-! Requests with their own challenger entry. -/
 
 section
 variable {c : Ctx}
-
-theorem askS_closed (st : St) (r : SReq) (hI : InvS c st) (hc : ∃ h ∈ r.hids, h ∉ st.rev) :
-    (addC st (firstIdx (mC false c.t st.rev r) st.ents) r).ents[firstIdx (mC false c.t st.rev r) st.ents]? =
-      some (false, r) := by
-  obtain ⟨e, he, _, ho⟩ := ask_res (c := c) st r
-  obtain ⟨h, hm, hnr⟩ := hc
-  rcases ho with ho | ho
-  · obtain ⟨g, r'⟩ := e
-    simp only at ho
-    subst ho
-    cases g
-    · exact he
-    · exfalso
-      generalize hi : firstIdx (mC false c.t st.rev r') st.ents = i at he
-      by_cases hl : i < st.ents.length
-      · have : addC st i r' = st := by simp [addC, hl]
-        rw [this] at he
-        have := hI.2.1 i r' he
-        rw [this] at hm; cases hm
-      · have ha : addC st i r' = ⟨st.ents ++ [(false, r')], st.rev⟩ := by simp [addC, hl]
-        rw [ha] at he
-        rcases fr_snoc he with ⟨hh, _⟩ | ⟨_, he'⟩
-        · exact hl hh
-        · cases he'
-  · exact absurd (open_mem ho.2 h hm) hnr
-
-theorem askS_known {st : St} (hI : InvS c st) {r : SReq} (hr : r.mode ≠ 999) {j : Nat}
-    (hj : st.ents[j]? = some (false, r)) : firstIdx (mC false c.t st.rev r) st.ents = j := by
-  have h3 : 3 ≤ j := ge3_of_ent hI hj hr
-  have hm : mC false c.t st.rev r (false, r) = true := by simp [mC]
-  have hle : firstIdx (mC false c.t st.rev r) st.ents ≤ j := by
-    refine Nat.le_of_not_lt (fun hlt => ?_)
-    have := fr_before _ _ j _ hj hlt
-    rw [hm] at this; cases this
-  rcases Nat.lt_or_eq_of_le hle with hlt | heq
-  · exfalso
-    obtain ⟨e, he, hp⟩ := fr_hit (mC false c.t st.rev r) st.ents (Nat.lt_trans hlt (lt_entry hj))
-    exact hI.2.2.2.2 _ j e (false, r) hlt h3 he hj (mC_false_true hp)
-  · exact heq
 
 /-- A challenger request with a closed handle, or with its own entry already: the
     answer is a challenger entry for exactly this request. -/
@@ -2106,8 +2763,10 @@ section
 variable {c : Ctx}
 
 theorem js_sign (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (msg : Bytes) {P0 : St → Prop} (hs : StableS c P0)
-    (h : ∀ st, InvS c st → P0 st → (∃ A, KidOK c st ρ (.th A)) ∧ ∃ j : Nat, st.ents[j]? = some (false, dTk c.n)) :
-    JS c (sSign c.v (coinEx c.n ++ [.hid ρ c.n]) msg) P0 (fun res st => ∀ sg, res = some sg → RevOK st sg) := by
+    (h : ∀ st, InvS c st → P0 st → (∃ A, KidOK c st ρ (.th A) ∧ par (params c.v) A = none) ∧
+      ∃ j : Nat, st.ents[j]? = some (false, dTk c.n)) :
+    JS c (sSign c.v (coinEx c.n ++ [.hid ρ c.n]) msg) P0
+      (fun res st => ∀ sg, res = some sg → RevOK st sg ∧ Cov c st sg) := by
   obtain ⟨_, hH, hd, _⟩ := variant_bounds c.v
   simp only [sSign, sDeriveKey, sKeyed, sHmsg]
   apply JS.ite
@@ -2151,7 +2810,7 @@ theorem js_sign (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (msg : Bytes) {P0 : 
   rw [hq]
   refine JS.bind (Q := fun v st => ∃ k, v = [.hid k c.pm] ∧ ∃ e, st.ents[k]? = some e ∧ (e.2.res c.t).mode = 2)
     (JS.ask (hqOf c.n c.pm c.root iR msg) (fun st hI hp => ?_) (fun st hI hp _ => ?_)) (fun dg => ?_) s4
-  · obtain ⟨A, d, hk⟩ := (h st hI hp.1.1.1.1.1).1
+  · obtain ⟨A, ⟨d, hk⟩, _⟩ := (h st hI hp.1.1.1.1.1).1
     obtain ⟨e, he, hm⟩ := kidAt_mode hk
     have h3 := ge3_of_res hI he (by rw [hm]; decide)
     refine Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨iR, msg, rfl, dk, hp.2, hp.1.2, ?_⟩)))))
@@ -2165,7 +2824,8 @@ theorem js_sign (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (msg : Bytes) {P0 : 
   refine JS.reveal (fun st hI hp => ?_) ?_ s5
   · obtain ⟨e, he, hm⟩ := hp.2
     intro j hj; simp [shids] at hj; subst hj
-    exact ⟨lt_entry he, notProt_of_res hI he (by rw [hm]; decide) (by rw [hm]; decide)⟩
+    exact ⟨lt_entry he, notProt_of_res hI he (by rw [hm]; decide) (by rw [hm]; decide),
+      ancOK_mode he (by rw [hm]; decide)⟩
   generalize hI : splitDigest (params c.v) (sres c.t [.hid k c.pm]) = I
   have ht : I.tree < 256^8 := hI ▸ split_tree_lt c.v _
   have hl : I.leaf < 2^(params c.v).hp := hI ▸ split_leaf_lt c.v _
@@ -2174,39 +2834,44 @@ theorem js_sign (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (msg : Bytes) {P0 : 
   refine JS.bind (js_forsSign itk ipk _ hfa I.md s5 (fun st _ hp => ⟨hp.1.1.1.1.2, hp.1.1.1.2⟩)) (fun fs => ?_) s5
   have S1 := stableS_and s5 (stable_slotsAt (c := c) (fslot (params c.v) {tree := I.tree, kind := 3, keypair := I.leaf} I.md)
     ((params c.v).k * ((params c.v).a + 1)) fs)
-  refine JS.bind (js_forsPkFromSig itk _ hfa fs I.md S1 (fun st _ hp => ⟨hp.1.1.1.1.1.2, hp.2⟩)) (fun fpk => ?_) S1
-  refine JS.obtain (X := fun i st => KidOK c st i (.th (frA {tree := I.tree, kind := 3, keypair := I.leaf}))) (fun f hf => ?_)
+  refine JS.bind (js_forsPkFromSigC itk _ hfa fs I.md S1 (fun st _ hp => ⟨hp.1.1.1.1.1.2, hp.2⟩)) (fun fpk => ?_) S1
+  refine JS.obtain (X := fun i st => KidOK c st i (.th (frA {tree := I.tree, kind := 3, keypair := I.leaf})) ∧
+    Cov c st fs) (fun f hf => ?_)
   subst hf
-  have S2 := stableS_and S1 (stableS_kid (c := c) f (.th (frA {tree := I.tree, kind := 3, keypair := I.leaf})))
+  have S2 := stableS_and S1 (stableS_and (stableS_kid (c := c) f (.th (frA {tree := I.tree, kind := 3, keypair := I.leaf})))
+    (stable_cov (c := c) fs))
   refine JS.bind (js_htSign itk ipk [.hid f c.n] I.tree I.leaf ht hl S2
-    (fun st _ hp => ⟨hp.1.1.1.1.1.1.2, hp.1.1.1.1.1.2, f, _, rfl, hp.2⟩)) (fun hsg => ?_) S2
+    (fun st _ hp => ⟨hp.1.1.1.1.1.1.2, hp.1.1.1.1.1.2, f, _, rfl, hp.2.1, par_frA _ _⟩)) (fun hsg => ?_) S2
   have S3 := stableS_and S2 (fun st st' hI' hg (h : ∃ g, [SV.hid f c.n] = [.hid g c.n] ∧ HSig c st g I.tree I.leaf hsg) =>
     let ⟨g, h1, h2⟩ := h; ⟨g, h1, stable_hsig g I.tree I.leaf hsg st st' hI' hg h2⟩)
   refine JS.bind (js_htRoot itk hsg [.hid f c.n] I.tree I.leaf ht hl S3 (fun st _ hp => ⟨hp.1.1.1.1.1.1.1.2, ?_⟩))
     (fun actual => ?_) S3
   · obtain ⟨g, hg, hsig⟩ := hp.2
     obtain rfl : f = g := by simpa using hg
-    exact ⟨f, _, rfl, hp.1.2, hsig⟩
-  refine JS.assume (X := ∃ i, actual = [.hid i c.n]) (fun st _ hp => let ⟨i, _, h1, _⟩ := hp.2; ⟨i, h1⟩)
+    exact ⟨f, _, rfl, hp.1.2.1, par_frA _ _, hsig⟩
+  refine JS.assume (X := ∃ i, actual = [.hid i c.n]) (fun st _ hp => let ⟨⟨i, _, h1, _⟩, _⟩ := hp.2; ⟨i, h1⟩)
     (fun ⟨ac, hac⟩ => ?_)
   subst hac
-  have S4 := stableS_and S3 (fun st st' _ hg (h : ∃ i A, [SV.hid ac c.n] = [.hid i c.n] ∧ KidOK c st i (.th A)) =>
-    let ⟨i, A, h1, h2⟩ := h; ⟨i, A, h1, kidOK_mono hg h2⟩)
+  have S4 := stableS_and S3 (fun st st' hI' hg (h : (∃ i A, [SV.hid ac c.n] = [.hid i c.n] ∧ KidOK c st i (.th A) ∧
+      par (params c.v) A = none) ∧ Cov c st hsg) =>
+    let ⟨⟨i, A, h1, h2, h3⟩, h4⟩ := h; ⟨⟨i, A, h1, kidOK_mono hg h2, h3⟩, stable_cov hsg st st' hI' hg h4⟩)
   refine JS.reveal (fun st hI hp => ?_) ?_ S4
-  · obtain ⟨i, A, h1, h2⟩ := hp.2
+  · obtain ⟨⟨i, A, h1, h2, hA⟩, _⟩ := hp.2
     obtain rfl : ac = i := by simpa using h1
-    exact revOK_kid hI h2 c.n
+    exact reveal_root hI h2 hA c.n
   refine JS.reveal (fun st hI hp => ?_) ?_ S4
-  · obtain ⟨A, hk⟩ := (h st hI hp.1.1.1.1.1.1.1.1.1.1).1
-    exact revOK_kid hI hk c.n
+  · obtain ⟨A, hk, hA⟩ := (h st hI hp.1.1.1.1.1.1.1.1.1.1).1
+    exact reveal_root hI hk hA c.n
   apply JS.ite
   · intro _; exact JS.pure' (fun _ _ _ sg h => by cases h)
   intro _
   refine JS.bind JS.unit (fun _ => JS.pure' (fun st hI hp sg hsg' => ?_)) S4
   cases hsg'
   have hp' := hp.1
-  exact revOK_append (revOK_append (revOK_ent hI hp'.1.1.1.1.1.2 (by simp [rqOf]) (by simp [rqOf]) c.n)
-    (revOK_slotsAt hI hp'.1.1.1.2)) (let ⟨g, _, hg⟩ := hp'.1.2; revOK_hsig hI hg)
+  refine ⟨revOK_append (revOK_append (revOK_ent hI hp'.1.1.1.1.1.2 (by simp [rqOf]) (by simp [rqOf]) c.n)
+    (revOK_slotsAt hI hp'.1.1.1.2)) (let ⟨g, _, hg⟩ := hp'.1.2; revOK_hsig hI hg),
+    cov_append (cov_append (cov_one (lt_entry hp'.1.1.1.1.1.2) (ancOK_rq hp'.1.1.1.1.1.2 hp'.1.1.1.1.1.1.2))
+      hp'.1.1.2.2) hp'.2.2⟩
 end
 
 /-! Adversary-only programs (the forgery's verification). -/
@@ -2327,13 +2992,13 @@ end
 
 /-- The signer's standing facts: the root is a canonical node, the tweak key has its entry. -/
 def PS (c : Ctx) (ρ : Nat) (st : St) : Prop :=
-  (∃ A, KidOK c st ρ (.th A)) ∧ ∃ j : Nat, st.ents[j]? = some (false, dTk c.n)
+  (∃ A, KidOK c st ρ (.th A) ∧ par (params c.v) A = none) ∧ ∃ j : Nat, st.ents[j]? = some (false, dTk c.n)
 
 section
 variable {c : Ctx}
 
 theorem stable_PS (ρ : Nat) : StableS c (PS c ρ) :=
-  fun _ _ _ hg ⟨⟨A, hA⟩, j, hj⟩ => ⟨⟨A, kidOK_mono hg hA⟩, j, grow_get hg hj⟩
+  fun _ _ _ hg ⟨⟨A, hA, hn⟩, j, hj⟩ => ⟨⟨A, kidOK_mono hg hA, hn⟩, j, grow_get hg hj⟩
 
 theorem js_play (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (limits : Limits) (pk : Bytes) :
     ∀ (A : RAdv) (signed : List Bytes),
@@ -2348,9 +3013,9 @@ theorem js_play (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (limits : Limits) (p
       rcases s with _ | sg
       · exact JS.conseq (P0 := PS c ρ) (js_play ρ hroot limits pk (k none) (signed ++ [m]))
           (fun _ _ hp => hp.1) (fun _ _ h => h)
-      · have hs1 : StableS c (fun st => PS c ρ st ∧ ∀ sg', some sg = some sg' → RevOK st sg') :=
-          stableS_and (stable_PS ρ) (fun st st' hI hg h sg' e => stable_revOK sg' st st' hI hg (h sg' e))
-        refine JS.reveal (fun st _ hp => hp.2 sg rfl) ?_ hs1
+      · have hs1 : StableS c (fun st => PS c ρ st ∧ ∀ sg', some sg = some sg' → RevOK st sg' ∧ Cov c st sg') :=
+          stableS_and (stable_PS ρ) (fun st st' hI hg h sg' e => stable_rc sg' st st' hI hg (h sg' e))
+        refine JS.reveal (fun st _ hp => reveal_ok (hp.2 sg rfl).1 (hp.2 sg rfl).2) ?_ hs1
         exact JS.conseq (P0 := PS c ρ) (js_play ρ hroot limits pk (k _) (signed ++ [m]))
           (fun _ _ hp => hp.1) (fun _ _ h => h)
     · have hl' : legal limits m = false := by cases h : legal limits m <;> simp_all
@@ -2369,6 +3034,13 @@ def ExtS (c : Ctx) (I : Indices) (st : St) : Prop :=
   (∃ i, KidOK c st i (.th (frA (forsAdrs I.tree I.leaf)))) ∧
   ∀ l, l < (params c.v).d → ∃ i, KidOK c st i (.th (nodeA {layer := l, tree := pathT (params c.v) I l}
     (params c.v).hp 0))
+
+/-- What the extension leaves for the canonical-collision argument: the digest the
+    extension used is the answer to the verifier's message-hash request, and the
+    structures on its path are materialized (`ExtS`). -/
+def ExtF (c : Ctx) (ρ : Nat) (msg sig : Bytes) (st : St) : Prop :=
+  ∃ (i : Nat) (e : Bool × SReq), st.ents[i]? = some e ∧ e.2.res c.t = extReq c ρ msg sig ∧
+    ExtS c (splitDigest (params c.v) (be c.pm (c.t.getD i 0))) st
 
 section
 variable {c : Ctx}
@@ -2406,7 +3078,8 @@ theorem js_extTail (itk ipk : Nat) (I : Indices) (htI : I.tree < 256^8) (hlI : I
   have hfr : ({(forsAdrs I.tree I.leaf).setType 4 with keypair := (forsAdrs I.tree I.leaf).keypair} : Adrs) =
       frA (forsAdrs I.tree I.leaf) := rfl
   rw [hfr]
-  refine JS.bind (js_thash (frA (forsAdrs I.tree I.leaf)) roots itk (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩))
+  refine JS.bind (js_thash (frA (forsAdrs I.tree I.leaf)) roots itk (dsmOK_frA _ _ hfa.1)
+    (fun st hI hp => ⟨(h st hI hp.1).1, ?_⟩))
     (fun z => ?_) hs1
   · obtain ⟨d, hlen, hv⟩ := hp.2
     have hkl : (kids (params c.v) (frA (forsAdrs I.tree I.leaf))).length = (params c.v).k := by
@@ -2445,7 +3118,7 @@ theorem js_extTail (itk ipk : Nat) (I : Indices) (htI : I.tree < 256^8) (hlI : I
 
 theorem js_ext (ρ : Nat) (msg sig : Bytes) {P0 : St → Prop} (hs : StableS c P0)
     (h : ∀ st, InvS c st → P0 st → PS c ρ st) :
-    JS c (sExtW c.v (coinEx c.n ++ [.hid ρ c.n]) msg sig) P0 (fun _ _ => True) := by
+    JS c (sExtW c.v (coinEx c.n ++ [.hid ρ c.n]) msg sig) P0 (fun _ st => ExtF c ρ msg sig st) := by
   obtain ⟨_, hH, hd, hkA, haA, hhb⟩ := variant_bounds c.v
   have e1 : sSlice (coinEx c.n ++ [SV.hid ρ c.n]) 2 1 = [SV.hid 2 c.n] := rfl
   have e2 : List.drop 3 (coinEx c.n ++ [SV.hid ρ c.n]) = [SV.hid ρ c.n] := rfl
@@ -2461,19 +3134,30 @@ theorem js_ext (ρ : Nat) (msg sig : Bytes) {P0 : St → Prop} (hs : StableS c P
   refine JS.obtain (X := fun i st => st.ents[i]? = some (false, dPrf c.n)) (fun ipk hpk => ?_)
   subst hpk
   have s2 := stableS_and s1 (stableS_ent (c := c) ipk (false, dPrf c.n))
-  refine JS.bind (JS.reveal (fun st hI hp => ?_) (JS.askA' (fun b => JS.pure' (fun _ _ _ => trivial)) s2) s2)
+  refine JS.bind (Q := fun dg st => ∃ (i : Nat) (e : Bool × SReq), st.ents[i]? = some e ∧ e.2.res c.t = extReq c ρ msg sig ∧
+      dg = be c.pm (c.t.getD i 0))
+    (JS.reveal (fun st hI hp => ?_) (JS.askA (fun st _ _ => JS.pure' (fun st' _ he => ?_))) s2)
     (fun dg => ?_) s2
+  rotate_left
+  · subst he
+    obtain ⟨e, he, hres, _⟩ := askA_entry (c := c) st
+      ⟨2, "DSM/sphincs/v2/h-msg", [], sig.take (params c.v).n ++ sres c.t ([SV.hid 2 c.n] ++ [SV.hid ρ c.n]) ++ msg,
+        (params c.v).m⟩
+    exact ⟨_, e, he, hres, rfl⟩
+  rotate_right
   · intro i hi
     simp [shids] at hi
     rcases hi with rfl | rfl
-    · refine ⟨lt_entry hI.1.2.2, ?_⟩
+    · refine ⟨lt_entry hI.1.2.2, ?_, ancOK_mode hI.1.2.2 (by simp [coin, SReq.res])⟩
       rintro ⟨e, he, hp'⟩
       rw [hI.1.2.2] at he
       obtain rfl := Option.some.inj he
       simp [coin, SReq.hids, shids] at hp'
-    · obtain ⟨A, hk⟩ := (h st hI hp.1.1).1
-      exact revOK_kid hI hk c.n i (by simp [shids])
-  have s3 := stableS_and s2 (stableS_true (c := c))
+    · obtain ⟨A, hk, hA⟩ := (h st hI hp.1.1).1
+      exact reveal_root hI hk hA c.n i (by simp [shids])
+  have s3 := stableS_and s2 (fun st st' (_ : InvS c st) hg (h : ∃ (i : Nat) (e : Bool × SReq), st.ents[i]? = some e ∧
+      e.2.res c.t = extReq c ρ msg sig ∧ dg = be c.pm (c.t.getD i 0)) =>
+    let ⟨i, e, h1, h2, h3⟩ := h; ⟨i, e, grow_get hg h1, h2, h3⟩)
   generalize hI : splitDigest (params c.v) dg = I
   have htI : I.tree < 256^8 := hI ▸ split_tree_lt c.v _
   have hlI : I.leaf < 2^(params c.v).hp := hI ▸ split_leaf_lt c.v _
@@ -2490,8 +3174,11 @@ theorem js_ext (ρ : Nat) (msg sig : Bytes) {P0 : St → Prop} (hs : StableS c P
       (fun _ _ _ => trivial) (fun _ _ h => h)
   refine JS.bind (JS.loop' _ _ (fun _ _ => True) (stableS_and s3 stableS_true) (fun _ => stableS_true) PUnit.unit
     (fun _ _ _ => trivial) (fun l hl u => ?_))
-    (fun _ => JS.conseq (js_extTail itk ipk I htI hlI (stableS_and (stableS_and s3 stableS_true) stableS_true)
-      (fun st _ hp => ⟨hp.1.1.1.1.2, hp.1.1.1.2⟩)) (fun _ _ h => h) (fun _ _ _ => trivial))
+    (fun _ => JS.conseq (JS.frame (js_extTail itk ipk I htI hlI (stableS_and (stableS_and s3 stableS_true) stableS_true)
+      (fun st _ hp => ⟨hp.1.1.1.1.2, hp.1.1.1.2⟩)) (stableS_and (stableS_and s3 stableS_true) stableS_true))
+      (fun _ _ h => h) (fun _ st hq => by
+        obtain ⟨i, e, h1, h2, h3⟩ := hq.1.1.1.2
+        exact ⟨i, e, h1, h2, by rw [← h3, hI]; exact hq.2⟩))
     (stableS_and s3 stableS_true)
   have hl' := List.mem_range.mp hl
   have hw : WotsR (wA l (((I.tree*2^(params c.v).hp + I.leaf)/2^((params c.v).hp*l)/2^(params c.v).hp))
@@ -2574,14 +3261,15 @@ theorem js_kgTail :
   refine JS.pure' (fun st _ hp => ?_)
   obtain ⟨ρ, hρ, hk⟩ := hp.2
   subst hρ
-  exact ⟨ρ, rfl, rfl, ⟨_, hk⟩, itk, hp.1.1.2⟩
+  have hp1 : 1 ≤ (params c.v).hp := by cases c.v <;> decide
+  exact ⟨ρ, rfl, rfl, ⟨_, hk, par_top _ _ hp1⟩, itk, hp.1.1.2⟩
 end
 
 section
 variable {c : Ctx}
 
 theorem invS_coin : InvS c (coinSt c.n) := by
-  refine ⟨⟨rfl, rfl, rfl⟩, ?_, ?_, ?_, ?_⟩
+  refine ⟨⟨rfl, rfl, rfl⟩, ?_, ?_, ?_, ?_, fun i hi => by simp [coinSt] at hi⟩
   · intro a qa he; rcases a with _ | _ | _ | a <;> simp [coinSt, coin] at he
   · intro i hi; simp [coinSt] at hi
   · intro i r he
@@ -2593,27 +3281,29 @@ theorem invS_coin : InvS c (coinSt c.n) := by
     simp [coinSt] at this; omega
 
 theorem js_rest (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) (limits : Limits) (A : Bytes → RAdv) :
-    JS c (restS c.v limits A ([.hid 2 c.n, .hid ρ c.n], coinEx c.n ++ [.hid ρ c.n])) (PS c ρ) (fun _ _ => True) := by
+    JS c (restS c.v limits A ([.hid 2 c.n, .hid ρ c.n], coinEx c.n ++ [.hid ρ c.n])) (PS c ρ)
+      (fun out st => ExtF c ρ out.msg out.sig st) := by
   simp only [restS]
   refine JS.reveal (fun st hI hp => ?_) ?_ (stable_PS ρ)
   · intro i hi
     simp [shids] at hi
     rcases hi with rfl | rfl
-    · refine ⟨lt_entry hI.1.2.2, ?_⟩
+    · refine ⟨lt_entry hI.1.2.2, ?_, ancOK_mode hI.1.2.2 (by simp [coin, SReq.res])⟩
       rintro ⟨e, he, hp'⟩
       rw [hI.1.2.2] at he
       obtain rfl := Option.some.inj he
       simp [coin, SReq.hids, shids] at hp'
-    · obtain ⟨A, hk⟩ := hp.1
-      exact revOK_kid hI hk c.n i (by simp [shids])
+    · obtain ⟨A, hk, hA⟩ := hp.1
+      exact reveal_root hI hk hA c.n i (by simp [shids])
   refine JS.bind' (js_play ρ hroot limits _ _ []) (fun out => ?_) (stable_PS ρ)
   refine JS.bind' (js_ext ρ out.msg out.sig (stableS_and (stable_PS ρ) stableS_true) (fun _ _ hp => hp.1))
-    (fun _ => JS.pure' (fun _ _ _ => trivial)) (stableS_and (stable_PS ρ) stableS_true)
+    (fun _ => JS.pure' (fun _ _ hp => hp.2)) (stableS_and (stable_PS ρ) stableS_true)
 
 /-- The structural judgment for the whole extended game, from the coin state. -/
 theorem js_game (hroot : c.root = (xrun false c.t (sKgTail c.v (coinEx c.n)) (coinSt c.n)).1.1.drop 1)
     (limits : Limits) (A : Bytes → RAdv) :
-    JS c (gameS' c.v limits A (coinEx c.n)) (fun st => st = coinSt c.n) (fun _ _ => True) := by
+    JS c (gameS' c.v limits A (coinEx c.n)) (fun st => st = coinSt c.n)
+      (fun out st => ∃ ρ, c.root = [.hid ρ c.n] ∧ ExtF c ρ out.msg out.sig st) := by
   rw [gameS'_eq]
   refine JS.bindX (JS.conseq js_kgTail (fun st _ h => by subst h; simp [coinSt]) (fun _ _ h => h))
     (fun st hI hp hnd => ?_)
@@ -2623,7 +3313,7 @@ theorem js_game (hroot : c.root = (xrun false c.t (sKgTail c.v (coinEx c.n)) (co
   have hks : (xrun false c.t (sKgTail c.v (coinEx c.n)) (coinSt c.n)).1 =
       ([.hid 2 c.n, .hid ρ c.n], coinEx c.n ++ [.hid ρ c.n]) := Prod.ext h1 h2
   rw [hks]
-  exact JS.conseq (js_rest ρ hr limits A) (fun st' _ he => by subst he; exact hPS) (fun _ _ h => h)
+  exact JS.conseq (js_rest ρ hr limits A) (fun st' _ he => by subst he; exact hPS) (fun _ _ h => ⟨ρ, hr, h⟩)
 
 /-- Every pre-step state of the extended game reached without a disagreement satisfies
     the structural invariant, and its step is a DSM family request, an adversary request,

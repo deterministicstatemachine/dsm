@@ -153,7 +153,7 @@ theorem structReq_shape {st : St} {d : Nat} {r : SReq} {A : Adrs} (h : StructReq
   cases d with
   | zero => exact h.elim
   | succ d =>
-    obtain ⟨hA, _, itk, hs, rfl, _, _, hh⟩ := h
+    obtain ⟨hA, _, _, itk, hs, rfl, _, _, hh⟩ := h
     refine ⟨itk, hs, rfl, fun v hv => ?_, hA⟩
     obtain ⟨k, hk⟩ := List.mem_iff_getElem?.mp hv
     obtain ⟨h', hx, _⟩ := hh k (List.getElem?_eq_some_iff.mp hk).1
@@ -251,8 +251,8 @@ variable {c : Ctx}
 /-- `Φ` from the structural invariant. -/
 theorem phi_of (ρ : Nat) (hroot : c.root = [.hid ρ c.n]) {st : St} {ev : Ev} (hI : InvS c st)
     (hS : StepOK c (st, ev)) : PhiP c.v (st, ev) := by
-  obtain ⟨hc, hadv, hrev, hfam, hD⟩ := hI
-  have hI : InvS c st := ⟨hc, hadv, hrev, hfam, hD⟩
+  obtain ⟨hc, hadv, hrev, hfam, hD, hanc⟩ := hI
+  have hI : InvS c st := ⟨hc, hadv, hrev, hfam, hD, hanc⟩
   have hfam3 : ∀ (j : Nat) (r : SReq), 3 ≤ j → st.ents[j]? = some (false, r) → FamOK c st r := by
     intro j r hj he
     rcases hfam j r he with h | h
