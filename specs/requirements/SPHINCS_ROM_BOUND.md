@@ -502,23 +502,63 @@ handle (`kidOK_unique_th`). Verification uses this to match the
 recomputed layer roots with the signer's. The game-level statement is
 `game_struct`.
 
-This is the input from which `Φ` is to be derived; it does not yet bound
-`B_lo`. The intended counting from it (to be proved, not yet checked):
+**The narrow-pin count of H1'** (`RomPhi.lean`, claim trace C58). Here
+`Φ` is derived from `game_struct`, and `B_lo` is bounded.
 
-* At an adversary step, a narrow pin is charged only against an entry
-  whose literal skeleton the query determines. Given `struct_unique`,
-  that is at most a constant number of entries.
-* At a fresh challenger step, a narrow pin is charged only against an
-  adversary entry. Freshness and the family shapes make this at most once
-  per adversary entry.
-* PRF and randomizer requests pin their 32-byte key, so they fall in the
-  wide class.
+* `Φ` (`PhiP`) is tape-free. Every challenger entry has one of DSM's request
+  shapes. Narrow-shaped entries (thash, the key derivations, the signing
+  request) have pairwise distinct literal skeletons (handle indices erased).
+  A challenger request's skeleton is shared only by its own entry. A PRF or
+  randomizer request's 32-byte key is unrevealed. `game_phiB` proves `Φ` at
+  every step of H1' with no earlier disagreement, on every tape.
+* A narrow-shaped request compatible with given bytes has a skeleton
+  determined by those bytes (`skel_of_compat`). This is what bounds the
+  skeletons compatible with one pinned handle.
+* Narrow pins are classified exhaustively for `anyDis`'s probes (`np_class`):
+  * at an adversary step, the pin is against a coin or a narrow-shaped
+    challenger entry compatible with the query;
+  * at a challenger step, it is against an adversary entry;
+  * challenger-vs-challenger narrow pins are impossible.
+* The count (`narrow_count`):
+  * an adversary step carries at most four narrow pins (three coins and one
+    skeleton-determined entry);
+  * an adversary entry is pinned by at most one fresh challenger step,
+    because a second would share the first's skeleton, contradicting
+    freshness (`fresh_entry`).
+  * So `B_lo ≤ 5·AA`, where `AA` bounds the adversary steps of H1'.
+  * Wide pins keep `B_hi ≤ S^2`.
+
+The bound for H1' (`rom_ext_struct`):
+
+    #anyDis(H1') · 2^256 ≤ R^N · 5·AA · 2^(256-8n) + R^N · S^2
+                          + #(wildColl ∨ initColl)(H1') · 2^256
+
+Composed for SPHINCS+-128f (`rom_win_struct_128f`):
+
+    Pr[won] ≤ Pr[canonical collision on H1''s table] + JA/2^128
+              + 10·AA/2^128 + 2·S^2/2^256 + 2·Pr[wildColl ∨ initColl in H1']
+
+This is conditional on the ITSR budget hypotheses, the step bound `S` and
+the adversary-step bound `AA`.
+
+Two caveats:
+
+* *Disagreements counted elsewhere.* The narrow-pin count covers
+  disagreements caused by guessing a hidden `n`-byte handle. Disagreements
+  caused by two independently sampled values coinciding are `collC`, in the
+  `wildColl` term, and are not bounded yet. The same goes for collisions
+  among the coins (`initColl`).
+* *SPHINCS+-256f.* There all handles are 32 bytes, so the split brings
+  nothing, and the wide term `S^2/2^256` is not small against the 256f
+  target. 256f needs a wide-class count of the same kind.
 
 Still open, and needed before this is a number:
 
-* the step bound, and deriving `Φ` from `game_struct` with the counting
-  `B_lo ≤ c · A` for H1', as above;
-* the wild-guess and unopened-collision term `#wildColl(H1')`;
+* the step bound `S` and the adversary-step bound `AA` for H1', derived from
+  the query budget;
+* a wide-class count for SPHINCS+-256f;
+* the wild-guess and unopened-collision term `#wildColl(H1')`, and
+  `initColl`;
 * the canonical-collision bound on H1''s table;
 * deriving the budget hypotheses from the adversary's query budget;
 * the seed hop;
