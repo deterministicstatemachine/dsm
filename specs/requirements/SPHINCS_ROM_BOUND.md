@@ -684,13 +684,106 @@ This is conditional on:
 * the step bound `S < N`, with `3 ≤ N`;
 * the adversary-step bound `AA` of H1'.
 
-Still open, and needed before this is a number:
+**The query budget** (`RomBudget.lean`, claim trace C61). This derives `S`,
+`N`, `AA`, `JA` and `q` from the adversary's query budget, with no further
+budget hypothesis.
 
-* the step bound `S` and the adversary-step bound `AA` for H1', derived from
-  the query budget; `N` must include the extension's draws (at most 117,605
-  for SPHINCS+-128f);
-* a wide-class count for SPHINCS+-256f;
-* deriving the budget hypotheses from the adversary's query budget;
+*Budget* (`Budget A qh qs`). On every path of the adversary's strategy tree:
+
+* each hash query (`hq`) consumes one unit of `qh`. Repeated queries are
+  charged again; the run memoizes them, so this only over-counts;
+* each signing query (`sq`) consumes one unit of `qs`, legal or not. An
+  illegal query costs the game nothing;
+* the final output (`out`) is free.
+
+Challenger requests (key generation, signing, the extension) are not charged
+to the adversary. They are bounded per routine instead.
+
+*Cost* (`Cost P K A C`). On every tape and from every state, the symbolic
+trace of `P` has at most `K` steps, at most `A` of them adversary steps. Both
+runs, real and symbolic, append at most `K` entries, at most `A` adversary
+entries and at most `C` challenger `h_msg` entries.
+
+Costs compose (`Cost.bind`, `Cost.forIn`, `Cost.ite`). They are computed in
+closed form for every routine of the signer, the verifier, key generation and
+the extension (`cost_sign`, `cost_verify`, `cost_kgTail`, `cost_extW`). For
+the strategy tree, `cost_playS` is by induction under `Budget`.
+
+*Steps vs. draws.* Entries are the run's distinct draws. A memoized repeat
+appends none, and every step appends at most one (`strace_ents`). So the
+draw count is bounded by the step count. `N` bounds H1's draws, which equal
+its entries (`runG_draws`, via `sim_game`). `S` bounds H1' trace steps, and
+entries at every step, as the collision count needs.
+
+*Classification.* Every adversary step of H1' is an adversary-oracle request,
+from one of three sources:
+
+* the adversary's own hash queries, at most `qh`;
+* the final verification. It runs the model's `verify` on the adversary
+  oracle (`advP`), at most `verC` requests;
+* the extension's `h_msg` request on the forged message, which is one.
+
+So `AA ≤ qh + verC + 1`, **not** `AA ≤ qh`. The verifier's and the extension's
+requests are adversary-side steps of H1' that the adversary did not choose,
+and the collision count must charge them. Similarly, `JA ≤ qh + verC` (H1 has
+no extension), and the challenger `h_msg` draws number at most `qs`.
+
+*Formulas* (`stepB`). H1' has at most
+
+    K' = kgC + 1 + qh + qs·(signC + 1) + verC + extC
+
+steps. The terms are: key generation, the public-key reveal, the adversary's
+queries, per signing query the signer plus the signature reveal, the final
+verification, and the extension. Then:
+
+* `S = K' + 3`: the coin state holds three entries;
+* `N = S + 1`.
+
+For SPHINCS+-128f the per-routine bounds evaluate to:
+
+| Routine | Steps |
+| --- | --- |
+| kgC | 4,497 |
+| signC | 370,401 |
+| verC | 11,872 |
+| extC | 117,606 (117,605 requests and one reveal) |
+
+So (`stepB_128f`):
+
+    JA = qh + 11872,  AA = qh + 11873,  q = qs,
+    S  = qh + 370402·qs + 133979,  N = qh + 370402·qs + 133980.
+
+In the form `N = N_KG + qs·N_Sign + qh + N_Verify + 117605 + C`:
+
+* N_KG = 4,497;
+* N_Sign = 370,402;
+* N_Verify = 11,872;
+* C = 6: the extension's reveal, the public-key reveal, the three coin
+  entries, and one for `S < N`.
+
+These are step counts, which over-count distinct draws whenever requests
+repeat.
+
+*Theorem* (`rom_win_budget_128f`). For every adversary with `Budget A qh qs`
+and `qs ≤ 2^64`, the model's own H1 game satisfies (multiplied out in Lean)
+
+    Pr[won] ≤ (12·qh + 142481)/2^128 + (2·S^2 + 3·N^2)/2^256
+
+with `S` and `N` as above. At `qh = qs = 2^64` this is about 2^-60.4: the
+linear term dominates, and the quadratic term is about 2^-88.7. These
+evaluations are arithmetic outside Lean.
+
+What this does not yet cover:
+
+* this is game H1: honest key generation from three independent coin entries,
+  not from the 32-byte seed;
+* the bound is per key (see the multi-key note below);
+* the random-oracle and tape assumptions of C54–C60 still apply.
+
+Still open, and needed before this is a number for DSM:
+
+* a wide-class count for SPHINCS+-256f (the budget lemmas are generic in the
+  variant; only the collision count is 128f-specific);
 * the seed hop;
 * the final composition.
 
