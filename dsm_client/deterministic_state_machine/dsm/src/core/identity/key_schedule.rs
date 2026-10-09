@@ -92,12 +92,7 @@ pub fn info(label: TaggedHashDomain<'_>, fields: &[&[u8]]) -> Vec<u8> {
 
 fn expand32(prk: &Prk, label: TaggedHashDomain<'_>, fields: &[&[u8]]) -> [u8; 32] {
     let mut inf = info(label, fields);
-    let mut okm = hkdf::expand(&prk.0, &inf, 32);
-    let out: [u8; 32] = okm
-        .as_slice()
-        .try_into()
-        .expect("HKDF-Expand returns exactly the 32 bytes asked for");
-    okm.zeroize();
+    let out = hkdf::expand32(&prk.0, &inf);
     inf.zeroize();
     out
 }
