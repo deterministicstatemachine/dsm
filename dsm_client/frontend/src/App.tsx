@@ -62,11 +62,15 @@ export default function App() {
     setThemeIndex,
   });
 
-  // Which skin the page is drawn in: Simple once the wallet is ready and the
-  // owner chose it, the Game Boy otherwise.
-  const skin = useSkin(session.identity_status, runtime.skin, runtime.scheme, runtime.appState);
+  // Which skin the page is drawn in: the owner's choice, made before anything
+  // else, in every phase (a combo-locked wallet's lock screen shows the device).
+  const skin = useSkin(session.received, runtime.skin, runtime.scheme, runtime.appState, session.lock_status.method);
 
-  const { showIntro, dismissIntro } = useIntroGate();
+  // The Game Boy's intro cutscene waits for its A button: the Simple skin has
+  // neither, so it shows no intro.
+  const introGate = useIntroGate();
+  const showIntro = introGate.showIntro && skin !== 'simple';
+  const dismissIntro = introGate.dismissIntro;
   const {
     chameleonSrc,
     setChameleonSrc,
@@ -176,7 +180,7 @@ export default function App() {
                         Classic, and is offered once Classic is the owner's choice. */}
                     {skin === 'classic' ? <GuidedTour appState={runtime.appState} /> : null}
                     {runtime.skin === 'classic' ? <TourOffer appState={runtime.appState} showIntro={showIntro} /> : null}
-                    <SkinChoice appState={runtime.appState} />
+                    <SkinChoice />
                   </ScreenContainer>
                   {/* The passcode prompt is its own layer, not part of the home
                       screen's content: it portals over the whole display, the
