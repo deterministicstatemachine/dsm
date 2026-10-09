@@ -10,7 +10,7 @@ import { loadSkinPreferences, readSkinHint } from '../runtime/skinPreferences';
 import { appRuntimeStore, type Scheme, type Skin } from '../runtime/appRuntimeStore';
 import type { AppState } from '../types/app';
 import type { NativeSessionLockStatus } from '../runtime/nativeSessionTypes';
-import { setSystemBars } from '../dsm/WebViewBridge/systemBars';
+import { setSystemBars, type BarsLook } from '../dsm/WebViewBridge/systemBars';
 import logger from '../utils/logger';
 
 /**
@@ -30,6 +30,8 @@ export function useSkin(
   scheme: Scheme,
   appState: AppState,
   lockMethod: NativeSessionLockStatus['method'],
+  /** `agreeing` while the beta agreement covers the screen: a page kept between the bars, like Modern. */
+  agreement: 'agreeing' | 'agreed',
 ): Skin {
   // The first paint is in the look the page last drew; the preference, read
   // below, is the authority.
@@ -47,23 +49,24 @@ export function useSkin(
   }, [bridgeUp]);
 
   const inUse = skinInUse(skin, appState, lockMethod);
-  // The bars native set at start: dark, around the device.
-  const bars = useRef<Scheme>('dark');
+  // The bars native set at start: dark, the page edge to edge around the device.
+  const bars = useRef<BarsLook>('device');
 
   useEffect(() => {
     const html = document.documentElement;
     html.setAttribute('data-skin', inUse);
     html.setAttribute('data-scheme', scheme);
     // The phone's status and navigation bars follow: dark around the device,
-    // the scheme's own colour around the Modern skin. Asked only on a change.
-    const wanted: Scheme = inUse === 'modern' ? scheme : 'dark';
+    // which runs under them; the Modern skin (and the black agreement page)
+    // kept between them, in its own colour. Asked only on a change.
+    const wanted: BarsLook = agreement === 'agreeing' ? 'dark' : inUse === 'modern' ? scheme : 'device';
     if (wanted === bars.current) return;
     bars.current = wanted;
     setSystemBars(wanted).then(
       () => undefined,
       (e: unknown) => logger.warn('[skin] the system bars were not set:', e),
     );
-  }, [inUse, scheme]);
+  }, [inUse, scheme, agreement]);
 
   return inUse;
 }

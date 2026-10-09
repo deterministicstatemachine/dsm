@@ -2,12 +2,13 @@
 // Your own contact card (DSM Amendment A17): your banner and photo (kept on
 // this phone), the name, email and phone you choose to share, and your code. The card rides on your DSM code, so
 // whoever scans it sees who you are, and can email you a receipt when they
-// pay you. Saving the card shows the code again, since the code carries it.
+// pay you. Saving says so in a pop-up and goes back to the wallet.
 
 import React, { useEffect, useState } from 'react';
 import { getOwnProfile, setOwnProfile } from '../../dsm/contacts';
 import type { PersonProfile } from '../../domain/types';
 import { PageTitle } from './parts';
+import { useFx } from '../fx/FxProvider';
 import ProfileHeader from './ProfileHeader';
 import { ownCardStore } from './ownCard';
 import { modernNav } from './modernNav';
@@ -20,7 +21,8 @@ type Card = { kind: 'reading' } | { kind: 'read'; card: PersonProfile } | { kind
 export default function ModernMyCard(): React.JSX.Element {
   const [card, setCard] = useState<Card>({ kind: 'reading' });
   const [said, setSaid] = useState<string | null>(null);
-  const [saves, setSaves] = useState(0);
+  const [saving, setSaving] = useState<'idle' | 'saving'>('idle');
+  const fx = useFx();
 
   useEffect(() => {
     let live = 'yes';
@@ -42,15 +44,21 @@ export default function ModernMyCard(): React.JSX.Element {
 
   const draft = card.card;
   const save = () => {
-    setSaid('Saving…');
+    if (saving === 'saving') return;
+    setSaving('saving');
+    setSaid(null);
     setOwnProfile(draft).then(
       (stored) => {
-        setCard({ kind: 'read', card: stored });
-        setSaid('Saved. Your DSM code now carries it.');
         ownCardStore.setName(stored.name);
-        setSaves((n) => n + 1);
+        // Saved: a pop-up says so, and the wallet is shown again. Nothing on
+        // this page changes under the owner on the way out.
+        fx.play({ anim: 'confirm', title: 'Saved', caption: 'Your card is saved, and your DSM code carries it.', tone: 'good', okLabel: 'OK' });
+        modernNav.showTab('wallet');
       },
-      (e: unknown) => setSaid(e instanceof Error ? e.message : String(e)),
+      (e: unknown) => {
+        setSaving('idle');
+        setSaid(e instanceof Error ? e.message : String(e));
+      },
     );
   };
 
@@ -72,10 +80,12 @@ export default function ModernMyCard(): React.JSX.Element {
           />
         </div>
       ))}
-      <button type="button" className="s-btn s-btn-primary" onClick={save}>Save my card</button>
-      {said !== null ? <p className="s-hint" style={{ textAlign: 'center', marginTop: 12 }}>{said}</p> : null}
+      <button type="button" className="s-btn s-btn-primary" disabled={saving === 'saving'} onClick={save}>
+        {saving === 'saving' ? 'Saving…' : 'Save my card'}
+      </button>
+      {said !== null ? <div className="s-notice s-error" role="alert" style={{ marginTop: 12 }}>{said}</div> : null}
       <div style={{ marginTop: 18 }}>
-        <ModernMyCode key={saves} heading="Your code: let someone scan it to add you." />
+        <ModernMyCode heading="Your code: let someone scan it to add you." />
       </div>
     </>
   );

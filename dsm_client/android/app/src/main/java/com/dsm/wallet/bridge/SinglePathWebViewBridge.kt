@@ -281,9 +281,9 @@ class SinglePathWebViewBridge(private val context: Context) {
                 "setSystemBars" -> {
                     val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
                         ?: throw IllegalStateException("setSystemBars: no active activity")
-                    val scheme = String(payload, Charsets.UTF_8)
-                    require(scheme == "light" || scheme == "dark") { "setSystemBars: no scheme named $scheme" }
-                    act.setSystemBars(scheme)
+                    val look = String(payload, Charsets.UTF_8)
+                    require(look == "light" || look == "dark" || look == "device") { "setSystemBars: no look named $look" }
+                    act.setSystemBars(look)
                     ByteArray(0)
                 }
 

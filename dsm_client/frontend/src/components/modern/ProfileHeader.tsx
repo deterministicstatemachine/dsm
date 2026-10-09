@@ -60,7 +60,7 @@ export default function ProfileHeader(props: Props): React.JSX.Element {
 
   const keep = (which: 'photo' | 'banner', picture: string) => {
     endFraming();
-    setSaid(which === 'photo' ? 'Saving your photo…' : 'Saving your banner…');
+    // Kept quietly: the header shows the new picture; only a failure is said.
     ownCardStore.setPicture(which, picture).then(
       () => setSaid(null),
       (e: unknown) => setSaid(messageOf(e)),

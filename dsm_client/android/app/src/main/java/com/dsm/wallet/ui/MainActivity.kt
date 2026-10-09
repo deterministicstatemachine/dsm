@@ -131,6 +131,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     lateinit var btEnableLauncher: ActivityResultLauncher<Intent>
 
     private lateinit var rootContainer: FrameLayout
+    /** How the page meets the phone's bars (see setSystemBars), and the bars' heights in pixels. */
+    private var barFit = "edge"
+    private var barInsetTop = 0
+    private var barInsetBottom = 0
     private lateinit var webView: WebView
     private var statusBarScrim: View? = null
     private lateinit var bridge: SinglePathWebViewBridge
@@ -1288,6 +1292,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     // can appear between the scrim and WebView content on some devices.
                     height = topInset + statusBarOverlapPx
                 }
+                barInsetTop = topInset
+                barInsetBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+                applyBarFit()
                 insets
             }
         }
@@ -1606,16 +1613,42 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
      * near-black around the Game Boy device, or the Simple skin's light or dark
      * page colour. Called by the page whenever the skin or its scheme changes.
      */
-    fun setSystemBars(scheme: String) {
-        val light = scheme == "light"
-        val color = android.graphics.Color.parseColor(if (light) "#FFF8E7" else "#0D0D0D")
+    /**
+     * The phone's bars for what the page shows: `device` is the Game Boy, which
+     * runs edge to edge under dark bars; `light` and `dark` are the Modern skin
+     * (and the screens before a look is chosen), which stop at the bars, the
+     * bars in the page's own colour behind them.
+     */
+    fun setSystemBars(look: String) {
+        val light = look == "light"
+        val color = android.graphics.Color.parseColor(
+            when (look) {
+                "light" -> "#FFFFFF"
+                "dark" -> "#0A0A0A"
+                else -> "#0D0D0D"
+            }
+        )
         runOnUiThread {
             val wic = WindowInsetsControllerCompat(window, window.decorView)
             wic.isAppearanceLightStatusBars = light
             wic.isAppearanceLightNavigationBars = light
             window.decorView.setBackgroundColor(color)
+            rootContainer.setBackgroundColor(color)
             paintLegacyBars(color)
+            barFit = if (look == "device") "edge" else "fit"
+            applyBarFit()
         }
+    }
+
+    /**
+     * The page under the bars (`edge`, the Game Boy) or between them (`fit`):
+     * from Android 15 the window runs behind the bars, so a page that must not
+     * sit under them is kept clear of them by the bars' own heights.
+     */
+    private fun applyBarFit() {
+        val fit = barFit == "fit"
+        rootContainer.setPadding(0, if (fit) barInsetTop else 0, 0, if (fit) barInsetBottom else 0)
+        statusBarScrim?.visibility = if (fit) View.GONE else View.VISIBLE
     }
 
     /** Before Android 15 the bars take their own colour; from 15 they show the window behind them. */
