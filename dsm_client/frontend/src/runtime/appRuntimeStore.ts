@@ -37,6 +37,8 @@ type AppRuntimeSnapshot = {
   receiptsEmail: Switch;
   /** The look the picker is previewing; `null` when no picker is open. */
   lookPreview: Look | null;
+  /** Whether this phone's user accepted the current beta agreement (read with the skin preferences). */
+  agreement: 'accepted' | 'not_accepted';
 };
 
 class AppRuntimeStore {
@@ -54,6 +56,7 @@ class AppRuntimeStore {
     simpleOffline: 'off',
     receiptsEmail: 'off',
     lookPreview: null,
+    agreement: 'not_accepted',
   };
 
   private listeners = new Set<() => void>();
@@ -123,6 +126,10 @@ class AppRuntimeStore {
 
   setLookPreview = (lookPreview: Look | null): void => {
     this.setState({ lookPreview });
+  };
+
+  setAgreement = (agreement: 'accepted' | 'not_accepted'): void => {
+    this.setState({ agreement });
   };
 
   setSimpleOffline = (simpleOffline: Switch): void => {

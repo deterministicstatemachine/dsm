@@ -124,6 +124,16 @@ describe('the Modern skin', () => {
     expect(within(more).getAllByRole('button').map((b) => b.textContent)).toEqual(['Tokens', 'Apps', 'Scan', 'Trade', 'Bitcoin', 'Storage']);
   });
 
+  it('lists fungible tokens, and switches to the one-of-a-kind objects as the DGen wallet does', () => {
+    const creature: TokenBalanceView = { ...currency('DRAKE', '1', 1n), tokenName: 'Ember Drake', protocolDefined: era.symbol === 'DRAKE', holding: 'object' };
+    renderShell([era, gold, creature]);
+    expect(within(screen.getByLabelText('Your tokens')).queryByText('DRAKE')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('switch', { name: 'Show objects' }));
+    const objects = screen.getByLabelText('Your objects');
+    expect(within(objects).getByText('DRAKE')).toBeInTheDocument();
+    expect(within(objects).queryByText('GOLD')).not.toBeInTheDocument();
+  });
+
   it('puts trading, the Bitcoin bridge and storage away in Simple mode, and keeps tokens and apps', () => {
     appRuntimeStore.setSimpleMode('on');
     renderShell();

@@ -8,6 +8,8 @@ export const SCHEME_PREFERENCE = 'ui_scheme';
 export const SIMPLE_MODE_PREFERENCE = 'simple_mode';
 export const SIMPLE_OFFLINE_PREFERENCE = 'simple_offline';
 export const RECEIPTS_EMAIL_PREFERENCE = 'receipts_email';
+/** The beta agreement's version the user accepted (domain/betaAgreement.ts). */
+export const AGREEMENT_PREFERENCE = 'beta_agreement';
 
 /** Every skin preference: the practice gate lets the tour change them. */
 export const SKIN_PREFERENCES = [

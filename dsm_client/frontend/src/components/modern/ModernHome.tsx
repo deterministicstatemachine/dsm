@@ -31,6 +31,10 @@ export default function ModernHome(): React.JSX.Element {
   const { contacts } = useContacts();
   const main = mainBalance(wallet.balances);
   const held = holdings(wallet.balances);
+  // Fungible tokens, or the one-of-a-kind objects (creatures, items): the same switch the DGen wallet has.
+  const [shown, setShown] = useState<'currency' | 'object'>('currency');
+  const showingObjects = shown === 'object';
+  const listed = held.filter((b) => (b.holding === 'object' ? 'object' : 'currency') === shown);
   // Read so the grid follows Simple mode as it is switched.
   const runtime = useAppRuntimeStore();
   const features = FEATURES.filter((f) => runtime.simpleMode === 'off' || reachable(f.to));
@@ -85,21 +89,35 @@ export default function ModernHome(): React.JSX.Element {
       </div>
 
       {held.length > 0 ? (
-        <section className="s-card" aria-label="Your tokens">
+        <section className="s-card" aria-label={showingObjects ? 'Your objects' : 'Your tokens'}>
           <div className="s-section-head">
-            <span className="s-section-title">Your Tokens</span>
-            <button type="button" className="s-chip" onClick={() => navigationStore.navigate('accounts')}>Add ›</button>
-          </div>
-          {held.map((b) => (
-            <button key={b.tokenId} type="button" className="s-row" onClick={() => modernNav.open({ kind: 'send', to: null, tokenId: b.tokenId })}>
-              <span className="s-coin"><TokenMark ticker={b.symbol} iconUrl={b.iconUrl} size={40} className="s-coin-img" /></span>
-              <span className="s-row-main">
-                <span className="s-row-title" style={{ display: 'block' }}>{b.symbol}</span>
-                {b.tokenName !== b.symbol ? <span className="s-row-sub" style={{ display: 'block' }}>{b.tokenName}</span> : null}
-              </span>
-              <span className="s-row-end"><span className="s-row-title">{b.displayAmount}</span></span>
+            <span className="s-section-title">{showingObjects ? 'Your Objects' : 'Your Tokens'}</span>
+            <button
+              type="button"
+              role="switch"
+              className="s-switch"
+              aria-checked={showingObjects}
+              aria-label="Show objects"
+              onClick={() => setShown(showingObjects ? 'currency' : 'object')}
+            >
+              <span>Objects</span><span className="s-switch-knob" aria-hidden />
             </button>
-          ))}
+          </div>
+          {listed.length === 0 ? (
+            <div className="s-empty">{showingObjects ? 'No objects yet. Creatures and other one-of-a-kind items show here.' : 'No tokens yet.'}</div>
+          ) : (
+            listed.map((b) => (
+              <button key={b.tokenId} type="button" className="s-row" onClick={() => modernNav.open({ kind: 'send', to: null, tokenId: b.tokenId })}>
+                <span className="s-coin"><TokenMark ticker={b.symbol} iconUrl={b.iconUrl} size={40} className="s-coin-img" /></span>
+                <span className="s-row-main">
+                  <span className="s-row-title" style={{ display: 'block' }}>{b.symbol}</span>
+                  {b.tokenName !== b.symbol ? <span className="s-row-sub" style={{ display: 'block' }}>{b.tokenName}</span> : null}
+                </span>
+                <span className="s-row-end"><span className="s-row-title">{b.displayAmount}</span></span>
+              </button>
+            ))
+          )}
+          <button type="button" className="s-chip" style={{ marginTop: 10 }} onClick={() => navigationStore.navigate('accounts')}>Add or create a token ›</button>
         </section>
       ) : null}
 
