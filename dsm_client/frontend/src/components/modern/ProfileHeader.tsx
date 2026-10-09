@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // The owner's banner, photo and name at the top of the Modern skin: on the
 // Wallet tab it is who the wallet is (tap it for your card); on My Card the
-// banner and the photo are tapped to choose a picture from the phone.
+// banner and the photo are tapped to choose a picture from the phone, which
+// is then framed (moved and zoomed) before it is kept.
 
 import React, { useEffect, useId, useState } from 'react';
-import { cropToDataUrl } from '../../utils/imageCrop';
+import { loadImageFile } from '../../utils/imageCrop';
+import ImageCropper from './ImageCropper';
 import { Icon } from './parts';
 import { ownCardStore, useOwnCard } from './ownCard';
 
@@ -27,6 +29,8 @@ export default function ProfileHeader(props: Props): React.JSX.Element {
   const card = useOwnCard();
   const id = useId();
   const [said, setSaid] = useState<string | null>(null);
+  // A picture being framed before it is kept.
+  const [framing, setFraming] = useState<{ which: 'photo' | 'banner'; image: HTMLImageElement; release: () => void } | null>(null);
 
   useEffect(() => {
     if (card.kind === 'unread') {
@@ -42,13 +46,25 @@ export default function ProfileHeader(props: Props): React.JSX.Element {
   const banner = card.kind === 'read' ? card.banner : null;
 
   const choose = (which: 'photo' | 'banner', file: File) => {
+    setSaid(null);
+    loadImageFile(file).then(
+      ({ image, release }) => setFraming({ which, image, release }),
+      (e: unknown) => setSaid(messageOf(e)),
+    );
+  };
+
+  const endFraming = () => {
+    framing?.release();
+    setFraming(null);
+  };
+
+  const keep = (which: 'photo' | 'banner', picture: string) => {
+    endFraming();
     setSaid(which === 'photo' ? 'Saving your photo…' : 'Saving your banner…');
-    cropToDataUrl(file, which === 'photo' ? PHOTO_SIDE : BANNER_W, which === 'photo' ? PHOTO_SIDE : BANNER_H)
-      .then((picture) => ownCardStore.setPicture(which, picture))
-      .then(
-        () => setSaid(null),
-        (e: unknown) => setSaid(messageOf(e)),
-      );
+    ownCardStore.setPicture(which, picture).then(
+      () => setSaid(null),
+      (e: unknown) => setSaid(messageOf(e)),
+    );
   };
 
   const remove = (which: 'photo' | 'banner') => {
@@ -111,6 +127,16 @@ export default function ProfileHeader(props: Props): React.JSX.Element {
       </div>
       <p className="s-hint" style={{ textAlign: 'center' }}>Your photo and banner stay on this phone. Your code shares your name, email and phone.</p>
       {said !== null ? <p className="s-hint" role="status" style={{ textAlign: 'center' }}>{said}</p> : null}
+      {framing !== null ? (
+        <ImageCropper
+          image={framing.image}
+          shape={framing.which === 'photo' ? 'circle' : 'banner'}
+          width={framing.which === 'photo' ? PHOTO_SIDE : BANNER_W}
+          height={framing.which === 'photo' ? PHOTO_SIDE : BANNER_H}
+          onSave={(picture) => keep(framing.which, picture)}
+          onCancel={endFraming}
+        />
+      ) : null}
     </section>
   );
 }

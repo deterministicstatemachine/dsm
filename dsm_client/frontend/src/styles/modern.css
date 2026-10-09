@@ -302,3 +302,41 @@ html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; 
 /* The top bar's card button shows the owner's photo once there is one. */
 .s-me { overflow: hidden; padding: 0; }
 .s-me img { width: 100%; height: 100%; object-fit: cover; }
+
+/* ---- Framing a picture (ImageCropper) ---- */
+.s-crop {
+  position: fixed; inset: 0; z-index: 9500; overflow-y: auto; box-sizing: border-box;
+  padding: calc(18px + env(safe-area-inset-top)) 20px calc(18px + env(safe-area-inset-bottom));
+  background: var(--s-bg); color: var(--s-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.s-crop-title { margin: 0; font-size: 26px; font-weight: 900; text-align: center; }
+.s-crop-frame {
+  position: relative; width: 100%; max-width: 420px; margin: 6px auto; overflow: hidden;
+  touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab;
+  background: #000000; border-radius: var(--s-radius);
+}
+.s-crop-frame:active { cursor: grabbing; }
+.s-crop-banner { aspect-ratio: 3 / 1; }
+.s-crop-circle { aspect-ratio: 1 / 1; max-width: 320px; }
+.s-crop-frame img { position: absolute; max-width: none; pointer-events: none; }
+/* The photo's circle: the picture outside it is dimmed. */
+.s-crop-ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.55); border: 3px solid #ffffff; pointer-events: none; }
+.s-crop-zoom { display: flex; align-items: center; gap: 12px; max-width: 420px; width: 100%; margin: 4px auto; font-weight: 700; }
+.s-crop-zoom input { flex: 1; accent-color: var(--s-fuchsia); }
+.s-crop .s-actions { max-width: 420px; width: 100%; margin: 8px auto 0; }
+
+/* A small switch in a card's head (the wallet's Tokens / Objects). */
+.s-switch {
+  display: inline-flex; align-items: center; gap: 8px; border: none; background: none; padding: 4px 0;
+  color: var(--s-muted); font-family: inherit; font-size: 14px; font-weight: 700;
+}
+.s-switch[aria-checked="true"] { color: var(--s-text); }
+.s-switch-knob { position: relative; width: 40px; height: 24px; border-radius: 999px; background: var(--s-surface-2); flex: 0 0 auto; transition: background 120ms ease-out; }
+.s-switch-knob::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
+  background: #ffffff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); transition: transform 120ms ease-out;
+}
+.s-switch[aria-checked="true"] .s-switch-knob { background: var(--s-fuchsia); }
+.s-switch[aria-checked="true"] .s-switch-knob::after { transform: translateX(16px); }

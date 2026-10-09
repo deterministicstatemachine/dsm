@@ -9,9 +9,11 @@
 // is already in the chosen look; the preference stays the authority.
 
 import { dsmClient } from '../services/dsmClient';
+import { AGREEMENT_VERSION } from '../domain/betaAgreement';
 import logger from '../utils/logger';
 import { appRuntimeStore, type Look, type Scheme, type Skin, type Switch } from './appRuntimeStore';
 import {
+  AGREEMENT_PREFERENCE,
   RECEIPTS_EMAIL_PREFERENCE,
   SCHEME_PREFERENCE,
   SIMPLE_MODE_PREFERENCE,
@@ -54,12 +56,13 @@ export function readSwitch(value: string | null): Switch {
 
 /** Reads every preference into the runtime store. */
 export async function loadSkinPreferences(): Promise<void> {
-  const [skin, scheme, simpleMode, offline, receipts] = await Promise.all([
+  const [skin, scheme, simpleMode, offline, receipts, agreement] = await Promise.all([
     dsmClient.getPreference(SKIN_PREFERENCE),
     dsmClient.getPreference(SCHEME_PREFERENCE),
     dsmClient.getPreference(SIMPLE_MODE_PREFERENCE),
     dsmClient.getPreference(SIMPLE_OFFLINE_PREFERENCE),
     dsmClient.getPreference(RECEIPTS_EMAIL_PREFERENCE),
+    dsmClient.getPreference(AGREEMENT_PREFERENCE),
   ]);
   appRuntimeStore.setSkin(readSkin(skin));
   keepSkinHint(readSkin(skin));
@@ -67,7 +70,14 @@ export async function loadSkinPreferences(): Promise<void> {
   appRuntimeStore.setSimpleMode(readSwitch(simpleMode));
   appRuntimeStore.setSimpleOffline(readSwitch(offline));
   appRuntimeStore.setReceiptsEmail(readSwitch(receipts));
+  appRuntimeStore.setAgreement(agreement === AGREEMENT_VERSION ? 'accepted' : 'not_accepted');
   appRuntimeStore.setSkinRead('read');
+}
+
+/** Keeps that the user accepted the current beta agreement. */
+export async function acceptAgreement(): Promise<void> {
+  await dsmClient.setPreference(AGREEMENT_PREFERENCE, AGREEMENT_VERSION);
+  appRuntimeStore.setAgreement('accepted');
 }
 
 export async function chooseSkin(skin: Skin): Promise<void> {
