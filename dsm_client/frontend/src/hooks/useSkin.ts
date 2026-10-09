@@ -1,34 +1,52 @@
 // SPDX-License-Identifier: Apache-2.0
-// Reads the skin preferences once the identity is ready, and dresses the page
-// for the skin in use: `data-skin` and `data-scheme` on <html> select the
-// Simple skin's styles (public/index.html, styles/simple.css), which put the
-// Game Boy device away and let the app fill the screen.
+// Reads the skin preferences once the bridge is up, and dresses the page for
+// the skin in use: `data-skin` and `data-scheme` on <html> select the Simple
+// skin's styles (styles/simple.css), which put the Game Boy device away and
+// let the app fill the screen. The choice is the app's, made before anything
+// else, so every screen from the first is in it.
 
-import { useEffect, useRef } from 'react';
-import { clearSkinPreferences, loadSkinPreferences } from '../runtime/skinPreferences';
+import { useEffect, useLayoutEffect, useRef } from 'react';
+import { loadSkinPreferences, readSkinHint } from '../runtime/skinPreferences';
+import { appRuntimeStore, type Scheme, type Skin } from '../runtime/appRuntimeStore';
 import type { AppState } from '../types/app';
-import type { Scheme, Skin } from '../runtime/appRuntimeStore';
+import type { NativeSessionLockStatus } from '../runtime/nativeSessionTypes';
 import { setSystemBars } from '../dsm/WebViewBridge/systemBars';
 import logger from '../utils/logger';
 
-/** The skin the page is drawn in now: Simple only once the wallet is ready. */
-export function skinInUse(skin: Skin | null, appState: AppState): Skin {
-  return skin === 'simple' && appState === 'wallet_ready' ? 'simple' : 'classic';
+/**
+ * The skin the page is drawn in now. Simple in every phase once it is the
+ * choice, except a wallet locked with a button combo: the combo is entered on
+ * the Game Boy's buttons, so its lock screen shows the device.
+ */
+export function skinInUse(skin: Skin | null, appState: AppState, lockMethod: NativeSessionLockStatus['method']): Skin {
+  if (skin !== 'simple') return 'classic';
+  if (appState === 'locked' && lockMethod === 'combo') return 'classic';
+  return 'simple';
 }
 
-export function useSkin(identityStatus: string, skin: Skin | null, scheme: Scheme, appState: AppState): Skin {
+export function useSkin(
+  bridgeUp: boolean,
+  skin: Skin | null,
+  scheme: Scheme,
+  appState: AppState,
+  lockMethod: NativeSessionLockStatus['method'],
+): Skin {
+  // The first paint is in the look the page last drew; the preference, read
+  // below, is the authority.
+  useLayoutEffect(() => {
+    const hint = readSkinHint();
+    if (hint !== null && appRuntimeStore.getSnapshot().skin === null) appRuntimeStore.setSkin(hint);
+  }, []);
+
   useEffect(() => {
-    if (identityStatus !== 'ready') {
-      clearSkinPreferences();
-      return;
-    }
+    if (!bridgeUp) return;
     loadSkinPreferences().then(
       () => undefined,
       (e: unknown) => logger.warn('[skin] the preferences were not read:', e),
     );
-  }, [identityStatus]);
+  }, [bridgeUp]);
 
-  const inUse = skinInUse(skin, appState);
+  const inUse = skinInUse(skin, appState, lockMethod);
   // The bars native set at start: dark, around the device.
   const bars = useRef<Scheme>('dark');
 

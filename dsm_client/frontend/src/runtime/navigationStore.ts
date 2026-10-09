@@ -20,7 +20,8 @@ const VALID_NAV_TARGETS = new Set<ScreenType>(SCREEN_TYPES);
 
 /**
  * The screens the Simple skin leaves out: sovereign finance (SoFi, tokens,
- * vaults), the storage set, the developer tools and the recovery pipeline. While
+ * vaults), the storage set and the developer tools. Recovery stays: a Simple
+ * wallet is restored like every other. While
  * Simple is the skin, nothing reaches them: no menu offers them, and a call
  * that names one, a deep link's included, is refused here.
  */
@@ -31,7 +32,6 @@ export const SIMPLE_EXCLUDED = new Set<ScreenType>([
   'vault',
   'storage',
   'dev_policy',
-  'recovery_pipeline',
   'bluetooth',
 ]);
 

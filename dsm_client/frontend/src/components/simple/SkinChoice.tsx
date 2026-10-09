@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-// The one-time choice a ready wallet asks for: Simple or Classic. Shown once
-// the preferences are read and none is set; Settings changes it after.
+// The one-time choice the app asks for before anything else: Simple or
+// Classic. Shown once the preferences are read and none is set, over whatever
+// is on the screen (a first launch's intro or setup, or a wallet set up before
+// the choice existed); Settings changes it after.
 
 import React, { useState } from 'react';
 import { useAppRuntimeStore, type Skin } from '../../runtime/appRuntimeStore';
 import { chooseSkin } from '../../runtime/skinPreferences';
-import type { AppState } from '../../types/app';
 import { Sheet } from './parts';
 
-export default function SkinChoice({ appState }: { appState: AppState }): React.JSX.Element | null {
+export default function SkinChoice(): React.JSX.Element | null {
   const runtime = useAppRuntimeStore();
   const [problem, setProblem] = useState<string | null>(null);
-  if (appState !== 'wallet_ready' || runtime.skinRead !== 'read' || runtime.skin !== null) return null;
+  if (runtime.skinRead !== 'read' || runtime.skin !== null) return null;
 
   const pick = (skin: Skin) => {
     chooseSkin(skin).then(

@@ -197,3 +197,18 @@ html[data-scheme="dark"] .s-seg button[aria-pressed="true"] { background: var(--
   --stateboy-gray: var(--s-muted); --text-disabled: var(--s-muted);
   font-size: 15px;
 }
+
+/* ---- Before the wallet is ready ---- */
+.s-step { flex: 1; text-align: center; padding: 10px 6px; border-radius: 10px; font-weight: 700; font-size: 14px; color: var(--s-muted); }
+.s-step[aria-current="step"] { background: var(--s-surface); color: var(--s-text); box-shadow: var(--s-shadow); }
+html[data-scheme="dark"] .s-step[aria-current="step"] { background: var(--s-secondary); color: #121212; }
+.s-seg[role="list"] { display: flex; }
+.s-words { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.s-words li { background: var(--s-surface-2); border-radius: 14px; padding: 12px 14px; font-size: 19px; font-weight: 800; display: flex; gap: 10px; align-items: baseline; }
+.s-words li span { color: var(--s-muted); font-size: 14px; font-weight: 700; min-width: 20px; }
+.s-word-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.s-waiting { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 70%; padding-top: 40px; }
+.s-spinner { width: 54px; height: 54px; border-radius: 50%; border: 5px solid var(--s-surface-2); border-top-color: var(--s-primary); animation: s-spin 0.9s linear infinite; margin-bottom: 18px; }
+@keyframes s-spin { to { transform: rotate(360deg); } }
+.s-progress { width: 100%; height: 14px; border-radius: 999px; background: var(--s-surface-2); overflow: hidden; margin-top: 10px; }
+.s-progress > div { height: 100%; background: var(--s-primary); border-radius: 999px; transition: width 180ms ease-out; }

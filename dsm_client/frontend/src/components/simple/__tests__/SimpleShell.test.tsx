@@ -188,7 +188,7 @@ describe('the choice of skin', () => {
   it('asks once the preferences are read and none is chosen, and remembers the choice', async () => {
     appRuntimeStore.setSkin(null);
     appRuntimeStore.setSkinRead('read');
-    render(<SkinChoice appState="wallet_ready" />);
+    render(<SkinChoice />);
     expect(screen.getByRole('dialog', { name: 'Choose your wallet' })).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Simple: send, receive, people/ }));
@@ -200,7 +200,7 @@ describe('the choice of skin', () => {
   it('does not ask before the preferences are read', () => {
     appRuntimeStore.setSkin(null);
     appRuntimeStore.setSkinRead('unread');
-    render(<SkinChoice appState="wallet_ready" />);
+    render(<SkinChoice />);
     expect(screen.queryByRole('dialog', { name: 'Choose your wallet' })).not.toBeInTheDocument();
   });
 });
