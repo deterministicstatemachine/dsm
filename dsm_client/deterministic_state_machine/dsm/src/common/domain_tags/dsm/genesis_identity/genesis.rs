@@ -24,10 +24,10 @@ pub const TAG_DSM_GENESIS_VERIFY: TaggedHashDomain<'static> =
 
 // --- Genesis v2 (mnemonic-rooted, canonical). The public genesis nonce makes G
 // deterministically recoverable from the BIP39 wallet seed without exposing it. ---
-/// `genesis_nonce = keyed-BLAKE3(wallet_seed, "DSM/genesis-public-nonce/v2" || network_id || wallet_index)`.
-/// PUBLIC; stored in GenesisRecord; NOT a secret.
-pub const TAG_DSM_GENESIS_NONCE_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/genesis-public-nonce/v2");
+/// `genesis_nonce = Expand(PRK_w, "DSM/genesis-public-nonce/v3" ‖ 0x00 ‖ lp(network_id) ‖
+/// wallet_index)` (key schedule KS1). PUBLIC; stored in GenesisRecord; NOT a secret.
+pub const TAG_DSM_GENESIS_NONCE_V3: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/genesis-public-nonce/v3");
 /// `G = BLAKE3("DSM/genesis/v2" || genesis_nonce || network_id || genesis_version)`.
 pub const TAG_DSM_GENESIS_V2: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/genesis/v2");
 
@@ -38,13 +38,13 @@ pub const TAG_DSM_GENESIS_V2: TaggedHashDomain<'static> = crate::tagged_domain!(
 /// `0x0018` — nonce, network id, version, `grk_alg_id`, and the exact
 /// `GRK_pk` bytes (never a commitment to them).
 pub const TAG_DSM_GENESIS_V3: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/genesis/v3");
-/// `GRK_seed = KDF(wallet_seed, "DSM/genesis-root-authority/v1" || network_id
-/// || wallet_index || genesis_version)`.
+/// `GRK_seed = Expand(PRK_w, "DSM/genesis-root-authority/v2" ‖ 0x00 ‖ lp(network_id)
+/// ‖ wallet_index ‖ genesis_version)` (key schedule KS1).
 ///
 /// `G` is deliberately NOT an input: every device-scoped key already depends
 /// on `G`, so folding it here would be circular by construction. Including
 /// `genesis_version` makes the GRK per-identity — without it, one mnemonic
 /// would reuse the same root authority across v3 and any future v4, and
 /// re-provisioning would not re-root the thing it exists to re-root.
-pub const TAG_DSM_GENESIS_ROOT_AUTHORITY_V1: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/genesis-root-authority/v1");
+pub const TAG_DSM_GENESIS_ROOT_AUTHORITY_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/genesis-root-authority/v2");

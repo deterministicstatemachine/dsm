@@ -1,0 +1,106 @@
+rust_file	rust_line	rust_symbol	lean_definition_or_obligation	git_blob
+crates/dsm-sphincs/src/lib.rs	106	SphincsVariant	Variant	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	120	Params	Params	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	157	param_set	params	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	71	Error	typed failure result; model None	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	79	CryptoFailure	four source failure reasons	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	87	message	fixed diagnostic reporting text (not wire authority)	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	146	compute_wots_len2	Params.len (finite six-variant specialization)	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	194	sizes	params / signature_sizes	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	211	Adrs	Adrs / be_roundtrip / type_clears	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	219	set_layer	Adrs.layer	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	222	set_tree	Adrs.tree / be8 / RustExtraction.tree_set_correct	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	228	set_type_and_clear	Adrs.setType / type_clears / RustExtraction.type_clear_correct	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	234	set_keypair	Adrs.keypair	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	237	keypair	Adrs.keypair	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	240	set_chain	Adrs.chain	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	243	set_tree_height	Adrs.chain	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	246	set_hash	Adrs.hash	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	249	set_tree_index	Adrs.hash	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	252	tree_index	Adrs.hash	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	255	as_bytes	Adrs.bytes / be_roundtrip / address_width	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	289	PublicCtx	deriveKey(thash)	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	306	SecretCtx	deriveKey(prf)	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	267	derive_key	deriveKey / Blake3.derive_request / derive_xof_same_32 / evaluate_width	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	318	keyed	keyed / Blake3.keyed_request / evaluate_width	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	332	thash	thash / Blake3.thash_request	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	343	prf	prf / Blake3.prf_request	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	351	prf_msg	sign (deriveKey(prf-msg) then keyed) / Blake3.derive / keyedHash	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	357	h_msg	hmsg / Blake3.hmsg_request / deployed_hmsg_widths / root_prefix	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	380	base_2b	base2b / base2b_digit_bound / RustExtraction.base_2b_complete / parser_outer_complete_fuel / refill_complete / refill_read_count_noninterference	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	400	to_int	toInt	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	405	to_byte	be / be_roundtrip	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	411	wots_digits	wotsDigits / wots_digit_count / wots_digit_bound / checksum_width_three	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	423	chain	chain / chain_composes / chain_width / wots_generated_digit_recovers	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	435	wots_sk_adrs	wotsSign / wotsPkgen	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	443	wots_compress	wotsCompress	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	452	wots_pkgen	wotsPkgen / wots_pkgen_width	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	466	wots_sign	wotsSign / wots_sign_correct	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	480	wots_pk_from_sig	wotsPkFromSig	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	499	xmss_node	xmssNode / xmss_node_parent / xmss_node_width / xmss_signer_tree_path	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	522	xmss_sign	xmssSign / xmss_sign_correct	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	543	xmss_pk_from_sig	xmssPkFromSig / xmss_authentication_path_recovers_tree	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	574	next_layer	nextLayer / next_layer_reconstructs / RustExtraction.next_layer_refines	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	579	ht_sign	htSign / supported_ht_sign_correct	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	607	ht_verify	htRoot / verification_structure	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	642	fors_sk_gen	forsSecret	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	652	fors_node	forsNode / fors_node_parent / fors_node_width / fors_signer_tree_path	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	667	fors_sign	forsSign / fors_sign_correct	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	687	fors_pk_from_sig	forsPkFromSig / fors_authentication_path_recovers_tree	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	717	Indices	Indices	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	723	split_digest	splitDigest / digest_tree_bounded / digest_leaf_bounded	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	739	fors_adrs	verify/sign (FORS address)	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	750	SphincsKeyPair	generateKeypair pair of bytes	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	767	generate_keypair_from_seed	generateKeypair / keygen_sign_verify / SeedHybrid.lean:keygen_expansion_refines / seed_prg_hybrid_bound	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	804	sign	sign / signer_correct	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	851	verify	verify / verification_structure	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	884	public_key_bytes	2*Params.n	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	887	secret_key_bytes	4*Params.n	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	890	signature_bytes	Params.sigBytes	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	897	sphincs_sign	sign(.spx256f)	e7b801a54ae6a8436373847eab797b1b9577d3ce
+crates/dsm-sphincs/src/lib.rs	903	sphincs_verify	verify(.spx256f)	e7b801a54ae6a8436373847eab797b1b9577d3ce
+dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	28	generate_keypair	OS entropy boundary; unproved	eb8d98a71c250712058f88e66fe24ccfda57027b
+dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	43	generate_keypair_from_seed	generateKeypair	eb8d98a71c250712058f88e66fe24ccfda57027b
+dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	51	sign	sign	eb8d98a71c250712058f88e66fe24ccfda57027b
+dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	57	verify	verify	eb8d98a71c250712058f88e66fe24ccfda57027b
+dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	74	sphincs_sign	sign(.spx256f)	eb8d98a71c250712058f88e66fe24ccfda57027b
+dsm_client/deterministic_state_machine/dsm/src/crypto/sphincs.rs	80	sphincs_verify	verify(.spx256f)	eb8d98a71c250712058f88e66fe24ccfda57027b
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	69	generate_from_entropy	entropy normalization; unproved	b8f246ee1dc88c519f0be50fa5a2b98165f60c66
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	74	generate_from_entropy_with_params	H(DSM/sphincs-seed,entropy) then generateKeypair; unproved	b8f246ee1dc88c519f0be50fa5a2b98165f60c66
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	102	sign	raw-byte forwarding; unproved	b8f246ee1dc88c519f0be50fa5a2b98165f60c66
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	122	verify	raw-byte forwarding; unproved	b8f246ee1dc88c519f0be50fa5a2b98165f60c66
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	173	sign_message_with_params	raw-byte forwarding; unproved	b8f246ee1dc88c519f0be50fa5a2b98165f60c66
+dsm_client/deterministic_state_machine/dsm/src/crypto/signatures.rs	197	verify_message_with_params	raw-byte forwarding; unproved	b8f246ee1dc88c519f0be50fa5a2b98165f60c66
+dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	42	derive_ephemeral_seed	ekSeedInput (tested encoding)	0c72673052df00fa8cc5cfcf328e198b89500860
+dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	121	derive_ek_cert_hash	ekCertInput / cert_preimage_binding	0c72673052df00fa8cc5cfcf328e198b89500860
+dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	130	sign_ek_cert	sign(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
+dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	141	verify_ek_cert	verify(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	120	derive_ak_seed	KS1 Expand under PRK_d: akInfo_inj (C68); refinement unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	131	derive_device_ak_keypair	seed-to-AK call path; unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	146	derive_devid	devidInput / devid_preimage_binding	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	167	derive_smaster	KS1 Expand under PRK_s0: snode_info_inj (C68), modeled in ks1_forge_256f (C69), vectors executed by KeyScheduleChecks; refinement unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
+dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	19	binding_digest	identityBindingInput / identity_preimage_binding	0aa0f212cfa0c7a82277da2d1df5b1e9366c3462
+dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	33	verify_kyber_identity_binding	key width + verify; tested by existing suite, not proved	0aa0f212cfa0c7a82277da2d1df5b1e9366c3462
+dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	184	setup_signing_digest	domainInput + opaque CCB; unproved CCB refinement	68f73b32f99648205dec063362f75479f8de997e
+dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	202	precommit_signing_digest	domainInput + opaque CCB; unproved CCB refinement	68f73b32f99648205dec063362f75479f8de997e
+dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	217	fulfillment_signing_digest	domainInput + opaque CCB; unproved CCB refinement	68f73b32f99648205dec063362f75479f8de997e
+dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	250	resolution_claim_signing_digest	WrapperInjective.lean: resolution_claim_signing_injective (claim CCB, alg, key, AttA)	68f73b32f99648205dec063362f75479f8de997e
+dsm_client/deterministic_state_machine/dsm/src/economic/claim.rs	243	signing_digest	root claim canonical signing digest; unproved	ccbdd539736fde2955f218de0a258681bb076929
+dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	166	sign_economic_root_claim	claim auth + key binding; unproved	fbee505369d0854e3874e15bf89fc1a3a1f7c472
+dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	72	substrate_signing_digest	substrate-bound digest; unproved	2044d5bba745f4c77676bfd63ea0c5cff005ca75
+dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2246	signing_bytes	operation-specific canonical signing bytes; unproved	b9c9228d1e437a4009b7d0c28c3fa68248190736
+dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	466	relationship_finalized_signing_target	finalized relationship digest; unproved	094a1954db4057a4943e4947ae64c64526542ee9
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	809	process_envelope_v3	JNI → ingress; unproved	88b9dd1721a73a74cfa0de3eeb0dafda30ea9cc2
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	212	dispatch_envelope_via_ingress	ingress dispatch; unproved	88b9dd1721a73a74cfa0de3eeb0dafda30ea9cc2
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	1059	Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3	JNI byte-array and unwind boundary; unproved	88b9dd1721a73a74cfa0de3eeb0dafda30ea9cc2
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/core_bridge_adapters.rs	100	install_app_router_adapter	router installation; unproved	e8c13660a518419c200f790a980030300b4528ee
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	46	signing_digest	WrapperInjective.lean: connect_signing_injective / signing_domain_separation	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	51	sign_own	AK sphincs_sign on signing_digest; unproved	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	60	verify	sphincs_verify on signing_digest; unproved	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	WrapperInjective.lean: escrow_statement_injective / signing_domain_separation	adc276ecc5cda273c5ae04c6719a995ff5c9e633
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	adc276ecc5cda273c5ae04c6719a995ff5c9e633
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	adc276ecc5cda273c5ae04c6719a995ff5c9e633
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_flow.rs	1	module boundary	unproved	e1869050a708c6184bbfe0c9e9d24485ff0a038f
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	ec9f14def64cbc800f2989b56ca571a8108c67b1
+crates/dsm-anchor-pico/src/main.rs	1	module boundary	unproved	fb0687d62f305afa7651ddf9cae981350853d91b
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	1	module boundary	unproved	d51fe36d683ca1af868b16d1ebdf65706111cae7

@@ -92,6 +92,18 @@ pub fn expand(prk: &[u8; 32], info: &[u8], length: usize) -> Vec<u8> {
     okm
 }
 
+/// HKDF-Expand per RFC 5869 §2.3 for exactly one hash length (L = 32): the
+/// output is the first block, `T(1) = HMAC(PRK, info ‖ 0x01)`, which is what
+/// `expand(prk, info, 32)` returns.
+pub fn expand32(prk: &[u8; 32], info: &[u8]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(info.len() + 1);
+    buf.extend_from_slice(info);
+    buf.push(1u8);
+    let t = hmac_blake3(prk, &buf);
+    zeroize::Zeroize::zeroize(&mut buf);
+    t
+}
+
 /// Convenience: combined Extract + Expand returning `length` bytes.
 pub fn extract_and_expand(salt: &[u8], ikm: &[u8], info: &[u8], length: usize) -> Vec<u8> {
     let prk = extract(salt, ikm);
@@ -101,6 +113,17 @@ pub fn extract_and_expand(salt: &[u8], ikm: &[u8], info: &[u8], length: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand32_is_the_first_block_of_expand() {
+        let prk = extract(b"DSM/dev\0", b"some-input-keying-material");
+        for info in [&b""[..], &b"label\0"[..], &b"label\0fields"[..]] {
+            assert_eq!(
+                expand32(&prk, info).as_slice(),
+                expand(&prk, info, 32).as_slice()
+            );
+        }
+    }
 
     #[test]
     fn extract_is_deterministic() {

@@ -84,10 +84,10 @@ pub fn create_recovery_capsule(
     smt_root: &[u8],
     counterparty_tips: HashMap<String, (u64, Vec<u8>)>, // counterparty_id -> (height, head_hash)
     rollup: &ReceiptRollup,
-    mnemonic: &str,
+    wallet_seed: &[u8],
     counter: u64,
 ) -> Result<EncryptedCapsule, DsmError> {
-    capsule::create_encrypted_capsule(smt_root, counterparty_tips, rollup, mnemonic, counter)
+    capsule::create_encrypted_capsule(smt_root, counterparty_tips, rollup, wallet_seed, counter)
 }
 
 /// Create an encrypted recovery capsule using a pre-derived recovery key.
@@ -125,9 +125,9 @@ pub fn create_recovery_capsule_with_binding(
 /// Decrypt and verify a recovery capsule from NFC ring
 pub fn decrypt_recovery_capsule(
     encrypted_capsule: &EncryptedCapsule,
-    mnemonic: &str,
+    wallet_seed: &[u8],
 ) -> Result<RecoveryCapsule, DsmError> {
-    capsule::decrypt_capsule(encrypted_capsule, mnemonic)
+    capsule::decrypt_capsule(encrypted_capsule, wallet_seed)
 }
 
 /// Create tombstone receipt to invalidate old device binding
@@ -225,12 +225,12 @@ mod tests {
             &smt_root,
             counterparty_tips.clone(),
             &rollup,
-            mnemonic,
+            mnemonic.as_bytes(),
             counter,
         )?;
 
         // Decrypt capsule
-        let decrypted = decrypt_recovery_capsule(&encrypted, mnemonic)?;
+        let decrypted = decrypt_recovery_capsule(&encrypted, mnemonic.as_bytes())?;
 
         // Verify contents
         assert_eq!(decrypted.smt_root, smt_root);

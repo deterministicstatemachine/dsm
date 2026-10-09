@@ -9,5 +9,6 @@ pub mod directory;
 pub mod genesis;
 pub mod genesis_v2;
 pub mod genesis_v3;
+pub mod key_schedule;
 
 pub use crate::core::identity::genesis::GenesisState;
