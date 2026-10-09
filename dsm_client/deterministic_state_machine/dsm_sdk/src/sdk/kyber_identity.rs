@@ -18,31 +18,17 @@
 //! persisting the Kyber key, closing any key-substitution path. The ~29 KB
 //! SPHINCS+ signature rides in the registry / device-info record, never the QR.
 //!
-//! The Kyber SECRET key is never read, transmitted, or reconstructed here.
+//! The Kyber SECRET key is never transmitted or persisted here. It is also
+//! never read from storage — the one place a secret exists in this module is
+//! the cold-cache recovery in [`build_local_kyber_identity_binding`], which
+//! re-derives the keypair solely to take its public half and drops the secret
+//! at the end of that expression.
 
-use dsm::crypto::{blake3::domain_hash, kyber, sphincs};
+use dsm::bilateral::identity_binding::binding_digest;
+use dsm::crypto::{kyber, sphincs};
 use dsm::types::error::DsmError;
 
 use crate::sdk::app_state::AppState;
-
-/// Domain tag binding an ML-KEM public key to a device identity + genesis.
-pub const KYBER_IDENTITY_BINDING_TAG: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::tagged_domain!(b"DSM/kyber-identity-binding");
-
-/// Canonical binding digest over `device_id || genesis_hash || kyber_pubkey`,
-/// domain-separated by [`KYBER_IDENTITY_BINDING_TAG`]. This is the message the
-/// device AK signs and a verifier re-derives.
-pub(crate) fn binding_digest(
-    device_id: &[u8; 32],
-    genesis_hash: &[u8; 32],
-    kyber_pubkey: &[u8],
-) -> [u8; 32] {
-    let mut preimage = Vec::with_capacity(64 + kyber_pubkey.len());
-    preimage.extend_from_slice(device_id);
-    preimage.extend_from_slice(genesis_hash);
-    preimage.extend_from_slice(kyber_pubkey);
-    *domain_hash(KYBER_IDENTITY_BINDING_TAG, &preimage).as_bytes()
-}
 
 fn as_array_32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
     <[u8; 32]>::try_from(bytes).map_err(|_| {
@@ -52,9 +38,32 @@ fn as_array_32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
 
 /// Build this device's Kyber identity binding for registry publication.
 /// Returns `(kyber_public_key, binding_sig)`. Fails closed when the wallet is
-/// locked (no AK secret) or the local Kyber public key is uninitialised or
-/// malformed. The Kyber secret key is never touched.
+/// locked (no AK secret) or the canonical Kyber key material is unavailable.
+///
+/// The process-global `bridge::LOCAL_KYBER_PUBKEY` is a CACHE, never a
+/// precondition. It is installed at router build, which on a first-run device
+/// happens BEFORE genesis exists — so `WalletSDK::new()` has no genesis state,
+/// the install is skipped, and the slot stays cold for the rest of that
+/// session. Genesis then publishes its device tree and immediately tries to
+/// publish the identity, which read the cold slot and failed with "local Kyber
+/// public key not installed". The device parked in `PublicationPending` with
+/// only the STARTUP retry able to clear it: every first-run device required an
+/// app restart to finish publishing, and a real user just watched "PUBLISHING
+/// IDENTITY…" forever.
+///
+/// So a cold slot is recovered here from the canonical source rather than
+/// refused: `current_smaster()` + `DSM/kyber\0`, the SAME derivation
+/// `WalletSDK::init_device_keys` uses to populate `{device_id}_device_kyber_pk`,
+/// so the recovered key is byte-identical to the keystore's. It is NOT the
+/// random pre-genesis shell keypair that path falls back to — if the canonical
+/// material is genuinely unavailable (no seed, no genesis, wallet locked) this
+/// fails closed. Nothing is synthesised or substituted.
+///
+/// The Kyber SECRET key is never transmitted or persisted here; the recovery
+/// path re-derives the keypair only to take its public half, and drops the
+/// secret immediately.
 pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    let kyber_pk = local_kyber_public_key()?;
     let device_id = as_array_32(
         &AppState::get_device_id()
             .ok_or_else(|| DsmError::InvalidState("device_id not initialised".into()))?,
@@ -65,9 +74,31 @@ pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmErr
             .ok_or_else(|| DsmError::InvalidState("genesis_hash not initialised".into()))?,
         "genesis_hash",
     )?;
-    let kyber_pk = crate::bridge::local_kyber_pubkey()
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| DsmError::InvalidState("local Kyber public key not installed".into()))?;
+    let ak_sk = crate::sdk::signing_authority::current_secret_key()?;
+    let digest = binding_digest(&device_id, &genesis, &kyber_pk);
+    let sig = sphincs::sphincs_sign(&ak_sk, &digest)?;
+    Ok((kyber_pk, sig))
+}
+
+/// This device's canonical Kyber public key: the cached slot, or — when it is
+/// cold — the key re-derived from `Smaster` under `DSM/kyber\0`, the same
+/// derivation `WalletSDK::init_device_keys` uses, installed into the slot.
+/// Fails closed when the canonical material is unavailable (no seed, no
+/// genesis, wallet locked). The secret half is dropped where it is derived.
+pub fn local_kyber_public_key() -> Result<Vec<u8>, DsmError> {
+    let kyber_pk = match crate::bridge::local_kyber_pubkey().filter(|k| !k.is_empty()) {
+        Some(pk) => pk,
+        None => {
+            let smaster = crate::init::current_smaster()?;
+            let (pk, ..) = kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?;
+            log::info!(
+                "[kyber_identity] local Kyber public key cache was cold; recovered the canonical \
+                 key from Smaster and installed it"
+            );
+            crate::bridge::install_local_kyber_pubkey(pk.clone());
+            pk
+        }
+    };
     if kyber_pk.len() != kyber::public_key_bytes() {
         return Err(DsmError::invalid_parameter(format!(
             "local Kyber public key must be {} bytes (ML-KEM-768), got {}",
@@ -75,58 +106,90 @@ pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmErr
             kyber_pk.len()
         )));
     }
-    let ak_sk = crate::sdk::signing_authority::current_secret_key()?;
-    let digest = binding_digest(&device_id, &genesis, &kyber_pk);
-    let sig = sphincs::sphincs_sign(&ak_sk, &digest)?;
-    Ok((kyber_pk, sig))
-}
-
-/// Verify a peer's Kyber identity binding before persisting it to a contact.
-///
-/// `signing_public_key` is the peer's AK public key, already trusted via the
-/// registry attestation that binds it to `device_id` + `genesis`. Fail-closed
-/// on missing, malformed-length, or unbound (substituted/mismatched) material —
-/// there is no fallback that would accept an unbound Kyber key.
-pub fn verify_kyber_identity_binding(
-    device_id: &[u8; 32],
-    genesis_hash: &[u8; 32],
-    kyber_pubkey: &[u8],
-    binding_sig: &[u8],
-    signing_public_key: &[u8],
-) -> Result<(), DsmError> {
-    if kyber_pubkey.is_empty() || binding_sig.is_empty() {
-        return Err(DsmError::invalid_operation(
-            "kyber identity binding: missing Kyber public key or binding signature (fail-closed)",
-        ));
-    }
-    if kyber_pubkey.len() != kyber::public_key_bytes() {
-        return Err(DsmError::invalid_operation(format!(
-            "kyber identity binding: Kyber public key must be {} bytes (ML-KEM-768), got {}",
-            kyber::public_key_bytes(),
-            kyber_pubkey.len()
-        )));
-    }
-    let digest = binding_digest(device_id, genesis_hash, kyber_pubkey);
-    let ok = sphincs::sphincs_verify(signing_public_key, &digest, binding_sig)?;
-    if !ok {
-        return Err(DsmError::invalid_operation(
-            "kyber identity binding: signature does not bind this Kyber key to (device_id, genesis) \
-             under the peer's AK — rejecting (possible substitution/equivocation)",
-        ));
-    }
-    Ok(())
+    Ok(kyber_pk)
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use dsm::bilateral::identity_binding::verify_kyber_identity_binding;
+
+    /// THE FIRST-RUN CONDITION, REPRODUCED. On a fresh device the router is
+    /// built before genesis exists, so `WalletSDK::new()` cannot hand over a
+    /// Kyber key and `bridge::LOCAL_KYBER_PUBKEY` stays cold for that whole
+    /// session. Genesis then commits and immediately builds the identity
+    /// binding to publish. Before the fix that read the cold slot and failed
+    /// with "local Kyber public key not installed", parking every first-run
+    /// device in `PublicationPending` until the app was RESTARTED.
+    ///
+    /// This test holds the cache cold and asserts the binding still builds, in
+    /// the same process, with no router rebuild and no restart — and that the
+    /// key it recovered is the canonical one, not a fresh random keypair.
+    #[test]
+    #[serial_test::serial]
+    fn binding_builds_with_a_cold_cache_and_recovers_the_canonical_key() {
+        let identity = crate::economic_fixtures::local_device(0x33).0;
+
+        // What the wallet keystore WOULD hold: the same Smaster derivation
+        // `WalletSDK::init_device_keys` uses. This is the canonical answer.
+        let smaster = crate::init::current_smaster().expect("smaster from seed + genesis");
+        let canonical_pk = kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")
+            .expect("canonical kyber derivation")
+            .0;
+
+        // Cold cache: empty is treated as absent by the getter's filter.
+        crate::bridge::install_local_kyber_pubkey(Vec::new());
+        assert!(
+            crate::bridge::local_kyber_pubkey()
+                .filter(|k| !k.is_empty())
+                .is_none(),
+            "precondition: the cache must be cold"
+        );
+
+        let (pk, sig) = build_local_kyber_identity_binding()
+            .expect("a cold cache must NOT block identity binding");
+
+        assert_eq!(
+            pk, canonical_pk,
+            "the recovered key must be the canonical Smaster-derived one, never a fresh keypair"
+        );
+        assert_eq!(
+            crate::bridge::local_kyber_pubkey().expect("cache warmed"),
+            canonical_pk,
+            "the fallback must install exactly the canonical key as the cache"
+        );
+
+        // The binding actually verifies against the device's own AK — proving
+        // we produced a publishable artifact, not merely a non-error.
+        let ak_pk = crate::sdk::signing_authority::current_public_key().expect("AK public key");
+        verify_kyber_identity_binding(&identity.device_id, &identity.genesis, &pk, &sig, &ak_pk)
+            .expect("the binding built from a cold cache must verify");
+    }
+
+    /// The honest residual: recovery is not a licence to invent. With no wallet
+    /// seed cached there is no canonical Kyber material, and the binding must
+    /// fail closed rather than fall back to the random pre-genesis shell
+    /// keypair `init_device_keys` uses for its own unpublished shell.
+    #[test]
+    #[serial_test::serial]
+    fn a_cold_cache_without_canonical_material_fails_closed() {
+        crate::economic_fixtures::local_device(0x55);
+        // The wallet locks: its seed leaves RAM.
+        crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
+        crate::bridge::install_local_kyber_pubkey(Vec::new());
+
+        let err = build_local_kyber_identity_binding()
+            .expect_err("no canonical material must fail closed, not fabricate a key");
+        let msg = format!("{err:?}");
+        assert!(!msg.is_empty(), "the refusal must carry a reason: {msg}");
+    }
 
     /// B4 CACHE TRACE, second half: verification is RECOMPUTED from the binding
     /// every call, never read from a stored verdict.
     ///
-    /// The inventory found no acceptance cache anywhere —
-    /// `verify_kyber_identity_binding` has zero production callers, the storage
+    /// There is no acceptance cache anywhere — the offline protocol verifies
+    /// the binding on every message (`dsm::bilateral::offline`), the storage
     /// node persists `kyber_binding_sig` without checking it, `contacts` caches
     /// the peer KEY not a verdict, and there is no Android reference. This test
     /// pins the remaining half: the verifier is a pure function of its
@@ -150,9 +213,9 @@ mod tests {
         let sig = kp.sign(&digest).expect("sign binding");
 
         // Accepted, twice — a memoizing verifier would also pass this.
-        for _ in 0..2 {
+        for attempt in 0..2 {
             verify_kyber_identity_binding(&device_id, &genesis, &kyber_pk, &sig, kp.public_key())
-                .expect("a valid binding must verify");
+                .unwrap_or_else(|e| panic!("attempt {attempt}: a valid binding must verify: {e}"));
         }
 
         // Same device identity, DIFFERENT Kyber key: the signature no longer

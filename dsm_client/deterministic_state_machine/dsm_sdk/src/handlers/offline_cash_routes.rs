@@ -43,7 +43,18 @@ impl AppRouterImpl {
                 ))
             }
         };
-        if req.amount == 0 {
+        // The amount as the user typed it, scaled by the token's decimals here:
+        // the parser the sends use, so one rule owns the unit in both directions.
+        let decimals = match super::wallet_routes::token_decimals(&req.token_id) {
+            Ok(d) => d,
+            Err(e) => return err(format!("wallet.{verb}: {e}")),
+        };
+        let amount =
+            match super::wallet_routes::parse_display_amount_to_base_units(&req.amount, decimals) {
+                Ok(a) => a,
+                Err(e) => return err(format!("wallet.{verb}: invalid amount: {e}")),
+            };
+        if amount == 0 {
             return err(format!("wallet.{verb}: amount must be > 0"));
         }
 
@@ -68,9 +79,9 @@ impl AppRouterImpl {
 
         // Apply the conserved regime shift (fail-closed persist-before-install in CoreSDK).
         let outcome = if is_load {
-            self.core_sdk.load_offline_cash(bundle, asset, req.amount)
+            self.core_sdk.load_offline_cash(bundle, asset, amount)
         } else {
-            self.core_sdk.unload_offline_cash(bundle, asset, req.amount)
+            self.core_sdk.unload_offline_cash(bundle, asset, amount)
         };
         let outcome = match outcome {
             Ok(o) => o,
@@ -78,19 +89,28 @@ impl AppRouterImpl {
         };
 
         let online_balance = self.core_sdk.get_device_balance(&asset);
+        // Rendered here, in the token's units: the wallet prints these and
+        // computes nothing.
+        let render = |base_units: u64| {
+            super::wallet_routes::format_base_units_for_display(base_units, decimals)
+        };
+        let online_display = render(online_balance);
+        let allocation_display = render(outcome.amount);
         let resp = generated::OfflineCashResponse {
             success: true,
             online_balance,
             allocation_balance: outcome.amount,
             device_root: outcome.new_root.to_vec(),
             message: format!(
-                "{} {} of {} — offline allocation now {}, online {}",
+                "{} {} {} — offline allocation now {}, online {}",
                 if is_load { "loaded" } else { "unloaded" },
-                req.amount,
+                render(amount),
                 req.token_id,
-                outcome.amount,
-                online_balance,
+                allocation_display,
+                online_display,
             ),
+            online_display,
+            allocation_display,
         };
         pack_envelope_ok(generated::envelope::Payload::OfflineCashResponse(resp))
     }
@@ -99,114 +119,49 @@ impl AppRouterImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init::SdkConfig;
     use crate::handlers::app_router_impl::AppRouterImpl;
+    use crate::init::SdkConfig;
 
-    /// Minimal process-global identity + storage, as every route test needs.
-    /// Deliberately NOT installing an anchor appliance factory — that absence IS the
-    /// condition under test.
-    fn install_identity() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-            std::env::remove_var("DSM_ENV_CONFIG_PATH");
-        }
-        crate::storage::client_db::reset_database_for_tests();
-        let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
-            "./.dsm_testdata_offline_cash_gate",
-        ));
-        crate::reset_sdk_context_for_testing();
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let (device_id, genesis_hash, binding_key) =
-            (vec![0x0Au8; 32], vec![0x0Bu8; 32], vec![0x0Cu8; 32]);
-        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("derive signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        crate::storage::client_db::init_database().expect("init db");
-    }
-
-    fn router() -> AppRouterImpl {
+    /// A router on a device created as wallet creation creates it. No anchor
+    /// appliance is attached — no transport to one exists — and that absence
+    /// is the condition under test.
+    fn router_on_a_device() -> AppRouterImpl {
+        crate::economic_fixtures::local_device(0x0A);
         AppRouterImpl::new(SdkConfig {
             node_id: "offline-cash-gate-test".to_string(),
-            storage_endpoints: vec![],
+            storage_endpoints: Vec::new(),
             enable_offline: true,
         })
         .expect("router init")
     }
 
-    fn pack(body: Vec<u8>) -> Vec<u8> {
-        generated::ArgPack {
-            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
-            codec: generated::Codec::Proto as i32,
-            body,
-        }
-        .encode_to_vec()
+    async fn invoke(router: &AppRouterImpl, method: &str, amount: &str) -> AppResult {
+        router
+            .handle_offline_cash_invoke(AppInvoke {
+                method: method.to_string(),
+                args: generated::ArgPack {
+                    codec: generated::Codec::Proto as i32,
+                    body: generated::OfflineCashRequest {
+                        token_id: "ERA".to_string(),
+                        amount: amount.to_string(),
+                    }
+                    .encode_to_vec(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            })
+            .await
     }
 
-    /// Install a factory that FAILS to attach — a chip that is absent or unreadable.
-    ///
-    /// This is the only way to reach the entry gate from a test build. With no factory
-    /// installed, `anchor_appliance_status` falls back to `hardware_appliance_or_fail`,
-    /// whose `#[cfg(test)]` arm returns the in-process mock and reports connected. The
-    /// fail-closed `#[cfg(not(test))]` arm that real device builds get is unreachable
-    /// here by construction, so a failing factory stands in for "no chip".
-    /// Restores on drop, panic included — the factory is process-global, and leaving one
-    /// installed silently changes anchor attachment for every later test.
-    struct FailingApplianceFactory;
-
-    impl FailingApplianceFactory {
-        fn install() -> Self {
-            crate::bridge::install_anchor_appliance_factory(std::sync::Arc::new(|| {
-                Err(dsm::types::error::DsmError::invalid_operation(
-                    "test: no anchor appliance attached",
-                ))
-            }));
-            Self
-        }
-    }
-
-    impl Drop for FailingApplianceFactory {
-        fn drop(&mut self) {
-            crate::bridge::clear_anchor_appliance_factory_for_tests();
-        }
-    }
-
-    /// GATE 1 — REGIME ENTRY. Offline cash is the appliance-gated regime: with no anchor
-    /// appliance reachable, no allocation can be created, so no bearer spend can ever
-    /// have anything to draw from.
-    ///
-    /// This is one of the three live gates carrying offline-bearer authority after the
-    /// vestigial `offline_bearer_attestation` flag was deleted. The flag could only
-    /// remember a past belief; this requires the appliance to answer NOW, on this
-    /// attempt. Delete the `!snap.connected` refusal and this test goes red.
-    #[test]
+    /// GATE 1 — REGIME ENTRY. Offline cash is the appliance-gated regime: with
+    /// no anchor appliance reachable, no allocation can be created, so no
+    /// bearer spend can ever have anything to draw from. Delete the
+    /// `!snap.connected` refusal and this test goes red.
+    #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
-    fn load_offline_refuses_when_the_anchor_appliance_cannot_be_reached() {
-        install_identity();
-        let _factory = FailingApplianceFactory::install();
-        let r = router();
-        let req = generated::OfflineCashRequest {
-            token_id: "ERA".to_string(),
-            amount: 10,
-        };
-
-        let res = futures::executor::block_on(r.handle_offline_cash_invoke(AppInvoke {
-            method: "wallet.loadOffline".to_string(),
-            args: pack(req.encode_to_vec()),
-        }));
-
+    async fn load_offline_refuses_when_the_anchor_appliance_cannot_be_reached() {
+        let r = router_on_a_device();
+        let res = invoke(&r, "wallet.loadOffline", "10").await;
         assert!(!res.success, "load must refuse when no appliance answers");
         let msg = res.error_message.unwrap_or_default();
         assert!(
@@ -215,28 +170,29 @@ mod tests {
         );
     }
 
-    /// The same gate gates the reverse direction: unload also crosses the regime
-    /// boundary and is bound to the enrolled bundle B.
-    #[test]
+    /// The same gate gates the reverse direction: unload also crosses the
+    /// regime boundary and is bound to the enrolled bundle B.
+    #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
-    fn unload_offline_refuses_when_the_anchor_appliance_cannot_be_reached() {
-        install_identity();
-        let _factory = FailingApplianceFactory::install();
-        let r = router();
-        let req = generated::OfflineCashRequest {
-            token_id: "ERA".to_string(),
-            amount: 10,
-        };
-
-        let res = futures::executor::block_on(r.handle_offline_cash_invoke(AppInvoke {
-            method: "wallet.unloadOffline".to_string(),
-            args: pack(req.encode_to_vec()),
-        }));
-
+    async fn unload_offline_refuses_when_the_anchor_appliance_cannot_be_reached() {
+        let r = router_on_a_device();
+        let res = invoke(&r, "wallet.unloadOffline", "10").await;
         assert!(!res.success);
         assert!(res
             .error_message
             .unwrap_or_default()
             .contains("connect your anchor device"));
+    }
+
+    /// The amount is the user's decimal text, scaled by Rust: text that is not
+    /// an amount is refused as one, before any gate that needs the appliance.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn an_amount_that_is_not_a_number_is_refused_as_an_amount() {
+        let r = router_on_a_device();
+        let res = invoke(&r, "wallet.loadOffline", "ten").await;
+        assert!(!res.success);
+        let msg = res.error_message.unwrap_or_default();
+        assert!(msg.contains("invalid amount"), "{msg}");
     }
 }

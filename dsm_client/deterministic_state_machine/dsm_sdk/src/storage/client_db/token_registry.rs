@@ -24,11 +24,10 @@
 //! be a second authority, and a restored snapshot could disagree with the
 //! canonical history — enforcing a supply cap against the wrong number.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// A token as recorded at creation time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,41 +37,48 @@ pub struct TokenRegistryRow {
     pub ticker: String,
     pub alias: String,
     pub decimals: u32,
-    /// Big-endian u128. `0` together with the policy's unlimited flag means
-    /// "uncapped"; the policy bytes remain the authority on that distinction.
-    pub max_supply: u128,
-    pub owner_device_id: [u8; 32],
+    /// The whole supply the policy fixes at creation (SoFi §51).
+    pub genesis_supply: u128,
+    /// The device the policy names as the token's creator (SoFi Amendment S8).
+    pub creator_device_id: [u8; 32],
+}
+
+/// A column that must hold exactly `N` bytes, or the row is refused.
+fn fixed<const N: usize>(r: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<[u8; N]> {
+    let bytes: Vec<u8> = r.get(index)?;
+    let len = bytes.len();
+    <[u8; N]>::try_from(bytes).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::other(format!(
+                "token_registry column {index} holds {len} bytes, not {N}"
+            ))),
+        )
+    })
 }
 
 fn row_to_registry(r: &rusqlite::Row<'_>) -> rusqlite::Result<TokenRegistryRow> {
-    let commit: Vec<u8> = r.get(1)?;
-    let owner: Vec<u8> = r.get(6)?;
-    let max_supply_be: Vec<u8> = r.get(5)?;
-    let mut commit32 = [0u8; 32];
-    let mut owner32 = [0u8; 32];
-    if commit.len() == 32 {
-        commit32.copy_from_slice(&commit);
-    }
-    if owner.len() == 32 {
-        owner32.copy_from_slice(&owner);
-    }
-    let mut max_supply = 0u128;
-    for b in &max_supply_be {
-        max_supply = (max_supply << 8) | (*b as u128);
-    }
+    let decimals: i64 = r.get(4)?;
     Ok(TokenRegistryRow {
         token_id: r.get(0)?,
-        policy_commit: commit32,
+        policy_commit: fixed::<32>(r, 1)?,
         ticker: r.get(2)?,
         alias: r.get(3)?,
-        decimals: r.get::<_, i64>(4)? as u32,
-        max_supply,
-        owner_device_id: owner32,
+        decimals: u32::try_from(decimals).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Integer,
+                Box::new(e),
+            )
+        })?,
+        genesis_supply: u128::from_be_bytes(fixed::<16>(r, 5)?),
+        creator_device_id: fixed::<32>(r, 6)?,
     })
 }
 
 const SELECT_COLS: &str =
-    "token_id, policy_commit, ticker, alias, decimals, max_supply, owner_device_id";
+    "token_id, policy_commit, ticker, alias, decimals, genesis_supply, creator_device_id";
 
 // ── policies ────────────────────────────────────────────────────────────────
 
@@ -86,11 +92,12 @@ pub fn upsert_policy_with_conn(
     policy_commit: &[u8; 32],
     policy_bytes: &[u8],
 ) -> Result<()> {
+    require_policy_hashes_to(policy_commit, policy_bytes)?;
     conn.execute(
-        "INSERT INTO token_policies(policy_commit, policy_bytes, created_at)
-         VALUES (?1, ?2, ?3)
+        "INSERT INTO token_policies(policy_commit, policy_bytes)
+         VALUES (?1, ?2)
          ON CONFLICT(policy_commit) DO NOTHING",
-        params![policy_commit.as_slice(), policy_bytes, tick() as i64],
+        params![policy_commit.as_slice(), policy_bytes],
     )?;
     Ok(())
 }
@@ -101,10 +108,23 @@ pub fn upsert_policy(policy_commit: &[u8; 32], policy_bytes: &[u8]) -> Result<()
     upsert_policy_with_conn(&conn, policy_commit, policy_bytes)
 }
 
-/// Load policy bytes and verify they still hash to the commit they are stored
-/// under. A row that fails this check is corrupt, so it is treated as absent
-/// rather than returned — the anchor is the definition of the policy, and
-/// bytes that do not match it are not that policy.
+/// Policy bytes are the policy their commit names only if they hash to it.
+fn require_policy_hashes_to(policy_commit: &[u8; 32], policy_bytes: &[u8]) -> Result<()> {
+    let derived = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_POLICY,
+        policy_bytes,
+    );
+    if derived != *policy_commit {
+        return Err(anyhow!(
+            "policy bytes do not hash to the commit they are stored under"
+        ));
+    }
+    Ok(())
+}
+
+/// Load the policy stored under `policy_commit`, or `None` when none is.
+/// Stored bytes that do not hash to their commit are a corrupt table and an
+/// error — the anchor is the definition of the policy.
 pub fn load_policy_verified(policy_commit: &[u8; 32]) -> Result<Option<Vec<u8>>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -119,19 +139,12 @@ pub fn load_policy_verified(policy_commit: &[u8; 32]) -> Result<Option<Vec<u8>>>
     let Some(bytes) = bytes else {
         return Ok(None);
     };
-    let derived =
-        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &bytes);
-    if derived != *policy_commit {
-        log::error!(
-            "[token_registry] stored policy does not hash to its own commit — treating as absent"
-        );
-        return Ok(None);
-    }
+    require_policy_hashes_to(policy_commit, &bytes)?;
     Ok(Some(bytes))
 }
 
-/// Every stored policy, verified. Used to rehydrate the in-memory policy
-/// system at startup.
+/// Every stored policy, verified; a corrupt row is an error. Used to
+/// rehydrate the in-memory policy system at startup.
 pub fn all_policies() -> Result<Vec<([u8; 32], Vec<u8>)>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -145,17 +158,11 @@ pub fn all_policies() -> Result<Vec<([u8; 32], Vec<u8>)>> {
     let mut out = Vec::new();
     for row in rows {
         let (c, b) = row?;
-        if c.len() != 32 {
-            continue;
-        }
-        let mut commit = [0u8; 32];
-        commit.copy_from_slice(&c);
-        let derived =
-            dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &b);
-        if derived != commit {
-            log::error!("[token_registry] skipping policy whose bytes do not match its commit");
-            continue;
-        }
+        let commit: [u8; 32] = c
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("a stored policy commit is {} bytes, expected 32", c.len()))?;
+        require_policy_hashes_to(&commit, &b)?;
         out.push((commit, b));
     }
     Ok(out)
@@ -173,18 +180,17 @@ pub fn all_policies() -> Result<Vec<([u8; 32], Vec<u8>)>> {
 pub fn insert_token_with_conn(conn: &Connection, row: &TokenRegistryRow) -> Result<()> {
     conn.execute(
         "INSERT INTO token_registry(
-             token_id, policy_commit, ticker, alias, decimals, max_supply,
-             owner_device_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             token_id, policy_commit, ticker, alias, decimals, genesis_supply,
+             creator_device_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             row.token_id,
             row.policy_commit.as_slice(),
             row.ticker,
             row.alias,
             row.decimals as i64,
-            row.max_supply.to_be_bytes().to_vec(),
-            row.owner_device_id.as_slice(),
-            tick() as i64,
+            row.genesis_supply.to_be_bytes().to_vec(),
+            row.creator_device_id.as_slice(),
         ],
     )?;
     Ok(())
@@ -262,7 +268,7 @@ pub fn all_tokens() -> Result<Vec<TokenRegistryRow>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SELECT_COLS} FROM token_registry ORDER BY created_at"
+        "SELECT {SELECT_COLS} FROM token_registry ORDER BY rowid"
     ))?;
     let rows = stmt.query_map([], row_to_registry)?;
     let mut out = Vec::new();
@@ -293,8 +299,8 @@ mod tests {
             ticker: ticker.to_string(),
             alias: "Test Token".into(),
             decimals: 8,
-            max_supply: 1_000_000,
-            owner_device_id: [0xAA; 32],
+            genesis_supply: 1_000_000,
+            creator_device_id: [0xAA; 32],
         }
     }
 
@@ -313,10 +319,10 @@ mod tests {
     }
 
     /// The table is self-verifying: bytes that no longer hash to their key are
-    /// not that policy, so they must read as absent rather than be returned.
+    /// not that policy, and reading them is an error, never an absent policy.
     #[test]
     #[serial_test::serial]
-    fn tampered_policy_bytes_read_as_absent() {
+    fn tampered_policy_bytes_are_an_error() {
         reset_database_for_tests();
         let bytes = policy_bytes(0x22);
         let commit = commit_of(&bytes);
@@ -333,14 +339,17 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(
-            load_policy_verified(&commit).unwrap(),
-            None,
+        assert!(
+            load_policy_verified(&commit).is_err(),
             "bytes that do not hash to the commit are not that policy"
         );
         assert!(
-            all_policies().unwrap().is_empty(),
+            all_policies().is_err(),
             "rehydration must not resurrect a corrupt policy"
+        );
+        assert!(
+            upsert_policy(&commit, &[0xEEu8; 48]).is_err(),
+            "bytes that do not hash to the commit are refused on the way in"
         );
     }
 

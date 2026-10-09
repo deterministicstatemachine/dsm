@@ -111,8 +111,7 @@ impl DLVManager {
         let fulfillment_bytes = fm_proto.encode_to_vec();
 
         // Build the unsigned STATE-ONLY DlvCreate operation (the legacy
-        // value-bearing fields are deleted; funded vaults use
-        // DlvCreateFundedV2 through the route, never this manager).
+        // value-bearing fields are deleted).
         let operation = Operation::DlvCreate {
             vault_id: vault_id.to_vec(),
             creator_public_key: vault.creator_public_key.clone(),
@@ -319,18 +318,16 @@ impl Default for DLVManager {
 
 /// Tier 2 Foundation accessors used by the chunks #7 routed-unlock gate.
 ///
-/// The gate authenticates a trader's `RouteCommitHopV1.vault_state_anchor_seq`
+/// The gate authenticates a trader's claimed vault-state anchor sequence
 /// and `vault_state_reserves_digest` against the LOCAL vault — storage anchors
 /// are advertisement-and-discovery only, never the verification source.
 impl LimboVault {
     /// The canonical reserves digest for this vault, over reserves the CALLER
     /// supplies.
     ///
-    /// The vault no longer stores reserves — they are encumbered leaves in the
-    /// owner's device SMT, and a digest computed from a number inside the
-    /// condition would describe liquidity nobody holds. The caller reads the
-    /// authoritative amounts (from its own reserve leaves, or from a verified
-    /// `VaultReserveInclusionProofV1`) and passes them here.
+    /// The vault no longer stores reserves — a digest computed from a number
+    /// inside the condition would describe liquidity nobody holds. The caller
+    /// reads the authoritative amounts and passes them here.
     ///
     /// Returns `None` for non-AMM fulfillments — Tier 2 Foundation is AMM-only.
     /// Read-only accessor for the vault's AMM token_a (the

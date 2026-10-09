@@ -2,14 +2,12 @@
 //! Contact record persistence and BLE status management.
 
 use anyhow::{anyhow, Result};
-use log::{info, warn};
-use dsm::types::receipt_types::DeviceTreeAcceptanceCommitment;
+use log::info;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
 use super::types::ContactRecord;
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
-use crate::util::deterministic_time::tick;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservedRemoteTipSource {
@@ -39,79 +37,83 @@ impl ObservedRemoteTipSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedRemoteTipRecord {
     pub tip: [u8; 32],
-    pub updated_at: u64,
     pub source: ObservedRemoteTipSource,
 }
 
 pub fn store_contact(contact: &ContactRecord) -> Result<()> {
-    info!(
-        "Storing contact: {} (device_id {} bytes, public_key {} bytes)",
-        contact.alias,
-        contact.device_id.len(),
-        contact.public_key.len()
-    );
-
-    // TRUST BOUNDARY GUARD: Log warning if storing contact without public key.
-    // Contacts without public keys CANNOT be used for bilateral verification.
-    // For protocol-controlled actors (DLV, Faucet), use SystemPeerRecord instead.
-    if contact.public_key.is_empty() {
-        log::warn!(
-            "TRUST BOUNDARY: Storing contact \"{}\" with EMPTY public_key.  \
-                 This contact CANNOT be used for bilateral verification.  \
-                 Consider using SystemPeerRecord for protocol-controlled actors.",
-            contact.alias
-        );
+    // A contact is added from its self-proving directory entry, which carries
+    // its AK and its Kyber key, and starts at the relationship's h_0. A record
+    // without any of them is not a contact.
+    if contact.device_id.len() != 32 {
+        return Err(anyhow!(
+            "contact device_id is {} bytes, expected 32",
+            contact.device_id.len()
+        ));
     }
+    if contact.public_key.is_empty() {
+        return Err(anyhow!("contact {:?} has no signing key", contact.alias));
+    }
+    if contact.kyber_public_key.is_empty() {
+        return Err(anyhow!("contact {:?} has no Kyber key", contact.alias));
+    }
+    if contact.current_chain_tip.as_ref().map(Vec::len) != Some(32) {
+        return Err(anyhow!(
+            "contact {:?} has no 32-byte relationship tip",
+            contact.alias
+        ));
+    }
+    info!("Storing contact: {}", contact.alias);
 
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
+    // Adding a contact again pins nothing new: its genesis, AK and Kyber key
+    // are the ones first pinned, and its relationship state (tips, pairing
+    // state, the online-reconcile hold) is not the add's to reset.
+    let pinned: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = conn
+        .query_row(
+            "SELECT genesis_hash, public_key, kyber_public_key FROM contacts WHERE device_id = ?1",
+            params![contact.device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((genesis_hash, public_key, kyber_public_key)) = pinned {
+        if genesis_hash != contact.genesis_hash
+            || public_key != contact.public_key
+            || kyber_public_key != contact.kyber_public_key
+        {
+            return Err(anyhow!(
+                "contact {:?} is pinned to another genesis or key; a contact's pinned identity is \
+                 not replaced",
+                contact.alias
+            ));
+        }
+    }
     conn.execute(
         "INSERT INTO contacts (
             contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
-            added_at, verified, verification_proof, metadata, ble_address,
-            status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+            local_bilateral_chain_tip, verified, verification_proof, metadata, ble_address,
+            status, needs_online_reconcile
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8,?9,?10,?11,?12,?13)
         ON CONFLICT(device_id) DO UPDATE SET
             alias = excluded.alias,
-            genesis_hash = excluded.genesis_hash,
-            public_key = COALESCE(excluded.public_key, contacts.public_key),
-            kyber_public_key = COALESCE(excluded.kyber_public_key, contacts.kyber_public_key),
-            chain_tip = COALESCE(contacts.chain_tip, excluded.chain_tip),
-            added_at = contacts.added_at,
             verified = CASE
                 WHEN excluded.verified != 0 OR contacts.verified != 0 THEN 1
                 ELSE 0
             END,
             verification_proof = COALESCE(excluded.verification_proof, contacts.verification_proof),
             metadata = excluded.metadata,
-            ble_address = COALESCE(excluded.ble_address, contacts.ble_address),
-            status = excluded.status,
-            needs_online_reconcile = excluded.needs_online_reconcile,
-            last_seen_online_counter = excluded.last_seen_online_counter,
-            last_seen_ble_counter = excluded.last_seen_ble_counter",
+            ble_address = COALESCE(excluded.ble_address, contacts.ble_address)",
         params![
             contact.contact_id,
             contact.device_id,
             contact.alias,
             contact.genesis_hash,
-            if contact.public_key.is_empty() {
-                None
-            } else {
-                Some(&contact.public_key)
-            },
-            // Position 6: kyber_public_key. NULL when empty so legacy contacts
-            // (added before per-step EK signing was wired) can be upgraded
-            // later without overwriting a populated value.
-            if contact.kyber_public_key.is_empty() {
-                None
-            } else {
-                Some(&contact.kyber_public_key)
-            },
+            contact.public_key,
+            contact.kyber_public_key,
             contact.current_chain_tip.as_ref(),
-            contact.added_at as i64,
             if contact.verified { 1i32 } else { 0i32 },
             contact.verification_proof.as_deref(),
             meta_to_blob(&contact.metadata),
@@ -122,24 +124,51 @@ pub fn store_contact(contact: &ContactRecord) -> Result<()> {
             } else {
                 0i32
             },
-            contact.last_seen_online_counter as i64,
-            contact.last_seen_ble_counter as i64,
         ],
     )?;
 
     // Persist the canonical single-device R_G alongside the contact record.
-    if contact.device_id.len() == 32 {
-        let mut devid = [0u8; 32];
-        devid.copy_from_slice(&contact.device_id);
-        let r_g = dsm::common::device_tree::DeviceTree::single(devid).root();
-        conn.execute(
-            "UPDATE contacts SET device_tree_root = ?1 WHERE contact_id = ?2 AND device_tree_root IS NULL",
-            params![r_g.as_slice(), contact.contact_id],
-        )?;
-    }
+    let mut devid = [0u8; 32];
+    devid.copy_from_slice(&contact.device_id);
+    let r_g = dsm::common::device_tree::DeviceTree::single(devid).root();
+    conn.execute(
+        "UPDATE contacts SET device_tree_root = ?1 WHERE contact_id = ?2 AND device_tree_root IS NULL",
+        params![r_g.as_slice(), contact.contact_id],
+    )?;
 
     info!("Contact stored");
     Ok(())
+}
+
+/// The columns [`contact_from_row`] reads, in its order.
+const CONTACT_COLUMNS: &str = "contact_id, device_id, alias, genesis_hash, public_key, \
+     kyber_public_key, chain_tip, verified, verification_proof, metadata, ble_address, status, \
+     needs_online_reconcile, previous_chain_tip";
+
+/// A contact row read as stored: every column its type, the keys present,
+/// the metadata decoding. A row that does not read is an error, never a
+/// record with defaults in its place.
+fn contact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContactRecord> {
+    let meta_blob: Vec<u8> = row.get(9)?;
+    let metadata = meta_from_blob(&meta_blob).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Blob, e.into())
+    })?;
+    Ok(ContactRecord {
+        contact_id: row.get(0)?,
+        device_id: row.get(1)?,
+        alias: row.get(2)?,
+        genesis_hash: row.get(3)?,
+        public_key: row.get(4)?,
+        kyber_public_key: row.get(5)?,
+        current_chain_tip: row.get(6)?,
+        verified: row.get::<_, i32>(7)? != 0,
+        verification_proof: row.get(8)?,
+        metadata,
+        ble_address: row.get(10)?,
+        status: row.get(11)?,
+        needs_online_reconcile: row.get::<_, i32>(12)? != 0,
+        previous_chain_tip: row.get(13)?,
+    })
 }
 
 pub fn get_all_contacts() -> Result<Vec<ContactRecord>> {
@@ -148,39 +177,10 @@ pub fn get_all_contacts() -> Result<Vec<ContactRecord>> {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    let mut stmt = conn.prepare(
-        "SELECT contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
-                added_at, verified, verification_proof, metadata, ble_address,
-                status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
-                previous_chain_tip
-           FROM contacts
-       ORDER BY added_at DESC",
-    )?;
-    let iter = stmt.query_map([], |row| {
-        let meta_blob: Vec<u8> = row.get(10)?;
-        let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
-        Ok(ContactRecord {
-            contact_id: row.get(0)?,
-            device_id: row.get(1)?,
-            alias: row.get(2)?,
-            genesis_hash: row.get(3)?,
-            public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-            kyber_public_key: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
-            current_chain_tip: row.get(6)?,
-            added_at: row.get::<_, i64>(7)? as u64,
-            verified: row.get::<_, i32>(8)? != 0,
-            verification_proof: row.get::<_, Option<Vec<u8>>>(9)?,
-            metadata,
-            ble_address: row.get(11)?,
-            status: row
-                .get::<_, String>(12)
-                .unwrap_or_else(|_| "Created".to_string()),
-            needs_online_reconcile: row.get::<_, i32>(13).unwrap_or(0) != 0,
-            last_seen_online_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
-            last_seen_ble_counter: row.get::<_, i64>(15).unwrap_or(0) as u64,
-            previous_chain_tip: row.get(16).unwrap_or(None),
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CONTACT_COLUMNS} FROM contacts ORDER BY rowid DESC"
+    ))?;
+    let iter = stmt.query_map([], contact_from_row)?;
 
     let mut contacts = Vec::new();
     for c in iter {
@@ -189,12 +189,21 @@ pub fn get_all_contacts() -> Result<Vec<ContactRecord>> {
     Ok(contacts)
 }
 
+/// How many contacts this device holds: each one a peer that can send to it.
+pub fn count_contacts() -> Result<u64> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM contacts", [], |row| row.get(0))?;
+    Ok(u64::try_from(count)?)
+}
+
 /// Check if a contact exists for the given device_id (32 bytes).
 /// Used by BLE layer to gate binding before attempting offline operations.
 pub fn has_contact_for_device_id(device_id: &[u8]) -> Result<bool> {
-    if device_id.len() != 32 {
-        return Ok(false); // Invalid device_id length
-    }
+    require_device_id(device_id)?;
 
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -236,9 +245,7 @@ pub fn is_ble_address_paired(address: &str) -> Result<bool> {
 /// Get contact by device_id for chain tip validation.
 /// Returns None if not found.
 pub fn get_contact_by_device_id(device_id: &[u8]) -> Result<Option<ContactRecord>> {
-    if device_id.len() != 32 {
-        return Ok(None);
-    }
+    require_device_id(device_id)?;
 
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -248,196 +255,31 @@ pub fn get_contact_by_device_id(device_id: &[u8]) -> Result<Option<ContactRecord
 
     let result = conn
         .query_row(
-            "SELECT contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
-                added_at, verified, verification_proof, metadata, ble_address,
-                status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
-                previous_chain_tip
-           FROM contacts
-          WHERE device_id = ?1",
+            &format!("SELECT {CONTACT_COLUMNS} FROM contacts WHERE device_id = ?1"),
             params![device_id],
-            |row| {
-                let meta_blob: Vec<u8> = row.get(10)?;
-                let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
-                Ok(ContactRecord {
-                    contact_id: row.get(0)?,
-                    device_id: row.get(1)?,
-                    alias: row.get(2)?,
-                    genesis_hash: row.get(3)?,
-                    public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-                    kyber_public_key: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
-                    current_chain_tip: row.get(6)?,
-                    added_at: row.get::<_, i64>(7)? as u64,
-                    verified: row.get::<_, i32>(8)? != 0,
-                    verification_proof: row.get::<_, Option<Vec<u8>>>(9)?,
-                    metadata,
-                    ble_address: row.get(11)?,
-                    status: row
-                        .get::<_, String>(12)
-                        .unwrap_or_else(|_| "Created".to_string()),
-                    needs_online_reconcile: row.get::<_, i32>(13).unwrap_or(0) != 0,
-                    last_seen_online_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
-                    last_seen_ble_counter: row.get::<_, i64>(15).unwrap_or(0) as u64,
-                    previous_chain_tip: row.get(16).unwrap_or(None),
-                })
-            },
+            contact_from_row,
         )
         .optional()?;
 
     Ok(result)
 }
 
-/// Get contact by alias.
-/// Returns None if not found.
-pub fn get_contact_by_alias(alias: &str) -> Result<Option<ContactRecord>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result = conn
-        .query_row(
-            "SELECT contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
-                added_at, verified, verification_proof, metadata, ble_address,
-                status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
-                previous_chain_tip
-           FROM contacts
-          WHERE alias = ?1",
-            params![alias],
-            |row| {
-                let meta_blob: Vec<u8> = row.get(10)?;
-                let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
-                Ok(ContactRecord {
-                    contact_id: row.get(0)?,
-                    device_id: row.get(1)?,
-                    alias: row.get(2)?,
-                    genesis_hash: row.get(3)?,
-                    public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-                    kyber_public_key: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
-                    current_chain_tip: row.get(6)?,
-                    added_at: row.get::<_, i64>(7)? as u64,
-                    verified: row.get::<_, i32>(8)? != 0,
-                    verification_proof: row.get::<_, Option<Vec<u8>>>(9)?,
-                    metadata,
-                    ble_address: row.get(11)?,
-                    status: row
-                        .get::<_, String>(12)
-                        .unwrap_or_else(|_| "Created".to_string()),
-                    needs_online_reconcile: row.get::<_, i32>(13).unwrap_or(0) != 0,
-                    last_seen_online_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
-                    last_seen_ble_counter: row.get::<_, i64>(15).unwrap_or(0) as u64,
-                    previous_chain_tip: row.get(16).unwrap_or(None),
-                })
-            },
-        )
-        .optional()?;
-
-    Ok(result)
+/// The signing key of the contact whose device id is `device_id_str`
+/// (Base32 Crockford), or `None` when no contact has that device id.
+pub fn get_contact_public_key_by_device_id(device_id_str: &str) -> Result<Option<Vec<u8>>> {
+    let device_id_bytes = crate::util::text_id::decode_base32_crockford(device_id_str)
+        .ok_or_else(|| anyhow!("device id is not Base32 Crockford"))?;
+    Ok(get_contact_by_device_id(&device_id_bytes)?.map(|contact| contact.public_key))
 }
 
-/// Get contact by normalized BLE address.
-/// Returns None if not found.
-pub fn get_contact_by_ble_address(ble_address: &str) -> Result<Option<ContactRecord>> {
-    let normalized = ble_address.trim().to_uppercase();
-    if normalized.is_empty() {
-        return Ok(None);
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result = conn
-        .query_row(
-            "SELECT contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
-                added_at, verified, verification_proof, metadata, ble_address,
-                status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
-                previous_chain_tip
-           FROM contacts
-          WHERE UPPER(ble_address) = ?1",
-            params![normalized],
-            |row| {
-                let meta_blob: Vec<u8> = row.get(10)?;
-                let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
-                Ok(ContactRecord {
-                    contact_id: row.get(0)?,
-                    device_id: row.get(1)?,
-                    alias: row.get(2)?,
-                    genesis_hash: row.get(3)?,
-                    public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-                    kyber_public_key: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
-                    current_chain_tip: row.get(6)?,
-                    added_at: row.get::<_, i64>(7)? as u64,
-                    verified: row.get::<_, i32>(8)? != 0,
-                    verification_proof: row.get::<_, Option<Vec<u8>>>(9)?,
-                    metadata,
-                    ble_address: row.get(11)?,
-                    status: row
-                        .get::<_, String>(12)
-                        .unwrap_or_else(|_| "Created".to_string()),
-                    needs_online_reconcile: row.get::<_, i32>(13).unwrap_or(0) != 0,
-                    last_seen_online_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
-                    last_seen_ble_counter: row.get::<_, i64>(15).unwrap_or(0) as u64,
-                    previous_chain_tip: row.get(16).unwrap_or(None),
-                })
-            },
-        )
-        .optional()?;
-
-    Ok(result)
-}
-
-/// Delete a contact by contact_id.
-pub fn delete_contact_by_id(contact_id: &str) -> Result<()> {
-    if contact_id.trim().is_empty() {
-        return Err(anyhow!("Invalid contact_id"));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let rows = conn.execute(
-        "DELETE FROM contacts WHERE contact_id = ?1",
-        params![contact_id],
-    )?;
-
-    if rows == 0 {
-        log::warn!(
-            "delete_contact_by_id: no rows deleted for contact_id={}",
-            contact_id
-        );
-    } else {
-        log::info!("delete_contact_by_id: removed contact_id={}", contact_id);
-    }
-
-    Ok(())
-}
-
-pub fn get_contact_public_key_by_device_id(device_id_str: &str) -> Option<Vec<u8>> {
-    let device_id_bytes = crate::util::text_id::decode_base32_crockford(device_id_str)?;
-
-    if device_id_bytes.len() != 32 {
-        return None;
-    }
-
-    match get_contact_by_device_id(&device_id_bytes) {
-        Ok(Some(contact)) if !contact.public_key.is_empty() => Some(contact.public_key),
-        _ => None,
-    }
-}
-
-/// Update contact status after BLE identity validation.
-/// Sets status to BleCapable if chain tips match, or sets needs_online_reconcile if mismatch.
+/// Record what a BLE identity observation says about a contact's transport:
+/// its BLE address, the pairing state that drives scanning (`BleCapable`),
+/// and a chain tip the peer reported, kept as an observed claim only.
 ///
-/// If the contact does not exist yet (common during BLE auto-pairing when the advertiser
-/// receives the scanner's identity before a contact record is persisted), this function
-/// returns Ok(()) with a warning instead of failing. The contact will be auto-created by
-/// `processBleIdentityEnvelope` and updated on the next BLE interaction.
+/// Transport facts decide nothing about the relationship: this never touches
+/// the relationship tips or the online-reconcile hold. A tip the peer reports
+/// that differs from the stored one leaves the pairing state as it was; the
+/// observed claim blocks sending until the relationship is reconciled.
 pub fn update_contact_ble_status(
     device_id: &[u8],
     observed_chain_tip: Option<&[u8]>,
@@ -446,55 +288,26 @@ pub fn update_contact_ble_status(
     if device_id.len() != 32 {
         return Err(anyhow!("Invalid device_id length"));
     }
-
-    let contact = match get_contact_by_device_id(device_id)? {
-        Some(c) => c,
-        None => {
-            log::warn!(
-                "update_contact_ble_status: contact not found for device {:02x}{:02x}... — \
-                 skipping (will be created by BLE auto-pairing)",
-                device_id[0],
-                device_id[1]
-            );
-            return Ok(());
+    let contact = get_contact_by_device_id(device_id)?
+        .ok_or_else(|| anyhow!("no contact has that device id"))?;
+    let observed_tip_bytes = match observed_chain_tip {
+        Some(tip) if tip.len() == 32 => Some(tip),
+        Some(tip) => {
+            return Err(anyhow!(
+                "an observed chain tip is {} bytes, expected 32",
+                tip.len()
+            ))
         }
+        None => None,
     };
-
-    let now = tick();
-
-    // Determine new status and reconciliation flag
-    let (new_status, needs_reconcile) = if observed_chain_tip.is_some() {
-        // Chain tip provided: validate it matches
-        match (contact.current_chain_tip.as_deref(), observed_chain_tip) {
-            (Some(stored_tip), Some(observed_tip))
-                if stored_tip.len() == 32 && observed_tip.len() == 32 =>
-            {
-                if stored_tip == observed_tip {
-                    // Tips match: BLE capable
-                    ("BleCapable".to_string(), false)
-                } else {
-                    // Tips diverged: flag for online reconciliation
-                    info!(
-                        "Chain tip mismatch for device: stored={:?} observed={:?}",
-                        &stored_tip[..8],
-                        &observed_tip[..8]
-                    );
-                    (contact.status.clone(), true) // Keep existing status, flag reconcile
-                }
-            }
-            (None, Some(_)) => {
-                // First tip observation from BLE
-                ("OnlineCapable".to_string(), false)
-            }
-            _ => {
-                // Invalid data
-                (contact.status.clone(), contact.needs_online_reconcile)
-            }
-        }
+    let diverged = match (contact.current_chain_tip.as_deref(), observed_tip_bytes) {
+        (Some(stored), Some(observed)) => stored != observed,
+        _ => false,
+    };
+    let new_status = if diverged {
+        contact.status.clone()
     } else {
-        // No chain tip provided (BLE identity observation without chain tip)
-        // Promote to BleCapable since we confirmed BLE connectivity and validated identity
-        ("BleCapable".to_string(), false)
+        "BleCapable".to_string()
     };
 
     let binding = get_connection()?;
@@ -504,7 +317,6 @@ pub fn update_contact_ble_status(
     });
 
     let updated_ble_address = ble_address.or(contact.ble_address.as_deref());
-    let observed_tip_bytes = observed_chain_tip.filter(|tip| tip.len() == 32);
     let observed_tip_source = observed_tip_bytes
         .as_ref()
         .map(|_| ObservedRemoteTipSource::LivePeerClaim.db_value());
@@ -512,23 +324,15 @@ pub fn update_contact_ble_status(
     conn.execute(
         "UPDATE contacts SET
             status = ?1,
-            needs_online_reconcile = ?2,
-            last_seen_ble_counter = ?3,
-            ble_address = ?4,
-            observed_remote_chain_tip = COALESCE(?5, observed_remote_chain_tip),
-            observed_remote_tip_updated_at = CASE
-                WHEN ?5 IS NULL THEN observed_remote_tip_updated_at
-                ELSE ?3
-            END,
+            ble_address = ?2,
+            observed_remote_chain_tip = COALESCE(?3, observed_remote_chain_tip),
             observed_remote_tip_source = CASE
-                WHEN ?5 IS NULL THEN observed_remote_tip_source
-                ELSE ?6
+                WHEN ?3 IS NULL THEN observed_remote_tip_source
+                ELSE ?4
             END
-         WHERE device_id = ?7",
+         WHERE device_id = ?5",
         params![
             new_status,
-            if needs_reconcile { 1i32 } else { 0i32 },
-            now as i64,
             updated_ble_address,
             observed_tip_bytes,
             observed_tip_source,
@@ -537,8 +341,8 @@ pub fn update_contact_ble_status(
     )?;
 
     info!(
-        "Updated contact BLE status: {} (reconcile: {})",
-        new_status, needs_reconcile
+        "Updated contact BLE status: {} (observed tip diverged: {})",
+        new_status, diverged
     );
 
     Ok(())
@@ -566,14 +370,12 @@ pub fn record_observed_remote_chain_tip(
         poisoned.into_inner()
     });
 
-    let now = tick();
     let updated = conn.execute(
         "UPDATE contacts SET
             observed_remote_chain_tip = ?1,
-            observed_remote_tip_updated_at = ?2,
-            observed_remote_tip_source = ?3
-         WHERE device_id = ?4",
-        params![observed_chain_tip, now as i64, source.db_value(), device_id],
+            observed_remote_tip_source = ?2
+         WHERE device_id = ?3",
+        params![observed_chain_tip, source.db_value(), device_id],
     )?;
     if updated == 0 {
         return Err(anyhow!(
@@ -600,30 +402,29 @@ pub fn get_observed_remote_tip_record(device_id: &[u8]) -> Result<Option<Observe
         poisoned.into_inner()
     });
 
-    let value: Option<(Option<Vec<u8>>, Option<i64>, Option<i64>)> = conn
+    let value: Option<(Option<Vec<u8>>, Option<i64>)> = conn
         .query_row(
-            "SELECT observed_remote_chain_tip, observed_remote_tip_updated_at, observed_remote_tip_source
+            "SELECT observed_remote_chain_tip, observed_remote_tip_source
                FROM contacts WHERE device_id = ?1",
             params![device_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
 
     match value {
-        Some((Some(tip), updated_at, source)) if tip.len() == 32 => {
+        Some((Some(tip), source)) if tip.len() == 32 => {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&tip);
             Ok(Some(ObservedRemoteTipRecord {
                 tip: arr,
-                updated_at: updated_at.unwrap_or_default() as u64,
                 source: ObservedRemoteTipSource::from_db(source),
             }))
         }
-        Some((Some(tip), _, _)) => Err(anyhow!(
+        Some((Some(tip), _)) => Err(anyhow!(
             "Observed remote chain tip has invalid length {}",
             tip.len()
         )),
-        Some((None, _, _)) => Ok(None),
+        Some((None, _)) => Ok(None),
         None => Ok(None),
     }
 }
@@ -647,7 +448,6 @@ pub fn clear_observed_remote_chain_tip(device_id: &[u8]) -> Result<()> {
     conn.execute(
         "UPDATE contacts
             SET observed_remote_chain_tip = NULL,
-                observed_remote_tip_updated_at = NULL,
                 observed_remote_tip_source = NULL
           WHERE device_id = ?1",
         params![device_id],
@@ -675,7 +475,6 @@ pub fn clear_observed_remote_chain_tip_if_matches(
     let rows = conn.execute(
         "UPDATE contacts
             SET observed_remote_chain_tip = NULL,
-                observed_remote_tip_updated_at = NULL,
                 observed_remote_tip_source = NULL
           WHERE device_id = ?1
             AND observed_remote_chain_tip = ?2",
@@ -702,56 +501,22 @@ pub fn restore_finalized_bilateral_chain_tip(device_id: &[u8], restored_tip: &[u
         poisoned.into_inner()
     });
 
-    let current_tip: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT chain_tip FROM contacts WHERE device_id = ?1",
-            params![device_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
-
-    match current_tip.as_deref() {
-        Some(tip) if tip.len() != 32 => {
-            return Err(anyhow!(
-                "Stored finalized chain tip has invalid length {}",
-                tip.len()
-            ));
-        }
-        Some(tip) if tip != restored_tip && !tip.iter().all(|byte| *byte == 0) => {
-            return Err(anyhow!(
-                "Refusing to overwrite finalized bilateral chain tip with a different restored tip"
-            ));
-        }
-        _ => {}
-    }
-
-    let now = tick();
-    let zero_tip = [0u8; 32];
     let updated = conn.execute(
         "UPDATE contacts SET
-            previous_chain_tip = CASE
-                WHEN chain_tip IS NULL OR chain_tip = ?1 OR chain_tip = ?2 THEN previous_chain_tip
-                ELSE chain_tip
-            END,
-            chain_tip = ?2,
-            local_bilateral_chain_tip = ?2,
+            local_bilateral_chain_tip = ?1,
             observed_remote_chain_tip = NULL,
-            observed_remote_tip_updated_at = NULL,
             observed_remote_tip_source = NULL,
             needs_online_reconcile = 0,
-            last_seen_online_counter = ?3,
             status = CASE
                 WHEN status = 'BleCapable' THEN 'BleCapable'
                 ELSE 'OnlineCapable'
             END
-         WHERE device_id = ?4
-           AND (chain_tip IS NULL OR chain_tip = ?1 OR chain_tip = ?2)",
-        params![&zero_tip, restored_tip, now as i64, device_id],
+         WHERE device_id = ?2 AND chain_tip = ?1",
+        params![restored_tip, device_id],
     )?;
     if updated == 0 {
         return Err(anyhow!(
-            "Cannot restore finalized bilateral chain tip for unknown contact"
+            "Refusing to restore a finalized bilateral chain tip: no contact holds that tip"
         ));
     }
 
@@ -764,8 +529,6 @@ pub fn restore_finalized_bilateral_chain_tip(device_id: &[u8], restored_tip: &[u
 
 /// Check whether the persisted shared relationship tip still matches the
 /// expected parent tip for the next transition.
-///
-/// `NULL` is treated as the zero tip for first-use relationships.
 pub fn contact_chain_tip_matches_expected(
     device_id: &[u8],
     expected_parent_tip: &[u8],
@@ -777,132 +540,9 @@ pub fn contact_chain_tip_matches_expected(
         return Err(anyhow!("Invalid expected_parent_tip length"));
     }
 
-    let current_tip = get_contact_chain_tip_raw(device_id).unwrap_or([0u8; 32]);
-    let mut expected = [0u8; 32];
-    expected.copy_from_slice(expected_parent_tip);
-    Ok(current_tip == expected)
-}
-
-/// Atomically advance a finalized relationship tip only if the persisted parent
-/// tip still matches `expected_parent_tip`.
-///
-/// Returns `Ok(true)` when the advance succeeds, `Ok(false)` when the parent no
-/// longer matches (Tripwire / ParentConsumed), and `Err(_)` for actual storage
-/// failures. `NULL` is treated as the zero tip for first-use relationships.
-pub fn try_advance_finalized_bilateral_chain_tip(
-    device_id: &[u8],
-    expected_parent_tip: &[u8],
-    new_chain_tip: &[u8],
-) -> Result<bool> {
-    if device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-    if expected_parent_tip.len() != 32 {
-        return Err(anyhow!("Invalid expected_parent_tip length"));
-    }
-    if new_chain_tip.len() != 32 {
-        return Err(anyhow!("Invalid chain_tip length"));
-    }
-    if expected_parent_tip == new_chain_tip {
-        return Err(anyhow!(
-            "Finalized bilateral chain tip advance requires child tip different from parent tip"
-        ));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let now = tick();
-    let expected_is_zero = expected_parent_tip.iter().all(|b| *b == 0);
-
-    let rows_changed = if expected_is_zero {
-        conn.execute(
-            "UPDATE contacts SET
-                previous_chain_tip = chain_tip,
-                chain_tip = ?1,
-                local_bilateral_chain_tip = ?1,
-                observed_remote_chain_tip = NULL,
-                observed_remote_tip_updated_at = NULL,
-                observed_remote_tip_source = NULL,
-                needs_online_reconcile = 0,
-                last_seen_online_counter = ?2,
-                status = CASE
-                    WHEN status = 'BleCapable' THEN 'BleCapable'
-                    ELSE 'OnlineCapable'
-                END
-             WHERE device_id = ?3
-               AND (chain_tip IS NULL OR chain_tip = ?4)",
-            params![new_chain_tip, now as i64, device_id, expected_parent_tip],
-        )?
-    } else {
-        conn.execute(
-            "UPDATE contacts SET
-                previous_chain_tip = chain_tip,
-                chain_tip = ?1,
-                local_bilateral_chain_tip = ?1,
-                observed_remote_chain_tip = NULL,
-                observed_remote_tip_updated_at = NULL,
-                observed_remote_tip_source = NULL,
-                needs_online_reconcile = 0,
-                last_seen_online_counter = ?2,
-                status = CASE
-                    WHEN status = 'BleCapable' THEN 'BleCapable'
-                    ELSE 'OnlineCapable'
-                END
-             WHERE device_id = ?3
-               AND chain_tip = ?4",
-            params![new_chain_tip, now as i64, device_id, expected_parent_tip],
-        )?
-    };
-
-    if rows_changed > 0 {
-        info!(
-            "Advanced finalized bilateral chain tip with parent match: parent={:?} tip={:?}",
-            &expected_parent_tip[..8],
-            &new_chain_tip[..8]
-        );
-        Ok(true)
-    } else {
-        warn!(
-            "Rejected finalized bilateral chain tip advance: expected_parent={:?} new_tip={:?}",
-            &expected_parent_tip[..8],
-            &new_chain_tip[..8]
-        );
-        Ok(false)
-    }
-}
-
-/// Clear the `needs_online_reconcile` flag for a contact WITHOUT touching the
-/// chain tip. This is the only correct way to mark a reconcile as done —
-/// the observed-tip namespace must NOT be written into canonical chain-tip
-/// columns just to clear this flag, as doing so destroys the real chain tip and
-/// causes every subsequent Prepare to be rejected with TipMismatch.
-pub fn clear_contact_reconcile_flag(device_id: &[u8]) -> Result<()> {
-    if device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    conn.execute(
-        "UPDATE contacts SET needs_online_reconcile = 0 WHERE device_id = ?1",
-        params![device_id],
-    )?;
-
-    log::info!(
-        "Cleared reconcile flag for contact {:02x}{:02x}..",
-        device_id[0],
-        device_id[1]
-    );
-
-    Ok(())
+    let current_tip = get_contact_chain_tip(device_id)?
+        .ok_or_else(|| anyhow!("no contact has this device id"))?;
+    Ok(current_tip.as_slice() == expected_parent_tip)
 }
 
 /// Flag a contact for online reconciliation without changing status.
@@ -932,118 +572,52 @@ pub fn mark_contact_needs_online_reconcile(device_id: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// §6 Tripwire Fork-Exclusion: Permanently brick a relationship after fork detection.
-///
-/// Sets the contact status to "Bricked" and records the reason in metadata.
-/// Once bricked, no future transfers with this counterparty are accepted.
-/// Only fires on post-commit fork: stored tip is non-zero, doesn't match
-/// the claimed parent tip. Pre-commit forking (abandoned BLE sessions,
-/// failed online attempts) does NOT trigger this because the stored tip
-/// only advances after full finalization.
-pub fn brick_contact(device_id: &[u8; 32], reason: &str) {
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!("[client_db] brick_contact: DB connection failed: {}", e);
-            return;
-        }
-    };
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let reason_bytes = reason.as_bytes();
-    match conn.execute(
-        "UPDATE contacts SET status = 'Bricked', metadata = ?1 WHERE device_id = ?2",
-        params![reason_bytes, device_id.as_slice()],
-    ) {
-        Ok(n) if n > 0 => {
-            log::error!(
-                "[client_db] §6 TRIPWIRE: Contact BRICKED (device_id={:02x}{:02x}{:02x}{:02x}..): {}",
-                device_id[0], device_id[1], device_id[2], device_id[3], reason
-            );
-        }
-        Ok(_) => {
-            log::warn!(
-                "[client_db] brick_contact: no matching contact for device_id={:02x}{:02x}{:02x}{:02x}..",
-                device_id[0], device_id[1], device_id[2], device_id[3]
-            );
-        }
-        Err(e) => {
-            log::error!("[client_db] brick_contact: SQL update failed: {}", e);
-        }
-    }
-}
-
-/// Check if a contact has been permanently bricked (Tripwire fork-exclusion).
-pub fn is_contact_bricked(device_id: &[u8]) -> bool {
+/// The Device Tree root `R_G` kept for a contact (§2.3): `None` when the
+/// device is not a contact or no root is kept for it. A malformed device id,
+/// an unreadable database, or a stored root that is not 32 bytes is an error,
+/// never an absent root.
+pub fn get_contact_device_tree_root(
+    device_id: &[u8],
+) -> Result<Option<[u8; 32]>, dsm::types::error::DsmError> {
+    use dsm::types::error::DsmError;
     if device_id.len() != 32 {
-        return false;
+        return Err(DsmError::invalid_operation(
+            "get_contact_device_tree_root: device_id must be 32 bytes",
+        ));
     }
-
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
+    let binding = get_connection()
+        .map_err(|e| DsmError::storage(format!("DB unavailable: {e}"), None::<std::io::Error>))?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-
-    conn.query_row(
-        "SELECT status FROM contacts WHERE device_id = ?1",
-        params![device_id],
-        |row| row.get::<_, String>(0),
-    )
-    .map(|status| status == "Bricked")
-    .unwrap_or(false)
-}
-
-/// Get the Device Tree root R_G for a contact (§2.3).
-///
-/// Returns the stored value if present.
-pub fn get_contact_device_tree_root(device_id: &[u8]) -> Option<[u8; 32]> {
-    if device_id.len() != 32 {
-        return None;
-    }
-
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(_) => return None,
-    };
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result: Option<Vec<u8>> = conn
+    let stored: Option<Option<Vec<u8>>> = conn
         .query_row(
             "SELECT device_tree_root FROM contacts WHERE device_id = ?1",
             params![device_id],
             |row| row.get(0),
         )
-        .ok()
-        .flatten();
-
-    match result {
-        Some(blob) if blob.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&blob);
-            Some(arr)
-        }
-        _ => None,
+        .optional()
+        .map_err(|e| {
+            DsmError::storage(
+                format!("contact device_tree_root read: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+    match stored.flatten() {
+        None => Ok(None),
+        Some(blob) => <[u8; 32]>::try_from(blob.as_slice())
+            .map(Some)
+            .map_err(|_| {
+                DsmError::storage(
+                    format!(
+                        "the contact's stored device_tree_root is {} bytes, not 32",
+                        blob.len()
+                    ),
+                    None::<std::io::Error>,
+                )
+            }),
     }
-}
-
-/// Get the authenticated persisted device-tree commitment for a contact.
-///
-/// Today this is the raw stored `R_G` wrapped for receipt acceptance paths
-/// that verify `π_dev` relationship-locally.
-pub fn get_contact_device_tree_commitment(
-    device_id: &[u8],
-) -> Option<DeviceTreeAcceptanceCommitment> {
-    get_contact_device_tree_root(device_id).map(DeviceTreeAcceptanceCommitment::from_root)
 }
 
 /// Persist the Device Tree root R_G for a contact (§2.3).
@@ -1075,118 +649,49 @@ pub fn store_contact_device_tree_root(
     Ok(())
 }
 
-/// Get a contact's current chain tip from SQLite storage.
-/// Strict mode: returns None if chain_tip is NULL or invalid.
-pub fn get_contact_chain_tip(device_id: &[u8]) -> Option<[u8; 32]> {
+fn require_device_id(device_id: &[u8]) -> Result<()> {
     if device_id.len() != 32 {
-        log::warn!(
-            "[client_db] get_contact_chain_tip: invalid device_id length {}",
+        return Err(anyhow!(
+            "device id is {} bytes, expected 32",
             device_id.len()
-        );
-        return None;
+        ));
     }
+    Ok(())
+}
 
-    // Debug: log the device_id we're looking for
-    log::info!(
-        "[client_db] get_contact_chain_tip: looking for device_id={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}...",
-        device_id[0], device_id[1], device_id[2], device_id[3],
-        device_id[4], device_id[5], device_id[6], device_id[7]
-    );
-
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!(
-                "[client_db] get_contact_chain_tip: failed to get connection: {}",
-                e
-            );
-            return None;
-        }
-    };
+/// Read one 32-byte tip column of the contact `device_id`: `None` when no
+/// contact has that device id. Every contact starts at its relationship's
+/// h_0, so a contact with no tip, or a tip that is not 32 bytes, is a
+/// corrupt row and an error.
+fn read_contact_tip(device_id: &[u8], column: &str) -> Result<Option<[u8; 32]>> {
+    require_device_id(device_id)?;
+    let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-
-    // Strict canonical lookup: chain_tip only.
-    // NOTE: DB column is "chain_tip", struct field is "current_chain_tip"
-    let result: Result<Option<Vec<u8>>, _> = conn.query_row(
-        "SELECT chain_tip FROM contacts WHERE device_id = ?1",
-        params![device_id],
-        |row| row.get(0),
-    );
-
-    match result {
-        Ok(Some(tip)) if tip.len() == 32 => {
-            log::info!(
-                "[client_db] get_contact_chain_tip: FOUND chain_tip in DB (first 8: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x})",
-                tip[0], tip[1], tip[2], tip[3], tip[4], tip[5], tip[6], tip[7]
-            );
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&tip);
-            Some(arr)
-        }
-        Ok(tip) => {
-            log::warn!(
-                "[client_db] get_contact_chain_tip: contact found but invalid chain_tip len={:?}",
-                tip.as_ref().map(|t| t.len())
-            );
-            None
-        }
-        Err(e) => {
-            log::warn!(
-                "[client_db] get_contact_chain_tip: query failed (contact not found?): {}",
-                e
-            );
-            None
-        }
+    let tip: Option<Option<Vec<u8>>> = conn
+        .query_row(
+            &format!("SELECT {column} FROM contacts WHERE device_id = ?1"),
+            params![device_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match tip {
+        None => Ok(None),
+        Some(None) => Err(anyhow!("the contact has no {column}")),
+        Some(Some(tip)) => tip
+            .as_slice()
+            .try_into()
+            .map(Some)
+            .map_err(|_| anyhow!("the contact's {column} is {} bytes, expected 32", tip.len())),
     }
 }
 
-/// Get a contact's chain tip from SQLite storage.
-/// Returns None if chain_tip is NULL or invalid length.
-pub fn get_contact_chain_tip_raw(device_id: &[u8]) -> Option<[u8; 32]> {
-    if device_id.len() != 32 {
-        log::warn!(
-            "[client_db] get_contact_chain_tip_raw: invalid device_id length {}",
-            device_id.len()
-        );
-        return None;
-    }
-
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!(
-                "[client_db] get_contact_chain_tip_raw: failed to get connection: {}",
-                e
-            );
-            return None;
-        }
-    };
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result: Result<Option<Vec<u8>>, _> = conn.query_row(
-        "SELECT chain_tip FROM contacts WHERE device_id = ?1",
-        params![device_id],
-        |row| row.get(0),
-    );
-
-    match result {
-        Ok(Some(tip)) if tip.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&tip);
-            Some(arr)
-        }
-        Ok(_) => None,
-        Err(e) => {
-            log::warn!("[client_db] get_contact_chain_tip_raw: query failed: {}", e);
-            None
-        }
-    }
+/// The contact's finalized relationship tip (`chain_tip`), or `None` when no
+/// contact has that device id.
+pub fn get_contact_chain_tip(device_id: &[u8]) -> Result<Option<[u8; 32]>> {
+    read_contact_tip(device_id, "chain_tip")
 }
 
 /// Persist the caller's own bilateral chain tip for a relationship with `device_id`.
@@ -1218,210 +723,43 @@ pub fn update_local_bilateral_chain_tip(device_id: &[u8], tip: &[u8]) -> Result<
     Ok(())
 }
 
-/// Get the caller's own bilateral chain tip for a relationship with `device_id`.
-/// Returns None if NULL or invalid length.
-pub fn get_local_bilateral_chain_tip(device_id: &[u8]) -> Option<[u8; 32]> {
-    if device_id.len() != 32 {
-        log::warn!(
-            "[client_db] get_local_bilateral_chain_tip: invalid device_id length {}",
-            device_id.len()
-        );
-        return None;
-    }
-
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!(
-                "[client_db] get_local_bilateral_chain_tip: failed to get connection: {}",
-                e
-            );
-            return None;
-        }
-    };
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result: Result<Option<Vec<u8>>, _> = conn.query_row(
-        "SELECT local_bilateral_chain_tip FROM contacts WHERE device_id = ?1",
-        params![device_id],
-        |row| row.get(0),
-    );
-
-    match result {
-        Ok(Some(tip)) if tip.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&tip);
-            Some(arr)
-        }
-        Ok(_) => None,
-        Err(e) => {
-            log::warn!(
-                "[client_db] get_local_bilateral_chain_tip: query failed: {}",
-                e
-            );
-            None
-        }
-    }
+/// This device's own tip for its relationship with `device_id`
+/// (`local_bilateral_chain_tip`), or `None` when no contact has that device id.
+pub fn get_local_bilateral_chain_tip(device_id: &[u8]) -> Result<Option<[u8; 32]>> {
+    read_contact_tip(device_id, "local_bilateral_chain_tip")
 }
 
-/// Check if there are any contacts that are not yet BLE-capable (i.e., need BLE pairing)
-pub fn has_unpaired_contacts() -> bool {
-    let binding = match get_connection() {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!(
-                "[client_db] has_unpaired_contacts: failed to get connection: {}",
-                e
-            );
-            return false;
-        }
-    };
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let result: Result<i64, _> = conn.query_row(
-        "SELECT COUNT(*) FROM contacts WHERE status != 'BleCapable' OR status IS NULL",
-        [],
-        |row| row.get(0),
-    );
-
-    match result {
-        Ok(count) => count > 0,
-        Err(e) => {
-            log::warn!("[client_db] has_unpaired_contacts: query failed: {}", e);
-            false
-        }
-    }
+/// Store `contact` in the client database as the contact add path would: its
+/// keys and its relationship tip, which the tests that build an in-memory
+/// manager hold only in memory.
+#[cfg(test)]
+pub(crate) fn store_contact_for_tests(contact: &dsm::types::contact_types::DsmVerifiedContact) {
+    let tip = contact
+        .chain_tip
+        .unwrap_or_else(|| panic!("a test contact starts at a relationship tip"));
+    store_contact(&ContactRecord {
+        contact_id: crate::util::text_id::encode_base32_crockford(&contact.device_id),
+        device_id: contact.device_id.to_vec(),
+        alias: contact.alias.clone(),
+        genesis_hash: contact.genesis_hash.to_vec(),
+        public_key: contact.public_key.clone(),
+        kyber_public_key: vec![0x4B; 1184],
+        current_chain_tip: Some(tip.to_vec()),
+        verified: true,
+        verification_proof: None,
+        metadata: std::collections::HashMap::new(),
+        ble_address: contact.ble_address.clone(),
+        status: "OnlineCapable".to_string(),
+        needs_online_reconcile: false,
+        previous_chain_tip: None,
+    })
+    .unwrap_or_else(|e| panic!("store the test contact: {e}"));
 }
 
-/// FIRST-WRITE-WINS persist of a counterparty's ML-KEM capability.
-///
-/// Writes ONLY when the contact currently has no key. A locally-bound nonempty
-/// key is never replaced — a counterparty's encapsulation target is identity
-/// material, so silently rebinding it would let a registry answer redirect
-/// where future receipts encapsulate. Rotation, if DSM ever needs it, is an
-/// explicit protocol, never a side effect of a lookup.
-///
-/// Returns `Ok(true)` when this call bound the key, `Ok(false)` when a key was
-/// already present (caller keeps the existing one) or no such contact exists.
-pub fn bind_contact_kyber_key_if_absent(device_id: &[u8], kyber_public_key: &[u8]) -> Result<bool> {
-    if device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-    if kyber_public_key.len() != 1184 {
-        return Err(anyhow!(
-            "Invalid Kyber public key length {} (expected 1184)",
-            kyber_public_key.len()
-        ));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let rows_changed = conn.execute(
-        "UPDATE contacts SET kyber_public_key = ?1
-         WHERE device_id = ?2
-           AND (kyber_public_key IS NULL OR length(kyber_public_key) = 0)",
-        params![kyber_public_key, device_id],
-    )?;
-    Ok(rows_changed > 0)
-}
-
-/// Outcome of a first-write-wins attempt to set a contact's signing AK from wire bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AkBindOutcome {
-    /// The contact had no AK; this call established it.
-    Established,
-    /// A matching AK was already pinned; nothing changed.
-    AlreadyPinnedMatching,
-    /// A *different* AK was already pinned; the wire AK was REJECTED and the pinned AK stands
-    /// (possible substitution/equivocation).
-    RejectedSubstitution,
-    /// No contact exists for this `device_id`.
-    NoContact,
-}
-
-/// FIRST-WRITE-WINS persist of a counterparty's signing AK — the pairing trust root (ADR 0002).
-///
-/// The signing AK is established out-of-band by the QR/BLE pairing and is the root every Kyber
-/// identity binding is verified against. It is NEVER re-rooted from wire bytes: this writes ONLY
-/// when the contact currently has no AK. A non-empty pinned AK is preserved; a *differing* wire AK
-/// is reported as a substitution attempt and rejected. Rotation, if DSM ever needs it, is an
-/// explicit re-pairing, never a side effect of a transfer handshake.
-///
-/// (This closes matrix rows 6/7. Authenticating the BLE-delivered *Kyber* key against the pinned AK
-/// — rows 8/9 — is the separate release-blocking BLE P0 work and is deliberately not done here.)
-pub fn bind_contact_public_key_if_absent(
-    device_id: &[u8],
-    public_key: &[u8],
-) -> Result<AkBindOutcome> {
-    if device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let existing: Option<Option<Vec<u8>>> = conn
-        .query_row(
-            "SELECT public_key FROM contacts WHERE device_id = ?1",
-            params![device_id],
-            |row| row.get::<_, Option<Vec<u8>>>(0),
-        )
-        .optional()?;
-
-    match existing {
-        None => Ok(AkBindOutcome::NoContact),
-        Some(pinned) => {
-            let pinned = pinned.unwrap_or_default();
-            if pinned.is_empty() {
-                // First establishment. The WHERE clause re-checks emptiness so a concurrent
-                // establisher cannot be clobbered.
-                conn.execute(
-                    "UPDATE contacts SET public_key = ?1
-                     WHERE device_id = ?2
-                       AND (public_key IS NULL OR length(public_key) = 0)",
-                    params![public_key, device_id],
-                )?;
-                Ok(AkBindOutcome::Established)
-            } else if pinned == public_key {
-                Ok(AkBindOutcome::AlreadyPinnedMatching)
-            } else {
-                Ok(AkBindOutcome::RejectedSubstitution)
-            }
-        }
-    }
-}
-
-/// Remove a contact by its contact_id. Returns Ok(true) if a row was deleted, Ok(false) if not found.
-pub fn remove_contact(contact_id: &str) -> Result<bool> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-    let affected = conn.execute(
-        "DELETE FROM contacts WHERE contact_id = ?1",
-        params![contact_id],
-    )?;
-    if affected > 0 {
-        info!("Contact removed: {contact_id}");
-        Ok(true)
-    } else {
-        info!("Contact not found: {contact_id}");
-        Ok(false)
-    }
+/// Store a contact record as the tests in this module build one.
+#[cfg(test)]
+pub(crate) fn store_contact_record_for_tests(device_id: [u8; 32], alias: &str) {
+    store_contact(&tests::make_contact(device_id, alias)).expect("store the test contact");
 }
 
 #[cfg(test)]
@@ -1431,51 +769,98 @@ mod tests {
     use std::collections::HashMap;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
 
-    fn make_contact(device_id: [u8; 32], alias: &str) -> ContactRecord {
+    pub(super) fn make_contact(device_id: [u8; 32], alias: &str) -> ContactRecord {
         ContactRecord {
             contact_id: format!("cid-{alias}"),
             device_id: device_id.to_vec(),
             alias: alias.to_string(),
             genesis_hash: [0xAAu8; 32].to_vec(),
             public_key: vec![0xBBu8; 64],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: None,
-            added_at: 1,
+            kyber_public_key: vec![0x4B; 1184],
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: false,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             previous_chain_tip: None,
         }
     }
 
+    /// A contact is its directory entry's keys and its relationship tip: a
+    /// record missing any of them is refused, and nothing is stored.
     #[test]
-    fn has_contact_for_device_id_rejects_short_device_id() {
-        let short = vec![0u8; 16];
-        assert!(!has_contact_for_device_id(&short).unwrap());
+    #[serial]
+    fn a_contact_without_its_keys_or_its_tip_is_refused() {
+        init_test_db();
+        let device_id = [0x5Du8; 32];
+        let refused = |contact: ContactRecord, why: &str| {
+            let err = store_contact(&contact).expect_err(why).to_string();
+            assert!(err.contains(why), "refused for another reason: {err}");
+            assert!(get_contact_by_device_id(&device_id).unwrap().is_none());
+        };
+        let mut c = make_contact(device_id, "keyless");
+        c.public_key = Vec::new();
+        refused(c, "no signing key");
+        let mut c = make_contact(device_id, "no-kyber");
+        c.kyber_public_key = Vec::new();
+        refused(c, "no Kyber key");
+        let mut c = make_contact(device_id, "no-tip");
+        c.current_chain_tip = None;
+        refused(c, "no 32-byte relationship tip");
+        let mut c = make_contact(device_id, "short-tip");
+        c.current_chain_tip = Some(vec![0x70; 31]);
+        refused(c, "no 32-byte relationship tip");
+
+        store_contact(&make_contact(device_id, "whole")).expect("a whole contact is stored");
+        assert_eq!(get_contact_chain_tip(&device_id).unwrap(), Some([0x70; 32]));
+        assert_eq!(
+            get_local_bilateral_chain_tip(&device_id).unwrap(),
+            Some([0x70; 32]),
+            "a new contact's local tip starts at its relationship tip"
+        );
+    }
+
+    /// A stored tip that is missing or not 32 bytes is a corrupt row: reading
+    /// it is an error, never "no tip".
+    #[test]
+    #[serial]
+    fn a_corrupt_stored_tip_is_an_error_not_an_absent_tip() {
+        init_test_db();
+        let device_id = [0x5Eu8; 32];
+        store_contact(&make_contact(device_id, "corrupt")).expect("store");
+        let corrupt = |sql: &str| {
+            let binding = get_connection().expect("db");
+            let conn = binding.lock().expect("lock");
+            conn.execute(sql, params![device_id])
+                .expect("corrupt the row");
+        };
+        corrupt("UPDATE contacts SET chain_tip = x'0102' WHERE device_id = ?1");
+        assert!(get_contact_chain_tip(&device_id).is_err());
+        corrupt("UPDATE contacts SET chain_tip = NULL WHERE device_id = ?1");
+        assert!(get_contact_chain_tip(&device_id).is_err());
+        corrupt("UPDATE contacts SET local_bilateral_chain_tip = x'0102' WHERE device_id = ?1");
+        assert!(get_local_bilateral_chain_tip(&device_id).is_err());
+        assert_eq!(
+            get_contact_chain_tip(&[0x5Fu8; 32]).unwrap(),
+            None,
+            "no such contact"
+        );
     }
 
     #[test]
-    fn get_contact_by_device_id_returns_none_for_invalid_length() {
-        assert!(get_contact_by_device_id(&[0u8; 31]).unwrap().is_none());
-        assert!(get_contact_by_device_id(&[0u8; 33]).unwrap().is_none());
-    }
-
-    #[test]
-    fn delete_contact_by_id_rejects_empty_id() {
-        let err = delete_contact_by_id("").unwrap_err();
-        assert!(err.to_string().contains("Invalid contact_id"));
-        let err2 = delete_contact_by_id("   ").unwrap_err();
-        assert!(err2.to_string().contains("Invalid contact_id"));
+    fn a_device_id_that_is_not_32_bytes_is_an_error_not_an_absent_contact() {
+        assert!(has_contact_for_device_id(&[0u8; 16]).is_err());
+        assert!(get_contact_by_device_id(&[0u8; 31]).is_err());
+        assert!(get_contact_by_device_id(&[0u8; 33]).is_err());
+        assert!(get_contact_chain_tip(&[0u8; 31]).is_err());
+        assert!(get_local_bilateral_chain_tip(&[0u8; 33]).is_err());
     }
 
     #[test]
@@ -1510,20 +895,8 @@ mod tests {
     }
 
     #[test]
-    fn try_advance_rejects_same_parent_and_child_tip() {
-        let tip = [0x11u8; 32];
-        let err = try_advance_finalized_bilateral_chain_tip(&[0u8; 32], &tip, &tip).unwrap_err();
-        assert!(err.to_string().contains("different from parent"));
-    }
-
-    #[test]
-    fn is_contact_bricked_returns_false_for_invalid_device_id() {
-        assert!(!is_contact_bricked(&[0u8; 10]));
-    }
-
-    #[test]
-    fn get_contact_device_tree_root_returns_none_for_invalid_device_id() {
-        assert!(get_contact_device_tree_root(&[0u8; 10]).is_none());
+    fn get_contact_device_tree_root_refuses_a_malformed_device_id() {
+        assert!(get_contact_device_tree_root(&[0u8; 10]).is_err());
     }
 
     #[test]
@@ -1542,68 +915,43 @@ mod tests {
         assert_eq!(loaded.public_key, vec![0xBBu8; 64]);
     }
 
-    /// Trust-root preservation (ADR 0002, matrix rows 6/7): the pairing-established signing AK is
-    /// first-write-wins and is NEVER re-rooted from wire bytes. A differing wire AK is reported as a
-    /// substitution and the pinned AK is preserved byte-for-byte.
+    /// A BLE identity observation records transport facts only. It never
+    /// lifts the online-reconcile hold a failed step set — not on a plain
+    /// address write, and not on a reported tip equal to the stored one — and
+    /// a contact that does not exist is not "updated". MUTATION CONTROL:
+    /// clearing the hold on a matching observation turns this red.
     #[test]
     #[serial]
-    fn bind_contact_public_key_if_absent_is_first_write_wins_and_rejects_substitution() {
+    fn a_ble_observation_never_lifts_the_reconcile_hold() {
         init_test_db();
-        let device_id = [0x5Au8; 32];
+        let device_id = [0x0Bu8; 32];
+        let mut contact = make_contact(device_id, "held");
+        contact.needs_online_reconcile = true;
+        store_contact(&contact).expect("store contact");
 
-        // No contact yet → NoContact (nothing to establish).
-        assert_eq!(
-            bind_contact_public_key_if_absent(&device_id, &[0x01u8; 64]).unwrap(),
-            AkBindOutcome::NoContact
-        );
+        update_contact_ble_status(&device_id, None, Some("AA:BB:CC:DD:EE:02"))
+            .expect("record the address");
+        update_contact_ble_status(&device_id, Some(&[0x70u8; 32]), None)
+            .expect("record a matching observation");
 
-        // Contact with an EMPTY AK → first write establishes it.
-        let mut c = make_contact(device_id, "peer");
-        c.public_key = Vec::new();
-        store_contact(&c).expect("store empty-AK contact");
-        let established_ak = vec![0xE1u8; 64];
-        assert_eq!(
-            bind_contact_public_key_if_absent(&device_id, &established_ak).unwrap(),
-            AkBindOutcome::Established
+        let stored = get_contact_by_device_id(&device_id)
+            .expect("read")
+            .expect("the contact");
+        assert!(
+            stored.needs_online_reconcile,
+            "a BLE observation lifted the reconcile hold"
         );
-        assert_eq!(
-            get_contact_by_device_id(&device_id)
-                .unwrap()
-                .unwrap()
-                .public_key,
-            established_ak,
-            "the empty slot was established from the wire"
+        assert_eq!(stored.ble_address.as_deref(), Some("AA:BB:CC:DD:EE:02"));
+        assert_eq!(stored.status, "BleCapable");
+        assert!(
+            update_contact_ble_status(&[0x0Cu8; 32], None, Some("AA:BB:CC:DD:EE:03")).is_err(),
+            "an observation of a device that is not a contact updated nothing and says so"
         );
-
-        // Same AK again → AlreadyPinnedMatching, unchanged.
-        assert_eq!(
-            bind_contact_public_key_if_absent(&device_id, &established_ak).unwrap(),
-            AkBindOutcome::AlreadyPinnedMatching
-        );
-
-        // A DIFFERENT wire AK → RejectedSubstitution; the pinned AK is preserved byte-for-byte.
-        let attacker_ak = vec![0xEEu8; 64];
-        assert_eq!(
-            bind_contact_public_key_if_absent(&device_id, &attacker_ak).unwrap(),
-            AkBindOutcome::RejectedSubstitution
-        );
-        assert_eq!(
-            get_contact_by_device_id(&device_id)
-                .unwrap()
-                .unwrap()
-                .public_key,
-            established_ak,
-            "a differing wire AK must NEVER re-root the pinned AK"
-        );
-
-        // Malformed device_id → error.
-        assert!(bind_contact_public_key_if_absent(&[0u8; 16], &established_ak).is_err());
     }
 
-    /// Cold-peer RPA rotation: after a paired peer's BLE address rotates, the canonical re-persist
-    /// (`update_contact_ble_status(device_id, None, Some(new))`, driven by the probe's on-match
-    /// `observeGattIdentityRead`) must re-point the contact so the FRESH address resolves and the
-    /// STALE one no longer does — the storage half of the directed-probe fix.
+    /// After a paired peer's BLE address rotates, the re-persist on a later
+    /// identity read (`update_contact_ble_status(device_id, None, Some(new))`)
+    /// re-points the contact: it holds the fresh address, not the stale one.
     #[test]
     #[serial]
     fn update_contact_ble_status_repoints_rotated_address() {
@@ -1613,21 +961,19 @@ mod tests {
 
         let old_addr = "AA:BB:CC:DD:EE:01";
         let new_addr = "11:22:33:44:55:66";
+        let held = || {
+            get_contact_by_device_id(&device_id)
+                .expect("read the contact")
+                .expect("the contact exists")
+                .ble_address
+        };
 
-        // Initial BLE address, then confirm it resolves.
         update_contact_ble_status(&device_id, None, Some(old_addr)).expect("set old addr");
-        assert!(get_contact_by_ble_address(old_addr).unwrap().is_some());
+        assert_eq!(held().as_deref(), Some(old_addr));
 
         // RPA rotates: re-point to the fresh address.
         update_contact_ble_status(&device_id, None, Some(new_addr)).expect("repoint addr");
-
-        let hit = get_contact_by_ble_address(new_addr).expect("query new addr");
-        assert!(hit.is_some(), "fresh rotated address must resolve");
-        assert_eq!(hit.unwrap().device_id, device_id.to_vec());
-        assert!(
-            get_contact_by_ble_address(old_addr).unwrap().is_none(),
-            "stale rotated address must no longer resolve",
-        );
+        assert_eq!(held().as_deref(), Some(new_addr));
     }
 
     #[test]
@@ -1643,38 +989,5 @@ mod tests {
         assert!(all.len() >= 2);
         assert!(all.iter().any(|c| c.alias == "bob"));
         assert!(all.iter().any(|c| c.alias == "carol"));
-    }
-
-    #[test]
-    #[serial]
-    fn get_contact_by_alias_finds_stored_contact() {
-        init_test_db();
-        let contact = make_contact([0x04u8; 32], "dave");
-        store_contact(&contact).expect("store");
-
-        let found = get_contact_by_alias("dave")
-            .expect("query")
-            .expect("contact exists");
-        assert_eq!(found.device_id, [0x04u8; 32].to_vec());
-    }
-
-    #[test]
-    #[serial]
-    fn remove_contact_returns_false_for_nonexistent() {
-        init_test_db();
-        let removed = remove_contact("nonexistent-id").expect("remove");
-        assert!(!removed);
-    }
-
-    #[test]
-    #[serial]
-    fn remove_contact_deletes_existing() {
-        init_test_db();
-        let contact = make_contact([0x05u8; 32], "eve");
-        store_contact(&contact).expect("store");
-
-        let removed = remove_contact("cid-eve").expect("remove");
-        assert!(removed);
-        assert!(get_contact_by_alias("eve").expect("query").is_none());
     }
 }

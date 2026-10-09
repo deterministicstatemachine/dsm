@@ -43,10 +43,49 @@ name: CodeQL
 on:
   push:
     branches: [main]
+    paths-ignore:
+      # A markdown-only change cannot alter any CI outcome, so running the
+      # pipeline on one buys nothing and costs ~95 minutes of runner time
+      # (Coverage alone is ~50). Verified before adding this, not assumed:
+      #   - no `.md` is compiled in — zero `include_str!("*.md")` in the tree;
+      #   - every gate that scans the tree excludes markdown explicitly
+      #     (`--glob '!**/*.md'` in no_clock_and_no_json.sh and
+      #     bridge_contracts_gate.sh, `--exclude='*.md'` in
+      #     check_forbidden_symbols.sh);
+      #   - the `main-branch-protect` ruleset requires deletion protection,
+      #     non-fast-forward, a reviewed PR and signed commits, and NO status
+      #     checks — so a skipped workflow cannot leave a PR unmergeable,
+      #     which is the usual trap with `paths-ignore`.
+      # Only `**/*.md` is listed. A non-markdown file under `docs/` (none
+      # today: docs/ holds only audits and bench proofs) still runs the
+      # pipeline, because "it lives under docs/" is not evidence that nothing
+      # consumes it.
+      - '**/*.md'
   # Run on every PR regardless of base branch (see ci.yml) so stacked PRs get
-  # scanned. Note: codeql-action restricts alerts to the PR diff, so a PR that
+  # scanned. The markdown skip below is consistent with the note that follows:
+  # alerts are already restricted to the PR diff, so a markdown-only PR reports
+  # nothing by construction. The scheduled and dispatch runs stay full-tree and
+  # are deliberately NOT filtered. Note: codeql-action restricts alerts to the PR diff, so a PR that
   # touches no Rust reports no Rust alerts by construction (see below).
   pull_request:
+    paths-ignore:
+      # A markdown-only change cannot alter any CI outcome, so running the
+      # pipeline on one buys nothing and costs ~95 minutes of runner time
+      # (Coverage alone is ~50). Verified before adding this, not assumed:
+      #   - no `.md` is compiled in — zero `include_str!("*.md")` in the tree;
+      #   - every gate that scans the tree excludes markdown explicitly
+      #     (`--glob '!**/*.md'` in no_clock_and_no_json.sh and
+      #     bridge_contracts_gate.sh, `--exclude='*.md'` in
+      #     check_forbidden_symbols.sh);
+      #   - the `main-branch-protect` ruleset requires deletion protection,
+      #     non-fast-forward, a reviewed PR and signed commits, and NO status
+      #     checks — so a skipped workflow cannot leave a PR unmergeable,
+      #     which is the usual trap with `paths-ignore`.
+      # Only `**/*.md` is listed. A non-markdown file under `docs/` (none
+      # today: docs/ holds only audits and bench proofs) still runs the
+      # pipeline, because "it lives under docs/" is not evidence that nothing
+      # consumes it.
+      - '**/*.md'
   # Lets a full-tree scan be forced without waiting for a push or the cron.
   # Worth knowing when reading a PR check: codeql-action restricts alerts to
   # the PR diff ("Persisted N diff range(s)"), so a PR that touches no Rust
@@ -60,6 +99,14 @@ on:
 
 permissions:
   contents: read
+
+# A newer push to the same pull request supersedes this run: it is cancelled
+# rather than finished for a result nobody reads. A run for anything else (a
+# push to main, the schedule, a dispatch) is its own group and is never
+# cancelled: each merge commit is checked by its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:

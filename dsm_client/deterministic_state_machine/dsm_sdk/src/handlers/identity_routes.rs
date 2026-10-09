@@ -1,151 +1,139 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Identity route handlers.
 
+use dsm::types::error::DsmError;
 use dsm::types::proto as generated;
 use prost::Message;
 
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{err, pack_bytes_ok, pack_envelope_ok};
 use crate::bridge::{AppQuery, AppResult};
-use crate::sdk::identity_sdk::IdentitySDK;
+use crate::sdk::app_state::AppState;
+
+/// This device's identity as `AppState` holds it.
+struct OwnIdentity {
+    device_id: [u8; 32],
+    genesis: [u8; 32],
+    ak: Vec<u8>,
+}
+
+fn own_identity() -> Result<OwnIdentity, DsmError> {
+    let device_id: [u8; 32] = AppState::get_device_id()
+        .ok_or_else(|| DsmError::InvalidState("device_id not set: no identity yet".into()))?
+        .as_slice()
+        .try_into()
+        .map_err(|e| DsmError::InvalidState(format!("device_id: {e}")))?;
+    let genesis: [u8; 32] = AppState::get_genesis_hash()
+        .ok_or_else(|| DsmError::InvalidState("genesis_hash not set: no identity yet".into()))?
+        .as_slice()
+        .try_into()
+        .map_err(|e| DsmError::InvalidState(format!("genesis_hash: {e}")))?;
+    let ak = AppState::get_public_key()
+        .ok_or_else(|| DsmError::InvalidState("signing key not set: no identity yet".into()))?;
+    if ak.len() != 64 {
+        return Err(DsmError::InvalidState(format!(
+            "signing key is {} bytes, not 64",
+            ak.len()
+        )));
+    }
+    Ok(OwnIdentity {
+        device_id,
+        genesis,
+        ak,
+    })
+}
+
+/// The network this device's genesis committed.
+fn committed_network() -> Result<String, DsmError> {
+    let network = crate::sdk::economic_admission_flow::committed_network_id()?;
+    String::from_utf8(network)
+        .map_err(|e| DsmError::InvalidState(format!("the committed network id: {e}")))
+}
+
+/// The text form of a contact card: this prefix, then the card's protobuf
+/// bytes in Base32 Crockford. `contact_code` writes it and `read_contact_code`
+/// reads it; nothing else knows the format.
+pub(crate) const CONTACT_CODE_PREFIX: &str = "dsm:contact/v3:";
+
+/// The contact card a peer scans to add this device: its device id, genesis
+/// and AK, and the network its genesis committed. The peer resolves the
+/// device's directory entry on that network's pinned set, so the card names
+/// no nodes.
+pub(crate) fn contact_card() -> Result<generated::ContactQrV3, DsmError> {
+    let own = own_identity()?;
+    Ok(generated::ContactQrV3 {
+        device_id: own.device_id.to_vec(),
+        network: committed_network()?,
+        genesis_hash: own.genesis.to_vec(),
+        signing_public_key: own.ak,
+        ..Default::default()
+    })
+}
+
+/// This device's contact card as the text its QR encodes.
+pub(crate) fn contact_code() -> Result<String, DsmError> {
+    Ok(format!(
+        "{CONTACT_CODE_PREFIX}{}",
+        crate::util::text_id::encode_base32_crockford(&contact_card()?.encode_to_vec())
+    ))
+}
+
+/// The contact card a scanned or pasted contact code carries. A card naming
+/// another network than the one this device's genesis committed is refused:
+/// its device's directory entry is on that network's set, not this one.
+pub(crate) fn read_contact_code(text: &str) -> Result<generated::ContactQrV3, DsmError> {
+    let body = text
+        .trim()
+        .strip_prefix(CONTACT_CODE_PREFIX)
+        .ok_or_else(|| {
+            DsmError::invalid_parameter(format!("a contact code starts with {CONTACT_CODE_PREFIX}"))
+        })?;
+    let bytes = crate::util::text_id::decode_base32_crockford(body)
+        .ok_or_else(|| DsmError::invalid_parameter("the contact code is not Base32 Crockford"))?;
+    let card = generated::ContactQrV3::decode(bytes.as_slice()).map_err(|e| {
+        DsmError::invalid_parameter(format!("the contact code carries no contact card: {e}"))
+    })?;
+    for (field, len, expected) in [
+        ("device id", card.device_id.len(), 32),
+        ("genesis", card.genesis_hash.len(), 32),
+        ("signing key", card.signing_public_key.len(), 64),
+    ] {
+        if len != expected {
+            return Err(DsmError::invalid_parameter(format!(
+                "the contact card's {field} is {len} bytes, not {expected}"
+            )));
+        }
+    }
+    let network = committed_network()?;
+    if card.network != network {
+        return Err(DsmError::invalid_parameter(format!(
+            "the contact is on network \"{}\"; this device is on \"{network}\"",
+            card.network
+        )));
+    }
+    Ok(card)
+}
 
 impl AppRouterImpl {
     /// Dispatch handler for all `identity.*` query routes.
     pub(crate) async fn handle_identity_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             // ---------- identity.transport_headers_v3 ----------
-            "identity.transport_headers_v3" => {
-                // SDK may bootstrap context if headers are requested early.
-                if !crate::is_sdk_context_initialized() {
-                    if let (Some(dev), Some(gen)) = (
-                        crate::sdk::app_state::AppState::get_device_id(),
-                        crate::sdk::app_state::AppState::get_genesis_hash(),
-                    ) {
-                        if dev.len() == 32 && gen.len() == 32 {
-                            let _ = crate::initialize_sdk_context(dev, gen.clone(), gen);
-                        }
-                    }
-                }
+            "identity.transport_headers_v3" => match crate::get_transport_headers_v3_bytes() {
+                Ok(bytes) => pack_bytes_ok(bytes),
+                Err(e) => err(format!("identity.transport_headers_v3 failed: {e}")),
+            },
 
-                match crate::get_transport_headers_v3_bytes() {
-                    Ok(bytes) => pack_bytes_ok(bytes, generated::Hash32 { v: vec![0u8; 32] }),
-                    Err(e) => err(format!("identity.transport_headers_v3 failed: {e}")),
-                }
-            }
-
-            // -------- identity.pairing_qr (protobuf ContactQrV3) --------
-            "identity.pairing_qr" => {
-                let identity = IdentitySDK::new("local".into());
-                match identity.generate_pairing_qr().await {
-                    Ok(qr) => {
-                        // Convert from generated::ContactQrV3 to dsm::types::proto::ContactQrV3
-                        // (both are from same proto, just different crate scopes)
-                        let dsm_qr = dsm::types::proto::ContactQrV3 {
-                            device_id: qr.device_id.clone(),
-                            network: qr.network.clone(),
-                            storage_nodes: qr.storage_nodes.clone(),
-                            sdk_fingerprint: qr.sdk_fingerprint.clone(),
-                            genesis_hash: qr.genesis_hash.clone(),
-                            signing_public_key: qr.signing_public_key.clone(),
-                            preferred_alias: qr.preferred_alias.clone(),
-                        };
-                        pack_envelope_ok(generated::envelope::Payload::ContactQrResponse(dsm_qr))
-                    }
-                    Err(e) => err(format!("identity.pairing_qr failed: {e}")),
-                }
-            }
-
-            // -------- identity.pairing_compact (string: deviceId@genesisBase32) --------
-            "identity.pairing_compact" => {
-                let identity = IdentitySDK::new("local".into());
-                match identity.pairing_qr_compact().await {
-                    Ok(s) => {
-                        let resp = generated::AppStateResponse {
-                            key: "pairing".into(),
-                            value: Some(s),
-                        };
-                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
-                    }
-                    Err(e) => err(format!("identity.pairing_compact failed: {e}")),
-                }
-            }
-
-            // -------- identity.devtree.snapshot (Phase B.7, issue #278) --------
-            //
-            // Pure-rendering DeviceTreeViewer payload. The SDK fetches
-            // the persisted DeviceTreeStateV1 from any configured
-            // storage node, re-canonicalises the leaf list, derives a
-            // fresh DeviceInclusionProofV1 for every leaf, and verifies
-            // each proof locally. The frontend renders the result —
-            // it does not hash anything.
-            "identity.devtree.snapshot" => {
-                let pack = match generated::ArgPack::decode(&*q.params) {
-                    Ok(p) => p,
-                    Err(e) => return err(format!("decode ArgPack failed: {e}")),
-                };
-                if pack.codec != generated::Codec::Proto as i32 {
-                    return err("identity.devtree.snapshot: ArgPack.codec must be PROTO".into());
-                }
-                let req = match generated::DeviceTreeSnapshotRequest::decode(&*pack.body) {
-                    Ok(r) => r,
-                    Err(e) => return err(format!("decode DeviceTreeSnapshotRequest failed: {e}")),
-                };
-                if req.genesis_hash.len() != 32 {
-                    return err("identity.devtree.snapshot: genesis_hash must be 32 bytes".into());
-                }
-                let mut genesis_hash = [0u8; 32];
-                genesis_hash.copy_from_slice(&req.genesis_hash);
-
-                let fut = async move {
-                    let cfg =
-                        match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
-                            .await
-                        {
-                            Ok(c) => c,
-                            Err(e) => return Err(format!("No storage node config available: {e}")),
-                        };
-                    let sdk = crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg)
-                        .await
-                        .map_err(|e| format!("sdk.new: {e}"))?;
-
-                    sdk.fetch_device_tree_snapshot(&genesis_hash)
-                        .await
-                        .map_err(|e| format!("fetch_device_tree_snapshot: {e}"))
-                };
-                let view = match crate::runtime::get_runtime().block_on(fut) {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-
-                // `view.claimed_tree` is a `crate::generated::DeviceTreeV1`
-                // (prost generation rooted in `dsm_sdk`), but the
-                // envelope variant expects a `dsm::types::proto::DeviceTreeV1`
-                // (prost generation rooted in `dsm`). They're distinct
-                // types from the same .proto, so copy fields by hand.
-                let claimed_tree_proto = generated::DeviceTreeV1 {
-                    schema_version: view.claimed_tree.schema_version,
-                    root_hash: view.claimed_tree.root_hash.clone(),
-                    device_count: view.claimed_tree.device_count,
-                    version_number: view.claimed_tree.version_number,
-                };
-                let resp = generated::DeviceTreeSnapshotResponse {
-                    tree: Some(claimed_tree_proto),
-                    recomputed_root: view.recomputed_root.to_vec(),
-                    claimed_root_matches_recomputed: view.claimed_root_matches_recomputed,
-                    leaves: view
-                        .leaves
-                        .into_iter()
-                        .map(|l| generated::DeviceTreeLeafView {
-                            device_id: l.device_id.to_vec(),
-                            proof_bytes: l.proof_bytes,
-                            inclusion_verified: l.inclusion_verified,
-                        })
-                        .collect(),
-                };
-                pack_envelope_ok(generated::envelope::Payload::DeviceTreeSnapshotResponse(
-                    resp,
-                ))
-            }
+            // -------- identity.contact_code (the text this device's QR encodes) --------
+            "identity.contact_code" => match contact_code() {
+                Ok(code) => pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+                    generated::AppStateResponse {
+                        key: "contact_code".into(),
+                        value: Some(code),
+                    },
+                )),
+                Err(e) => err(format!("identity.contact_code failed: {e}")),
+            },
 
             _ => err(format!("unknown identity query: {}", q.path)),
         }
@@ -154,200 +142,140 @@ impl AppRouterImpl {
 
 #[cfg(test)]
 mod tests {
-    use dsm::types::proto as generated;
-    use prost::Message;
+    use super::*;
+    use crate::economic_fixtures;
 
-    use crate::bridge::AppResult;
+    fn identity() -> economic_fixtures::TestIdentity {
+        economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        economic_fixtures::create_identity(0x5A)
+    }
 
+    /// A card's text form, written the way `contact_code` writes it.
+    fn code_of(card: &generated::ContactQrV3) -> String {
+        format!(
+            "{CONTACT_CODE_PREFIX}{}",
+            crate::util::text_id::encode_base32_crockford(&card.encode_to_vec())
+        )
+    }
+
+    fn refusal(text: &str) -> String {
+        read_contact_code(text)
+            .expect_err("the text is refused")
+            .to_string()
+    }
+
+    /// The contact card carries exactly the identity the device holds and the
+    /// network its genesis committed, and its code reads back as that card.
     #[test]
-    fn identity_route_names_are_stable() {
-        let expected_routes = [
-            "identity.transport_headers_v3",
-            "identity.pairing_qr",
-            "identity.pairing_compact",
-            "identity.devtree.snapshot",
-        ];
-        for route in &expected_routes {
-            assert!(!route.is_empty());
-            assert!(route.starts_with("identity."));
+    #[serial_test::serial]
+    fn the_contact_code_is_the_devices_own_identity() {
+        let identity = identity();
+
+        let card = contact_card().expect("contact card");
+        assert_eq!(card.device_id, identity.device_id.to_vec());
+        assert_eq!(card.genesis_hash, identity.genesis.to_vec());
+        assert_eq!(card.signing_public_key, identity.ak_public_key);
+        assert_eq!(card.network.as_bytes(), economic_fixtures::NETWORK);
+
+        let code = contact_code().expect("contact code");
+        assert_eq!(code, code_of(&card));
+        assert_eq!(read_contact_code(&code).expect("the code reads back"), card);
+    }
+
+    /// A card naming another network is refused before any directory read:
+    /// its device's entry is on that network's set.
+    #[test]
+    #[serial_test::serial]
+    fn a_contact_code_naming_another_network_is_refused() {
+        identity();
+        let mut card = contact_card().expect("contact card");
+        card.network = "another-network".into();
+        let refusal = refusal(&code_of(&card));
+        assert!(refusal.contains("\"another-network\""), "{refusal}");
+    }
+
+    /// Text that is not a whole contact code names nobody.
+    #[test]
+    #[serial_test::serial]
+    fn text_that_is_not_a_contact_code_is_refused() {
+        identity();
+        let card = contact_card().expect("contact card");
+        let code = code_of(&card);
+
+        let bare = code
+            .strip_prefix(CONTACT_CODE_PREFIX)
+            .expect("the code has its prefix");
+        assert!(refusal(bare).contains("starts with"));
+        assert!(refusal(&format!("{CONTACT_CODE_PREFIX}!!")).contains("Base32"));
+        let not_a_card = format!(
+            "{CONTACT_CODE_PREFIX}{}",
+            crate::util::text_id::encode_base32_crockford(&[0xFF, 0xFF, 0xFF])
+        );
+        assert!(refusal(&not_a_card).contains("no contact card"));
+
+        let mut short = card.clone();
+        short.device_id.pop();
+        assert!(refusal(&code_of(&short)).contains("device id is 31 bytes"));
+        let mut short = card.clone();
+        short.genesis_hash.pop();
+        assert!(refusal(&code_of(&short)).contains("genesis is 31 bytes"));
+        let mut short = card;
+        short.signing_public_key.pop();
+        assert!(refusal(&code_of(&short)).contains("signing key is 63 bytes"));
+    }
+
+    /// Where the guided tour's practice contact code is kept in the frontend.
+    const PRACTICE_CONTACT_FILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/tour/practiceContact.ts"
+    );
+
+    /// The guided tour's practice contact, bob: a card on the beta network,
+    /// written as this module writes a contact code. The tour has the user
+    /// paste the code into Add Contact, where Rust reads it for real (a read
+    /// the practice sandbox lets through) and practice mode adds bob. The
+    /// frontend's file must hold exactly this code, one Rust reads back as the
+    /// card; DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    #[test]
+    #[serial_test::serial]
+    fn the_tour_practice_contact_code_is_one_rust_reads() {
+        identity();
+        let card = generated::ContactQrV3 {
+            device_id: vec![0xB0; 32],
+            network: String::from_utf8(dsm::economic::register::BETA_NETWORK_ID.to_vec())
+                .expect("the beta network id is UTF-8"),
+            genesis_hash: vec![0xB1; 32],
+            signing_public_key: vec![0xB2; 64],
+            preferred_alias: "bob".into(),
+        };
+        let code = code_of(&card);
+        assert_eq!(
+            read_contact_code(&code).expect("Rust reads the practice code"),
+            card
+        );
+
+        let file = format!(
+            "// SPDX-License-Identifier: Apache-2.0\n\
+             //\n\
+             // The guided tour's practice contact, bob: his contact code, as Rust writes\n\
+             // one. Written by the dsm_sdk test\n\
+             // `the_tour_practice_contact_code_is_one_rust_reads` (handlers/identity_routes.rs),\n\
+             // which fails when this file and Rust's encoding differ. Rust reads it when\n\
+             // it is pasted into Add Contact; adding bob is practice mode's.\n\
+             export const PRACTICE_CONTACT_CODE =\n  '{code}';\n"
+        );
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => std::fs::write(PRACTICE_CONTACT_FILE, &file)
+                .expect("write the frontend's practice contact"),
+            None => assert_eq!(
+                std::fs::read_to_string(PRACTICE_CONTACT_FILE)
+                    .expect("the frontend's committed practice contact"),
+                file,
+                "the frontend's practice contact code differs from Rust's encoding; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
         }
-    }
-
-    #[test]
-    fn device_tree_snapshot_request_round_trips_through_argpack() {
-        // The route decodes ArgPack { codec: PROTO, body:
-        // DeviceTreeSnapshotRequest } before dispatching. Lock the
-        // wire shape here so the route handler stays in sync with the
-        // frontend bridge wrapper.
-        let req = generated::DeviceTreeSnapshotRequest {
-            genesis_hash: vec![0x42u8; 32],
-        };
-        let body = req.encode_to_vec();
-        let pack = generated::ArgPack {
-            codec: generated::Codec::Proto as i32,
-            body: body.clone(),
-            schema_hash: None,
-        };
-        let pack_bytes = pack.encode_to_vec();
-
-        let decoded_pack = generated::ArgPack::decode(&*pack_bytes).expect("decode pack");
-        assert_eq!(decoded_pack.codec, generated::Codec::Proto as i32);
-        let decoded_req = generated::DeviceTreeSnapshotRequest::decode(&*decoded_pack.body)
-            .expect("decode request");
-        assert_eq!(decoded_req.genesis_hash.len(), 32);
-        assert_eq!(decoded_req.genesis_hash, vec![0x42u8; 32]);
-    }
-
-    #[test]
-    fn device_tree_snapshot_response_round_trips() {
-        let resp = generated::DeviceTreeSnapshotResponse {
-            tree: Some(generated::DeviceTreeV1 {
-                schema_version: 1,
-                root_hash: vec![0xABu8; 32],
-                device_count: 2,
-                version_number: 5,
-            }),
-            recomputed_root: vec![0xABu8; 32],
-            claimed_root_matches_recomputed: true,
-            leaves: vec![
-                generated::DeviceTreeLeafView {
-                    device_id: vec![0x11u8; 32],
-                    proof_bytes: vec![0xFEu8, 0xEDu8],
-                    inclusion_verified: true,
-                },
-                generated::DeviceTreeLeafView {
-                    device_id: vec![0x22u8; 32],
-                    proof_bytes: vec![0xBEu8, 0xEFu8],
-                    inclusion_verified: true,
-                },
-            ],
-        };
-        let bytes = resp.encode_to_vec();
-        let decoded = generated::DeviceTreeSnapshotResponse::decode(&*bytes).expect("decode");
-        assert!(decoded.claimed_root_matches_recomputed);
-        assert_eq!(decoded.recomputed_root, vec![0xABu8; 32]);
-        assert_eq!(decoded.leaves.len(), 2);
-        let tree = decoded.tree.expect("tree present");
-        assert_eq!(tree.device_count, 2);
-        assert_eq!(tree.version_number, 5);
-    }
-
-    /// Drives `build_device_tree_snapshot_view` end-to-end through a
-    /// fabricated DeviceTreeStateV1, asserting that
-    /// claimed_root_matches_recomputed is true for honest state and
-    /// false for tampered state, and that every leaf's
-    /// inclusion_verified flag is true.
-    #[test]
-    fn build_snapshot_view_flags_match_versus_mismatch() {
-        use crate::sdk::storage_node_sdk::build_device_tree_snapshot_view;
-
-        let dev_a = [0x11u8; 32];
-        let dev_b = [0x22u8; 32];
-        let canonical_root = dsm::common::device_tree::DeviceTree::new(vec![dev_a, dev_b]).root();
-
-        // Honest: claimed root matches recomputed.
-        let honest = generated::DeviceTreeStateV1 {
-            tree: Some(generated::DeviceTreeV1 {
-                schema_version: 1,
-                root_hash: canonical_root.to_vec(),
-                device_count: 2,
-                version_number: 7,
-            }),
-            device_ids: vec![dev_a.to_vec(), dev_b.to_vec()],
-        };
-        let view =
-            build_device_tree_snapshot_view(&honest.encode_to_vec()).expect("honest snapshot");
-        assert!(view.claimed_root_matches_recomputed);
-        assert_eq!(view.leaves.len(), 2);
-        assert!(view.leaves.iter().all(|l| l.inclusion_verified));
-
-        // Tampered: same leaf set, fake claimed root.
-        let tampered = generated::DeviceTreeStateV1 {
-            tree: Some(generated::DeviceTreeV1 {
-                schema_version: 1,
-                root_hash: vec![0xFFu8; 32], // bogus
-                device_count: 2,
-                version_number: 7,
-            }),
-            device_ids: vec![dev_a.to_vec(), dev_b.to_vec()],
-        };
-        let view =
-            build_device_tree_snapshot_view(&tampered.encode_to_vec()).expect("tampered snapshot");
-        assert!(!view.claimed_root_matches_recomputed);
-        // Per-leaf verification still passes because proofs are
-        // re-derived against the recomputed (not claimed) root —
-        // the trust-but-verify gate is the tree-level flag.
-        assert!(view.leaves.iter().all(|l| l.inclusion_verified));
-    }
-
-    #[test]
-    fn contact_qr_v3_response_roundtrip() {
-        let qr = generated::ContactQrV3 {
-            device_id: vec![0xAA; 32],
-            network: "main".into(),
-            storage_nodes: vec!["http://node:8080".into()],
-            sdk_fingerprint: vec![0xBB; 32],
-            genesis_hash: vec![0xCC; 32],
-            signing_public_key: vec![0xDD; 64],
-            preferred_alias: "TestUser".into(),
-        };
-
-        let bytes = qr.encode_to_vec();
-        let decoded = generated::ContactQrV3::decode(&*bytes).expect("decode");
-        assert_eq!(decoded.network, "main");
-        assert_eq!(decoded.device_id.len(), 32);
-        assert_eq!(decoded.genesis_hash.len(), 32);
-        assert_eq!(decoded.preferred_alias, "TestUser");
-    }
-
-    #[test]
-    fn app_state_response_for_pairing_compact() {
-        let resp = generated::AppStateResponse {
-            key: "pairing".into(),
-            value: Some("DEVICE123@GENESIS456".into()),
-        };
-        let bytes = resp.encode_to_vec();
-        let decoded = generated::AppStateResponse::decode(&*bytes).expect("decode");
-        assert_eq!(decoded.key, "pairing");
-        assert_eq!(decoded.value.as_deref(), Some("DEVICE123@GENESIS456"));
-    }
-
-    #[test]
-    fn envelope_framing_byte_is_0x03() {
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: Some(generated::Headers {
-                device_id: vec![0u8; 32],
-                chain_tip: vec![0u8; 32],
-                genesis_hash: vec![0u8; 32],
-                seq: 0,
-            }),
-            message_id: vec![0u8; 16],
-            payload: Some(generated::envelope::Payload::AppStateResponse(
-                generated::AppStateResponse {
-                    key: "test".into(),
-                    value: Some("val".into()),
-                },
-            )),
-        };
-        let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
-        buf.push(0x03);
-        envelope.encode(&mut buf).unwrap();
-
-        assert_eq!(buf[0], 0x03, "framing byte must be 0x03 for v3");
-        let decoded = dsm::envelope::from_canonical_bytes(&buf[1..]).expect("decode envelope");
-        assert_eq!(decoded.version, 3);
-    }
-
-    #[test]
-    fn err_helper_produces_failed_result() {
-        let result = AppResult {
-            success: false,
-            data: vec![],
-            error_message: Some("test error".into()),
-        };
-        assert!(!result.success);
-        assert!(result.data.is_empty());
-        assert_eq!(result.error_message.as_deref(), Some("test error"));
     }
 }

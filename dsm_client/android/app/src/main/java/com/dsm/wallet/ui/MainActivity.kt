@@ -4,6 +4,7 @@ package com.dsm.wallet.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -32,6 +33,7 @@ import android.view.Gravity
 import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -43,7 +45,6 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
-import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
@@ -61,27 +62,21 @@ import com.dsm.wallet.bridge.BleEventRelay
 import com.dsm.wallet.bridge.SinglePathWebViewBridge
 import com.dsm.wallet.bridge.Unified
 import com.dsm.wallet.bridge.ble.BleCoordinator
-import com.dsm.wallet.mcp.McpService
 import com.dsm.wallet.permissions.BluetoothPermissionHelper
 import com.dsm.wallet.service.BleBackgroundService
 import com.dsm.wallet.session.NativeFirstCutoverReset
-import dsm.types.proto.BiometricAuthorizeResult
 import dsm.types.proto.NativeHostEvent
 import dsm.types.proto.NativeHostEventKind
 import dsm.types.proto.QrScanResultPayload
 import dsm.types.proto.SessionHardwareFactsProto
-import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.InputStream
 import java.lang.ref.WeakReference
-import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
-    @Volatile private var mcpStarted = false
 
     // Dedicated single-thread executor for genesis + heavy JNI work, keeping the main thread
     // free (Genesis v2 is mnemonic-rooted and fast — there is no silicon enrollment).
@@ -97,7 +92,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             Thread(r, "dsm-bridge-worker").also { it.isDaemon = true }
         }
 
-    private val cameraPermCode = 2001
     private val runtimePermCode = 2002
     lateinit var btPermLauncher: ActivityResultLauncher<Array<String>> 
     private var btPermsRequested = false
@@ -109,6 +103,11 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     // Native QR scanner launcher and callback
     lateinit var qrScannerLauncher: ActivityResultLauncher<Intent>
     @Volatile var qrScanCallback: ((String?) -> Unit)? = null
+    // The page's file control (the token wizard's coin artwork): an
+    // <input type="file"> opens the system picker only if the host launches
+    // it. The WebView's default is to do nothing on the tap.
+    lateinit var fileChooserLauncher: ActivityResultLauncher<Intent>
+    @Volatile private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     @Volatile private var qrLockRoundTripState = QrLockRoundTripState()
     @Volatile private var walletRefreshHint = 0L
     @Volatile private var isAppForeground = true
@@ -133,12 +132,26 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private lateinit var bridge: SinglePathWebViewBridge
     private lateinit var assetLoader: WebViewAssetLoader
     @Volatile private var dsmPort: WebMessagePortCompat? = null
+    /** A connect code a link handed over (DSM Amendment A11), held until the page can take it. */
+    @Volatile private var pendingConnectLink: String? = null
+    /** The connect link that opened the wallet from another app, until the player answers it. */
+    @Volatile private var connectLinkOpened: String? = null
     @Volatile private var pendingJsPort: WebMessagePortCompat? = null
     @Volatile private var bleBackgroundService: BleBackgroundService? = null
     private val batteryChangedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (updateBatterySnapshotFromIntent(intent)) {
                 publishSessionState("battery")
+            }
+        }
+    }
+    // Bluetooth turning on or off changes a fact Rust decides pairing from.
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE, android.bluetooth.BluetoothAdapter.ERROR)) {
+                android.bluetooth.BluetoothAdapter.STATE_ON,
+                android.bluetooth.BluetoothAdapter.STATE_OFF -> publishSessionState("bluetoothState")
             }
         }
     }
@@ -149,6 +162,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             bleBackgroundService = binder?.getService()
             bleServiceBound = bleBackgroundService != null
             Log.i(tag, "BLE service bound: $bleServiceBound")
+            // A resume or init that ran before the bind had no service to ask.
+            bleBackgroundService?.refreshAdvertising()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -729,7 +744,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             .setBlePermissions(NativeFirstCutoverReset.hasBlePermissions(this))
             .setBleScanning(service?.isScanningActive() == true)
             .setBleAdvertising(service?.isAdvertisingActive() == true)
-            .setQrAvailable(true)
+            .setQrAvailable(packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_CAMERA_ANY))
             .setQrActive(qrState.effectiveQrActive())
             .setCameraPermission(NativeFirstCutoverReset.hasCameraPermission(this))
             .setBatteryCharging(batteryCharging)
@@ -788,6 +803,28 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         updateBatterySnapshotFromIntent(stickyIntent)
     }
 
+    private fun registerBluetoothStateReceiver() {
+        val filter = IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(bluetoothStateReceiver, filter)
+            }
+        } catch (t: Throwable) {
+            Log.w(tag, "registerBluetoothStateReceiver: failed", t)
+        }
+    }
+
+    private fun unregisterBluetoothStateReceiver() {
+        try {
+            unregisterReceiver(bluetoothStateReceiver)
+        } catch (_: IllegalArgumentException) {
+        } catch (t: Throwable) {
+            Log.w(tag, "unregisterBluetoothStateReceiver: failed", t)
+        }
+    }
+
     private fun unregisterBatteryReceiver() {
         try {
             unregisterReceiver(batteryChangedReceiver)
@@ -797,8 +834,28 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    fun setBleAdvertisingDesired(desired: Boolean) {
-        bleBackgroundService?.setAdvertisingDesired(desired)
+    /**
+     * The appliance has an identity: the BLE foreground service runs (it survives
+     * activity lifecycle transitions) and brings the GATT server and advertising
+     * up on its own thread; a service already running is asked again, since the
+     * identity may only now exist. Called on the UI thread (context
+     * requirement) at init when the identity is read and when genesis creates it.
+     */
+    fun startBleForIdentity() {
+        // Rust starts pairing on the next session facts, and pairing drives the
+        // radio through the coordinator: it exists before those facts go out.
+        try {
+            BleCoordinator.getInstance(applicationContext)
+        } catch (t: Throwable) {
+            Log.w(tag, "startBleForIdentity: BLE coordinator init failed", t)
+        }
+        try {
+            BleBackgroundService.start(this)
+            Log.i(tag, "startBleForIdentity: BLE foreground service started")
+        } catch (t: Throwable) {
+            Log.w(tag, "startBleForIdentity: BLE foreground service start failed", t)
+        }
+        bleBackgroundService?.refreshAdvertising()
     }
 
     private fun setSessionFatalError(message: String?) {
@@ -821,59 +878,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    private fun bleCoordinator(): BleCoordinator = BleCoordinator.getInstance(applicationContext)
 
-
-    // The WebView external-host allowlist lives at file scope below so that
-    // `WebViewAllowlistTest` (src/test) can read the set literals and the
-    // `isAllowlistedExternalHost` predicate directly. The lock is the test
-    // — any change to the allowlist requires a matching test diff that is
-    // visible in PR review.
-
-    @VisibleForTesting
-    internal fun proxyWithCorsForTest(request: WebResourceRequest): WebResourceResponse? {
-        return proxyWithCorsInternal(request)
-    }
-
-    private fun proxyWithCorsInternal(request: WebResourceRequest): WebResourceResponse? {
-        val url = request.url?.toString() ?: return null
-        val host = request.url?.host ?: return null
-        if (!isAllowlistedExternalHost(host)) return null
-        return try {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 10_000
-                readTimeout = 15_000
-                requestMethod = request.method
-                for ((k, v) in request.requestHeaders) {
-                    if (k.isNullOrBlank()) continue
-                    setRequestProperty(k, v)
-                }
-            }
-            val code = conn.responseCode
-            val rawContentType = conn.contentType ?: "application/octet-stream"
-            val parts = rawContentType.split(';').map { it.trim() }
-            val mime = parts.firstOrNull()?.ifBlank { "application/octet-stream" } ?: "application/octet-stream"
-            val charset = parts.firstOrNull { it.startsWith("charset=", ignoreCase = true) }
-                ?.substringAfter('=')
-                ?.ifBlank { null }
-                ?: "utf-8"
-
-            val stream: InputStream = try {
-                conn.inputStream
-            } catch (_: Throwable) {
-                conn.errorStream ?: ByteArrayInputStream(ByteArray(0))
-            }
-
-            val headers = mutableMapOf<String, String>()
-            headers["Access-Control-Allow-Origin"] = "https://appassets.androidplatform.net"
-            headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-            headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-
-            WebResourceResponse(mime, charset, code, conn.responseMessage ?: "OK", headers, stream)
-        } catch (_: Throwable) {
-            null
-        }
-    }
 
     private fun installDsmBinaryBridge(wv: WebView) {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.CREATE_WEB_MESSAGE_CHANNEL)) {
@@ -963,40 +968,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
             Log.i(tag, "DSM bridge: parsed messageId=$messageId method='$method' bodyBytes=${body.size}")
 
-            // Biometric auth is async — return ACK immediately; result arrives via binary event.
-            if (method == "biometric.auth") {
-                Log.i(tag, "DSM bridge: biometric.auth — launching BiometricPrompt")
-                val ackResponse = ByteArray(8)
-                java.nio.ByteBuffer.wrap(ackResponse, 0, 8).order(java.nio.ByteOrder.BIG_ENDIAN).putLong(messageId)
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
-                    port.postMessage(WebMessageCompat(ackResponse))
-                }
-                runOnUiThread { showBiometricPrompt() }
-                return
-            }
-
-            // System bar color update: payload is UTF-8 "bgHex|darkHex".
-            if (method == "setSystemBarColors") {
-                try {
-                    val parts = String(body, Charsets.UTF_8).split("|", limit = 2)
-                    if (parts.size == 2) {
-                        applySystemBarColors(parts[0], parts[1])
-                    }
-                } catch (t: Throwable) {
-                    Log.w(tag, "DSM bridge: setSystemBarColors failed: ${t.message}")
-                }
-                val ackResponse = ByteArray(8)
-                java.nio.ByteBuffer.wrap(ackResponse, 0, 8).order(java.nio.ByteOrder.BIG_ENDIAN).putLong(messageId)
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
-                    port.postMessage(WebMessageCompat(ackResponse))
-                }
-                return
-            }
-
-            // Both genesis routes: the legacy MPC path AND the canonical mnemonic-rooted v2 path.
-            // Each must publish a fresh session snapshot after completing — without it React never
-            // sees phase=wallet_ready and the UI sits on the start screen despite the wallet existing.
-            val isLongRunningGenesisRequest = method == "createGenesis" || method == "createGenesisV2"
+            // Wallet creation must publish a fresh session snapshot after completing — without it
+            // React never sees phase=wallet_ready and the UI sits on the start screen despite the
+            // wallet existing.
+            val isLongRunningGenesisRequest = method == "createGenesisV2"
 
             // Genesis + heavy JNI run on the dedicated executor to avoid starving the general
             // bridge worker pool (Genesis v2 is mnemonic-rooted; no silicon enrollment).
@@ -1033,18 +1008,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     com.dsm.wallet.bridge.SinglePathWebViewBridge.createErrorResponse(method, 3, "Native error: ${t.message}")
                 }
                 Log.i(tag, "DSM bridge: method '$method' response size: ${respBytes.size} bytes")
-
-                // Optional: native-side deterministic safety routing (Error.source_tag == 11)
-                try {
-                    val (ok, data) = com.dsm.wallet.bridge.BridgeEnvelopeCodec.parseEnvelopeResponse(respBytes)
-                    if (ok) {
-                        com.dsm.wallet.bridge.BridgeEnvelopeCodec.extractDeterministicSafetyMessageFromEnvelope(data)?.let {
-                            dispatchDsmEventOnUi("dsm.deterministicSafety", it.toByteArray(Charsets.UTF_8))
-                        }
-                    }
-                } catch (_: Throwable) {
-                    // ignore parse errors (response may not be an Envelope)
-                }
 
                 // Prepend message ID to response (8 bytes u64)
                 val responseWithId = ByteArray(8 + respBytes.size)
@@ -1114,18 +1077,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    fun requestNamedPermissionsFromUi(permissions: Array<String>) {
-        val needed = permissions
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-            .toTypedArray()
-        if (needed.isEmpty()) {
-            return
-        }
-        requestPermissions(needed, cameraPermCode)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         // Drop the launch theme as soon as the activity starts so the splash artwork
         // does not remain as the live window background after the first frame.
@@ -1140,6 +1091,15 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         @Suppress("DEPRECATION")
         overridePendingTransition(com.dsm.wallet.R.anim.splash_fade_in, com.dsm.wallet.R.anim.splash_fade_out)
         NativeFirstCutoverReset.resetIfNeeded(this)
+        takeConnectLink(intent)
+        // The storage base dir is set BEFORE anything on this thread can ask Rust for identity:
+        // onStart/onResume and the WebView bridge do, and AppState cannot be read until it is
+        // set. It is a path and a mkdir; the rest of native init stays on its own thread.
+        try {
+            Unified.initStorageBaseDir(filesDir.path.toByteArray(Charsets.UTF_8))
+        } catch (t: Throwable) {
+            Log.e(tag, "onCreate: initStorageBaseDir failed", t)
+        }
 
         // Force system bars to near-black (95% solid) permanently across all themes.
         // Grain texture and overlay effects can't extend to native bars, so keep them
@@ -1191,9 +1151,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     .setCancelable(false)
                     .setPositiveButton("Exit") { _, _ -> finishAffinity() }
                     .setNegativeButton("Learn More") { _, _ ->
-                        // Open architecture guide
-                        val intent = Intent(Intent.ACTION_VIEW, 
-                            Uri.parse("https://github.com/deterministicstatemachine/dsm/blob/main/docs/book/04-architecture.md"))
+                        // Open the support page: how to report an incompatible device
+                        val intent = Intent(Intent.ACTION_VIEW,
+                            Uri.parse("https://github.com/deterministicstatemachine/dsm/blob/main/SUPPORT.md"))
                         startActivity(intent)
                         finishAffinity()
                     }
@@ -1259,6 +1219,15 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             cb?.invoke(data)
         }
 
+        fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val cb = fileChooserCallback
+            fileChooserCallback = null
+            // A cancelled picker answers null, which the page sees as no file chosen.
+            val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            Log.i(tag, "File chooser result: code=${result.resultCode} files=${uris?.size ?: 0}")
+            cb?.onReceiveValue(uris)
+        }
+
         val neededBt = BluetoothPermissionHelper.requiredPermissions()
         if (!BluetoothPermissionHelper.hasAll(this, neededBt) && !btPermsRequested) {
             btPermsRequested = true
@@ -1313,12 +1282,11 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         setContentView(rootContainer)
         setupWebView(webView)
         registerBatteryReceiver()
+        registerBluetoothStateReceiver()
 
 
         initDsmAndSignalReady()
         handleBackPress()
-        
-        com.dsm.wallet.EventPoller.start()
     }
 
     override fun onResume() {
@@ -1333,24 +1301,16 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         if (hasIdentityViaRust()) {
             invokeNativeRouterInvoke("inbox.resume")
         }
-        // Only restart BLE after genesis — during genesis the device is busy and
-        // BLE scanning/advertising wastes resources and causes errors.
+        // Stale GATT sessions from before the pause are closed (a peer's RPA
+        // may have rotated); advertising follows the identity. Pre-genesis
+        // there is no identity and nothing to restart. An unbound service
+        // refreshes when it binds.
         if (hasIdentityViaRust()) {
-            try {
-                val svc = bleBackgroundService
-                if (svc != null) {
-                    svc.closeStaleGattSessions()
-                    val gattOk = svc.ensureGattServerStarted()
-                    svc.setAdvertisingDesired(true)
-                    Log.i(tag, "onResume: BLE restart — stale sessions closed, GATT=$gattOk advertising=desired")
-                } else {
-                    Log.w(tag, "onResume: BLE service not bound yet, GATT restart deferred")
-                }
-            } catch (t: Throwable) {
-                Log.w(tag, "onResume: BLE restart failed: ${t.message}")
+            val svc = bleBackgroundService
+            if (svc != null) {
+                svc.closeStaleGattSessions()
+                svc.refreshAdvertising()
             }
-        } else {
-            Log.d(tag, "onResume: skipping BLE restart (no identity yet, pre-genesis)")
         }
 
         // Suppress Android's system NFC popup while the app is in foreground.
@@ -1373,54 +1333,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         // Do not stop advertising here; background service owns BLE state.
     }
 
-    /**
-     * System bars are permanently near-black (#0D0D0D), set once in onCreate().
-     * Bridge RPC "setSystemBarColors" still routes here but is intentionally a no-op.
-     */
-    fun applySystemBarColors(@Suppress("UNUSED_PARAMETER") bgHex: String, @Suppress("UNUSED_PARAMETER") darkHex: String) {
-        // No-op: bars are permanently dark. Kept so the bridge route doesn't error.
-    }
-
-    fun showBiometricPrompt(
-        promptTitle: String = "DSM Wallet",
-        promptSubtitle: String = "Authenticate to unlock",
-        negativeText: String = "Use PIN / Combo",
-    ) {
-        val executor = ContextCompat.getMainExecutor(this)
-        val callback = object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
-                    BiometricAuthorizeResult.newBuilder()
-                        .setSuccess(true)
-                        .build()
-                        .toByteArray(),
-                )
-            }
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
-                    BiometricAuthorizeResult.newBuilder()
-                        .setSuccess(false)
-                        .setErrorCode(errorCode)
-                        .setErrorMessage(errString.toString())
-                        .build()
-                        .toByteArray(),
-                )
-            }
-            override fun onAuthenticationFailed() {
-                // Finger not recognised — BiometricPrompt shows retry UI automatically.
-            }
-        }
-        val prompt = BiometricPrompt(this, executor, callback)
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(if (promptTitle.isBlank()) "DSM Wallet" else promptTitle)
-            .setSubtitle(if (promptSubtitle.isBlank()) "Authenticate to unlock" else promptSubtitle)
-            .setNegativeButtonText(if (negativeText.isBlank()) "Use PIN / Combo" else negativeText)
-            .build()
-        prompt.authenticate(promptInfo)
-    }
-
     override fun onStart() {
         super.onStart()
         // Start as a foreground service FIRST so it survives onStop() unbind.
@@ -1433,6 +1345,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             } catch (t: Throwable) {
                 Log.w(tag, "onStart: startForegroundService failed", t)
             }
+            BatteryExemption.askOnce(this)
         }
         val intent = Intent(this, BleBackgroundService::class.java)
         try {
@@ -1473,21 +1386,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    override fun onPostResume() {
-        super.onPostResume()
-        if (!mcpStarted) {
-            startForegroundMcp()
-            mcpStarted = true
-        }
-    }
-    
     override fun onDestroy() {
         if (activeInstance?.get() === this) {
             activeInstance = null
         }
         unregisterBatteryReceiver()
+        unregisterBluetoothStateReceiver()
         super.onDestroy()
-        com.dsm.wallet.EventPoller.stop()
     }
 
 
@@ -1511,9 +1416,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         } catch (_: Throwable) {}
     }
 
-    private fun startForegroundMcp() {
-        ContextCompat.startForegroundService(this, Intent(this, McpService::class.java))
-    }
 
 
     private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
@@ -1528,19 +1430,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         
         if (blePermsGranted) {
             Log.i(tag, "BLE permissions granted")
-            // Start the background service so it's bound and ready, but only
-            // initialize GATT/advertising after genesis (hasIdentityViaRust).
-            try {
-                val svc = bleBackgroundService
-                if (hasIdentityViaRust()) {
-                    val gattResult = svc?.ensureGattServerStarted() ?: false
-                    Log.i(tag, "Bluetooth permissions granted: GATT server ensure-start result=$gattResult")
-                } else {
-                    Log.d(tag, "Bluetooth permissions granted: deferring GATT start until after genesis")
-                }
-            } catch (t: Throwable) {
-                Log.e(tag, "Failed to reinitialize BLE after permissions granted", t)
-            }
+            // The radio can now do what the identity asks of it.
+            bleBackgroundService?.refreshAdvertising()
         } else {
             Log.w(tag, "BLE permissions not granted: $grants")
         }
@@ -1581,7 +1472,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         val outFile = File(files, assetName)
 
         // Materialize bundled assets that the SDK reads from filesDir.
-        // ca.crt is the self-signed CA for AWS storage node TLS certs.
+        // ca.crt is the storage fleet's CA, the one the bundled env config names.
         materializeAssetIfBundled("ca.crt", files)
 
         fun firstExisting(vararg candidates: File?): File? = candidates.firstOrNull { it != null && it.exists() }
@@ -1670,10 +1561,53 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         return name.filter { it.isLetterOrDigit() || it == '-' || it == '.' || it == '_' }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        takeConnectLink(intent)
+    }
+
+    /**
+     * A `dsm:connect/v1:` link opened the wallet (the manifest admits no other
+     * link): hold its text for the page. Routing only: Rust reads the code when
+     * the player asks it to.
+     */
+    private fun takeConnectLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (intent.action != Intent.ACTION_VIEW || data.scheme != "dsm") return
+        val ssp = data.schemeSpecificPart ?: return
+        if (!ssp.startsWith("connect/v1:")) return
+        pendingConnectLink = intent.dataString
+        connectLinkOpened = intent.dataString
+        deliverConnectLink()
+    }
+
+    /**
+     * After the player approves a connect code a link brought, step back to the
+     * app that sent it, so the player lands in that app again rather than in the
+     * wallet. Answers whether the wallet stepped back: only once per link, and
+     * only when a link opened it. The wallet's main activity is its task's root,
+     * and a task it is not the root of is not the wallet's to send back.
+     */
+    fun returnToConnectCaller(): Boolean {
+        val opened = connectLinkOpened
+        connectLinkOpened = null
+        return opened != null && moveTaskToBack(isTaskRoot)
+    }
+
+    /** Hand a held connect link to the page once its message port exists. */
+    private fun deliverConnectLink() {
+        val link = pendingConnectLink ?: return
+        if (dsmPort == null) return
+        pendingConnectLink = null
+        dispatchDsmEventOnUi("connect.link", link.toByteArray(Charsets.UTF_8))
+    }
+
     private fun signalBridgeReady() {
         Log.i(tag, "signalBridgeReady: Dispatching events to JS...")
         BleEventRelay.markBridgeReady(this)
         dispatchDsmEventOnUi("dsm-bridge-ready", ByteArray(0))
+        deliverConnectLink()
         // Publish session state at 100 ms, 500 ms, and 1500 ms.
         // Redundant deliveries are harmless — the snapshot is idempotent.
         // This covers any JS-side port-setup race without a frontend retry timer;
@@ -1691,7 +1625,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 
                 val baseDir = filesDir.path
                 Log.i(tag, "initDsmAndSignalReady: Base dir = $baseDir")
-                Unified.initStorageBaseDir(baseDir.toByteArray(Charsets.UTF_8))
                 
                 val cfg = materializeEnvConfig()
                 if (cfg != null) {
@@ -1730,8 +1663,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 }
                 
                 Log.i(tag, "initDsmAndSignalReady: Calling initSdk...")
-                Unified.initSdk(baseDir)
-                Log.i(tag, "initDsmAndSignalReady: SDK initialized; switching to UI thread...")
+                // A failed startup is Rust's to report: it records the reason as
+                // the session's fatal error, and the page shows it.
+                if (Unified.initSdk(baseDir)) {
+                    Log.i(tag, "initDsmAndSignalReady: SDK initialized")
+                } else {
+                    Log.e(tag, "initDsmAndSignalReady: SDK initialization failed; the session carries Rust's reason")
+                }
                 
                 Log.i(tag, "initDsmAndSignalReady: event-driven bridge mode enabled; will rely on dsm-bridge-ready signal")
                 try {
@@ -1739,20 +1677,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     Log.i(tag, "initDsmAndSignalReady: getAppRouterStatus() returned $status")
                 } catch (t: Throwable) {
                     Log.w(tag, "initDsmAndSignalReady: getAppRouterStatus() not available", t)
-                }
-
-                try {
-                    val deviceIdBin = try { Unified.getDeviceIdBin() } catch (_: Throwable) { byteArrayOf() }
-                    val genesis = ByteArray(32)
-                    val tip = ByteArray(32)
-                    if (deviceIdBin.size == 32) {
-                        val b0x = Unified.computeB0xAddress(genesis, deviceIdBin, tip)
-                        Log.i(tag, "initDsmAndSignalReady: computeB0xAddress (diag) = $b0x")
-                    } else {
-                        Log.i(tag, "initDsmAndSignalReady: computeB0xAddress skipped (missing device id)")
-                    }
-                } catch (t: Throwable) {
-                    Log.w(tag, "initDsmAndSignalReady: computeB0xAddress failed", t)
                 }
 
                 // CRITICAL: Bootstrap FIRST (background thread) — restores identity + SDK
@@ -1806,32 +1730,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         }
 
                         if (capturedDeviceId.size == 32 && capturedGenesis.size == 32) {
-                            // Start BLE as a foreground service so it survives activity
-                            // lifecycle transitions. Must happen on the UI thread (context
-                            // requirement) BEFORE the background GATT init thread.
-                            try {
-                                BleBackgroundService.start(this@MainActivity)
-                                Log.i(tag, "initDsmAndSignalReady: BLE foreground service started")
-                            } catch (t: Throwable) {
-                                Log.w(tag, "initDsmAndSignalReady: BLE foreground service start failed", t)
-                            }
-
-                            // GATT server init + identity write are synchronous Bluetooth
-                            // framework calls (100-500ms). Run on a background thread to
-                            // avoid blocking the UI thread on slower chipsets (MediaTek).
-                            Thread {
-                                try {
-                                    val coordinator = bleCoordinator()
-                                    val gattReady = coordinator.ensureGattServerStarted()
-                                    Log.i(tag, "initDsmAndSignalReady: GATT server ensure-started: $gattReady")
-                                    coordinator.setIdentityValue(capturedGenesis, capturedDeviceId)
-                                    Log.i(tag, "initDsmAndSignalReady: BLE identity set (genesis + deviceId)")
-                                } catch (t: Throwable) {
-                                    Log.w(tag, "initDsmAndSignalReady: GATT/identity setup failed", t)
-                                }
-                            }.start()
+                            startBleForIdentity()
                         } else {
-                            Log.i(tag, "initDsmAndSignalReady: BLE identity not yet present in persisted bytes; skipping setIdentityValue")
+                            Log.i(tag, "initDsmAndSignalReady: no identity yet; BLE stays down until genesis")
                         }
                         publishSessionState("initComplete")
                     } catch (t: Throwable) {
@@ -1854,7 +1755,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == runtimePermCode || requestCode == cameraPermCode) {
+        if (requestCode == runtimePermCode) {
             val summary = permissions.zip(grantResults.toTypedArray()).joinToString(", ") { (p, r) ->
                 val state = if (r == PackageManager.PERMISSION_GRANTED) "granted" else "denied"
                 "$p=$state"
@@ -1865,20 +1766,31 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             val allGranted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
             if (!allGranted) {
                 Log.w(tag, "Bluetooth permissions not granted")
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS,
-                    byteArrayOf(0x00),
-                )
             } else {
-                Log.i(tag, "Bluetooth permissions granted, notifying WebView")
-                // BLE ops are NOT auto-started here. The UI must explicitly request
-                // scanning/advertising via the native host boundary.
-                dispatchNativeHostEventOnUi(
-                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS,
-                    byteArrayOf(0x01),
-                )
+                // The radio can now do what the identity asks of it. The UI is
+                // not asked to start anything: advertising is native policy.
+                Log.i(tag, "Bluetooth permissions granted")
+                bleBackgroundService?.refreshAdvertising()
             }
+            // The permission facts reach the UI in the session snapshot.
             publishSessionState("runtimePermissions")
+        }
+    }
+
+    /**
+     * A page asked to leave the app. Only the beta issue form goes, to the
+     * system browser; every other address is refused (pre-audit item 13).
+     */
+    private fun openOutside(uri: Uri) {
+        when (WebNavigationPolicy.decide(uri.scheme, uri.host, uri.path)) {
+            WebNavigation.IssueForm ->
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                } catch (e: ActivityNotFoundException) {
+                    Log.w(tag, "No browser to open the issue form in", e)
+                }
+            WebNavigation.App, WebNavigation.NativeQr, WebNavigation.Refused ->
+                Log.w(tag, "Refused to open ${uri.scheme}://${uri.host} outside the app")
         }
     }
 
@@ -1895,6 +1807,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            // The StateBoy UI is laid out in pixels on a fixed screen; the
+            // system font scale must not stretch its labels out of their bricks.
+            textZoom = 100
             @Suppress("DEPRECATION")
             savePassword = false
             @Suppress("DEPRECATION")
@@ -1928,21 +1843,14 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     val hitResult = view?.hitTestResult
                     val url = hitResult?.extra
                     if (!url.isNullOrEmpty()) {
-                        Log.i(tag, "window.open intercepted — opening in system browser: $url")
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                        startActivity(intent)
+                        openOutside(Uri.parse(url))
                         return false
                     }
                     // Secondary path: create a temporary WebView to capture the URL
                     val tempWebView = WebView(view?.context ?: this@MainActivity)
                     tempWebView.webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
-                            val uri = request?.url
-                            if (uri != null) {
-                                Log.i(tag, "window.open secondary path: opening in system browser: ${uri.host}")
-                                val intent = Intent(Intent.ACTION_VIEW, uri)
-                                startActivity(intent)
-                            }
+                            request?.url?.let { openOutside(it) }
                             tempWebView.destroy()
                             return true
                         }
@@ -1956,9 +1864,40 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return false
             }
 
+            // The page's console reaches logcat in debug builds only: a release
+            // build's logcat is readable by other apps with the permission, and
+            // the page logs what it is doing with the wallet.
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                consoleMessage?.let { Log.i("WebViewConsole", it.message()) }
+                if (BuildConfig.DEBUG) {
+                    consoleMessage?.let { Log.i("WebViewConsole", it.message()) }
+                }
                 return true
+            }
+
+            // One chooser at a time: a request that arrives while one is open
+            // answers the open one with nothing first.
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                fileChooserCallback?.onReceiveValue(null)
+                fileChooserCallback = filePathCallback
+                return try {
+                    // The page's accept types (image/png, image/jpeg, image/webp) ride
+                    // on the intent the params build.
+                    val intent = fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "image/*"
+                    }
+                    fileChooserLauncher.launch(intent)
+                    true
+                } catch (t: Throwable) {
+                    Log.w(tag, "onShowFileChooser: the picker did not open", t)
+                    fileChooserCallback = null
+                    filePathCallback?.onReceiveValue(null)
+                    false
+                }
             }
 
             override fun onPermissionRequest(request: PermissionRequest?) {
@@ -1995,7 +1934,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                             try {
                                 if (WebViewFeature.isFeatureSupported(WebViewFeature.POST_WEB_MESSAGE)) {
                                     val msg = WebMessageCompat("", arrayOf(port))
-                                    WebViewCompat.postWebMessage(target, msg, "https://appassets.androidplatform.net".toUri())
+                                    WebViewCompat.postWebMessage(target, msg, WebNavigationPolicy.APP_ORIGIN.toUri())
                                     pendingJsPort = null
                                     Log.i(tag, "Delivered DSM MessagePort to page")
                                 }
@@ -2024,38 +1963,30 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     ?: return super.shouldInterceptRequest(view, request as WebResourceRequest?)
                 val uri = req.url
                     ?: return super.shouldInterceptRequest(view, request as WebResourceRequest?)
-                // APK assets are served by WebViewAssetLoader.
-                // Allowlisted external hosts fall through to the CORS proxy.
-                // Everything else returns null so WebView handles it normally.
+                // APK assets are served by WebViewAssetLoader; everything else
+                // returns null so WebView handles it normally.
                 return assetLoader.shouldInterceptRequest(uri)
-                    ?: proxyWithCorsInternal(req)
             }
 
+            // Every navigation goes through WebNavigationPolicy (pre-audit item 13):
+            // only the app's own page loads here; the QR link and the issue form
+            // are handled natively; everything else is refused.
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                try {
-                    val uri = request?.url ?: return false
-                    // Handle native DSM deep links
-                    if (uri.scheme == "dsm" && uri.host == "native") {
-                        val path = uri.path ?: ""
-                        if (path == "/qr/start") {
-                            Log.i(tag, "WebView requested native QR scan")
-                            launchNativeQrScanner { qrText: String? ->
-                                dispatchQrScanResult(qrText)
-                            }
-                            return true
+                val uri = request?.url ?: return super.shouldOverrideUrlLoading(view, request)
+                val navigation = WebNavigationPolicy.decide(uri.scheme, uri.host, uri.path)
+                when (navigation) {
+                    WebNavigation.App -> Unit
+                    WebNavigation.NativeQr -> {
+                        Log.i(tag, "WebView requested native QR scan")
+                        launchNativeQrScanner { qrText: String? ->
+                            dispatchQrScanResult(qrText)
                         }
                     }
-                    // External URLs (http/https): open in system browser, keep WebView intact
-                    if (uri.scheme == "http" || uri.scheme == "https") {
-                        Log.i(tag, "Opening external URL in system browser: ${uri.host}")
-                        val intent = Intent(Intent.ACTION_VIEW, uri)
-                        startActivity(intent)
-                        return true
-                    }
-                } catch (t: Throwable) {
-                    Log.w(tag, "shouldOverrideUrlLoading: error", t)
+                    WebNavigation.IssueForm -> openOutside(uri)
+                    WebNavigation.Refused ->
+                        Log.w(tag, "Refused navigation to ${uri.scheme}://${uri.host}")
                 }
-                return false
+                return navigation != WebNavigation.App
             }
         }
 
@@ -2068,37 +1999,3 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     }
 }
 
-// =============================================================================
-// SECURITY: WebView external-host allowlist (CI-locked).
-//
-// These declarations are deliberately at file scope (not inside MainActivity)
-// so that `dsm_client/android/app/src/test/.../WebViewAllowlistTest.kt` can
-// read the set literals and call `isAllowlistedExternalHost` directly. The
-// lock is the test: any change to either set requires a matching test diff
-// that is visible in PR review.
-//
-// `proxyWithCorsInternal` consults `isAllowlistedExternalHost` BEFORE
-// performing any external fetch or injecting CORS response headers. Adding
-// a new external host therefore requires both:
-//   1. updating the set(s) below, AND
-//   2. updating WebViewAllowlistTest.kt to match.
-// Both edits land in the same PR diff and trigger explicit review.
-// =============================================================================
-
-internal val WEBVIEW_ALLOWED_EXACT_HOSTS: Set<String> = setOf(
-    "tile.openstreetmap.org",
-    "localhost",
-    "127.0.0.1",
-)
-
-internal val WEBVIEW_ALLOWED_HOST_SUFFIXES: Set<String> = setOf(
-    ".tile.openstreetmap.org",
-)
-
-internal fun isAllowlistedExternalHost(host: String): Boolean {
-    if (host in WEBVIEW_ALLOWED_EXACT_HOSTS) return true
-    for (suffix in WEBVIEW_ALLOWED_HOST_SUFFIXES) {
-        if (host.endsWith(suffix)) return true
-    }
-    return false
-}

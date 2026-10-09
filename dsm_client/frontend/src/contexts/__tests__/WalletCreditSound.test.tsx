@@ -8,10 +8,17 @@ import { bridgeEvents } from '../../bridge/bridgeEvents';
 import { dsmClient } from '../../services/dsmClient';
 import { walletStore } from '../../stores/walletStore';
 import { playCoinSound } from '../../utils/coinSound';
+import { initializeEventBridge } from '../../dsm/EventBridge';
+import * as pb from '../../proto/dsm_app_pb';
 
 jest.mock('../../utils/coinSound', () => ({
   playCoinSound: jest.fn(),
 }));
+
+/** A native event as Kotlin posts it: the topic and the raw payload bytes. */
+function announce(topic: string, payload: Uint8Array) {
+  window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic, payload } }));
+}
 
 describe('wallet credit sound routing', () => {
   beforeEach(() => {
@@ -27,10 +34,17 @@ describe('wallet credit sound routing', () => {
       error: null,
     };
     (walletStore as any).loadingCount = 0;
-    (walletStore as any).hasObservedBalances = false;
   });
 
-  it('plays the coin sound only after a positive balance delta on receiver-side refreshes', async () => {
+  // What the event bridge announces for one change reloads the projection
+  // once: a completed bilateral transfer (`bilateral.event`) and an inbox sync
+  // with new items (`inbox.updated`) each become one `wallet.refresh`, and the
+  // provider reloads on that alone. The coin sound follows what Rust reports
+  // landed (the inbox items it processed), never a higher number on a reload:
+  // a balance that grew between two reads used to be announced as a payment,
+  // and at launch the first read is empty, so every launch was greeted as one.
+  it('reloads once per announced change and plays the coin sound only for items Rust reports', async () => {
+    initializeEventBridge();
     jest.spyOn(dsmClient, 'getIdentity' as any).mockResolvedValue({
       genesisHash: 'G'.repeat(32),
       deviceId: 'D'.repeat(32),
@@ -38,13 +52,13 @@ describe('wallet credit sound routing', () => {
     jest.spyOn(dsmClient, 'getWalletHistory' as any).mockResolvedValue({ transactions: [] });
     jest.spyOn(dsmClient, 'getAllBalances' as any)
       .mockResolvedValueOnce([
-        { tokenId: 'dBTC', tokenName: 'dBTC', balance: 5n, decimals: 8, symbol: 'dBTC' },
+        { tokenId: 'dBTC', tokenName: 'dBTC', baseUnits: 5n, decimals: 8, symbol: 'dBTC' },
       ])
       .mockResolvedValueOnce([
-        { tokenId: 'dBTC', tokenName: 'dBTC', balance: 6n, decimals: 8, symbol: 'dBTC' },
+        { tokenId: 'dBTC', tokenName: 'dBTC', baseUnits: 6n, decimals: 8, symbol: 'dBTC' },
       ])
       .mockResolvedValueOnce([
-        { tokenId: 'dBTC', tokenName: 'dBTC', balance: 6n, decimals: 8, symbol: 'dBTC' },
+        { tokenId: 'dBTC', tokenName: 'dBTC', baseUnits: 6n, decimals: 8, symbol: 'dBTC' },
       ]);
 
     await act(async () => {
@@ -65,21 +79,34 @@ describe('wallet credit sound routing', () => {
     expect(playCoinSound).not.toHaveBeenCalled();
 
     act(() => {
-      bridgeEvents.emit('bilateral.transferComplete', undefined as any);
+      announce(
+        'bilateral.event',
+        new pb.BilateralEventNotification({
+          eventType: pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE,
+          message: 'test',
+        } as any).toBinary(),
+      );
     });
 
     await waitFor(() => {
-      expect(playCoinSound).toHaveBeenCalledTimes(1);
+      expect((dsmClient.getAllBalances as any)).toHaveBeenCalledTimes(2);
     });
+    // The balance rose from 5 to 6 on that reload; that is not a credit.
+    expect(playCoinSound).not.toHaveBeenCalled();
 
     act(() => {
-      bridgeEvents.emit('inbox.updated', { unreadCount: 1, newItems: 1, source: 'poll' });
+      announce('inbox.updated', new pb.StorageSyncResponse({ processed: 1 } as any).toBinary());
     });
 
     await waitFor(() => {
       expect((dsmClient.getAllBalances as any)).toHaveBeenCalledTimes(3);
     });
-
+    // A second reload of either change would follow within a frame or two;
+    // none does.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 80));
+    });
+    expect((dsmClient.getAllBalances as any)).toHaveBeenCalledTimes(3);
     expect(playCoinSound).toHaveBeenCalledTimes(1);
   });
 

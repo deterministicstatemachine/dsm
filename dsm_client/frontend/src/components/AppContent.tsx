@@ -6,8 +6,8 @@ import type { AppState, ScreenType } from '../types/app';
 import LoadingSpinner from './common/LoadingSpinner';
 import SplashController from './SplashController';
 import LockScreen from './lock/LockScreen';
-import LockPromptModal from './lock/LockPromptModal';
 import AppScreenRouter from './AppScreenRouter';
+import RecoveryPhraseScreen from './screens/RecoveryPhraseScreen';
 import { buildHomeStatusLines } from '../viewmodels/homeViewModel';
 
 type Props = {
@@ -25,9 +25,8 @@ type Props = {
   currentScreen: ScreenType;
   navigate: (to: ScreenType) => void;
   handleGenerateGenesis: () => Promise<void> | void;
-  showLockPrompt: boolean;
-  dismissLockPrompt: () => void;
-  unlockToWallet: () => void;
+  cancelPhraseBackup: () => void;
+  answerPhraseCheck: (word: string) => Promise<void>;
   menuItems: string[];
   currentMenuIndex: number;
   setCurrentMenuIndex: (next: number) => void;
@@ -70,7 +69,7 @@ function MenuRenderer({
             }
           }}
         >
-          <span className={`brick-label ${options?.itemClassName ? 'visible' : ''}`}>{item}</span>
+          <span className={`brick-label${options?.itemClassName ? ' visible' : ''}${item.length > 10 ? ' brick-label--long' : ''}`}>{item}</span>
         </div>
       ))}
     </div>
@@ -167,9 +166,8 @@ export default function AppContent({
   currentScreen,
   navigate,
   handleGenerateGenesis,
-  showLockPrompt,
-  dismissLockPrompt,
-  unlockToWallet,
+  cancelPhraseBackup,
+  answerPhraseCheck,
   menuItems,
   currentMenuIndex,
   setCurrentMenuIndex,
@@ -217,7 +215,7 @@ export default function AppContent({
             src={chameleonSrc}
             onError={() => setChameleonSrc('images/vaulthunters/chameleon-green(default).GIF')}
             alt="Chameleon"
-            style={{ width: '260px', height: 'auto', position: 'absolute', top: '-43px', left: '-23px', zIndex: 1000 }}
+            style={{ width: '260px', height: 'auto', position: 'absolute', top: '-23px', left: '-3px', zIndex: 1000 }}
           />
           <div className="dsm-logo-placeholder" style={{ marginTop: '80px', marginBottom: '10px' }}>
             <img src={eraTokenSrc} alt="Setup..." style={{ width: '60px', height: '60px', objectFit: 'contain' }} />
@@ -226,7 +224,7 @@ export default function AppContent({
             WALLET SETUP REQUIRED
           </div>
           <MenuRenderer
-            items={['INITIALIZE', 'ADDITIONAL DEVICE', 'DEVICE RECOVERY']}
+            items={['INITIALIZE', 'DEVICE RECOVERY']}
             currentMenuIndex={currentMenuIndex}
             setCurrentMenuIndex={setCurrentMenuIndex}
             options={{
@@ -234,8 +232,6 @@ export default function AppContent({
               actions: {
                 // New genesis (unchanged): creates a brand-new identity/device tree root.
                 INITIALIZE: () => void handleGenerateGenesis(),
-                // Join an existing genesis tree as a secondary/Nth device (admission-gated).
-                'ADDITIONAL DEVICE': () => navigate('additional_device'),
                 // Recover a lost identity onto this device from the NFC-ring backup.
                 'DEVICE RECOVERY': () => navigate('recovery'),
               },
@@ -245,10 +241,15 @@ export default function AppContent({
         </div>
       );
 
+    // INITIALIZE generated the recovery phrase: the user writes it down and
+    // picks words back out, and the wallet is created from it after that.
+    case 'backup_phrase':
+      return <RecoveryPhraseScreen onCancel={cancelPhraseBackup} onAnswer={answerPhraseCheck} />;
+
     // Local genesis is committed but the identity is not yet published to a
     // quorum of storage nodes, so it is not resolvable by peers. Rust retries
-    // publication on its own; this screen just reports the wait. Without a case
-    // here the switch falls through and renders an empty screen.
+    // publication on its own; this screen reports the wait once the intro has
+    // played out.
     case 'publication_pending':
       return (
         <div className="dsm-content">
@@ -308,7 +309,7 @@ export default function AppContent({
               src={chameleonSrc}
               onError={() => setChameleonSrc('images/vaulthunters/chameleon.gif')}
               alt="Chameleon"
-              style={{ width: '260px', height: 'auto', position: 'absolute', top: '-43px', left: '-23px', zIndex: 1000 }}
+              style={{ width: '260px', height: 'auto', position: 'absolute', top: '-23px', left: '-3px', zIndex: 1000 }}
             />
             <div className="dsm-logo-placeholder" style={{ marginTop: '80px', marginBottom: '10px' }}>
               <img src={dsmLogoSrc} alt="DSM StateBoy Logo" style={{ width: '140%', height: '140%', objectFit: 'contain' }} />
@@ -322,7 +323,8 @@ export default function AppContent({
                 actions: {
                   WALLET: () => navigate('wallet'),
                   TOKENS: () => navigate('accounts'),
-                  SOFI: () => navigate('sofi'),
+                  TRADE: () => navigate('sofi'),
+                  APPS: () => navigate('apps'),
                   CONTACTS: () => navigate('contacts'),
                   STORAGE: () => navigate('storage'),
                   SETTINGS: () => navigate('settings'),
@@ -330,12 +332,6 @@ export default function AppContent({
               }}
             />
             <StatusText lines={buildHomeStatusLines({ appState, soundEnabled, error })} />
-            {showLockPrompt ? (
-              <LockPromptModal
-                onNavigate={navigate}
-                onDismiss={dismissLockPrompt}
-              />
-            ) : null}
           </div>
         );
       }
@@ -350,7 +346,7 @@ export default function AppContent({
       );
 
     case 'locked':
-      return <LockScreen onUnlock={unlockToWallet} />;
+      return <LockScreen />;
 
     case 'error':
       return (

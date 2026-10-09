@@ -3,23 +3,22 @@
 
 use dsm::types::proto as generated;
 
-use crate::bridge::{AppInvoke, AppQuery, AppResult};
+use crate::bridge::{AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
-use super::relationship_status::{
-    blocked_status, derive_local_send_status_for_device_id, status_message,
-};
+use super::relationship_status::{blocked_status, derive_local_send_status_for_device_id};
 use super::response_helpers::{pack_envelope_ok, err};
 
+use super::wallet_routes::{format_base_units_for_display, token_decimals};
+use crate::bluetooth::bilateral_session;
 use crate::storage::client_db::{
     get_all_bilateral_sessions, get_contact_by_device_id, deserialize_operation,
 };
-use std::collections::HashMap;
 
 impl AppRouterImpl {
     pub(crate) async fn handle_bilateral_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "bilateral.pending_list" => {
-                // Authoritative list of pending bilateral sessions from client_db.
+                // Authoritative list of this device's bilateral sessions from client_db.
                 let sessions = match get_all_bilateral_sessions() {
                     Ok(v) => v,
                     Err(e) => return err(format!("bilateral.pending_list failed: {e}")),
@@ -28,111 +27,125 @@ impl AppRouterImpl {
                 let mut out: Vec<generated::OfflineBilateralTransaction> = Vec::new();
 
                 for s in sessions {
-                    let phase = s.phase.as_str();
-                    // Include active AND terminal phases so the frontend poller
-                    // can distinguish real failures from completed transfers.
-                    if !matches!(
-                        phase,
-                        "pending_user_action"
-                            | "accepted"
-                            | "committed"
-                            | "failed"
-                            | "rejected"
-                            | "confirm_pending"
-                            | "preparing"
-                            | "prepared"
+                    // Active AND terminal phases, so the frontend poller can
+                    // distinguish real failures from completed transfers.
+                    let phase = match bilateral_session::phase_from_str(&s.phase) {
+                        Ok(phase) => phase,
+                        Err(e) => return err(format!("bilateral.pending_list: {e}")),
+                    };
+                    let wire_phase = {
+                        use bilateral_session::BilateralPhase as P;
+                        use generated::OfflineBilateralPhase as W;
+                        match phase {
+                            P::Preparing => W::OfflinePhasePreparing,
+                            P::Prepared => W::OfflinePhasePrepared,
+                            P::PendingUserAction => W::OfflinePhasePendingUserAction,
+                            P::Accepted => W::OfflinePhaseAccepted,
+                            P::Rejected => W::OfflinePhaseRejected,
+                            P::ConfirmPending => W::OfflinePhaseConfirmPending,
+                            P::Committed => W::OfflinePhaseCommitted,
+                            P::Failed => W::OfflinePhaseFailed,
+                        }
+                    };
+
+                    let (Ok(commitment_hash_arr), Ok(counterparty_device_id_arr)) = (
+                        <[u8; 32]>::try_from(s.commitment_hash.as_slice()),
+                        <[u8; 32]>::try_from(s.counterparty_device_id.as_slice()),
+                    ) else {
+                        return err(format!(
+                            "bilateral.pending_list: a stored session has a {}-byte commitment \
+                             and a {}-byte counterparty id, not 32 and 32",
+                            s.commitment_hash.len(),
+                            s.counterparty_device_id.len()
+                        ));
+                    };
+
+                    let operation = match deserialize_operation(&s.operation_bytes) {
+                        Ok(operation) => operation,
+                        Err(e) => {
+                            return err(format!(
+                                "bilateral.pending_list: a stored session's operation \
+                                 does not decode: {e}"
+                            ))
+                        }
+                    };
+                    // The token is the one the step's terms name, and they open
+                    // its operation (pre-audit item 4).
+                    let terms = match crate::bluetooth::bilateral_session::step_terms(
+                        &operation,
+                        s.terms_bytes.as_deref(),
                     ) {
-                        continue;
-                    }
+                        Ok(terms) => terms,
+                        Err(e) => {
+                            return err(format!(
+                                "bilateral.pending_list: a stored session's terms: {e}"
+                            ))
+                        }
+                    };
+                    let (amount, token_id, to_device_id) = match (&operation, terms) {
+                        (
+                            dsm::types::operations::Operation::Transfer {
+                                amount,
+                                to_device_id,
+                                ..
+                            },
+                            Some(terms),
+                        ) => (amount.available(), terms.token_id, to_device_id.clone()),
+                        (other, _) => {
+                            return err(format!(
+                                "bilateral.pending_list: a stored session carries a {} \
+                                     operation, not a transfer",
+                                other.get_operation_type()
+                            ))
+                        }
+                    };
+                    let token_id = match String::from_utf8(token_id) {
+                        Ok(token_id) => token_id,
+                        Err(e) => {
+                            return err(format!(
+                                "bilateral.pending_list: a stored session's token id is not \
+                                 text: {e}"
+                            ))
+                        }
+                    };
 
-                    if s.commitment_hash.len() != 32 || s.counterparty_device_id.len() != 32 {
-                        continue;
-                    }
-
-                    let mut commitment_hash_arr = [0u8; 32];
-                    commitment_hash_arr.copy_from_slice(&s.commitment_hash);
-
-                    let mut counterparty_device_id_arr = [0u8; 32];
-                    counterparty_device_id_arr.copy_from_slice(&s.counterparty_device_id);
-
-                    let mut amount: Option<u64> = None;
-                    let mut token_id: Option<Vec<u8>> = None;
-                    let mut to_device_id: Option<Vec<u8>> = None;
-
-                    if let Ok(dsm::types::operations::Operation::Transfer {
-                        amount: amt,
-                        token_id: tok,
-                        to_device_id: to_dev,
-                        ..
-                    }) = deserialize_operation(&s.operation_bytes)
-                    {
-                        amount = Some(amt.available());
-                        token_id = Some(tok);
-                        to_device_id = Some(to_dev);
-                    }
-
-                    let direction = if let Some(to_dev) = &to_device_id {
-                        if to_dev.len() == 32
-                            && to_dev.as_slice() == self.device_id_bytes.as_slice()
-                        {
-                            "incoming"
+                    use generated::OfflineBilateralDirection as Direction;
+                    let (direction, sender_id, recipient_id) =
+                        if to_device_id.as_slice() == self.device_id_bytes.as_slice() {
+                            (
+                                Direction::OfflineDirectionIncoming,
+                                s.counterparty_device_id.clone(),
+                                self.device_id_bytes.to_vec(),
+                            )
                         } else {
-                            "outgoing"
+                            (
+                                Direction::OfflineDirectionOutgoing,
+                                self.device_id_bytes.to_vec(),
+                                s.counterparty_device_id.clone(),
+                            )
+                        };
+
+                    // Rendered as a bilateral event renders it: a token whose
+                    // decimals this device does not know carries only its
+                    // base-unit amount.
+                    let display_amount = match token_decimals(&token_id) {
+                        Ok(decimals) => Some(format_base_units_for_display(amount, decimals)),
+                        Err(e) => {
+                            log::warn!("bilateral.pending_list {token_id}: no display amount: {e}");
+                            None
                         }
-                    } else {
-                        "incoming"
                     };
 
-                    let (sender_id, recipient_id) = if direction == "incoming" {
-                        (
-                            s.counterparty_device_id.clone(),
-                            self.device_id_bytes.to_vec(),
-                        )
-                    } else {
-                        (
-                            self.device_id_bytes.to_vec(),
-                            s.counterparty_device_id.clone(),
-                        )
-                    };
-
-                    let status = match phase {
-                        "pending_user_action" => {
-                            generated::OfflineBilateralTransactionStatus::OfflineTxPending
-                        }
-                        "committed" => {
-                            generated::OfflineBilateralTransactionStatus::OfflineTxConfirmed
-                        }
-                        "failed" => generated::OfflineBilateralTransactionStatus::OfflineTxFailed,
-                        "rejected" => {
-                            generated::OfflineBilateralTransactionStatus::OfflineTxRejected
-                        }
-                        _ => generated::OfflineBilateralTransactionStatus::OfflineTxInProgress,
-                    };
-
-                    let mut metadata: HashMap<String, String> = HashMap::new();
-                    metadata.insert("phase".to_string(), phase.to_string());
-                    metadata.insert("direction".to_string(), direction.to_string());
-                    metadata.insert("created_at_step".to_string(), s.created_at_step.to_string());
-                    if let Some(amt) = amount {
-                        metadata.insert("amount".to_string(), amt.to_string());
-                    }
-                    if let Some(tok) = token_id.clone() {
-                        metadata.insert(
-                            "token_id".to_string(),
-                            String::from_utf8_lossy(&tok).into_owned(),
-                        );
-                    }
-                    if let Some(addr) = s.sender_ble_address.clone() {
-                        if !addr.is_empty() {
-                            metadata.insert("sender_ble_address".to_string(), addr);
-                        }
-                    }
-                    if let Ok(Some(contact)) = get_contact_by_device_id(&counterparty_device_id_arr)
-                    {
-                        if !contact.alias.is_empty() {
-                            metadata.insert("counterparty_alias".to_string(), contact.alias);
-                        }
-                    }
+                    let counterparty_alias =
+                        match get_contact_by_device_id(&counterparty_device_id_arr) {
+                            Ok(Some(contact)) if !contact.alias.is_empty() => Some(contact.alias),
+                            Ok(_) => None,
+                            Err(e) => {
+                                return err(format!(
+                                    "bilateral.pending_list: counterparty contact unreadable: {e}"
+                                ))
+                            }
+                        };
 
                     let id = crate::util::text_id::encode_base32_crockford(&commitment_hash_arr);
 
@@ -141,15 +154,20 @@ impl AppRouterImpl {
                         sender_id,
                         recipient_id,
                         commitment_hash: commitment_hash_arr.to_vec(),
-                        sender_state_hash: vec![0u8; 32],
-                        recipient_state_hash: vec![0u8; 32],
-                        status: status.into(),
-                        metadata,
+                        phase: wire_phase.into(),
+                        direction: direction.into(),
+                        amount,
+                        display_amount,
+                        token_id,
+                        counterparty_alias,
+                        sender_ble_address: s.sender_ble_address.filter(|a| !a.is_empty()),
+                        // The rule `cancel_proposal` enforces, stated where
+                        // the UI reads it.
+                        cancellable: bilateral_session::is_cancellable_proposal_phase(&phase),
                     });
                 }
 
                 let resp = generated::OfflineBilateralPendingListResponse { transactions: out };
-                // NEW: Return as Envelope.offlineBilateralPendingListResponse (field 36)
                 pack_envelope_ok(
                     generated::envelope::Payload::OfflineBilateralPendingListResponse(resp),
                 )
@@ -162,17 +180,13 @@ impl AppRouterImpl {
 
 impl AppRouterImpl {
     /// The send-status calibration a UI or the offline-send path asks for
-    /// (`bilateral.reconcile` / `wallet.sendOffline`).
+    /// (`wallet.sendOffline`).
     ///
     /// Under the finality barrier this is READ-ONLY: it never releases the
-    /// pending online gate. Historically it cleared the gate on two signals —
-    /// `contacts.chain_tip == gate.next` and a storage-node "message
-    /// acknowledged" answer — both of which are transport/projection facts, not
-    /// finality: the tip equality is simply the normal
-    /// `finalization_checkpoint_pending` state now, and an ACK proves only that
-    /// the recipient consumed its spool copy. The ONE deleter is the
-    /// post-quorum checkpoint sweep. What remains here: while a gate is armed,
-    /// make sure the poller is running (it drives the sweep), then report the
+    /// pending online gate. Neither the relationship tip reaching the gate's
+    /// next tip nor a storage node's acknowledgement is finality; the one
+    /// deleter is the post-quorum checkpoint sweep. While a gate is armed this
+    /// makes sure the poller is running (it drives the sweep), then reports the
     /// authority's status.
     pub(crate) async fn calibrate_local_relationship_send_status(
         &self,
@@ -199,49 +213,145 @@ impl AppRouterImpl {
         }
         derive_local_send_status_for_device_id(counterparty_device_id)
     }
+}
 
-    pub(crate) async fn handle_bilateral_reconcile_invoke(&self, i: AppInvoke) -> AppResult {
-        use prost::Message;
+#[cfg(test)]
+mod pending_list_tests {
+    use crate::bridge::{AppQuery, AppRouter};
+    use crate::storage::client_db::{store_bilateral_session, BilateralSessionRecord};
+    use dsm::types::operations::{Operation, TransactionMode};
+    use dsm::types::proto as generated;
 
-        let pack = match generated::ArgPack::decode(&*i.args) {
-            Ok(p) => p,
-            Err(e) => return err(format!("bilateral.reconcile: ArgPack decode failed: {e}")),
+    /// A stored outgoing transfer step to `peer` in `phase`. The list reads
+    /// the step's phase, direction, amount and token and verifies nothing,
+    /// so the operation here is unsigned.
+    fn outgoing(peer: [u8; 32], commitment: [u8; 32], phase: &str) -> BilateralSessionRecord {
+        let terms = dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: commitment[..16].to_vec(),
+            mode: TransactionMode::Bilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
         };
-        if pack.codec != generated::Codec::Proto as i32 {
-            return err("bilateral.reconcile: ArgPack.codec must be PROTO".to_string());
-        }
-
-        let req = match generated::BilateralReconciliationRequest::decode(&*pack.body) {
-            Ok(r) => r,
-            Err(e) => return err(format!("bilateral.reconcile: request decode failed: {e}")),
+        let operation = Operation::Transfer {
+            to_device_id: peer.to_vec(),
+            amount: dsm::types::token_types::Balance::amount(3),
+            policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+            terms_commitment: terms.commitment(),
+            signature: Vec::new(),
+            authority_policy: None,
         };
-
-        let remote_device_id = req.remote_device_id;
-        if remote_device_id.len() != 32 {
-            return err(format!(
-                "bilateral.reconcile: remote_device_id must be 32 bytes, got {}",
-                remote_device_id.len()
-            ));
+        BilateralSessionRecord {
+            commitment_hash: commitment.to_vec(),
+            counterparty_device_id: peer.to_vec(),
+            counterparty_genesis_hash: None,
+            operation_bytes: crate::storage::codecs::serialize_operation(&operation),
+            phase: phase.to_string(),
+            local_signature: None,
+            counterparty_signature: None,
+            sender_ble_address: None,
+            stitched_receipt_bytes: None,
+            counter_signed_receipt: None,
+            parent_tip: None,
+            receiver_challenge: None,
+            sent_child_root: None,
+            anchor_leaf_key: None,
+            anchor_leaf_value: None,
+            spend_anchor_bundle: None,
+            spend_asset: None,
+            spend_amount: None,
+            owed_frame: None,
+            terms_bytes: Some(terms.to_bytes()),
         }
+    }
 
-        let local_status = self
-            .calibrate_local_relationship_send_status(&remote_device_id)
+    async fn pending_list(
+        device: &crate::test_support::one_device::Device,
+    ) -> Result<generated::OfflineBilateralPendingListResponse, String> {
+        let answer = device
+            .router
+            .query(AppQuery {
+                path: "bilateral.pending_list".to_string(),
+                params: Vec::new(),
+            })
             .await;
-        let remote_tip = crate::storage::client_db::get_contact_chain_tip_raw(&remote_device_id)
-            .unwrap_or([0u8; 32]);
-        let peer_status = None;
-        let resp = generated::BilateralReconciliationResponse {
-            mismatch_detected: !local_status.send_ready,
-            reconciled: local_status.send_ready,
-            remote_tip: remote_tip.to_vec(),
-            error_message: if local_status.send_ready {
-                String::new()
-            } else {
-                status_message(&local_status)
-            },
-            local_status: Some(local_status),
-            peer_status,
+        if !answer.success {
+            return Err(answer.error_message.unwrap_or_default());
+        }
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answer.data)
+            .expect("a local envelope");
+        match env.payload {
+            Some(generated::envelope::Payload::OfflineBilateralPendingListResponse(list)) => {
+                Ok(list)
+            }
+            Some(generated::envelope::Payload::Error(e)) => Err(e.message),
+            other => panic!("bilateral.pending_list answered {other:?}"),
+        }
+    }
+
+    /// The pending list states each step as its session holds it, and offers
+    /// a step for cancelling exactly when `cancel_proposal` would cancel it:
+    /// before its confirm. A confirmed step is listed without the offer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn only_an_unconfirmed_proposal_is_offered_for_cancelling() {
+        let device = crate::test_support::one_device::Device::start(0x73).await;
+        let peer = [0x74u8; 32];
+        store_bilateral_session(&outgoing(peer, [0xA1; 32], "prepared")).expect("store");
+        store_bilateral_session(&outgoing(peer, [0xA2; 32], "confirm_pending")).expect("store");
+
+        let list = pending_list(&device).await.expect("the list");
+        let step = |commitment: [u8; 32]| {
+            list.transactions
+                .iter()
+                .find(|t| t.commitment_hash == commitment.to_vec())
+                .cloned()
+                .expect("the step is listed")
         };
-        pack_envelope_ok(generated::envelope::Payload::ReconciliationResponse(resp))
+
+        let prepared = step([0xA1; 32]);
+        assert_eq!(
+            prepared.phase(),
+            generated::OfflineBilateralPhase::OfflinePhasePrepared
+        );
+        assert_eq!(
+            prepared.direction(),
+            generated::OfflineBilateralDirection::OfflineDirectionOutgoing
+        );
+        assert_eq!(prepared.recipient_id, peer.to_vec());
+        assert_eq!((prepared.amount, prepared.token_id.as_str()), (3, "ERA"));
+        assert_eq!(prepared.display_amount.as_deref(), Some("0.03"));
+        assert!(prepared.cancellable, "an unconfirmed proposal is offered");
+
+        let confirmed = step([0xA2; 32]);
+        assert_eq!(
+            confirmed.phase(),
+            generated::OfflineBilateralPhase::OfflinePhaseConfirmPending
+        );
+        assert!(!confirmed.cancellable, "a confirmed step is not offered");
+    }
+
+    /// A stored step whose phase the SDK does not name is not left out of the
+    /// list: the list refuses, naming the phase. The writer refuses such a
+    /// phase, so the row is written past it, as a damaged database holds it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_step_in_an_unnamed_phase_is_not_left_out_of_the_list() {
+        let device = crate::test_support::one_device::Device::start(0x75).await;
+        store_bilateral_session(&outgoing([0x76; 32], [0xA3; 32], "prepared")).expect("store");
+        {
+            let conn = crate::storage::client_db::get_connection().expect("the database");
+            let conn = conn.lock().expect("the connection");
+            let changed = conn
+                .execute(
+                    "UPDATE bilateral_sessions SET phase = 'half_sent' WHERE commitment_hash = ?1",
+                    rusqlite::params![[0xA3u8; 32].to_vec()],
+                )
+                .expect("raw update");
+            assert_eq!(changed, 1);
+        }
+
+        let refusal = pending_list(&device).await.expect_err("the list refuses");
+        assert!(refusal.contains("half_sent"), "{refusal}");
     }
 }

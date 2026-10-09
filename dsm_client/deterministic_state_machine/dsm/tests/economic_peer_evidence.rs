@@ -2,8 +2,7 @@
 
 //! The PR2 evidence formats, adversarially: successor evidence (`sigma_dsm`),
 //! the portable acceptance bundle (`sig_b` IS the acceptance), the
-//! signer-identity EK ancestry, and the exact peer-debit predicate's refusal
-//! clauses.
+//! signer-identity EK ancestry.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -11,22 +10,14 @@ use prost::Message;
 
 use dsm::crypto::ephemeral_key::sign_ek_cert;
 use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
-use dsm::economic::credit::{CreditSource, CreditSourceValidatedPeerDebit};
-use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::peer_acceptance::{
-    acceptance_evidence_addr, ek_cert_step_addr, verify_peer_transfer_acceptance, AcceptanceParty,
+    ek_cert_step_addr, verify_peer_transfer_acceptance, AcceptanceParty,
 };
-use dsm::economic::provenance::{
-    verify_credit_source, FaucetTicketWin, PeerLineageFailure, ProvenanceContext, ProvenanceError,
-    ProvenanceResolver, ValidatedPeerTransition,
-};
-use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
+use dsm::economic::provenance::PeerLineageFailure;
 use dsm::economic::successor_evidence::{
     sign_dsm_successor_evidence, verify_dsm_successor_evidence, SuccessorEvidenceError,
 };
-use dsm::economic::tree::EconomicSmt;
-use dsm::economic::witness::EconomicTransitionWitness;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::proto as generated;
 use dsm::types::receipt_types::{
     compute_receipt_b_canonical_target, compute_receipt_challenge_response_target,
@@ -36,7 +27,6 @@ use dsm::types::token_types::Balance;
 
 const G_SENDER: [u8; 32] = [0x51; 32];
 const DEV_SENDER: [u8; 32] = [0x52; 32];
-const G_RECIP: [u8; 32] = [0x61; 32];
 const DEV_RECIP: [u8; 32] = [0x62; 32];
 
 fn era() -> [u8; 32] {
@@ -46,16 +36,16 @@ fn era() -> [u8; 32] {
 fn transfer_to(recipient: [u8; 32], amount: u64) -> Operation {
     Operation::Transfer {
         to_device_id: recipient.to_vec(),
-        amount: Balance::from_state(amount, [0u8; 32]),
-        token_id: b"ERA".to_vec(),
+        amount: Balance::amount(amount),
         policy_commit: era(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![9; 32],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: Vec::new(),
-        to: Vec::new(),
-        message: String::new(),
+        terms_commitment: dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![9; 32],
+            mode: TransactionMode::Bilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
+        }
+        .commitment(),
         signature: Vec::new(),
         authority_policy: None,
     }
@@ -119,6 +109,89 @@ struct AcceptanceFixture {
     child_tip: [u8; 32],
     b_pair: ([u8; 32], [u8; 32]),
     steps: std::collections::HashMap<[u8; 32], Vec<u8>>,
+    /// Steps the verifier holds as a party: `(signer, addr)` to its key.
+    held: std::collections::HashMap<([u8; 32], [u8; 32]), Vec<u8>>,
+}
+
+/// The fixture's EK steps, with every fetch recorded.
+struct FixtureSteps<'f> {
+    fx: &'f AcceptanceFixture,
+    fetched: std::cell::RefCell<Vec<[u8; 32]>>,
+}
+
+impl dsm::economic::peer_acceptance::EkSteps for FixtureSteps<'_> {
+    fn held(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        Ok(self.fx.held.get(&(*signer, *addr)).cloned())
+    }
+
+    fn fetch(&self, addr: &[u8; 32]) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.fetched.borrow_mut().push(*addr);
+        self.fx
+            .steps
+            .get(addr)
+            .cloned()
+            .ok_or_else(|| PeerLineageFailure::Incomplete("no such EK step in this fixture".into()))
+    }
+}
+
+/// The sender's receipt of its first step toward the recipient: its faucet
+/// payout on its self-loop, then `op`, both by the real advance, with the
+/// receipt the one producer builds from the step.
+fn sender_step_receipt(ak_pk: &[u8], op: &Operation, amount: u64) -> StitchedReceiptV2 {
+    use dsm::core::bilateral_transaction_manager::compute_smt_key;
+    use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+
+    let funded = DeviceState::new(G_SENDER, DEV_SENDER, ak_pk.to_vec())
+        .advance(
+            compute_smt_key(&DEV_SENDER, &DEV_SENDER),
+            DEV_SENDER,
+            Operation::FaucetClaim {
+                reserve_id: dsm::economic::native_reserve::era_reserve_id(
+                    dsm::economic::register::BETA_NETWORK_ID,
+                ),
+                generation: 1,
+            },
+            &[BalanceDelta {
+                policy_commit: era(),
+                direction: BalanceDirection::Credit,
+                amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            }],
+            None,
+            None,
+        )
+        .unwrap()
+        .new_device_state
+        .establish_relationship(DEV_RECIP)
+        .unwrap();
+    let outcome = funded
+        .advance(
+            compute_smt_key(&DEV_SENDER, &DEV_RECIP),
+            DEV_RECIP,
+            op.clone(),
+            &[BalanceDelta {
+                policy_commit: era(),
+                direction: BalanceDirection::Debit,
+                amount,
+            }],
+            None,
+            None,
+        )
+        .unwrap();
+    StitchedReceiptV2::of_step(
+        G_SENDER,
+        DEV_SENDER,
+        DEV_RECIP,
+        &outcome,
+        None,
+        &dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(
+            dsm::common::device_tree::DeviceTree::single(DEV_SENDER).root(),
+        ),
+    )
+    .unwrap()
 }
 
 /// Build a fully valid acceptance bundle with real keys, both sides at
@@ -131,21 +204,9 @@ fn acceptance_fixture() -> AcceptanceFixture {
 
     let op = transfer_to(DEV_RECIP, 40);
     let transfer_bytes = op.to_bytes();
-    let parent_tip = [0x71; 32];
-    let child_tip = [0x72; 32];
-
-    let mut receipt = StitchedReceiptV2::new(
-        G_SENDER,
-        DEV_SENDER,
-        DEV_RECIP,
-        parent_tip,
-        child_tip,
-        [0x73; 32],
-        [0x74; 32],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
+    let mut receipt = sender_step_receipt(&sender_ak_pk, &op, 40);
+    let parent_tip = receipt.parent_tip;
+    let child_tip = receipt.child_tip;
     receipt.ek_pk_a = ek_pk_a.clone();
     receipt.ek_cert_a = sign_ek_cert(&sender_ak_sk, &ek_pk_a, &parent_tip).unwrap();
     let commitment = receipt.compute_commitment().unwrap();
@@ -156,11 +217,6 @@ fn acceptance_fixture() -> AcceptanceFixture {
     let request = generated::OnlineTransferRequest {
         signature: sphincs_sign(&sender_ak_sk, &transfer_bytes).unwrap(),
         canonical_operation_bytes: transfer_bytes.clone(),
-        receipt_evidence_digest: dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-            &evidence_a_bytes,
-        )
-        .to_vec(),
         ..Default::default()
     };
 
@@ -169,7 +225,11 @@ fn acceptance_fixture() -> AcceptanceFixture {
         compute_receipt_b_canonical_target(&commitment, &commitment, &b_parent, &b_child);
     let countersign = generated::ReceiptCountersignB {
         commitment: commitment.to_vec(),
-        receipt_evidence_digest_a: request.receipt_evidence_digest.clone(),
+        receipt_evidence_digest_a: dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
+            &evidence_a_bytes,
+        )
+        .to_vec(),
         sig_b: sphincs_sign(&ek_sk_b, &b_target).unwrap(),
         ek_cert_b: sign_ek_cert(&recipient_ak_sk, &ek_pk_b, &parent_tip).unwrap(),
         ek_pk_b: ek_pk_b.clone(),
@@ -194,6 +254,7 @@ fn acceptance_fixture() -> AcceptanceFixture {
         child_tip,
         b_pair: (b_parent, b_child),
         steps: std::collections::HashMap::new(),
+        held: std::collections::HashMap::new(),
     }
 }
 
@@ -203,14 +264,24 @@ fn verify_fixture(
     expected_transfer: &[u8],
     expected_child: &[u8; 32],
 ) -> Result<dsm::economic::peer_acceptance::VerifiedAcceptance, PeerLineageFailure> {
-    let steps = fx.steps.clone();
-    let mut fetch = move |addr: &[u8; 32]| {
-        steps
-            .get(addr)
-            .cloned()
-            .ok_or_else(|| PeerLineageFailure::Incomplete("no such EK step in this fixture".into()))
+    verify_fixture_counting(fx, recipient_devid, expected_transfer, expected_child).0
+}
+
+/// The verdict, and the EK step addresses the check fetched.
+fn verify_fixture_counting(
+    fx: &AcceptanceFixture,
+    recipient_devid: [u8; 32],
+    expected_transfer: &[u8],
+    expected_child: &[u8; 32],
+) -> (
+    Result<dsm::economic::peer_acceptance::VerifiedAcceptance, PeerLineageFailure>,
+    Vec<[u8; 32]>,
+) {
+    let steps = FixtureSteps {
+        fx,
+        fetched: std::cell::RefCell::new(Vec::new()),
     };
-    verify_peer_transfer_acceptance(
+    let verdict = verify_peer_transfer_acceptance(
         &fx.bundle_bytes,
         &AcceptanceParty {
             devid: DEV_SENDER,
@@ -223,8 +294,9 @@ fn verify_fixture(
         expected_transfer,
         expected_child,
         &fx.b_pair,
-        &mut fetch,
-    )
+        &steps,
+    );
+    (verdict, steps.fetched.into_inner())
 }
 
 #[test]
@@ -288,6 +360,7 @@ fn acceptance_clone(fx: &AcceptanceFixture) -> AcceptanceFixture {
         child_tip: fx.child_tip,
         b_pair: fx.b_pair,
         steps: fx.steps.clone(),
+        held: fx.held.clone(),
     }
 }
 
@@ -355,323 +428,81 @@ fn ek_ancestry_walks_one_step_and_refuses_unhashed_substitution() {
     ));
 }
 
+/// The recipient's countersign under an EK certified by `prior_sk`, with the
+/// bundle naming `prior_addr` as the recipient's predecessor step.
+fn countersigned_after(
+    fx: &AcceptanceFixture,
+    prior_addr: [u8; 32],
+    prior_sk: &[u8],
+) -> AcceptanceFixture {
+    let (ek_pk_b, ek_sk_b) = generate_sphincs_keypair().unwrap();
+    let mut bundle =
+        generated::PeerTransferAcceptanceEvidenceV1::decode(fx.bundle_bytes.as_slice()).unwrap();
+    let receipt =
+        StitchedReceiptV2::from_canonical_protobuf(&bundle.receipt_evidence_a_bytes).unwrap();
+    let commitment = receipt.compute_commitment().unwrap();
+    let (b_parent, b_child) = fx.b_pair;
+    let b_target =
+        compute_receipt_b_canonical_target(&commitment, &commitment, &b_parent, &b_child);
+    let countersign = generated::ReceiptCountersignB {
+        commitment: commitment.to_vec(),
+        receipt_evidence_digest_a: dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
+            &bundle.receipt_evidence_a_bytes,
+        )
+        .to_vec(),
+        sig_b: sphincs_sign(&ek_sk_b, &b_target).unwrap(),
+        ek_cert_b: sign_ek_cert(prior_sk, &ek_pk_b, &receipt.parent_tip).unwrap(),
+        ek_pk_b,
+        kyber_ct_b: vec![0x0B; 32],
+        b_parent_tip: b_parent.to_vec(),
+        b_child_tip: b_child.to_vec(),
+        recipient_economic_release_addr: Vec::new(),
+    };
+    bundle.receipt_countersign_b_bytes = countersign.encode_to_vec();
+    bundle.b_prior_step_addr = Some(prior_addr.to_vec());
+    let mut after = acceptance_clone(fx);
+    after.bundle_bytes = bundle.encode_to_vec();
+    after
+}
+
+#[test]
+fn a_party_to_the_relationship_checks_one_certificate_from_the_step_it_holds() {
+    // Deep in the relationship: the recipient's predecessor step is one the
+    // verifier holds as a party. Nothing behind it is in any store here, so
+    // a check that went looking for the relationship's history could not
+    // complete — this one fetches nothing and verifies the one certificate.
+    let fx = acceptance_fixture();
+    let (prior_pk, prior_sk) = generate_sphincs_keypair().unwrap();
+    let prior_addr = [0x5A; 32];
+    let mut deep = countersigned_after(&fx, prior_addr, &prior_sk);
+    deep.held.insert((DEV_RECIP, prior_addr), prior_pk.clone());
+    let (verdict, fetched) =
+        verify_fixture_counting(&deep, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    verdict.expect("the step after a held step verifies from it");
+    assert!(fetched.is_empty(), "fetched {} EK steps", fetched.len());
+
+    // The held key must be the one that certified the current EK.
+    let (other_pk, _) = generate_sphincs_keypair().unwrap();
+    let mut wrong = acceptance_clone(&deep);
+    wrong.held.insert((DEV_RECIP, prior_addr), other_pk);
+    assert!(matches!(
+        verify_fixture(&wrong, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip),
+        Err(PeerLineageFailure::Invalid(_))
+    ));
+
+    // A step held in another signer's chain is not this signer's: the check
+    // goes looking for the step and, finding none, cannot complete.
+    let mut other_signer = acceptance_clone(&deep);
+    other_signer.held.clear();
+    other_signer.held.insert((DEV_SENDER, prior_addr), prior_pk);
+    let (verdict, fetched) =
+        verify_fixture_counting(&other_signer, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    assert!(
+        matches!(verdict, Err(PeerLineageFailure::Incomplete(_))),
+        "got: {verdict:?}"
+    );
+    assert_eq!(fetched, vec![prior_addr]);
+}
+
 // ── The exact peer-debit predicate's refusal clauses ───────────────────────
-
-/// A resolver hand-crafted to return one VPT; evidence store empty.
-struct OnePeer {
-    vpt: ValidatedPeerTransition,
-}
-impl ProvenanceResolver for OnePeer {
-    fn root_register_candidate_set(
-        &self,
-        _network_id: &[u8],
-    ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
-        Ok(crate::beta_candidate_set())
-    }
-
-    fn validated_peer_transition(
-        &self,
-        _g: &[u8; 32],
-        _d: &[u8; 32],
-        _p: u64,
-    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        Ok(self.vpt.clone())
-    }
-    fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
-        None
-    }
-
-    fn parent_binding_observation(
-        &self,
-        _resource_key: &[u8; 32],
-        _storage_set: &dsm::ccb::StorageSetMembers,
-        _quorum: u32,
-    ) -> dsm::dlv::binding_observation::BindingObservation {
-        // This fixture roots no bindings: it cannot observe the key, which is
-        // not the same as observing it free.
-        dsm::dlv::binding_observation::BindingObservation::Unavailable {
-            attributed: 0,
-            required: 2,
-        }
-    }
-    fn immutable_evidence(
-        &self,
-        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
-        _addr: &[u8; 32],
-    ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete("no evidence store".into()))
-    }
-
-    fn anchored_policy_bytes(
-        &self,
-        _policy_commit: &[u8; 32],
-    ) -> Result<Vec<u8>, PeerLineageFailure> {
-        Err(PeerLineageFailure::Incomplete(
-            "this fixture roots no token anchors".into(),
-        ))
-    }
-}
-
-/// A peer VPT whose witness has one exact debit, with `verified_operation`
-/// supplied by the test.
-fn peer_vpt(verified_operation: Operation, debit_amount: u64) -> ValidatedPeerTransition {
-    let mut tree = EconomicSmt::new();
-    let pre = EconomicLeafState::Balance(EconomicBalanceState::new(era(), 100).unwrap());
-    let key = pre.leaf_key(&G_SENDER, &DEV_SENDER);
-    tree.insert(key, pre.leaf_value().unwrap());
-    let pre_root = tree.root();
-    let post =
-        EconomicLeafState::Balance(EconomicBalanceState::new(era(), 100 - debit_amount).unwrap());
-    let siblings = tree.siblings(&key).to_vec();
-    let mutation = EconomicLeafMutation::new(Some(pre), Some(post.clone()), siblings).unwrap();
-    tree.insert(key, post.leaf_value().unwrap());
-    let witness = EconomicTransitionWitness::new(
-        pre_root,
-        tree.root(),
-        [0x0E; 32],
-        dsm::economic::faucet::dsm_operation_digest(&verified_operation.to_bytes()),
-        vec![mutation],
-        Vec::new(),
-    )
-    .unwrap();
-    ValidatedPeerTransition {
-        peer_genesis: G_SENDER,
-        peer_devid: DEV_SENDER,
-        validated_root:
-            dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                4,
-                tree.root(),
-            ),
-        witness,
-        proven_ak: vec![0xAA; 64],
-        c_dsm_plus: [0xC5; 32],
-        verified_operation,
-    }
-}
-
-/// The consuming recipient's witness: one credit funded by the peer debit.
-fn consuming_witness(amount: u64) -> EconomicTransitionWitness {
-    let mut tree = EconomicSmt::new();
-    let pre_root = tree.root();
-    let credit = EconomicLeafState::Balance(EconomicBalanceState::new(era(), amount).unwrap());
-    let key = credit.leaf_key(&G_RECIP, &DEV_RECIP);
-    let siblings = tree.siblings(&key).to_vec();
-    let mutation = EconomicLeafMutation::new(None, Some(credit.clone()), siblings).unwrap();
-    tree.insert(key, credit.leaf_value().unwrap());
-    EconomicTransitionWitness::new(
-        pre_root,
-        tree.root(),
-        [0x0F; 32],
-        [0x77; 32],
-        vec![mutation],
-        vec![CreditSource::ValidatedPeerDebit(
-            CreditSourceValidatedPeerDebit {
-                credit_mutation_index: 0,
-                peer_genesis: G_SENDER,
-                peer_devid: DEV_SENDER,
-                peer_economic_position: 4,
-                peer_debit_mutation_index: 0,
-                acceptance_evidence_addr: [0x44; 32],
-            },
-        )],
-    )
-    .unwrap()
-}
-
-fn recip_ctx<'a>(ak: &'a [u8], set_id: &'a [u8; 32]) -> ProvenanceContext<'a> {
-    ProvenanceContext {
-        genesis: &G_RECIP,
-        device_id: &DEV_RECIP,
-        economic_position: 1,
-        network_id: b"dsm-testnet",
-        proven_ak: ak,
-        canonical_storage_set_id: *set_id,
-        // The consuming substrate's own pair; these fixtures refuse before
-        // the pair is compared, so a placeholder pair is inert here.
-        substrate_b_pair: Some(([0x7A; 32], [0x7B; 32])),
-        verified_operation: None,
-    }
-}
-
-#[test]
-fn a_peer_burn_cannot_fund_a_credit() {
-    // The correction-2 control: "some peer had a validated debit" is not the
-    // semantics — a Burn debit funds nothing.
-    let burn = Operation::Burn {
-        amount: Balance::from_state(40, [0u8; 32]),
-        token_id: b"ERA".to_vec(),
-        policy_commit: era(),
-        proof_of_ownership: Vec::new(),
-        message: String::new(),
-    };
-    let resolver = OnePeer {
-        vpt: peer_vpt(burn, 40),
-    };
-    let w = consuming_witness(40);
-    let set_id = [0xB1; 32];
-    assert_eq!(
-        verify_credit_source(
-            &w.credit_sources[0],
-            &w,
-            &resolver,
-            &recip_ctx(&[0xAB; 64], &set_id)
-        )
-        .unwrap_err(),
-        ProvenanceError::PeerDebitIsNotAnOnlineTransfer
-    );
-}
-
-#[test]
-fn a_transfer_to_a_third_identity_cannot_fund_this_credit() {
-    let resolver = OnePeer {
-        vpt: peer_vpt(transfer_to([0x99; 32], 40), 40),
-    };
-    let w = consuming_witness(40);
-    let set_id = [0xB1; 32];
-    assert_eq!(
-        verify_credit_source(
-            &w.credit_sources[0],
-            &w,
-            &resolver,
-            &recip_ctx(&[0xAB; 64], &set_id)
-        )
-        .unwrap_err(),
-        ProvenanceError::PeerDebitNotAddressedToConsumer
-    );
-}
-
-#[test]
-fn a_debit_that_is_not_the_operations_debit_is_refused() {
-    // Operation says 40; the named mutation debits 30 — the descriptor is
-    // pointing at a debit the operation did not perform.
-    let resolver = OnePeer {
-        vpt: peer_vpt(transfer_to(DEV_RECIP, 40), 30),
-    };
-    let w = consuming_witness(30);
-    let set_id = [0xB1; 32];
-    assert_eq!(
-        verify_credit_source(
-            &w.credit_sources[0],
-            &w,
-            &resolver,
-            &recip_ctx(&[0xAB; 64], &set_id)
-        )
-        .unwrap_err(),
-        ProvenanceError::PeerDebitIndexIsNotTheOperationDebit
-    );
-}
-
-#[test]
-fn an_unresolvable_acceptance_fails_closed_as_incomplete() {
-    // Everything about the debit is right; the acceptance bytes cannot be
-    // fetched. The taxonomy survives: Incomplete, not Invalid.
-    let resolver = OnePeer {
-        vpt: peer_vpt(transfer_to(DEV_RECIP, 40), 40),
-    };
-    let w = consuming_witness(40);
-    let set_id = [0xB1; 32];
-    match verify_credit_source(
-        &w.credit_sources[0],
-        &w,
-        &resolver,
-        &recip_ctx(&[0xAB; 64], &set_id),
-    )
-    .unwrap_err()
-    {
-        ProvenanceError::AcceptanceEvidence(PeerLineageFailure::Incomplete(_)) => {}
-        other => panic!("expected Incomplete acceptance fetch, got {other:?}"),
-    }
-}
-
-#[test]
-fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
-    // The resolver returns bytes that do NOT hash to the descriptor's
-    // acceptance_evidence_addr: refused as Invalid before any verification.
-    struct WrongBytes {
-        vpt: ValidatedPeerTransition,
-    }
-    impl ProvenanceResolver for WrongBytes {
-        fn root_register_candidate_set(
-            &self,
-            _network_id: &[u8],
-        ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure>
-        {
-            Ok(crate::beta_candidate_set())
-        }
-
-        fn validated_peer_transition(
-            &self,
-            _g: &[u8; 32],
-            _d: &[u8; 32],
-            _p: u64,
-        ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-            Ok(self.vpt.clone())
-        }
-        fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
-            None
-        }
-
-        fn parent_binding_observation(
-            &self,
-            _resource_key: &[u8; 32],
-            _storage_set: &dsm::ccb::StorageSetMembers,
-            _quorum: u32,
-        ) -> dsm::dlv::binding_observation::BindingObservation {
-            // This fixture roots no bindings: it cannot observe the key, which
-            // is not the same as observing it free.
-            dsm::dlv::binding_observation::BindingObservation::Unavailable {
-                attributed: 0,
-                required: 2,
-            }
-        }
-        fn immutable_evidence(
-            &self,
-            _n: dsm::crypto::domain::TaggedHashDomain<'static>,
-            _a: &[u8; 32],
-        ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Ok(vec![0xEE; 64])
-        }
-
-        fn anchored_policy_bytes(
-            &self,
-            _policy_commit: &[u8; 32],
-        ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(
-                "this fixture roots no token anchors".into(),
-            ))
-        }
-    }
-    let resolver = WrongBytes {
-        vpt: peer_vpt(transfer_to(DEV_RECIP, 40), 40),
-    };
-    let w = consuming_witness(40);
-    let set_id = [0xB1; 32];
-    match verify_credit_source(
-        &w.credit_sources[0],
-        &w,
-        &resolver,
-        &recip_ctx(&[0xAB; 64], &set_id),
-    )
-    .unwrap_err()
-    {
-        ProvenanceError::AcceptanceEvidence(PeerLineageFailure::Invalid(m)) => {
-            assert!(m.contains("hash to the descriptor"), "{m}");
-        }
-        other => panic!("expected Invalid addr mismatch, got {other:?}"),
-    }
-    let _ = acceptance_evidence_addr(b"anchor the helper in this file");
-}
-
-/// The beta fleet as a catalog resolves it: the network's canonical member
-/// ids paired with the register incarnations those members are serving.
-///
-/// A set id is a function of `(member_id, register_incarnation_id)` pairs, so
-/// a fixture cannot state one as a constant — it derives it the same way
-/// production does, from candidate entries the profile then checks.
-fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
-    // Built from the network's PINNED pairs, so a fixture resolves to the
-    // real committed register rather than to values a fixture chose.
-    let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
-        .expect("the beta network is known");
-    dsm::ccb::StorageSetMembers::new(pinned).expect("pinned beta set")
-}

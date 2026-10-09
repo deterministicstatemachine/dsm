@@ -1,5676 +1,1451 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! # Storage Node SDK (protobuf-only, clockless, signature-free nodes)
+//! The storage operations of a committed set's members (storage spec Part
+//! II): immutable objects (§5), keyed cells (§6), indexes (§7), and the
+//! ByteCommit reads route chains need (§14).
 //!
-//! - Protobuf octet-stream only; no JSON/CBOR/base64/hex on the wire.
-//! - Storage nodes are dumb indexers: they never sign, never enforce time-based TTL, never attest.
-//! - Client-side must sign canonical bytes; nodes simply persist bytes and mirror hash-addressed content.
-//! - TTL parameters are retained for wire compatibility but MUST be set to 0 in the clockless protocol.
-//! - All identifiers are raw bytes; any UI/base32 rendering happens at the edges, not in this SDK.
-//! - Deterministic behavior only: no wall clocks, no randomized alternate paths, no best-effort paths.
+//! Bytes in, bytes out. A member holds no key, checks no writer, and decides
+//! nothing, so nothing here authenticates to a member or counts what members
+//! answered. Every storage fact — `Stored`, `LeaderHeld`, `Final` — is Core's,
+//! derived from the raw answers these calls return.
+
+use dsm::crypto::domain::TaggedHashDomain;
+use dsm::sofi::storage::ObjectRead;
+use dsm::storage_cell::{ArrivalRecord, ByteCommit, CellCommitProof};
 use dsm::types::error::DsmError;
+use dsm::types::proto;
+use prost::Message;
+use reqwest::header::HeaderValue;
 
-use prost::Message; // for canonical proto encode/decode
-use crate::generated; // prost generated messages
+use crate::sdk::storage_set::StorageSet;
+use crate::util::text_id::encode_base32_crockford;
 
-use std::collections::HashMap; // HashSet removed as unused
-use std::sync::Arc;
-use dsm::utils::time::Duration;
+// ── The HTTP client ─────────────────────────────────────────────────────────
 
-use tokio::sync::{Mutex, RwLock};
-
-use log::{debug, info, warn};
-
-use crate::util::deterministic_time as dt;
-use crate::util::registry_addr::{
-    build_root_device_tree_evidence, registry_content_addr_b64url, REGISTRY_QUORUM_THRESHOLD,
-};
-use dsm::common::deterministic_id;
-use dsm::crypto::blake3::dsm_domain_hasher;
-
-/// Auth credentials for storage node device authentication.
-/// Transport-layer only — does not affect protocol semantics (Invariant #12).
-#[derive(Debug, Clone)]
-pub struct StorageAuthContext {
-    /// Device ID in Base32 Crockford (52 chars for 32 bytes)
-    pub device_id_b32: String,
-    /// Auth token in Base32 Crockford (as returned by device registration)
-    pub token_b32: String,
+/// The CA material a storage client is built from: the resolved env-config
+/// path and the bytes of every PEM it names, in order. Two calls that resolve
+/// the same material get the same client; a re-pointed config or a replaced
+/// certificate produces different material and so a fresh build.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct CaMaterial {
+    env_path: Option<String>,
+    certs: Vec<(std::path::PathBuf, Vec<u8>)>,
 }
 
-/// Minimal StorageNodeClient type required by impl blocks below.
-#[derive(Debug, Clone)]
-pub struct StorageNodeClient {
-    pub client: reqwest::Client,
-    pub node_info: NodeInfo,
-    pub security_config: SecurityConfig,
-    /// Optional device auth credentials for write operations (PUT/DELETE).
-    pub auth: Option<StorageAuthContext>,
+fn ca_error(what: String) -> DsmError {
+    DsmError::storage(what, None::<std::io::Error>)
 }
 
-/// Simple connection pool container expected by the SDK.
-pub struct ConnectionPool {
-    pub pools: Arc<RwLock<HashMap<String, NodeConnectionPool>>>,
-    pub config: ConnectionPoolConfig,
+/// Read the env config and every CA certificate it names. A config that
+/// cannot be read or parsed, or that names a certificate that cannot be read,
+/// is an error: a client built without a certificate the config requires
+/// cannot reach the members that use it. With no env config there is no CA,
+/// and [`member_client`] builds no client from no CA.
+fn resolve_ca_material() -> Result<CaMaterial, DsmError> {
+    let env_path = crate::network::resolved_env_config_path();
+    let Some(path) = env_path.as_ref() else {
+        return Ok(CaMaterial {
+            env_path,
+            certs: Vec::new(),
+        });
+    };
+    let certs = read_ca_certs(path)?;
+    Ok(CaMaterial { env_path, certs })
 }
 
-impl ConnectionPool {
-    pub fn new(config: ConnectionPoolConfig) -> Self {
-        Self {
-            pools: Arc::new(RwLock::new(HashMap::new())),
-            config,
-        }
+/// A file as it stood when it was read: its length and modification time.
+/// A file whose stamp is unchanged is taken to hold what it held then.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Stamp {
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+fn stamp(path: &std::path::Path) -> Result<Stamp, DsmError> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| ca_error(format!("storage client: {}: {e}", path.display())))?;
+    let modified = meta
+        .modified()
+        .map_err(|e| ca_error(format!("storage client: {}: {e}", path.display())))?;
+    Ok(Stamp {
+        len: meta.len(),
+        modified,
+    })
+}
+
+/// One env config's certificates as read: the config's stamp, and each
+/// certificate's path, stamp and bytes.
+struct CaRead {
+    config: Stamp,
+    certs: Vec<(std::path::PathBuf, Stamp, Vec<u8>)>,
+}
+
+impl CaRead {
+    fn certs(&self) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        self.certs
+            .iter()
+            .map(|(path, _, bytes)| (path.clone(), bytes.clone()))
+            .collect()
     }
 }
 
-/// A successful keyed PUT on one node: the object address it reported and the
-/// node identity it echoed (`x-dsm-node-id`), if any.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PutAcceptance {
-    pub address: String,
-    pub echoed_node_id: Option<String>,
-}
+/// Every env config's certificates this process read, by the config's path.
+/// Every storage call resolves its client's material, and reading and parsing
+/// the config and each certificate from disk for every member of every call
+/// is work that only repeats what was read: a config and its certificates
+/// are read again once one of them is changed (its stamp differs), so a
+/// re-pointed config or a replaced certificate still takes effect.
+static CA_READS: std::sync::Mutex<std::collections::BTreeMap<String, CaRead>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-/// One member's outcome in a keyed fan-out over a canonical storage set.
-/// `accepted` is `true` ONLY when the PUT succeeded AND the node echoed the
-/// member id the catalog says lives at `endpoint` — so two catalog members
-/// pointing at one physical node yield one countable acceptance, not two, and
-/// a node that does not identify itself does not count.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemberPutOutcome {
-    pub member_id: String,
-    pub endpoint: String,
-    pub accepted: bool,
-    pub echoed_node_id: Option<String>,
-    pub error: Option<String>,
-}
-
-/// Result of a keyed fan-out over a canonical storage set. Never short-circuits;
-/// `total` is the SET size (the quorum denominator), not the number of nodes
-/// that happened to be reachable or constructible.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyedPutFanout {
-    pub outcomes: Vec<MemberPutOutcome>,
-    pub accepted: u32,
-    pub total: u32,
-}
-
-/// One member's answer to a settlement-slot claim submission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemberClaimResult {
-    /// The member accepted our bytes as the FIRST value for the slot.
-    Accepted,
-    /// The member already held exactly our bytes (idempotent re-ack).
-    HeldIdentical,
-    /// The member holds DIFFERENT bytes; `held_digest` names them (as the
-    /// member reported it), if it did.
-    Refused { held_digest: Option<Vec<u8>> },
-    /// No usable answer: transport error, auth failure, no set configured on
-    /// the member, foreign set, malformed — the member did NOT accept.
-    Unavailable(String),
-}
-
-/// One member's outcome in a settlement-slot claim fan-out.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemberClaimOutcome {
-    pub member_id: String,
-    pub endpoint: String,
-    pub result: MemberClaimResult,
-    /// The node id the member echoed (`x-dsm-node-id`); an acceptance counts
-    /// only when it equals `member_id`.
-    pub echoed_node_id: Option<String>,
-}
-
-/// Result of submitting one frozen claim envelope to every member of a set.
-/// Never short-circuits; the caller decides quorum.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimFanout {
-    pub outcomes: Vec<MemberClaimOutcome>,
-    pub total: u32,
-}
-
-/// The ONE mapping from a register member's answer — HTTP status plus the
-/// register's `{prefix}-outcome` header, and its `{prefix}-held-digest`
-/// header when present — to what the client counts.
-///
-/// Pure and shared: every live claim path calls it, and so does the
-/// in-process register double, which reproduces a member's `(status,
-/// outcome)` pair and hands it here rather than constructing results of its
-/// own. That is what makes "the fake refuses exactly as the node does" a
-/// statement about one function rather than two hand-typed tables.
-///
-/// Exactly three answers count; EVERY other pair — a transport-layer 401/403/
-/// 409-without-outcome/413/415, an endpoint 400 `malformed`, 403
-/// `signature-invalid` / `claimant-not-caller` / `device-not-caller`, 422
-/// `foreign-set` / `noncanonical-faucet` / `ticket-out-of-range`, 503
-/// `no-storage-set` / `no-network`, 500 `error` — is `Unavailable`, which the
-/// quorum counter ignores: the member did NOT accept, and nothing else about
-/// it is the client's to interpret.
-pub fn classify_one_shot_response(
-    status: u16,
-    outcome: &str,
-    held_digest_b32: Option<&str>,
-) -> MemberClaimResult {
-    match (status, outcome) {
-        (200, "accepted") => MemberClaimResult::Accepted,
-        (200, "held-identical") => MemberClaimResult::HeldIdentical,
-        (409, "refused") => MemberClaimResult::Refused {
-            held_digest: held_digest_b32.and_then(crate::util::text_id::decode_base32_crockford),
-        },
-        (code, other) => MemberClaimResult::Unavailable(format!("status {code} outcome {other:?}")),
+/// The certificates read from the config at `path`, when neither it nor any
+/// of them changed since.
+fn unchanged_ca_certs(
+    path: &str,
+    config: &Stamp,
+) -> Result<Option<Vec<(std::path::PathBuf, Vec<u8>)>>, DsmError> {
+    let reads = match CA_READS.lock() {
+        Ok(reads) => reads,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(read) = reads.get(path) else {
+        return Ok(None);
+    };
+    if read.config != *config {
+        return Ok(None);
     }
-}
-
-/// Every `(status, outcome)` pair a register member emits, mapped once. The
-/// in-process register double reproduces a member's pair and calls this same
-/// function, so this table is what "the fake refuses exactly as the node
-/// does" rests on; it must enumerate the node's vocabulary, not a sample.
-#[cfg(test)]
-mod one_shot_classifier_tests {
-    use super::{classify_one_shot_response, MemberClaimResult};
-
-    #[test]
-    fn the_three_countable_answers_and_nothing_else() {
-        assert_eq!(
-            classify_one_shot_response(200, "accepted", None),
-            MemberClaimResult::Accepted
-        );
-        assert_eq!(
-            classify_one_shot_response(200, "held-identical", None),
-            MemberClaimResult::HeldIdentical
-        );
-        let digest = [0x5Au8; 32];
-        let b32 = crate::util::text_id::encode_base32_crockford(&digest);
-        assert_eq!(
-            classify_one_shot_response(409, "refused", Some(&b32)),
-            MemberClaimResult::Refused {
-                held_digest: Some(digest.to_vec())
-            }
-        );
-        // A refusal whose held-digest header is absent or undecodable still
-        // refuses; it just cannot name the winner.
-        assert_eq!(
-            classify_one_shot_response(409, "refused", None),
-            MemberClaimResult::Refused { held_digest: None }
-        );
-        assert_eq!(
-            classify_one_shot_response(409, "refused", Some("not base32!")),
-            MemberClaimResult::Refused { held_digest: None }
-        );
-        // The countable answers are bound to THEIR status: the same outcome
-        // word on another status is not an acceptance.
-        assert!(matches!(
-            classify_one_shot_response(201, "accepted", None),
-            MemberClaimResult::Unavailable(_)
-        ));
-        assert!(matches!(
-            classify_one_shot_response(200, "refused", None),
-            MemberClaimResult::Unavailable(_)
-        ));
-    }
-
-    #[test]
-    fn every_member_refusal_is_unavailable_with_its_exact_text() {
-        // Endpoint refusals (both registers) and the device_auth layer's.
-        for (status, outcome) in [
-            (400u16, "malformed"),
-            (400, "caller-id-malformed"),
-            (403, "signature-invalid"),
-            (403, "claimant-not-caller"),
-            (403, "device-not-caller"),
-            (422, "foreign-set"),
-            (422, "noncanonical-faucet"),
-            (422, "ticket-out-of-range"),
-            (503, "no-storage-set"),
-            (503, "no-network"),
-            (500, "error"),
-            (401, ""),
-            (403, ""),
-            (409, ""),
-            (413, ""),
-            (415, ""),
-        ] {
-            assert_eq!(
-                classify_one_shot_response(status, outcome, None),
-                MemberClaimResult::Unavailable(format!("status {status} outcome {outcome:?}")),
-                "({status}, {outcome:?})"
-            );
-        }
-    }
-}
-
-/// The request headers a claim submission carries besides its body: the
-/// carrier content type, and — when the member is authenticated — the
-/// device's bearer authorization and a fresh transport message id (replay
-/// guard only; register idempotency is by BYTES, not by message id).
-///
-/// Shared for the same reason as [`classify_one_shot_response`]: a
-/// conformance harness that drives a real member router must send exactly
-/// what the live client sends, and a second copy of this list would be a
-/// second definition of the wire contract.
-pub fn one_shot_claim_headers(
-    auth: Option<&StorageAuthContext>,
-    message_id: &str,
-) -> Vec<(&'static str, String)> {
-    let mut headers = vec![("Content-Type", "application/octet-stream".to_string())];
-    if let Some(auth) = auth {
-        headers.push((
-            "authorization",
-            format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-        ));
-        headers.push(("x-dsm-message-id", message_id.to_string()));
-    }
-    headers
-}
-
-/// API-facing health status for nodes
-#[derive(Debug, Clone)]
-pub struct ApiNodeHealthStatus {
-    pub node_id: String,
-    pub is_healthy: bool,
-    pub last_check: u64,
-    pub response_time_ms: u64,
-    pub error_count: u32,
-    pub region: String,
-    pub load_percentage: f64,
-    pub storage_utilization: f64,
-}
-
-/// Metrics collected by the SDK
-#[derive(Debug, Clone)]
-pub struct StorageMetrics {
-    pub total_operations: u64,
-    pub successful_operations: u64,
-    pub failed_operations: u64,
-    pub average_response_time_ticks: f64,
-    pub bytes_stored: u64,
-    pub bytes_retrieved: u64,
-    pub cache_hit_ratio: f64,
-}
-
-/// Retry policy structure used in configs
-#[derive(Debug, Clone)]
-pub struct RetryConfig {
-    pub max_attempts: u32,
-    pub initial_delay: Duration,
-    pub max_delay: Duration,
-    pub backoff_multiplier: f64,
-}
-
-/// Minimal security configuration
-#[derive(Debug, Clone, Default)]
-pub struct SecurityConfig {
-    pub enable_auth: bool,
-}
-
-/// Minimal B0x types used locally by this module
-#[derive(Debug, Clone)]
-pub struct B0xEntry {
-    pub id: String,
-    pub sender_genesis_hash: String,
-    pub recipient_genesis_hash: String,
-    pub transaction: Vec<u8>,
-    pub signature: Vec<u8>,
-    pub tick: u64,
-    pub expires_at: u64,
-    pub metadata: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct B0xSubmission {
-    pub entry: B0xEntry,
-}
-
-/// Minimal DeviceIdentity used for the simple reconstruction in retrieve_device_identity
-#[derive(Debug, Clone)]
-pub struct DeviceIdentity {
-    pub device_id: Vec<u8>,
-    pub genesis_state: dsm::core::identity::genesis::GenesisState,
-    pub device_entropy: Vec<u8>,
-    pub blind_key: Vec<u8>,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-/// Convert a HashMap into a deterministic, lexicographically sorted Vec of ParamKv for tests.
-pub fn map_to_param_kv(m: &HashMap<String, String>) -> Vec<generated::ParamKv> {
-    let mut keys: Vec<&String> = m.keys().collect();
-    keys.sort();
-    keys.into_iter()
-        .map(|k| generated::ParamKv {
-            key: k.clone(),
-            value: m.get(k).cloned().unwrap_or_default(),
-        })
-        .collect()
-}
-
-/// Produce canonical bytes for transaction parameters deterministically (length-prefixed key/value).
-/// This avoids any reliance on JSON and keeps ordering deterministic.
-pub fn canonical_params_bytes(m: &HashMap<String, String>) -> Vec<u8> {
-    let mut keys: Vec<&String> = m.keys().collect();
-    keys.sort();
-    let mut out = Vec::new();
-    for k in keys {
-        let v = m.get(k).map(|s| s.as_bytes()).unwrap_or(&[]);
-        // encode key length (u16) + key bytes + value length (u32) + value bytes for deterministic parsing
-        let kbytes = k.as_bytes();
-        let klen = (kbytes.len() as u16).to_le_bytes();
-        out.extend_from_slice(&klen);
-        out.extend_from_slice(kbytes);
-        let vlen = (v.len() as u32).to_le_bytes();
-        out.extend_from_slice(&vlen);
-        out.extend_from_slice(v);
-    }
-    out
-}
-
-/// Build a reqwest::Client that loads custom CA certs from the DSM env config TOML.
-/// Reusable by any code path that needs HTTPS to storage nodes with self-signed certs.
-pub fn build_ca_aware_client() -> reqwest::Client {
-    let mut builder = reqwest::Client::builder().user_agent("DSM-SDK/1.0");
-    let mut certs_loaded: u32 = 0;
-    let env_path_opt = std::env::var("DSM_ENV_CONFIG_PATH")
-        .ok()
-        .or_else(|| crate::network::get_env_config_path().map(|s| s.to_string()))
-        .or_else(|| std::env::var("ENV_CONFIG_PATH").ok());
-    match env_path_opt {
-        Some(ref env_path) => {
-            log::info!("[build_ca_aware_client] env config path: {}", env_path);
-            let config_dir = std::path::Path::new(env_path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            match std::fs::read_to_string(env_path) {
-                Ok(toml_str) => match toml::from_str::<toml::Value>(&toml_str) {
-                    Ok(v) => {
-                        if let Some(arr) = v.get("custom_ca_certs").and_then(|a| a.as_array()) {
-                            for item in arr {
-                                if let Some(p) = item.as_str() {
-                                    let cert_path = if std::path::Path::new(p).is_absolute() {
-                                        std::path::PathBuf::from(p)
-                                    } else {
-                                        config_dir.join(p)
-                                    };
-                                    match std::fs::read(&cert_path) {
-                                        Ok(bytes) => match reqwest::Certificate::from_pem(&bytes) {
-                                            Ok(cert) => {
-                                                builder = builder.add_root_certificate(cert);
-                                                certs_loaded += 1;
-                                                log::info!(
-                                                            "[build_ca_aware_client] Loaded CA cert: {} ({} bytes)",
-                                                            cert_path.display(),
-                                                            bytes.len()
-                                                        );
-                                            }
-                                            Err(e) => {
-                                                log::error!(
-                                                            "[build_ca_aware_client] PEM parse FAILED for {}: {} — HTTPS to self-signed storage nodes will fail",
-                                                            cert_path.display(),
-                                                            e
-                                                        );
-                                            }
-                                        },
-                                        Err(e) => {
-                                            log::error!(
-                                                    "[build_ca_aware_client] Cannot read CA cert at {}: {} — HTTPS to self-signed storage nodes will fail",
-                                                    cert_path.display(),
-                                                    e
-                                                );
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            log::warn!(
-                                    "[build_ca_aware_client] No custom_ca_certs array in env config — using system CA store only"
-                                );
-                        }
-                    }
-                    Err(e) => {
-                        log::error!(
-                                "[build_ca_aware_client] Failed to parse env config TOML: {} — no custom CA certs loaded",
-                                e
-                            );
-                    }
-                },
-                Err(e) => {
-                    log::error!(
-                        "[build_ca_aware_client] Cannot read env config at {}: {} — no custom CA certs loaded",
-                        env_path,
-                        e
-                    );
-                }
-            }
-        }
-        None => {
-            log::warn!(
-                "[build_ca_aware_client] No env config path found (DSM_ENV_CONFIG_PATH / get_env_config_path / ENV_CONFIG_PATH) — no custom CA certs loaded"
-            );
-        }
-    }
-    CA_CERTS_LOADED.store(certs_loaded, std::sync::atomic::Ordering::SeqCst);
-    log::info!(
-        "[build_ca_aware_client] Total custom CA certs loaded: {}",
-        certs_loaded
-    );
-    builder.build().unwrap_or_else(|_| reqwest::Client::new())
-}
-
-/// Number of custom CA certificates loaded by `build_ca_aware_client()`.
-/// Exposed for diagnostics (storage.connectivity route).
-static CA_CERTS_LOADED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Returns the number of custom CA certificates that were loaded into the HTTP client.
-pub fn ca_certs_loaded_count() -> u32 {
-    CA_CERTS_LOADED.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-#[derive(Debug, Clone)]
-pub struct MpcGenesisConfig {
-    pub identity_id: String,
-    pub participants: Vec<String>,
-    pub quantum_resistant: bool,
-    pub key_rotation_interval_hours: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct BilateralSyncState {
-    pub last_sync_tick: u64,
-    pub pending_operations: u64,
-    pub sync_conflicts: u64,
-    pub resolution_strategy: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct MpcGenesisResponse {
-    pub success: bool,
-    pub session_id: String,
-    // Raw bytes
-    pub device_id: Option<Vec<u8>>,
-    pub error: Option<String>,
-    // Raw bytes
-    pub genesis_hash: Option<Vec<u8>>,
-}
-
-/// Response for Genesis ID creation via MPC (CORRECTED IMPLEMENTATION)
-/// Genesis device ID is the OUTPUT of this process
-#[derive(Debug, Clone)]
-pub struct GenesisCreationResponse {
-    /// Session ID for tracking this Genesis creation
-    pub session_id: String,
-    /// GENERATED Genesis device ID (output of MPC process)
-    // Raw bytes; no encoding in SDK
-    pub genesis_device_id: Vec<u8>,
-    /// Current session state
-    pub state: String,
-    /// Number of contributions received (n-of-n; whitepaper §2.5)
-    pub contributions_received: usize,
-    /// Whether genesis creation is complete
-    pub complete: bool,
-    /// Genesis hash for verification (available when complete)
-    pub genesis_hash: Option<Vec<u8>>,
-    /// List of participating storage node IDs
-    pub participating_nodes: Vec<String>,
-    /// Deterministic tick
-    pub tick: u64,
-    /// Post-update Device Tree snapshot — populated by
-    /// [`StorageNodeSDK::apply_admitted_device`] and
-    /// [`StorageNodeSDK::remove_secondary_device`] so that the JNI / Kotlin
-    /// layer can persist the new R_G locally without rebuilding the tree.
-    /// `None` for primary-genesis responses (which do not modify a tree).
-    pub device_tree: Option<DeviceTreeSnapshot>,
-}
-
-/// Lightweight snapshot of a published Device Tree. Mirrors the wire
-/// [`generated::DeviceTreeV1`] message but uses native Rust types
-/// (`[u8; 32]` root) so callers do not need a prost decode round-trip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeviceTreeSnapshot {
-    /// 32-byte Merkle root R_G of the current Device Tree.
-    pub root_hash: [u8; 32],
-    /// Count of real (non-padding) DevID leaves. Always `>= 1` post-genesis.
-    pub device_count: u32,
-    /// Monotone counter; strictly increases on every successful add/remove.
-    pub version_number: u64,
-}
-
-impl DeviceTreeSnapshot {
-    /// Convert to the wire [`generated::DeviceTreeV1`] proto.
-    pub fn to_proto(&self) -> generated::DeviceTreeV1 {
-        generated::DeviceTreeV1 {
-            schema_version: 1,
-            root_hash: self.root_hash.to_vec(),
-            device_count: self.device_count,
-            version_number: self.version_number,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StorageNodeErrorKind {
-    Network,
-    Timeout,
-    Authentication,
-    NotFound,
-    InvalidInput,
-    ServerError,
-    PoolExhausted,
-    DiscoveryFailed,
-    HealthCheckFailed,
-    Unknown,
-}
-
-#[derive(Debug, Clone)]
-pub struct StorageNodeError {
-    message: String,
-    pub(crate) kind: StorageNodeErrorKind,
-}
-
-impl StorageNodeError {
-    pub fn from_message(message: String) -> Self {
-        Self {
-            message,
-            kind: StorageNodeErrorKind::Unknown,
-        }
-    }
-
-    pub fn new(message: String) -> Self {
-        Self::from_message(message)
-    }
-
-    pub fn network(message: String) -> Self {
-        Self {
-            message,
-            kind: StorageNodeErrorKind::Network,
-        }
-    }
-
-    pub fn timeout() -> Self {
-        Self {
-            message: "Operation timed out".to_string(),
-            kind: StorageNodeErrorKind::Timeout,
-        }
-    }
-
-    pub fn not_found(message: String) -> Self {
-        Self {
-            message,
-            kind: StorageNodeErrorKind::NotFound,
-        }
-    }
-
-    pub fn invalid_input(message: String) -> Self {
-        Self {
-            message,
-            kind: StorageNodeErrorKind::InvalidInput,
-        }
-    }
-
-    pub fn server_error(message: String) -> Self {
-        Self {
-            message,
-            kind: StorageNodeErrorKind::ServerError,
-        }
-    }
-
-    pub fn unknown() -> Self {
-        Self {
-            message: "Unknown error".to_string(),
-            kind: StorageNodeErrorKind::Unknown,
-        }
-    }
-}
-
-impl std::fmt::Display for StorageNodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for StorageNodeError {}
-
-/// What a member said about ITSELF alongside a register answer.
-///
-/// Both halves are required for the answer to count. `node_id` says which
-/// member replied; `register_incarnation` says which durable register history
-/// that member is serving. A vault commits the pair at birth, so a member
-/// that still owns its identity key but rebuilt its register no longer
-/// matches, and its answers stop counting.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MemberEcho {
-    pub node_id: Option<String>,
-    pub register_incarnation: Option<[u8; 32]>,
-}
-
-/// Whether an answer can be counted for the member the set committed.
-///
-/// BOTH halves must match, and a failure of either is `Unavailable` — never
-/// an absence and never a value:
-///
-/// | echoed | verdict |
-/// |---|---|
-/// | member A, incarnation X (the committed pair) | may count |
-/// | member A, incarnation Y | unavailable — this is A, but not the register history the vault named |
-/// | member B, incarnation X | unavailable — attribution failure |
-/// | either half missing | unavailable — an answer about nobody |
-///
-/// The second row is the one this exists for. A member that lost and rebuilt
-/// its register can honestly report "nothing here" for a cell the committed
-/// incarnation once held, and node identity alone cannot tell that apart from
-/// the real member reporting the same thing. Counting it as emptiness is the
-/// undetectable substitution. It is also NOT a forgery — the node is not
-/// lying, it simply is no longer the member this vault committed — which is
-/// why the verdict is `Unavailable` and not an invalid-credit finding.
-pub fn answer_counts_for(
-    echoed: &MemberEcho,
-    member: &crate::sdk::storage_set::StorageMember,
-) -> bool {
-    echoed.node_id.as_deref() == Some(member.member_id.as_str())
-        && echoed.register_incarnation == Some(member.register_incarnation_id)
-}
-
-impl StorageNodeClient {
-    pub async fn new(config: StorageNodeConfig) -> Result<Self, StorageNodeError> {
-        let client = build_ca_aware_client();
-
-        // Use the first node URL as primary
-        let primary_url = config.node_urls.first().ok_or_else(|| {
-            StorageNodeError::invalid_input("No storage node URLs provided".to_string())
-        })?;
-
-        let node_info = NodeInfo {
-            url: primary_url.clone(),
-            id: "primary".to_string(),
-            region: config
-                .selection_config
-                .preferred_regions
-                .first()
-                .cloned()
-                .unwrap_or_default(),
-            health_status: NodeHealthStatus {
-                is_healthy: true,
-                last_check: dt::tick(),
-                response_time_ms: 0,
-                consecutive_failures: 0,
-                error_rate: 0.0,
-            },
-            performance_metrics: NodePerformanceMetrics {
-                total_requests: 0,
-                successful_requests: 0,
-                average_latency_ms: 0.0,
-                throughput_mbps: 0.0,
-                load_score: 0.0,
-            },
-            last_updated: dt::tick(),
-        };
-
-        Ok(Self {
-            client,
-            node_info,
-            security_config: config.security_config,
-            auth: None,
-        })
-    }
-
-    /// Set device auth credentials for write operations (PUT/DELETE).
-    pub fn with_auth(mut self, auth: StorageAuthContext) -> Self {
-        self.auth = Some(auth);
-        self
-    }
-
-    /// Generate a unique message ID for replay protection (transport-layer, not protocol).
-    ///
-    /// The server-side replay guard at `dsm_storage_node/src/auth/mod.rs:78`
-    /// enforces `unique(device_id, message_id)` per device.  A 409 Conflict
-    /// is returned when an already-seen message_id is replayed.  The id is
-    /// transport-layer only (not part of the canonical protocol) and the
-    /// DSM clockless rule applies to PROTOCOL decisions, not transport
-    /// nonces — so a CSPRNG nonce is the correct shape here.
-    ///
-    /// Prior versions of this function used `BLAKE3("DSM/obj-msg-id", key,
-    /// dt::tick())` which was DETERMINISTIC per (key, tick).  Same key PUT
-    /// twice in the same commit-height window collided.  Worse, once the
-    /// server's auth layer recorded a message_id (even when the surrounding
-    /// PUT body subsequently failed), that id was burnt forever — so any
-    /// future retry with the same deterministic id 409'd against the
-    /// poisoned slot.  Real-hardware repro: SoFiTradeRealHwTest's two
-    /// publishRoutingAdvertisement calls both PUT under the same commit
-    /// height; consistent 409 across runs even with genuinely fresh
-    /// vault_ids.
-    ///
-    /// Generates 32 bytes of CSPRNG, encoded Base32-Crockford — same
-    /// shape the server's auth layer parses.  The `key` arg is kept in
-    /// the signature for telemetry / future binding but isn't hashed in;
-    /// the server validates only `unique(device_id, message_id)`.
-    fn generate_message_id(_key: &str) -> String {
-        use rand::RngCore;
-        let mut nonce = [0u8; 32];
-        rand::rng().fill_bytes(&mut nonce);
-        crate::util::text_id::encode_base32_crockford(&nonce)
-    }
-
-    pub async fn put(
-        &self,
-        key: &str,
-        data: &[u8],
-        _ttl_seconds: Option<u64>, // Unused: clockless system
-    ) -> Result<String, StorageNodeError> {
-        // Generate DLV ID from key
-        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DLV_PARTITION);
-        hasher.update(key.as_bytes());
-        let dlv_id = hasher.finalize();
-
-        // Transport header identifier: use canonical Base32 Crockford (no hex).
-        let dlv_id_text = crate::util::text_id::encode_base32_crockford(dlv_id.as_bytes());
-        let stake_hash_text = crate::util::text_id::encode_base32_crockford(&[0u8; 32]);
-
-        let url = format!("{base}/api/v2/object/put", base = self.node_info.url);
-
-        // Send data with headers (storage node expects headers + raw body)
-        // Also provide bootstrap headers for auto-slot creation (428 fix)
-        let mut req_builder = self
-            .client
-            .post(&url)
-            .header("x-dlv-id", dlv_id_text)
-            .header("x-path", key)
-            .header("x-capacity-bytes", "10485760")
-            .header("x-stake-hash", stake_hash_text)
-            .header("Content-Type", "application/octet-stream");
-
-        // Add device auth headers for authenticated write (transport-layer, Invariant #12 preserved)
-        if let Some(auth) = &self.auth {
-            let msg_id = Self::generate_message_id(key);
-            req_builder = req_builder
-                .header(
-                    "authorization",
-                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-                )
-                .header("x-dsm-message-id", msg_id);
-        }
-
-        let req_builder = req_builder.body(data.to_vec());
-
-        // Clockless: do not enforce wall-clock/tokio timeouts here.
-        let response = req_builder
-            .send()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("HTTP request failed: {e}")))?;
-
-        if response.status().is_success() {
-            let addr = response
-                .headers()
-                .get("x-object-address")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            Ok(addr)
-        } else {
-            Err(StorageNodeError::server_error(format!(
-                "PUT failed with status: {}",
-                response.status()
-            )))
-        }
-    }
-
-    /// Keyed PUT that also returns the node's ECHOED identity
-    /// (`x-dsm-node-id` response header), so a fan-out can count an
-    /// PUT one immutable object (Area 4). The node computes the address from
-    /// `(namespace, payload)`; `expected_addr_b32` is sent so a disagreeing
-    /// encoder is refused server-side as a storage error (Req 15.2). Returns
-    /// the node's address string on 200/201.
-    pub async fn put_immutable(
-        &self,
-        namespace: &str,
-        payload: &[u8],
-        expected_addr_b32: &str,
-    ) -> Result<(String, Option<String>), StorageNodeError> {
-        let url = format!("{base}/api/v2/immutable/put", base = self.node_info.url);
-        let mut req = self
-            .client
-            .post(&url)
-            .header("x-namespace", namespace)
-            .header("x-expected-addr", expected_addr_b32)
-            .header("Content-Type", "application/octet-stream")
-            .body(payload.to_vec());
-        if let Some(auth) = &self.auth {
-            // The device-auth middleware requires the replay-protection
-            // message id beside the token — same contract as every other
-            // authenticated write. A FRESH nonce per attempt, deliberately:
-            // the server enforces unique(device_id, message_id), and the
-            // tuple's idempotence lives in the write-once store, not here.
-            let msg_id = Self::generate_message_id(expected_addr_b32);
-            req = req
-                .header(
-                    "authorization",
-                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-                )
-                .header("x-dsm-message-id", msg_id);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("immutable put: {e}")))?;
-        let status = resp.status();
-        // The member-id echo, for Req 15.8 attribution at the fan-out layer.
-        let echoed = resp
-            .headers()
-            .get("x-dsm-node-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        if !(status.is_success()) {
-            return Err(StorageNodeError::network(format!(
-                "immutable put: HTTP {status}"
-            )));
-        }
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("immutable put body: {e}")))?;
-        Ok((body, echoed))
-    }
-
-    /// GET one immutable object by content address. Returns the raw
-    /// `(namespace, payload)` tuple, both **untrusted** — the caller MUST
-    /// recompute the address from this tuple and compare it with the address
-    /// it asked for, before decoding anything (Req 15.3). The node's own
-    /// hash-on-read is defence in depth against corruption; this return value
-    /// crossing the trust boundary is the reason it is not the security
-    /// boundary.
-    pub async fn get_immutable(
-        &self,
-        addr_b32: &str,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageNodeError> {
-        let url = format!(
-            "{base}/api/v2/immutable/{addr}",
-            base = self.node_info.url,
-            addr = addr_b32
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("immutable get: {e}")))?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    for (cert_path, was, _) in &read.certs {
+        if stamp(cert_path)? != *was {
             return Ok(None);
         }
-        if !resp.status().is_success() {
-            return Err(StorageNodeError::network(format!(
-                "immutable get: HTTP {}",
-                resp.status()
+    }
+    Ok(Some(read.certs()))
+}
+
+/// Every CA certificate the env config at `path` names: as last read when
+/// neither the config nor any certificate changed since, read from disk
+/// otherwise.
+fn read_ca_certs(path: &str) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, DsmError> {
+    let config = stamp(std::path::Path::new(path))?;
+    if let Some(certs) = unchanged_ca_certs(path, &config)? {
+        return Ok(certs);
+    }
+    let read = CaRead {
+        config,
+        certs: read_ca_certs_from_disk(path)?,
+    };
+    let certs = read.certs();
+    match CA_READS.lock() {
+        Ok(mut reads) => reads.insert(path.to_string(), read),
+        Err(poisoned) => poisoned.into_inner().insert(path.to_string(), read),
+    };
+    Ok(certs)
+}
+
+/// Every CA certificate the env config at `path` names, read from disk, each
+/// stamped before it was read: a file changed while it was read is then read
+/// again next time.
+fn read_ca_certs_from_disk(
+    path: &str,
+) -> Result<Vec<(std::path::PathBuf, Stamp, Vec<u8>)>, DsmError> {
+    let config_dir = std::path::Path::new(path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| ca_error(format!("storage client: env config {path}: {e}")))?;
+    let config: toml::Value = toml::from_str(&text)
+        .map_err(|e| ca_error(format!("storage client: env config {path}: {e}")))?;
+    let mut certs = Vec::new();
+    // An absent key names no CA, and no member can then be known by its
+    // certificate; a key that is present but not a list of paths is a
+    // malformed config, not an empty one.
+    let entries = match config.get("custom_ca_certs") {
+        None => None,
+        Some(value) => Some(value.as_array().ok_or_else(|| {
+            ca_error(format!(
+                "storage client: {path}: custom_ca_certs is not a list of certificate paths"
+            ))
+        })?),
+    };
+    if let Some(entries) = entries {
+        for entry in entries {
+            let named = entry.as_str().ok_or_else(|| {
+                ca_error(format!(
+                    "storage client: {path}: custom_ca_certs holds a non-string entry"
+                ))
+            })?;
+            let cert_path = if std::path::Path::new(named).is_absolute() {
+                std::path::PathBuf::from(named)
+            } else {
+                config_dir.join(named)
+            };
+            let was = stamp(&cert_path)?;
+            let bytes = std::fs::read(&cert_path).map_err(|e| {
+                ca_error(format!(
+                    "storage client: CA certificate {}: {e}",
+                    cert_path.display()
+                ))
+            })?;
+            certs.push((cert_path, was, bytes));
+        }
+    }
+    Ok(certs)
+}
+
+/// How long a member has to accept a connection.
+const MEMBER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long one request to a member may take, end to end. A member that
+/// accepts a connection and never answers is then a member that did not
+/// answer, which every flow already handles, rather than a write that hangs
+/// with no error. A transport bound only: nothing in DSM's validity or
+/// ordering reads it.
+const MEMBER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A member is reached only over `https://`: its identity is the
+/// certificate it presents, and plain HTTP presents none.
+pub fn require_https(endpoint: &str) -> Result<(), DsmError> {
+    match endpoint.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("https") => Ok(()),
+        _ => Err(ca_error(format!(
+            "storage member endpoint {endpoint} is not https://: a member is known by its \
+             certificate, and plain HTTP presents none"
+        ))),
+    }
+}
+
+/// Accepts a member's certificate only when it chains to one of the CAs the
+/// env config names AND names the member, as a DNS name among its subject
+/// alternative names, whatever address the member was dialled at. A member
+/// signs nothing (storage spec §2), so the certificate is the only thing that
+/// says which member answered; a certificate for another member of the same
+/// set, at this member's address, is refused.
+#[derive(Debug)]
+struct NamesTheMember {
+    chain: std::sync::Arc<rustls::client::WebPkiServerVerifier>,
+    member: rustls::pki_types::ServerName<'static>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for NamesTheMember {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _dialled: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        self.chain
+            .verify_server_cert(end_entity, intermediates, &self.member, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.chain.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.chain.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.chain.supported_verify_schemes()
+    }
+}
+
+/// The client for `member_id`, built from resolved material: it trusts the
+/// CAs the material holds and nothing else (no system store), and accepts
+/// only a certificate that names `member_id`.
+fn build_member_client(
+    material: &CaMaterial,
+    member_id: &str,
+) -> Result<reqwest::Client, DsmError> {
+    use rustls::pki_types::pem::PemObject;
+    if material.certs.is_empty() {
+        return Err(ca_error(
+            "storage client: the env config names no CA (`custom_ca_certs`), so no member \
+             can be known by its certificate"
+                .to_string(),
+        ));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for (cert_path, bytes) in &material.certs {
+        let mut held = 0usize;
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(bytes) {
+            let cert = cert.map_err(|e| {
+                ca_error(format!(
+                    "storage client: CA certificate {}: {e}",
+                    cert_path.display()
+                ))
+            })?;
+            roots.add(cert).map_err(|e| {
+                ca_error(format!(
+                    "storage client: CA certificate {}: {e}",
+                    cert_path.display()
+                ))
+            })?;
+            held += 1;
+        }
+        if held == 0 {
+            return Err(ca_error(format!(
+                "storage client: {} holds no certificate",
+                cert_path.display()
             )));
         }
-        let namespace = resp
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        std::sync::Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .map_err(|e| ca_error(format!("storage client: {e}")))?;
+    let member = rustls::pki_types::ServerName::try_from(member_id.to_string()).map_err(|e| {
+        ca_error(format!(
+            "storage member id {member_id} is not a name a certificate can carry: {e}"
+        ))
+    })?;
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| ca_error(format!("storage client: {e}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(NamesTheMember { chain, member }))
+        .with_no_client_auth();
+    // HTTP/2 where the member offers it (the node's listener does): every
+    // request to a member rides one connection, so a sync that reads many
+    // routes at once pays one handshake per member, not one per request.
+    // HTTP/1.1 stays for a member that does not offer HTTP/2.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    reqwest::Client::builder()
+        .user_agent("DSM-SDK/1.0")
+        .connect_timeout(MEMBER_CONNECT_TIMEOUT)
+        .timeout(MEMBER_REQUEST_TIMEOUT)
+        .use_preconfigured_tls(config)
+        .build()
+        .map_err(|e| ca_error(format!("storage client: {e}")))
+}
+
+/// The HTTP client for the member `member_id`, reached at `endpoint`: over
+/// `https://` only, trusting only the CAs the env config names, and accepting
+/// only a certificate that names `member_id`. The material is resolved on
+/// every call, and read from disk again whenever the config or a certificate
+/// changed ([`read_ca_certs`]), so a re-pointed config or a replaced
+/// certificate takes effect; each member's client is built once per material
+/// and shared.
+pub fn member_client(member_id: &str, endpoint: &str) -> Result<reqwest::Client, DsmError> {
+    require_https(endpoint)?;
+    let material = resolve_ca_material()?;
+    let mut slot = MEMBER_CLIENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((cached, clients)) = slot.as_ref() {
+        if let Some(client) = clients.get(member_id).filter(|_| *cached == material) {
+            return Ok(client.clone());
+        }
+    }
+    let client = build_member_client(&material, member_id)?;
+    match slot.as_mut() {
+        Some((cached, clients)) if *cached == material => {
+            clients.insert(member_id.to_string(), client.clone());
+        }
+        _ => {
+            let clients = MemberClients::from([(member_id.to_string(), client.clone())]);
+            *slot = Some((material, clients));
+        }
+    }
+    Ok(client)
+}
+
+type MemberClients = std::collections::HashMap<String, reqwest::Client>;
+
+static MEMBER_CLIENTS: std::sync::Mutex<Option<(CaMaterial, MemberClients)>> =
+    std::sync::Mutex::new(None);
+
+// ── One member ──────────────────────────────────────────────────────────────
+
+/// One member of a committed set, reached at the endpoint the set names.
+#[derive(Debug, Clone)]
+pub struct MemberClient {
+    member_id: String,
+    endpoint: String,
+    client: reqwest::Client,
+}
+
+/// `error` and every error under it, outermost first: a transport error's
+/// own text says only that a request failed, and the reason (a refused
+/// certificate, a reset connection) is underneath it.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(under) = cause {
+        text.push_str(": ");
+        text.push_str(&under.to_string());
+        cause = under.source();
+    }
+    text
+}
+
+/// A member's answer: `Ok(Some)` for a `200`/`201` body, `Ok(None)` for `204`
+/// (the member answered with nothing), `Err` for anything else. A `404` is not
+/// an answer: no route of the member's answers it on success, so it means a
+/// wrong path or a member without the route, and reading it as an
+/// acknowledgement would count a write that never happened (storage spec §4:
+/// nothing a member returns is a verdict, and a fact that is not established
+/// is never read as its opposite).
+async fn answer(request: reqwest::RequestBuilder) -> Result<Option<Vec<u8>>, String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("transport: {}", with_causes(&e)))?;
+    match response.status().as_u16() {
+        200 | 201 => response
+            .bytes()
+            .await
+            .map(|b| Some(b.to_vec()))
+            .map_err(|e| format!("reading the answer: {e}")),
+        204 => Ok(None),
+        status => Err(format!("answered HTTP {status}")),
+    }
+}
+
+fn namespace_header(namespace: &[u8]) -> Result<HeaderValue, String> {
+    HeaderValue::from_bytes(namespace).map_err(|e| format!("namespace: {e}"))
+}
+
+/// The header every member answers with: the member id it is configured as
+/// (§14 mirror sync). Identity, not authentication.
+const ECHO_HEADER: &str = "x-dsm-node-id";
+
+/// What a member answered when asked for its latest ByteCommit (§14). An
+/// observation, never a verdict (§4): nothing here was checked against a
+/// mirror or a predecessor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatestByteCommit {
+    /// `200`: the member's latest ByteCommit, as it stated it. It names this
+    /// member; a ByteCommit naming another member is `Unanswered`.
+    Stated(ByteCommit),
+    /// `204`: the member states it has closed no cycle yet.
+    NoCycle,
+    /// Why there is no ByteCommit of this member's to show.
+    Unanswered(String),
+}
+
+/// A member's answer to `bytecommit/latest`, with the member id the node
+/// that answered echoed, when it echoed one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestByteCommitRead {
+    pub answer: LatestByteCommit,
+    pub answered_as: Option<Vec<u8>>,
+}
+
+impl MemberClient {
+    /// The member `member_id` at `endpoint`, reached with a client that
+    /// accepts only `member_id`'s certificate ([`member_client`]). The client
+    /// is built here, from the member id, so a member's name and the identity
+    /// its connection checks cannot disagree.
+    pub fn new(member_id: &str, endpoint: &str) -> Result<Self, DsmError> {
+        Ok(Self {
+            member_id: member_id.to_string(),
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            client: member_client(member_id, endpoint)?,
+        })
+    }
+
+    pub fn member_id(&self) -> &str {
+        &self.member_id
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Put an immutable object (§5). The member computes the address; the
+    /// address this client computed travels as a check the member applies.
+    pub async fn put_immutable(
+        &self,
+        namespace: TaggedHashDomain<'_>,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        let addr = dsm::storage_object::immutable_addr(namespace, payload);
+        answer(
+            self.client
+                .post(format!("{}/api/v2/immutable/put", self.endpoint))
+                .header("x-namespace", namespace_header(namespace.source_bytes())?)
+                .header("x-expected-addr", encode_base32_crockford(&addr))
+                .body(payload.to_vec()),
+        )
+        .await
+        .map(|body| {
+            log::debug!(
+                "immutable put at {}: {} bytes answered",
+                self.member_id,
+                body.map_or(0, |b| b.len())
+            )
+        })
+    }
+
+    /// The `(namespace, payload)` the member holds at `addr`, untrusted until
+    /// the caller re-hashes it to `addr`.
+    pub async fn get_immutable(&self, addr: &[u8; 32]) -> ObjectRead {
+        let response = match self
+            .client
+            .get(format!(
+                "{}/api/v2/immutable/{}",
+                self.endpoint,
+                encode_base32_crockford(addr)
+            ))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                log::debug!("immutable get at {}: {e}", self.member_id);
+                return ObjectRead::Unavailable;
+            }
+        };
+        match response.status().as_u16() {
+            200 => {}
+            404 => return ObjectRead::Absent,
+            status => {
+                log::debug!("immutable get at {}: HTTP {status}", self.member_id);
+                return ObjectRead::Unavailable;
+            }
+        }
+        let Some(namespace) = response
             .headers()
             .get("x-namespace")
             .map(|v| v.as_bytes().to_vec())
-            .ok_or_else(|| {
-                StorageNodeError::network("immutable get: response missing x-namespace".into())
-            })?;
-        let payload = resp
-            .bytes()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("immutable get body: {e}")))?;
-        Ok(Some((namespace, payload.to_vec())))
-    }
-
-    /// acceptance only when the node that answered is the member the catalog
-    /// says lives at this endpoint. Same request shape as [`Self::put`].
-    pub async fn put_echoing_node_id(
-        &self,
-        key: &str,
-        data: &[u8],
-    ) -> Result<PutAcceptance, StorageNodeError> {
-        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DLV_PARTITION);
-        hasher.update(key.as_bytes());
-        let dlv_id = hasher.finalize();
-        let dlv_id_text = crate::util::text_id::encode_base32_crockford(dlv_id.as_bytes());
-        let stake_hash_text = crate::util::text_id::encode_base32_crockford(&[0u8; 32]);
-        let url = format!("{base}/api/v2/object/put", base = self.node_info.url);
-        let mut req_builder = self
-            .client
-            .post(&url)
-            .header("x-dlv-id", dlv_id_text)
-            .header("x-path", key)
-            .header("x-capacity-bytes", "10485760")
-            .header("x-stake-hash", stake_hash_text)
-            .header("Content-Type", "application/octet-stream");
-        if let Some(auth) = &self.auth {
-            let msg_id = Self::generate_message_id(key);
-            req_builder = req_builder
-                .header(
-                    "authorization",
-                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-                )
-                .header("x-dsm-message-id", msg_id);
-        }
-        let response = req_builder
-            .body(data.to_vec())
-            .send()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("HTTP request failed: {e}")))?;
-        let status = response.status();
-        let echoed_node_id = response
-            .headers()
-            .get("x-dsm-node-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        if status.is_success() {
-            let address = response
-                .headers()
-                .get("x-object-address")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            Ok(PutAcceptance {
-                address,
-                echoed_node_id,
-            })
-        } else {
-            Err(StorageNodeError::server_error(format!(
-                "PUT failed with status: {status}"
-            )))
-        }
-    }
-
-    /// Submit the exact frozen claim envelope to THIS member's settlement-slot
-    /// register (`POST /api/v2/settlement-slot/claim`, device-authenticated).
-    /// Returns the member's outcome and its echoed node id. Never retries: the
-    /// caller owns idempotent replay of the same bytes.
-    /// POST one-shot register claim to an economic register endpoint
-    /// (`faucet-ticket` or `economic-root`). Same contract as the settlement
-    /// register: outcome/held-digest headers with the given prefix, register
-    /// idempotency by BYTES, fresh message id per attempt (transport replay
-    /// guard only).
-    pub async fn post_one_shot_claim(
-        &self,
-        path: &str,
-        header_prefix: &str,
-        envelope: &[u8],
-    ) -> (MemberClaimResult, Option<String>) {
-        let url = format!("{base}{path}", base = self.node_info.url);
-        let msg_id = Self::generate_message_id("one-shot-claim");
-        let mut req_builder = self.client.post(&url);
-        for (name, value) in one_shot_claim_headers(self.auth.as_ref(), &msg_id) {
-            req_builder = req_builder.header(name, value);
-        }
-        let response = match req_builder.body(envelope.to_vec()).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    MemberClaimResult::Unavailable(format!("HTTP request failed: {e}")),
-                    None,
-                )
-            }
+        else {
+            return ObjectRead::Unavailable;
         };
-        let echoed = response
-            .headers()
-            .get("x-dsm-node-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let outcome_hdr = response
-            .headers()
-            .get(format!("{header_prefix}-outcome").as_str())
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let held_digest_hdr = response
-            .headers()
-            .get(format!("{header_prefix}-held-digest").as_str())
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let result = classify_one_shot_response(
-            response.status().as_u16(),
-            &outcome_hdr,
-            held_digest_hdr.as_deref(),
-        );
-        (result, echoed)
-    }
-
-    /// GET a register cell. Returns `(read, echoed node id)`.
-    ///
-    /// THE THREE-VALUED READ. An explicit `404` is this member ASSERTING the
-    /// cell holds nothing; every other unsuccessful outcome — transport error,
-    /// timeout, 5xx from a failing database, a body that will not read — is
-    /// [`MemberCellRead::Unavailable`] and supports no conclusion in either
-    /// direction. Collapsing those into "no value" let a quorum of broken
-    /// members manufacture an emptiness fact, which is the one observation a
-    /// forward lineage walk treats as terminal.
-    ///
-    /// The echo is NORMATIVE, and it has TWO halves: a response without the
-    /// member's own node id, or without the register incarnation that member
-    /// is serving, is uncountable — the caller folds either into
-    /// `Unavailable` rather than counting it as a value or as an absence.
-    pub async fn get_register_cell(
-        &self,
-        path: &str,
-    ) -> (dsm::economic::cell_observation::MemberCellRead, MemberEcho) {
-        use dsm::economic::cell_observation::MemberCellRead;
-        let url = format!("{base}{path}", base = self.node_info.url);
-        let response = match self.client.get(&url).send().await {
-            Ok(r) => r,
-            Err(_) => return (MemberCellRead::Unavailable, MemberEcho::default()),
-        };
-        let echoed = MemberEcho {
-            node_id: response
-                .headers()
-                .get("x-dsm-node-id")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            register_incarnation: response
-                .headers()
-                .get("x-dsm-register-incarnation")
-                .and_then(|v| v.to_str().ok())
-                .and_then(crate::util::text_id::decode_base32_crockford)
-                .and_then(|raw| <[u8; 32]>::try_from(raw).ok()),
-        };
-        let status = response.status().as_u16();
-        let outcome = response
-            .headers()
-            .get("x-dsm-slot-outcome")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        // AN ABSENCE MUST BE ASSERTED. A bare 404 proves only that something
-        // in that process declined to serve the path — a route miss reaches
-        // the fallback, which still carries the identity echo — so emptiness
-        // is counted only when the member SAYS the cell is absent. Any other
-        // status, and any 404 without that assertion, answered nothing.
-        if status == 404 {
-            return match outcome.as_deref() {
-                Some("absent") => (MemberCellRead::Absent, echoed),
-                _ => (MemberCellRead::Unavailable, echoed),
-            };
-        }
-        if status != 200 {
-            return (MemberCellRead::Unavailable, echoed);
-        }
         match response.bytes().await {
-            Ok(b) => (MemberCellRead::Value(b.to_vec()), echoed),
-            Err(_) => (MemberCellRead::Unavailable, echoed),
-        }
-    }
-
-    pub async fn post_settlement_slot_claim(
-        &self,
-        envelope: &[u8],
-    ) -> (MemberClaimResult, Option<String>) {
-        let url = format!(
-            "{base}/api/v2/settlement-slot/claim",
-            base = self.node_info.url
-        );
-        let mut req_builder = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/octet-stream");
-        if let Some(auth) = &self.auth {
-            // Transport replay guard only: each submission is its own message.
-            // Register idempotency is by BYTES (identical envelope re-acks), not
-            // by message id.
-            let msg_id = Self::generate_message_id("settlement-slot-claim");
-            req_builder = req_builder
-                .header(
-                    "authorization",
-                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-                )
-                .header("x-dsm-message-id", msg_id);
-        }
-        let response = match req_builder.body(envelope.to_vec()).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    MemberClaimResult::Unavailable(format!("HTTP request failed: {e}")),
-                    None,
-                )
-            }
-        };
-        let echoed = response
-            .headers()
-            .get("x-dsm-node-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let outcome_hdr = response
-            .headers()
-            .get("x-dsm-slot-outcome")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let held_digest_hdr = response
-            .headers()
-            .get("x-dsm-slot-held-digest")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let result = classify_one_shot_response(
-            response.status().as_u16(),
-            &outcome_hdr,
-            held_digest_hdr.as_deref(),
-        );
-        (result, echoed)
-    }
-
-    pub async fn get(&self, key: &str) -> Result<Vec<u8>, StorageNodeError> {
-        // Use direct GET by key/addr
-        let encoded_key = urlencoding::encode(key);
-        let url = format!(
-            "{base}/api/v2/object/get/{encoded_key}",
-            base = self.node_info.url
-        );
-
-        let req_builder = self.client.get(&url);
-
-        // Clockless: do not enforce wall-clock/tokio timeouts here.
-        let response = req_builder
-            .send()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("HTTP request failed: {e}")))?;
-
-        if response.status().is_success() {
-            let bytes = response.bytes().await.map_err(|e| {
-                StorageNodeError::network(format!("Failed to read response body: {e}"))
-            })?;
-            Ok(bytes.to_vec())
-        } else if response.status() == 404 {
-            Err(StorageNodeError::not_found(format!("Key not found: {key}")))
-        } else {
-            Err(StorageNodeError::server_error(format!(
-                "GET failed with status: {}",
-                response.status()
-            )))
-        }
-    }
-
-    pub async fn list_objects(
-        &self,
-        prefix: &str,
-        cursor: Option<&str>,
-        limit: u32,
-    ) -> Result<generated::ObjectListResponseV1, StorageNodeError> {
-        let query = {
-            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            if !prefix.is_empty() {
-                serializer.append_pair("prefix", prefix);
-            }
-            serializer.append_pair("limit", &limit.clamp(1, 1000).to_string());
-            if let Some(cursor) = cursor.filter(|value| !value.is_empty()) {
-                serializer.append_pair("cursor", cursor);
-            }
-            serializer.finish()
-        };
-        let url = format!("{}/api/v2/object/list?{}", self.node_info.url, query);
-
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("HTTP request failed: {e}")))?;
-
-        if !response.status().is_success() {
-            return Err(StorageNodeError::server_error(format!(
-                "LIST failed with status: {}",
-                response.status()
-            )));
-        }
-
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("Failed to read response body: {e}")))?;
-        generated::ObjectListResponseV1::decode(body.as_ref()).map_err(|e| {
-            StorageNodeError::server_error(format!("Object list response decode failed: {e}"))
-        })
-    }
-
-    pub async fn delete(&self, key: &str) -> Result<(), StorageNodeError> {
-        // Generate DLV ID from key
-        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DLV_PARTITION);
-        hasher.update(key.as_bytes());
-        let dlv_id = hasher.finalize();
-
-        // Create protobuf message
-        let delete_request = generated::StorageObjectDelete {
-            dlv_id: dlv_id.as_bytes().to_vec(),
-            path: key.to_string(),
-        };
-
-        // Encode to protobuf bytes
-        let request_bytes = delete_request.encode_to_vec();
-
-        let url = format!(
-            "{base}/api/v2/object/delete_proto",
-            base = self.node_info.url
-        );
-
-        let mut req_builder = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/octet-stream");
-
-        // Add device auth headers for authenticated delete (transport-layer, Invariant #12 preserved)
-        if let Some(auth) = &self.auth {
-            let msg_id = Self::generate_message_id(key);
-            req_builder = req_builder
-                .header(
-                    "authorization",
-                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-                )
-                .header("x-dsm-message-id", msg_id);
-        }
-
-        let req_builder = req_builder.body(request_bytes);
-
-        // Clockless: do not enforce wall-clock/tokio timeouts here.
-        let response = req_builder
-            .send()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("HTTP request failed: {e}")))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else if response.status() == 404 {
-            Err(StorageNodeError::not_found(format!("Key not found: {key}")))
-        } else {
-            Err(StorageNodeError::server_error(format!(
-                "DELETE failed with status: {}",
-                response.status()
-            )))
-        }
-    }
-
-    pub async fn check_health(&self) -> Result<bool, StorageNodeError> {
-        let url = format!("{}/api/v2/health", self.node_info.url);
-
-        // Clockless: do not enforce wall-clock/tokio timeouts here.
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| StorageNodeError::network(format!("Health check failed: {e}")))?;
-
-        Ok(response.status().is_success())
-    }
-
-    pub async fn get_session_status(
-        &self,
-        session_id: &str,
-    ) -> Result<generated::GenesisCreated, StorageNodeError> {
-        let url = format!(
-            "{base}/api/v2/session/{sid}",
-            base = self.node_info.url,
-            sid = session_id
-        );
-
-        let req_builder = self.client.get(&url);
-
-        // Clockless: do not enforce wall-clock/tokio timeouts here.
-        let response = req_builder.send().await.map_err(|e| {
-            StorageNodeError::network(format!("Session status request failed: {e}"))
-        })?;
-
-        if response.status().is_success() {
-            let bytes = response.bytes().await.map_err(|e| {
-                StorageNodeError::network(format!("Failed to read session response bytes: {e}"))
-            })?;
-
-            generated::GenesisCreated::decode(bytes.as_ref()).map_err(|e| {
-                StorageNodeError::network(format!(
-                    "Failed to decode protobuf session response: {e}"
-                ))
-            })
-        } else {
-            Err(StorageNodeError::server_error(format!(
-                "Session status request failed with status: {}",
-                response.status()
-            )))
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum LoadBalanceStrategy {
-    RoundRobin,
-    LeastConnections,
-    WeightedRoundRobin,
-    ConsistentHashing,
-    AdaptiveLatency,
-    GeographicAffinity,
-}
-
-#[derive(Debug, Clone)]
-pub enum NodeSelectionAlgorithm {
-    Random,
-    HealthBased,
-    LatencyBased,
-    ReputationBased,
-    HybridScoring,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum BilateralTransactionStatus {
-    /// Transaction initiated, waiting for recipient signature
-    Pending,
-    /// Recipient has signed, transaction is complete offline
-    Signed,
-    /// Transaction has been finalized and published to network
-    Finalized,
-    /// Transaction was rejected by recipient
-    Rejected,
-    /// Transaction expired without completion
-    Expired,
-}
-
-/// Additional missing types for JNI bindings
-#[derive(Debug)]
-#[allow(dead_code)] // Fields used for future connection pooling functionality
-pub struct NodeConnectionPool {
-    #[allow(dead_code)]
-    node_url: String,
-    clients: Mutex<Vec<Arc<StorageNodeClient>>>,
-    active_count: Arc<std::sync::atomic::AtomicUsize>,
-    max_connections: usize,
-}
-
-impl NodeConnectionPool {
-    pub fn new(node_url: String, max_connections: usize) -> Self {
-        Self {
-            node_url,
-            clients: Mutex::new(Vec::new()),
-            active_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            max_connections,
-        }
-    }
-}
-
-/// Enhanced storage node with health and performance metrics
-#[derive(Debug, Clone)]
-pub struct NodeInfo {
-    pub url: String,
-    pub id: String,
-    pub region: String,
-    pub health_status: NodeHealthStatus,
-    pub performance_metrics: NodePerformanceMetrics,
-    pub last_updated: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct NodeHealthStatus {
-    pub is_healthy: bool,
-    pub last_check: u64,
-    pub response_time_ms: u64,
-    pub consecutive_failures: usize,
-    pub error_rate: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct NodePerformanceMetrics {
-    pub total_requests: u64,
-    pub successful_requests: u64,
-    pub average_latency_ms: f64,
-    pub throughput_mbps: f64,
-    pub load_score: f64,
-}
-
-// Removed orphan trait implementation for GenesisState - cannot implement orphan traits
-// Default for GenesisState should be implemented in the dsm crate where it's defined
-
-/// Result of an identity-publication attempt across the configured fleet.
-///
-/// `verified` counts only nodes whose read-back matched the full identity
-/// tuple — not nodes that merely returned 2xx to the register call.
-#[derive(Debug, Clone)]
-pub struct PublicationReport {
-    pub verified: u32,
-    pub required: u32,
-    pub total_nodes: usize,
-    /// `(node_url, reason)` for every node that did not verify.
-    pub failures: Vec<(String, String)>,
-}
-
-impl PublicationReport {
-    /// Whether a quorum was reached. `required == 0` means no nodes are
-    /// configured, which is never "published".
-    pub fn is_published(&self) -> bool {
-        self.required > 0 && self.verified >= self.required
-    }
-}
-
-/// Production-grade SDK for interacting with DSM Storage Nodes
-#[derive(Clone)]
-pub struct StorageNodeSDK {
-    /// Primary client — used by non-retry call sites and as `clients[0]`.
-    inner: Arc<StorageNodeClient>,
-    /// All configured storage node clients, one per URL in
-    /// `config.node_urls` order.  DSM storage nodes are independent
-    /// (not a cluster) — each is an autonomous endpoint that the SDK
-    /// can hit directly.  Cross-device SoFi test surfaced that
-    /// `execute_with_retry` had been hammering only `inner` (the first
-    /// node) — when GCP-side rate limiting kicked in on that single
-    /// endpoint with HTTP 429, every retry hit the same blacklisted
-    /// URL.  Rotating through this slice lets the rate-limit window
-    /// on one node clear while we hit a different region's node.
-    clients: Arc<Vec<Arc<StorageNodeClient>>>,
-    pub config: StorageNodeConfig,
-    #[allow(dead_code)]
-    connection_pool: Arc<ConnectionPool>,
-    health_statuses: Arc<RwLock<HashMap<String, ApiNodeHealthStatus>>>,
-    metrics: Arc<RwLock<StorageMetrics>>,
-    mpc_genesis_config: Arc<RwLock<Option<MpcGenesisConfig>>>,
-    bilateral_sync_state: Arc<RwLock<BilateralSyncState>>,
-}
-
-impl StorageNodeSDK {
-    /// Initialize the SDK with enhanced configuration and production features
-    pub async fn new(config: StorageNodeConfig) -> Result<Self, DsmError> {
-        // Build a client per configured storage node URL.  DSM storage
-        // nodes are independent (not a cluster); each is an autonomous
-        // endpoint and the SDK can hit any of them.  First-built becomes
-        // the primary; the full set is used by `execute_with_retry`
-        // to rotate across nodes on transient failures (e.g. GCP-side
-        // HTTP 429 throttling against any single endpoint).
-        if config.node_urls.is_empty() {
-            return Err(DsmError::storage(
-                "StorageNodeSDK.new: no node URLs configured".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-        let mut clients: Vec<Arc<StorageNodeClient>> = Vec::with_capacity(config.node_urls.len());
-        for url in &config.node_urls {
-            // Per-URL client config: same as `config` but with this one URL
-            // pinned as `node_urls.first()` so StorageNodeClient::new picks
-            // it as primary.
-            let mut per_url_config = config.clone();
-            per_url_config.node_urls = vec![url.clone()];
-            match StorageNodeClient::new(per_url_config).await {
-                Ok(c) => clients.push(Arc::new(c)),
-                Err(e) => log::warn!(
-                    "StorageNodeSDK.new: skipping node {url}: {e} — other nodes still available"
-                ),
-            }
-        }
-        if clients.is_empty() {
-            return Err(DsmError::storage(
-                "StorageNodeSDK.new: every configured node failed to build a client".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-        let inner = clients[0].clone();
-
-        let connection_pool = Arc::new(ConnectionPool::new(config.pool_config.clone()));
-
-        let sdk = StorageNodeSDK {
-            inner,
-            clients: Arc::new(clients),
-            config: config.clone(),
-            connection_pool,
-            health_statuses: Arc::new(RwLock::new(HashMap::new())),
-            metrics: Arc::new(RwLock::new(StorageMetrics {
-                total_operations: 0,
-                successful_operations: 0,
-                failed_operations: 0,
-                average_response_time_ticks: 0.0,
-                bytes_stored: 0,
-                bytes_retrieved: 0,
-                cache_hit_ratio: 0.0,
-            })),
-            mpc_genesis_config: Arc::new(RwLock::new(None)),
-            bilateral_sync_state: Arc::new(RwLock::new(BilateralSyncState {
-                last_sync_tick: dt::tick(),
-                pending_operations: 0,
-                sync_conflicts: 0,
-                resolution_strategy: "last_write_wins".to_string(),
-            })),
-        };
-
-        // Start background health monitoring if enabled
-        if config.selection_config.health_check_interval_ms > 0 {
-            sdk.start_health_monitoring().await;
-        }
-
-        Ok(sdk)
-    }
-
-    /// Store data in the storage node with comprehensive error handling and retry logic
-    pub async fn put(
-        &self,
-        key: &str,
-        data: &[u8],
-        ttl_seconds: Option<u64>,
-    ) -> Result<String, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        let result = self
-            .execute_with_retry(|client| {
-                let key = key.to_string();
-                let data = data.to_vec();
-                async move { client.put(&key, &data, ttl_seconds).await }
-            })
-            .await;
-
-        // Update metrics
-        #[cfg(feature = "perf-metrics")]
-        {
-            self.update_metrics(start_time, data.len() as u64, 0, result.is_ok())
-                .await;
-        }
-
-        result.map_err(|e| {
-            DsmError::storage(format!("StorageNodeSDK.put: {e}"), None::<std::io::Error>)
-        })
-    }
-
-    /// Submit one frozen settlement-slot claim envelope to EVERY member of the
-    /// canonical set. Never short-circuits; the caller counts acceptances whose
-    /// echoed node id equals the member id and decides quorum.
-    /// Fan a one-shot register claim out to every member of `set` — the
-    /// generic sibling of `submit_settlement_slot_claim`, for the economic
-    /// registers. Never short-circuits; `total` is the SET size.
-    pub async fn submit_one_shot_claim(
-        &self,
-        set: &crate::sdk::storage_set::StorageSet,
-        path: &str,
-        header_prefix: &str,
-        envelope: &[u8],
-    ) -> ClaimFanout {
-        let mut outcomes = Vec::with_capacity(set.len());
-        for member in set.members() {
-            let client = self
-                .clients
-                .iter()
-                .find(|c| c.node_info.url == member.endpoint);
-            let (result, echoed_node_id) = match client {
-                None => (
-                    MemberClaimResult::Unavailable("no client for this member's endpoint".into()),
-                    None,
-                ),
-                Some(c) => c.post_one_shot_claim(path, header_prefix, envelope).await,
-            };
-            outcomes.push(MemberClaimOutcome {
-                member_id: member.member_id.clone(),
-                endpoint: member.endpoint.clone(),
-                result,
-                echoed_node_id,
-            });
-        }
-        ClaimFanout {
-            outcomes,
-            total: set.len() as u32,
-        }
-    }
-
-    /// Fan a register-cell GET out to every member. Returns one row per
-    /// member: `(member_id, echoed node id, winner bytes if any)`.
-    /// One attributed read per COMMITTED MEMBER, in set order.
-    ///
-    /// Attribution is folded in here: a member whose response does not echo
-    /// that member's own id is `Unavailable`, never counted as a value and
-    /// never counted as an absence. A member this client cannot locate is
-    /// likewise `Unavailable` — configuration only tells us where to ask, and
-    /// failing to ask is not an answer.
-    pub async fn read_register_cell(
-        &self,
-        set: &crate::sdk::storage_set::StorageSet,
-        path: &str,
-    ) -> Vec<dsm::economic::cell_observation::MemberCellRead> {
-        use dsm::economic::cell_observation::MemberCellRead;
-        let mut rows = Vec::with_capacity(set.len());
-        for member in set.members() {
-            let client = self
-                .clients
-                .iter()
-                .find(|c| c.node_info.url == member.endpoint);
-            let read = match client {
-                None => MemberCellRead::Unavailable,
-                Some(c) => {
-                    let (read, echoed) = c.get_register_cell(path).await;
-                    if answer_counts_for(&echoed, member) {
-                        read
-                    } else {
-                        MemberCellRead::Unavailable
-                    }
-                }
-            };
-            rows.push(read);
-        }
-        rows
-    }
-
-    pub async fn submit_settlement_slot_claim(
-        &self,
-        set: &crate::sdk::storage_set::StorageSet,
-        envelope: &[u8],
-    ) -> ClaimFanout {
-        let mut outcomes = Vec::with_capacity(set.len());
-        for member in set.members() {
-            let client = self
-                .clients
-                .iter()
-                .find(|c| c.node_info.url == member.endpoint);
-            let (result, echoed_node_id) = match client {
-                None => (
-                    MemberClaimResult::Unavailable("no client for this member's endpoint".into()),
-                    None,
-                ),
-                Some(c) => c.post_settlement_slot_claim(envelope).await,
-            };
-            outcomes.push(MemberClaimOutcome {
-                member_id: member.member_id.clone(),
-                endpoint: member.endpoint.clone(),
-                result,
-                echoed_node_id,
-            });
-        }
-        ClaimFanout {
-            outcomes,
-            total: set.len() as u32,
-        }
-    }
-
-    /// Keyed PUT of `payload` under `key` to EVERY member of the canonical set
-    /// `set`, returning a per-member outcome. Never short-circuits; returns `Ok`
-    /// even at zero acceptances — whether that reaches quorum is the caller's
-    /// decision (`set.quorum()`), and the denominator is `set.len()`, never the
-    /// number of clients this SDK managed to construct.
-    ///
-    /// A member is contacted through the client whose URL equals its catalog
-    /// endpoint (per-node auth already attached). An acceptance counts only if
-    /// the node ECHOES that member's id: "distinct members" is executable, not
-    /// administrative.
-    /// Publish an immutable object to every configured node. Returns the
-    /// number of nodes that accepted (201 Created or 200 idempotent re-ack).
-    ///
-    /// The address is computed CLIENT-SIDE from `(namespace, payload)` and
-    /// sent as the expected address, so a node whose derivation disagrees
-    /// refuses rather than storing under a different key.
-    pub async fn publish_immutable(
-        &self,
-        namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
-        payload: &[u8],
-    ) -> Result<(String, u32), DsmError> {
-        let addr = dsm::storage_object::immutable_addr(namespace, payload);
-        let addr_b32 = crate::util::text_id::encode_base32_crockford(&addr);
-        let ns_str = String::from_utf8(namespace.source_bytes().to_vec())
-            .map_err(|_| DsmError::invalid_parameter("namespace tag is not UTF-8"))?;
-        let mut acks = 0u32;
-        for client in self.clients.iter() {
-            match client.put_immutable(&ns_str, payload, &addr_b32).await {
-                Ok(_) => acks += 1,
-                Err(e) => log::warn!(
-                    "publish_immutable: node {} refused: {e}",
-                    client.node_info.url
-                ),
-            }
-        }
-        Ok((addr_b32, acks))
-    }
-
-    /// Fetch an immutable object by its namespace and inner digest, verifying
-    /// it CLIENT-SIDE before returning — this is the Req 15.3 boundary.
-    ///
-    /// For a registered CCB object the inner digest is the object's identity
-    /// (`c_n` for `V_n`), so a caller holding the identity needs no index and
-    /// no discovery: the address is a computation.
-    ///
-    /// Tries every configured node; the first response whose returned
-    /// `(namespace, payload)` tuple re-hashes to the REQUESTED address wins.
-    /// A response that fails the re-hash is discarded and logged — a hostile
-    /// or corrupt node cannot make the client accept wrong bytes, only fail
-    /// to serve it.
-    pub async fn fetch_immutable_verified(
-        &self,
-        namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
-        inner: &[u8; 32],
-    ) -> Result<Option<Vec<u8>>, DsmError> {
-        let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
-        let addr_b32 = crate::util::text_id::encode_base32_crockford(&addr);
-        let mut any_found = false;
-        for client in self.clients.iter() {
-            let Ok(Some((ns, payload))) = client.get_immutable(&addr_b32).await else {
-                continue;
-            };
-            any_found = true;
-            // The security boundary: recompute from the RETURNED tuple and
-            // compare against the address WE computed — never against
-            // anything the node reports.
-            let Ok(domain) = dsm::crypto::domain::TaggedHashDomain::try_new(&ns) else {
-                log::warn!(
-                    "fetch_immutable_verified: {} returned an invalid namespace — discarded",
-                    client.node_info.url
-                );
-                continue;
-            };
-            let recomputed = dsm::storage_object::immutable_addr(domain, &payload);
-            if recomputed != addr {
-                log::warn!(
-                    "fetch_immutable_verified: {} returned bytes that do not hash to the \
-                     requested address — discarded",
-                    client.node_info.url
-                );
-                continue;
-            }
-            return Ok(Some(payload));
-        }
-        if any_found {
-            return Err(DsmError::verification(
-                "immutable fetch: every response failed the client-side re-hash",
-            ));
-        }
-        Ok(None)
-    }
-
-    pub async fn put_bytes_to_all_members(
-        &self,
-        set: &crate::sdk::storage_set::StorageSet,
-        key: &str,
-        payload: &[u8],
-    ) -> KeyedPutFanout {
-        let mut outcomes = Vec::with_capacity(set.len());
-        let mut accepted = 0u32;
-        for member in set.members() {
-            let client = self
-                .clients
-                .iter()
-                .find(|c| c.node_info.url == member.endpoint);
-            let outcome = match client {
-                None => MemberPutOutcome {
-                    member_id: member.member_id.clone(),
-                    endpoint: member.endpoint.clone(),
-                    accepted: false,
-                    echoed_node_id: None,
-                    error: Some("no client for this member's endpoint".to_string()),
-                },
-                Some(c) => match c.put_echoing_node_id(key, payload).await {
-                    Ok(ack) => {
-                        let identity_matches =
-                            ack.echoed_node_id.as_deref() == Some(member.member_id.as_str());
-                        if identity_matches {
-                            let _ = crate::network::report_storage_success(&member.endpoint);
-                        }
-                        MemberPutOutcome {
-                            member_id: member.member_id.clone(),
-                            endpoint: member.endpoint.clone(),
-                            accepted: identity_matches,
-                            echoed_node_id: ack.echoed_node_id.clone(),
-                            error: if identity_matches {
-                                None
-                            } else {
-                                Some(format!(
-                                    "node did not echo member id {:?} (echoed {:?}) — not counted",
-                                    member.member_id, ack.echoed_node_id
-                                ))
-                            },
-                        }
-                    }
-                    Err(e) => {
-                        let _ = crate::network::report_storage_failure(&member.endpoint);
-                        MemberPutOutcome {
-                            member_id: member.member_id.clone(),
-                            endpoint: member.endpoint.clone(),
-                            accepted: false,
-                            echoed_node_id: None,
-                            error: Some(e.to_string()),
-                        }
-                    }
-                },
-            };
-            if outcome.accepted {
-                accepted += 1;
-            }
-            outcomes.push(outcome);
-        }
-        log::info!(
-            "put_bytes_to_all_members: key={} accepted={}/{} members",
-            &key[..key.len().min(24)],
-            accepted,
-            set.len()
-        );
-        KeyedPutFanout {
-            outcomes,
-            accepted,
-            total: set.len() as u32,
-        }
-    }
-
-    /// Immutable-channel fan-out to every member of `set`: PUT the exact
-    /// `(namespace, payload)` tuple through `/api/v2/immutable/put` with the
-    /// caller's expected address, on each member's own client. Write-once on
-    /// the tuple node-side, so replays are idempotent and a divergent byte
-    /// string under the same address refuses loudly (409) instead of storing.
-    ///
-    /// Never decides quorum — the caller counts acceptances against the set's
-    /// own threshold, exactly like `put_bytes_to_all_members`.
-    pub async fn put_immutable_to_all_members(
-        &self,
-        set: &crate::sdk::storage_set::StorageSet,
-        namespace: &str,
-        payload: &[u8],
-        expected_addr_b32: &str,
-    ) -> KeyedPutFanout {
-        let mut outcomes = Vec::with_capacity(set.len());
-        let mut accepted = 0u32;
-        for member in set.members() {
-            let client = self
-                .clients
-                .iter()
-                .find(|c| c.node_info.url == member.endpoint);
-            let outcome = match client {
-                None => MemberPutOutcome {
-                    member_id: member.member_id.clone(),
-                    endpoint: member.endpoint.clone(),
-                    accepted: false,
-                    echoed_node_id: None,
-                    error: Some("no client for this member's endpoint".to_string()),
-                },
-                Some(c) => match c.put_immutable(namespace, payload, expected_addr_b32).await {
-                    Ok((_, echoed)) => {
-                        let _ = crate::network::report_storage_success(&member.endpoint);
-                        // Req 15.8: a 2xx counts ONLY when the member echoes
-                        // its own configured id. Before this fix, immutable
-                        // quorum was the one channel counted WITHOUT
-                        // attribution — evidence durability for economic
-                        // admission runs through here, so the gap mattered.
-                        let attributed = echoed.as_deref() == Some(member.member_id.as_str());
-                        MemberPutOutcome {
-                            member_id: member.member_id.clone(),
-                            endpoint: member.endpoint.clone(),
-                            accepted: attributed,
-                            echoed_node_id: echoed,
-                            error: if attributed {
-                                None
-                            } else {
-                                Some("acceptance not attributed (member-id echo mismatch)".into())
-                            },
-                        }
-                    }
-                    Err(e) => {
-                        let _ = crate::network::report_storage_failure(&member.endpoint);
-                        MemberPutOutcome {
-                            member_id: member.member_id.clone(),
-                            endpoint: member.endpoint.clone(),
-                            accepted: false,
-                            echoed_node_id: None,
-                            error: Some(e.to_string()),
-                        }
-                    }
-                },
-            };
-            if outcome.accepted {
-                accepted += 1;
-            }
-            outcomes.push(outcome);
-        }
-        log::info!(
-            "put_immutable_to_all_members: addr={} accepted={}/{} members",
-            &expected_addr_b32[..expected_addr_b32.len().min(24)],
-            accepted,
-            set.len()
-        );
-        KeyedPutFanout {
-            outcomes,
-            accepted,
-            total: set.len() as u32,
-        }
-    }
-
-    /// Write to ALL configured storage nodes (spec §6: redundant mirrors).
-    ///
-    /// DSM storage nodes are independent endpoints — there is NO server-
-    /// side cross-node replication of object writes in production (the
-    /// `dev_replication.rs` shim is localhost-only and not wired into
-    /// the GCP deployment).  For the trader on device B to discover
-    /// what the owner on device A published, the owner must write to
-    /// every node the trader might query.  Calling `put` (single node)
-    /// instead of this method is the canonical "owner writes get lost"
-    /// failure mode in cross-device tests.
-    ///
-    /// Fans the PUT out to every client in `self.clients`, each of
-    /// which already carries its own per-node auth token via
-    /// [`with_per_node_auth`].  Returns successfully if at least one
-    /// write succeeds, with the primary address from the first
-    /// successful node.  Failed nodes are quarantined via
-    /// `report_storage_failure` so background health monitoring picks
-    /// them up.
-    pub async fn put_to_all_replicas(
-        &self,
-        key: &str,
-        data: &[u8],
-        ttl_seconds: Option<u64>,
-    ) -> Result<String, DsmError> {
-        if self.clients.is_empty() {
-            return Err(DsmError::storage(
-                "put_to_all_replicas: no clients configured",
-                None::<std::io::Error>,
-            ));
-        }
-
-        let mut primary_addr = String::new();
-        let mut success_count = 0u32;
-        let total = self.clients.len();
-
-        for client in self.clients.iter() {
-            let endpoint = client.node_info.url.clone();
-            match client.put(key, data, ttl_seconds).await {
-                Ok(addr) => {
-                    if primary_addr.is_empty() {
-                        primary_addr = addr;
-                    }
-                    success_count += 1;
-                    let _ = crate::network::report_storage_success(&endpoint);
-                }
-                Err(e) => {
-                    log::warn!("replica fanout: PUT to {endpoint} failed: {e}");
-                    let _ = crate::network::report_storage_failure(&endpoint);
-                }
-            }
-        }
-
-        log::info!(
-            "put_to_all_replicas: key={} success={}/{} nodes",
-            &key[..key.len().min(24)],
-            success_count,
-            total
-        );
-
-        if success_count == 0 {
-            return Err(DsmError::storage(
-                "all replica writes failed",
-                None::<std::io::Error>,
-            ));
-        }
-        Ok(primary_addr)
-    }
-
-    /// DELETE the key from ALL configured storage nodes.  Mirrors the
-    /// put_to_all_replicas write-everywhere semantics so deletes also
-    /// fan out — otherwise a deleted advertisement would still be
-    /// reachable by traders hitting a node where the delete didn't
-    /// reach.  Returns successfully if at least one delete succeeds.
-    pub async fn delete_at_all_replicas(&self, key: &str) -> Result<(), DsmError> {
-        if self.clients.is_empty() {
-            return Err(DsmError::storage(
-                "delete_at_all_replicas: no clients configured",
-                None::<std::io::Error>,
-            ));
-        }
-
-        let mut success_count = 0u32;
-        let total = self.clients.len();
-
-        for client in self.clients.iter() {
-            let endpoint = client.node_info.url.clone();
-            match client.delete(key).await {
-                Ok(()) => {
-                    success_count += 1;
-                    let _ = crate::network::report_storage_success(&endpoint);
-                }
-                Err(e) => {
-                    log::warn!("replica fanout: DELETE to {endpoint} failed: {e}");
-                    let _ = crate::network::report_storage_failure(&endpoint);
-                }
-            }
-        }
-
-        log::info!(
-            "delete_at_all_replicas: key={} success={}/{} nodes",
-            &key[..key.len().min(24)],
-            success_count,
-            total
-        );
-
-        if success_count == 0 {
-            return Err(DsmError::storage(
-                "all replica deletes failed",
-                None::<std::io::Error>,
-            ));
-        }
-        Ok(())
-    }
-
-    /// Retrieve data from storage node with automatic decoding and failover
-    pub async fn get(&self, key: &str) -> Result<Vec<u8>, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        let result = self
-            .execute_with_retry(|client| {
-                let key = key.to_string();
-                async move { client.get(&key).await }
-            })
-            .await;
-
-        let _data_size = result.as_ref().map(|data| data.len() as u64).unwrap_or(0);
-        #[cfg(feature = "perf-metrics")]
-        {
-            self.update_metrics(start_time, 0, _data_size, result.is_ok())
-                .await;
-        }
-
-        result.map_err(|e| {
-            DsmError::storage(format!("StorageNodeSDK.get: {e}"), None::<std::io::Error>)
-        })
-    }
-
-    pub async fn list_objects(
-        &self,
-        prefix: &str,
-        cursor: Option<&str>,
-        limit: u32,
-    ) -> Result<generated::ObjectListResponseV1, DsmError> {
-        let result = self
-            .execute_with_retry(|client| {
-                let prefix = prefix.to_string();
-                let cursor = cursor.map(str::to_string);
-                async move { client.list_objects(&prefix, cursor.as_deref(), limit).await }
-            })
-            .await;
-
-        result.map_err(|e| {
-            DsmError::storage(
-                format!("StorageNodeSDK.list_objects: {e}"),
-                None::<std::io::Error>,
-            )
-        })
-    }
-
-    /// Delete data from storage
-    pub async fn delete(&self, key: &str) -> Result<(), DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        let result = self
-            .execute_with_retry(|client| {
-                let key = key.to_string();
-                async move { client.delete(&key).await }
-            })
-            .await;
-
-        #[cfg(feature = "perf-metrics")]
-        {
-            self.update_metrics(start_time, 0, 0, result.is_ok()).await;
-        }
-
-        result.map_err(|e| {
-            DsmError::crypto(
-                format!("StorageNodeSDK.delete: {e}"),
-                None::<std::io::Error>,
-            )
-        })
-    }
-
-    /// Enhanced health check with node discovery and status caching
-    pub async fn check_health(&self) -> Result<bool, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let _start_tick = dt::tick();
-
-        let result = self.inner.check_health().await.map_err(|e| {
-            DsmError::crypto(
-                format!("StorageNodeSDK.check_health: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        // Update health status cache
-        let node_status = ApiNodeHealthStatus {
-            node_id: self.inner.node_info.id.clone(),
-            is_healthy: result,
-            last_check: dt::tick(),
-            #[cfg(feature = "perf-metrics")]
-            // Clockless: measured milliseconds are forbidden; expose 0 here.
-            response_time_ms: 0,
-            #[cfg(not(feature = "perf-metrics"))]
-            response_time_ms: 0,
-            error_count: if result { 0 } else { 1 },
-            region: self.inner.node_info.region.clone(),
-            load_percentage: 0.0, // This would require more advanced metrics from the node
-            storage_utilization: 0.0, // This would require more advanced metrics from the node
-        };
-
-        // Scope the lock to release it before potential async operations
-        {
-            let mut health_statuses = self.health_statuses.write().await;
-            health_statuses.insert(self.inner.node_info.id.clone(), node_status);
-        } // Lock is released here
-
-        Ok(result)
-    }
-
-    /// Initialize MPC Genesis identity for quantum-resistant operations
-    pub async fn initialize_mpc_genesis(&self, config: MpcGenesisConfig) -> Result<(), DsmError> {
-        if !self.config.advanced_features.enable_mpc_genesis {
-            return Err(DsmError::crypto(
-                "MPC Genesis not enabled in configuration".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // Store MPC Genesis configuration - scope the lock
-        {
-            let mut mpc_config = self.mpc_genesis_config.write().await;
-            *mpc_config = Some(config.clone());
-        } // Lock is released here
-
-        // Initialize identity with the storage node using the create_genesis_with_mpc method.
-        // No threshold parameter — n-of-n MPC per whitepaper §2.5.
-        match self.create_genesis_with_mpc(None).await {
-            Ok(response) => {
-                if !response.session_id.is_empty() {
-                    info!(
-                        "MPC Genesis initialized successfully for {} with session {}",
-                        config.identity_id, response.session_id
-                    );
-                    Ok(())
-                } else {
-                    Err(DsmError::crypto(
-                        "MPC Genesis failed: empty session ID".to_string(),
-                        None::<std::io::Error>,
-                    ))
-                }
-            }
-            Err(e) => Err(DsmError::crypto(
-                format!("MPC Genesis initialization failed: {e}"),
-                None::<std::io::Error>,
-            )),
-        }
-    }
-
-    /// Perform bilateral sync with remote nodes
-    pub async fn bilateral_sync(&self) -> Result<(), DsmError> {
-        if !self.config.advanced_features.enable_epidemic_sync {
-            return Err(DsmError::crypto(
-                "Bilateral sync not enabled in configuration".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // In a real implementation, this would sync with other nodes
-        // For now, just update sync state - scope the lock
-        {
-            let mut sync_state = self.bilateral_sync_state.write().await;
-            sync_state.last_sync_tick = dt::tick();
-            sync_state.pending_operations = 0;
-        }
-
-        info!("Bilateral sync completed");
-        Ok(())
-    }
-
-    /// Get current storage metrics
-    pub async fn get_metrics(&self) -> StorageMetrics {
-        self.metrics.read().await.clone()
-    }
-
-    /// Get all node health statuses
-    pub async fn get_health_statuses(&self) -> HashMap<String, ApiNodeHealthStatus> {
-        self.health_statuses.read().await.clone()
-    }
-
-    /// Get current MPC Genesis configuration
-    pub async fn get_mpc_genesis_config(&self) -> Option<MpcGenesisConfig> {
-        self.mpc_genesis_config.read().await.clone()
-    }
-
-    /// Get current bilateral sync state
-    pub async fn get_bilateral_sync_state(&self) -> BilateralSyncState {
-        self.bilateral_sync_state.read().await.clone()
-    }
-
-    /// Get session status for Genesis creation session (CORRECTED IMPLEMENTATION)
-    pub async fn get_genesis_session_status(
-        &self,
-        session_id: &str,
-    ) -> Result<GenesisCreationResponse, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        let url = format!(
-            "{}/api/v2/genesis/session/{}",
-            self.inner.node_info.url, session_id
-        );
-
-        let response = self.inner.client.get(&url).send().await.map_err(|e| {
-            DsmError::crypto(
-                format!("Genesis session status request failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        if response.status().is_success() {
-            let bytes = response.bytes().await.map_err(|e| {
-                DsmError::crypto(
-                    format!("Failed to read Genesis session status response bytes: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-
-            // Expect protobuf-encoded GenesisCreated message from storage node
-            match generated::GenesisCreated::decode(bytes.as_ref()) {
-                Ok(g) => {
-                    // Map prost GenesisCreated -> local GenesisCreationResponse
-                    let genesis_response = GenesisCreationResponse {
-                        session_id: g.session_id.clone(),
-                        genesis_device_id: g.device_id.clone(),
-                        state: "complete".to_string(),
-                        contributions_received: 0_usize, // detailed counts not always provided here
-                        complete: true,
-                        genesis_hash: g.genesis_hash.as_ref().map(|h| h.v.clone()),
-                        participating_nodes: g.storage_nodes.clone(),
-                        // No wall-clock time in protocol; use deterministic monotonic tick
-                        tick: dt::tick(),
-                        device_tree: None,
-                    };
-                    #[cfg(feature = "perf-metrics")]
-                    self.update_metrics(start_time, 0, 0, true).await;
-                    Ok(genesis_response)
-                }
-                Err(e) => Err(DsmError::crypto(
-                    format!("Failed to decode GenesisCreated protobuf: {e}"),
-                    None::<std::io::Error>,
-                )),
-            }
-        } else {
-            Err(DsmError::crypto(
-                format!(
-                    "Genesis session status failed with status: {}",
-                    response.status()
-                ),
-                None::<std::io::Error>,
-            ))
-        }
-    }
-
-    /// Store data with geographic replication across multiple regions
-    pub async fn put_with_replication(
-        &self,
-        key: &str,
-        data: &[u8],
-        ttl_seconds: Option<u64>,
-        replicas: u32,
-    ) -> Result<String, DsmError> {
-        if !self.config.advanced_features.enable_geo_replication {
-            return self.put(key, data, ttl_seconds).await;
-        }
-
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-        let mut successful_replicas = 0;
-        let required_replicas = std::cmp::min(
-            replicas,
-            self.config.selection_config.preferred_regions.len() as u32,
-        );
-
-        // For now, just use the primary node (in a real implementation, this would use regional endpoints)
-        let mut primary_addr = String::new();
-        match self.put(key, data, ttl_seconds).await {
-            Ok(addr) => {
-                successful_replicas += 1;
-                primary_addr = addr;
-            }
-            Err(e) => {
-                warn!("Failed to replicate to primary node: {e}");
-            }
-        }
-
-        #[cfg(feature = "perf-metrics")]
-        self.update_metrics(start_time, data.len() as u64, 0, successful_replicas > 0)
-            .await;
-
-        if successful_replicas == 0 {
-            Err(DsmError::crypto(
-                "All geographic replications failed".to_string(),
-                None::<std::io::Error>,
-            ))
-        } else if successful_replicas < required_replicas {
-            warn!("Only {successful_replicas} of {required_replicas} replicas succeeded");
-            Ok(primary_addr)
-        } else {
-            Ok(primary_addr)
-        }
-    }
-
-    /// Retrieve data with automatic failover across regions
-    pub async fn get_with_failover(&self, key: &str) -> Result<Vec<u8>, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        // Try primary region first
-        match self.get(key).await {
-            Ok(data) => {
-                #[cfg(feature = "perf-metrics")]
-                self.update_metrics(start_time, 0, data.len() as u64, true)
-                    .await;
-                return Ok(data);
-            }
-            Err(e) => {
-                if !self.config.advanced_features.enable_geo_replication {
-                    return Err(e);
-                }
-                warn!("Primary retrieval failed, trying failover: {e}");
-            }
-        }
-
-        // Build a list of candidate node URLs excluding the current primary
-        let primary_url = self.inner.node_info.url.clone();
-        let mut candidates: Vec<String> = self
-            .config
-            .node_urls
-            .iter()
-            .filter(|&u| u.trim_end_matches('/') != primary_url.trim_end_matches('/'))
-            .cloned()
-            .collect();
-
-        // Deterministic ordering: keep as configured
-        let mut last_err: Option<DsmError> = None;
-
-        for url in candidates.drain(..) {
-            // Create a temporary client targeting this candidate URL
-            let mut cfg = self.config.clone();
-            cfg.node_urls = vec![url.clone()];
-
-            match StorageNodeClient::new(cfg.clone()).await {
-                Ok(temp_client) => {
-                    match temp_client.get(key).await {
-                        Ok(data) => {
-                            #[cfg(feature = "perf-metrics")]
-                            self.update_metrics(start_time, 0, data.len() as u64, true)
-                                .await;
-                            // Optionally update health cache to mark this node healthy
-                            {
-                                let mut hs = self.health_statuses.write().await;
-                                hs.insert(
-                                    url.clone(),
-                                    ApiNodeHealthStatus {
-                                        node_id: url.clone(),
-                                        is_healthy: true,
-                                        last_check: dt::tick(),
-                                        response_time_ms: 0,
-                                        error_count: 0,
-                                        region: self.inner.node_info.region.clone(),
-                                        load_percentage: 0.0,
-                                        storage_utilization: 0.0,
-                                    },
-                                );
-                            }
-                            return Ok(data);
-                        }
-                        Err(err) => {
-                            warn!("Failover GET failed on {url}: {err}");
-                            // Update health cache to reflect failure
-                            {
-                                let mut hs = self.health_statuses.write().await;
-                                hs.insert(
-                                    url.clone(),
-                                    ApiNodeHealthStatus {
-                                        node_id: url.clone(),
-                                        is_healthy: false,
-                                        last_check: dt::tick(),
-                                        response_time_ms: 0,
-                                        error_count: 1,
-                                        region: self.inner.node_info.region.clone(),
-                                        load_percentage: 0.0,
-                                        storage_utilization: 0.0,
-                                    },
-                                );
-                            }
-                            last_err = Some(DsmError::crypto(
-                                format!("Failover GET error on {url}: {err}"),
-                                None::<std::io::Error>,
-                            ));
-                        }
-                    }
-                }
-                Err(ne) => {
-                    warn!("Failed to initialize client for {url}: {ne}");
-                    last_err = Some(DsmError::crypto(
-                        format!("Client init failed for {url}: {ne}"),
-                        None::<std::io::Error>,
-                    ));
-                }
-            }
-        }
-
-        #[cfg(feature = "perf-metrics")]
-        self.update_metrics(start_time, 0, 0, false).await;
-        Err(last_err.unwrap_or_else(|| {
-            DsmError::crypto(
-                "Failover exhausted: no storage nodes succeeded".to_string(),
-                None::<std::io::Error>,
-            )
-        }))
-    }
-
-    /// Submit a b0x entry for unilateral transactions
-    pub async fn submit_b0x_entry(
-        &self,
-        entry_id: &str,
-        sender_genesis_hash: &str,
-        recipient_genesis_hash: &str,
-        transaction_data: Vec<u8>,
-        signature: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        // Create the b0x entry
-        let b0x_entry = B0xEntry {
-            id: entry_id.to_string(),
-            sender_genesis_hash: sender_genesis_hash.to_string(),
-            recipient_genesis_hash: recipient_genesis_hash.to_string(),
-            transaction: transaction_data.clone(),
-            signature: signature.clone(),
-            tick: dt::tick(),
-            expires_at: 0, // Never expires
-            metadata: HashMap::new(),
-        };
-
-        // Create the submission wrapper
-        let submission = B0xSubmission { entry: b0x_entry };
-
-        // Submit via HTTP POST to /api/v2/b0x
-        let result = self
-            .execute_with_retry(|client| {
-                let submission = submission.clone();
-                async move {
-                    let url = format!("{}/api/v2/b0x/submit", client.node_info.url);
-
-                    let mut buf = Vec::new();
-                    // If a protobuf for B0x exists, encode it; otherwise, send opaque bytes of serialized entry
-                    // Here we serialize entry as proto-opaque in Envelope body (application/octet-stream)
-                    // For now, just send the transaction bytes as body; storage node API should expect protobuf.
-                    buf.extend_from_slice(&submission.entry.transaction);
-
-                    let req_builder = client
-                        .client
-                        .post(&url)
-                        .header("content-type", "application/octet-stream")
-                        .body(buf);
-
-                    // Clockless: do not enforce wall-clock/tokio timeouts here.
-                    let response = req_builder.send().await.map_err(|e| {
-                        StorageNodeError::network(format!("HTTP request failed: {e}"))
-                    })?;
-
-                    if response.status().is_success() {
-                        debug!("Successfully submitted b0x entry: {entry_id}");
-                        Ok(())
-                    } else {
-                        let status = response.status();
-                        let error_text = response.text().await.unwrap_or_default();
-                        Err(StorageNodeError::server_error(format!(
-                            "B0x submission failed {status}: {error_text}"
-                        )))
-                    }
-                }
-            })
-            .await;
-
-        // Update metrics
-        #[cfg(feature = "perf-metrics")]
-        self.update_metrics(start_time, transaction_data.len() as u64, 0, result.is_ok())
-            .await;
-
-        result.map_err(|e| {
-            DsmError::crypto(
-                format!("StorageNodeSDK.submit_b0x_entry: {e}"),
-                None::<std::io::Error>,
-            )
-        })
-    }
-
-    /// Submit a bilateral transaction entry for offline peer-to-peer transfers
-    /// Implements the bilateral transaction protocol from DSM whitepaper Section 17.2
-    pub async fn submit_bilateral_entry(
-        &self,
-        sender_genesis_hash: &str,
-        recipient_genesis_hash: &str,
-        transaction_params: HashMap<String, String>,
-        state_number: u64,
-    ) -> Result<BilateralEntry, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        // Generate deterministic entry ID from transaction parameters hash
-        let params_hash = {
-            let mut hasher =
-                dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_BILATERAL_PARAMS_HASH);
-            for (k, v) in transaction_params.iter() {
-                hasher.update(k.as_bytes());
-                hasher.update(v.as_bytes());
-            }
-            hasher.finalize()
-        };
-        let entry_id = format!(
-            "bilateral_{}",
-            deterministic_id::derive_id_from_hash("DSM/entry-id", &[params_hash.as_bytes()])
-        );
-
-        // Generate pre-commitment hash strictly using provided state hash (raw bytes only)
-        let state_hash_bytes: Vec<u8> = match transaction_params.get("state_hash") {
-            Some(v) if !v.is_empty() => v.as_bytes().to_vec(),
-            _ => {
-                return Err(DsmError::invalid_parameter(
-                    "transaction_params.state_hash (bytes) is required",
-                ));
-            }
-        };
-        // Canonicalize transaction parameters into a deterministic protobuf
-        // representation. This avoids using JSON for canonical commit preimages
-        // and for persisted payloads.
-        let params_proto = generated::TransactionParamsProto {
-            kv: map_to_param_kv(&transaction_params),
-        };
-        let params_bytes = params_proto.encode_to_vec();
-
-        let next_state = state_number + 1;
-
-        // SDK-internal bilateral-entry tracking hash. This is NOT the protocol
-        // precommit (which lives under the canonical v2 family in
-        // dsm::commitments::precommit). The preimage shape
-        // `state_hash || params_proto || next_state(le)` is SDK-specific and
-        // distinct from the protocol's `h_n || payload_i || e_i`; the domain
-        // tag is therefore SDK-scoped to prevent collision with the protocol
-        // precommit family.
-        let mut preimage: Vec<u8> = Vec::with_capacity(32 + params_bytes.len() + 8);
-        preimage.extend_from_slice(&state_hash_bytes);
-        preimage.extend_from_slice(&params_bytes);
-        preimage.extend_from_slice(&next_state.to_le_bytes());
-        let pre_commitment_hash = dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_SDK_BILATERAL_ENTRY_V1,
-            &preimage,
-        );
-
-        // transaction_payload is the canonical proto bytes for parameters
-        let transaction_payload = params_bytes.clone();
-
-        // Create bilateral entry
-        let bilateral_entry = BilateralEntry {
-            id: entry_id,
-            sender_genesis_hash: sender_genesis_hash.to_string(),
-            recipient_genesis_hash: recipient_genesis_hash.to_string(),
-            pre_commitment_hash: pre_commitment_hash.as_bytes().to_vec(),
-            sender_signature: Vec::new(), // Will be populated by calling code
-            recipient_signature: None,
-            transaction_payload,
-            final_signature: None,
-            transaction_params,
-            state_number,
-            tick: dt::tick(),
-            status: BilateralTransactionStatus::Pending,
-            metadata: HashMap::new(),
-        };
-
-        // Update metrics for submit step
-        #[cfg(feature = "perf-metrics")]
-        {
-            self.update_metrics(
-                start_time,
-                bilateral_entry.transaction_payload.len() as u64,
-                0,
-                true,
-            )
-            .await;
-        }
-
-        Ok(bilateral_entry)
-    }
-
-    /// Process a received bilateral transaction for counter-signing
-    /// Implements recipient-side bilateral transaction processing per DSM whitepaper
-    pub async fn process_bilateral_transaction(
-        &self,
-        mut bilateral_entry: BilateralEntry,
-        recipient_signature: Vec<u8>,
-        approve: bool,
-    ) -> Result<BilateralEntry, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        // Verify pre-commitment hash
-        // Recompute state hash strictly from provided parameter
-        let state_hash_bytes: Vec<u8> = match bilateral_entry.transaction_params.get("state_hash") {
-            Some(v) if !v.is_empty() => v.as_bytes().to_vec(),
-            _ => {
-                return Err(DsmError::invalid_parameter(
-                    "transaction_params.state_hash (bytes) is required",
-                ));
-            }
-        };
-        // Reconstruct canonical params proto bytes and recompute expected preimage
-        // Reconstruct canonical params bytes deterministically (same format as when created)
-        let params_proto = generated::TransactionParamsProto {
-            kv: map_to_param_kv(&bilateral_entry.transaction_params),
-        };
-        let params_bytes = params_proto.encode_to_vec();
-        let next_state = bilateral_entry.state_number + 1;
-        let mut expected_preimage: Vec<u8> = Vec::with_capacity(32 + params_bytes.len() + 8);
-        expected_preimage.extend_from_slice(&state_hash_bytes);
-        expected_preimage.extend_from_slice(&params_bytes);
-        expected_preimage.extend_from_slice(&next_state.to_le_bytes());
-        // Match the SDK-internal domain used by submit_bilateral_entry above;
-        // this is intentionally distinct from the protocol precommit family.
-        let expected_hash = dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_SDK_BILATERAL_ENTRY_V1,
-            &expected_preimage,
-        );
-
-        if bilateral_entry.pre_commitment_hash != expected_hash.as_bytes() {
-            bilateral_entry.status = BilateralTransactionStatus::Rejected;
-            return Err(DsmError::crypto(
-                "Pre-commitment hash verification failed".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // Update transaction status based on approval
-        if approve {
-            bilateral_entry.recipient_signature = Some(recipient_signature);
-            bilateral_entry.status = BilateralTransactionStatus::Signed;
-            bilateral_entry.tick = dt::tick();
-        } else {
-            bilateral_entry.status = BilateralTransactionStatus::Rejected;
-        }
-
-        // Update metrics
-        #[cfg(feature = "perf-metrics")]
-        self.update_metrics(
-            start_time,
-            bilateral_entry.transaction_payload.len() as u64,
-            0,
-            approve,
-        )
-        .await;
-
-        Ok(bilateral_entry)
-    }
-
-    /// Finalize a bilateral transaction after both parties have signed
-    /// Prepares transaction for network publication when connectivity is restored
-    pub async fn finalize_bilateral_transaction(
-        &self,
-        mut bilateral_entry: BilateralEntry,
-        final_signature: Vec<u8>,
-    ) -> Result<BilateralEntry, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        // Verify transaction is ready for finalization
-        if bilateral_entry.status != BilateralTransactionStatus::Signed {
-            return Err(DsmError::crypto(
-                "Transaction must be signed before finalization".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-
-        if bilateral_entry.recipient_signature.is_none() {
-            return Err(DsmError::crypto(
-                "Recipient signature required for finalization".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // Set final signature and mark as finalized
-        bilateral_entry.final_signature = Some(final_signature);
-        bilateral_entry.status = BilateralTransactionStatus::Finalized;
-        bilateral_entry.tick = dt::tick();
-
-        // Update metrics
-        #[cfg(feature = "perf-metrics")]
-        self.update_metrics(
-            start_time,
-            bilateral_entry.transaction_payload.len() as u64,
-            0,
-            true,
-        )
-        .await;
-
-        Ok(bilateral_entry)
-    }
-
-    /// Graceful shutdown with connection cleanup
-    pub async fn shutdown(&self) -> Result<(), DsmError> {
-        info!("Shutting down StorageNodeSDK");
-        // Deterministic: no wall-clock delays
-        Ok(())
-    }
-
-    /// Create a DSM Genesis Identity via Multi-Party Computation (MPC).
-    ///
-    /// Per whitepaper §2.5: this is n-of-n commit-then-reveal entropy
-    /// aggregation, NOT threshold cryptography.  Every configured storage
-    /// node contributes; the floor is `≥3` (anti-2-collusion).  The prior
-    /// `threshold` argument and `node_urls.iter().take(threshold_count)`
-    /// pre-truncation (Issue #252 prefix-bias sub-bug) have been removed:
-    /// every node contributes its entropy, every contribution goes into G.
-    pub async fn create_genesis_with_mpc(
-        &self,
-        client_entropy: Option<Vec<u8>>,
-    ) -> Result<GenesisCreationResponse, DsmError> {
-        // Genesis is created LOCALLY by gathering entropy from storage nodes
-        // Storage nodes just provide entropy - they don't create genesis
-
-        log::info!("Creating genesis locally with MPC entropy from storage nodes");
-
-        // For the FIRST device: Genesis hash = Device ID (root device)
-        // The device_id parameter to create_genesis_via_blind_mpc is a temporary value
-        // The actual Genesis G will become DevID_1, and we'll use G as both genesis and device_id
-
-        // Use client entropy as temporary device_id for the MPC process
-        // The final genesis hash G will replace this as the root device ID
-        let temp_device_id = if let Some(ref entropy) = client_entropy {
-            if entropy.len() >= 32 {
-                let mut id = [0u8; 32];
-                id.copy_from_slice(&entropy[..32]);
-                id.to_vec()
-            } else {
-                let mut hasher =
-                    dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_GENESIS_ENTROPY_PAD);
-                hasher.update(entropy);
-                hasher.finalize().as_bytes().to_vec()
-            }
-        } else {
-            return Err(DsmError::invalid_operation(
-                "Client entropy required for genesis creation",
-            ));
-        };
-
-        if temp_device_id.len() != 32 {
-            return Err(DsmError::invalid_operation(
-                "Temporary device ID must be 32 bytes",
-            ));
-        }
-
-        // Gather entropy from ALL storage nodes (n-of-n).
-        let node_urls = self.get_node_urls();
-
-        if node_urls.len() < 3 {
-            return Err(DsmError::invalid_operation(format!(
-                "Need at least 3 storage nodes for MPC genesis (whitepaper §2.5), only {} configured",
-                node_urls.len()
-            )));
-        }
-
-        log::info!(
-            "Gathering entropy from all {} storage nodes (n-of-n; whitepaper §2.5)",
-            node_urls.len(),
-        );
-
-        // Fetch entropy from EVERY storage node.  No prefix truncation —
-        // closes Issue #252's "first threshold_count nodes" bias.
-        let mut mpc_participants = Vec::new();
-        for (i, url) in node_urls.iter().enumerate() {
-            let entropy_url = format!("{}/api/v2/genesis/entropy", url.trim_end_matches('/'));
-
-            log::info!("Fetching entropy from node {}: {}", i, entropy_url);
-
-            let response = match self.inner.client.get(&entropy_url).send().await {
-                Ok(resp) => resp,
-                Err(e) => {
-                    log::error!("Failed to fetch entropy from {}: {}", entropy_url, e);
-                    return Err(DsmError::crypto(
-                        format!("Failed to fetch entropy from storage node: {}", e),
-                        None::<String>,
-                    ));
-                }
-            };
-
-            if !response.status().is_success() {
-                return Err(DsmError::crypto(
-                    format!("Storage node returned error: {}", response.status()),
-                    None::<String>,
-                ));
-            }
-
-            let entropy_bytes = response.bytes().await.map_err(|e| {
-                DsmError::crypto(
-                    format!("Failed to read entropy bytes: {}", e),
-                    None::<String>,
-                )
-            })?;
-
-            if entropy_bytes.len() != 32 {
-                return Err(DsmError::crypto(
-                    format!(
-                        "Storage node returned {} bytes, expected 32",
-                        entropy_bytes.len()
-                    ),
-                    None::<String>,
-                ));
-            }
-
-            mpc_participants.push(entropy_bytes.to_vec());
-            log::info!("Received 32 bytes of entropy from node {}", i);
-        }
-
-        log::info!(
-            "Gathered {} entropy contributions, creating genesis locally",
-            mpc_participants.len()
-        );
-
-        // Create genesis locally using core SDK
-        use crate::sdk::core_sdk::CoreSDK;
-        let core_sdk = CoreSDK::new()?;
-
-        // Phase B.6 (issue #277): publish the initial DeviceTreeStateV1
-        // to a quorum of storage nodes BEFORE the core SDK installs the
-        // genesis into the state machine. If quorum cannot be reached
-        // the closure returns Err, the core SDK aborts before touching
-        // any local state, and the caller sees a clean fail-closed
-        // error with no partial-genesis residue.
-        //
-        // The initial tree has exactly one leaf: the root device, whose
-        // DevID equals the genesis hash by protocol invariant. The
-        // SDK publishes against `/api/v2/identity/{genesis_b32}/devtree/root`
-        // (Phase B.4 issue #275 validator) and counts 2xx responses
-        // toward `REGISTRY_QUORUM_THRESHOLD`. A 409 Conflict (rejected
-        // stale by the validator) also counts as a successful publish
-        // because it confirms the storage node already holds a
-        // DeviceTreeStateV1 row for this genesis at version >= 1,
-        // which is the same end-state we wanted.
-        let publisher_node_urls = node_urls.clone();
-        let publisher_client = self.inner.client.clone();
-        let initial_tree_snapshot: std::sync::Arc<tokio::sync::OnceCell<DeviceTreeSnapshot>> =
-            std::sync::Arc::new(tokio::sync::OnceCell::new());
-        let snapshot_for_publisher = initial_tree_snapshot.clone();
-        let publisher = move |genesis_hash: [u8; 32]| {
-            let publisher_node_urls = publisher_node_urls.clone();
-            let publisher_client = publisher_client.clone();
-            let snapshot_for_publisher = snapshot_for_publisher.clone();
-            async move {
-                let (snapshot, payload) = Self::build_initial_device_tree_payload(genesis_hash)?;
-                // Stash the snapshot so the outer scope can build the
-                // GenesisCreationResponse without recomputing it.
-                let _ = snapshot_for_publisher.set(snapshot);
-
-                let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
-                let acks = Self::publish_initial_device_tree_to_quorum(
-                    &publisher_client,
-                    &publisher_node_urls,
-                    &genesis_b32,
-                    &payload,
-                )
-                .await;
-
-                if acks < REGISTRY_QUORUM_THRESHOLD {
-                    return Err(DsmError::network(
-                        format!(
-                            "Phase B.6: initial Device Tree publish reached only {}/{} \
-                             storage nodes; need >= {} for quorum. Genesis aborted; \
-                             no local state installed.",
-                            acks,
-                            publisher_node_urls.len(),
-                            REGISTRY_QUORUM_THRESHOLD
-                        ),
-                        None::<std::io::Error>,
-                    ));
-                }
-
-                log::info!(
-                    "Phase B.6: initial Device Tree published to {}/{} storage nodes \
-                     (quorum {} satisfied) for genesis={}",
-                    acks,
-                    publisher_node_urls.len(),
-                    REGISTRY_QUORUM_THRESHOLD,
-                    genesis_b32,
-                );
-                Ok::<(), DsmError>(())
-            }
-        };
-
-        let genesis_info = core_sdk
-            .create_genesis_with_passive_contributors(
-                temp_device_id.clone(),
-                mpc_participants.clone(),
-                client_entropy.clone(),
-                publisher,
-            )
-            .await?;
-
-        log::info!(
-            "Genesis created locally: hash={}",
-            crate::util::text_id::encode_base32_crockford(&genesis_info.genesis_hash)
-        );
-
-        // CRITICAL: For the root device, Genesis hash = Device ID
-        // The genesis_hash IS the device_id for the first device
-        let device_id = genesis_info.genesis_hash.clone();
-
-        log::info!(
-            "Root device ID (same as genesis): {}",
-            crate::util::text_id::encode_base32_crockford(&device_id)
-        );
-
-        // Persist the initial R_G as the bilateral-settlement device
-        // tree root so receipts post-genesis verify against the
-        // canonical anchor that storage nodes now hold.
-        let initial_snapshot = initial_tree_snapshot.get().copied();
-        if let Some(snapshot) = initial_snapshot {
-            crate::sdk::app_state::AppState::set_device_tree_root(snapshot.root_hash);
-        }
-
-        // Build response matching expected structure
-        let genesis_response = GenesisCreationResponse {
-            session_id: crate::util::text_id::encode_base32_crockford(
-                &genesis_info.genesis_hash[0..16],
-            ),
-            genesis_device_id: device_id, // Genesis hash = Device ID for root device
-            state: "complete".to_string(),
-            contributions_received: mpc_participants.len(),
-            complete: true,
-            genesis_hash: Some(genesis_info.genesis_hash),
-            participating_nodes: mpc_participants
-                .iter()
-                .map(|p| crate::util::text_id::encode_base32_crockford(p))
-                .collect(),
-            tick: dt::tick(),
-            // Phase B.6 (issue #277): the initial single-leaf tree
-            // snapshot the publisher just anchored to quorum-N storage
-            // nodes. None only on the unreachable case where the
-            // OnceCell wasn't initialised before the publisher Ok'd.
-            device_tree: initial_snapshot,
-        };
-
-        Ok(genesis_response)
-    }
-
-    /// Fetch + re-verify one genesis's Device Tree from any node in
-    /// the configured cluster.
-    ///
-    /// The Phase B.4 validator guarantees that every node holds the
-    /// same `DeviceTreeStateV1` for a given genesis at version >= the
-    /// monotone counter, so picking any one node is sufficient. We
-    /// walk `self.config.node_urls` in order and return on the first
-    /// successful GET; if every node returns an error or 404, the
-    /// outer call returns `Err`.
-    ///
-    /// On success returns a [`DeviceTreeSnapshotView`] whose
-    /// `inclusion_verified` flags are all `true` for an honest
-    /// server (since we re-derive proofs from the same canonical
-    /// leaf list before verifying), but the
-    /// `claimed_root_matches_recomputed` gate can still be `false`
-    /// if the storage node lied about its `root_hash` while serving
-    /// a tampered `device_ids` list.
-    pub async fn fetch_device_tree_snapshot(
-        &self,
-        genesis_hash: &[u8; 32],
-    ) -> Result<DeviceTreeSnapshotView, DsmError> {
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(genesis_hash);
-
-        let mut last_err: Option<String> = None;
-        for node_url in &self.config.node_urls {
-            let trimmed = node_url.trim_end_matches('/');
-            if trimmed.is_empty() {
-                continue;
-            }
-            let url = format!("{}/api/v2/identity/{}/devtree/root", trimmed, genesis_b32);
-            match self.inner.client.get(&url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    let bytes = resp.bytes().await.map_err(|e| {
-                        DsmError::network(
-                            format!("fetch_device_tree_snapshot: read body: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    })?;
-                    return build_device_tree_snapshot_view(&bytes);
-                }
-                Ok(resp) => {
-                    last_err = Some(format!(
-                        "{} returned HTTP {}",
-                        trimmed,
-                        resp.status().as_u16()
-                    ));
-                    log::debug!(
-                        "fetch_device_tree_snapshot: {} returned HTTP {}",
-                        trimmed,
-                        resp.status().as_u16()
-                    );
-                }
-                Err(e) => {
-                    last_err = Some(format!("{trimmed}: {e}"));
-                    log::debug!(
-                        "fetch_device_tree_snapshot: network error against {}: {}",
-                        trimmed,
-                        e
-                    );
-                }
-            }
-        }
-
-        Err(DsmError::not_found(
-            "DeviceTreeStateV1",
-            Some(format!(
-                "no storage node returned a published Device Tree for genesis {genesis_b32}{}",
-                last_err
-                    .map(|e| format!(" (last error: {e})"))
-                    .unwrap_or_default()
-            )),
-        ))
-    }
-
-    /// Build the canonical initial `DeviceTreeStateV1` proto payload
-    /// for a freshly-created genesis. Single leaf = `genesis_hash`
-    /// (root device's DevID by protocol invariant). Used by the
-    /// Phase B.6 (issue #277) initial-tree publish path.
-    pub(crate) fn build_initial_device_tree_payload(
-        genesis_hash: [u8; 32],
-    ) -> Result<(DeviceTreeSnapshot, Vec<u8>), DsmError> {
-        let tree = dsm::common::device_tree::DeviceTree::single(genesis_hash);
-        let snapshot = DeviceTreeSnapshot {
-            root_hash: tree.root(),
-            device_count: 1,
-            version_number: 1,
-        };
-        let state = generated::DeviceTreeStateV1 {
-            tree: Some(snapshot.to_proto()),
-            device_ids: vec![genesis_hash.to_vec()],
-        };
-        let mut payload = Vec::with_capacity(state.encoded_len());
-        state.encode(&mut payload).map_err(|e| {
-            DsmError::internal(
-                format!("encode initial DeviceTreeStateV1: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        Ok((snapshot, payload))
-    }
-
-    /// PUT `payload` to `/api/v2/identity/{genesis_b32}/devtree/root` on
-    /// every node in `node_urls`. Returns the count of nodes that
-    /// confirmed the write (HTTP 2xx OR 409 Conflict).
-    ///
-    /// 409 Conflict from the Phase B.4 validator means the storage node
-    /// already holds a DeviceTreeStateV1 row for this genesis at a
-    /// version >= the candidate version. For the initial publish
-    /// (`version_number = 1`) this can only happen if a prior
-    /// successful publish landed on that node, so it's the same
-    /// end-state we wanted and counts toward quorum.
-    async fn publish_initial_device_tree_to_quorum(
-        client: &reqwest::Client,
-        node_urls: &[String],
-        genesis_b32: &str,
-        payload: &[u8],
-    ) -> usize {
-        let mut acks: usize = 0;
-        for node_url in node_urls {
-            let trimmed = node_url.trim_end_matches('/');
-            if trimmed.is_empty() {
-                continue;
-            }
-            let url = format!("{}/api/v2/identity/{}/devtree/root", trimmed, genesis_b32);
-            match client
-                .put(&url)
-                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-                .body(payload.to_vec())
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if status.is_success() || status == reqwest::StatusCode::CONFLICT {
-                        acks += 1;
-                        log::info!(
-                            "Phase B.6 publish: {} accepted (HTTP {})",
-                            trimmed,
-                            status.as_u16()
-                        );
-                    } else {
-                        log::warn!(
-                            "Phase B.6 publish: {} returned HTTP {}",
-                            trimmed,
-                            status.as_u16()
-                        );
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Phase B.6 publish: network error against {}: {}",
-                        trimmed,
-                        e
-                    );
-                }
-            }
-        }
-        acks
-    }
-
-    /// Best-effort, idempotent publish of the local wallet's registry artifacts so counterparties
-    /// can verify it (`verify_device_tree_evidence_quorum` during contact add): storage-node
-    /// auth-registration + [`Self::ensure_device_in_tree`] (the content-addressed 100-byte
-    /// DeviceTreeEntry evidence blob the contact-discovery quorum reader actually GETs — NOT the
-    /// `devtree/root` DeviceTreeStateV1, which serves the multi-device admission path and has a
-    /// canonical single-device fallback).
-    ///
-    /// Genesis v2 is offline-first (mnemonic-rooted) and does NOT fail-close on the registry the
-    /// way the legacy MPC genesis publisher did — a wallet created offline is valid; it just is
-    /// not registry-visible until this succeeds. Spawned detached from `system.createGenesisV2`
-    /// AND from every `storage.sync`, so an offline-created wallet heals on the first sync with
-    /// reachable nodes. Publishes are content-addressed idempotent, and a process-wide success
-    /// latch stops re-checking once quorum has confirmed. (A same-process re-genesis is refused
-    /// fail-closed upstream, so the latch cannot mask a second wallet.)
-    pub fn spawn_ensure_genesis_registry_published(trigger: &'static str) {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        // Success latch + single-flight guard (concurrent storage.syncs must not stack publishes).
-        static PUBLISH_CONFIRMED: AtomicBool = AtomicBool::new(false);
-        static PUBLISH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-        if PUBLISH_CONFIRMED.load(Ordering::Acquire) {
-            return;
-        }
-        // No identity yet (pre-genesis storage.sync) is the EXPECTED state, not an anomaly:
-        // return silently without spawning so periodic syncs don't spam warn logs.
-        let (Some(device_id), Some(genesis_hash_vec), Some(public_key)) = (
-            crate::sdk::app_state::AppState::get_device_id().filter(|d| d.len() == 32),
-            crate::sdk::app_state::AppState::get_genesis_hash().filter(|g| g.len() == 32),
-            crate::sdk::app_state::AppState::get_public_key().filter(|p| !p.is_empty()),
-        ) else {
-            return;
-        };
-        if PUBLISH_IN_FLIGHT
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-
-        let task = async move {
-            let attempt = async {
-                let mut genesis_hash = [0u8; 32];
-                genesis_hash.copy_from_slice(&genesis_hash_vec);
-
-                let mut cfg = StorageNodeConfig::from_env_config()
-                    .await
-                    .map_err(|e| format!("config: {e}"))?;
-                // This SDK instance is a short-lived publish tool: disable the background health
-                // monitor (interval 0 -> not spawned). With the default 30000 every failed heal
-                // attempt would leak one immortal monitor task — unbounded on an offline device
-                // since storage.sync re-spawns until the latch confirms.
-                cfg.selection_config.health_check_interval_ms = 0;
-                let sdk = StorageNodeSDK::new(cfg)
-                    .await
-                    .map_err(|e| format!("sdk: {e}"))?;
-
-                let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-                let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
-                let pubkey_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
-
-                // Auth-registration first: nodes that gate PUTs by token would otherwise 401 the
-                // devtree publish. Warn-and-continue — dev nodes run require_auth=false.
-                if let Err(e) = sdk
-                    .register_device_for_auth(&device_id_b32, &pubkey_b32, &genesis_b32)
-                    .await
-                {
-                    warn!(
-                        "registry publish ({trigger}): auth-registration failed (continuing): {e}"
-                    );
-                }
-
-                // The evidence blob contact discovery reads: verify-first, republish below quorum.
-                // Ok(count) contractually means count >= REGISTRY_QUORUM_THRESHOLD.
-                let count = sdk
-                    .ensure_device_in_tree(&device_id, &genesis_hash)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "evidence publish below quorum ({e}); will retry on next storage.sync"
-                        )
-                    })?;
-                Ok((count as usize, sdk.get_node_urls().len()))
-            };
-            // TOTAL deadline over the whole attempt (transport-layer timing — the sanctioned
-            // clockless exception, per the execute_with_retry contract). The CA-aware reqwest
-            // client has NO per-request timeout, so one half-dead node (TCP accepted, response
-            // never sent) would otherwise pend forever with PUBLISH_IN_FLIGHT held — silently
-            // killing the very heal loop this function exists to provide. Bounded here, the
-            // guard ALWAYS releases and the next storage.sync retries.
-            let outcome: Result<(usize, usize), String> =
-                match tokio::time::timeout(std::time::Duration::from_secs(60), attempt).await {
-                    Ok(r) => r,
-                    Err(_) => Err("attempt exceeded the 60s total deadline (stalled node?); \
-                         will retry on next storage.sync"
-                        .to_string()),
-                };
-
-            match outcome {
-                Ok((acks, total)) => {
-                    PUBLISH_CONFIRMED.store(true, Ordering::Release);
-                    info!(
-                        "registry publish ({trigger}): device tree visible on {acks}/{total} nodes (quorum ok)"
-                    );
-                }
-                Err(e) => warn!("registry publish ({trigger}): {e}"),
-            }
-            PUBLISH_IN_FLIGHT.store(false, Ordering::Release);
-        };
-
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(task);
-        } else {
-            std::thread::spawn(move || {
-                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    rt.block_on(task);
-                } else {
-                    PUBLISH_IN_FLIGHT.store(false, Ordering::Release);
-                }
-            });
-        }
-    }
-
-    /// Read the current authoritative Device Tree frontier for `genesis_hash`:
-    /// `(sorted device_ids, version_number, root)`. Used by the admitting (existing) device to fill
-    /// an `AddDeviceAdmission`'s parent frontier and by the gated insert to verify it. An empty
-    /// store (pre-publish edge) returns the canonical root-only tree.
-    pub async fn read_device_tree_state(
-        &self,
-        genesis_hash: &[u8; 32],
-    ) -> Result<(Vec<[u8; 32]>, u64, [u8; 32]), DsmError> {
-        let key = Self::device_tree_state_key(genesis_hash);
-        let bytes = self.inner.get(&key).await.map_err(|e| {
-            DsmError::network(
-                format!("read_device_tree_state: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        if bytes.is_empty() {
-            let tree = dsm::common::device_tree::DeviceTree::single(*genesis_hash);
-            return Ok((tree.leaves().to_vec(), 1, tree.root()));
-        }
-        let st = decode_device_tree_state(&bytes)?;
-        let tree = dsm::common::device_tree::DeviceTree::new(st.device_ids);
-        Ok((tree.leaves().to_vec(), st.version_number, tree.root()))
-    }
-
-    /// ADMITTING (existing) device: verify a gate-signed `AddDeviceAdmission` against the current
-    /// authoritative tree, then insert the new device. `signer_signing_pubkey` is the existing
-    /// device's signing key (from the QR the new device scanned — no quorum). The gate signature in
-    /// the admission IS the authorization (only a key already in the tree can produce a verifying
-    /// admission); this replaces the old ungated self-insert. Returns the new tree snapshot.
-    pub async fn apply_admitted_device(
-        &self,
-        admission: &dsm::common::device_admission::AddDeviceAdmission,
-        signer_signing_pubkey: &[u8],
-    ) -> Result<DeviceTreeSnapshot, DsmError> {
-        let genesis = admission.genesis_hash;
-        let (device_ids, version, _root) = self.read_device_tree_state(&genesis).await?;
-        // Fail-closed: full gate-signature + self-attestation + frontier verification.
-        let expected_next = dsm::common::device_admission::verify_add_device_admission(
-            admission,
-            &genesis,
-            &device_ids,
-            version,
-            signer_signing_pubkey,
-        )?;
-        let new_id = admission.new_device_id;
-        let snapshot = self
-            .mutate_device_tree_state(genesis, move |ids| {
-                if !ids.contains(&new_id) {
-                    ids.push(new_id);
-                }
-            })
-            .await?;
-        if snapshot.root_hash != expected_next {
-            return Err(DsmError::verification(
-                "apply_admitted_device: post-insert root != verified next root (concurrent tree \
-                 change); refusing",
-            ));
-        }
-        Ok(snapshot)
-    }
-
-    /// Remove a secondary device from an existing Device Tree.
-    ///
-    /// Loads the persisted
-    /// [`DeviceTreeStateV1`], drops `device_id_to_remove`, bumps
-    /// `version_number`, and writes the new state back.
-    ///
-    /// Enforces:
-    /// * `genesis_hash` and `device_id_to_remove` are 32 bytes each.
-    /// * A Device Tree state must already exist for this genesis
-    ///   (returns [`DsmError::not_found`] otherwise — there is nothing
-    ///   to remove from).
-    /// * The device must currently be a member (returns
-    ///   [`DsmError::not_found`] otherwise so callers can distinguish
-    ///   "already gone" from "tree missing").
-    /// * `device_count >= 1` after removal — the root device leaf is
-    ///   permanent; removing the last remaining leaf is rejected with
-    ///   [`DsmError::invalid_operation`]. This preserves the post-
-    ///   genesis non-empty-tree invariant.
-    ///
-    /// Returns a [`GenesisCreationResponse`] whose `device_tree` field
-    /// carries the post-removal snapshot.
-    pub async fn remove_secondary_device(
-        &self,
-        genesis_hash: Vec<u8>,
-        device_id_to_remove: Vec<u8>,
-    ) -> Result<GenesisCreationResponse, DsmError> {
-        log::info!("Removing secondary device from existing genesis");
-
-        if genesis_hash.len() != 32 {
-            return Err(DsmError::invalid_operation("Genesis hash must be 32 bytes"));
-        }
-        if device_id_to_remove.len() != 32 {
-            return Err(DsmError::invalid_operation(
-                "device_id_to_remove must be 32 bytes",
-            ));
-        }
-
-        let mut genesis_hash_array = [0u8; 32];
-        genesis_hash_array.copy_from_slice(&genesis_hash);
-        let mut target = [0u8; 32];
-        target.copy_from_slice(&device_id_to_remove);
-
-        // Read first so we can fail-closed if the tree is absent or the
-        // device is not currently a member — distinct from the
-        // post-mutation device_count >= 1 check inside the mutator.
-        let device_tree_key = Self::device_tree_state_key(&genesis_hash_array);
-        let bytes = self.inner.get(&device_tree_key).await.map_err(|e| {
-            DsmError::network(
-                format!(
-                    "remove_secondary_device: failed to read DeviceTreeStateV1 for genesis: {e}"
-                ),
-                None::<std::io::Error>,
-            )
-        })?;
-        if bytes.is_empty() {
-            return Err(DsmError::not_found(
-                "DeviceTreeStateV1",
-                Some(format!(
-                    "no Device Tree state for genesis {}",
-                    crate::util::text_id::encode_base32_crockford(&genesis_hash)
-                )),
-            ));
-        }
-        let existing = decode_device_tree_state(&bytes)?;
-        if !existing.device_ids.contains(&target) {
-            return Err(DsmError::not_found(
-                "DeviceTreeStateV1.device_ids",
-                Some(format!(
-                    "device {} not in tree for genesis {}",
-                    crate::util::text_id::encode_base32_crockford(&device_id_to_remove),
-                    crate::util::text_id::encode_base32_crockford(&genesis_hash)
-                )),
-            ));
-        }
-
-        let snapshot = self
-            .mutate_device_tree_state(genesis_hash_array, |device_ids| {
-                device_ids.retain(|id| id != &target);
-            })
-            .await?;
-
-        let response = GenesisCreationResponse {
-            session_id: crate::util::text_id::encode_base32_crockford(&device_id_to_remove[0..16]),
-            genesis_device_id: device_id_to_remove,
-            state: "complete".to_string(),
-            contributions_received: 0,
-            complete: true,
-            genesis_hash: Some(genesis_hash),
-            participating_nodes: vec![],
-            tick: dt::tick(),
-            device_tree: Some(snapshot),
-        };
-
-        Ok(response)
-    }
-
-    /// Local KV key for the persisted [`generated::DeviceTreeStateV1`].
-    fn device_tree_state_key(genesis_hash: &[u8; 32]) -> String {
-        format!(
-            "device_tree:{}",
-            crate::util::text_id::encode_base32_crockford(genesis_hash)
-        )
-    }
-
-    /// Read-modify-write the persisted [`generated::DeviceTreeStateV1`]
-    /// for `genesis_hash`. The `mutate` closure receives a mutable
-    /// device-id list; on return, the list is canonicalised via
-    /// [`dsm::common::device_tree::DeviceTree::new`] (sort + dedup) and
-    /// the new state is persisted with `version_number` strictly
-    /// greater than the previous value. Enforces the post-genesis
-    /// non-empty-tree invariant (`device_count >= 1`).
-    async fn mutate_device_tree_state<F: FnOnce(&mut Vec<[u8; 32]>)>(
-        &self,
-        genesis_hash: [u8; 32],
-        mutate: F,
-    ) -> Result<DeviceTreeSnapshot, DsmError> {
-        let device_tree_key = Self::device_tree_state_key(&genesis_hash);
-
-        // Read prior state (if any). Empty bytes means the initial
-        // root-device-only tree has not been written yet (Phase B.6
-        // issue #277 lands the genesis-time write).
-        let prior_bytes = self.inner.get(&device_tree_key).await.map_err(|e| {
-            DsmError::network(
-                format!("mutate_device_tree_state: read failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let (snapshot, new_bytes) = apply_device_tree_mutation(&prior_bytes, genesis_hash, mutate)?;
-
-        // Persist the new state.
-        self.inner
-            .put(&device_tree_key, &new_bytes, None)
-            .await
-            .map_err(|e| {
-                DsmError::network(
-                    format!("mutate_device_tree_state: write failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-
-        log::info!(
-            "Device Tree state for genesis {}: root={}, count={}, version={}",
-            crate::util::text_id::encode_base32_crockford(&genesis_hash),
-            crate::util::text_id::encode_base32_crockford(&snapshot.root_hash),
-            snapshot.device_count,
-            snapshot.version_number
-        );
-
-        Ok(snapshot)
-    }
-
-    /// Retrieve the complete device identity after Genesis creation
-    pub async fn retrieve_device_identity(
-        &self,
-        device_id: &str,
-    ) -> Result<Option<DeviceIdentity>, DsmError> {
-        let key = format!("device_identity:{device_id}");
-
-        // Use the storage node's get endpoint to retrieve the device identity
-        match self.inner.get(&key).await {
-            Ok(response_bytes) => {
-                // Protobuf-only: decode a stored protobuf DeviceIdentity if present
-                if response_bytes.is_empty() {
-                    return Ok(None);
-                }
-
-                let identity = generated::GenesisCreated::decode(response_bytes.as_ref()).ok();
-                if let Some(gen) = identity {
-                    // Construct a minimal DeviceIdentity from prost type; for richer details,
-                    // extend protobuf on storage-node side to return a dedicated identity message.
-                    let device_identity = DeviceIdentity {
-                        device_id: gen.device_id.clone(),
-                        genesis_state: {
-                            // Compatibility genesis_state built from prost fields (non-authoritative)
-                            use dsm::core::identity::genesis::{
-                                GenesisState, KyberKey, SigningKey, Contribution,
-                            };
-                            use std::collections::HashSet;
-                            GenesisState {
-                                hash: gen
-                                    .genesis_hash
-                                    .as_ref()
-                                    .map(|h| h.v.clone().try_into().unwrap_or([0u8; 32]))
-                                    .unwrap_or([0u8; 32]),
-                                initial_entropy: gen
-                                    .device_entropy
-                                    .clone()
-                                    .try_into()
-                                    .unwrap_or([0u8; 32]),
-                                participants: HashSet::new(),
-                                merkle_root: None,
-                                device_id: None,
-                                signing_key: SigningKey {
-                                    public_key: gen.public_key.clone(),
-                                    secret_key: Vec::new(),
-                                },
-                                kyber_keypair: KyberKey {
-                                    public_key: Vec::new(),
-                                    secret_key: Vec::new(),
-                                },
-                                contributions: Vec::<Contribution>::new(),
-                            }
-                        },
-                        device_entropy: gen.device_entropy,
-                        blind_key: Vec::new(),
-                        created_at: dt::tick(),
-                        updated_at: dt::tick(),
-                    };
-                    Ok(Some(device_identity))
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(e) if matches!(e.kind, StorageNodeErrorKind::NotFound) => Ok(None),
-            Err(e) => Err(DsmError::crypto(
-                format!("Failed to retrieve device identity: {e}"),
-                None::<String>,
-            )),
-        }
-    }
-
-    /// Start health monitoring for storage nodes
-    pub async fn start_health_monitoring(&self) {
-        let health_statuses = self.health_statuses.clone();
-
-        tokio::spawn(async move {
-            loop {
-                // In a real implementation, this would check actual node health
-                // For now, we'll just maintain basic health status
-                let statuses = health_statuses.read().await;
-
-                // In a real implementation, this would ping nodes and update their status
-                // For now, we'll just read the existing status for monitoring
-                let _active_nodes = statuses.values().filter(|status| status.is_healthy).count();
-                log::trace!("Health check completed, {} active nodes", _active_nodes);
-
-                drop(statuses);
-                // Deterministic: no wall-clock delays
-            }
-        });
-    }
-
-    /// Execute a storage operation with exponential-backoff retry +
-    /// node rotation across the configured set of independent storage
-    /// nodes.
-    ///
-    /// **Transport-only operational behavior** — per the DSM clockless
-    /// rule, wall-clock APIs are banned in protocol semantics (schemas,
-    /// payloads, receipts, ordering).  Network retry backoff is the
-    /// approved exception: it is opaque to the protocol layer and only
-    /// affects HOW fast the SDK rehits a 429/503/transient failure.
-    /// Mirrors the `b0x_sdk.rs` retry pattern.
-    ///
-    /// Each attempt rotates to a different storage node from
-    /// `self.clients` (DSM storage nodes are independent endpoints,
-    /// not a cluster).  Cross-device SoFi test surfaced that the
-    /// previous single-node-only path failed every retry against the
-    /// same blacklisted GCP-hosted endpoint when GCP-side rate
-    /// limiting kicked in — rotation lets the limiter on one node
-    /// clear while we hit a different region's healthy node.
-    ///
-    /// Backoff schedule (capped at MAX_DELAY_MS):
-    ///   attempt 0 → no sleep (first try); pick clients[0]
-    ///   attempt 1 → 200ms; pick clients[1 % N]
-    ///   attempt 2 → 400ms; pick clients[2 % N]
-    ///   ...
-    ///   attempt 6 → 5000ms (capped); pick clients[6 % N]
-    ///
-    /// Total worst-case wait: ~11s spread across 7 attempts.
-    pub async fn execute_with_retry<F, Fut, T>(&self, operation: F) -> Result<T, DsmError>
-    where
-        F: Fn(Arc<StorageNodeClient>) -> Fut,
-        Fut: std::future::Future<Output = Result<T, StorageNodeError>>,
-    {
-        // Retry on EVERY error, as this function always has. Its callers get
-        // the erased `DsmError`; nothing about their behaviour changes.
-        self.retry_loop(operation, |_| true)
-            .await
-            .map_err(|(e, n_clients)| {
-                DsmError::storage(
-                    format!(
-                        "Storage operation failed after {} retries across {} node(s): {e}",
-                        Self::MAX_RETRIES,
-                        n_clients
-                    ),
-                    None::<std::io::Error>,
-                )
-            })
-    }
-
-    /// Fetch an object, keeping NOT-FOUND typed.
-    ///
-    /// `get` erases every error into a `DsmError` string and, worse, RETRIES a
-    /// 404 six times with exponential backoff (200ms → 5s, ~11s in total)
-    /// before doing so — an absence treated as a transient fault. Callers that
-    /// had to tell "absent" from "unreachable" were reduced to matching
-    /// `"not found"` in the message, which is the class confusion amendment
-    /// 2c-C3 exists to remove, implemented in string comparison.
-    ///
-    /// Here a 404 returns `Ok(None)` on the first attempt, with no retry, and
-    /// every other failure is still retried across nodes and then surfaced as
-    /// `Err`. `Ok(None)` is ONE node's answer, not a quorum observation; it
-    /// says the key was absent where this reader looked, and nothing more.
-    pub async fn get_opt(&self, key: &str) -> Result<Option<Vec<u8>>, DsmError> {
-        let outcome = self
-            .retry_loop(
-                |client| {
-                    let key = key.to_string();
-                    async move { client.get(&key).await }
-                },
-                |e| !matches!(e.kind, StorageNodeErrorKind::NotFound),
-            )
-            .await;
-        match outcome {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err((e, _)) if matches!(e.kind, StorageNodeErrorKind::NotFound) => Ok(None),
-            Err((e, n_clients)) => Err(DsmError::storage(
-                format!(
-                    "Storage get failed after {} retries across {} node(s): {e}",
-                    Self::MAX_RETRIES,
-                    n_clients
-                ),
-                None::<std::io::Error>,
-            )),
-        }
-    }
-
-    const MAX_RETRIES: u32 = 6;
-
-    /// The one retry loop, with the erasure of `StorageNodeError` kept OUT of
-    /// it so a caller can decide what an error kind means before it becomes a
-    /// string. `retry_on` says whether a given failure is worth another
-    /// attempt; the final failure is returned typed, with the node count for
-    /// the caller's message.
-    async fn retry_loop<F, Fut, T>(
-        &self,
-        operation: F,
-        retry_on: impl Fn(&StorageNodeError) -> bool,
-    ) -> Result<T, (StorageNodeError, usize)>
-    where
-        F: Fn(Arc<StorageNodeClient>) -> Fut,
-        Fut: std::future::Future<Output = Result<T, StorageNodeError>>,
-    {
-        const MAX_RETRIES: u32 = StorageNodeSDK::MAX_RETRIES;
-        const BASE_DELAY_MS: u64 = 200;
-        const MAX_DELAY_MS: u64 = 5_000;
-
-        // `clients` is non-empty per `StorageNodeSDK::new` invariant;
-        // pre-compute the modulus once to avoid taking the lock per
-        // attempt.
-        let n_clients = self.clients.len();
-
-        for attempt in 0..=MAX_RETRIES {
-            // Rotate: attempt N hits clients[N % n_clients].  When
-            // n_clients == 1 (legacy single-node config) the rotation
-            // degrades cleanly to retry-the-same-node behaviour.
-            let client = self.clients[(attempt as usize) % n_clients].clone();
-            match operation(client).await {
-                Ok(result) => return Ok(result),
-                Err(e) if attempt < MAX_RETRIES && retry_on(&e) => {
-                    let delay_ms =
-                        (BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(20))).min(MAX_DELAY_MS);
-                    let next_node_idx = ((attempt as usize) + 1) % n_clients;
-                    warn!(
-                        "Storage operation failed (attempt {}/{} via node {}): {e} — \
-                         retrying via node {} in {}ms",
-                        attempt + 1,
-                        MAX_RETRIES + 1,
-                        (attempt as usize) % n_clients,
-                        next_node_idx,
-                        delay_ms
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                }
-                Err(e) => return Err((e, n_clients)),
-            }
-        }
-
-        // Unreachable: the loop exits via `return` in both Ok and final-Err
-        // branches; this is here only to satisfy the compiler.
-        Err((
-            StorageNodeError::new(
-                "Storage operation failed due to unhandled error after retries".to_string(),
-            ),
-            n_clients,
-        ))
-    }
-
-    /// Update storage metrics
-    #[cfg(feature = "perf-metrics")]
-    pub async fn update_metrics(
-        &self,
-        start_time: u64,
-        bytes_written: u64,
-        bytes_read: u64,
-        success: bool,
-    ) {
-        let mut metrics = self.metrics.write().await;
-
-        metrics.total_operations += 1;
-        if success {
-            metrics.successful_operations += 1;
-        } else {
-            metrics.failed_operations += 1;
-        }
-
-        metrics.bytes_stored += bytes_written;
-        metrics.bytes_retrieved += bytes_read;
-
-        // Update average response time
-        let operation_time = dt::tick().saturating_sub(start_time) as f64;
-        if metrics.total_operations == 1 {
-            metrics.average_response_time_ticks = operation_time;
-        } else {
-            // Moving average calculation
-            let total_time = metrics.average_response_time_ticks
-                * (metrics.total_operations - 1) as f64
-                + operation_time;
-            metrics.average_response_time_ticks = total_time / metrics.total_operations as f64;
-        }
-    }
-
-    #[cfg(not(feature = "perf-metrics"))]
-    pub async fn update_metrics(
-        &self,
-        _start_time: u64,
-        bytes_written: u64,
-        bytes_read: u64,
-        success: bool,
-    ) {
-        // Update counters without timing when perf metrics are disabled
-        let mut metrics = self.metrics.write().await;
-
-        metrics.total_operations += 1;
-        if success {
-            metrics.successful_operations += 1;
-        } else {
-            metrics.failed_operations += 1;
-        }
-
-        metrics.bytes_stored += bytes_written;
-        metrics.bytes_retrieved += bytes_read;
-        // Do not touch average_response_time_ms when perf metrics are disabled
-    }
-
-    /// Return a new SDK instance with device auth credentials set on the inner client.
-    /// Required for authenticated PUT/DELETE operations on storage nodes.
-    ///
-    /// Single-node convenience — applies the same auth to `inner` only.
-    /// Callers driving multi-node writes (put_to_all_replicas, rotated
-    /// retries) should use [`with_per_node_auth`] so each client carries
-    /// its own node-specific token instead of one token leaking across
-    /// nodes.
-    pub fn with_auth(self, auth: StorageAuthContext) -> Self {
-        let client = (*self.inner).clone().with_auth(auth);
-        Self {
-            inner: Arc::new(client),
-            ..self
-        }
-    }
-
-    /// Return a new SDK with per-node auth tokens applied.
-    ///
-    /// Each `auths[url]` is matched against the corresponding
-    /// `StorageNodeClient.node_info.url` in `self.clients` and applied
-    /// to that specific client.  Clients whose URL is absent from
-    /// `auths` retain whatever auth they had (typically None).
-    ///
-    /// Critical for production multi-node deployments: DSM storage nodes
-    /// each maintain their own device-auth table, and a token issued by
-    /// node A is invalid at node B.  Without per-node auth, rotated PUT
-    /// retries against nodes 1..N return HTTP 401 even though the wallet
-    /// is correctly registered with each of them.
-    pub fn with_per_node_auth(
-        self,
-        auths: &std::collections::HashMap<String, StorageAuthContext>,
-    ) -> Self {
-        let new_clients: Vec<Arc<StorageNodeClient>> = self
-            .clients
-            .iter()
-            .map(|c| {
-                let mut client = (**c).clone();
-                if let Some(auth) = auths.get(&client.node_info.url) {
-                    client.auth = Some(auth.clone());
-                }
-                Arc::new(client)
-            })
-            .collect();
-        // `clients` is non-empty per `StorageNodeSDK::new` invariant.
-        let new_inner = new_clients[0].clone();
-        Self {
-            inner: new_inner,
-            clients: Arc::new(new_clients),
-            ..self
-        }
-    }
-
-    /// Store data with a simple interface for Genesis publication
-    pub async fn store_data(&self, key: &str, data: &[u8]) -> Result<String, DsmError> {
-        // Clockless: do not use wall-clock-based TTLs.
-        // Storage nodes are dumb mirrors; retention/policy is enforced by
-        // content-addressing and higher-level deterministic rules.
-        self.put(key, data, None).await
-    }
-
-    /// Get the list of configured storage node URLs
-    pub fn get_node_urls(&self) -> Vec<String> {
-        self.config.node_urls.clone()
-    }
-
-    /// Discover local storage nodes (simplified for JNI)
-    pub async fn discover_local(
-        &self,
-    ) -> Result<crate::generated::DiscoverLocalResponse, DsmError> {
-        let resp = crate::generated::DiscoverLocalResponse {
-            discovered_nodes: self.config.node_urls.clone(),
-            discovery_method: "configuration".to_string(),
-            event_counter: dt::tick(),
-        };
-        Ok(resp)
-    }
-
-    /// Publish genesis data to storage nodes
-    pub async fn publish_genesis_to_nodes(
-        &self,
-        genesis: crate::generated::GenesisCreated,
-    ) -> Result<crate::generated::PublishGenesisResponse, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        // Use protobuf canonical bytes for storage persistence
-        let genesis_bytes = genesis.encode_to_vec();
-
-        // Publish to registry endpoint on ALL storage nodes (required for HTTP verification)
-        let mut published_count = 0u32;
-        let mut last_error: Option<String> = None;
-
-        for node_url in &self.config.node_urls {
-            let url = format!("{}/api/v2/registry/publish", node_url.trim_end_matches('/'));
-
-            match self
-                .inner
-                .client
-                .post(&url)
-                .header("Content-Type", "application/octet-stream")
-                .body(genesis_bytes.clone())
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    log::info!("Genesis published to node: {}", node_url);
-                    published_count += 1;
-                }
-                Ok(resp) => {
-                    let err = format!(
-                        "Failed to publish genesis to node {}: status {}",
-                        node_url,
-                        resp.status()
-                    );
-                    log::warn!("{}", err);
-                    last_error = Some(err);
-                }
-                Err(e) => {
-                    let err = format!(
-                        "Network error publishing genesis to node {}: {}",
-                        node_url, e
-                    );
-                    log::warn!("{}", err);
-                    last_error = Some(err);
-                }
-            }
-        }
-
-        #[cfg(feature = "perf-metrics")]
-        self.update_metrics(
-            start_time,
-            genesis_bytes.len() as u64,
-            0,
-            published_count > 0,
-        )
-        .await;
-
-        // Fail if no nodes succeeded
-        if published_count == 0 {
-            return Err(DsmError::internal(
-                format!(
-                    "Failed to publish genesis to any storage node. Last error: {:?}",
-                    last_error
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-
-        let resp = crate::generated::PublishGenesisResponse {
-            success: true,
-            published: true,
-            key: "registry".to_string(),
-            published_to_nodes: published_count,
-            event_counter: dt::tick(),
-        };
-
-        Ok(resp)
-    }
-
-    /// Register a device in the Device Tree on storage nodes.
-    ///
-    /// Publishes the 100-byte DeviceTreeEntry evidence blob to the
-    /// content-addressed `/api/v2/registry/publish` endpoint on all configured
-    /// nodes. The entry is required for contact discovery (`contacts.addManual`
-    /// → `verify_device_tree_evidence_quorum`).
-    ///
-    /// **Quorum contract.** The read side requires at least
-    /// [`REGISTRY_QUORUM_THRESHOLD`] nodes to hold the entry before a contact
-    /// can be resolved. If fewer nodes accept the publish, this function
-    /// returns an `Err` so the caller can surface (or retry) the failure
-    /// rather than silently proceeding with an unreachable identity.
-    ///
-    /// Writes are idempotent — the server keys each object by
-    /// `BLAKE3("DSM/registry\0" || evidence)`, so repeated publishes of the
-    /// same 100-byte evidence are no-ops and safe to call on every bootstrap.
-    pub async fn register_device_in_tree(
-        &self,
-        device_id: &[u8],
-        genesis_hash: &[u8],
-    ) -> Result<crate::generated::PublishGenesisResponse, DsmError> {
-        #[cfg(feature = "perf-metrics")]
-        let start_time = dt::tick();
-
-        if device_id.len() != 32 {
-            return Err(DsmError::invalid_parameter(format!(
-                "register_device_in_tree: device_id must be 32 bytes, got {}",
-                device_id.len()
-            )));
-        }
-        if genesis_hash.len() != 32 {
-            return Err(DsmError::invalid_parameter(format!(
-                "register_device_in_tree: genesis_hash must be 32 bytes, got {}",
-                genesis_hash.len()
-            )));
-        }
-
-        // Canonical 100-byte evidence (shared with the quorum reader).
-        let evidence_bytes = build_root_device_tree_evidence(device_id, genesis_hash);
-
-        // Publish to registry endpoint on all storage nodes.
-        let mut published_count: u32 = 0;
-        let mut last_error: Option<String> = None;
-        // HTTP headers require text; use Base32 Crockford (canon), not hex/base64.
-        let genesis_text = crate::util::text_id::encode_base32_crockford(genesis_hash);
-
-        for node_url in &self.config.node_urls {
-            let url = format!("{}/api/v2/registry/publish", node_url.trim_end_matches('/'));
-
-            match self
-                .inner
-                .client
-                .post(&url)
-                .header("Content-Type", "application/octet-stream")
-                .header("X-DSM-Kind", "1") // Device tree evidence kind
-                .header("X-DSM-DLV-ID", genesis_text.clone())
-                .body(evidence_bytes.clone())
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    log::info!("Device registered in tree on node: {}", node_url);
-                    published_count += 1;
-                }
-                Ok(resp) => {
-                    let err = format!(
-                        "register_device_in_tree: node {} returned HTTP {}",
-                        node_url,
-                        resp.status()
-                    );
-                    log::warn!("{err}");
-                    last_error = Some(err);
-                }
-                Err(e) => {
-                    let err = format!(
-                        "register_device_in_tree: network error on node {}: {}",
-                        node_url, e
-                    );
-                    log::warn!("{err}");
-                    last_error = Some(err);
-                }
-            }
-        }
-
-        #[cfg(feature = "perf-metrics")]
-        self.update_metrics(
-            start_time,
-            evidence_bytes.len() as u64,
-            0,
-            published_count as usize >= REGISTRY_QUORUM_THRESHOLD,
-        )
-        .await;
-
-        // Reject any publish that fell below the quorum threshold required by
-        // the reader. Without this gate, an identity would be persisted locally
-        // with no way for peers to verify it, leaving QR pairing permanently
-        // broken until a manual re-publish (see fix: systemic silent failure).
-        if (published_count as usize) < REGISTRY_QUORUM_THRESHOLD {
-            return Err(DsmError::internal(
-                format!(
-                    "register_device_in_tree: published to only {}/{} nodes (need >= {} for quorum). Last error: {:?}",
-                    published_count,
-                    self.config.node_urls.len(),
-                    REGISTRY_QUORUM_THRESHOLD,
-                    last_error
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // Avoid hex/base64 in filenames/keys: render a deterministic small decimal suffix.
-        let device_prefix_u64 = {
-            let mut b = [0u8; 8];
-            let take = std::cmp::min(8, device_id.len());
-            b[..take].copy_from_slice(&device_id[..take]);
-            u64::from_le_bytes(b)
-        };
-
-        Ok(crate::generated::PublishGenesisResponse {
-            success: true,
-            published: true,
-            key: format!("device_tree:{}", device_prefix_u64),
-            published_to_nodes: published_count,
-            event_counter: dt::tick(),
-        })
-    }
-
-    /// Idempotent self-heal for a root device's registry entry.
-    ///
-    /// Verifies that the content-addressed DeviceTreeEntry for `(device_id,
-    /// genesis_hash)` is present on at least [`REGISTRY_QUORUM_THRESHOLD`]
-    /// storage nodes. If the entry is already visible to a quorum of nodes,
-    /// returns immediately without any writes. Otherwise, re-runs
-    /// [`Self::register_device_in_tree`] to republish.
-    ///
-    /// This exists to close the "silent publish failure" gap that used to
-    /// leave users with locally-valid-but-network-invisible genesis states.
-    /// Call it from bootstrap so any previously dropped publish heals itself
-    /// on the first successful network round-trip after the issue.
-    ///
-    /// Returns:
-    /// - `Ok(verified_count)` with `verified_count >= REGISTRY_QUORUM_THRESHOLD`
-    ///   on success (either already present or republish succeeded).
-    /// - `Err(_)` if the entry is below quorum AND republish fails.
-    pub async fn ensure_device_in_tree(
-        &self,
-        device_id: &[u8],
-        genesis_hash: &[u8],
-    ) -> Result<u32, DsmError> {
-        if device_id.len() != 32 || genesis_hash.len() != 32 {
-            return Err(DsmError::invalid_parameter(
-                "ensure_device_in_tree: device_id and genesis_hash must be 32 bytes",
-            ));
-        }
-
-        let evidence = build_root_device_tree_evidence(device_id, genesis_hash);
-        let addr = registry_content_addr_b64url(&evidence);
-
-        // Quick verify pass: count nodes that already hold the entry.
-        let mut verified: u32 = 0;
-        for node_url in &self.config.node_urls {
-            let trimmed = node_url.trim_end_matches('/');
-            if trimmed.is_empty() {
-                continue;
-            }
-            let url = format!("{}/api/v2/registry/get/{}", trimmed, addr);
-            match self.inner.client.get(&url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    verified += 1;
-                }
-                Ok(resp) => {
-                    log::debug!(
-                        "ensure_device_in_tree: node {} returned HTTP {} (will attempt republish if below quorum)",
-                        trimmed,
-                        resp.status()
-                    );
-                }
-                Err(e) => {
-                    log::debug!(
-                        "ensure_device_in_tree: network error verifying node {}: {}",
-                        trimmed,
-                        e
-                    );
-                }
-            }
-
-            if verified as usize >= REGISTRY_QUORUM_THRESHOLD {
-                log::info!(
-                    "ensure_device_in_tree: registry entry already visible on {} nodes (>= quorum {}), no republish needed",
-                    verified,
-                    REGISTRY_QUORUM_THRESHOLD
-                );
-                return Ok(verified);
-            }
-        }
-
-        // Below quorum — republish. register_device_in_tree is idempotent
-        // (content-addressed), so this is safe on every bootstrap.
-        log::warn!(
-            "ensure_device_in_tree: registry entry visible on only {}/{} nodes (< quorum {}), republishing",
-            verified,
-            self.config.node_urls.len(),
-            REGISTRY_QUORUM_THRESHOLD
-        );
-        let resp = self
-            .register_device_in_tree(device_id, genesis_hash)
-            .await?;
-        Ok(resp.published_to_nodes)
-    }
-
-    /// Register device with storage nodes for authentication
-    /// Returns the auth token from the first successful registration
-    pub async fn register_device_for_auth(
-        &self,
-        device_id: &str,    // base32-encoded device_id
-        pubkey: &str,       // base32-encoded public key
-        genesis_hash: &str, // base32-encoded genesis hash
-    ) -> Result<String, DsmError> {
-        // IMPORTANT: `device_id` must be the canonical base32(32 bytes) identifier.
-        // Using dotted-decimal here leads to tokens being stored/used under a different key, and
-        // later authenticated b0x calls will fail (storage-node rejects non-base32 device ids).
-        let decoded =
-            crate::util::text_id::decode_base32_crockford(device_id).ok_or_else(|| {
-                DsmError::invalid_parameter("register_device_for_auth: device_id must be base32")
-            })?;
-        if decoded.len() != 32 {
-            return Err(DsmError::invalid_parameter(format!(
-                "register_device_for_auth: device_id base32 decoded to {} bytes (expected 32)",
-                decoded.len()
-            )));
-        }
-
-        // Kyber identity binding is MANDATORY (DSM beta, no legacy path): a device
-        // registration MUST carry the device's ML-KEM public key bound to its
-        // identity so online peers can do per-step-EK sends without a prior BLE
-        // exchange. Fail-closed if unavailable (wallet locked / key not installed).
-        let (kyber_public_key, kyber_binding_sig) =
-            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
-        let req = dsm::types::proto::RegisterDeviceRequest {
-            device_id: decoded.clone(),
-            pubkey: crate::util::text_id::decode_base32_crockford(pubkey).unwrap_or_default(),
-            genesis_hash: crate::util::text_id::decode_base32_crockford(genesis_hash)
-                .unwrap_or_default(),
-            kyber_public_key,
-            kyber_binding_sig,
-        };
-        let mut body = Vec::with_capacity(req.encoded_len());
-        req.encode(&mut body).map_err(|e| {
-            DsmError::internal(
-                format!("Failed to encode RegisterDeviceRequest: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let mut last_error = None;
-        let mut first_success_token: Option<String> = None;
-        let mut success_count = 0usize;
-
-        // Register with EVERY configured storage node.  DSM storage
-        // nodes are independent endpoints: each maintains its own
-        // device-registration table and gates PUT/DELETE by an
-        // auth-token issued by THAT node.  If we register with only
-        // one node (the previous early-return-on-first-success
-        // behaviour), subsequent PUTs that rotate to any of the other
-        // nodes get rejected with HTTP 401 Unauthorized — exactly the
-        // failure mode observed on the cross-device SoFi test after
-        // node-rotation landed.  The fix is to keep walking the full
-        // list so every node knows this device.
-        //
-        // Returned token: the first successful node's token (callers
-        // use the return value only as a sentinel; per-node tokens
-        // are read on demand via `resolve_storage_auth` against the
-        // local DB which is keyed by (node_url, device_id)).
-        for node_url in &self.config.node_urls {
-            let url = format!("{}/api/v2/device/register", node_url.trim_end_matches('/'));
-
-            match self
-                .inner
-                .client
-                .post(&url)
-                .header("Content-Type", "application/protobuf")
-                .body(body.clone())
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.bytes().await {
-                        Ok(bytes) => {
-                            match dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                            {
-                                Ok(parsed) => {
-                                    // token is now bytes on the wire; encode to Base32 for storage/return
-                                    let token = crate::util::text_id::encode_base32_crockford(
-                                        &parsed.token,
-                                    );
-                                    log::info!("Device registered for auth on node: {}", node_url);
-
-                                    // Store the auth token for this node
-                                    if let Err(e) = crate::storage::client_db::store_auth_token(
-                                        node_url,
-                                        device_id,
-                                        genesis_hash,
-                                        &token,
-                                    ) {
-                                        log::warn!(
-                                            "Failed to store auth token for {} (device {}): {}",
-                                            node_url,
-                                            device_id,
-                                            e
-                                        );
-                                    }
-
-                                    success_count += 1;
-                                    if first_success_token.is_none() {
-                                        first_success_token = Some(token);
-                                    }
-                                    // DON'T return — keep walking the list so EVERY node
-                                    // gets a registration + token entry in the local DB.
-                                }
-                                Err(e) => {
-                                    log::warn!("Failed to decode RegisterDeviceResponse: {}", e);
-                                    last_error = Some(format!("Decode error: {}", e));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to read bytes from response: {}", e);
-                            last_error = Some(format!("Read error: {}", e));
-                        }
-                    }
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let error_text = resp
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    log::warn!(
-                        "Failed to register device on node {}: status {} - {}",
-                        node_url,
-                        status,
-                        error_text
-                    );
-                    last_error = Some(format!("HTTP {}: {}", status, error_text));
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Network error registering device on node {}: {}",
-                        node_url,
-                        e
-                    );
-                    last_error = Some(format!("Network error: {}", e));
-                }
-            }
-        }
-
-        log::info!(
-            "register_device_for_auth: registered with {}/{} nodes",
-            success_count,
-            self.config.node_urls.len()
-        );
-
-        match first_success_token {
-            Some(token) => Ok(token),
-            None => Err(DsmError::storage(
-                format!(
-                    "Failed to register device with any storage node. Last error: {}",
-                    last_error.unwrap_or_else(|| "Unknown".to_string())
-                ),
-                None::<std::io::Error>,
-            )),
-        }
-    }
-
-    /// Publish this device's identity to the storage fleet and *verify by
-    /// read-back* that each node durably holds the exact identity tuple.
-    ///
-    /// This is deliberately stronger than [`Self::register_device_for_auth`],
-    /// which treats an HTTP 2xx as success. A 2xx only says the node accepted
-    /// the request; it does not say the row survived, that it carries the ML-KEM
-    /// binding, or that the node will answer a later lookup. So for every node
-    /// this method registers (or reconciles, if already registered) and then
-    /// performs `GET /api/v2/device/{id}`, comparing all five fields — device
-    /// id, genesis hash, AK, ML-KEM public key, ML-KEM binding signature. Only a
-    /// node that returns a full match counts toward quorum.
-    ///
-    /// Idempotent by construction: a node that already has the device answers
-    /// the register with 409 CONFLICT, which is reconciled (not failed) by
-    /// reissuing a transport token and then verifying the read-back. Re-running
-    /// this against an already-published identity is a no-op that re-confirms
-    /// it.
-    pub async fn publish_identity(
-        &self,
-        device_id: &str,
-        pubkey: &str,
-        genesis_hash: &str,
-    ) -> Result<PublicationReport, DsmError> {
-        let device_id_bytes =
-            crate::util::text_id::decode_base32_crockford(device_id).ok_or_else(|| {
-                DsmError::invalid_parameter("publish_identity: device_id must be base32")
-            })?;
-        if device_id_bytes.len() != 32 {
-            return Err(DsmError::invalid_parameter(format!(
-                "publish_identity: device_id base32 decoded to {} bytes (expected 32)",
-                device_id_bytes.len()
-            )));
-        }
-        let pubkey_bytes =
-            crate::util::text_id::decode_base32_crockford(pubkey).ok_or_else(|| {
-                DsmError::invalid_parameter("publish_identity: pubkey must be base32")
-            })?;
-        let genesis_bytes = crate::util::text_id::decode_base32_crockford(genesis_hash)
-            .ok_or_else(|| {
-                DsmError::invalid_parameter("publish_identity: genesis_hash must be base32")
-            })?;
-
-        // The ML-KEM identity binding is mandatory. If it cannot be built the
-        // wallet is locked or the key is not installed — fail closed rather than
-        // publishing an identity that peers cannot send to.
-        let (kyber_public_key, kyber_binding_sig) =
-            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
-
-        let req = dsm::types::proto::RegisterDeviceRequest {
-            device_id: device_id_bytes.clone(),
-            pubkey: pubkey_bytes.clone(),
-            genesis_hash: genesis_bytes.clone(),
-            kyber_public_key: kyber_public_key.clone(),
-            kyber_binding_sig: kyber_binding_sig.clone(),
-        };
-        let mut body = Vec::with_capacity(req.encoded_len());
-        req.encode(&mut body).map_err(|e| {
-            DsmError::internal(
-                format!("publish_identity: failed to encode RegisterDeviceRequest: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let total_nodes = self.config.node_urls.len();
-        let required = crate::storage::client_db::publication::quorum_for(total_nodes);
-        let mut failures: Vec<(String, String)> = Vec::new();
-
-        for node_url in &self.config.node_urls {
-            let base = node_url.trim_end_matches('/');
-
-            // --- Step 1: register (or reconcile an existing registration) ---
-            let register_url = format!("{base}/api/v2/device/register");
-            let registered = match self
-                .inner
-                .client
-                .post(&register_url)
-                .header("Content-Type", "application/protobuf")
-                .body(body.clone())
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                    Ok(bytes) => {
-                        match dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref()) {
-                            Ok(parsed) => {
-                                let token =
-                                    crate::util::text_id::encode_base32_crockford(&parsed.token);
-                                if let Err(e) = crate::storage::client_db::store_auth_token(
-                                    node_url,
-                                    device_id,
-                                    genesis_hash,
-                                    &token,
-                                ) {
-                                    log::warn!(
-                                        "publish_identity: failed to store auth token for {node_url}: {e}"
-                                    );
-                                }
-                                true
-                            }
-                            Err(e) => {
-                                failures.push((node_url.clone(), format!("decode error: {e}")));
-                                false
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        failures.push((node_url.clone(), format!("read error: {e}")));
-                        false
-                    }
-                },
-                Ok(resp) if resp.status() == reqwest::StatusCode::CONFLICT => {
-                    // Already registered. This is the normal outcome of a retry,
-                    // NOT a failure — reconcile the local token slot and fall
-                    // through to read-back verification, which is what actually
-                    // decides whether this node counts.
-                    log::info!(
-                        "publish_identity: {node_url} already holds device {}, reconciling",
-                        &device_id[..8.min(device_id.len())]
-                    );
-                    if let Err(e) = self
-                        .reissue_transport_token(base, node_url, device_id, genesis_hash, &body)
-                        .await
-                    {
-                        log::warn!("publish_identity: token reissue on {node_url} failed: {e}");
-                    }
-                    true
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_else(|_| "unknown".to_string());
-                    failures.push((node_url.clone(), format!("HTTP {status}: {text}")));
-                    false
-                }
-                Err(e) => {
-                    failures.push((node_url.clone(), format!("network error: {e}")));
-                    false
-                }
-            };
-
-            if !registered {
-                // Registration failed outright; a stale prior verification for
-                // this node must not keep counting toward quorum.
-                let _ = crate::storage::client_db::publication::clear_verified_node(
-                    device_id, node_url,
-                );
-                continue;
-            }
-
-            // --- Step 2: read back and verify the FULL tuple ---
-            match self
-                .verify_identity_readback(
-                    base,
-                    device_id,
-                    &device_id_bytes,
-                    &pubkey_bytes,
-                    &genesis_bytes,
-                    &kyber_public_key,
-                    &kyber_binding_sig,
-                )
-                .await
-            {
-                Ok(()) => {
-                    if let Err(e) = crate::storage::client_db::publication::record_verified_node(
-                        device_id, node_url,
-                    ) {
-                        log::warn!("publish_identity: failed to record verified node: {e}");
-                    }
-                }
-                Err(e) => {
-                    let _ = crate::storage::client_db::publication::clear_verified_node(
-                        device_id, node_url,
-                    );
-                    failures.push((node_url.clone(), format!("read-back mismatch: {e}")));
-                }
-            }
-        }
-
-        let verified =
-            crate::storage::client_db::publication::count_verified_nodes(device_id).unwrap_or(0);
-
-        log::info!(
-            "publish_identity: {verified}/{total_nodes} nodes verified (quorum {required}) for device={}",
-            &device_id[..8.min(device_id.len())]
-        );
-
-        Ok(PublicationReport {
-            verified,
-            required,
-            total_nodes,
-            failures,
-        })
-    }
-
-    /// Re-issue a transport token for a device the node already knows about.
-    /// Used on the 409 reconciliation path so a retry restores the local token
-    /// slot instead of leaving authenticated writes permanently 401ing.
-    async fn reissue_transport_token(
-        &self,
-        base: &str,
-        node_url: &str,
-        device_id: &str,
-        genesis_hash: &str,
-        body: &[u8],
-    ) -> Result<(), DsmError> {
-        let url = format!("{base}/api/v2/device/token");
-        let resp = self
-            .inner
-            .client
-            .post(&url)
-            .header("Content-Type", "application/protobuf")
-            .body(body.to_vec())
-            .send()
-            .await
-            .map_err(|e| DsmError::network(format!("token reissue failed: {e}"), Some(e)))?;
-
-        if !resp.status().is_success() {
-            return Err(DsmError::storage(
-                format!("token reissue returned HTTP {}", resp.status()),
-                None::<std::io::Error>,
-            ));
-        }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| DsmError::network(format!("token reissue read failed: {e}"), Some(e)))?;
-        let parsed =
-            dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref()).map_err(|e| {
-                DsmError::internal(
-                    format!("token reissue decode failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-        let token = crate::util::text_id::encode_base32_crockford(&parsed.token);
-        crate::storage::client_db::store_auth_token(node_url, device_id, genesis_hash, &token)
-            .map_err(|e| {
-                DsmError::storage(
-                    format!("failed to store reissued token: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-        Ok(())
-    }
-
-    /// Fetch the identity a node claims to hold and require it to match every
-    /// field we published. Any mismatch means the node must not count toward
-    /// publication quorum.
-    #[allow(clippy::too_many_arguments)]
-    async fn verify_identity_readback(
-        &self,
-        base: &str,
-        device_id_b32: &str,
-        expected_device_id: &[u8],
-        expected_pubkey: &[u8],
-        expected_genesis: &[u8],
-        expected_kyber_pk: &[u8],
-        expected_kyber_sig: &[u8],
-    ) -> Result<(), DsmError> {
-        let url = format!("{base}/api/v2/device/{device_id_b32}");
-        let resp =
-            self.inner.client.get(&url).send().await.map_err(|e| {
-                DsmError::network(format!("read-back request failed: {e}"), Some(e))
-            })?;
-
-        if !resp.status().is_success() {
-            return Err(DsmError::storage(
-                format!("read-back returned HTTP {}", resp.status()),
-                None::<std::io::Error>,
-            ));
-        }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| DsmError::network(format!("read-back read failed: {e}"), Some(e)))?;
-        let stored =
-            dsm::types::proto::RegisterDeviceRequest::decode(bytes.as_ref()).map_err(|e| {
-                DsmError::internal(
-                    format!("read-back decode failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-
-        // Compare every field. A node that returns a *different* identity under
-        // this device id is worse than one that returns nothing, so this is a
-        // hard mismatch rather than a warning.
-        let mismatch = |field: &str| {
-            Err(DsmError::storage(
-                format!("read-back {field} does not match published identity"),
-                None::<std::io::Error>,
-            ))
-        };
-        if stored.device_id != expected_device_id {
-            return mismatch("device_id");
-        }
-        if stored.genesis_hash != expected_genesis {
-            return mismatch("genesis_hash");
-        }
-        if stored.pubkey != expected_pubkey {
-            return mismatch("pubkey");
-        }
-        if stored.kyber_public_key != expected_kyber_pk {
-            return mismatch("kyber_public_key");
-        }
-        if stored.kyber_binding_sig != expected_kyber_sig {
-            return mismatch("kyber_binding_sig");
-        }
-        Ok(())
-    }
-
-    /// Sync with a storage node (simplified for JNI)
-    /// Returns a protobuf-typed response to avoid JSON usage.
-    /// Performs a real health check against the node to confirm connectivity.
-    pub async fn sync(
-        &self,
-        node_url: &str,
-    ) -> Result<crate::generated::PublishGenesisResponse, DsmError> {
-        let url = format!("{}/api/v2/health", node_url.trim_end_matches('/'));
-
-        // Perform real network check
-        let response = self.inner.client.get(&url).send().await.map_err(|e| {
-            DsmError::network(
-                format!("Failed to sync with node {}: {}", node_url, e),
-                Some(e),
-            )
-        })?;
-
-        if !response.status().is_success() {
-            return Err(DsmError::network(
-                format!("Node sync failed: HTTP {}", response.status()),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // Emit a canonical protobuf response indicating success
-        let resp = crate::generated::PublishGenesisResponse {
-            success: true,
-            published: true,
-            key: format!("synced:{node_url}"),
-            published_to_nodes: 1,
-            event_counter: dt::tick(),
-        };
-        Ok(resp)
-    }
-}
-
-// ────────────────────────────────────────────────────────────────
-// Blocking convenience helpers for recovery route handlers.
-// These create a short-lived runtime + SDK to perform a single
-// storage operation synchronously.  Used by recovery_routes.rs.
-// ────────────────────────────────────────────────────────────────
-
-/// Store data at a key on the first available storage node (blocking).
-pub fn put_to_storage(key: &str, data: &[u8]) -> Result<(), StorageNodeError> {
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| StorageNodeError::new(format!("Failed to create tokio runtime: {e}")))?;
-    let cfg = rt.block_on(StorageNodeConfig::from_env_config())?;
-    let sdk = rt
-        .block_on(StorageNodeSDK::new(cfg))
-        .map_err(|e| StorageNodeError::new(format!("SDK init failed: {e}")))?;
-
-    rt.block_on(sdk.inner.put(key, data, None))?;
-    Ok(())
-}
-
-/// Retrieve data by key from the first available storage node (blocking).
-/// Returns `Ok(None)` if the key is not found.
-pub fn get_from_storage(key: &str) -> Result<Option<Vec<u8>>, StorageNodeError> {
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| StorageNodeError::new(format!("Failed to create tokio runtime: {e}")))?;
-    let cfg = rt.block_on(StorageNodeConfig::from_env_config())?;
-    let sdk = rt
-        .block_on(StorageNodeSDK::new(cfg))
-        .map_err(|e| StorageNodeError::new(format!("SDK init failed: {e}")))?;
-
-    match rt.block_on(sdk.inner.get(key)) {
-        Ok(data) => Ok(Some(data)),
-        Err(e) if e.kind == StorageNodeErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(test)]
-mod storage_node_sdk_auth_tests {
-    use super::*;
-
-    #[test]
-    fn register_device_for_auth_rejects_dotted_decimal_device_id() {
-        // This is a pure validation test; we do not hit the network.
-        // We only need to ensure the function fails fast before attempting HTTP.
-        let rt = match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt,
-            Err(e) => panic!("Failed to create runtime: {:?}", e),
-        };
-
-        // Construct a minimal valid SDK using a dummy node URL.
-        // The dotted-decimal validation should fail before any HTTP is attempted.
-        let cfg = StorageNodeConfig {
-            node_urls: vec!["http://127.0.0.1:1".to_string()],
-            ..Default::default()
-        };
-        let sdk = match rt.block_on(StorageNodeSDK::new(cfg)) {
-            Ok(sdk) => sdk,
-            Err(e) => panic!("Failed to create SDK: {:?}", e),
-        };
-
-        let res = rt.block_on(sdk.register_device_for_auth(
-            "1.2.3.4", // dotted-decimal must be rejected
-            "AAAA", "BBBB",
-        ));
-        assert!(res.is_err());
-    }
-}
-
-/// Configuration structures
-#[derive(Debug, Clone, Default)]
-pub struct StorageNodeConfig {
-    pub node_urls: Vec<String>,
-    pub pool_config: ConnectionPoolConfig,
-    pub retry_config: RetryConfig,
-    pub selection_config: NodeSelectionConfig,
-    pub security_config: SecurityConfig,
-    pub advanced_features: AdvancedFeatures,
-    pub monitoring_config: MonitoringConfig,
-    /// Dedicated MPC genesis endpoint (POST application/octet-stream)
-    pub mpc_genesis_url: Option<String>,
-    /// Optional API key sent as Bearer token to MPC service
-    pub mpc_api_key: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConnectionPoolConfig {
-    pub max_connections: usize,
-    pub timeout_seconds: u64,
-    pub retry_attempts: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct NodeSelectionConfig {
-    pub strategy: LoadBalanceStrategy,
-    pub algorithm: NodeSelectionAlgorithm,
-    pub max_retries: u32,
-    pub preferred_regions: Vec<String>,
-    pub health_check_interval_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct AdvancedFeatures {
-    pub enable_bilateral_sync: bool,
-    pub enable_mpc_genesis: bool,
-    pub cache_size: usize,
-    pub enable_epidemic_sync: bool,
-    pub enable_geo_replication: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct MonitoringConfig {
-    pub enable_metrics: bool,
-    pub metrics_interval: Duration,
-    pub log_level: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct BilateralEntry {
-    pub id: String,
-    pub sender_genesis_hash: String,
-    pub recipient_genesis_hash: String,
-    pub pre_commitment_hash: Vec<u8>,
-    pub sender_signature: Vec<u8>,
-    pub recipient_signature: Option<Vec<u8>>,
-    pub transaction_payload: Vec<u8>,
-    pub final_signature: Option<Vec<u8>>,
-    pub transaction_params: HashMap<String, String>,
-    pub state_number: u64,
-    pub tick: u64,
-    pub status: BilateralTransactionStatus,
-    pub metadata: HashMap<String, String>,
-}
-
-impl Default for ConnectionPoolConfig {
-    fn default() -> Self {
-        Self {
-            max_connections: 25,
-            timeout_seconds: 30,
-            retry_attempts: 3,
-        }
-    }
-}
-
-impl Default for NodeSelectionConfig {
-    fn default() -> Self {
-        Self {
-            strategy: LoadBalanceStrategy::RoundRobin,
-            algorithm: NodeSelectionAlgorithm::HealthBased,
-            max_retries: 3,
-            preferred_regions: vec!["us-east-1".to_string()],
-            health_check_interval_ms: 30000,
-        }
-    }
-}
-
-impl Default for AdvancedFeatures {
-    fn default() -> Self {
-        Self {
-            enable_bilateral_sync: false,
-            enable_mpc_genesis: true,
-            cache_size: 1000,
-            enable_epidemic_sync: false,
-            enable_geo_replication: false,
-        }
-    }
-}
-
-impl Default for MonitoringConfig {
-    fn default() -> Self {
-        Self {
-            enable_metrics: true,
-            metrics_interval: Duration::from_ticks(60),
-            log_level: "info".to_string(),
-        }
-    }
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            initial_delay: Duration::from_ticks(1000),
-            max_delay: Duration::from_ticks(30000),
-            backoff_multiplier: 2.0,
-        }
-    }
-}
-
-impl StorageNodeConfig {
-    pub fn new(node_urls: Vec<String>) -> Self {
-        Self {
-            node_urls,
-            pool_config: ConnectionPoolConfig::default(),
-            retry_config: RetryConfig {
-                max_attempts: 3,
-                initial_delay: Duration::from_ticks(1000),
-                max_delay: Duration::from_ticks(30000),
-                backoff_multiplier: 2.0,
+            Ok(payload) => ObjectRead::Bytes {
+                namespace,
+                payload: payload.to_vec(),
             },
-            selection_config: NodeSelectionConfig::default(),
-            security_config: SecurityConfig { enable_auth: false },
-            advanced_features: AdvancedFeatures::default(),
-            monitoring_config: MonitoringConfig::default(),
-            mpc_genesis_url: None,
-            mpc_api_key: None,
-        }
-    }
-
-    /// Create configuration by discovering storage node URLs automatically
-    /// No hardcoded or compatibility-path values allowed per DSM protocol
-    pub async fn from_env_config() -> Result<Self, StorageNodeError> {
-        // First, try to load explicit endpoints from the core env config if present
-        // This allows Android to provide a packaged config (copied to filesDir) and be honored here.
-        match crate::network::NetworkConfigLoader::load_env_config() {
-            Ok(env) => {
-                let urls: Vec<String> = env.nodes.into_iter().map(|n| n.endpoint).collect();
-                if !urls.is_empty() {
-                    log::info!("Using {} storage nodes from env config", urls.len());
-                    let mut cfg = Self::new(urls);
-                    // Carry optional MPC endpoint from env config
-                    if let Ok(env2) = crate::network::NetworkConfigLoader::load_env_config() {
-                        cfg.mpc_genesis_url = env2.mpc_genesis_url;
-                        cfg.mpc_api_key = env2.mpc_api_key;
-                        if let Some(ref u) = cfg.mpc_genesis_url {
-                            log::info!("MPC genesis endpoint configured: {}", u);
-                        } else {
-                            log::warn!(
-                                "MPC genesis endpoint not configured; genesis will fail-closed"
-                            );
-                        }
-                    }
-                    return Ok(cfg);
-                }
-            }
             Err(e) => {
-                log::warn!(
-                    "Env config not available for storage nodes: {e} — no discovery in strict mode"
-                );
+                log::debug!("immutable get at {}: {e}", self.member_id);
+                ObjectRead::Unavailable
             }
         }
-
-        // In strict mode, we require env config - no automatic discovery
-        Err(StorageNodeError::new("STRICT: env config unavailable or contains no storage nodes. Discovery is disabled in production builds.".to_string()))
     }
 
-    /// Create configuration with automatic network detection and discovery
-    #[cfg(feature = "dev-discovery")]
-    pub async fn auto_discover() -> Result<Self, StorageNodeError> {
-        log::info!("Starting automatic DSM storage node discovery");
+    /// Append `addr` under `locator` (§7).
+    pub async fn append_index(
+        &self,
+        namespace: &[u8],
+        locator: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<(), String> {
+        answer(
+            self.client
+                .post(format!(
+                    "{}/api/v2/index/{}",
+                    self.endpoint,
+                    encode_base32_crockford(locator)
+                ))
+                .header("x-namespace", namespace_header(namespace)?)
+                .body(addr.to_vec()),
+        )
+        .await
+        .map(|body| {
+            log::debug!(
+                "index append at {}: {} bytes answered",
+                self.member_id,
+                body.map_or(0, |b| b.len())
+            )
+        })
+    }
 
-        // Try the network detection auto-discovery
-        match crate::sdk::network_detection::auto_detect_and_configure().await {
-            Ok(detection_result) => {
-                log::info!("Network detection succeeded");
-                log::info!(
-                    "Primary interface: {} ({})",
-                    detection_result.primary_interface.name,
-                    detection_result.primary_interface.ip_address
-                );
-                log::info!("Network type: {:?}", detection_result.network_type);
-                log::info!(
-                    "Discovered {} storage nodes",
-                    detection_result.discovered_storage_nodes.len()
-                );
+    /// One page of the addresses under `locator` after sequence `after`, in
+    /// append order. `None` when the member did not answer.
+    pub async fn read_index(
+        &self,
+        namespace: &[u8],
+        locator: &[u8; 32],
+        after: i64,
+        limit: i64,
+    ) -> Option<Vec<proto::IndexEntryV1>> {
+        let body = answer(
+            self.client
+                .get(format!(
+                    "{}/api/v2/index/{}?after={after}&limit={limit}",
+                    self.endpoint,
+                    encode_base32_crockford(locator)
+                ))
+                .header("x-namespace", namespace_header(namespace).ok()?),
+        )
+        .await
+        .ok()??;
+        Some(proto::IndexPageV1::decode(body.as_slice()).ok()?.entries)
+    }
 
-                let urls: Vec<String> = detection_result
-                    .discovered_storage_nodes
-                    .into_iter()
-                    .map(|node| node.endpoint)
-                    .collect();
-
-                if urls.is_empty() {
-                    return Err(StorageNodeError::from_message(
-                        "No storage nodes discovered via network detection".to_string(),
+    /// Put entries in one local transaction at the member, all or none (§6).
+    /// One arrival record per entry, in order, each checked to name this
+    /// member and its entry's cell.
+    pub async fn put_cells(
+        &self,
+        entries: &[(Vec<u8>, [u8; 32], Vec<u8>)],
+    ) -> Result<Vec<ArrivalRecord>, String> {
+        let batch = proto::CellPutsV1 {
+            entries: entries
+                .iter()
+                .map(|(namespace, key, value)| proto::CellPutV1 {
+                    namespace: namespace.clone(),
+                    key: key.to_vec(),
+                    value: value.clone(),
+                })
+                .collect(),
+        };
+        let body = answer(
+            self.client
+                .post(format!("{}/api/v2/cells", self.endpoint))
+                .body(batch.encode_to_vec()),
+        )
+        .await?
+        .ok_or("cells put: answered with no arrival records")?;
+        let page = proto::ArrivalRecordsV1::decode(body.as_slice())
+            .map_err(|e| format!("cells put: {e}"))?;
+        if page.records.len() != entries.len() {
+            return Err(format!(
+                "cells put: {} arrival records for {} entries",
+                page.records.len(),
+                entries.len()
+            ));
+        }
+        page.records
+            .iter()
+            .zip(entries)
+            .map(|(record, (namespace, key, value))| {
+                let record = ArrivalRecord::from_proto(record)
+                    .ok_or("cells put: a malformed arrival record")?;
+                if record.member_id != self.member_id.as_bytes()
+                    || record.namespace != *namespace
+                    || record.key != *key
+                {
+                    return Err(format!(
+                        "cells put: the record for a {}-byte entry names another member or cell",
+                        value.len()
                     ));
                 }
+                Ok(record)
+            })
+            .collect()
+    }
 
-                log::info!(
-                    "Auto-discovery completed successfully with {} storage nodes",
-                    urls.len()
-                );
-                Ok(Self::new(urls))
-            }
+    /// Everything the member holds at the cell, in arrival order. `None` when
+    /// the member did not answer; an empty list is an answer.
+    pub async fn get_cell(&self, namespace: &[u8], key: &[u8; 32]) -> Option<Vec<Vec<u8>>> {
+        let body = answer(
+            self.client
+                .get(format!(
+                    "{}/api/v2/cell/{}",
+                    self.endpoint,
+                    encode_base32_crockford(key)
+                ))
+                .header("x-namespace", namespace_header(namespace).ok()?),
+        )
+        .await
+        .ok()??;
+        Some(proto::CellValuesV1::decode(body.as_slice()).ok()?.values)
+    }
+
+    /// Close a ByteCommit cycle over what arrived since the last one and
+    /// return the cycle of the member's latest ByteCommit, as the member
+    /// states it (§14 closing).
+    pub async fn close_cycle(&self) -> Option<u64> {
+        let body = answer(
+            self.client
+                .post(format!("{}/api/v2/bytecommit/close", self.endpoint)),
+        )
+        .await
+        .ok()??;
+        let commit = ByteCommit::from_proto(&proto::ByteCommitV4::decode(body.as_slice()).ok()?)?;
+        (commit.member_id == self.member_id.as_bytes()).then_some(commit.cycle_index)
+    }
+
+    /// Ask the member to fetch its set-mates' new ByteCommits into its mirror
+    /// (§14 mirror sync). The member answers `204 No Content` once every
+    /// set-mate answered; anything else is why its mirror is not current.
+    pub async fn sync_mirror(&self) -> Result<(), String> {
+        match answer(
+            self.client
+                .post(format!("{}/api/v2/bytecommit/mirror/sync", self.endpoint)),
+        )
+        .await?
+        {
+            None => Ok(()),
+            Some(body) => Err(format!(
+                "mirror sync at {} answered {} bytes where no content is the answer",
+                self.member_id,
+                body.len()
+            )),
+        }
+    }
+
+    /// Every distinct ByteCommit this member's mirror holds for `member` at
+    /// `cycle`. `None` when the member did not answer.
+    pub async fn mirrored(&self, member: &[u8], cycle: u64) -> Option<Vec<ByteCommit>> {
+        let body = answer(self.client.get(format!(
+            "{}/api/v2/bytecommit/mirror/{}/{cycle}",
+            self.endpoint,
+            encode_base32_crockford(member)
+        )))
+        .await
+        .ok()??;
+        proto::ByteCommitsV4::decode(body.as_slice())
+            .ok()?
+            .commits
+            .iter()
+            .map(ByteCommit::from_proto)
+            .collect()
+    }
+
+    /// The member's proof that its ByteCommit at `cycle` commits the cell's
+    /// latest entry as of that cycle.
+    pub async fn proof(
+        &self,
+        namespace: &[u8],
+        key: &[u8; 32],
+        cycle: u64,
+    ) -> Option<CellCommitProof> {
+        let body = answer(
+            self.client
+                .get(format!(
+                    "{}/api/v2/bytecommit/proof/{}",
+                    self.endpoint,
+                    encode_base32_crockford(key)
+                ))
+                .header("x-namespace", namespace_header(namespace).ok()?)
+                .header("x-cycle", cycle.to_string()),
+        )
+        .await
+        .ok()??;
+        CellCommitProof::from_proto(&proto::CellCommitProofV1::decode(body.as_slice()).ok()?)
+    }
+
+    /// The member's latest ByteCommit, as it states it (§14).
+    pub async fn latest_bytecommit(&self) -> LatestByteCommitRead {
+        let response = match self
+            .client
+            .get(format!("{}/api/v2/bytecommit/latest", self.endpoint))
+            .send()
+            .await
+        {
+            Ok(response) => response,
             Err(e) => {
-                log::warn!("Network detection failed: {e}, trying fallback discovery");
-
-                match crate::sdk::discovery::discover_storage_nodes_async().await {
-                    Ok(nodes) => {
-                        if nodes.is_empty() {
-                            Err(StorageNodeError::from_message(
-                                "No storage nodes found via any discovery method".to_string()
-                            ))
-                        } else {
-                            log::info!("Compatibility discovery found {} nodes", nodes.len());
-                            log::info!("Auto-discovery completed successfully with {} storage nodes", nodes.len());
-                            Ok(Self::new(nodes))
-                        }
-                    },
-                    Err(discovery_err) => {
-                            Err(StorageNodeError::from_message(format!(
-                                "All discovery methods failed. Network detection: {e}. Discovery service: {discovery_err}",
-                          )))
-                    }
+                return LatestByteCommitRead {
+                    answer: LatestByteCommit::Unanswered(format!("transport: {}", with_causes(&e))),
+                    answered_as: None,
                 }
             }
+        };
+        let answered_as = response
+            .headers()
+            .get(ECHO_HEADER)
+            .map(|v| v.as_bytes().to_vec());
+        let answer = match response.status().as_u16() {
+            200 => match response.bytes().await {
+                Ok(body) => match proto::ByteCommitV4::decode(body.as_ref())
+                    .ok()
+                    .and_then(|p| ByteCommit::from_proto(&p))
+                {
+                    Some(commit) if commit.member_id == self.member_id.as_bytes() => {
+                        LatestByteCommit::Stated(commit)
+                    }
+                    Some(commit) => LatestByteCommit::Unanswered(format!(
+                        "answered with a ByteCommit naming {}",
+                        String::from_utf8_lossy(&commit.member_id)
+                    )),
+                    None => LatestByteCommit::Unanswered(
+                        "answered with bytes that are not a ByteCommit".to_string(),
+                    ),
+                },
+                Err(e) => LatestByteCommit::Unanswered(format!("reading the answer: {e}")),
+            },
+            204 => LatestByteCommit::NoCycle,
+            status => LatestByteCommit::Unanswered(format!("answered HTTP {status}")),
+        };
+        LatestByteCommitRead {
+            answer,
+            answered_as,
         }
     }
-
-    /// Auto-discovery is disabled unless the `dev-discovery` feature is enabled.
-    #[cfg(not(feature = "dev-discovery"))]
-    pub async fn auto_discover() -> Result<Self, StorageNodeError> {
-        Err(StorageNodeError::from_message(
-            "Auto-discovery requires the 'dev-discovery' Cargo feature".to_string(),
-        ))
-    }
 }
 
-/// Pure read-modify-canonicalise step for a Device Tree.
-///
-/// Given the prior-persisted [`generated::DeviceTreeStateV1`] bytes (or
-/// an empty slice if no tree has been written yet), the `genesis_hash`
-/// (used to seed the root-device leaf when no tree exists yet), and a
-/// caller `mutate` closure, this function:
-///
-/// 1. Decodes the prior state if non-empty, or initialises a single-
-///    leaf tree containing `genesis_hash` (== root device_id).
-/// 2. Applies `mutate` to the mutable leaf list.
-/// 3. Canonicalises through [`dsm::common::device_tree::DeviceTree::new`]
-///    (sort + dedup).
-/// 4. Enforces `device_count >= 1` post-genesis.
-/// 5. Bumps `version_number` strictly.
-/// 6. Re-encodes a fresh [`generated::DeviceTreeStateV1`] as bytes.
-///
-/// Returns the new [`DeviceTreeSnapshot`] alongside the bytes the
-/// caller persists. Pure: no I/O, no global state, so it's directly
-/// unit-testable.
-fn apply_device_tree_mutation<F: FnOnce(&mut Vec<[u8; 32]>)>(
-    prior_bytes: &[u8],
-    genesis_hash: [u8; 32],
-    mutate: F,
-) -> Result<(DeviceTreeSnapshot, Vec<u8>), DsmError> {
-    let (mut device_ids, prior_version) = if prior_bytes.is_empty() {
-        (vec![genesis_hash], 0u64)
-    } else {
-        let prior = decode_device_tree_state(prior_bytes)?;
-        (prior.device_ids, prior.version_number)
-    };
+// ── A committed set ─────────────────────────────────────────────────────────
 
-    mutate(&mut device_ids);
+/// Every member of one committed set, in the set's member order.
+#[derive(Debug, Clone)]
+pub struct SetClient {
+    members: Vec<MemberClient>,
+}
 
-    // Canonicalise (sort + dedup) via DeviceTree::new.
-    let tree = dsm::common::device_tree::DeviceTree::new(device_ids);
-    let device_count = tree.len() as u32;
-    if device_count == 0 {
-        return Err(DsmError::invalid_operation(
-            "Device Tree must contain at least one device post-genesis",
-        ));
+impl SetClient {
+    pub fn new(set: &StorageSet) -> Result<Self, DsmError> {
+        Ok(Self {
+            members: set
+                .members()
+                .iter()
+                .map(|m| MemberClient::new(&m.member_id, &m.endpoint))
+                .collect::<Result<_, DsmError>>()?,
+        })
     }
 
-    let sorted_ids: Vec<[u8; 32]> = tree.leaves().to_vec();
-    let root = tree.root();
-    let new_version = prior_version.checked_add(1).ok_or_else(|| {
-        DsmError::invalid_operation("Device Tree version_number overflowed u64; refusing to wrap")
-    })?;
+    pub fn members(&self) -> &[MemberClient] {
+        &self.members
+    }
 
-    let snapshot = DeviceTreeSnapshot {
-        root_hash: root,
-        device_count,
-        version_number: new_version,
-    };
+    /// The member with this id, if the set has it.
+    pub fn member(&self, member_id: &[u8]) -> Option<&MemberClient> {
+        self.members
+            .iter()
+            .find(|m| m.member_id.as_bytes() == member_id)
+    }
 
-    let new_state = generated::DeviceTreeStateV1 {
-        tree: Some(snapshot.to_proto()),
-        device_ids: sorted_ids.iter().map(|id| id.to_vec()).collect(),
-    };
-    let mut buf = Vec::with_capacity(new_state.encoded_len());
-    new_state.encode(&mut buf).map_err(|e| {
-        DsmError::internal(
-            format!("encode DeviceTreeStateV1: {e}"),
-            None::<std::io::Error>,
+    // Every set-wide call asks all members at once and keeps their answers
+    // in member order: a phone pays one network latency for the set, not
+    // one per member, and nothing a member answers changes.
+
+    /// Put an immutable object at every member. Returns how many members
+    /// took it; `Stored` is Core's reading of the members afterwards, never
+    /// this count.
+    pub async fn put_immutable(&self, namespace: TaggedHashDomain<'_>, payload: &[u8]) -> u32 {
+        let answers = futures::future::join_all(
+            self.members
+                .iter()
+                .map(|member| member.put_immutable(namespace, payload)),
         )
-    })?;
-
-    Ok((snapshot, buf))
-}
-
-/// Phase B.7 (issue #278) — DeviceTreeViewer one-row-per-leaf view
-/// of one genesis's currently-published Device Tree.
-///
-/// Returned by [`StorageNodeSDK::fetch_device_tree_snapshot`] and
-/// consumed by the `identity.devtree.snapshot` query handler (in
-/// `dsm_sdk::handlers::identity_routes`). Carries:
-///
-/// * `claimed_tree` — the storage-node-published `DeviceTreeV1`
-///   summary (claimed root_hash, device_count, version_number).
-/// * `recomputed_root` — the R_G we get from rebuilding
-///   `DeviceTree::new` over the persisted `device_ids` list.
-/// * `claimed_root_matches_recomputed` — trust-but-verify gate.
-///   `false` means the storage node is serving a state whose
-///   declared root doesn't match its declared leaf set.
-/// * `leaves` — per-leaf `(device_id, encoded DeviceInclusionProofV1
-///   bytes, inclusion_verified)`. `inclusion_verified` is the
-///   Rust-side result of `DevTreeProof::verify(device_id,
-///   recomputed_root)`.
-#[derive(Debug, Clone)]
-pub struct DeviceTreeSnapshotView {
-    pub claimed_tree: generated::DeviceTreeV1,
-    pub recomputed_root: [u8; 32],
-    pub claimed_root_matches_recomputed: bool,
-    pub leaves: Vec<DeviceTreeLeafViewRust>,
-}
-
-/// Phase B.7 (issue #278) — one row in [`DeviceTreeSnapshotView`].
-#[derive(Debug, Clone)]
-pub struct DeviceTreeLeafViewRust {
-    pub device_id: [u8; 32],
-    /// Encoded [`generated::DeviceInclusionProofV1`] proto bytes
-    /// — produced via `DevTreeProof::to_v1_proto_bytes` so the
-    /// storage-node-served and SDK-served bytes are byte-identical
-    /// for the same input.
-    pub proof_bytes: Vec<u8>,
-    /// `DevTreeProof::verify(device_id, recomputed_root)` result.
-    pub inclusion_verified: bool,
-}
-
-/// Pure helper for Phase B.7 (issue #278). Decodes a persisted
-/// [`generated::DeviceTreeStateV1`] body, rebuilds the canonical
-/// `DeviceTree`, derives a fresh inclusion proof for every leaf, and
-/// verifies each proof locally with `DevTreeProof::verify`. Returns a
-/// [`DeviceTreeSnapshotView`] suitable for handing to the
-/// `identity.devtree.snapshot` route.
-///
-/// Pure: no I/O, so directly unit-testable.
-pub(crate) fn build_device_tree_snapshot_view(
-    persisted_bytes: &[u8],
-) -> Result<DeviceTreeSnapshotView, DsmError> {
-    let state = generated::DeviceTreeStateV1::decode(persisted_bytes).map_err(|e| {
-        DsmError::serialization_error(
-            format!("decode DeviceTreeStateV1: {e}"),
-            "DeviceTreeStateV1",
-            None::<String>,
-            Some(e),
-        )
-    })?;
-    let claimed_tree = state.tree.clone().ok_or_else(|| {
-        DsmError::serialization_error(
-            "DeviceTreeStateV1.tree is missing",
-            "DeviceTreeStateV1",
-            None::<String>,
-            None::<std::io::Error>,
-        )
-    })?;
-
-    let mut devids: Vec<[u8; 32]> = Vec::with_capacity(state.device_ids.len());
-    for (i, id) in state.device_ids.iter().enumerate() {
-        if id.len() != 32 {
-            return Err(DsmError::serialization_error(
-                format!(
-                    "DeviceTreeStateV1.device_ids[{i}] is {} bytes, expected 32",
-                    id.len()
-                ),
-                "DeviceTreeStateV1",
-                None::<String>,
-                None::<std::io::Error>,
-            ));
+        .await;
+        let mut took = 0u32;
+        for (member, answer) in self.members.iter().zip(answers) {
+            match answer {
+                Ok(()) => took += 1,
+                Err(e) => log::warn!("immutable put: {} did not take it: {e}", member.member_id),
+            }
         }
-        let mut buf = [0u8; 32];
-        buf.copy_from_slice(id);
-        devids.push(buf);
+        took
     }
 
-    let tree = dsm::common::device_tree::DeviceTree::new(devids);
-    let recomputed_root = tree.root();
-
-    let claimed_root_matches_recomputed = claimed_tree.root_hash.len() == 32
-        && claimed_tree.root_hash.as_slice() == recomputed_root.as_slice();
-
-    let mut leaves: Vec<DeviceTreeLeafViewRust> = Vec::with_capacity(tree.leaves().len());
-    for leaf in tree.leaves() {
-        let dev_proof = tree.proof(leaf).ok_or_else(|| {
-            DsmError::internal(
-                "build_device_tree_snapshot_view: DeviceTree::proof returned None for own leaf",
-                None::<std::io::Error>,
-            )
-        })?;
-        let proof_bytes = dev_proof.to_v1_proto_bytes(leaf, &recomputed_root);
-        let inclusion_verified = dev_proof.verify(leaf, &recomputed_root);
-        leaves.push(DeviceTreeLeafViewRust {
-            device_id: *leaf,
-            proof_bytes,
-            inclusion_verified,
-        });
+    /// What every member answered at `addr`, in member order.
+    pub async fn get_immutable(&self, addr: &[u8; 32]) -> Vec<ObjectRead> {
+        futures::future::join_all(self.members.iter().map(|member| member.get_immutable(addr)))
+            .await
     }
 
-    Ok(DeviceTreeSnapshotView {
-        claimed_tree,
-        recomputed_root,
-        claimed_root_matches_recomputed,
-        leaves,
-    })
-}
-
-/// Owned view of a persisted [`generated::DeviceTreeStateV1`].
-///
-/// Carries the canonical sorted + deduplicated 32-byte DevID list and
-/// the prior `version_number` so [`StorageNodeSDK::mutate_device_tree_state`]
-/// can apply a strictly-monotonic bump on every accepted update.
-#[derive(Debug, Clone)]
-struct PersistedDeviceTreeState {
-    device_ids: Vec<[u8; 32]>,
-    version_number: u64,
-}
-
-/// Decode the persisted [`generated::DeviceTreeStateV1`] proto and
-/// project it into a normalised [`PersistedDeviceTreeState`].
-///
-/// Returns [`DsmError::deserialization`] on any of:
-///   - body fails prost decoding,
-///   - the inner `tree` summary is missing,
-///   - any `device_ids` element is not exactly 32 bytes.
-///
-/// The list is re-canonicalised via
-/// [`dsm::common::device_tree::DeviceTree::new`] so a future restart
-/// reproduces the byte-exact root even if the on-disk encoding was
-/// produced by an older SDK that didn't sort + dedup pre-persist.
-fn decode_device_tree_state(bytes: &[u8]) -> Result<PersistedDeviceTreeState, DsmError> {
-    let state = generated::DeviceTreeStateV1::decode(bytes).map_err(|e| {
-        DsmError::serialization_error(
-            format!("decode DeviceTreeStateV1: {e}"),
-            "DeviceTreeStateV1",
-            None::<String>,
-            Some(e),
-        )
-    })?;
-    let tree = state.tree.ok_or_else(|| {
-        DsmError::serialization_error(
-            "DeviceTreeStateV1.tree is missing",
-            "DeviceTreeStateV1",
-            None::<String>,
-            None::<std::io::Error>,
-        )
-    })?;
-    let mut ids: Vec<[u8; 32]> = Vec::with_capacity(state.device_ids.len());
-    for (i, id) in state.device_ids.iter().enumerate() {
-        if id.len() != 32 {
-            return Err(DsmError::serialization_error(
-                format!(
-                    "DeviceTreeStateV1.device_ids[{i}] is {} bytes, expected 32",
-                    id.len()
-                ),
-                "DeviceTreeStateV1",
-                None::<String>,
-                None::<std::io::Error>,
-            ));
+    /// The first bytes a member answers that re-hash to `addr` under the
+    /// namespace they came with. The content address is the check: a member
+    /// can fail to serve an object, never substitute one, so whichever
+    /// member's bytes verify first are the object's bytes, and the answers
+    /// still on their way are not waited for. Every member is asked at once.
+    /// `None` when no member holds such bytes.
+    pub async fn fetch_verified(&self, addr: &[u8; 32]) -> Option<Vec<u8>> {
+        let mut answers: futures::stream::FuturesUnordered<_> = self
+            .members
+            .iter()
+            .map(|member| async move { (member, member.get_immutable(addr).await) })
+            .collect();
+        while let Some((member, read)) = futures::StreamExt::next(&mut answers).await {
+            let ObjectRead::Bytes { namespace, payload } = read else {
+                continue;
+            };
+            let Ok(domain) = TaggedHashDomain::try_new(&namespace) else {
+                log::warn!(
+                    "immutable get at {}: a namespace that is not a domain",
+                    member.member_id
+                );
+                continue;
+            };
+            if dsm::storage_object::immutable_addr(domain, &payload) == *addr {
+                return Some(payload);
+            }
+            log::warn!(
+                "immutable get at {}: bytes that do not hash to the address",
+                member.member_id
+            );
         }
-        let mut buf = [0u8; 32];
-        buf.copy_from_slice(id);
-        ids.push(buf);
+        None
     }
-    // Re-canonicalise via DeviceTree::new so any earlier writer that
-    // happened to persist an unsorted / non-deduped list still yields
-    // the same recovered list this code path produces. Idempotent
-    // when the list is already canonical.
-    let canon = dsm::common::device_tree::DeviceTree::new(ids);
-    Ok(PersistedDeviceTreeState {
-        device_ids: canon.leaves().to_vec(),
-        version_number: tree.version_number,
-    })
+
+    /// Append `addr` under `locator` at every member. Returns how many took
+    /// it.
+    pub async fn append_index(&self, namespace: &[u8], locator: &[u8; 32], addr: &[u8; 32]) -> u32 {
+        let answers = futures::future::join_all(
+            self.members
+                .iter()
+                .map(|member| member.append_index(namespace, locator, addr)),
+        )
+        .await;
+        let mut took = 0u32;
+        for (member, answer) in self.members.iter().zip(answers) {
+            match answer {
+                Ok(()) => took += 1,
+                Err(e) => log::warn!("index append: {} did not take it: {e}", member.member_id),
+            }
+        }
+        took
+    }
+
+    /// Every member's addresses under `locator`, in append order, paged
+    /// until the member's index ends or `max_per_member` were read; `None`
+    /// where a member did not answer.
+    pub async fn read_index(
+        &self,
+        namespace: &[u8],
+        locator: &[u8; 32],
+        max_per_member: usize,
+    ) -> Vec<Option<Vec<[u8; 32]>>> {
+        const PAGE: i64 = 256;
+        // Each member's pages follow one another; the members are read at once.
+        futures::future::join_all(self.members.iter().map(|member| async move {
+            let mut addrs: Vec<[u8; 32]> = Vec::new();
+            let mut after = 0i64;
+            let mut answered = false;
+            while let Some(page) = member.read_index(namespace, locator, after, PAGE).await {
+                answered = true;
+                let full = page.len() == PAGE as usize;
+                for entry in page {
+                    match <[u8; 32]>::try_from(entry.addr.as_slice()) {
+                        Ok(addr) => addrs.push(addr),
+                        Err(e) => log::warn!(
+                            "index read at {}: an entry that is not an address: {e}",
+                            member.member_id
+                        ),
+                    }
+                    after = after.max(entry.seq);
+                }
+                if !full || addrs.len() >= max_per_member {
+                    break;
+                }
+            }
+            answered.then_some(addrs)
+        }))
+        .await
+    }
+
+    /// Put `value` at a cell at every member, each put its own transaction.
+    /// For cells whose objects prove themselves and are not raced (the
+    /// device directory); a cell that is raced is written along its route
+    /// (`sdk::route_seats`). Returns how many members took it.
+    pub async fn put_cell(&self, namespace: &[u8], key: &[u8; 32], value: &[u8]) -> u32 {
+        let entry = [(namespace.to_vec(), *key, value.to_vec())];
+        let answers =
+            futures::future::join_all(self.members.iter().map(|member| member.put_cells(&entry)))
+                .await;
+        let mut took = 0u32;
+        for (member, answer) in self.members.iter().zip(answers) {
+            match answer {
+                Ok(records) => {
+                    log::debug!(
+                        "cell put at {}: {} arrival record",
+                        member.member_id,
+                        records.len()
+                    );
+                    took += 1;
+                }
+                Err(e) => log::warn!("cell put: {} did not take it: {e}", member.member_id),
+            }
+        }
+        took
+    }
+
+    /// Everything every member holds at a cell, in member order; `None`
+    /// where a member did not answer.
+    pub async fn get_cell(&self, namespace: &[u8], key: &[u8; 32]) -> Vec<Option<Vec<Vec<u8>>>> {
+        futures::future::join_all(
+            self.members
+                .iter()
+                .map(|member| member.get_cell(namespace, key)),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
-    use super::*;
-    use std::collections::HashMap;
+    use super::{build_member_client, read_ca_certs, CaMaterial, LatestByteCommit, MemberClient};
 
-    // Helper to build a minimal SDK instance (no network I/O on new())
-    async fn make_sdk() -> StorageNodeSDK {
-        let config = StorageNodeConfig::new(vec!["http://localhost:8080".to_string()]);
-        StorageNodeSDK::new(config).await.expect("SDK init")
-    }
-
+    /// The env config the app bundles names the CA bundled beside it, and the
+    /// storage client builds from that CA through the same reader and builder
+    /// every client is made by. (Which CA issued the fleet's certificates is
+    /// not decidable offline; a device run against the fleet is what shows the
+    /// bundled CA verifies them.)
     #[test]
-    fn param_kv_is_deterministic_and_sorted() {
-        let mut m = HashMap::new();
-        m.insert("z".to_string(), "9".to_string());
-        m.insert("a".to_string(), "1".to_string());
-        m.insert("m".to_string(), "5".to_string());
-
-        let kv = super::map_to_param_kv(&m);
-        // Expect lexicographic order by key: a, m, z
-        let keys: Vec<&str> = kv.iter().map(|e| e.key.as_str()).collect();
-        assert_eq!(keys, vec!["a", "m", "z"]);
-        // Values should correspond to original map entries (order independent of insertion)
-        let vals: Vec<&str> = kv.iter().map(|e| e.value.as_str()).collect();
-        assert_eq!(vals, vec!["1", "5", "9"]);
-    }
-
-    #[tokio::test]
-    async fn submit_bilateral_requires_state_hash_param() {
-        let sdk = make_sdk().await;
-
-        let params: HashMap<String, String> = HashMap::new();
-        let res = sdk
-            .submit_bilateral_entry("sender_genesis", "recipient_genesis", params, 1)
-            .await;
-        assert!(res.is_err(), "expected error when state_hash missing");
-    }
-
-    #[tokio::test]
-    async fn submit_bilateral_with_valid_state_hash() {
-        let sdk = make_sdk().await;
-
-        let mut params: HashMap<String, String> = HashMap::new();
-        // Provide raw bytes via a short ASCII string (treated as bytes in SDK)
-        params.insert("state_hash".to_string(), "abcd".to_string());
-
-        let entry = sdk
-            .submit_bilateral_entry("sender_genesis", "recipient_genesis", params.clone(), 1)
-            .await
-            .expect("submit should succeed with valid state_hash");
-
-        // Recompute expected pre-commitment to verify
-        // Build canonical params proto and preimage deterministically as used above
-        let params_proto = generated::TransactionParamsProto {
-            kv: super::map_to_param_kv(&params),
-        };
-        let params_bytes = params_proto.encode_to_vec();
-        let mut preimage: Vec<u8> = Vec::with_capacity(4 + params_bytes.len() + 8);
-        // state_hash is the raw bytes of "abcd"
-        let state_hash_bytes_for_test = b"abcd".to_vec();
-        preimage.extend_from_slice(&state_hash_bytes_for_test);
-        preimage.extend_from_slice(&params_bytes);
-        preimage.extend_from_slice(&2u64.to_le_bytes());
-        let expected = dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_SDK_BILATERAL_ENTRY_V1,
-            &preimage,
+    fn the_bundled_env_config_names_a_ca_the_storage_client_builds_from() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../frontend/public/dsm_env_config.toml"
         );
-        assert_eq!(entry.pre_commitment_hash, expected.as_bytes());
-        assert_eq!(entry.state_number, 1);
-        assert_eq!(entry.status, BilateralTransactionStatus::Pending);
+        let certs = read_ca_certs(path).expect("the bundled CA is named and readable");
+        assert_eq!(certs.len(), 1, "exactly the fleet's CA");
+        assert!(certs[0].0.ends_with("ca.crt"));
+        build_member_client(
+            &CaMaterial {
+                env_path: Some(path.to_string()),
+                certs,
+            },
+            "dsm-node-1",
+        )
+        .expect("the storage client builds from the bundled CA");
     }
 
-    #[tokio::test]
-    async fn process_bilateral_transaction_validates_hash() {
-        let sdk = make_sdk().await;
-
-        let mut params: HashMap<String, String> = HashMap::new();
-        params.insert("state_hash".to_string(), "abcd".to_string());
-
-        let entry = sdk
-            .submit_bilateral_entry("sender_genesis", "recipient_genesis", params.clone(), 5)
+    /// A relay in front of one member: it holds the first connection it
+    /// accepts until every relay of the set holds one, then carries the bytes
+    /// both ways. A client that asked the members one at a time would wait at
+    /// the first relay for ever; one that asks them at once is answered.
+    async fn relay(
+        scheme: &str,
+        target: String,
+        all_in: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("submit should succeed with valid state_hash");
-
-        // Happy path: approve with a dummy signature
-        let approved = sdk
-            .process_bilateral_transaction(entry.clone(), vec![1, 2, 3], true)
-            .await
-            .expect("process should verify and sign");
-        assert_eq!(approved.status, BilateralTransactionStatus::Signed);
-        assert!(approved.recipient_signature.is_some());
-
-        // Tamper with params -> verification must fail
-        let mut tampered = entry.clone();
-        tampered
-            .transaction_params
-            .insert("memo".to_string(), "tamper".to_string());
-        let err = sdk
-            .process_bilateral_transaction(tampered, vec![9, 9], true)
-            .await
-            .expect_err("tampered pre-commitment should fail");
-        let msg = format!("{}", err);
-        assert!(msg.contains("Pre-commitment hash verification failed") || msg.contains("crypto"));
+            .expect("a relay port");
+        let port = listener.local_addr().expect("its address").port();
+        tokio::spawn(async move {
+            let mut gate = Some(all_in);
+            loop {
+                let (mut inbound, ..) = listener.accept().await.expect("the relay accepts");
+                let held = gate.take();
+                let target = target.clone();
+                tokio::spawn(async move {
+                    if let Some(held) = held {
+                        held.wait().await;
+                    }
+                    let mut outbound = tokio::net::TcpStream::connect(&target)
+                        .await
+                        .expect("the relay reaches its member");
+                    // The connection ends when either side closes it.
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
+                    {
+                        log::debug!("relay: {e}");
+                    }
+                });
+            }
+        });
+        format!("{scheme}://127.0.0.1:{port}")
     }
 
-    // ---------------------------------------------------------------
-    // Phase B.3 (issue #274): Device Tree mutation invariants.
-    // The mutator is split out as `apply_device_tree_mutation` so the
-    // I/O-free core is directly unit-testable.
-    // ---------------------------------------------------------------
+    /// `set` with every member reached through its own [`relay`], all held
+    /// until each has a connection.
+    async fn relayed(
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> crate::sdk::storage_set::StorageSet {
+        let all_in = std::sync::Arc::new(tokio::sync::Barrier::new(set.members().len()));
+        let mut members = Vec::new();
+        for member in set.members() {
+            let (scheme, target) = member
+                .endpoint
+                .split_once("://")
+                .expect("an endpoint names its scheme");
+            members.push(crate::sdk::storage_set::StorageMember {
+                endpoint: relay(scheme, target.to_string(), all_in.clone()).await,
+                ..member.clone()
+            });
+        }
+        crate::sdk::storage_set::StorageSet::new(members).expect("the relayed set")
+    }
 
-    fn build_state_bytes(device_ids: Vec<[u8; 32]>, version: u64) -> Vec<u8> {
-        let tree = dsm::common::device_tree::DeviceTree::new(device_ids.clone());
-        let state = generated::DeviceTreeStateV1 {
-            tree: Some(generated::DeviceTreeV1 {
-                schema_version: 1,
-                root_hash: tree.root().to_vec(),
-                device_count: tree.len() as u32,
-                version_number: version,
-            }),
-            device_ids: tree.leaves().iter().map(|id| id.to_vec()).collect(),
+    /// A set-wide read or write asks every member at once. On the rig a
+    /// trade's settle spent most of its minute fetching objects member after
+    /// member: five round trips per object over a phone's network. Each
+    /// member here sits behind a relay that answers only once every member
+    /// has been asked, so a client that waits for one member before asking
+    /// the next is never answered. The object put directly is read through
+    /// the relays from every member, and a put through them is taken by every
+    /// member. On the storage node's own app, on Postgres.
+    #[test]
+    #[serial_test::serial]
+    fn a_set_asks_every_member_at_once() {
+        let _fleet = crate::test_support::one_device::Fleet::start();
+        let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+            .expect("the pinned set");
+        let ns = dsm::crypto::domain::TaggedHashDomain::try_new(b"DSM/test/every-member-at-once")
+            .expect("a domain");
+        let everyone = set.members().len();
+        crate::runtime::get_runtime().block_on(async {
+            let direct = super::SetClient::new(&set).expect("a client");
+            assert_eq!(
+                direct.put_immutable(ns, b"held by every member").await as usize,
+                everyone
+            );
+            let addr = dsm::storage_object::immutable_addr(ns, b"held by every member");
+
+            let reads = super::SetClient::new(&relayed(&set).await)
+                .expect("a client")
+                .get_immutable(&addr)
+                .await;
+            assert_eq!(
+                reads
+                    .iter()
+                    .filter(|read| matches!(read, super::ObjectRead::Bytes { .. }))
+                    .count(),
+                everyone,
+                "every member answered the read, each asked while the others were"
+            );
+            let took = super::SetClient::new(&relayed(&set).await)
+                .expect("a client")
+                .put_immutable(ns, b"put through the relays")
+                .await;
+            assert_eq!(
+                took as usize, everyone,
+                "every member took the put, each asked while the others were"
+            );
+        });
+    }
+
+    /// A relay in front of one member that carries nothing until `opened`
+    /// has a permit, then carries every connection both ways.
+    async fn relay_after(
+        scheme: &str,
+        target: String,
+        opened: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a relay port");
+        let port = listener.local_addr().expect("its address").port();
+        tokio::spawn(async move {
+            loop {
+                let (mut inbound, ..) = listener.accept().await.expect("the relay accepts");
+                let (target, opened) = (target.clone(), opened.clone());
+                tokio::spawn(async move {
+                    drop(opened.acquire().await.expect("the relay is opened"));
+                    let mut outbound = tokio::net::TcpStream::connect(&target)
+                        .await
+                        .expect("the relay reaches its member");
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await
+                    {
+                        log::debug!("relay: {e}");
+                    }
+                });
+            }
+        });
+        format!("{scheme}://127.0.0.1:{port}")
+    }
+
+    /// A member that answers the first request it is sent at once, whatever
+    /// was asked, with `payload` under `namespace`, and then opens `opened`.
+    /// It serves `tls`, a certificate naming the member it stands in for, so
+    /// a device reaches it as it reaches that member.
+    async fn substituting(
+        tls: axum_server::tls_rustls::RustlsConfig,
+        namespace: &'static [u8],
+        payload: &'static [u8],
+        opened: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a member port");
+        let port = listener.local_addr().expect("its address").port();
+        let acceptor = tokio_rustls::TlsAcceptor::from(tls.get_inner());
+        tokio::spawn(async move {
+            let (inbound, ..) = listener.accept().await.expect("the member accepts");
+            let mut inbound = acceptor.accept(inbound).await.expect("the TLS handshake");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                let read = inbound.read(&mut chunk).await.expect("the request");
+                assert!(read > 0, "the request ended before its head did");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nx-namespace: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                String::from_utf8_lossy(namespace),
+                payload.len()
+            );
+            inbound
+                .write_all(head.as_bytes())
+                .await
+                .expect("the answer's head");
+            inbound.write_all(payload).await.expect("the answer");
+            inbound.flush().await.expect("the answer sent");
+            opened.add_permits(1);
+        });
+        format!("https://127.0.0.1:{port}")
+    }
+
+    /// A fetch keeps the first bytes that re-hash to the address, not the
+    /// first answer. Here every member holds the object, but the first
+    /// member is replaced by one that answers at once with other bytes under
+    /// the object's namespace, and every other member is reached only after
+    /// it has answered: its bytes always arrive first. They are passed over,
+    /// and the object fetched is the one the members hold. On the storage
+    /// node's own app, on Postgres.
+    #[test]
+    #[serial_test::serial]
+    fn a_fetch_passes_over_a_member_that_answers_first_with_other_bytes() {
+        let fleet = crate::test_support::one_device::Fleet::start();
+        let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
+            .expect("the pinned set");
+        const NAMESPACE: &[u8] = b"DSM/test/first-bytes-that-verify";
+        let ns = dsm::crypto::domain::TaggedHashDomain::try_new(NAMESPACE).expect("a domain");
+        crate::runtime::get_runtime().block_on(async {
+            let direct = super::SetClient::new(&set).expect("a client");
+            assert_eq!(
+                direct.put_immutable(ns, b"the object").await as usize,
+                set.members().len()
+            );
+            let addr = dsm::storage_object::immutable_addr(ns, b"the object");
+
+            let opened = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+            let mut members = Vec::new();
+            for (position, member) in set.members().iter().enumerate() {
+                let (scheme, target) = member
+                    .endpoint
+                    .split_once("://")
+                    .expect("an endpoint names its scheme");
+                let endpoint = if position == 0 {
+                    let tls = fleet.tls_for(&member.member_id).await;
+                    substituting(tls, NAMESPACE, b"other bytes", opened.clone()).await
+                } else {
+                    relay_after(scheme, target.to_string(), opened.clone()).await
+                };
+                members.push(crate::sdk::storage_set::StorageMember {
+                    endpoint,
+                    ..member.clone()
+                });
+            }
+            let substituted = crate::sdk::storage_set::StorageSet::new(members).expect("the set");
+            let fetched = super::SetClient::new(&substituted)
+                .expect("a client")
+                .fetch_verified(&addr)
+                .await;
+            assert_eq!(
+                fetched.as_deref(),
+                Some(&b"the object"[..]),
+                "the bytes that verify, not the first answer"
+            );
+        });
+    }
+
+    /// A write the member did not take is not acknowledged. The same running
+    /// node, reached at a path it does not serve, answers `404`: the put, the
+    /// index append and the mirror sync are errors, never acknowledgements,
+    /// and there is no ByteCommit of its to show. Reached at its real path,
+    /// every one is taken. On the storage node's own app, on Postgres.
+    #[test]
+    #[serial_test::serial]
+    fn a_member_that_answers_404_took_nothing() {
+        let fleet = crate::test_support::one_device::Fleet::start();
+        let endpoint = fleet.endpoints()[0].clone();
+        let ns = dsm::crypto::domain::TaggedHashDomain::try_new(b"DSM/test/404-is-not-an-answer")
+            .expect("a domain");
+        crate::runtime::get_runtime().block_on(async {
+            let wrong = MemberClient::new("dsm-node-1", &format!("{endpoint}/not-the-api"))
+                .expect("a client");
+            assert!(wrong.put_immutable(ns, b"bytes").await.is_err());
+            assert!(wrong
+                .append_index(b"DSM/test/index", &[0x41; 32], &[0x42; 32])
+                .await
+                .is_err());
+            assert!(wrong.sync_mirror().await.is_err());
+            assert_eq!(
+                wrong.latest_bytecommit().await.answer,
+                LatestByteCommit::Unanswered("answered HTTP 404".to_string())
+            );
+
+            let right = MemberClient::new("dsm-node-1", &endpoint).expect("a client");
+            right
+                .put_immutable(ns, b"bytes")
+                .await
+                .expect("the put is taken");
+            right
+                .append_index(b"DSM/test/index", &[0x41; 32], &[0x42; 32])
+                .await
+                .expect("the append is taken");
+            assert_eq!(
+                right.latest_bytecommit().await.answer,
+                LatestByteCommit::NoCycle,
+                "no cell entry has arrived, so no cycle has closed"
+            );
+        });
+    }
+
+    /// A member's latest ByteCommit is shown only as that member's own. The
+    /// member states "no cycle" until one closes, then the ByteCommit it
+    /// closed; the node that answers echoes the member id it is configured
+    /// as. Reached as ANOTHER member, at this node's address, nothing is
+    /// read at all: the node's certificate names the member it is, and a
+    /// client for another member refuses it before any request is sent. On
+    /// the storage node's own app, on Postgres.
+    #[test]
+    #[serial_test::serial]
+    fn a_members_latest_bytecommit_is_its_own_or_there_is_none() {
+        let fleet = crate::test_support::one_device::Fleet::start();
+        let endpoint = fleet.endpoints()[0].clone();
+        crate::runtime::get_runtime().block_on(async {
+            let member = MemberClient::new("dsm-node-1", &endpoint).expect("a client");
+            let before = member.latest_bytecommit().await;
+            assert_eq!(before.answer, LatestByteCommit::NoCycle);
+            assert_eq!(before.answered_as.as_deref(), Some(&b"dsm-node-1"[..]));
+
+            member
+                .put_cells(&[(
+                    b"DSM/test/latest-bytecommit".to_vec(),
+                    [0x51; 32],
+                    b"value".to_vec(),
+                )])
+                .await
+                .expect("the entry is taken");
+            let cycle = member.close_cycle().await.expect("the cycle closes");
+
+            let after = member.latest_bytecommit().await;
+            let LatestByteCommit::Stated(commit) = after.answer else {
+                panic!(
+                    "the member states the ByteCommit it closed: {:?}",
+                    after.answer
+                );
+            };
+            assert_eq!(commit.member_id, b"dsm-node-1");
+            assert_eq!(commit.cycle_index, cycle);
+            assert_eq!(after.answered_as.as_deref(), Some(&b"dsm-node-1"[..]));
+
+            let misnamed = MemberClient::new("dsm-node-2", &endpoint).expect("a client");
+            let read = misnamed.latest_bytecommit().await;
+            let LatestByteCommit::Unanswered(why) = &read.answer else {
+                panic!(
+                    "dsm-node-1's node answered a client for dsm-node-2: {:?}",
+                    read.answer
+                );
+            };
+            assert!(
+                why.contains("certificate not valid for name \"dsm-node-2\""),
+                "the connection is refused because the certificate names another member: {why}"
+            );
+            assert_eq!(read.answered_as, None, "nothing was read from the node");
+        });
+    }
+
+    fn config(body: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("root.pem"), b"PEM").expect("pem");
+        let path = dir.path().join("env.toml");
+        std::fs::write(&path, body).expect("config");
+        let path = path.to_string_lossy().into_owned();
+        (dir, path)
+    }
+
+    /// An absent `custom_ca_certs` names no CA; a present one is a list of
+    /// readable certificate paths or the config is malformed — a scalar, a
+    /// table, a non-string entry or an unreadable file is an error, never
+    /// "no certificates".
+    /// A member is known only by a certificate from a CA the env config
+    /// names, so no client is built from no CA (the system store is never
+    /// trusted in its place), nor from a named file that holds no
+    /// certificate, nor for a member id no certificate can carry.
+    #[test]
+    fn no_client_is_built_without_a_named_ca_or_for_an_unnameable_member() {
+        let none = CaMaterial {
+            env_path: None,
+            certs: Vec::new(),
         };
-        state.encode_to_vec()
-    }
+        let refused = build_member_client(&none, "dsm-node-1").unwrap_err();
+        assert!(refused.to_string().contains("names no CA"), "{refused}");
 
-    #[test]
-    fn add_first_secondary_seeds_with_root_device_and_bumps_version_to_1() {
-        let genesis = [0x11u8; 32];
-        let new_devid = [0x22u8; 32];
-        let (snapshot, _bytes) = super::apply_device_tree_mutation(&[], genesis, |ids| {
-            ids.push(new_devid);
-        })
-        .expect("first add must succeed");
-
-        // Expect a 2-leaf tree: {genesis (root), new_devid}.
-        assert_eq!(snapshot.device_count, 2);
-        assert_eq!(snapshot.version_number, 1);
-        let expected_root =
-            dsm::common::device_tree::DeviceTree::new(vec![genesis, new_devid]).root();
-        assert_eq!(snapshot.root_hash, expected_root);
-    }
-
-    #[test]
-    fn add_is_idempotent_on_duplicate_device_id() {
-        let genesis = [0x11u8; 32];
-        let new_devid = [0x22u8; 32];
-
-        // First add: empty -> {genesis, new_devid}.
-        let (snap1, bytes1) =
-            super::apply_device_tree_mutation(&[], genesis, |ids| ids.push(new_devid))
-                .expect("first add");
-
-        // Second add of the same device_id: should dedup and produce
-        // identical root + device_count, but version_number must still
-        // monotonically bump because a caller invoked the mutator.
-        let (snap2, _bytes2) =
-            super::apply_device_tree_mutation(&bytes1, genesis, |ids| ids.push(new_devid))
-                .expect("second add");
-        assert_eq!(snap2.root_hash, snap1.root_hash);
-        assert_eq!(snap2.device_count, snap1.device_count);
-        assert_eq!(snap2.version_number, snap1.version_number + 1);
-    }
-
-    #[test]
-    fn add_then_remove_cycles_back_to_root_only() {
-        let genesis = [0x11u8; 32];
-        let dev_a = [0x22u8; 32];
-
-        let (_snap1, bytes1) =
-            super::apply_device_tree_mutation(&[], genesis, |ids| ids.push(dev_a)).expect("add A");
-
-        let (snap2, _bytes2) = super::apply_device_tree_mutation(&bytes1, genesis, |ids| {
-            ids.retain(|id| id != &dev_a)
-        })
-        .expect("remove A");
-
-        // After removing A we should be back to a single-leaf tree
-        // containing only the root device (genesis_hash).
-        assert_eq!(snap2.device_count, 1);
-        let expected_root = dsm::common::device_tree::DeviceTree::single(genesis).root();
-        assert_eq!(snap2.root_hash, expected_root);
-        // Two mutations applied, so version_number must be 2.
-        assert_eq!(snap2.version_number, 2);
-    }
-
-    #[test]
-    fn version_number_is_strictly_monotonic_across_multiple_updates() {
-        let genesis = [0x11u8; 32];
-        let dev_a = [0x22u8; 32];
-        let dev_b = [0x33u8; 32];
-        let dev_c = [0x44u8; 32];
-
-        let (s1, b1) =
-            super::apply_device_tree_mutation(&[], genesis, |ids| ids.push(dev_a)).expect("add A");
-        let (s2, b2) =
-            super::apply_device_tree_mutation(&b1, genesis, |ids| ids.push(dev_b)).expect("add B");
-        let (s3, b3) =
-            super::apply_device_tree_mutation(&b2, genesis, |ids| ids.push(dev_c)).expect("add C");
-        let (s4, _b4) =
-            super::apply_device_tree_mutation(&b3, genesis, |ids| ids.retain(|id| id != &dev_b))
-                .expect("remove B");
-
-        assert_eq!(s1.version_number, 1);
-        assert_eq!(s2.version_number, 2);
-        assert_eq!(s3.version_number, 3);
-        assert_eq!(s4.version_number, 4);
-    }
-
-    #[test]
-    fn input_order_is_canonicalised_via_lexicographic_sort_and_dedup() {
-        let genesis = [0x11u8; 32];
-        let dev_a = [0xAAu8; 32];
-        let dev_b = [0xBBu8; 32];
-
-        // Different insertion orders must produce the same persisted
-        // bytes (modulo proto field-ordering, which prost emits
-        // deterministically for the same input).
-        let (snap_ab, bytes_ab) = super::apply_device_tree_mutation(&[], genesis, |ids| {
-            ids.push(dev_a);
-            ids.push(dev_b);
-        })
-        .expect("AB order");
-        let (snap_ba, bytes_ba) = super::apply_device_tree_mutation(&[], genesis, |ids| {
-            ids.push(dev_b);
-            ids.push(dev_a);
-        })
-        .expect("BA order");
-
-        assert_eq!(snap_ab.root_hash, snap_ba.root_hash);
-        assert_eq!(snap_ab.device_count, snap_ba.device_count);
-        assert_eq!(bytes_ab, bytes_ba);
-    }
-
-    #[test]
-    fn removing_the_last_device_post_genesis_is_rejected() {
-        // Construct a one-leaf state (just genesis) directly so we can
-        // attempt to drain it.
-        let genesis = [0x11u8; 32];
-        let bytes = build_state_bytes(vec![genesis], 1);
-
-        // Caller asks to remove the single leaf -> mutator must fail
-        // closed with an InvalidOperation.
-        let err = super::apply_device_tree_mutation(&bytes, genesis, |ids| ids.clear())
-            .expect_err("empty post-mutation tree must be rejected");
+        let not_pem = CaMaterial {
+            env_path: None,
+            certs: vec![(std::path::PathBuf::from("root.pem"), b"PEM".to_vec())],
+        };
+        let refused = build_member_client(&not_pem, "dsm-node-1").unwrap_err();
         assert!(
-            format!("{err}").contains("at least one device"),
-            "unexpected error message: {err}"
+            refused.to_string().contains("holds no certificate"),
+            "{refused}"
         );
-    }
 
-    #[test]
-    fn malformed_state_bytes_are_rejected_with_serialization_error() {
-        let genesis = [0x11u8; 32];
-        let garbage = b"this is not a valid DeviceTreeStateV1 proto".to_vec();
-        let err =
-            super::apply_device_tree_mutation(&garbage, genesis, |ids| ids.push([0x99u8; 32]))
-                .expect_err("garbage prior state must fail decode");
-        let msg = format!("{err}");
+        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("a CA")
+            .cert
+            .pem()
+            .into_bytes();
+        let named = CaMaterial {
+            env_path: None,
+            certs: vec![(std::path::PathBuf::from("ca.pem"), ca)],
+        };
+        build_member_client(&named, "dsm-node-1").expect("a client for a nameable member");
+        let refused = build_member_client(&named, "not a name").unwrap_err();
         assert!(
-            msg.contains("DeviceTreeStateV1")
-                || msg.contains("Serialization")
-                || msg.contains("decode"),
-            "unexpected error: {msg}"
+            refused
+                .to_string()
+                .contains("not a name a certificate can carry"),
+            "{refused}"
         );
     }
 
+    /// Only `https://` reaches a member: a plain or schemeless endpoint gets
+    /// no client at all.
     #[test]
-    fn decode_device_tree_state_rejects_non_32_byte_device_ids() {
-        let bad_state = generated::DeviceTreeStateV1 {
-            tree: Some(generated::DeviceTreeV1 {
-                schema_version: 1,
-                root_hash: vec![0u8; 32],
-                device_count: 1,
-                version_number: 1,
-            }),
-            device_ids: vec![vec![0u8; 31]], // 31 bytes, not 32
-        };
-        let bytes = bad_state.encode_to_vec();
-        let err =
-            super::decode_device_tree_state(&bytes).expect_err("non-32-byte device_id rejected");
-        let msg = format!("{err}");
-        assert!(msg.contains("31 bytes"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn decode_device_tree_state_rejects_missing_tree_field() {
-        let bad_state = generated::DeviceTreeStateV1 {
-            tree: None,
-            device_ids: vec![],
-        };
-        let bytes = bad_state.encode_to_vec();
-        let err =
-            super::decode_device_tree_state(&bytes).expect_err("missing tree summary rejected");
-        let msg = format!("{err}");
-        assert!(msg.contains("tree is missing"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn snapshot_to_proto_round_trips_through_prost() {
-        let snap = DeviceTreeSnapshot {
-            root_hash: [0x42u8; 32],
-            device_count: 7,
-            version_number: 123,
-        };
-        let proto = snap.to_proto();
-        let bytes = proto.encode_to_vec();
-        let decoded = generated::DeviceTreeV1::decode(bytes.as_slice()).expect("decode");
-        assert_eq!(decoded.schema_version, 1);
-        assert_eq!(decoded.root_hash, snap.root_hash.to_vec());
-        assert_eq!(decoded.device_count, 7);
-        assert_eq!(decoded.version_number, 123);
-    }
-
-    #[test]
-    fn root_hash_matches_canonical_device_tree_root() {
-        // Cross-check: the snapshot.root_hash from apply_device_tree_mutation
-        // must equal dsm::common::device_tree::DeviceTree::new(...).root().
-        let genesis = [0x11u8; 32];
-        let dev_a = [0x22u8; 32];
-        let dev_b = [0x33u8; 32];
-
-        let (snap, _bytes) = super::apply_device_tree_mutation(&[], genesis, |ids| {
-            ids.push(dev_a);
-            ids.push(dev_b);
-        })
-        .expect("add A then B");
-
-        let expected =
-            dsm::common::device_tree::DeviceTree::new(vec![genesis, dev_a, dev_b]).root();
-        assert_eq!(snap.root_hash, expected);
-    }
-
-    // -----------------------------------------------------------------
-    // Phase B.6 (issue #277): initial Device Tree publish at genesis-MPC
-    // finalisation. The fail-closed publish-before-install contract is
-    // implemented in `create_genesis_with_mpc`; the pure helper
-    // `build_initial_device_tree_payload` is directly testable.
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn initial_device_tree_payload_has_single_root_leaf() {
-        let genesis_hash = [0x77u8; 32];
-        let (snapshot, payload) = StorageNodeSDK::build_initial_device_tree_payload(genesis_hash)
-            .expect("initial payload");
-
-        assert_eq!(snapshot.device_count, 1);
-        assert_eq!(snapshot.version_number, 1);
-        let expected_root = dsm::common::device_tree::DeviceTree::single(genesis_hash).root();
-        assert_eq!(snapshot.root_hash, expected_root);
-
-        // Decode the payload back and confirm the contained state
-        // matches the snapshot exactly.
-        let state =
-            generated::DeviceTreeStateV1::decode(payload.as_slice()).expect("decode payload");
-        let tree = state.tree.expect("tree summary");
-        assert_eq!(tree.root_hash, expected_root.to_vec());
-        assert_eq!(tree.device_count, 1);
-        assert_eq!(tree.version_number, 1);
-        assert_eq!(state.device_ids, vec![genesis_hash.to_vec()]);
-    }
-
-    #[test]
-    fn initial_device_tree_payload_round_trips_through_validator_shape() {
-        // The payload the publisher PUTs must be acceptable to the
-        // Phase B.4 validator. Re-encode + decode it through the same
-        // proto definitions and confirm the round-trip preserves
-        // everything the validator cares about (CHECK 1: parses;
-        // CHECK 2: 32-byte non-zero root; CHECK 3: device_count >= 1
-        // and matches list length).
-        let genesis_hash = [0xABu8; 32];
-        let (_snapshot, payload) =
-            StorageNodeSDK::build_initial_device_tree_payload(genesis_hash).expect("payload");
-
-        let decoded =
-            generated::DeviceTreeStateV1::decode(payload.as_slice()).expect("decode round-trip");
-        let tree = decoded.tree.expect("tree present");
-        assert_eq!(tree.root_hash.len(), 32);
-        assert!(
-            tree.root_hash.iter().any(|&b| b != 0),
-            "root_hash must be non-zero"
-        );
-        assert!(tree.device_count >= 1);
-        assert_eq!(tree.device_count as usize, decoded.device_ids.len());
-        for id in &decoded.device_ids {
-            assert_eq!(id.len(), 32);
+    fn a_member_endpoint_that_is_not_https_gets_no_client() {
+        for endpoint in ["http://127.0.0.1:8080", "127.0.0.1:8080"] {
+            let refused = super::member_client("dsm-node-1", endpoint).unwrap_err();
+            assert!(
+                refused.to_string().contains("not https://"),
+                "{endpoint}: {refused}"
+            );
         }
     }
 
+    /// A config and its certificates are read once while none of them
+    /// changes: a certificate that can no longer be opened, but is unchanged,
+    /// is not opened again, and every call resolves what was read. A
+    /// replaced certificate is read again, and its new bytes are the
+    /// material.
+    #[cfg(unix)]
     #[test]
-    fn initial_device_tree_payload_is_deterministic() {
-        // Two calls with the same genesis_hash must produce
-        // byte-identical payloads — prost emits deterministic output
-        // for the same input, so the storage-node-side dedup logic
-        // (idempotent PUT on retries) holds.
-        let genesis_hash = [0x12u8; 32];
-        let (s1, p1) = StorageNodeSDK::build_initial_device_tree_payload(genesis_hash).unwrap();
-        let (s2, p2) = StorageNodeSDK::build_initial_device_tree_payload(genesis_hash).unwrap();
-        assert_eq!(s1, s2);
-        assert_eq!(p1, p2);
+    fn unchanged_ca_material_is_not_read_again_and_a_replaced_one_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, path) = config("custom_ca_certs = [\"root.pem\"]\n");
+        let pem = dir.path().join("root.pem");
+        let first = read_ca_certs(&path).expect("the certificates");
+        assert_eq!(first[0].1, b"PEM");
+
+        std::fs::set_permissions(&pem, std::fs::Permissions::from_mode(0o000))
+            .expect("the certificate made unreadable");
+        let again = read_ca_certs(&path);
+        std::fs::set_permissions(&pem, std::fs::Permissions::from_mode(0o644))
+            .expect("the certificate readable again");
+        assert_eq!(
+            again.expect("an unchanged certificate is not opened again"),
+            first
+        );
+
+        std::fs::write(&pem, b"REPLACED PEM").expect("the certificate replaced");
+        let replaced = read_ca_certs(&path).expect("the certificates");
+        assert_eq!(
+            replaced[0].1, b"REPLACED PEM",
+            "a replaced certificate is read again"
+        );
     }
 
     #[test]
-    fn initial_device_tree_payloads_differ_across_genesis() {
-        let (s1, p1) = StorageNodeSDK::build_initial_device_tree_payload([0x01u8; 32]).unwrap();
-        let (s2, p2) = StorageNodeSDK::build_initial_device_tree_payload([0x02u8; 32]).unwrap();
-        assert_ne!(s1.root_hash, s2.root_hash);
-        assert_ne!(p1, p2);
-    }
-}
+    fn custom_ca_certs_is_a_list_of_readable_paths_or_an_error() {
+        let (_d, path) = config("network_id = \"x\"\n");
+        assert!(read_ca_certs(&path).expect("absent key").is_empty());
 
-#[cfg(test)]
-mod member_echo_tests {
-    #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
-    use super::{answer_counts_for, MemberEcho};
-    use crate::sdk::storage_set::StorageMember;
+        let (_d, path) = config("custom_ca_certs = [\"root.pem\"]\n");
+        let certs = read_ca_certs(&path).expect("a list of paths");
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs[0].1, b"PEM");
 
-    fn committed() -> StorageMember {
-        StorageMember {
-            member_id: "dsm-node-1".into(),
-            register_incarnation_id: [0xC1; 32],
-            endpoint: "http://n1.example".into(),
+        for malformed in [
+            "custom_ca_certs = \"root.pem\"\n",
+            "[custom_ca_certs]\nfile = \"root.pem\"\n",
+            "custom_ca_certs = [1]\n",
+            "custom_ca_certs = [\"missing.pem\"]\n",
+        ] {
+            let (_d, path) = config(malformed);
+            assert!(read_ca_certs(&path).is_err(), "{malformed}");
         }
-    }
-
-    fn echo(node_id: Option<&str>, incarnation: Option<[u8; 32]>) -> MemberEcho {
-        MemberEcho {
-            node_id: node_id.map(|s| s.to_string()),
-            register_incarnation: incarnation,
-        }
-    }
-
-    /// The whole matrix, one case per row of the contract.
-    #[test]
-    fn only_the_committed_member_in_its_committed_incarnation_counts() {
-        let m = committed();
-
-        assert!(
-            answer_counts_for(&echo(Some("dsm-node-1"), Some([0xC1; 32])), &m),
-            "the committed pair counts"
-        );
-
-        assert!(
-            !answer_counts_for(&echo(Some("dsm-node-1"), Some([0x99; 32])), &m),
-            "SAME NODE, REBUILT REGISTER: this is the substitution the pair \
-             exists to catch — it must not count, in either direction"
-        );
-
-        assert!(
-            !answer_counts_for(&echo(Some("dsm-node-2"), Some([0xC1; 32])), &m),
-            "another member answering for this one is an attribution failure"
-        );
-
-        assert!(
-            !answer_counts_for(&echo(None, Some([0xC1; 32])), &m),
-            "an answer that names no member is an answer about nobody"
-        );
-        assert!(
-            !answer_counts_for(&echo(Some("dsm-node-1"), None), &m),
-            "a member that will not say which register it is serving has not \
-             answered the question that matters"
-        );
-        assert!(!answer_counts_for(&echo(None, None), &m), "no echo at all");
     }
 }

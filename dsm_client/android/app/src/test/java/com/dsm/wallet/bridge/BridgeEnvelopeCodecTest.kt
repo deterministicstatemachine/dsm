@@ -96,11 +96,9 @@ class BridgeEnvelopeCodecTest {
         assertEquals(method128, req.method)
     }
 
-    @Test
-    fun parseBridgeRequest_emptyInput_defaultValues() {
-        val req = BridgeEnvelopeCodec.parseBridgeRequest(ByteArray(0))
-        assertEquals("", req.method)
-        assertEquals(0, req.payload.size)
+    @Test(expected = IllegalArgumentException::class)
+    fun parseBridgeRequest_noMethod_refused() {
+        BridgeEnvelopeCodec.parseBridgeRequest(ByteArray(0))
     }
 
     @Test
@@ -213,18 +211,14 @@ class BridgeEnvelopeCodecTest {
         BridgeEnvelopeCodec.parseBridgeRequest(encodeVarintField(1, 42))
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun parseBridgeRequest_payloadWrongWireType() {
+    @Test
+    fun parseBridgeRequest_wrongWireTypeIsNotThePayload() {
+        // A varint where the preference message would be is an unknown field to
+        // the protobuf parser: it is skipped, and the request carries no payload.
         val bytes = encodeLenField(1, "test".toByteArray()) + encodeVarintField(5, 42)
-        BridgeEnvelopeCodec.parseBridgeRequest(bytes)
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun parseBridgeRequest_duplicatePayloads() {
-        val methodField = encodeLenField(1, "test".toByteArray())
-        val payload1 = encodeLenField(3, encodeLenField(1, byteArrayOf(1)))
-        val payload2 = encodeLenField(4, encodeLenField(1, byteArrayOf(2)))
-        BridgeEnvelopeCodec.parseBridgeRequest(methodField + payload1 + payload2)
+        val req = BridgeEnvelopeCodec.parseBridgeRequest(bytes)
+        assertEquals("test", req.method)
+        assertEquals(0, req.payload.size)
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -303,9 +297,13 @@ class BridgeEnvelopeCodecTest {
     }
 
     @Test
-    fun decodeBridgeRpcError_wrongWireTypeForMessage_returnsNull() {
+    fun decodeBridgeRpcError_wrongWireTypeForMessage_leavesTheMessageEmpty() {
+        // A varint where the message string would be is skipped as unknown; the
+        // code stands alone.
         val bytes = encodeVarintField(1, 1) + encodeVarintField(2, 42)
-        assertNull(BridgeEnvelopeCodec.decodeBridgeRpcError(bytes))
+        val err = BridgeEnvelopeCodec.decodeBridgeRpcError(bytes)!!
+        assertEquals(1, err.errorCode)
+        assertEquals("", err.message)
     }
 
     @Test
@@ -368,14 +366,6 @@ class BridgeEnvelopeCodecTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun parseEnvelopeResponse_multipleResults() {
-        val successInner = encodeLenField(1, byteArrayOf(0x01))
-        val success = encodeLenField(1, successInner)
-        val error = encodeLenField(2, byteArrayOf(0x08, 0x01))
-        BridgeEnvelopeCodec.parseEnvelopeResponse(success + error)
-    }
-
-    @Test(expected = IllegalArgumentException::class)
     fun parseEnvelopeResponse_successWrongWireType() {
         BridgeEnvelopeCodec.parseEnvelopeResponse(encodeVarintField(1, 42))
     }
@@ -414,14 +404,14 @@ class BridgeEnvelopeCodecTest {
     }
 
     @Test
-    fun createErrorResponse_debugEncoderThrows_emptyDebug() {
+    fun createErrorResponse_debugEncoderThrows_noDebug() {
         val response = BridgeEnvelopeCodec.createErrorResponse(1, "test") {
             throw RuntimeException("encoder broke")
         }
         val (isSuccess, errorPayload) = BridgeEnvelopeCodec.parseEnvelopeResponse(response)
         assertFalse(isSuccess)
         val err = BridgeEnvelopeCodec.decodeBridgeRpcError(errorPayload)!!
-        assertEquals("", err.debugB32)
+        assertNull(err.debugB32)
     }
 
     // ── encodeAppRouterPayload / decodeAppRouterPayload ──────────────────
@@ -530,58 +520,5 @@ class BridgeEnvelopeCodecTest {
     @Test
     fun decodeBilateralPayload_emptyInput_returnsNull() {
         assertNull(BridgeEnvelopeCodec.decodeBilateralPayload(ByteArray(0)))
-    }
-
-    // ── extractDeterministicSafetyMessageFromEnvelope ─────────────────────
-
-    @Test
-    fun extractSafetyMessage_emptyEnvelope_returnsNull() {
-        assertNull(
-            BridgeEnvelopeCodec.extractDeterministicSafetyMessageFromEnvelope(ByteArray(0))
-        )
-    }
-
-    @Test
-    fun extractSafetyMessage_noErrorInfo_returnsNull() {
-        assertNull(
-            BridgeEnvelopeCodec.extractDeterministicSafetyMessageFromEnvelope(
-                encodeVarintField(1, 42)
-            )
-        )
-    }
-
-    @Test
-    fun extractSafetyMessage_field99_sourceTag11_returnsMessage() {
-        val errorInfo = encodeLenField(2, "safety violation".toByteArray()) +
-            encodeVarintField(4, 11)
-        val envelope = encodeLenField(99, errorInfo)
-        assertEquals(
-            "safety violation",
-            BridgeEnvelopeCodec.extractDeterministicSafetyMessageFromEnvelope(envelope)
-        )
-    }
-
-    @Test
-    fun extractSafetyMessage_field99_differentSourceTag_returnsNull() {
-        val errorInfo = encodeLenField(2, "other error".toByteArray()) +
-            encodeVarintField(4, 5)
-        assertNull(
-            BridgeEnvelopeCodec.extractDeterministicSafetyMessageFromEnvelope(
-                encodeLenField(99, errorInfo)
-            )
-        )
-    }
-
-    @Test
-    fun extractSafetyMessage_field11_nestedPath_returnsMessage() {
-        val errorInfo = encodeLenField(2, "deep error".toByteArray()) +
-            encodeVarintField(4, 11)
-        val opResult = encodeLenField(5, errorInfo)
-        val universalRx = encodeLenField(1, opResult)
-        val envelope = encodeLenField(11, universalRx)
-        assertEquals(
-            "deep error",
-            BridgeEnvelopeCodec.extractDeterministicSafetyMessageFromEnvelope(envelope)
-        )
     }
 }

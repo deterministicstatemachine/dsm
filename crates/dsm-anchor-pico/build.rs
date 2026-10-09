@@ -5,7 +5,13 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
+include!("../../scripts/real_code_guard_build.rs");
+
 fn main() {
+    if let Err(refusal) = real_code_guard() {
+        eprintln!("{refusal}");
+        std::process::exit(1);
+    }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     File::create(out.join("memory.x"))
         .unwrap()

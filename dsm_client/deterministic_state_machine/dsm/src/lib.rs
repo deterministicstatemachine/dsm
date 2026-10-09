@@ -42,7 +42,6 @@
 //! - [`vault`] — Deterministic Limbo Vaults (DLV), asset management, fulfillment
 //! - [`merkle`] — Sparse Merkle Tree (per-device SMT) and Device Trees
 //! - [`emissions`] — DJTE (Deterministic Join-Triggered Emissions), JAP, winner selection
-//! - [`cpta`] — Content-Addressed Token Policy Anchors
 //! - [`bitcoin`] — dBTC tap primitives (HTLC, deep-anchor)
 //! - [`bilateral`] — Bilateral transaction types and protocol definitions
 //! - [`commitments`] — Deterministic, smart, and external commitments
@@ -64,50 +63,45 @@
 //! ## Security Policy
 //!
 //! - `#![forbid(unsafe_code)]` — no unsafe Rust anywhere in this crate
-//! - MPC genesis requires ≥3 storage nodes with threshold ≥3
 //! - All secrets use `Zeroize` + `ZeroizeOnDrop` for memory safety
-//! - Feature-gated optional modules (perf, telemetry, bluetooth)
+//! - Feature-gated optional modules (bluetooth)
 
 pub mod bilateral;
 pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
 pub mod commitments;
 pub mod common;
+// keyed-cell arrival records and running hashes (storage spec §14)
+pub mod route_chain;
+pub mod storage_cell;
 pub mod storage_object; // Area 4 immutable content addressing — addr(N, P)
                         // pub mod config; // Network detection moved to SDK - no HTTP in core
 pub mod core;
-pub mod cpta;
 pub mod crypto;
 // A separate dead-code attestation module previously lived here
 // (Issue #185 — all 4 findings). It exported types with zero
 // production callers anywhere in `dsm/` or `dsm_sdk/` (verified by
 // source inspection); the audit findings were all on a never-
 // executed path. Module removed entirely.
+pub mod bitcoin;
 pub mod dlv;
 pub mod economic; // the online economic root R_econ
 pub mod emissions;
 pub mod envelope;
 pub mod merkle;
 pub mod pbi;
-// #[cfg(feature = "perf")]
-pub mod bitcoin;
-pub mod performance;
 pub mod prelude;
 pub mod recovery;
+pub mod shared_lineage; // shared lineages: discovery without authority (DSM A15, SoFi S23)
+pub mod sofi; // SoFi v8 wire registry and pure derivations (dark)
 pub mod storage;
-pub mod telemetry;
 pub mod types;
 pub mod utils;
 pub mod vault;
 pub mod verification;
 
-use crate::core::identity;
 use crate::types::error::DsmError;
 
-pub use crate::core::identity::TrustlessGenesisArtifacts;
-
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const RUST_VERSION: &str = env!("DSM_RUSTC_VERSION");
-const TARGET: &str = env!("DSM_BUILD_TARGET");
 
 /// Returns the version of the SDK
 ///
@@ -118,81 +112,4 @@ const TARGET: &str = env!("DSM_BUILD_TARGET");
 /// A string containing the version number in semver format (e.g., "0.1.0")
 pub fn version() -> String {
     VERSION.to_string()
-}
-
-/// Build information for debugging and support
-pub fn build_info() -> BuildInfo {
-    BuildInfo {
-        version: VERSION.to_string(),
-        rust_version: RUST_VERSION.to_string(),
-        target: TARGET.to_string(),
-        features: get_enabled_features(),
-    }
-}
-
-/// Build information structure
-#[derive(Debug, Clone)]
-pub struct BuildInfo {
-    /// SDK version
-    pub version: String,
-    /// Rust compiler version
-    pub rust_version: String,
-    /// Target architecture
-    pub target: String,
-    /// Enabled features
-    pub features: Vec<String>,
-}
-
-#[allow(unused_mut)]
-#[allow(clippy::vec_init_then_push)]
-fn get_enabled_features() -> Vec<String> {
-    let mut features = vec![];
-    // JNI moved to dsm_sdk
-    #[cfg(feature = "bluetooth")]
-    features.push("bluetooth".to_string());
-    #[cfg(feature = "storage")]
-    features.push("storage".to_string());
-    #[cfg(feature = "threadsafe")]
-    features.push("threadsafe".to_string());
-    features
-}
-
-/// Expose core trustless genesis creation to SDK consumers.
-///
-/// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter. The CSPRNG
-/// secret root `s0` is drawn inside the MPC session and folded into `Smaster`
-/// (whitepaper §12 eq.13); anti-cloning is the secure-element attestation, not
-/// a genesis input.
-pub async fn create_trustless_genesis<
-    S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
->(
-    device_id: String,
-    storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    metadata: Option<String>,
-    storage: Option<&S>,
-) -> Result<TrustlessGenesisArtifacts, DsmError> {
-    identity::create_trustless_genesis(device_id, storage_nodes, metadata, storage)
-        .await
-        .map_err(DsmError::from)
-}
-
-// verify_trustless_identity wrapper deleted: zero external callers, and
-// the underlying impl was deleted (it relied on state_number reads
-// reconstructed from `state.hash[0] as u64` after §4.3 — meaningless).
-
-#[cfg(test)]
-mod tests {
-    use super::{build_info, version, VERSION};
-
-    #[test]
-    fn build_info_is_compile_time_stamped() {
-        let info = build_info();
-
-        assert_eq!(version(), VERSION);
-        assert_eq!(info.version, VERSION);
-        assert_ne!(info.rust_version, "unknown");
-        assert!(!info.rust_version.is_empty());
-        assert_ne!(info.target, "unknown");
-        assert!(!info.target.is_empty());
-    }
 }

@@ -1,0 +1,16 @@
+# Test-only environment config for the instrumented suite.
+#
+# The app's bundled dsm_env_config.toml is a deployment file maintained
+# outside this suite; the bridge tests must not depend on it. These tests
+# replicate MainActivity's startup and exercise the local bridge (codec,
+# routing, identity, balances) without reaching a storage node, so the node
+# entries only have to satisfy the loader: at least one node, each with name,
+# an https:// endpoint (the loader refuses any other scheme: a member is known
+# by its certificate) and register_incarnation. Loopback endpoints need
+# allow_localhost, which the Android release loader otherwise refuses.
+allow_localhost = true
+
+[[nodes]]
+name = "instrumented-node-1"
+endpoint = "https://127.0.0.1:8080"
+register_incarnation = "INSTRUMENTED-TEST-NODE-1"

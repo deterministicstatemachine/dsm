@@ -2,6 +2,7 @@ package com.dsm.wallet.bridge
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -82,21 +83,30 @@ class BridgeLoggerTest {
         assertTrue("Log should contain BRIDGE prefix", content.contains("BRIDGE:"))
     }
 
+    // A bridge payload can be the mnemonic, and the log is a file on disk:
+    // it names the payload's size and never a byte of it.
     @Test
-    fun logBridgeCall_shortPayload_notTruncated() {
-        val payload = byteArrayOf(0x01, 0x02, 0x03)
-        val b32 = BridgeEncoding.base32CrockfordEncode(payload)
+    fun logBridgeCall_namesThePayloadSize_neverItsBytes() {
+        val payload = byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05)
         BridgeLogger.logBridgeCall("m", payload, null, null)
         val content = String(BridgeLogger.readLogBytes(), Charsets.UTF_8)
-        assertTrue("Short payload b32 should appear in full", content.contains(b32))
+        assertTrue("The size is logged", content.contains("payload=5b"))
+        assertFalse(
+            "No byte of the payload is logged",
+            content.contains(BridgeEncoding.base32CrockfordEncode(payload))
+        )
     }
 
     @Test
-    fun logBridgeCall_longPayload_truncated() {
+    fun logBridgeCall_longPayload_notEvenAPrefix() {
         val payload = ByteArray(100) { it.toByte() }
         BridgeLogger.logBridgeCall("m", payload, null, null)
         val content = String(BridgeLogger.readLogBytes(), Charsets.UTF_8)
-        assertTrue("Long payload should be truncated with ...", content.contains("..."))
+        assertTrue("The size is logged", content.contains("payload=100b"))
+        assertFalse(
+            "Not even its first five bytes",
+            content.contains(BridgeEncoding.base32CrockfordEncode(payload.copyOfRange(0, 5)))
+        )
     }
 
     @Test

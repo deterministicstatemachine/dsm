@@ -139,51 +139,36 @@ pub fn rebuild_head_from_checkpoint(
         let (state, stored_tip) = candidates[0];
 
         // Re-derive the transition through the canonical advance. This is the
-        // validity check: conservation is enforced inside `advance`, and the
-        // resulting tip must reproduce the stored one exactly.
+        // validity check: conservation is enforced inside `advance`, the
+        // transition entropy is Core's own derivation from the tip (the stored
+        // one is never passed in — Part VII step 3), and the resulting tip
+        // must reproduce the stored one exactly, entropy included.
         let deltas = deltas_for_transition(state, &head.devid());
 
-        // REPLAY of an already-committed recipient credit (3.5b PR4): the
-        // accepting gate requires a Prepared/DsmBacked admission bound to the
-        // exact operation. This is reconstruction of locally-durable,
-        // previously-accepted state — attach a synthetic Prepared with the
-        // recorded operation's digest so the gate's digest binding still
-        // holds, and strip it from the successor before continuing. The gate
-        // stays total: a transition that was never accepted has no preserved
-        // chain state to replay.
-        let is_gated_credit = matches!(
-            &state.operation,
-            Operation::Transfer {
-                to_device_id,
-                authority_policy: Option::None,
-                ..
-            } if to_device_id.as_slice() == head.devid().as_slice()
-        ) || matches!(&state.operation, Operation::FaucetClaim { .. })
-            // An admitted Mint is admission-gated the same way (0x0029
-            // producer cut): without this arm, a head rebuild TRUNCATES at the
-            // first historical mint — the replay hits the accepting gate with
-            // no fence attached and stops the whole reconstruction.
-            || matches!(&state.operation, Operation::Mint { .. });
-        if is_gated_credit {
-            head = head.with_pending_economic_admission(Some(
-                dsm::economic::admission::PendingEconomicAdmission::prepared(
-                    dsm::economic::admission::PendingAdmissionKind::DsmBacked,
-                    1,
-                    [0u8; 32],
-                    dsm::economic::faucet::dsm_operation_digest(&state.operation.to_bytes()),
-                ),
-            ));
+        // A relationship's first preserved state extends the h_0 its
+        // establishment committed; establish it on the rebuilt head first. A
+        // first state that names any other parent diverges below.
+        if head.chain_tip(&state.rel_key).is_none() {
+            head = match head.establish_relationship(state.counterparty_devid) {
+                Ok(established) => established,
+                Err(e) => {
+                    return Ok(RebuildReport {
+                        head,
+                        applied,
+                        stop: RebuildStop::Rejected {
+                            rel_key: state.rel_key,
+                            reason: e.to_string(),
+                        },
+                    })
+                }
+            };
         }
 
         let outcome = match head.advance(
             state.rel_key,
             state.counterparty_devid,
             state.operation.clone(),
-            state.entropy.clone(),
-            state.encapsulated_entropy.clone(),
             &deltas,
-            Some(state.embedded_parent),
-            None,
             None,
             None,
         ) {
@@ -213,14 +198,7 @@ pub fn rebuild_head_from_checkpoint(
             });
         }
 
-        head = if is_gated_credit {
-            // The synthetic replay admission must not survive the step.
-            outcome
-                .new_device_state
-                .with_pending_economic_admission(None)
-        } else {
-            outcome.new_device_state
-        };
+        head = outcome.new_device_state;
         applied.push(*stored_tip);
         consumed.push(*stored_tip);
     }
@@ -255,18 +233,6 @@ fn deltas_for_transition(
                 amount: amount.value(),
             }]
         }
-        // `Mint` carries its own `policy_commit` (the mint-repair work made it
-        // mandatory), and the chain state no longer carries a balance witness
-        // to second-guess it from — the commitment is balance-free by design.
-        Operation::Mint {
-            amount,
-            policy_commit,
-            ..
-        } => vec![BalanceDelta {
-            policy_commit: *policy_commit,
-            direction: BalanceDirection::Credit,
-            amount: amount.value(),
-        }],
         // Non-value operations carry no delta; conservation rejects anything else.
         _ => Vec::new(),
     }
@@ -300,7 +266,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn checkpoint() -> DeviceState {
-        DeviceState::new([0x01u8; 32], [0x02u8; 32], vec![0xAAu8; 32], 16)
+        DeviceState::new([0x01u8; 32], [0x02u8; 32], vec![0xAAu8; 32])
     }
 
     /// A preserved state that claims `parent` on `rel`, carrying a witness so the
@@ -443,11 +409,7 @@ mod tests {
                 message: String::new(),
                 signature: Vec::new(),
             },
-            vec![0x22u8; 32],
-            None,
             &[],
-            Some([0x33u8; 32]),
-            None,
             None,
             None,
         );

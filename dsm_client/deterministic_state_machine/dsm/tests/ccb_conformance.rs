@@ -462,117 +462,6 @@ fn the_storage_set_id_is_the_ccb_construction_and_not_the_burned_one() {
     );
 }
 
-/// Every live schema matches the registry, and none is burned.
-///
-/// The registry is the authority; this asserts the encoder agrees with it, so
-/// a table edit that is not mirrored in code fails here rather than silently
-/// producing different `c_n` bytes. Burned pairs are listed so a later change
-/// cannot quietly re-adopt one.
-#[test]
-fn live_schemas_match_the_registry_and_none_is_burned() {
-    use dsm::ccb::{schema, CcbObject};
-
-    let live: &[(&str, u16, u16)] = &[
-        ("VaultStateV2", VaultStateV2::CLASS, VaultStateV2::SCHEMA),
-        (
-            "StorageSet",
-            StorageSetMembers::CLASS,
-            StorageSetMembers::SCHEMA,
-        ),
-        (
-            "EncumbranceClaim",
-            EncumbranceClaim::CLASS,
-            EncumbranceClaim::SCHEMA,
-        ),
-        (
-            "EncumbranceSet",
-            EncumbranceSet::CLASS,
-            EncumbranceSet::SCHEMA,
-        ),
-        ("MarketPolicy", MarketPolicy::CLASS, MarketPolicy::SCHEMA),
-        ("ReleasePolicy", ReleasePolicy::CLASS, ReleasePolicy::SCHEMA),
-        ("FeePolicy", FeePolicy::CLASS, FeePolicy::SCHEMA),
-        // Amendment 2c-A.1: the settlement bundle and what it nests.
-        (
-            "TradeIntent",
-            dsm::ccb::TradeIntent::CLASS,
-            dsm::ccb::TradeIntent::SCHEMA,
-        ),
-        ("Route", dsm::ccb::Route::CLASS, dsm::ccb::Route::SCHEMA),
-        (
-            "SettlementBundle",
-            dsm::ccb::SettlementBundle::CLASS,
-            dsm::ccb::SettlementBundle::SCHEMA,
-        ),
-        (
-            "ConsumedDlvTransition",
-            dsm::ccb::ConsumedDlvTransition::CLASS,
-            dsm::ccb::ConsumedDlvTransition::SCHEMA,
-        ),
-        (
-            "DlvProofMaterial",
-            dsm::ccb::DlvProofMaterial::CLASS,
-            dsm::ccb::DlvProofMaterial::SCHEMA,
-        ),
-        (
-            "Allocation",
-            dsm::ccb::Allocation::CLASS,
-            dsm::ccb::Allocation::SCHEMA,
-        ),
-        (
-            "AllocationBundle",
-            dsm::ccb::AllocationBundle::CLASS,
-            dsm::ccb::AllocationBundle::SCHEMA,
-        ),
-        (
-            "DsmSuccessorEvidence",
-            dsm::ccb::DsmSuccessorEvidence::CLASS,
-            dsm::ccb::DsmSuccessorEvidence::SCHEMA,
-        ),
-        (
-            "MarketTerms",
-            dsm::ccb::MarketTerms::CLASS,
-            dsm::ccb::MarketTerms::SCHEMA,
-        ),
-    ];
-
-    // Registry §3, the live column.
-    let expected: &[(u16, u16)] = &[
-        (0x0001, 4),
-        (0x0002, 3),
-        (0x0004, 2),
-        (0x0005, 2),
-        (0x0007, 1),
-        (0x0009, 1),
-        (0x000A, 1),
-        (0x000B, 1),
-        (0x000D, 2),
-        (0x000E, 1),
-        (0x000F, 1),
-        (0x0010, 1),
-        (0x0015, 2),
-        (0x0016, 2),
-        (0x0031, 1),
-        (0x0033, 1),
-    ];
-
-    for (name, class, sch) in live {
-        assert!(
-            expected.contains(&(*class, *sch)),
-            "{name}: ({class:#06x}, {sch}) is not the registry's live pair"
-        );
-        assert!(
-            !schema::is_burned(*class, *sch),
-            "{name}: encoding at a burned schema"
-        );
-    }
-    assert_eq!(
-        live.len(),
-        expected.len(),
-        "a class is missing from one list"
-    );
-}
-
 /// A nested-schema bump changes the enclosing bytes, which is why it
 /// propagates.
 ///
@@ -629,7 +518,8 @@ fn genesis_params_v3_agrees_with_an_independent_construction() {
         nonce.to_vec(),
         indep::bytes_field(&net),
         indep::u32be(3),
-        indep::u16be(0x0001),
+        // SPHINCS+ SPX256f, construction version 2.
+        indep::u16be(0x0002),
         indep::bytes_field(&pk),
     ]
     .concat();

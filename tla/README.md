@@ -223,51 +223,265 @@ cargo run -p dsm_vertical_validation -- implementation-traces
 
 Tip: if the state space is large, shrink constants in `DSM.cfg` (fewer devices, smaller payloads).
 
-## DSM_EconRegisterObservation.tla — the economic register, observed concurrently
+## DSM_RouteChain.tla — route-chain finality at one cell
 
-The write-once economic register read under concurrency: competing claimants,
-member outage, register **rebuild**, and a **non-atomic read round** whose
-samples interleave with all of them.
+Finality is a route chain (storage spec §9, §12.6; DSM Amendment A6; SoFi
+Amendment S4). A writer writes a value along the cell's route, leader first,
+each copy carrying the chain so far; a seat that does not answer is passed
+over. `LeaderHeld` is the first value to reach the leader, `Preserved` adds one
+further valid link, `Final` adds two. Only a value with a valid leader link can
+have valid further links. Nodes append and never remove.
 
-Owns the *behavioural* half of the frozen `observe_cell` semantics
-(`dsm/src/economic/cell_observation.rs:122-175`). The *algebraic* half — that
-the canonical quorum is the strict majority, and that `2q > n` forces any two
-qualifying quorums to intersect — is a universal statement over all `n` and
-lives in `lean4/DSMEconomicSmtSeparation.lean` §10. Neither restates the other.
-`Quorum` is a CONSTANT here, exactly as `observe_cell` takes it as an argument;
-there is deliberately no operator computing a quorum from `Cardinality(Member)`,
-because a local majority-of-catalog rule is the verifier's opinion, not the
-vault's.
+This module replaces the copy rule ("LeaderHeld and two other members hold x")
+that `DSM_SofiSuccessorCells`, `DSM_SofiFulfillment` and
+`DSM_NativeReserveRelease` still encode; those take their finality from here
+when they are rewritten (G15). The loss rule, handover and retirement are
+outside beta.
 
-What TLC uniquely buys is the **round**: what can happen to the register between
-sampling one member and the next, and what a reader may conclude across a
-sequence of rounds. `NoEmptyAtQuorumAfterClaimed` is the statement only a model
-checker can make — a cell observed `Claimed` is never later observed empty,
-across every interleaving of claims, outages and rebuilds.
+| Invariant | Requirement |
+|---|---|
+| `ChainUniqueness`, `AtMostOneFinal` | MR-STOR-0143 |
+| `StatesNest` | MR-DSM-0270 |
+| `FinalSurvivesTwoLosses` | §12.6 durability under the two-seat loss bound |
+| `FinalityStable`, `LeaderHeldStable` | MR-DSM-0270, MR-STOR-0127 |
 
-### Deliberate falsifications — now machine-gated
+| Mutation config | What it breaks | Must fail |
+|---|---|---|
+| `_AnyArrivalLeads` | any arrival at the leader counts as its link | `ChainUniqueness` |
+| `_CountWithoutLeader` | further links count without a valid leader link | `ChainUniqueness` |
+| `_NodeRemoves` | a seat drops what it holds | `FinalityStable` |
 
-Each config below models a **real shipped defect** and must violate the named
-invariant. These are no longer asserted in this table and checked by nobody:
-`TlaSpec::expect_violation` inverts the verdict, and the run passes only if TLC
-reports *exactly* that invariant. Three ways to fail — no violation at all (the
-invariant is decoration), the wrong invariant (the config is not modelling what
-it claims), or a TLC error.
+The configs state the five seats as a set (`Seats = {s1, …, s5}`; a `.cfg`
+cannot state a tuple, so the module chooses the route ordering) and set
+`CHECK_DEADLOCK FALSE`: a finished write has no successor, and that is not a
+deadlock. The model is finite and exhausts in about a second. It runs in CI
+through `dsm_vertical_validation tla-check` (`RouteChain` and its three
+falsifications).
+
+```
+java -cp tla2tools.jar tlc2.TLC -config DSM_RouteChain.cfg DSM_RouteChain.tla
+```
+
+## DSM_NativeReserveRelease.tla — the native ERA reserve, released leader first
+
+One network's native ERA reserve (Part IX §51, rebuild step R4) at its head
+state and the ONE cell where its successor is decided, replicated across the
+frozen five-member set: claimants write releases naming themselves, anyone
+writes garbage, members keep everything and decide nothing, Core recognizes
+(a release that verifies AND is the successor of the state it validated),
+resolves leader first, and advances the reserve by exactly the amount the
+final release names. The Rust twins are `dsm/src/economic/native_reserve.rs`
+(the construction predicate, recognition, the walk) and
+`dsm_sdk/src/sdk/native_reserve.rs` (the leader-first write, the memoised
+walk, the background carry); the algebra is `lean4/DSMNativeReserve.lean`.
+
+Two properties, kept apart (owner ruling, 2026-09-20): finality is the
+deterministic leader plus two other members holding the same recognized
+object — `ThreeHoldersIsFinal`, `UnavailableNonLeaderNeverBlocks` — and
+replication is all-member, in the background, never a condition of finality
+(`_AllMembersHoldReachable` witnesses every member holding the winner). The
+reserve's accounting is `Conservation` (`Supply = remaining + Σ balances`),
+`NoValidReserveTransitionMints`, `NoCreatorBackout` and `RecipientIsClaimant`
+(`FaucetClaim(A, x) ⇒ balance[A] += x`).
+
+### Deliberate falsifications and non-vacuity — machine-gated
 
 | Config | Models | Must violate |
 |---|---|---|
-| `_FlattenCollapse` | `peer_lineage.rs:165-169` `.ok().flatten()` — a quarantined write-once cell delivered as emptiness | `EmptinessIsGrounded` |
-| `_UnavailableIsNone` | `economic_registers.rs:232` `Unavailable => Ok(None)` | `EmptinessIsGrounded` |
-| `_ErrorIsEmpty` | the historical defect `cell_observation.rs` exists to remove: an unusable answer classified as "no value" | `EmptyAtQuorumIsWitnessed` |
-| `_NoIncarnationEcho` | attribution on node id alone — the live economic read path before the incarnation header was stamped | `EmptyAtQuorumIsWitnessed` |
-| `_Reachability` | **non-vacuity**: `Conflict` must be REACHABLE from two claimants racing one write-once cell, with no misbehaviour. Without it the configs above could pass for the wrong reason | `ConflictUnreachable` |
+| `_CountWithoutLeader` | finality counted over any three holders | `FinalRequiresLeader` |
+| `_AvailabilityLeader` | the leader is whoever is reachable | `LeaderFromCommittedSet` |
+| `_AllMemberFinality` | finality waits for every member (five copies) | `ThreeHoldersIsFinal` |
+| `_UnavailableNonLeaderBlocks` | the same fault, seen from a member that is down | `UnavailableNonLeaderNeverBlocks` |
+| `_OverdraftRecognized` | recognition accepts a release of more than remains — the one arm that would mint | `NoValidReserveTransitionMints` |
+| `_MintArm` | a transition that raises `remaining` | `Conservation` |
+| `_CreatorBackout` | a transition that moves units to a creator without a release | `NoCreatorBackout` |
+| `_RecipientSubstitution` | the release credits someone other than its claimant | `RecipientIsClaimant` |
+| `_ReleaseReachable` | **non-vacuity**: a release does advance the reserve | `NeverReleased` |
+| `_AllMembersHoldReachable` | **non-vacuity**: every member eventually holds the final release | `NeverAllHold` |
+| `_LossAtLeaderReachable` | **non-vacuity**: two recognized releases race, one loses at the leader | `NeverLostAtLeader` |
 
-Mutation-controlled: neutering `_FlattenCollapse` back to the faithful consumer
-makes the gate report
+## The foundation: lean4/DSMRecognition.lean
 
+Every DSM proof hangs under one theorem about what may become DSM state at
+all:
+
+```text
+ConstructibleDSM(x)  ⇒  RecognizedDSM(x)  ⇒  ValidDSM(x)
 ```
-FAILED [expected-to-fail] ...
-  ERROR: falsification config must violate EmptinessIsGrounded,
-         but saw no violation at all — the invariant is decoration
+
+Raw bytes from anyone are one universe; protocol objects are another; Core's
+deterministic recognition (rebuild the candidate, keep it only if every
+recomputation agrees) is the only way across. `DSMRecognition.lean` models an
+adversary that can craft any object and sign with any key it holds, defines
+`Constructible` by Core's canonical producer and `Valid` by independent
+semantic predicates (authority as the verification relation under the owner
+key, ancestry, naming, availability, conservation, proof soundness), and
+keeps two statements apart: the producer ladder, what Core emits Core
+recognizes and it is valid (`constructible_implies_recognized`, the witness);
+and the security statement, nothing crosses the boundary unless every
+construction constraint holds (`recognized_implies_valid`,
+`hostile_bytes_never_become_state`). Recognized ⇒ Constructible is not
+claimed: it would need every verifying signature to be byte for byte the
+deterministic signer's output, which is stronger than EUF-CMA and than the
+verifier, which has no `sk_prf` and cannot recompute the deterministic `R`.
+Seven mutation controls remove one recomputation each (signature binding,
+ancestry binding, coordinate derivation, canonical encoding, proof
+verification, consumed-key exclusion, the bound); the named theorems rest on
+`sorryAx` and the witness stays green. The cryptography is exactly the model
+of `DSMCertChain.lean`: an injective domain-separated hash and deterministic
+SPHINCS+ as `(keyGen, sign, verify)` with round-trip soundness and message
+binding; unforgeability is stated over the adversary's outputs, with replay
+allowed; nothing is assumed about `sign` as a function of its key, and a
+public key tells nothing about its seed.
+Conservation, the tripwire, SoFi atomicity and leader finality are refinements
+of that boundary: none of them rescues DSM from an invalid state after the
+fact, because no invalid state is admissible.
+
+## SoFi settlement: DSM_SofiSuccessorCells.tla and DSM_SofiFulfillment.tla
+
+A route is one unilateral trader operation, P → G₁…Gₙ → F → realization. Two
+modules check it at two levels, and each leaves the other level alone:
+
+```text
+lean4/DSMSofiSuccessorCells.lean  the ALGEBRA of leader-first cells: members keep every
+                                  value; Final(K,x) iff x is the leader's first object and
+                                  two other members hold it; one final value ever;
+                                  LeaderHeld settles loss; no key is dead; Unknown never
+                                  counts; the attempt walk
+lean4/DSMSofiAtomicity.lean       identities, the hash order, the two Core predicates
+                                  (RouteValidation with SetupValid inside;
+                                  FulfillmentConformance), the ladder, the fence
+lean4/DSMSofiStorage.lean         the STORAGE FACTS for objects and indexes (R1):
+                                  Stored(o) iff three members return bytes that re-hash
+                                  to the address; wrong bytes, a wrong namespace and
+                                  silence never count; under a locator only the candidate
+                                  whose recomputed identity is the locator is kept; a scan
+                                  over budget is Unavailable, never None. Each theorem is a
+                                  Rust test of the same name in CORE/sofi/storage.rs
+
+tla/DSM_SofiSuccessorCells.tla    the MEMBERS, behind the recognition boundary: raw
+                                  member storage takes any bytes from anyone in arrival
+                                  order and holds exactly what it was given
+                                  (MembersKeepEverything, R2); LeaderHeld and Final are
+                                  derived over Core's recognized view; leader-first
+                                  writes, copies, partial reads, the position pair
+                                  written together, faults (a leader chosen by
+                                  reachability, counting without the leader, an unread
+                                  member counted, recognition weakened, a member that
+                                  refuses a second value or replaces what it holds)
+
+tla/DSM_SofiFulfillment.tla       the OPERATION over the facts Core derives: rivals
+                                  between the witnesses and F, abandonment, relayers,
+                                  late evidence, parent canonicality settling, the
+                                  trader parent's branch selection (P15-3), the
+                                  resolution ladder with its conformance rungs, the
+                                  fence on Core resolution, genesis
 ```
 
+**What the storage cut changed (spec Part II, §42).** No member records, refuses
+or decides anything, so the models hold no Dead record, no outcome register
+`K_out`, no registration written by a member and no ingress rule. Registration
+is the race at the leader of the position pair; completion and permanent defeat
+are derived from the leg reads; FulfillmentConformance and RouteValidation are
+separate three-valued Core predicates and registration supplies no truth value
+for either. Early cell occupancy is reachable (`_EarlyCellReachable`,
+`_EarlyOccupancyReachable`); early cell consumption is not
+(`EarlyCellCannotCauseConsumption`). One skip the walk gained here, and the
+Core walk gained in rebuild step R12: an exercise final at a key whose F can
+never register, because its trader's position already holds another claim, is
+skipped (`LostPosition`, spec §21.1; `_LostPositionDropped`). SoFi Amendment
+S14 made it a skip of its own, `SkipReason::RejectedFinalInadmissible`, beside
+`RouteImpossible` and never an arm of it, since `RouteImpossible(P, E)` takes
+no F.
+
+**The recognition boundary at a cell (P1 of §42.3).** The cells model keeps
+hostile bytes: `G` is bytes any caller may send that no recognition rebuilds
+into an object, and it may physically arrive first at a leader and be held by
+every copy member (`_GarbageFirstReachable`). It is never the occupant, never
+final and never consumes: the winner at a key is the first RECOGNIZED object
+at the leader, not the first bytes received (`UnrecognizedBytesNeverOccupy`,
+`UnrecognizedBytesNeverFinalize`, `UnrecognizedBytesNeverConsume`,
+`RecognizedAttemptNamesItsKey`, `FinalImpliesRecognized`,
+`RecognizedImpliesConstructible`). The `_RecognizeAnyBytes*` configs weaken
+recognition and each named invariant falls. There is no protocol state, before
+or after rebuild step R11, in which unclassifiable material occupies a key;
+R11 fixes the concrete `SOFI_EXERCISE` encoding that recognition rebuilds.
+
+**The trader parent (P15-3, R17-3).** `parent` carries the claim at `p` that P
+was built on: `"single"` for an ordinary claim, or one conditional claim as
+`"open"` → `"taken"` / `"other"` / `"none"`, selected once by
+`SelectParentBranch`. Both kinds are initial states, so one run covers each.
+
+**Liveness as quiescence.** Every action in both models is bounded, so every
+behaviour is finite, and under weak fairness on the required actions a behaviour
+ends in a state where none of them is enabled. "A registered F resolves under
+evidence availability" (R13-5) and "witnesses never lock" are invariants of the
+form *quiescent ⇒ resolved*. A trader that still holds a decision (an open
+parent branch, an exercise it carried but never registered) keeps the world
+non-quiescent: those are questions a completer cannot answer. P2 of §42.3
+(a registered fulfillment can be completed by anyone) is proved by the standard
+set — `QuiescentFulfillmentResolved` with no write authorization — and
+`_TraderOnlyCompletion` is its mutation: an authorization only the trader
+satisfies leaves a registered F unresolved.
+
+### Falsifications and non-vacuity (machine-gated)
+
+Each config lists one invariant and must violate exactly it; the three standard
+configs per module (`.cfg`, `_AdverseFacts`, and the cells' `_SecondAttempt`)
+carry the full invariant set and must pass.
+
+| Module | Config | Removes / claims | Must violate |
+|---|---|---|---|
+| cells | `_AdverseFacts` | T's and the rival's operations Invalid, F non-conforming (standard set) | `(standard set)` |
+| cells | `_AttemptLiveOmitted` | AttemptLive | `ConsumedImpliesAttemptLive` |
+| cells | `_AttemptLiveOmittedTwoConsumers` | AttemptLive | `OneConsumerPerParent` |
+| cells | `_AvailabilityLeader` | the leader is whoever is reachable | `LeaderFromCommittedSet` |
+| cells | `_AvailabilityLeaderTwoFinals` | the leader is whoever is reachable | `AtMostOneFinalPerCoordinate` |
+| cells | `_ConsumptionReachable` | *claim:* nothing is consumed | `NeverConsumed` |
+| cells | `_CountWithoutLeader` | finality counted over any three holders | `FinalRequiresLeader` |
+| cells | `_CountWithoutLeaderTwoFinals` | finality counted over any three holders | `AtMostOneFinalPerCoordinate` |
+| cells | `_EarlyOccupancyReachable` | *claim:* a key is never occupied early | `NeverEarlyOccupied` |
+| cells | `_ExerciseCountsAnywhere` | an exercise consuming at a key it does not name | `ExerciseNamesItsKey` |
+| cells | `_ExerciseCountsAnywhereRecognized` | recognition: an exercise read at a key it does not name | `RecognizedAttemptNamesItsKey` |
+| cells | `_GarbageFirstReachable` | *claim:* garbage never arrives first at a leader (it does; the exercise behind it is still the occupant, and final) | `GarbageNeverArrivesFirst` |
+| cells | `_InvalidFinalNotSkipped` | the Invalid skip | `ObjectiveRejectionImpliesSkipped` |
+| cells | `_LossAtLeaderReachable` | *claim:* the race at a leader is never lost | `NeverLostAtLeader` |
+| cells | `_OccupancyIsConsumption` | a final exercise consumes with no Core predicate | `EarlyCellCannotCauseConsumption` |
+| cells | `_RecognizeAnyBytes` | recognition: bytes that rebuild into no object are read as one | `UnrecognizedBytesNeverOccupy` |
+| cells | `_RecognizeAnyBytesConstructible` | recognition: an occupant Core could not construct | `RecognizedImpliesConstructible` |
+| cells | `_RecognizeAnyBytesConsume` | recognition, at consumption | `UnrecognizedBytesNeverConsume` |
+| cells | `_RecognizeAnyBytesFinal` | recognition, at finality | `UnrecognizedBytesNeverFinalize` |
+| cells | `_RegistrationIsConformance` | a registered F taken as conforming | `RegistrationIsNotConformance` |
+| cells | `_RegistrationReachable` | *claim:* nothing registers | `NeverRegistered` |
+| cells | `_SecondAttempt` | F names attempt 1, the rival's final at K0 Invalid (standard set) | `(standard set)` |
+| cells | `_SecondAttemptConsumptionReachable` | *claim:* attempt 1 never consumes | `NeverConsumedAtSecondAttempt` |
+| cells | `_SplitPositionPair` | K_ful(q) and K_root(q) written in two steps | `PositionPairAtomic` |
+| cells | `_UnavailableAsInvalid` | three-valued validation | `UnavailableNeverRejects` |
+| cells | `_UnreadCountedAsCopy` | an unread member counts as a holder | `PartialReadIsSound` |
+| fulfillment | `_AdverseFacts` | both routes Invalid, vault B's creation unvalidated (standard set) | `(standard set)` |
+| fulfillment | `_CompleteRejectedNotSkipped` | arm (i) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_CompleteWithoutCanonicalParents` | established parent canonicality | `OnlyCanonicalParentsConsumed` |
+| fulfillment | `_ConformanceDropped` | FulfillmentConformance in ConsumedRoute | `RealizedRequiresConformance` |
+| fulfillment | `_DescendantOnStorageResolution` | the fence on Core resolution, not storage resolution | `UnresolvedConditionalNeverPredecessor` |
+| fulfillment | `_EarlyCellReachable` | *claim:* no key holds an exercise before registration | `EarlyCellNeverOccupied` |
+| fulfillment | `_GuaranteedSuccessClaim` | *claim:* valid, canonical F never Voids | `RegisteredValidFulfillmentNeverVoids` |
+| fulfillment | `_LockingPolicyFulfillments` | non-locking witnesses | `PolicyFulfillmentNeverLocks` |
+| fulfillment | `_LostPositionDropped` | the S14 skip: an exercise whose F can never register is skipped (R12) | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_MalformedFulfillmentRegisters` | *claim:* a malformed F never registers | `MalformedFulfillmentNeverRegisters` |
+| fulfillment | `_OccupancyIsConsumption` | final legs consume with no Core predicate | `EarlyCellCannotCauseConsumption` |
+| fulfillment | `_OccupancyIsConsumptionInvalid` | final legs of an Invalid route consume | `InvalidStoredNeverAdmitted` |
+| fulfillment | `_OrdinaryClaimBypassesFence` | the fence for every claim kind | `UnresolvedConditionalNeverPredecessor` |
+| fulfillment | `_OrphanNotSkipped` | arm (ii) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_ParentArmReachable` | *claim:* the parent arm never decides Invalid | `ParentArmNeverDecidesInvalid` |
+| fulfillment | `_ParentBranchIgnored` | the branch T0 selected (P15-3) | `MismatchedParentNeverRealizes` |
+| fulfillment | `_PendingParentIsImpossible` | an undecided T0 decides nothing | `PendingParentDecidesNothing` |
+| fulfillment | `_PermanentEvidenceUnavailability` | R13-5's evidence assumption | `QuiescentFulfillmentResolved` |
+| fulfillment | `_PrecommitAsExercise` | P occupies no position | `PrecommitNonEconomic` |
+| fulfillment | `_ProducerBuildsOnOpenPredecessor` | the producer fails closed on an open predecessor (R6) | `QuiescentFulfillmentResolved` |
+| fulfillment | `_RegisteredGenesisAccepted` | validated creation | `GenesisCanonicalOnlyIfCreationValid` |
+| fulfillment | `_RegistrationIsConformance` | a registered F taken as conforming | `RegistrationIsNotConformance` |
+| fulfillment | `_RouteRealizable` | *claim:* the route never realizes | `RouteNeverRealized` |
+| fulfillment | `_SetupValidRemoved` | SetupValid inside RouteValidation | `RealizedRequiresValidSetup` |
+| fulfillment | `_StaleLegNotSkipped` | arm (iii) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_TraderOnlyCompletion` | *P2:* completion by anyone (a write authorization) | `QuiescentFulfillmentResolved` |
+| fulfillment | `_VoidBeforeValidation` | Void requires RouteValidation = Valid | `ResolutionPermanent` |

@@ -66,7 +66,7 @@ impl dsm::core::bridge::AppRouter for CoreAppRouterAdapter {
         .map_err(|_| "App router query panicked".to_string())?
     }
 
-    fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<Vec<u8>, String> {
         // Fetch the current SDK router dynamically (supports hot-swap from bootstrap to full router)
         let router =
             sdk_bridge::app_router().ok_or_else(|| "SDK app router not installed".to_string())?;
@@ -80,8 +80,7 @@ impl dsm::core::bridge::AppRouter for CoreAppRouterAdapter {
             handle.block_on(async move {
                 let result = router.invoke(sdk_bridge::AppInvoke { method, args }).await;
                 if result.success {
-                    // Second Vec<u8> slot reserved for future sideband bytes; keep empty for now.
-                    Ok((result.data, Vec::new()))
+                    Ok(result.data)
                 } else {
                     Err(result
                         .error_message
@@ -131,43 +130,59 @@ mod tests {
         let _ = adapter.handle;
     }
 
+    // Each test below states its premise — no SDK router installed — with a
+    // hold on the router slot, rather than inheriting whatever router an
+    // earlier test in this binary left there; the hold puts that router back
+    // when it drops. Serial, as every test that touches the slot is.
+
+    /// With no SDK router installed, a query is refused as "not installed".
     #[test]
-    #[ignore = "flaky under parallel execution: depends on global APP_ROUTER state"]
+    #[serial_test::serial]
     fn handle_query_fails_without_sdk_router() {
+        let _no_router = crate::bridge::NoAppRouterHold::take();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
-        let result = dsm::core::bridge::AppRouter::handle_query(&adapter, "/test", &[]);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not installed"));
+        let err = dsm::core::bridge::AppRouter::handle_query(&adapter, "/test", &[])
+            .expect_err("no router answers");
+        assert!(err.contains("not installed"), "unexpected refusal: {err}");
     }
 
+    /// With no SDK router installed, an invoke is refused as "not installed".
     #[test]
-    #[ignore = "flaky under parallel execution: depends on global APP_ROUTER state"]
+    #[serial_test::serial]
     fn handle_invoke_fails_without_sdk_router() {
+        let _no_router = crate::bridge::NoAppRouterHold::take();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
-        let result = dsm::core::bridge::AppRouter::handle_invoke(&adapter, "test_method", &[]);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not installed"));
+        let err = dsm::core::bridge::AppRouter::handle_invoke(&adapter, "test_method", &[])
+            .expect_err("no router answers");
+        assert!(err.contains("not installed"), "unexpected refusal: {err}");
     }
 
+    /// With no SDK router installed, a query with an empty path is refused
+    /// the same way: the path is handed nowhere before there is a router.
     #[test]
-    #[ignore = "flaky under parallel execution: depends on global APP_ROUTER state"]
+    #[serial_test::serial]
     fn handle_query_with_empty_path() {
+        let _no_router = crate::bridge::NoAppRouterHold::take();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
-        let result = dsm::core::bridge::AppRouter::handle_query(&adapter, "", &[]);
-        assert!(result.is_err());
+        let err = dsm::core::bridge::AppRouter::handle_query(&adapter, "", &[])
+            .expect_err("no router answers");
+        assert!(err.contains("not installed"), "unexpected refusal: {err}");
     }
 
+    /// With no SDK router installed, an invoke carrying a 1 MiB payload is
+    /// refused the same way, before the payload is copied anywhere.
     #[test]
-    #[ignore = "flaky under parallel execution: depends on global APP_ROUTER state"]
+    #[serial_test::serial]
     fn handle_invoke_with_large_payload() {
+        let _no_router = crate::bridge::NoAppRouterHold::take();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
         let big_payload = vec![0xFFu8; 1024 * 1024];
-        let result =
-            dsm::core::bridge::AppRouter::handle_invoke(&adapter, "big_method", &big_payload);
-        assert!(result.is_err());
+        let err = dsm::core::bridge::AppRouter::handle_invoke(&adapter, "big_method", &big_payload)
+            .expect_err("no router answers");
+        assert!(err.contains("not installed"), "unexpected refusal: {err}");
     }
 }

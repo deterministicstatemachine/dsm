@@ -35,6 +35,7 @@ fn kind_code(kind: &PendingAdmissionKind) -> i64 {
         PendingAdmissionKind::DsmBacked => 0,
         PendingAdmissionKind::OfflineLoad { .. } => 1,
         PendingAdmissionKind::OfflineUnload { .. } => 2,
+        PendingAdmissionKind::SofiFulfillment { .. } => 3,
     }
 }
 
@@ -68,7 +69,6 @@ pub fn put_pending_admission_with_conn(
     tx: &Transaction<'_>,
     device_id: &[u8; 32],
     pending: &PendingEconomicAdmission,
-    now: i64,
 ) -> Result<()> {
     // `Prepared` is never durable: before acceptance nothing changed, so
     // recovery has nothing to finish — and a Prepared record has no
@@ -77,14 +77,16 @@ pub fn put_pending_admission_with_conn(
     let coords = pending
         .accepted_coords()
         .map_err(|e| anyhow!("refusing to persist a pre-acceptance admission: {e}"))?;
-    let fenced: Option<Vec<u8>> = pending.kind.fenced_asset().map(|a| a.to_vec());
+    // The column holds whatever 32 bytes the KIND needs back, which is the
+    // fenced asset for a boundary and the fulfillment id for a SoFi position.
+    let fenced: Option<Vec<u8>> = pending.kind.durable_digest().map(|a| a.to_vec());
     tx.execute(
         "INSERT INTO economic_pending_admissions(
              device_id, kind, fenced_asset, lifecycle_state, economic_position,
              pre_economic_root, post_economic_root, operation_digest,
              accepted_substrate_addr, admission_manifest_addr, c_dsm_plus,
-             embedded_parent, updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             embedded_parent)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
          ON CONFLICT(device_id) DO UPDATE SET
              kind=excluded.kind,
              fenced_asset=excluded.fenced_asset,
@@ -96,8 +98,7 @@ pub fn put_pending_admission_with_conn(
              accepted_substrate_addr=excluded.accepted_substrate_addr,
              admission_manifest_addr=excluded.admission_manifest_addr,
              c_dsm_plus=excluded.c_dsm_plus,
-             embedded_parent=excluded.embedded_parent,
-             updated_at=excluded.updated_at",
+             embedded_parent=excluded.embedded_parent",
         params![
             device_id.as_slice(),
             kind_code(&pending.kind),
@@ -111,7 +112,6 @@ pub fn put_pending_admission_with_conn(
             coords.admission_manifest_addr.as_slice(),
             coords.c_dsm_plus.as_slice(),
             coords.embedded_parent.as_slice(),
-            now,
         ],
     )?;
     Ok(())
@@ -205,6 +205,18 @@ pub fn load_pending_admission_with_conn(
                     asset_policy_commit: asset,
                 }
             }
+        }
+        3 => {
+            // Without the id the admission cannot be matched to the
+            // fulfillment that finishes it, and a pending admission is
+            // finished, never abandoned. Refuse rather than guess.
+            let fulfillment_id = digest32(
+                fenced.ok_or_else(|| {
+                    anyhow!("a SoFi fulfillment admission has no fulfillment id — cannot resume")
+                })?,
+                "fulfillment_id",
+            )?;
+            PendingAdmissionKind::SofiFulfillment { fulfillment_id }
         }
         other => return Err(anyhow!("unknown pending admission kind {other}")),
     };

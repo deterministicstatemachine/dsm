@@ -14,31 +14,25 @@ futures = "0.3.31"
 # HTTP server
 axum = { version = "0.8", features = ["macros"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }              # TLS listener
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }    # bounds on accepted connections
 rustls = { version = "0.23", features = ["ring"] }
-tokio-rustls = "0.26"
 # PEM cert/key parsing via the maintained rustls-pki-types crate (Issue #24).
 # Replaces the unmaintained rustls-pemfile (RUSTSEC-2025-0134); the
 # `alloc` feature gates the PEM-reading helpers (`from_pem_slice`,
 # `from_pem_reader`, etc.) on `rustls::pki_types::CertificateDer` and friends.
 rustls-pki-types = { version = "1", features = ["alloc"] }
-tower = { version = "0.5", features = ["limit", "timeout"] }
-tower-http = { version = "0.6", features = ["trace", "set-header", "limit", "metrics"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["trace", "set-header", "limit", "timeout"] }
 
 # Error handling
-thiserror = "2.0.18"
 anyhow = "1.0.75"
 
-# Cryptography (quantum-resistant)
-blake3 = "1.4.0"
-ml-kem = "0.2.0"
+# Randomness (the register incarnation)
 rand = "0.8.6"
-zeroize = { version = "1.6.0", features = ["derive"] }
-subtle = "2"
 
 # Configuration
 clap = { version = "4.6.1", features = ["derive"] }
 config = "0.15.23"
-toml = "1.1.2"
 
 # Logging
 tracing = "0.1.40"
@@ -49,55 +43,24 @@ tracing-log = "0.2"
 # HTTP Client
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 
-# Database (PostgreSQL — default)
-tokio-postgres = { version = "0.7.17", default-features = false, features = ["runtime"], optional = true }
-deadpool-postgres = { version = "0.14.1", optional = true }
-tokio-postgres-rustls = { version = "0.14", optional = true }
-rustls-native-certs = "0.8"      # use system roots (optional)
+# Database (PostgreSQL)
+tokio-postgres = { version = "0.7.17", default-features = false, features = ["runtime"] }
+deadpool-postgres = "0.14.1"
+tokio-postgres-rustls = "0.14"
 webpki-roots = "1.0.7"
-
-# Database (SQLite — local-dev only)
-rusqlite = { version = "0.40.1", features = ["bundled"], optional = true }
-
-# Async traits for health checks
-async-trait = "0.1"
-
-# Deterministic tick sources live in dsm core
 
 # DSM Core (for SPHINCS+ and shared types)
 dsm = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_machine/dsm" }
 
-# DSM SDK (for centralized utilities like base32 Crockford)
-dsm_sdk = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_machine/dsm_sdk" }
-
 # Protobuf support
 prost = "0.14"
-metrics = "0.24"
-once_cell = "1.19"
-
-[features]
-default = ["strict", "postgres"]
-strict = []
-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:tokio-postgres-rustls"]
-local-dev = ["dep:rusqlite"]
-dev-genesis = []
-dev-vault = []
-dev-inbox-blinded = []
-dev-discovery = []
-unilateral = []
-dev-replication = []
-benchmarking = []
 
 [[bin]]
 name = "storage_node"
 path = "src/main.rs"
 
 [dev-dependencies]
-# The register conformance suite drives the in-process register double
-# (`dsm_sdk::sdk::storage_io::fake_registers`, gated `test-utils`) against
-# this node's real routers. Same package edge as the normal dependency above;
-# only the feature is unified onto the test build.
-dsm_sdk = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_machine/dsm_sdk", features = ["test-utils"] }
-hyper = { version = "1.10", features = ["full"] }
-prost = "0.14"
-serial_test = "3"
+# Parse the node's own sources for clock reads (tests/no_clock_reads.rs).
+proc-macro2 = "1"
+rcgen = "0.14.8"
+syn = { version = "2", features = ["full", "visit"] }

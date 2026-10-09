@@ -18,7 +18,7 @@ fn gen(id: u8) -> [u8; 32] {
 
 fn reset_db() {
     // Use in-memory DB to avoid stale schema from production DB files
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
+    dsm_sdk::economic_fixtures::use_test_storage_dir();
     client_db::reset_database_for_tests();
     if let Err(e) = client_db::init_database() {
         eprintln!("[ble_pairing_e2e] init_database skipped (already init): {e}");
@@ -33,17 +33,14 @@ fn make_contact_record(device_id: [u8; 32], genesis_hash: [u8; 32], alias: &str)
         alias: alias.to_string(),
         genesis_hash: genesis_hash.to_vec(),
         public_key: vec![1u8; 32],
-        kyber_public_key: Vec::new(),
-        current_chain_tip: None,
-        added_at: 100,
+        kyber_public_key: vec![0x4B; 1184],
+        current_chain_tip: Some(vec![0x70; 32]),
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: None,
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     }
 }
@@ -102,17 +99,14 @@ async fn test_read_contact_preserves_existing() {
         alias: "ExistingContact".to_string(),
         genesis_hash: genesis_hash.to_vec(),
         public_key: vec![1u8; 32],
-        kyber_public_key: Vec::new(),
-        current_chain_tip: None,
-        added_at: 100,
+        kyber_public_key: vec![0x4B; 1184],
+        current_chain_tip: Some(vec![0x70; 32]),
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     };
     client_db::store_contact(&record).expect("store_contact");
@@ -155,18 +149,15 @@ async fn test_ble_address_persistence_after_ensure() {
         device_id: device_id.to_vec(),
         alias: "TestContact".to_string(),
         genesis_hash: genesis_hash.to_vec(),
-        public_key: Vec::new(),
-        kyber_public_key: Vec::new(),
-        current_chain_tip: None,
-        added_at: 100,
+        public_key: vec![0x41; 64],
+        kyber_public_key: vec![0x4B; 1184],
+        current_chain_tip: Some(vec![0x70; 32]),
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: None,
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     };
     client_db::store_contact(&record).expect("store_contact");
@@ -193,11 +184,12 @@ async fn test_ble_address_persistence_after_ensure() {
 }
 
 // =============================================================================
-// Test 4: BLE status update does not auto-create a missing contact
+// Test 4: a BLE status update for a device that is not a contact creates
+// nothing and says so
 // =============================================================================
 #[tokio::test]
 #[serial_test::serial]
-async fn test_ble_status_update_skips_missing_contact() {
+async fn test_ble_status_update_refuses_a_missing_contact() {
     reset_db();
 
     let device_id = dev(0x77);
@@ -207,9 +199,12 @@ async fn test_ble_status_update_skips_missing_contact() {
         .unwrap()
         .is_none());
 
-    // Strict path: missing contacts are not created implicitly.
-    client_db::update_contact_ble_status(&device_id, None, Some("AA:BB:CC:DD:EE:FF"))
-        .expect("update should succeed");
+    // Strict path: missing contacts are not created implicitly, and an
+    // update that updated nothing is not reported as done.
+    assert!(
+        client_db::update_contact_ble_status(&device_id, None, Some("AA:BB:CC:DD:EE:FF")).is_err(),
+        "an update of a device that is not a contact reported success"
+    );
 
     assert!(
         client_db::get_contact_by_device_id(&device_id)
@@ -260,17 +255,14 @@ async fn test_ble_address_roundtrip() {
         alias: "DeviceB".to_string(),
         genesis_hash: b_gen.to_vec(),
         public_key: vec![1u8; 32],
-        kyber_public_key: Vec::new(),
-        current_chain_tip: None,
-        added_at: 1,
+        kyber_public_key: vec![0x4B; 1184],
+        current_chain_tip: Some(vec![0x70; 32]),
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: None,
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     };
     let hash_a = blake3::hash(&a_dev);
@@ -280,17 +272,14 @@ async fn test_ble_address_roundtrip() {
         alias: "DeviceA".to_string(),
         genesis_hash: a_gen.to_vec(),
         public_key: vec![2u8; 32],
-        kyber_public_key: Vec::new(),
-        current_chain_tip: None,
-        added_at: 1,
+        kyber_public_key: vec![0x4B; 1184],
+        current_chain_tip: Some(vec![0x70; 32]),
         verified: true,
         verification_proof: None,
         metadata: std::collections::HashMap::new(),
         ble_address: None,
         status: "Created".to_string(),
         needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
         previous_chain_tip: None,
     };
     client_db::store_contact(&rec_b).expect("store B on A's side");

@@ -31,7 +31,10 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 13;
+///
+/// 91 since the receipt's write set (`ReceiptWriteSet` and its two
+/// falsifications) and `OfflineAnchorSingleAppliance/release-before-receipt`.
+pub const EXPECTED_STANDARD_SPECS: usize = 91;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -57,6 +60,15 @@ pub struct TlaSpec {
     /// no violation at all (the invariant is decoration), the wrong invariant
     /// (the config is not modelling what it says), or a TLC error.
     pub expect_violation: Option<String>,
+    /// `true` for a model whose state graph is finite by construction — every
+    /// action monotone, or every variable over a fixed finite set: TLC
+    /// explores it breadth-first with parallel workers and exhausts it, and
+    /// only then checks liveness (DFID cannot). `false` keeps the bounded DFID
+    /// search that unbounded models need. Iterative deepening regenerated 71M states to
+    /// find the 1.08M of `DSM_SofiFulfillment` (five minutes); breadth-first
+    /// finds them once (seventeen seconds).
+    #[serde(default)]
+    pub exhaustive: bool,
 }
 
 /// Structured result from parsing TLC stdout.
@@ -70,8 +82,14 @@ pub struct TlcResult {
     pub distinct_states: u64,
     /// Depth of the complete state graph search
     pub depth_reached: u64,
-    /// Error messages (empty if passed)
+    /// Error messages (empty if passed). These are results ABOUT THE MODEL:
+    /// an invariant was violated, or TLC could not run the check.
     pub errors: Vec<String>,
+    /// Diagnostics about the TOOL that do not change the verdict — chiefly a
+    /// TLC exception thrown AFTER it printed "Model checking completed. No
+    /// error has been found". Never silent, never fatal.
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// Full TLC stdout (retained for debugging when verbose output is needed)
     #[serde(skip)]
     #[allow(dead_code)]
@@ -145,13 +163,20 @@ impl TlaRunner {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or_else(|| dfid_depth_for_config(&config_text));
-        let output = tokio::process::Command::new("java")
+        let mut command = tokio::process::Command::new("java");
+        command
             .arg("-XX:+UseParallelGC")
             .arg("-cp")
             .arg(&self.jar_path)
-            .arg("tlc2.TLC")
-            .arg("-dfid")
-            .arg(dfid_depth.to_string())
+            .arg("tlc2.TLC");
+        if spec.exhaustive {
+            // Finite by construction: exhaust the graph breadth-first. DFID
+            // cannot take workers; this can.
+            command.arg("-workers").arg("auto");
+        } else {
+            command.arg("-dfid").arg(dfid_depth.to_string());
+        }
+        let output = command
             .arg("-checkpoint")
             .arg("0")
             .arg("-metadir")
@@ -298,6 +323,7 @@ impl TlaRunner {
                 ],
                 supports_trace_replay: true,
                 expect_violation: None,
+                exhaustive: false,
             },
             TlaSpec {
                 label: "DSM_small".into(),
@@ -327,6 +353,7 @@ impl TlaRunner {
                 ],
                 supports_trace_replay: true,
                 expect_violation: None,
+                exhaustive: false,
             },
             TlaSpec {
                 label: "DSM_system".into(),
@@ -356,6 +383,7 @@ impl TlaRunner {
                 ],
                 supports_trace_replay: true,
                 expect_violation: None,
+                exhaustive: false,
             },
             TlaSpec {
                 label: "Tripwire".into(),
@@ -373,35 +401,81 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![
-                    "tripwire_parent_consumption".into(),
-                    "receipt_verifier_tripwire".into(),
+                    "receiver_tripwire".into(),
                     "tripwire_first_contact_binding".into(),
                     "bilateral_precommit_tripwire".into(),
                     "bilateral_precomputed_finalize_hash".into(),
                 ],
                 supports_trace_replay: true,
                 expect_violation: None,
+                exhaustive: false,
             },
-            // --- Offline Finality (Paper Theorems 4.1, 4.2) ---
-            // Bilateral settlement irreversibility + BLE partition tolerance.
+            // --- Offline finality: the offline step between two devices ---
+            // Both-or-neither across a lost link, frames delivered again, a
+            // restart, rejection and cancellation; one step at a time at both
+            // doors; every proposed step settles once the link stays up.
             TlaSpec {
                 label: "OfflineFinality".into(),
                 spec_file: "DSM_OfflineFinality.tla".into(),
                 config_file: "DSM_OfflineFinality.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
-                    "BilateralIrreversibility".into(),
-                    "FullSettlement".into(),
+                    "NoFork".into(),
                     "NoHalfCommit".into(),
                     "TripwireGuaranteesUniqueness".into(),
+                    "CommitsExtendTheirParent".into(),
+                    "OneStepInFlight".into(),
                     "TokenConservation".into(),
                     "BalancesNonNegative".into(),
+                    "ConfirmFollowsDurableConfirm".into(),
+                    "AckFollowsDurableCommit".into(),
                 ],
-                properties: vec![],
+                properties: vec!["ChainsOnlyGrow".into(), "SessionTermination".into()],
                 linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
                 supports_trace_replay: true,
                 expect_violation: None,
+                exhaustive: true,
             },
+            // Each rule of the offline step removed, one at a time: the
+            // invariant it holds up fails.
+            expect_violation(
+                "OfflineFinality/frame-before-durable",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_FrameBeforeDurable.cfg",
+                "NoHalfCommit",
+            ),
+            expect_violation(
+                "OfflineFinality/cancel-after-confirm",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_CancelAfterConfirm.cfg",
+                "NoHalfCommit",
+            ),
+            expect_violation(
+                "OfflineFinality/link-loss-fails-steps",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_LinkLossFailsSteps.cfg",
+                "NoHalfCommit",
+            ),
+            expect_violation(
+                "OfflineFinality/crossing-proposals",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_CrossingProposals.cfg",
+                "NoFork",
+            ),
+            // Non-vacuity: both steps commit on both devices, and proposals
+            // cross, in states the model config checks.
+            expect_violation(
+                "OfflineFinality/steps-commit-reachable",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_StepsCommitReachable.cfg",
+                "NeverCommittedOnBoth",
+            ),
+            expect_violation(
+                "OfflineFinality/crossing-reachable",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_CrossingReachable.cfg",
+                "NeverCrossed",
+            ),
             // --- Non-Interference (Paper Lemma 3.1, 3.2, Theorem 3.1) ---
             // Additive scaling: operations on one bilateral pair cannot affect
             // any other pair. Mathematical core of Θ(N) throughput.
@@ -420,6 +494,7 @@ impl TlaRunner {
                 linked_implementation_traces: vec!["bilateral_pair_non_interference".into()],
                 supports_trace_replay: true,
                 expect_violation: None,
+                exhaustive: false,
             },
             // --- Offline Anchor Single Appliance (Software Authority, Hardware
             // Identity: appliance-producer form of Theorem 1). One correct
@@ -439,103 +514,713 @@ impl TlaRunner {
                     "CommitAdvancesOrigin".into(),
                     "SecondSameOriginFails".into(),
                     "RecoveryIdempotence".into(),
+                    "NoCommitWithoutDeliverableConfirm".into(),
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
                 expect_violation: None,
+                exhaustive: false,
             },
-            // ── Economic register, observed concurrently (amendment 2c-C2) ──
-            // The write-once economic register read under concurrency:
-            // competing claimants, member outage, register REBUILD, and a
-            // NON-ATOMIC read round whose samples interleave with all of them.
-            // Owns the BEHAVIOURAL half of observe_cell
-            // (dsm/src/economic/cell_observation.rs:122-175); the algebraic
-            // half -- canonical quorum, 2q > n -- is Lean's
-            // (lean4/DSMEconomicSmtSeparation.lean §10) and is deliberately
-            // not restated here.
+            // The host proves a step's receipt before it drives PREPARE: the
+            // order that released first and built the receipt after spends a
+            // counter step on a confirm that can never be delivered.
+            expect_violation(
+                "OfflineAnchorSingleAppliance/release-before-receipt",
+                "DSM_OfflineAnchorSingleAppliance.tla",
+                "DSM_OfflineAnchorSingleAppliance_ReleaseBeforeReceipt.cfg",
+                "NoCommitWithoutDeliverableConfirm",
+            ),
+            // ── A receipt proves its step's whole write set ───────────────────
+            // An offline-bearer spend moves its relationship tip, anchor
+            // counter and offline allocation in one root; the receipt proves
+            // all three against the parent root and the verifier derives every
+            // post-value. The Rust twin is `verify_receipt_state`
+            // (dsm/src/verification/receipt_verification.rs) over the batch
+            // fold (dsm/src/merkle/batch_fold.rs); the fold's algebra is
+            // lean4/DSMStepTransition.lean. Finite by construction.
             TlaSpec {
-                label: "EconRegisterObservation".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation.cfg".into(),
+                label: "ReceiptWriteSet".into(),
+                spec_file: "DSM_ReceiptWriteSet.tla".into(),
+                config_file: "DSM_ReceiptWriteSet.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
-                    "EmptinessIsGrounded".into(),
-                    "EmptyAtQuorumIsWitnessed".into(),
-                    "NoEmptyAtQuorumAfterClaimed".into(),
-                    "TwoAtQuorumIsConflict".into(),
-                    "VerdictMatchesObservation".into(),
+                    "ClosedWriteSet".into(),
+                    "AllocationConserved".into(),
+                    "CounterMovesWithRoot".into(),
+                    "HonestSpendAcceptable".into(),
+                ],
+                properties: vec!["HonestBearerStepAccepted".into()],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+                exhaustive: true,
+            },
+            expect_violation(
+                "ReceiptWriteSet/relationship-only-check",
+                "DSM_ReceiptWriteSet.tla",
+                "DSM_ReceiptWriteSet_RelationshipOnlyCheck.cfg",
+                "AllocationConserved",
+            ),
+            expect_violation(
+                "ReceiptWriteSet/one-path-rule",
+                "DSM_ReceiptWriteSet.tla",
+                "DSM_ReceiptWriteSet_OnePathRule.cfg",
+                "HonestSpendAcceptable",
+            ),
+            // ── The native ERA reserve: one lineage, released leader first ────
+            // Part IX §51, rebuild step R4, owner ruling 2026-09-20. The
+            // reserve's successor cell at the members while claimants, garbage,
+            // outages and the background carry interleave; Core recognizes,
+            // resolves leader first, and advances the reserve by exactly the
+            // amount the final release names. Finality (leader + two copies) and
+            // all-member replication are two properties, kept apart. The Rust
+            // twins are dsm/src/economic/native_reserve.rs and
+            // dsm_sdk/src/sdk/native_reserve.rs; the algebra is
+            // lean4/DSMNativeReserve.lean.
+            TlaSpec {
+                label: "NativeReserveRelease".into(),
+                spec_file: "DSM_NativeReserveRelease.tla".into(),
+                config_file: "DSM_NativeReserveRelease.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "Conservation".into(),
+                    "NoValidReserveTransitionMints".into(),
+                    "NoCreatorBackout".into(),
+                    "RecipientIsClaimant".into(),
+                    "ReleaseAccounting".into(),
+                    "FinalRequiresLeader".into(),
+                    "AtMostOneFinal".into(),
+                    "LeaderFromCommittedSet".into(),
+                    "UnrecognizedBytesNeverOccupy".into(),
+                    "ThreeHoldersIsFinal".into(),
+                    "UnavailableNonLeaderNeverBlocks".into(),
+                    "ReplicasDoNotAlterTheWinner".into(),
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
                 expect_violation: None,
+                exhaustive: true,
             },
-            // ── DELIBERATE FALSIFICATIONS ───────────────────────────────────
-            // Each models a REAL shipped defect and must violate the named
-            // invariant. A green run here means the invariant has no teeth.
+            expect_violation(
+                "NativeReserveRelease/count-without-leader",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_CountWithoutLeader.cfg",
+                "FinalRequiresLeader",
+            ),
+            expect_violation(
+                "NativeReserveRelease/availability-leader",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_AvailabilityLeader.cfg",
+                "LeaderFromCommittedSet",
+            ),
+            expect_violation(
+                "NativeReserveRelease/all-member-finality",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_AllMemberFinality.cfg",
+                "ThreeHoldersIsFinal",
+            ),
+            expect_violation(
+                "NativeReserveRelease/unavailable-non-leader-blocks",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_UnavailableNonLeaderBlocks.cfg",
+                "UnavailableNonLeaderNeverBlocks",
+            ),
+            expect_violation(
+                "NativeReserveRelease/overdraft-recognized",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_OverdraftRecognized.cfg",
+                "NoValidReserveTransitionMints",
+            ),
+            expect_violation(
+                "NativeReserveRelease/mint-arm",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_MintArm.cfg",
+                "Conservation",
+            ),
+            // Route-chain finality at one cell (storage spec §9, §12.6; DSM
+            // Amendment A6; SoFi Amendment S4): the leader's link and two
+            // further links of one chain, and what survives two lost seats.
+            // Finite: two values over five seats, exhausted breadth-first in
+            // about a second. The Rust twin is dsm/src/route_chain.rs; the
+            // Lean statement is lean4/DSMRouteChain.lean.
             TlaSpec {
-                label: "EconRegisterObservation/flatten-collapse".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_FlattenCollapse.cfg".into(),
-                invariants: vec!["EmptinessIsGrounded".into()],
+                label: "RouteChain".into(),
+                spec_file: "DSM_RouteChain.tla".into(),
+                config_file: "DSM_RouteChain.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "ChainUniqueness".into(),
+                    "AtMostOneFinal".into(),
+                    "StatesNest".into(),
+                    "FinalSurvivesTwoLosses".into(),
+                ],
+                properties: vec!["FinalityStable".into(), "LeaderHeldStable".into()],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+                exhaustive: true,
+            },
+            expect_violation(
+                "RouteChain/any-arrival-leads",
+                "DSM_RouteChain.tla",
+                "DSM_RouteChain_AnyArrivalLeads.cfg",
+                "ChainUniqueness",
+            ),
+            expect_violation(
+                "RouteChain/count-without-leader",
+                "DSM_RouteChain.tla",
+                "DSM_RouteChain_CountWithoutLeader.cfg",
+                "ChainUniqueness",
+            ),
+            expect_property_violation(
+                "RouteChain/node-removes",
+                "DSM_RouteChain.tla",
+                "DSM_RouteChain_NodeRemoves.cfg",
+                "FinalityStable",
+            ),
+            expect_violation(
+                "NativeReserveRelease/creator-backout",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_CreatorBackout.cfg",
+                "NoCreatorBackout",
+            ),
+            expect_violation(
+                "NativeReserveRelease/recipient-substitution",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_RecipientSubstitution.cfg",
+                "RecipientIsClaimant",
+            ),
+            expect_violation(
+                "NativeReserveRelease/release-reachable",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_ReleaseReachable.cfg",
+                "NeverReleased",
+            ),
+            expect_violation(
+                "NativeReserveRelease/all-members-hold-reachable",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_AllMembersHoldReachable.cfg",
+                "NeverAllHold",
+            ),
+            expect_violation(
+                "NativeReserveRelease/loss-at-leader-reachable",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_LossAtLeaderReachable.cfg",
+                "NeverLostAtLeader",
+            ),
+            // ── DELIBERATE FALSIFICATIONS AND NON-VACUITY, SoFi ───────────────
+            // Each config lists exactly one invariant. A mutation config flips one
+            // gate and must violate it; a *-reachable / *-claim config states
+            // something false (a witness must exist) and must violate it.
+            // ── SoFi successor cells and the position pair, at the members ────
+            // Raw member storage takes any bytes from anyone; Core's recognition
+            // is the only way from bytes to a protocol object, and every cell
+            // fact (LeaderHeld, Final, consumption) is derived over the
+            // recognized view (Part II §7-8, §13, §17.5). Unrecognized bytes
+            // never occupy, finalize or consume; a recognized occupant names its
+            // key and is constructible; the `recognize-any-bytes*` configs weaken
+            // recognition and each named invariant falls. Standard, adverse-facts
+            // and second-attempt configs carry the full invariant set. The
+            // algebra is lean4/DSMSofiSuccessorCells.lean.
+            TlaSpec {
+                label: "SofiSuccessorCells".into(),
+                spec_file: "DSM_SofiSuccessorCells.tla".into(),
+                config_file: "DSM_SofiSuccessorCells.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "MembersKeepEverything".into(),
+                    "UnrecognizedBytesNeverOccupy".into(),
+                    "UnrecognizedBytesNeverFinalize".into(),
+                    "UnrecognizedBytesNeverConsume".into(),
+                    "RecognizedAttemptNamesItsKey".into(),
+                    "FinalImpliesRecognized".into(),
+                    "RecognizedImpliesConstructible".into(),
+                    "FinalRequiresLeader".into(),
+                    "AtMostOneFinalPerCoordinate".into(),
+                    "LeaderFromCommittedSet".into(),
+                    "FinalityIsPermanent".into(),
+                    "PartialReadIsSound".into(),
+                    "PositionPairAtomic".into(),
+                    "PairMutualExclusion".into(),
+                    "EarlyCellCannotCauseConsumption".into(),
+                    "RegistrationIsNotConformance".into(),
+                    "InvalidStoredNeverAdmitted".into(),
+                    "ExerciseNamesItsKey".into(),
+                    "OneConsumerPerParent".into(),
+                    "ConsumedImpliesAttemptLive".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "UnavailableNeverRejects".into(),
+                ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
-                // peer_lineage.rs:165-169 -- .ok().flatten() delivers a
-                // quarantined write-once cell as emptiness.
-                expect_violation: Some("EmptinessIsGrounded".into()),
+                expect_violation: None,
+                exhaustive: true,
             },
             TlaSpec {
-                label: "EconRegisterObservation/unavailable-is-none".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_UnavailableIsNone.cfg".into(),
-                invariants: vec!["EmptinessIsGrounded".into()],
+                label: "SofiSuccessorCells/adverse-facts".into(),
+                spec_file: "DSM_SofiSuccessorCells.tla".into(),
+                config_file: "DSM_SofiSuccessorCells_AdverseFacts.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "MembersKeepEverything".into(),
+                    "UnrecognizedBytesNeverOccupy".into(),
+                    "UnrecognizedBytesNeverFinalize".into(),
+                    "UnrecognizedBytesNeverConsume".into(),
+                    "RecognizedAttemptNamesItsKey".into(),
+                    "FinalImpliesRecognized".into(),
+                    "RecognizedImpliesConstructible".into(),
+                    "FinalRequiresLeader".into(),
+                    "AtMostOneFinalPerCoordinate".into(),
+                    "LeaderFromCommittedSet".into(),
+                    "FinalityIsPermanent".into(),
+                    "PartialReadIsSound".into(),
+                    "PositionPairAtomic".into(),
+                    "PairMutualExclusion".into(),
+                    "EarlyCellCannotCauseConsumption".into(),
+                    "RegistrationIsNotConformance".into(),
+                    "InvalidStoredNeverAdmitted".into(),
+                    "ExerciseNamesItsKey".into(),
+                    "OneConsumerPerParent".into(),
+                    "ConsumedImpliesAttemptLive".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "UnavailableNeverRejects".into(),
+                ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
-                // economic_registers.rs:232 -- Unavailable => Ok(None).
-                expect_violation: Some("EmptinessIsGrounded".into()),
+                expect_violation: None,
+                exhaustive: true,
             },
+            expect_violation(
+                "SofiSuccessorCells/attempt-live-omitted",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_AttemptLiveOmitted.cfg",
+                "ConsumedImpliesAttemptLive",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/attempt-live-omitted-two-consumers",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_AttemptLiveOmittedTwoConsumers.cfg",
+                "OneConsumerPerParent",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/availability-leader",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_AvailabilityLeader.cfg",
+                "LeaderFromCommittedSet",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/availability-leader-two-finals",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_AvailabilityLeaderTwoFinals.cfg",
+                "AtMostOneFinalPerCoordinate",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/consumption-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_ConsumptionReachable.cfg",
+                "NeverConsumed",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/count-without-leader",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_CountWithoutLeader.cfg",
+                "FinalRequiresLeader",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/count-without-leader-two-finals",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_CountWithoutLeaderTwoFinals.cfg",
+                "AtMostOneFinalPerCoordinate",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/early-occupancy-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_EarlyOccupancyReachable.cfg",
+                "NeverEarlyOccupied",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/exercise-counts-anywhere",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_ExerciseCountsAnywhere.cfg",
+                "ExerciseNamesItsKey",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/exercise-counts-anywhere-recognized",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_ExerciseCountsAnywhereRecognized.cfg",
+                "RecognizedAttemptNamesItsKey",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/garbage-first-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_GarbageFirstReachable.cfg",
+                "GarbageNeverArrivesFirst",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/invalid-final-not-skipped",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_InvalidFinalNotSkipped.cfg",
+                "ObjectiveRejectionImpliesSkipped",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/loss-at-leader-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_LossAtLeaderReachable.cfg",
+                "NeverLostAtLeader",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/occupancy-is-consumption",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_OccupancyIsConsumption.cfg",
+                "EarlyCellCannotCauseConsumption",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/recognize-any-bytes",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RecognizeAnyBytes.cfg",
+                "UnrecognizedBytesNeverOccupy",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/recognize-any-bytes-constructible",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RecognizeAnyBytesConstructible.cfg",
+                "RecognizedImpliesConstructible",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/recognize-any-bytes-consume",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RecognizeAnyBytesConsume.cfg",
+                "UnrecognizedBytesNeverConsume",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/recognize-any-bytes-final",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RecognizeAnyBytesFinal.cfg",
+                "UnrecognizedBytesNeverFinalize",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/registration-is-conformance",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RegistrationIsConformance.cfg",
+                "RegistrationIsNotConformance",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/registration-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RegistrationReachable.cfg",
+                "NeverRegistered",
+            ),
             TlaSpec {
-                label: "EconRegisterObservation/error-is-empty".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_ErrorIsEmpty.cfg".into(),
-                invariants: vec!["EmptyAtQuorumIsWitnessed".into()],
+                label: "SofiSuccessorCells/second-attempt".into(),
+                spec_file: "DSM_SofiSuccessorCells.tla".into(),
+                config_file: "DSM_SofiSuccessorCells_SecondAttempt.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "MembersKeepEverything".into(),
+                    "UnrecognizedBytesNeverOccupy".into(),
+                    "UnrecognizedBytesNeverFinalize".into(),
+                    "UnrecognizedBytesNeverConsume".into(),
+                    "RecognizedAttemptNamesItsKey".into(),
+                    "FinalImpliesRecognized".into(),
+                    "RecognizedImpliesConstructible".into(),
+                    "FinalRequiresLeader".into(),
+                    "AtMostOneFinalPerCoordinate".into(),
+                    "LeaderFromCommittedSet".into(),
+                    "FinalityIsPermanent".into(),
+                    "PartialReadIsSound".into(),
+                    "PositionPairAtomic".into(),
+                    "PairMutualExclusion".into(),
+                    "EarlyCellCannotCauseConsumption".into(),
+                    "RegistrationIsNotConformance".into(),
+                    "InvalidStoredNeverAdmitted".into(),
+                    "ExerciseNamesItsKey".into(),
+                    "OneConsumerPerParent".into(),
+                    "ConsumedImpliesAttemptLive".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "UnavailableNeverRejects".into(),
+                ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
-                // The historical defect cell_observation.rs exists to remove:
-                // an unusable answer classified as "no value".
-                expect_violation: Some("EmptyAtQuorumIsWitnessed".into()),
+                expect_violation: None,
+                exhaustive: true,
             },
+            expect_violation(
+                "SofiSuccessorCells/second-attempt-consumption-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_SecondAttemptConsumptionReachable.cfg",
+                "NeverConsumedAtSecondAttempt",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/split-position-pair",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_SplitPositionPair.cfg",
+                "PositionPairAtomic",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/unavailable-as-invalid",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_UnavailableAsInvalid.cfg",
+                "UnavailableNeverRejects",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/unread-counted-as-copy",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_UnreadCountedAsCopy.cfg",
+                "PartialReadIsSound",
+            ),
+            // R2 (Part II §12): a member that drops a later arrival, or
+            // overwrites an earlier one, no longer holds what it was given.
+            expect_violation(
+                "SofiSuccessorCells/member-refuses-second-value",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_MemberRefusesSecondValue.cfg",
+                "MembersKeepEverything",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/member-replaces-value",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_MemberReplacesValue.cfg",
+                "MembersKeepEverything",
+            ),
+            // ── SoFi: one unilateral trader operation, run concurrently ───────
+            // P -> G -> F -> realization over the facts Core derives: no outcome
+            // register, no member ingress, registration = the leader race at the
+            // position pair, RouteValidation (with SetupValid inside) and
+            // FulfillmentConformance as separate predicates, the fence on Core
+            // resolution. `producer-builds-on-open-predecessor` is the producer
+            // mutation of spec §42.2; `trader-only-completion` is the mutation of
+            // P2 (§42.3), which the standard set proves.
             TlaSpec {
-                label: "EconRegisterObservation/no-incarnation-echo".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_NoIncarnationEcho.cfg".into(),
-                invariants: vec!["EmptyAtQuorumIsWitnessed".into()],
+                label: "SofiFulfillment".into(),
+                spec_file: "DSM_SofiFulfillment.tla".into(),
+                config_file: "DSM_SofiFulfillment.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "PrecommitNonEconomic".into(),
+                    "FulfillmentAtomic".into(),
+                    "OnlyCanonicalParentsConsumed".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "ResolutionPermanent".into(),
+                    "MismatchedParentNeverRealizes".into(),
+                    "PendingParentDecidesNothing".into(),
+                    "ContiguousPositions".into(),
+                    "UnresolvedConditionalNeverPredecessor".into(),
+                    "GenesisCanonicalOnlyIfCreationValid".into(),
+                    "RealizedRequiresValidSetup".into(),
+                    "RealizedRequiresConformance".into(),
+                    "RegistrationIsNotConformance".into(),
+                    "EarlyCellCannotCauseConsumption".into(),
+                    "InvalidStoredNeverAdmitted".into(),
+                    "QuiescentFulfillmentResolved".into(),
+                    "PolicyFulfillmentNeverLocks".into(),
+                ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
-                // Attribution on node id alone -- the live economic read path
-                // before the incarnation header was stamped. A rebuilt member's
-                // absence is counted as attributable when it is not.
-                expect_violation: Some("EmptyAtQuorumIsWitnessed".into()),
+                expect_violation: None,
+                exhaustive: true,
             },
             TlaSpec {
-                label: "EconRegisterObservation/conflict-reachable".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_Reachability.cfg".into(),
-                invariants: vec!["ConflictUnreachable".into()],
+                label: "SofiFulfillment/adverse-facts".into(),
+                spec_file: "DSM_SofiFulfillment.tla".into(),
+                config_file: "DSM_SofiFulfillment_AdverseFacts.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "PrecommitNonEconomic".into(),
+                    "FulfillmentAtomic".into(),
+                    "OnlyCanonicalParentsConsumed".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "ResolutionPermanent".into(),
+                    "MismatchedParentNeverRealizes".into(),
+                    "PendingParentDecidesNothing".into(),
+                    "ContiguousPositions".into(),
+                    "UnresolvedConditionalNeverPredecessor".into(),
+                    "GenesisCanonicalOnlyIfCreationValid".into(),
+                    "RealizedRequiresValidSetup".into(),
+                    "RealizedRequiresConformance".into(),
+                    "RegistrationIsNotConformance".into(),
+                    "EarlyCellCannotCauseConsumption".into(),
+                    "InvalidStoredNeverAdmitted".into(),
+                    "QuiescentFulfillmentResolved".into(),
+                    "PolicyFulfillmentNeverLocks".into(),
+                ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
-                // NON-VACUITY. Conflict must be REACHABLE from two claimants
-                // racing one write-once cell, with no misbehaviour at all.
-                // Without this, the falsification configs above could pass for
-                // the wrong reason.
-                expect_violation: Some("ConflictUnreachable".into()),
+                expect_violation: None,
+                exhaustive: true,
             },
+            expect_violation(
+                "SofiFulfillment/complete-rejected-not-skipped",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_CompleteRejectedNotSkipped.cfg",
+                "ObjectiveRejectionImpliesSkipped",
+            ),
+            // Stage 10 installs whichever root a caller names: the installed
+            // root stops being the ladder's answer.
+            expect_violation(
+                "SofiFulfillment/install-on-caller-value",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_InstallOnCallerValue.cfg",
+                "InstalledRootIsTheLadders",
+            ),
+            // Non-vacuity: an install is reachable in the states the base
+            // config checks.
+            expect_violation(
+                "SofiFulfillment/install-reachable",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_InstallReachable.cfg",
+                "NeverInstalled",
+            ),
+            expect_violation(
+                "SofiFulfillment/complete-without-canonical-parents",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_CompleteWithoutCanonicalParents.cfg",
+                "OnlyCanonicalParentsConsumed",
+            ),
+            expect_violation(
+                "SofiFulfillment/conformance-dropped",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_ConformanceDropped.cfg",
+                "RealizedRequiresConformance",
+            ),
+            expect_violation(
+                "SofiFulfillment/descendant-on-storage-resolution",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_DescendantOnStorageResolution.cfg",
+                "UnresolvedConditionalNeverPredecessor",
+            ),
+            expect_violation(
+                "SofiFulfillment/early-cell-reachable",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_EarlyCellReachable.cfg",
+                "EarlyCellNeverOccupied",
+            ),
+            expect_violation(
+                "SofiFulfillment/guaranteed-success-claim",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_GuaranteedSuccessClaim.cfg",
+                "RegisteredValidFulfillmentNeverVoids",
+            ),
+            expect_violation(
+                "SofiFulfillment/locking-policy-fulfillments",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_LockingPolicyFulfillments.cfg",
+                "PolicyFulfillmentNeverLocks",
+            ),
+            expect_violation(
+                "SofiFulfillment/malformed-fulfillment-registers",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_MalformedFulfillmentRegisters.cfg",
+                "MalformedFulfillmentNeverRegisters",
+            ),
+            expect_violation(
+                "SofiFulfillment/occupancy-is-consumption",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_OccupancyIsConsumption.cfg",
+                "EarlyCellCannotCauseConsumption",
+            ),
+            expect_violation(
+                "SofiFulfillment/occupancy-is-consumption-invalid",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_OccupancyIsConsumptionInvalid.cfg",
+                "InvalidStoredNeverAdmitted",
+            ),
+            expect_violation(
+                "SofiFulfillment/ordinary-claim-bypasses-fence",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_OrdinaryClaimBypassesFence.cfg",
+                "UnresolvedConditionalNeverPredecessor",
+            ),
+            expect_violation(
+                "SofiFulfillment/orphan-not-skipped",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_OrphanNotSkipped.cfg",
+                "ObjectiveRejectionImpliesSkipped",
+            ),
+            expect_violation(
+                "SofiFulfillment/parent-arm-reachable",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_ParentArmReachable.cfg",
+                "ParentArmNeverDecidesInvalid",
+            ),
+            expect_violation(
+                "SofiFulfillment/parent-branch-ignored",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_ParentBranchIgnored.cfg",
+                "MismatchedParentNeverRealizes",
+            ),
+            expect_violation(
+                "SofiFulfillment/pending-parent-is-impossible",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_PendingParentIsImpossible.cfg",
+                "PendingParentDecidesNothing",
+            ),
+            expect_violation(
+                "SofiFulfillment/permanent-evidence-unavailability",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_PermanentEvidenceUnavailability.cfg",
+                "QuiescentFulfillmentResolved",
+            ),
+            expect_violation(
+                "SofiFulfillment/precommit-as-exercise",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_PrecommitAsExercise.cfg",
+                "PrecommitNonEconomic",
+            ),
+            expect_violation(
+                "SofiFulfillment/producer-builds-on-open-predecessor",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_ProducerBuildsOnOpenPredecessor.cfg",
+                "QuiescentFulfillmentResolved",
+            ),
+            expect_violation(
+                "SofiFulfillment/registered-genesis-accepted",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_RegisteredGenesisAccepted.cfg",
+                "GenesisCanonicalOnlyIfCreationValid",
+            ),
+            expect_violation(
+                "SofiFulfillment/registration-is-conformance",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_RegistrationIsConformance.cfg",
+                "RegistrationIsNotConformance",
+            ),
+            expect_violation(
+                "SofiFulfillment/route-realizable",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_RouteRealizable.cfg",
+                "RouteNeverRealized",
+            ),
+            expect_violation(
+                "SofiFulfillment/setup-valid-removed",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_SetupValidRemoved.cfg",
+                "RealizedRequiresValidSetup",
+            ),
+            expect_violation(
+                "SofiFulfillment/stale-leg-not-skipped",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_StaleLegNotSkipped.cfg",
+                "ObjectiveRejectionImpliesSkipped",
+            ),
+            expect_violation(
+                "SofiFulfillment/trader-only-completion",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_TraderOnlyCompletion.cfg",
+                "QuiescentFulfillmentResolved",
+            ),
+            expect_violation(
+                "SofiFulfillment/void-before-validation",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_VoidBeforeValidation.cfg",
+                "ResolutionPermanent",
+            ),
         ]
     }
 
@@ -572,6 +1257,7 @@ impl TlaRunner {
                 ],
                 supports_trace_replay: true,
                 expect_violation: None,
+                exhaustive: false,
             },
             TlaSpec {
                 label: "DSM_bilateral_liveness".into(),
@@ -592,6 +1278,7 @@ impl TlaRunner {
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
                 expect_violation: None,
+                exhaustive: false,
             },
         ]
     }
@@ -618,12 +1305,49 @@ impl TlaRunner {
         for spec in specs {
             eprintln!("  Running TLC: {} ({}) ...", spec.label, spec.config_file);
             let mut result = self.run_spec(&spec).await?;
+
+            // A TOOL CRASH IS NOT EVIDENCE ABOUT THE MODEL, so measure again.
+            //
+            // TLC intermittently dies with `ArithmeticException: Division by
+            // zero` part way through the sweep. It is resource-dependent, not
+            // spec-dependent: it hit `SofiFulfillment` in CI and `DSM_small`
+            // locally on the same tree, and each spec runs clean standalone.
+            // Re-running the SAME check is not bypassing it — nothing about
+            // the verdict is relaxed, and the second reading stands on its own.
+            //
+            // Deliberately narrow: only when TLC crashed with NO finding about
+            // the model, and only once. An invariant violation is never
+            // retried, because that IS evidence and retrying it would be
+            // fishing for a green.
+            if crashed_without_a_finding(&result) {
+                eprintln!(
+                    "    TLC crashed without reaching a verdict ({}); re-running once",
+                    result
+                        .errors
+                        .iter()
+                        .find(|e| e.starts_with("TLC exception:"))
+                        .map(String::as_str)
+                        .unwrap_or("unknown")
+                );
+                let second = self.run_spec(&spec).await?;
+                let still_crashing = second
+                    .errors
+                    .iter()
+                    .any(|e| e.starts_with("TLC exception:"));
+                if still_crashing {
+                    eprintln!("    it crashed again — reporting it, not retrying further");
+                }
+                result = second;
+            }
             // A deliberate-falsification config INVERTS the verdict, and only
             // for the invariant it names. A config that fails for some other
             // reason is not evidence about the invariant it was written for.
             if let Some(expected) = spec.expect_violation.as_deref() {
-                let needle = format!("Invariant violated: {expected}");
-                let hit = result.errors.iter().any(|e| e == &needle);
+                let needles = [
+                    format!("Invariant violated: {expected}"),
+                    format!("Property violated: {expected}"),
+                ];
+                let hit = result.errors.iter().any(|e| needles.contains(e));
                 if hit {
                     result.passed = true;
                     result.errors = vec![format!(
@@ -655,10 +1379,91 @@ impl TlaRunner {
                 result.distinct_states,
                 result.depth_reached
             );
+            // The reason belongs NEXT TO the verdict. Reconstructing it from a
+            // 400-line CI log is how a tool crash gets mistaken for a protocol
+            // regression.
+            if !result.passed {
+                for err in &result.errors {
+                    eprintln!("      reason: {err}");
+                }
+            }
+            for warn in &result.warnings {
+                eprintln!(
+                    "      warning: the model check COMPLETED and found no error; \
+                     TLC then crashed in its own post-run statistics: {warn}"
+                );
+            }
             results.push((spec, result));
         }
 
         Ok(results)
+    }
+}
+
+/// Whether a result is a TOOL CRASH CARRYING NO FINDING — the only thing worth
+/// measuring again.
+///
+/// Every clause earns its place:
+/// - `!passed`: a completed check is never re-run.
+/// - a `TLC exception:` error: something crashed rather than concluded.
+/// - NO `Invariant violated:` error: an invariant violation IS evidence about
+///   the model. Re-running it would be fishing for a green, which is the exact
+///   difference between measuring again and bypassing a gate.
+fn crashed_without_a_finding(result: &TlcResult) -> bool {
+    !result.passed
+        && result
+            .errors
+            .iter()
+            .any(|e| e.starts_with("TLC exception:"))
+        && !result
+            .errors
+            .iter()
+            .any(|e| e.starts_with("Invariant violated:"))
+}
+
+/// A registry entry whose config must violate exactly `invariant`: a deliberate
+/// falsification (one gate removed) or a negated non-vacuity claim. The config
+/// lists that invariant alone, so no other invariant can report first.
+/// The SoFi modules and the offline step model are finite by construction
+/// (see `TlaSpec::exhaustive`).
+fn exhaustive_by_construction(spec_file: &str) -> bool {
+    spec_file.starts_with("DSM_Sofi")
+        || spec_file == "DSM_OfflineFinality.tla"
+        || spec_file == "DSM_ReceiptWriteSet.tla"
+}
+
+/// A falsification config whose named finding is a `[][P]_vars` action
+/// property rather than a state invariant.
+fn expect_property_violation(
+    label: &str,
+    spec_file: &str,
+    config_file: &str,
+    property: &str,
+) -> TlaSpec {
+    TlaSpec {
+        label: label.into(),
+        spec_file: spec_file.into(),
+        config_file: config_file.into(),
+        invariants: vec![],
+        properties: vec![property.into()],
+        linked_implementation_traces: vec![],
+        supports_trace_replay: false,
+        expect_violation: Some(property.into()),
+        exhaustive: exhaustive_by_construction(spec_file),
+    }
+}
+
+fn expect_violation(label: &str, spec_file: &str, config_file: &str, invariant: &str) -> TlaSpec {
+    TlaSpec {
+        label: label.into(),
+        spec_file: spec_file.into(),
+        config_file: config_file.into(),
+        invariants: vec![invariant.into()],
+        properties: vec![],
+        linked_implementation_traces: vec![],
+        supports_trace_replay: false,
+        expect_violation: Some(invariant.into()),
+        exhaustive: exhaustive_by_construction(spec_file),
     }
 }
 
@@ -689,11 +1494,13 @@ mod registry_tests {
                 continue;
             };
             assert!(
-                spec.invariants.iter().any(|i| i == expected),
+                spec.invariants.iter().any(|i| i == expected)
+                    || spec.properties.iter().any(|p| p == expected),
                 "{} expects a violation of `{expected}`, which is not in its own \
-                 declared invariants {:?}",
+                 declared invariants {:?} or properties {:?}",
                 spec.label,
-                spec.invariants
+                spec.invariants,
+                spec.properties
             );
         }
     }
@@ -727,11 +1534,10 @@ fn parse_tlc_output(stdout: &str, stderr: &str) -> TlcResult {
     } else {
         format!("{stdout}\n{stderr}")
     };
-    let mut passed = false;
+    let passed;
     let mut states_generated: u64 = 0;
     let mut distinct_states: u64 = 0;
     let mut depth_reached: u64 = 0;
-    let mut errors = Vec::new();
 
     // Parse state counts: "X states generated (Y s), Z distinct states found"
     // TLC may emit this in different formats; handle both
@@ -770,55 +1576,102 @@ fn parse_tlc_output(stdout: &str, stderr: &str) -> TlcResult {
         }
     }
 
-    // Check for errors
+    // "FAILED" used to mean three different things with no way to tell them
+    // apart: an invariant was violated, TLC could not run the check, or TLC
+    // finished the check and then crashed computing its own end-of-run
+    // statistics. Only the first two are results about the protocol.
+    //
+    // This is not hypothetical. On 2026-09-18 `DSM_SofiFulfillment` reported
+    // `FAILED (1639668 states, 31804 distinct, depth 19)` from a
+    // `java.lang.ArithmeticException: Division by zero` in the
+    // fingerprint-collision estimate, with byte-identical state counts to a
+    // local run that printed "No error has been found". It put `main` red with
+    // no TLA change at all, and the terse line carried none of that.
+    let completed_clean = combined.contains("Model checking completed. No error has been found");
+
     let error_re = Regex::new(r"(?m)^Error:\s*(.+)$").ok();
     let invariant_re = Regex::new(r"Invariant\s+(\S+)\s+is\s+violated").ok();
+    // `[][P]_vars` properties: TLC names them the same way, so a falsification
+    // config can expect one by name.
+    let property_re = Regex::new(r"Action property\s+(\S+)\s+is\s+violated").ok();
     let exception_re = Regex::new(r"(?m)^The exception was a\s+(.+)$").ok();
 
-    let mut push_error = |msg: String| {
-        if !errors.contains(&msg) {
-            errors.push(msg);
+    // About the MODEL.
+    let mut faults: Vec<String> = Vec::new();
+    // About the TOOL.
+    let mut crashes: Vec<String> = Vec::new();
+    let push = |bucket: &mut Vec<String>, msg: String| {
+        if !bucket.contains(&msg) {
+            bucket.push(msg);
         }
     };
 
     if let Some(ref re) = error_re {
         for caps in re.captures_iter(&combined) {
-            push_error(caps[1].trim().to_string());
-            passed = false;
+            push(&mut faults, caps[1].trim().to_string());
         }
     }
 
     if let Some(ref re) = invariant_re {
         for caps in re.captures_iter(&combined) {
-            push_error(format!("Invariant violated: {}", &caps[1]));
-            passed = false;
+            push(&mut faults, format!("Invariant violated: {}", &caps[1]));
+        }
+    }
+
+    if let Some(ref re) = property_re {
+        for caps in re.captures_iter(&combined) {
+            push(&mut faults, format!("Property violated: {}", &caps[1]));
         }
     }
 
     if let Some(ref re) = exception_re {
         for caps in re.captures_iter(&combined) {
-            push_error(format!("TLC exception: {}", caps[1].trim()));
-            passed = false;
+            push(&mut crashes, format!("TLC exception: {}", caps[1].trim()));
         }
     }
 
+    // TLC prints an exception's cause on a CONTINUATION line beginning with
+    // ':'. The old rule took ANY line starting with ':' anywhere in the output
+    // and reported it as a failure cause, so unrelated TLC text could fail a
+    // spec. Only a line directly following an exception marker counts.
+    let mut after_exception = false;
     for line in combined.lines() {
-        if let Some(cause) = line.strip_prefix(':') {
-            let cause = cause.trim();
-            if !cause.is_empty() {
-                push_error(format!("TLC cause: {cause}"));
-                passed = false;
+        let trimmed = line.trim_end();
+        if trimmed.starts_with("The exception was a")
+            || trimmed.contains("TLC threw an unexpected exception")
+        {
+            after_exception = true;
+            continue;
+        }
+        if let Some(cause) = trimmed.strip_prefix(':') {
+            if after_exception {
+                let cause = cause.trim();
+                if !cause.is_empty() {
+                    push(&mut crashes, format!("TLC cause: {cause}"));
+                }
             }
+            continue;
+        }
+        if !trimmed.trim().is_empty() {
+            after_exception = false;
         }
     }
 
-    if errors.is_empty()
+    // A crash AFTER a clean completion does not change what TLC found: it
+    // already printed the verdict. A crash BEFORE one means the check never
+    // finished, which is not a pass — missing evidence never hardens into a
+    // result.
+    passed = faults.is_empty()
         && states_generated > 0
-        && (combined.contains("Model checking completed. No error has been found")
-            || combined.contains("Finished in"))
-    {
-        passed = true;
-    }
+        && (completed_clean || (crashes.is_empty() && combined.contains("Finished in")));
+
+    let (errors, warnings) = if completed_clean {
+        (faults, crashes)
+    } else {
+        let mut fatal = faults;
+        fatal.extend(crashes);
+        (fatal, Vec::new())
+    };
 
     TlcResult {
         passed,
@@ -826,6 +1679,7 @@ fn parse_tlc_output(stdout: &str, stderr: &str) -> TlcResult {
         distinct_states,
         depth_reached,
         errors,
+        warnings,
         raw_stdout: stdout.to_string(),
         raw_stderr: stderr.to_string(),
     }
@@ -909,5 +1763,147 @@ The exception was a java.util.concurrent.ExecutionException
             .errors
             .iter()
             .any(|err| err.contains("Listen failed on port: 0")));
+    }
+
+    /// A run that TLC finished cleanly is a pass, with nothing to report.
+    #[test]
+    fn a_clean_completion_passes_with_no_diagnostics() {
+        let out = "Model checking completed. No error has been found.\n\
+                   1639668 states generated, 31804 distinct states found, 0 states left on queue.\n\
+                   Finished in 12s at (2026-09-18 20:51:33)\n";
+        let r = parse_tlc_output(out, "");
+        assert!(r.passed, "errors: {:?}", r.errors);
+        assert!(r.errors.is_empty());
+        assert!(r.warnings.is_empty());
+        assert_eq!(r.distinct_states, 31804);
+    }
+
+    /// THE INCIDENT. TLC printed the verdict and THEN crashed computing its
+    /// own fingerprint statistics. The model check is a pass; the crash is
+    /// reported and never silent.
+    #[test]
+    fn a_crash_after_the_verdict_is_a_warning_not_a_failure() {
+        let out = "Model checking completed. No error has been found.\n\
+                     Estimates of the probability that TLC did not check all reachable states\n\
+                   1639668 states generated, 31804 distinct states found, 0 states left on queue.\n\
+                   Finished in 12s\n";
+        let err = "TLC threw an unexpected exception.\n\
+                   The exception was a java.lang.ArithmeticException\n\
+                   : Division by zero\n";
+        let r = parse_tlc_output(out, err);
+        assert!(
+            r.passed,
+            "a completed check is not undone by a post-run crash"
+        );
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("ArithmeticException")),
+            "the crash must still be surfaced: {:?}",
+            r.warnings
+        );
+        assert!(r.warnings.iter().any(|w| w.contains("Division by zero")));
+    }
+
+    /// A violated invariant is a result ABOUT THE MODEL and still fails, named.
+    #[test]
+    fn a_violated_invariant_fails_and_is_named() {
+        let out = "Error: Invariant ResolutionPermanent is violated.\n\
+                   1000 states generated, 100 distinct states found\n\
+                   Finished in 3s\n";
+        let r = parse_tlc_output(out, "");
+        assert!(!r.passed);
+        assert!(
+            r.errors.iter().any(|e| e.contains("ResolutionPermanent")),
+            "errors: {:?}",
+            r.errors
+        );
+        assert!(r.warnings.is_empty());
+    }
+
+    /// A crash BEFORE any verdict means the check never finished. That is not
+    /// a pass: missing evidence never hardens into a result.
+    #[test]
+    fn a_crash_before_the_verdict_fails() {
+        let out = "500 states generated, 50 distinct states found\nFinished in 4s\n";
+        let err = "TLC threw an unexpected exception.\n\
+                   The exception was a java.lang.OutOfMemoryError\n\
+                   : Java heap space\n";
+        let r = parse_tlc_output(out, err);
+        assert!(!r.passed, "an unfinished check must not pass");
+        assert!(
+            r.errors.iter().any(|e| e.contains("OutOfMemoryError")),
+            "errors: {:?}",
+            r.errors
+        );
+        assert!(r.warnings.is_empty());
+    }
+
+    /// The old rule treated ANY line beginning with ':' as a failure cause, so
+    /// ordinary TLC output could fail a spec. A ':' line only means something
+    /// directly after an exception marker.
+    #[test]
+    fn a_colon_line_outside_an_exception_is_not_a_cause() {
+        let out = "Model checking completed. No error has been found.\n\
+                   : this is ordinary output, not a cause\n\
+                   1000 states generated, 100 distinct states found\n\
+                   Finished in 1s\n";
+        let r = parse_tlc_output(out, "");
+        assert!(r.passed, "errors: {:?}", r.errors);
+        assert!(r.errors.is_empty());
+        assert!(r.warnings.is_empty(), "warnings: {:?}", r.warnings);
+    }
+
+    fn result_with(passed: bool, errors: &[&str]) -> TlcResult {
+        TlcResult {
+            passed,
+            states_generated: 1,
+            distinct_states: 1,
+            depth_reached: 1,
+            errors: errors.iter().map(|e| (*e).to_string()).collect(),
+            warnings: Vec::new(),
+            raw_stdout: String::new(),
+            raw_stderr: String::new(),
+        }
+    }
+
+    /// A crash with nothing to say about the model is worth measuring again.
+    #[test]
+    fn a_bare_crash_is_retried() {
+        assert!(crashed_without_a_finding(&result_with(
+            false,
+            &[
+                "TLC exception: java.lang.ArithmeticException",
+                "TLC cause: Division by zero"
+            ]
+        )));
+    }
+
+    /// AN INVARIANT VIOLATION IS EVIDENCE. Retrying it would be fishing for a
+    /// green, which is the whole difference between measuring again and
+    /// bypassing a gate.
+    #[test]
+    fn a_violation_is_never_retried() {
+        assert!(!crashed_without_a_finding(&result_with(
+            false,
+            &["Invariant violated: ResolutionPermanent"]
+        )));
+        // Even alongside a crash: the finding stands.
+        assert!(!crashed_without_a_finding(&result_with(
+            false,
+            &[
+                "TLC exception: java.lang.ArithmeticException",
+                "Invariant violated: ResolutionPermanent"
+            ]
+        )));
+    }
+
+    /// A completed check is never re-run, whatever else is in the output.
+    #[test]
+    fn a_passing_result_is_never_retried() {
+        assert!(!crashed_without_a_finding(&result_with(true, &[])));
+        assert!(!crashed_without_a_finding(&result_with(
+            true,
+            &["TLC exception: java.lang.ArithmeticException"]
+        )));
     }
 }

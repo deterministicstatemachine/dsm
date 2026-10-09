@@ -45,36 +45,38 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
     warnSpy.mockRestore();
   });
 
-  test('dBTC offline send is encoded as wallet.sendOffline with token and memo hints', async () => {
+  // The token is forwarded exactly as chosen: Rust canonicalizes it
+  // (`canonicalize_token_id`) and refuses one that names nothing.
+  test('an offline send reaches wallet.sendOffline with the token and memo as given', async () => {
     const to = new Uint8Array(32).fill(0xcc);
-    const bleAddress = 'AA:BB:CC:DD:EE:FF';
     const commitmentHash = new Uint8Array(32).fill(0x77);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { route, args } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
 
       const argPack = pb.ArgPack.fromBinary(args);
-      const prepare = pb.BilateralPrepareRequest.fromBinary(argPack.body);
-      expect(prepare.counterpartyDeviceId).toEqual(to);
-      expect(prepare.transferAmountDisplay).toBe('5');
-      expect(prepare.bleAddress).toBe(bleAddress);
-      expect(prepare.tokenIdHint).toBe('dBTC');
-      expect(prepare.memoHint).toBe('hi');
+      const request = pb.OfflineTransferRequest.fromBinary(argPack.body);
+      expect(request.counterpartyDeviceId).toEqual(to);
+      expect(request.amount).toBe('5');
+      expect(request.tokenId).toBe('DBTC');
+      expect(request.memo).toBe('hi');
 
       const env = new pb.Envelope({
         version: 3,
         payload: {
-          case: 'bilateralPrepareResponse',
-          value: new pb.BilateralPrepareResponse({
-            commitmentHash: new pb.Hash32({ v: commitmentHash }),
+          case: 'bilateralTransferResponse',
+          value: new pb.BilateralTransferResponse({
+            success: true,
+            transactionHash: new pb.Hash32({ v: commitmentHash }),
+            message: 'prepare sent over BLE',
           }),
         },
       });
       return wrapSuccessEnvelope(frameEnvelope(env));
     };
 
-    const promise = dsm.offlineSend({ to, amount: 5n, tokenId: 'DBTC', bleAddress, memo: 'hi' } as any);
+    const promise = dsm.offlineSend({ to, amount: 5n, tokenId: 'DBTC', memo: 'hi' });
     await new Promise((resolve) => setTimeout(resolve, 0));
     emit('bilateral.event', new pb.BilateralEventNotification({
       eventType: pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE,
@@ -86,30 +88,30 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
     await expect(promise).resolves.toEqual(expect.objectContaining({ accepted: true }));
   });
 
-  test('dBTC lowercase canonical token hint stays canonical', async () => {
+  test('dBTC lowercase canonical token stays canonical', async () => {
     const to = new Uint8Array(32).fill(0xdd);
-    const bleAddress = 'AA:BB:CC:DD:EE:11';
     const commitmentHash = new Uint8Array(32).fill(0x33);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { args } = decodeRouterInvoke(reqBytes);
       const argPack = pb.ArgPack.fromBinary(args);
-      const prepare = pb.BilateralPrepareRequest.fromBinary(argPack.body);
-      expect(prepare.tokenIdHint).toBe('dBTC');
+      expect(pb.OfflineTransferRequest.fromBinary(argPack.body).tokenId).toBe('dBTC');
 
       const env = new pb.Envelope({
         version: 3,
         payload: {
-          case: 'bilateralPrepareResponse',
-          value: new pb.BilateralPrepareResponse({
-            commitmentHash: new pb.Hash32({ v: commitmentHash }),
+          case: 'bilateralTransferResponse',
+          value: new pb.BilateralTransferResponse({
+            success: true,
+            transactionHash: new pb.Hash32({ v: commitmentHash }),
+            message: 'prepare sent over BLE',
           }),
         },
       });
       return wrapSuccessEnvelope(frameEnvelope(env));
     };
 
-    const promise = dsm.offlineSend({ to, amount: 7n, tokenId: 'dBTC', bleAddress, memo: 'ok' } as any);
+    const promise = dsm.offlineSend({ to, amount: 7n, tokenId: 'dBTC', memo: 'ok' });
     await new Promise((resolve) => setTimeout(resolve, 0));
     emit('bilateral.event', new pb.BilateralEventNotification({
       eventType: pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE,

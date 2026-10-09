@@ -15,7 +15,6 @@ object BleConstants {
     val TX_REQUEST_UUID: UUID = UUID.fromString("8e7f0002-7c07-4f3f-9b32-7bf3ba6c2a01")
     val TX_RESPONSE_UUID: UUID = UUID.fromString("8e7f0003-7c07-4f3f-9b32-7bf3ba6c2a01")
     val IDENTITY_UUID: UUID = UUID.fromString("8e7f00ff-7c07-4f3f-9b32-7bf3ba6c2a01")
-    val RELATIONSHIP_STATUS_UUID: UUID = UUID.fromString("8e7f00fc-7c07-4f3f-9b32-7bf3ba6c2a01")
     val PAIRING_UUID: UUID = UUID.fromString("8e7f00fe-7c07-4f3f-9b32-7bf3ba6c2a01")
     val PAIRING_ACK_UUID: UUID = UUID.fromString("8e7f00fd-7c07-4f3f-9b32-7bf3ba6c2a01")
 
@@ -54,10 +53,4 @@ object BleConstants {
     // ── Connection priority management ──
     // Reset HIGH → BALANCED after transfer completion to save battery.
     const val CONNECTION_PRIORITY_RESET_DELAY_MS = 500L
-
-    // ── MTU fallback ──
-    // Android 14+ auto-requests MTU 517. If the app's requestMtu() is
-    // ignored (returns false), this fallback fires after the delay to
-    // unblock the CCCD subscription chain.
-    const val MTU_FALLBACK_DELAY_MS = 2_000L
 }

@@ -31,13 +31,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- The one-time "let DSM run in the background" dialog (BatteryExemption):
+         the wallet keeps its own connection to the storage nodes while the
+         phone sleeps, with no push service in between. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
     <!-- Notifications (Android 13+) for FGS persistent notif -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-
-    <!-- Start after reboot when user opts into Always-on scanning -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
 
     <!-- Camera for QR scanning in WebView -->
     <uses-permission android:name="android.permission.CAMERA"/>
@@ -79,6 +79,18 @@
             android:exported="false"
             android:initOrder="1000" />
 
+        <!-- The debug report file the share sheet hands to the app the user picks
+             (DiagnosticsReport); only the report's cache directory is exposed. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/diagnostics_paths" />
+        </provider>
+
         <!-- MAIN ACTIVITY (WebView container + deterministic JS bridge) -->
         <activity
             android:name="com.dsm.wallet.ui.MainActivity"
@@ -101,6 +113,19 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- DSM Connect (Amendment A11; pre-audit item 16 amended by the owner
+                 2026-10-04): an app on this phone opens the wallet with a
+                 dsm:connect/v1: link, and the Apps screen shows its code for the
+                 player to read. The link carries a code only: nothing is fetched
+                 until the player reads it, nothing is trusted until the offer
+                 verifies. ci/android_exported_components.sh admits this filter
+                 and no other. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="dsm" android:sspPrefix="connect/v1:"/>
+            </intent-filter>
         </activity>
 
         <!-- Native QR Scanner Activity (ML Kit + CameraX) -->
@@ -112,73 +137,15 @@
             android:theme="@style/Theme.AppCompat.NoActionBar"
             tools:ignore="LockedOrientationActivity" />
 
-        <!-- MCP core host (protobuf-only runtime hub) -->
-        <service
-            android:name="com.dsm.wallet.mcp.McpService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice|dataSync" />
-
-        <!-- Proximity Foreground Service (Always-on mode; if you use it) -->
-        <service
-            android:name="com.dsm.wallet.proximity.ProximityScanService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice|dataSync" />
-
         <!-- BLE Foreground Service (keeps advertising/GATT alive for offline transfers) -->
         <service
             android:name="com.dsm.wallet.service.BleBackgroundService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|dataSync" />
 
-        <!-- Faucet background scanner (location-based availability signals) -->
-        <service
-            android:name="com.dsm.faucet.FaucetService"
-            android:exported="false"
-            android:foregroundServiceType="location" />
-
-
-        <!-- Restart DSM/MCP after app updates -->
-        <receiver
-            android:name="com.dsm.wallet.mcp.PackageReplacedReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
-            </intent-filter>
-        </receiver>
-
-        <!-- Auto-start proximity service on reboot IF user chose Always-on -->
-        <receiver
-            android:name="com.dsm.wallet.proximity.BootCompletedReceiver"
-            android:enabled="true"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-            </intent-filter>
-        </receiver>
-
-        <!-- Debug pairing test activity (manual isolated pairing control) -->
-        <activity
-            android:name="com.dsm.wallet.debug.PairingTestActivity"
-            android:exported="false"
-            android:label="Pairing Test"
-            android:launchMode="singleTop" />
-
-        <!-- H2 bench self-test: launched when the Pico anchor attaches over USB-OTG (that launch
-             also grants USB permission for the device). Replays one OP_SPI_PASSTHROUGH round-trip
-             and logs whether the phone reached the real TROPIC01. Debug bring-up only. -->
-        <activity
-            android:name="com.dsm.wallet.debug.PicoSelfTestActivity"
-            android:exported="true"
-            android:label="Pico USB self-test"
-            android:launchMode="singleTop">
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-            </intent-filter>
-            <meta-data
-                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                android:resource="@xml/pico_device_filter" />
-        </activity>
+        <!-- The H2 bench self-test (PicoSelfTestActivity) is declared in src/debug/AndroidManifest.xml
+             only: it is exported, and a launch with its confirmation extras runs irreversible chip
+             operations, so a release build must not declare it (pre-audit item 16). -->
 
         <!-- Hardware Incompatibility Screen (shown when JNI library fails to load) -->
         <activity

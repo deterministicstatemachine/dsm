@@ -16,10 +16,6 @@ jest.mock('../contexts/ContactsContext', () => ({
   ContactsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-jest.mock('../contexts/BleContext', () => ({
-  BleProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
-
 jest.mock('../bridge/BridgeProvider', () => ({
   BridgeProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
@@ -63,7 +59,7 @@ jest.mock('../hooks/useGenesisFlow', () => ({
 }));
 
 jest.mock('../hooks/useIntroGate', () => ({
-  useIntroGate: () => false,
+  useIntroGate: () => ({ showIntro: false, dismissIntro: () => {} }),
 }));
 
 jest.mock('../hooks/useThemeAssets', () => ({
@@ -87,10 +83,6 @@ jest.mock('../hooks/useBottomNav', () => ({
 
 jest.mock('../hooks/useLockState', () => ({
   useLockState: () => ({ unlock: jest.fn() }),
-}));
-
-jest.mock('../services/pendingBilateralSync', () => ({
-  installPendingBilateralSync: () => () => undefined,
 }));
 
 jest.mock('../utils/theme', () => ({

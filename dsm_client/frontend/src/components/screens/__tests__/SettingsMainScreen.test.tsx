@@ -21,11 +21,6 @@ jest.mock('../../../dsm/EventBridge', () => ({
   on: jest.fn(() => jest.fn()),
 }));
 
-jest.mock('../../../services/settings/backupService', () => ({
-  exportStateBackupFile: jest.fn(),
-  importStateBackupFile: jest.fn(),
-}));
-
 jest.mock('../../../services/recovery/nfcRecoveryService', () => ({
   getNfcBackupStatus: (...args: unknown[]) => mockGetNfcBackupStatus(...args),
   setAutoWriteEnabled: jest.fn().mockResolvedValue(undefined),
@@ -110,6 +105,22 @@ describe('SettingsMainScreen developer unlock', () => {
     expect(
       screen.getByRole('button', { name: /INSPECT OR RECOVER/i }),
     ).toBeInTheDocument();
+  });
+
+  // A failed status read is that failure; it used to render as "NOT SET" —
+  // the status of a device that has no backup at all.
+  it('shows a failed NFC status read as its failure, not as NOT SET', async () => {
+    mockGetPreference.mockResolvedValueOnce('false');
+    mockGetNfcBackupStatus.mockRejectedValueOnce(new Error('recovery.status: the recovery tables are not migrated'));
+
+    render(<SettingsMainScreen />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/Status not read: recovery.status: the recovery tables are not migrated/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText('NOT READ')).toBeInTheDocument();
+    expect(screen.queryByText('NOT SET')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not configured/)).not.toBeInTheDocument();
   });
 
   it('dispatches diagnostics event from report-issue button (dev mode)', async () => {

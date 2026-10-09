@@ -1,39 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
-// Overview tab for the wallet screen — balances, recent activity, wallet info.
+// Overview tab for the wallet screen — balances, recent activity, wallet identity.
 import React, { useState, useMemo, useCallback } from 'react';
 import TransactionItem from './TransactionItem';
-import { shortStr } from './helpers';
-import type { Balance } from './helpers';
+import { Disclosure } from '../../common/ScreenFrame';
+import type { BalanceHoldingView, TokenBalanceView } from '../../../dsm/types';
+import { TokenMark } from '../../TokenMark';
+import BluetoothIcon from '../../icons/BluetoothIcon';
 import type { DomainTransaction } from '../../../domain/types';
 
 const MAX_OVERVIEW_BALANCES = 5;
 
 type Props = {
-  balances: Balance[];
+  balances: TokenBalanceView[];
+  /** The store has not answered balances yet: neither a holding nor an empty wallet is known. */
+  balancesLoading: boolean;
   transactions: DomainTransaction[];
-  aliasLookup: Map<string, string>;
-  eraGif: string;
   genesisB32: string;
   deviceB32: string;
   onSwitchToSend: () => void;
   onSwitchToHistory: () => void;
 };
 
-function OverviewTabInner({ balances, transactions, aliasLookup, eraGif, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): JSX.Element {
+function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
   const [showAllBalances, setShowAllBalances] = useState(false);
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
-
-  const tokenOptions = useMemo(() => {
-    if (!Array.isArray(balances) || balances.length === 0) {
-      return [{ tokenId: 'ERA', symbol: 'ERA', balance: '0' } as Balance];
-    }
-    return balances;
-  }, [balances]);
+  // Currencies, or the state objects (supply-one tokens: creatures, items) the wallet holds.
+  const [shown, setShown] = useState<BalanceHoldingView>('currency');
+  const showingObjects = shown === 'object';
+  const listed = useMemo(() => balances.filter((b) => (b.holding ?? 'currency') === shown), [balances, shown]);
 
   const visibleBalances = useMemo(() => {
-    if (showAllBalances) return tokenOptions;
-    return tokenOptions.slice(0, MAX_OVERVIEW_BALANCES);
-  }, [tokenOptions, showAllBalances]);
+    if (showAllBalances) return listed;
+    return listed.slice(0, MAX_OVERVIEW_BALANCES);
+  }, [listed, showAllBalances]);
 
   const recentTransactions = useMemo(() => transactions.slice(0, 5), [transactions]);
 
@@ -43,69 +42,101 @@ function OverviewTabInner({ balances, transactions, aliasLookup, eraGif, genesis
 
   return (
     <div className="overview-tab">
-      <div className="balance-section">
-        <h3>
-          <img src={eraGif} alt="ERA" className="era-gif" />
-          Your Balances
-        </h3>
-        {balances.length === 0 ? (
-          <div className="balance-card">
-            <div className="balance-info">
-              <span className="token-symbol">ERA</span>
-              <span className="balance-amount">0</span>
-            </div>
-            <div className="balance-usd" style={{ fontSize: 10, opacity: 0.7 }}>Claim tokens from the faucet to get started</div>
-          </div>
+      <section className="sb-card" aria-label="Your balances">
+        <div className="sb-card__title">
+          <span className="sb-hero__label">Your Balances</span>
+          <button
+            type="button"
+            role="switch"
+            className="sb-switch"
+            aria-checked={showingObjects}
+            aria-label="Show state objects"
+            title={showingObjects ? 'State objects' : 'Currencies'}
+            onClick={() => setShown(showingObjects ? 'currency' : 'object')}
+          />
+        </div>
+        {balancesLoading ? (
+          <div className="sb-hero__sub" style={{ textAlign: 'center' }}>Loading balances{'…'}</div>
+        ) : listed.length === 0 && showingObjects ? (
+          <div className="sb-hero__sub" style={{ textAlign: 'center' }}>No state objects yet.</div>
+        ) : listed.length === 0 ? (
+          <>
+            <div className="sb-hero__sub" style={{ textAlign: 'center' }}>No balances yet. Claim tokens from the faucet to get started.</div>
+          </>
         ) : (
-          <div className="balance-card balance-card-stacked">
-            <div className="balance-list">
-              {visibleBalances.map((b) => (
-                <div key={b.tokenId} className="balance-list-row">
-                  <span className="token-symbol">{b.symbol || b.tokenId}</span>
-                  <span className="balance-amount balance-amount-inline">{String(b.balance ?? '0')}</span>
+          <>
+            {visibleBalances.map((b) => (
+              <React.Fragment key={b.tokenId}>
+                <div className="sb-kv" style={{ padding: '6px 0' }}>
+                  <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <TokenMark ticker={b.symbol} iconUrl={b.iconUrl} />
+                    {b.symbol}
+                  </span>
+                  <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{b.displayAmount}</span>
                 </div>
-              ))}
-            </div>
-            {tokenOptions.length > MAX_OVERVIEW_BALANCES && (
+                {/* Cash in hand, under the token it belongs to: the offline
+                    allocation an offline send spends, which the amount above
+                    does not include. Shown once there is some. */}
+                {b.offline && b.offline.baseUnits > BigInt(0) && (
+                  <div className="sb-kv" style={{ padding: '0 0 6px 22px' }} data-testid={`offline-allocation-${b.tokenId}`}>
+                    <span className="sb-kv__k" style={{ fontSize: 10, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <BluetoothIcon size={11} title="Offline allocation" />
+                      offline
+                    </span>
+                    <span className="sb-kv__v" style={{ fontSize: 12, fontWeight: 600 }}>{b.offline.displayAmount}</span>
+                  </div>
+                )}
+              </React.Fragment>
+            ))}
+            {listed.length > MAX_OVERVIEW_BALANCES && (
               <button
                 type="button"
                 onClick={() => setShowAllBalances((prev) => !prev)}
-                className="view-all-button"
-                style={{ marginTop: 10 }}
+                className="sb-btn sb-btn--ghost sb-btn--small sb-btn--block"
+                style={{ marginTop: 6 }}
               >
                 {showAllBalances
                   ? 'Show Less'
-                  : `Show ${tokenOptions.length - MAX_OVERVIEW_BALANCES} More`}
+                  : `Show ${listed.length - MAX_OVERVIEW_BALANCES} More`}
               </button>
             )}
-          </div>
+          </>
         )}
+      </section>
+
+      <div className="sb-actions" style={{ marginTop: 0 }}>
+        <button type="button" onClick={onSwitchToSend} className="sb-btn sb-btn--primary">Send</button>
       </div>
-      <div className="quick-actions">
-        <button onClick={onSwitchToSend} className="action-button button-brick">Send</button>
-      </div>
+
       {recentTransactions.length > 0 && (
-        <div className="recent-transactions">
-          <h3>Recent Activity</h3>
+        <section className="recent-transactions" style={{ marginBottom: 8 }} data-tour="recent-activity">
+          <h3 className="sb-section-title">Recent Activity</h3>
           <div className="transaction-items">
-            {recentTransactions.map((tx, idx) => (
+            {recentTransactions.map((tx) => (
               <TransactionItem
-                key={(tx.txId?.length ?? 0) > 0 ? tx.txId! : `tx:idx:${idx}`}
+                key={tx.txId}
                 tx={tx}
-                idx={idx}
                 expandedTxId={expandedTxId}
                 onToggle={handleToggleTx}
-                aliasLookup={aliasLookup}
               />
             ))}
           </div>
-          <button onClick={onSwitchToHistory} className="view-all-button">View All Transactions</button>
-        </div>
+          <button type="button" onClick={onSwitchToHistory} className="sb-btn sb-btn--ghost sb-btn--small sb-btn--block">
+            View All Transactions
+          </button>
+        </section>
       )}
-      <div className="wallet-info">
-        <div className="info-item"><label>Genesis Hash:</label><span className="info-value">{shortStr(genesisB32, 12, 10)}</span></div>
-        <div className="info-item"><label>Device ID:</label><span className="info-value">{shortStr(deviceB32, 12, 10)}</span></div>
-      </div>
+
+      <Disclosure summary="Wallet identity" className="wallet-identity">
+        <div className="sb-kv">
+          <span className="sb-kv__k">Genesis</span>
+          <span className="sb-kv__v sb-kv__v--mono">{genesisB32 || '—'}</span>
+        </div>
+        <div className="sb-kv">
+          <span className="sb-kv__k">Device</span>
+          <span className="sb-kv__v sb-kv__v--mono">{deviceB32 || '—'}</span>
+        </div>
+      </Disclosure>
     </div>
   );
 }

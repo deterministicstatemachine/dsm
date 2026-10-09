@@ -7,59 +7,86 @@ import {
     getWalletHistoryStrictBridge,
     getInboxStrictBridge,
 } from './WebViewBridge';
-import { TokenBalanceView, WalletHistory } from './types';
+import { TokenBalanceView, WalletHistory, InboxItemView, OfflineAllocationView } from './types';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { mapTransactions } from '../domain/mappers';
 import logger from '../utils/logger';
 
-export async function getAllBalances(): Promise<TokenBalanceView[]> {
-  try {
-    const responseBytes = await getAllBalancesStrictBridge();
-    const env = decodeFramedEnvelopeV3(responseBytes);
-    if (env.payload.case === 'error') {
-      const err = env.payload.value;
-      throw new Error(`DSM native error: code=${err.code} msg=${err.message}`);
-    }
-    if (env.payload.case !== 'balancesListResponse') {
-      throw new Error(`Unexpected payload case for balances: ${env.payload.case}`);
-    }
-    const balancesResponse = env.payload.value;
-
-    const out = (balancesResponse.balances ?? []).map((b: any) => ({
-      tokenId: b.tokenId || 'ERA',
-      ticker: b.symbol || b.tokenId || 'ERA',
-      // Rust's rendered display form. This layer never computes it.
-      displayAmount: String(b.displayAmount ?? ''),
-      // The token's CPTA anchor, rendered by Rust. Carried, never derived: a
-      // second Base32 encoder pads the wrong group and yields an anchor that
-      // resolves to nothing.
-      canonicalTokenId: String(b.canonicalTokenId ?? ''),
-      policyAnchorB32: String(b.policyAnchorB32 ?? ''),
-      anchorFingerprint: String(b.anchorFingerprint ?? ''),
-      balance: (b.available ?? 0).toString(),
-      baseUnits: typeof b.available === 'bigint' ? b.available : BigInt(b.available || 0),
-      decimals: typeof b.decimals === 'number' ? b.decimals : 0,
-      symbol: b.symbol || b.tokenId || 'ERA',
-      tokenName: b.tokenName || b.symbol || b.tokenId || 'ERA',
-    }));
-    return out;
-  } catch (e) {
-    logger.warn('[DSM] getAllBalances failed:', e);
-    throw e;
-  }
+/** A string field Rust leaves empty when it names nothing, carried as absent. */
+function named(value: string): string | undefined {
+  return value.length > 0 ? value : undefined;
 }
 
-export async function getWalletBalance(): Promise<string> {
-  try {
-    const balances = await getAllBalances();
-    if (balances.length > 0) {
-      return balances[0].balance;
-    }
-    return "0";
-  } catch (e) {
-    logger.warn('getWalletBalance failed:', e);
-    throw e;
+/**
+ * The row's offline allocation as Rust stated it. Absent is unknown, not
+ * zero; present without its rendered form is a row Rust did not finish,
+ * refused like any other.
+ */
+function offlineView(b: pb.BalanceGetResponse): OfflineAllocationView | undefined {
+  const offline = b.offlineAllocation;
+  if (!offline) return undefined;
+  if (offline.displayAmount.length === 0) {
+    throw new Error(`STRICT: balance.list answered ${b.tokenId}'s offline allocation without its display form`);
   }
+  return { baseUnits: offline.baseUnits, displayAmount: offline.displayAmount };
+}
+
+export async function getAllBalances(): Promise<TokenBalanceView[]> {
+  const responseBytes = await getAllBalancesStrictBridge();
+  const env = decodeFramedEnvelopeV3(responseBytes);
+  if (env.payload.case === 'error') {
+    const err = env.payload.value;
+    throw new Error(`DSM native error: code=${err.code} msg=${err.message}`);
+  }
+  if (env.payload.case !== 'balancesListResponse') {
+    throw new Error(`Unexpected payload case for balances: ${env.payload.case}`);
+  }
+  return env.payload.value.balances.map(balanceView);
+}
+
+/** One balance row as the wallet shows it, from the row Rust answered; a row missing what Rust always states is refused. */
+export function balanceView(b: pb.BalanceGetResponse): TokenBalanceView {
+  for (const [field, value] of [
+    ['token_id', b.tokenId],
+    ['symbol', b.symbol],
+    ['token_name', b.tokenName],
+    ['display_amount', b.displayAmount],
+  ] as const) {
+    if (value.length === 0) {
+      throw new Error(`STRICT: balance.list answered a row for ${b.tokenId || 'no token'} without its ${field}`);
+    }
+  }
+  // A created token's row always carries its policy's supply and what it
+  // permits: Rust reads them from the committed bytes or refuses the row.
+  if (!b.protocolDefined && (b.genesisSupplyDisplay.length === 0 || !b.permissions)) {
+    throw new Error(`STRICT: balance.list answered a created token ${b.tokenId} without its policy facts`);
+  }
+  return {
+    tokenId: b.tokenId,
+    symbol: b.symbol,
+    tokenName: b.tokenName,
+    baseUnits: b.available,
+    decimals: b.decimals,
+    // Rust's rendered display form. This layer never computes it.
+    displayAmount: b.displayAmount,
+    canonicalTokenId: named(b.canonicalTokenId),
+    // The token's CPTA anchor, rendered by Rust. Carried, never derived: a
+    // second Base32 encoder pads the wrong group and yields an anchor that
+    // resolves to nothing.
+    policyAnchorB32: named(b.policyAnchorB32),
+    anchorFingerprint: named(b.anchorFingerprint),
+    // The token policy's icon field, carried from Rust. The wallet draws the coin from it.
+    iconUrl: named(b.iconUrl),
+    // Rust's word on what the token is and what its policy fixes and permits.
+    protocolDefined: b.protocolDefined,
+    genesisSupplyDisplay: named(b.genesisSupplyDisplay),
+    // Rust's word on whether the token is a state object (its supply is one).
+    holding: b.holding === pb.BalanceHolding.STATE_OBJECT ? 'object' : 'currency',
+    permissions: b.permissions
+      ? { burnEnabled: b.permissions.burnEnabled, transferable: b.permissions.transferable }
+      : undefined,
+    offline: offlineView(b),
+  };
 }
 
 export async function getWalletHistory(): Promise<WalletHistory> {
@@ -104,82 +131,28 @@ export async function getWalletHistory(): Promise<WalletHistory> {
   }
 }
 
-export async function getTransactions(): Promise<any[]> {
-  const history = await getWalletHistory();
-  return history.transactions;
-}
-
-export async function getInbox(limit = 50): Promise<{ items: Array<{ id: string; preview: string; sender_id?: string; tick?: bigint; payload?: Uint8Array; isStaleRoute: boolean }> }> {
-  try {
-    const responseBytes = await getInboxStrictBridge({ limit });
-    
-    // CANONICAL PATH: All bridge responses are FramedEnvelopeV3
-    const env = decodeFramedEnvelopeV3(responseBytes);
-    logger.debug('[DSM:getInbox] Successfully decoded Envelope! payload.case=', env.payload.case);
-
-    // Check for error response
-    if (env.payload.case === 'error') {
-      const err = env.payload.value;
-      throw new Error(`Native error: ${err.message || 'Unknown'} (code ${err.code || 0})`);
-    }
-
-    // Extract inbox from envelope
-    if (env.payload.case !== 'inboxResponse') {
-      logger.error('[DSM:getInbox] Unexpected payload.case:', env.payload.case);
-      throw new Error(`Unexpected payload case for inbox: ${env.payload.case}`);
-    }
-
-    const inboxResponse = env.payload.value;
-    if (!inboxResponse) {
-      throw new Error('inboxResponse payload is null');
-    }
-
-    const items = inboxResponse.items.map((item: pb.InboxItem) => ({
-      id: item.id || '',
-      preview: item.preview || '',
-      sender_id: item.senderId,
-      tick: item.tick,
-      payload: item.payload,
-      isStaleRoute: item.isStaleRoute,
-    }));
-
-    return { items };
-  } catch (e) {
-    logger.warn('[DSM:getInbox] Bridge call failed:', e);
-    throw e;
+/**
+ * The items `inbox.pull` found queued for this device. Rust writes an id and a
+ * preview on every item; an item without them is refused, never filled in.
+ */
+export async function getInbox(limit = 50): Promise<{ items: InboxItemView[] }> {
+  const env = decodeFramedEnvelopeV3(await getInboxStrictBridge({ limit }));
+  if (env.payload.case === 'error') {
+    const err = env.payload.value;
+    throw new Error(`Native error: ${err.message || 'Unknown'} (code ${err.code || 0})`);
   }
+  if (env.payload.case !== 'inboxResponse') {
+    throw new Error(`Unexpected payload case for inbox: ${env.payload.case}`);
+  }
+  if (!env.payload.value) {
+    throw new Error('inboxResponse payload is null');
+  }
+  const items = env.payload.value.items.map((item: pb.InboxItem): InboxItemView => {
+    if (!item.id || !item.preview) {
+      throw new Error(`STRICT: inbox.pull answered an item without its id or preview (id "${item.id}")`);
+    }
+    return { id: item.id, preview: item.preview, senderId: item.senderId, isStaleRoute: item.isStaleRoute };
+  });
+  return { items };
 }
 
-export async function listB0xMessages(): Promise<any[]> {
-  const inbox = await getInbox();
-  return inbox.items.map(item => ({
-    id: item.id,
-    preview: item.preview,
-    tick: item.tick,
-    senderId: item.sender_id,
-    payload: item.payload,
-    isStaleRoute: item.isStaleRoute ?? false,
-  }));
-}
-
-export async function getTokens(): Promise<any[]> {
-  const balances = await getAllBalances();
-  return balances.map(balance => ({
-    tokenId: balance.tokenId,
-    balance: balance.balance,
-    decimals: balance.decimals,
-    symbol: balance.symbol || balance.tokenId || 'ERA',
-  }));
-}
-
-export async function getToken(tokenId: string): Promise<any> {
-  const balances = await getAllBalances();
-  const balance = balances.find(b => b.tokenId === tokenId);
-  if (!balance) return null;
-  return {
-    tokenId: balance.tokenId,
-    balance: balance.balance,
-    decimals: balance.decimals,
-    symbol: balance.symbol || balance.tokenId || 'ERA',
-  };
-}

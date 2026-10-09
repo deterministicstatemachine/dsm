@@ -13,23 +13,20 @@
 //! is not a witness with a suffix; it is not a witness.
 //!
 //! Scope is the witness closure: `0x001D`, `0x001E`, the leaf states
-//! `0x001F`–`0x0022`, and the credit sources `0x0023`–`0x0028`. The claim and
+//! `0x001F`–`0x0022`, and the credit sources `0x0025`, `0x005D` and `0x005F`. The claim and
 //! manifest (`0x001B` / `0x001C`) are the register and admission layer and
 //! decode with that work, not here.
 
-use crate::economic::issuance::IssuanceAuthorizationBody;
 use crate::ccb::decode::{invalid, Cursor, DecodeError};
 use crate::ccb::{class, CcbObject};
 use crate::economic::credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
-    CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
-    CreditSourceValidatedFaucetDistribution, CreditSourceValidatedPeerDebit,
-    CreditSourceVerifiedOfflineReentry,
+    CreditSource, CreditSourceGenesisRelease, CreditSourceNativeReserveRelease,
+    CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::state::{
     EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
-    EconomicSettlementReceiptState, EconomicVaultReserveState,
+    EconomicTokenCreationState,
 };
 use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 use crate::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
@@ -59,7 +56,8 @@ pub fn decode_leaf_mutation(bytes: &[u8]) -> Result<EconomicLeafMutation, Decode
     Ok(m)
 }
 
-/// Decode a standalone `CreditSource` — one of classes `0x0023`–`0x0028`.
+/// Decode a standalone `CreditSource` — one of classes `0x0025`, `0x005D`
+/// and `0x005F`.
 pub fn decode_credit_source(bytes: &[u8]) -> Result<CreditSource, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     let s = read_credit_source(&mut c)?;
@@ -158,41 +156,6 @@ pub fn decode_admission_manifest(bytes: &[u8]) -> Result<EconomicAdmissionManife
 }
 
 /// Decode a standalone `EconomicLeafState` — one of classes `0x001F`–`0x0022`.
-/// Decode a standalone `IssuanceAuthorizationBody` — class `0x0029`, schema 1.
-///
-/// Strict on both ends: the envelope must be exactly this class and schema,
-/// and the bytes must be fully consumed. The caller additionally requires
-/// re-encode equality, because the signature covers BYTES — two encodings
-/// carrying one authorization would be two authorizations.
-pub fn decode_issuance_authorization_body(
-    bytes: &[u8],
-) -> Result<IssuanceAuthorizationBody, DecodeError> {
-    let mut c = Cursor { b: bytes, i: 0 };
-    c.envelope(
-        IssuanceAuthorizationBody::CLASS,
-        IssuanceAuthorizationBody::SCHEMA,
-    )?;
-    let policy_commit = c.digest32()?;
-    let issuer_genesis = c.digest32()?;
-    let issuer_devid = c.digest32()?;
-    let issuer_economic_position = c.u64()?;
-    let recipient_operation_digest = c.digest32()?;
-    let amount = c.u64()?;
-    if c.i != c.b.len() {
-        return Err(DecodeError::TrailingBytes {
-            extra: c.b.len() - c.i,
-        });
-    }
-    Ok(IssuanceAuthorizationBody {
-        policy_commit,
-        issuer_genesis,
-        issuer_devid,
-        issuer_economic_position,
-        recipient_operation_digest,
-        amount,
-    })
-}
-
 pub fn decode_leaf_state(bytes: &[u8]) -> Result<EconomicLeafState, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     let s = read_leaf_state(&mut c)?;
@@ -274,55 +237,17 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 EconomicBalanceState::new(policy_commit, amount).map_err(invalid)?,
             ))
         }
-        class::ECONOMIC_VAULT_RESERVE_STATE => {
-            c.envelope(
-                EconomicVaultReserveState::CLASS,
-                EconomicVaultReserveState::SCHEMA,
-            )?;
-            Ok(EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-                vault_id: c.digest32()?,
-                policy_commit: c.digest32()?,
-                amount: c.u64()?,
-                vault_sequence: c.u64()?,
-            }))
-        }
-        class::ECONOMIC_SETTLEMENT_RECEIPT_STATE => {
-            c.envelope(
-                EconomicSettlementReceiptState::CLASS,
-                EconomicSettlementReceiptState::SCHEMA,
-            )?;
-            let vault_id = c.digest32()?;
-            let carried_receipt_id = c.digest32()?;
-            let x = c.digest32()?;
-            let parent_sequence = c.u64()?;
-            let new_sequence = c.u64()?;
-            let input_policy_commit = c.digest32()?;
-            let input_amount = c.u64()?;
-            let output_policy_commit = c.digest32()?;
-            let output_amount = c.u64()?;
-            let state = EconomicSettlementReceiptState::new(
-                vault_id,
-                x,
-                parent_sequence,
-                new_sequence,
-                input_policy_commit,
-                input_amount,
-                output_policy_commit,
-                output_amount,
-            )
-            .map_err(invalid)?;
-            // `receipt_id` is DERIVED from (vault_id, x). The constructor
-            // recomputed it; if the bytes carried a different one, the object
-            // was naming something its own contents do not produce.
-            if state.receipt_id != carried_receipt_id {
-                return Err(DecodeError::Invalid(
-                    "settlement receipt: carried receipt_id does not derive from \
-                     (vault_id, x) — a derived name must not be assertable"
-                        .to_string(),
-                ));
-            }
-            Ok(EconomicLeafState::SettlementReceipt(state))
-        }
+        // The SoFi relationship leaf (P15-6). The class is keyed here because
+        // a class-keyed decoder does NOT get an exhaustiveness error when a
+        // new enum arm appears — the compiler forced every `match` on the enum
+        // and said nothing about this one, which is precisely how a variant
+        // ends up encodable and undecodable.
+        class::SOFI_TRADER_RELATIONSHIP_LEAF => Ok(EconomicLeafState::Relationship(
+            crate::sofi::wire::TraderRelationshipLeaf::at(c)?,
+        )),
+        class::SOFI_VAULT_CREATION => Ok(EconomicLeafState::VaultCreation(
+            crate::sofi::wire::VaultCreation::at(c)?,
+        )),
         class::ECONOMIC_CONSUMED_SOURCE_STATE => {
             c.envelope(
                 EconomicConsumedSourceState::CLASS,
@@ -335,43 +260,23 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 },
             ))
         }
+        class::ECONOMIC_TOKEN_CREATION_STATE => {
+            c.envelope(
+                EconomicTokenCreationState::CLASS,
+                EconomicTokenCreationState::SCHEMA,
+            )?;
+            Ok(EconomicLeafState::TokenCreation(
+                EconomicTokenCreationState {
+                    policy_commit: c.digest32()?,
+                },
+            ))
+        }
         got => Err(DecodeError::WrongClass { got }),
     }
 }
 
 fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
     match c.peek_class()? {
-        class::CREDIT_SOURCE_AUTHORIZED_ISSUANCE => {
-            c.envelope(
-                CreditSourceAuthorizedIssuance::CLASS,
-                CreditSourceAuthorizedIssuance::SCHEMA,
-            )?;
-            Ok(CreditSource::AuthorizedIssuance(
-                CreditSourceAuthorizedIssuance {
-                    credit_mutation_index: c.u32()?,
-                    issuance_authorization_addr: c.digest32()?,
-                },
-            ))
-        }
-        class::CREDIT_SOURCE_SAME_TRANSITION_MOVE => {
-            c.envelope(
-                CreditSourceSameTransitionMove::CLASS,
-                CreditSourceSameTransitionMove::SCHEMA,
-            )?;
-            let credit_mutation_index = c.u32()?;
-            let debit_mutation_index = c.u32()?;
-            if credit_mutation_index == debit_mutation_index {
-                return Err(DecodeError::Invalid(format!(
-                    "same-transition move: mutation {credit_mutation_index} cannot fund itself"
-                )));
-            }
-            Ok(CreditSource::SameTransitionMove(
-                CreditSourceSameTransitionMove {
-                    credit_mutation_index,
-                    debit_mutation_index,
-                },
-            ))
-        }
         class::CREDIT_SOURCE_VALIDATED_PEER_DEBIT => {
             c.envelope(
                 CreditSourceValidatedPeerDebit::CLASS,
@@ -388,77 +293,28 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                 },
             ))
         }
-        class::CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION => {
+        class::CREDIT_SOURCE_NATIVE_RESERVE_RELEASE => {
             c.envelope(
-                CreditSourceDlvReserveConsumption::CLASS,
-                CreditSourceDlvReserveConsumption::SCHEMA,
+                CreditSourceNativeReserveRelease::CLASS,
+                CreditSourceNativeReserveRelease::SCHEMA,
             )?;
-            Ok(CreditSource::DlvReserveConsumption(
-                CreditSourceDlvReserveConsumption {
+            Ok(CreditSource::NativeReserveRelease(
+                CreditSourceNativeReserveRelease {
                     credit_mutation_index: c.u32()?,
-                    vault_id: c.digest32()?,
-                    parent_sequence: c.u64()?,
-                    x: c.digest32()?,
-                    owner_economic_position: c.u64()?,
-                    reserve_consumption_evidence_addr: c.digest32()?,
+                    reserve_id: c.digest32()?,
+                    generation: c.u64()?,
+                    release_evidence_addr: c.digest32()?,
                 },
             ))
         }
-        class::CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT => {
+        class::CREDIT_SOURCE_GENESIS_RELEASE => {
             c.envelope(
-                CreditSourceValidatedDlvSettlementPayment::CLASS,
-                CreditSourceValidatedDlvSettlementPayment::SCHEMA,
+                CreditSourceGenesisRelease::CLASS,
+                CreditSourceGenesisRelease::SCHEMA,
             )?;
-            Ok(CreditSource::ValidatedDlvSettlementPayment(
-                CreditSourceValidatedDlvSettlementPayment {
-                    credit_mutation_index: c.u32()?,
-                    vault_id: c.digest32()?,
-                    settlement_receipt_id: c.digest32()?,
-                    parent_sequence: c.u64()?,
-                    trader_genesis: c.digest32()?,
-                    trader_devid: c.digest32()?,
-                    trader_economic_position: c.u64()?,
-                    payment_evidence_addr: c.digest32()?,
-                },
-            ))
-        }
-        class::CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION => {
-            c.envelope(
-                CreditSourceValidatedFaucetDistribution::CLASS,
-                CreditSourceValidatedFaucetDistribution::SCHEMA,
-            )?;
-            Ok(CreditSource::ValidatedFaucetDistribution(
-                CreditSourceValidatedFaucetDistribution {
-                    credit_mutation_index: c.u32()?,
-                    faucet_id: c.digest32()?,
-                    ticket_index: c.u64()?,
-                    faucet_claim_evidence_addr: c.digest32()?,
-                },
-            ))
-        }
-        class::CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY => {
-            c.envelope(
-                CreditSourceVerifiedOfflineReentry::CLASS,
-                CreditSourceVerifiedOfflineReentry::SCHEMA,
-            )?;
-            let credit_mutation_index = c.u32()?;
-            let prior_boundary_id = c.digest32()?;
-            let unload_boundary_id = c.digest32()?;
-            if prior_boundary_id == unload_boundary_id {
-                return Err(DecodeError::Invalid(
-                    "offline reentry: prior_boundary_id equals unload_boundary_id — the \
-                     consumed checkpoint must be the predecessor"
-                        .to_string(),
-                ));
-            }
-            Ok(CreditSource::VerifiedOfflineReentry(
-                CreditSourceVerifiedOfflineReentry {
-                    credit_mutation_index,
-                    prior_boundary_id,
-                    unload_boundary_id,
-                    branch_evidence_addr: c.digest32()?,
-                },
-            ))
+            Ok(CreditSource::GenesisRelease(CreditSourceGenesisRelease {
+                credit_mutation_index: c.u32()?,
+            }))
         }
         got => Err(DecodeError::WrongClass { got }),
     }

@@ -1,28 +1,23 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Adversarial Bilateral Tests
+//! Adversarial bilateral attacks against the path production runs.
 //!
-//! Simulates 6 adversarial attack scenarios against the DSM state machine
-//! and verifies 100% rejection.  Every attack that is unexpectedly accepted
-//! is a hard failure.
+//! Every attack is made on real device heads (`DeviceState::advance`) and
+//! decided as production's receiver decides a step: Core's `decide_prepare`
+//! and `decide_confirm` (`dsm::bilateral::offline`), against the shared tip
+//! the receiver holds and the keys its contact pins. Each attack first shows
+//! the honest step it perturbs is accepted, so a refusal is the receiver
+//! refusing the attack and not refusing everything. An attack that is
+//! accepted is a hard failure.
 
-// Validation harness: panicking on crypto setup failures is correct behavior.
-// If SPHINCS+ keygen or signing fails, the test environment is broken.
+// Validation harness: a device or step that cannot be built is a broken
+// harness, and panicking says so.
 #![allow(clippy::expect_used)]
 
 use instant::Instant;
 use serde::Serialize;
 
-use dsm::core::state_machine::transition::verify_transition_integrity;
-use dsm::core::state_machine::StateMachine;
-use dsm::core::token::{derive_canonical_balance_key, resolve_policy_commit};
-use dsm::crypto::blake3::domain_hash;
-use dsm::crypto::sphincs::{
-    generate_keypair_from_seed, sphincs_sign, sphincs_verify, SphincsVariant,
-};
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::state_types::{DeviceInfo, State};
-use dsm::types::token_types::Balance;
+use crate::live_device::{commit, connect, marked, Decision, LiveDevice, Stage};
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -45,53 +40,6 @@ pub struct AdversarialSuiteResult {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn make_genesis(seed: &[u8; 32], pk: &[u8], initial_balance: u64) -> (State, StateMachine) {
-    let device_id: [u8; 32] =
-        *domain_hash(dsm::common::domain_tags::TAG_DSM_TEST_DEVICE, seed).as_bytes();
-    let device_info = DeviceInfo::new(device_id, pk.to_vec());
-    let mut state = State::new_genesis(*seed, device_info);
-    if let Ok(h) = state.hash() {
-        state.hash = h;
-    }
-    let era_pc = resolve_policy_commit("ERA").expect("ERA policy_commit");
-    let era_key = derive_canonical_balance_key(&era_pc, pk, "ERA");
-    state
-        .token_balances
-        .insert(era_key, Balance::from_state(initial_balance, state.hash));
-
-    let mut machine = StateMachine::new();
-    machine.set_state(state.clone());
-    (state, machine)
-}
-
-fn signed_transfer(sk: &[u8], state: &State, nonce: Vec<u8>, amount: u64) -> Operation {
-    let mut op = Operation::Transfer {
-        policy_commit: [0u8; 32],
-        token_id: "ERA".into(),
-        to_device_id: vec![0xCC; 32],
-        amount: Balance::from_state(amount, state.hash),
-        mode: TransactionMode::Unilateral,
-        nonce,
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: vec![0xCC; 32],
-        to: "b32recipient".into(),
-        message: String::new(),
-        signature: Vec::new(),
-        authority_policy: None,
-    };
-    let bytes = op.to_bytes();
-    let sig = sphincs_sign(sk, &bytes).expect("sign");
-    if let Operation::Transfer { signature, .. } = &mut op {
-        *signature = sig;
-    }
-    op
-}
-
-// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -99,19 +47,13 @@ pub fn collect_adversarial_results() -> AdversarialSuiteResult {
     eprintln!("\n=== ADVERSARIAL BILATERAL TESTS ===\n");
     let start = Instant::now();
 
-    eprintln!("  Generating SPHINCS+ keypairs...");
-    let seed = [77u8; 32];
-    let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &seed).expect("keygen");
-    let pk = kp.public_key.clone();
-    let sk = kp.secret_key.clone();
-
     let attacks = vec![
-        attack_double_spend(&seed, &pk, &sk),
-        attack_forged_signature(&seed, &pk, &sk),
-        attack_replay(&seed, &pk, &sk),
+        attack_double_spend(),
+        attack_forged_sender_signature(),
+        attack_replay(),
         attack_balance_underflow(),
-        attack_state_number_manipulation(&seed, &pk, &sk),
-        attack_hash_chain_break(&seed, &pk, &sk),
+        attack_forged_post_state(),
+        attack_receiver_behind(),
     ];
 
     for a in &attacks {
@@ -121,268 +63,319 @@ pub fn collect_adversarial_results() -> AdversarialSuiteResult {
     eprintln!();
 
     let all_passed = attacks.iter().all(|a| a.passed);
-    let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
     AdversarialSuiteResult {
         attacks,
         all_passed,
-        duration_ms,
+        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Attack 1: Double-spend (fork detection)
+// Setup
 // ---------------------------------------------------------------------------
 
-fn attack_double_spend(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> AdversarialAttackResult {
-    let (genesis, _) = make_genesis(seed, pk, 1000);
+/// Alice, holding two faucet payouts of ERA, and Bob, contacts.
+fn funded_pair() -> (LiveDevice, LiveDevice) {
+    let mut alice = LiveDevice::new("adversarial-alice").expect("alice");
+    alice.claim_faucet(1).expect("first claim");
+    alice.claim_faucet(2).expect("second claim");
+    let mut bob = LiveDevice::new("adversarial-bob").expect("bob");
+    connect(&mut alice, &mut bob).expect("the two are contacts");
+    (alice, bob)
+}
 
-    // Two different transfers from the SAME genesis state
-    let op_a = signed_transfer(sk, &genesis, vec![0xAA; 8], 100);
-    let op_b = signed_transfer(sk, &genesis, vec![0xBB; 8], 200);
-
-    let mut machine_a = StateMachine::new();
-    machine_a.set_state(genesis.clone());
-    let mut machine_b = StateMachine::new();
-    machine_b.set_state(genesis);
-
-    let result_a = crate::compat_shim::machine_execute_transition(&mut machine_a, op_a);
-    let result_b = crate::compat_shim::machine_execute_transition(&mut machine_b, op_b);
-
-    let (passed, actual) = match (&result_a, &result_b) {
-        (Ok(sa), Ok(sb)) => {
-            if sa.hash != sb.hash {
-                (
-                    true,
-                    "fork detected: different ops produce different hashes".into(),
-                )
-            } else {
-                (false, "COLLISION: different ops produced SAME hash".into())
-            }
-        }
-        _ => (
-            false,
-            format!("transition errors: a={result_a:?} b={result_b:?}"),
-        ),
+fn result(
+    name: &str,
+    description: &str,
+    expected: &str,
+    outcome: Result<String, String>,
+) -> AdversarialAttackResult {
+    let (passed, actual_result) = match outcome {
+        Ok(actual) => (true, actual),
+        Err(actual) => (false, actual),
     };
-
     AdversarialAttackResult {
-        attack_name: "double_spend_fork_detection".into(),
-        description: "Two different transfers from same parent must produce different hashes"
-            .into(),
-        expected_result: "different hashes (fork detected)".into(),
-        actual_result: actual,
+        attack_name: name.into(),
+        description: description.into(),
+        expected_result: expected.into(),
+        actual_result,
         passed,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Attack 2: Forged signature
+// Attack 1: double spend — a second child of one tip (Tripwire)
 // ---------------------------------------------------------------------------
 
-fn attack_forged_signature(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> AdversarialAttackResult {
-    let _ = seed; // used via pk/sk
+fn attack_double_spend() -> AdversarialAttackResult {
+    let (mut alice, mut bob) = funded_pair();
+    // Two different steps proposed on the SAME tip: two children of one
+    // parent, each fully signed.
+    let first = alice.propose(&bob, marked(0x01)).expect("first step");
+    let second = alice.propose(&bob, marked(0x02)).expect("second step");
 
-    let msg = b"forged signature attack test message";
-
-    // Random bytes as signature. Size matches the canonical production
-    // variant (SPHINCS+ SPX256f = 49_856 bytes per FIPS 205 Cat-5 fast
-    // profile, the variant pinned by whitepaper §11.1 line 1572 and used
-    // by `sphincs_sign` / `sphincs_verify` everywhere in dsm/dsm_sdk).
-    let forged_sig = vec![0xDE; 49_856];
-    let forged_result = sphincs_verify(pk, msg, &forged_sig);
-
-    // Valid sig but wrong key. Use SPX256f to match the canonical
-    // production variant rather than the smaller-signature SPX256s.
-    let seed2 = [88u8; 32];
-    let kp2 = generate_keypair_from_seed(SphincsVariant::SPX256f, &seed2).expect("keygen2");
-    let sig = sphincs_sign(sk, msg).expect("sign");
-    let wrong_key_result = sphincs_verify(&kp2.public_key, msg, &sig);
-
-    let forged_rejected = matches!(forged_result, Ok(false));
-    let wrong_key_rejected = matches!(wrong_key_result, Ok(false));
-    let passed = forged_rejected && wrong_key_rejected;
-
-    AdversarialAttackResult {
-        attack_name: "forged_signature".into(),
-        description: "Random bytes and wrong-key signatures must be rejected".into(),
-        expected_result: "both rejected".into(),
-        actual_result: format!(
-            "forged={} wrong_key={}",
-            if forged_rejected {
-                "rejected"
-            } else {
-                "ACCEPTED"
-            },
-            if wrong_key_rejected {
-                "rejected"
-            } else {
-                "ACCEPTED"
-            },
-        ),
-        passed,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Attack 3: Replay attack
-// ---------------------------------------------------------------------------
-
-fn attack_replay(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> AdversarialAttackResult {
-    let (genesis, mut machine) = make_genesis(seed, pk, 1000);
-
-    // Execute Transfer A at state 0 -> state 1
-    let op = signed_transfer(sk, &genesis, vec![0x01; 8], 10);
-    let op_clone = op.clone();
-    let state1 =
-        crate::compat_shim::machine_execute_transition(&mut machine, op).expect("first transition");
-
-    // Replay the SAME operation at state 1
-    let state2_result = crate::compat_shim::machine_execute_transition(&mut machine, op_clone);
-
-    let (passed, actual) = match state2_result {
-        Ok(state2) => {
-            // The replay "succeeds" in producing a new state, BUT:
-            // 1. It chains from state1, not genesis (prev_state_hash == state1.hash)
-            // 2. The resulting hash is different from state1.hash
-            // Both conditions prove the replay cannot be confused with the original
-            let chains_from_state1 = state2.prev_state_hash == state1.hash;
-            let different_hash = state2.hash != state1.hash;
-            if chains_from_state1 && different_hash {
-                (
-                    true,
-                    "replay produces new unique state chained from current tip (not the original)"
-                        .into(),
-                )
-            } else {
-                (
-                    false,
-                    format!(
-                        "chains_from_state1={chains_from_state1} different_hash={different_hash}"
-                    ),
-                )
+    let outcome = (|| {
+        if first.expected_tip != second.expected_tip || first.successor_tip == second.successor_tip
+        {
+            return Err("the two steps are not two children of one tip".into());
+        }
+        let verified = match bob.decide(&alice, &first) {
+            Decision::Accepted(v) => v,
+            other => return Err(format!("the honest first step was refused: {other}")),
+        };
+        commit(&mut alice, &mut bob, first, &verified).map_err(|e| e.to_string())?;
+        match bob.decide(&alice, &second) {
+            Decision::Accepted(_) => Err("the second child of a committed tip was ACCEPTED".into()),
+            Decision::StaleTip => {
+                Ok("second child refused: it does not extend the held tip".into())
             }
+            other => Err(format!("refused for the wrong reason: {other}")),
         }
-        Err(_) => {
-            // Rejection is also acceptable
-            (true, "replay rejected by state machine".into())
-        }
-    };
-
-    AdversarialAttackResult {
-        attack_name: "replay_attack".into(),
-        description: "Replaying a valid operation must not recreate the original state".into(),
-        expected_result: "unique new state or rejection".into(),
-        actual_result: actual,
-        passed,
-    }
+    })();
+    result(
+        "double_spend_second_child",
+        "Two fully signed children of one tip: the first commits, the second is refused",
+        "first committed, second refused as a stale tip",
+        outcome,
+    )
 }
 
 // ---------------------------------------------------------------------------
-// Attack 4: Balance underflow
+// Attack 2: a step signed by someone other than the pinned sender
+// ---------------------------------------------------------------------------
+
+fn attack_forged_sender_signature() -> AdversarialAttackResult {
+    let (mut alice, bob) = funded_pair();
+    let honest = alice.propose(&bob, marked(0x03)).expect("honest step");
+    let mallory = LiveDevice::new("adversarial-mallory").expect("mallory");
+
+    let outcome = (|| {
+        match bob.decide(&alice, &honest) {
+            Decision::Accepted(_) => {}
+            other => return Err(format!("the honest step was refused: {other}")),
+        }
+
+        // A valid SPHINCS+ signature over the right commitment, by the wrong key.
+        let mut wrong_signer = honest.clone();
+        wrong_signer.sender_signature = mallory
+            .keypair
+            .sign(
+                &dsm::core::bilateral_transaction_manager::bilateral_sign_message(
+                    &honest.commitment_hash,
+                ),
+            )
+            .map_err(|e| e.to_string())?;
+        let decided = bob.decide(&alice, &wrong_signer);
+        match decided.refusal_at(Stage::Prepare) {
+            Some(e) if e.to_string().contains(NOT_SIGNED_BY_PINNED_AK) => {}
+            _ => return Err(format!("a step signed by the wrong key: {decided}")),
+        }
+
+        // Bytes that are no signature at all, at the production size.
+        let mut garbage = honest.clone();
+        garbage.sender_signature = vec![0xDE; honest.sender_signature.len()];
+        let decided = bob.decide(&alice, &garbage);
+        match decided.refusal_at(Stage::Prepare) {
+            Some(e) if e.to_string().contains(NOT_SIGNED_BY_PINNED_AK) => {}
+            _ => return Err(format!("a garbage signature: {decided}")),
+        }
+
+        // A genuinely signed receipt under an EK the sender's chain never
+        // certified: Mallory's AK certifies it.
+        let foreign = honest
+            .clone()
+            .with_ek_certified_by(&mallory)
+            .map_err(|e| e.to_string())?;
+        let decided = bob.decide(&alice, &foreign);
+        match decided.refusal_at(Stage::Confirm) {
+            Some(e) if e.to_string().contains(EK_NOT_CHAINED) => {
+                Ok("wrong-key, garbage and foreign-EK signatures refused".into())
+            }
+            _ => Err(format!("a receipt under a foreign EK: {decided}")),
+        }
+    })();
+    result(
+        "forged_sender_signature",
+        "A step whose signature is not the pinned sender's, or whose receipt's EK the sender's chain never certified, is refused",
+        "all three forgeries refused, each by the check it defeats",
+        outcome,
+    )
+}
+
+/// `decide_prepare`'s refusal of a proposal its sender's pinned AK did not
+/// sign over the commitment.
+const NOT_SIGNED_BY_PINNED_AK: &str = "is not signed over its commitment by the pinned AK";
+/// `decide_confirm`'s refusal of a receipt whose EK its sender's chain did
+/// not certify.
+const EK_NOT_CHAINED: &str = "does NOT chain";
+/// `decide_confirm`'s refusal of a receipt whose writes do not fold.
+const WRITES_DO_NOT_FOLD: &str = "do not fold";
+
+// ---------------------------------------------------------------------------
+// Attack 3: replay of a committed step
+// ---------------------------------------------------------------------------
+
+fn attack_replay() -> AdversarialAttackResult {
+    let (mut alice, mut bob) = funded_pair();
+    let step = alice.propose(&bob, marked(0x04)).expect("step");
+    let replayed = step.clone();
+
+    let outcome = (|| {
+        let verified = match bob.decide(&alice, &step) {
+            Decision::Accepted(v) => v,
+            other => return Err(format!("the step was refused the first time: {other}")),
+        };
+        commit(&mut alice, &mut bob, step, &verified).map_err(|e| e.to_string())?;
+        match bob.decide(&alice, &replayed) {
+            Decision::Accepted(_) => Err("the replayed step was ACCEPTED".into()),
+            Decision::StaleTip => Ok("replay refused: it does not extend the held tip".into()),
+            other => Err(format!("refused for the wrong reason: {other}")),
+        }
+    })();
+    result(
+        "step_replay",
+        "A committed step presented again is refused",
+        "first committed, replay refused as a stale tip",
+        outcome,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Attack 4: spending more than the head holds
 // ---------------------------------------------------------------------------
 
 fn attack_balance_underflow() -> AdversarialAttackResult {
-    // u64 arithmetic: transferring more than balance must be prevented
-    let balance: u64 = 100;
-    let transfer: u64 = 200;
+    let (alice, bob) = funded_pair();
+    let held = alice.era_balance();
 
-    let checked = balance.checked_sub(transfer);
-    let saturating = balance.saturating_sub(transfer);
-
-    let checked_prevented = checked.is_none();
-    let saturating_safe = saturating == 0;
-    let passed = checked_prevented && saturating_safe;
-
-    AdversarialAttackResult {
-        attack_name: "balance_underflow".into(),
-        description:
-            "Transferring more than available balance must be prevented by unsigned arithmetic"
-                .into(),
-        expected_result: "checked_sub=None, saturating_sub=0".into(),
-        actual_result: format!("checked_sub={checked:?} saturating_sub={saturating}"),
-        passed,
-    }
+    let outcome = (|| {
+        let exact = alice
+            .transfer(&bob, held, &[0x05; 8])
+            .map_err(|e| e.to_string())?;
+        alice
+            .send(&bob, &exact)
+            .map_err(|e| format!("spending exactly the balance was refused: {e}"))?;
+        let over = alice
+            .transfer(&bob, held + 1, &[0x06; 8])
+            .map_err(|e| e.to_string())?;
+        match alice.send(&bob, &over) {
+            Ok(_) => Err(format!(
+                "a debit of {} over a balance of {held} was ACCEPTED",
+                held + 1
+            )),
+            Err(e) => Ok(format!("overspend refused by advance: {e}")),
+        }
+    })();
+    result(
+        "balance_underflow",
+        "A debit one unit above the head's balance is refused by the advance itself",
+        "exact balance spendable, one more refused",
+        outcome,
+    )
 }
 
 // ---------------------------------------------------------------------------
-// Attack 5: State number manipulation
+// Attack 5: a post-state root the path does not produce
 // ---------------------------------------------------------------------------
 
-fn attack_state_number_manipulation(
-    seed: &[u8; 32],
-    pk: &[u8],
-    sk: &[u8],
-) -> AdversarialAttackResult {
-    let (genesis, mut machine) = make_genesis(seed, pk, 1000);
+fn attack_forged_post_state() -> AdversarialAttackResult {
+    let (mut alice, bob) = funded_pair();
+    let honest = alice.propose(&bob, marked(0x07)).expect("honest step");
 
-    // Execute one valid transition to get state 1
-    let op = signed_transfer(sk, &genesis, vec![0x01; 8], 10);
-    let state1 =
-        crate::compat_shim::machine_execute_transition(&mut machine, op).expect("transition");
+    let outcome = (|| {
+        match bob.decide(&alice, &honest) {
+            Decision::Accepted(_) => {}
+            other => return Err(format!("the honest step was refused: {other}")),
+        }
 
-    // §4.3 — no state_number to manipulate. Equivalent attack in the
-    // counterless model: forge the self-hash without recomputing it.
-    let mut tampered = state1.clone();
-    tampered.hash[0] ^= 0xAA; // self-hash no longer matches preimage
+        // The sender signs a receipt whose child root is not the one the
+        // relationship path folds to: the signature holds, the state does not.
+        let mut forged = honest.clone();
+        forged.receipt.child_root[0] ^= 0x01;
+        let forged = forged.resigned().map_err(|e| e.to_string())?;
+        let decided = bob.decide(&alice, &forged);
+        match decided.refusal_at(Stage::Confirm) {
+            Some(e) if e.to_string().contains(WRITES_DO_NOT_FOLD) => {}
+            _ => {
+                return Err(format!(
+                    "a signed receipt over a forged post-state root: {decided}"
+                ))
+            }
+        }
 
-    let op_dummy = Operation::Generic {
-        operation_type: "test".into(),
-        data: vec![0u8],
-        message: "dummy".into(),
-        signature: vec![],
-    };
-    let result = verify_transition_integrity(&genesis, &tampered, &op_dummy);
-
-    let passed = match &result {
-        Ok(false) => true,
-        Err(_) => true, // Error also counts as rejection
-        Ok(true) => false,
-    };
-
-    AdversarialAttackResult {
-        attack_name: "self_hash_forgery".into(),
-        description: "Forged self-hash must be rejected by verify_transition_integrity".into(),
-        expected_result: "rejected (Ok(false) or Err)".into(),
-        actual_result: format!("{result:?}"),
-        passed,
-    }
+        // The same with one sibling of the path changed: the writes no
+        // longer fold to the pre-state root.
+        let mut bent = honest.clone();
+        let siblings = &mut bent.receipt.step_writes[0].path.siblings;
+        if siblings.is_empty() {
+            return Err("the relationship path carries no sibling to bend".into());
+        }
+        siblings[0] ^= 0x01;
+        let bent = bent.resigned().map_err(|e| e.to_string())?;
+        let decided = bob.decide(&alice, &bent);
+        match decided.refusal_at(Stage::Confirm) {
+            Some(e) if e.to_string().contains(WRITES_DO_NOT_FOLD) => {
+                Ok(format!("forged post-state and bent path refused: {e}"))
+            }
+            _ => Err(format!(
+                "a signed receipt over a bent relationship path: {decided}"
+            )),
+        }
+    })();
+    result(
+        "forged_post_state",
+        "Signed receipts whose roots the one relationship path does not produce are refused",
+        "forged child root and bent path refused by the state rules",
+        outcome,
+    )
 }
 
 // ---------------------------------------------------------------------------
-// Attack 6: Hash chain break
+// Attack 6: a step on a tip the receiver does not hold
 // ---------------------------------------------------------------------------
 
-fn attack_hash_chain_break(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> AdversarialAttackResult {
-    let (genesis, mut machine) = make_genesis(seed, pk, 1000);
+fn attack_receiver_behind() -> AdversarialAttackResult {
+    let (mut alice, mut bob) = funded_pair();
+    // The same device as Bob, restored from before the first step: it holds
+    // the relationship's tip as it stood then.
+    let mut restored = LiveDevice::new("adversarial-bob").expect("restored bob");
+    connect(&mut restored, &mut alice).expect("restored contact");
 
-    // Execute one valid transition
-    let op = signed_transfer(sk, &genesis, vec![0x02; 8], 10);
-    let state1 =
-        crate::compat_shim::machine_execute_transition(&mut machine, op).expect("transition");
-
-    // Tamper with prev_state_hash
-    let mut tampered = state1;
-    tampered.prev_state_hash = [0xFF; 32];
-
-    let op_dummy = Operation::Generic {
-        operation_type: "test".into(),
-        data: vec![0u8],
-        message: "dummy".into(),
-        signature: vec![],
-    };
-    let result = verify_transition_integrity(&genesis, &tampered, &op_dummy);
-
-    let passed = match &result {
-        Ok(false) => true,
-        Err(_) => true,
-        Ok(true) => false,
-    };
-
-    AdversarialAttackResult {
-        attack_name: "hash_chain_break".into(),
-        description: "Wrong prev_state_hash must be rejected by verify_transition_integrity".into(),
-        expected_result: "rejected (Ok(false) or Err)".into(),
-        actual_result: format!("{result:?}"),
-        passed,
-    }
+    let outcome = (|| {
+        let first = alice
+            .propose(&bob, marked(0x08))
+            .map_err(|e| e.to_string())?;
+        let verified = match bob.decide(&alice, &first) {
+            Decision::Accepted(v) => v,
+            other => return Err(format!("the first step was refused: {other}")),
+        };
+        commit(&mut alice, &mut bob, first, &verified).map_err(|e| e.to_string())?;
+        // A genuine, fully signed second step on the tip the first committed.
+        let second = alice
+            .propose(&bob, marked(0x09))
+            .map_err(|e| e.to_string())?;
+        match bob.decide(&alice, &second) {
+            Decision::Accepted(_) => {}
+            other => {
+                return Err(format!(
+                    "the second step was refused at its own tip: {other}"
+                ))
+            }
+        }
+        match restored.decide(&alice, &second) {
+            Decision::Accepted(_) => {
+                Err("a step on a tip the receiver does not hold was ACCEPTED".into())
+            }
+            Decision::StaleTip => {
+                Ok("refused: it does not extend the tip the receiver holds".into())
+            }
+            other => Err(format!("refused for the wrong reason: {other}")),
+        }
+    })();
+    result(
+        "receiver_behind",
+        "A genuine step on a tip the receiver does not hold is refused",
+        "accepted at its own tip, refused by a receiver behind it",
+        outcome,
+    )
 }

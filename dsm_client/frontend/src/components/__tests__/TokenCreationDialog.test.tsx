@@ -1,14 +1,42 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { join } from 'path';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { TokenCreationDialog } from '../TokenCreationDialog';
+import { answerFromRustRecord } from '../../tests/helpers/rustIngressRecord';
 
 jest.mock('@/services/dsmClient', () => ({
   dsmClient: {
     createToken: jest.fn(),
   },
 }));
+
+// The coin itself is covered by utils/__tests__/coinArtwork.test.ts; here it only has to be placed.
+jest.mock('../TokenCoin', () => ({
+  TokenCoin: ({ iconUrl }: { iconUrl?: string }) => <span data-testid="token-coin" data-icon={iconUrl ?? ''} />,
+}));
+
+jest.mock('../../utils/imageRgba', () => ({
+  readImageRgba: jest.fn(),
+}));
+
+jest.mock('@/dsm/policies', () => ({
+  ...jest.requireActual('@/dsm/policies'),
+  getTokenCreationFee: jest.fn(),
+  createToken: jest.fn(),
+}));
+
+import { readImageRgba } from '../../utils/imageRgba';
+import { createToken, getTokenCreationFee } from '@/dsm/policies';
+
+// Each step moves on once Rust refuses none of its fields (token.check). The
+// bridge answers from Rust's own record of the wizard's checks (ingress.rs,
+// token_check_answers_through_the_ingress_as_the_wizard_records_it).
+const TOKEN_CHECK_RECORD = join(__dirname, 'fixtures/token_check.ingress.bin');
+beforeEach(() => {
+  answerFromRustRecord(TOKEN_CHECK_RECORD);
+});
 
 describe('TokenCreationDialog token kind selector', () => {
   // Fungible is the only kind the protocol enforces. NFT and SBT are not
@@ -20,20 +48,161 @@ describe('TokenCreationDialog token kind selector', () => {
 
     const fungible = screen.getByRole('button', { name: /FUNGIBLE/i });
     expect(fungible).toHaveAttribute('aria-pressed', 'true');
-    expect(fungible.className).toContain('tcd-kind-btn--active');
 
     expect(screen.queryByRole('button', { name: /^NFT$/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /^SBT$/i })).toBeNull();
   });
 
-  it('does not show a transferable toggle on the rules step', () => {
+  it('does not show a transferable toggle on the rules step', async () => {
     render(<TokenCreationDialog onClose={jest.fn()} />);
 
     fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'ART' } });
     fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
     fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
 
+    expect(await screen.findByLabelText('Total Supply')).toBeInTheDocument();
     expect(screen.queryByText(/^Transferable$/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/tcd-transferable/i)).not.toBeInTheDocument();
+  });
+
+  // The wizard keeps no rules of its own: a ticker Rust refuses is refused in
+  // Rust's words, and the step stays.
+  it("shows Rust's reason beside a refused field and stays on the step", async () => {
+    // Nothing here closes the dialog.
+    render(<TokenCreationDialog onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'X' } });
+    fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('a ticker is 2 to 8 characters, not 1');
+    expect(screen.getByLabelText(/Ticker/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Total Supply')).not.toBeInTheDocument();
+  });
+});
+
+describe('TokenCreationDialog coin artwork', () => {
+  const logo = () => {
+    const width = 40, height = 40;
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const inLogo = x >= 10 && x < 30 && y >= 10 && y < 30;
+        rgba.set(inLogo ? [10, 10, 10, 255] : [245, 245, 245, 255], (y * width + x) * 4);
+      }
+    }
+    return { rgba, width, height };
+  };
+
+  it('stores an uploaded logo as the canonical silhouette, and can go back to the ticker', async () => {
+    (readImageRgba as jest.Mock).mockResolvedValue(logo());
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+
+    // The free-form icon URL is gone: a policy's icon is the coin artwork now.
+    expect(screen.queryByLabelText(/Icon URL/i)).toBeNull();
+    expect(screen.getByTestId('token-coin')).toHaveAttribute('data-icon', '');
+
+    const file = new File([new Uint8Array([1, 2, 3])], 'logo.png', { type: 'image/png' });
+    fireEvent.change(screen.getByLabelText(/Coin artwork/i), { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByTestId('token-coin').getAttribute('data-icon')).toMatch(/^dsm:coin:v1:[0-9A-HJKMNP-TV-Z]+$/));
+    expect(screen.getByLabelText(/Cut out the background instead/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Use the ticker instead/i }));
+    expect(screen.getByTestId('token-coin')).toHaveAttribute('data-icon', '');
+    expect(screen.queryByRole('button', { name: /Use the ticker instead/i })).toBeNull();
+  });
+
+  it('says why an image cannot be used and keeps the ticker coin', async () => {
+    (readImageRgba as jest.Mock).mockRejectedValue(new Error('Choose a PNG, JPEG or WebP image.'));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+
+    const file = new File([new Uint8Array([1])], 'logo.gif', { type: 'image/gif' });
+    fireEvent.change(screen.getByLabelText(/Coin artwork/i), { target: { files: [file] } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Choose a PNG, JPEG or WebP image.');
+    expect(screen.getByTestId('token-coin')).toHaveAttribute('data-icon', '');
+  });
+});
+
+
+describe('TokenCreationDialog creation fee', () => {
+  // What Rust reports for these base-unit amounts at ERA's two decimals.
+  const shown: Record<string, string> = { '0': '0.00', '100': '1.00', '1000': '10.00' };
+  const standing = (eraHeld: bigint, feeCovered: boolean) => ({
+    feeEra: 1000n,
+    eraHeld,
+    feeDisplay: shown['1000'],
+    heldDisplay: shown[eraHeld.toString()],
+    feeCovered,
+  });
+
+  async function toReview() {
+    fireEvent.change(screen.getByLabelText(/Ticker/i), { target: { value: 'ART' } });
+    fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'Artwork' } });
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    await screen.findByLabelText('Total Supply');
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    await screen.findByText('10.00 ERA (burned)');
+  }
+
+  beforeEach(() => {
+    (getTokenCreationFee as jest.Mock).mockReset();
+  });
+
+  // A fresh wallet used to fill in every step and learn only when it pressed
+  // the final button that it held no ERA for the fee.
+  it('shows the ERA held beside the fee, and where to get ERA when it does not pay', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(0n, false));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+
+    expect(screen.getByText('0.00 ERA')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'This burns 10.00 ERA and you hold 0.00. Get ERA from the Faucet tab first.',
+    );
+    // The review step burns ERA; getting ERA is the faucet's, not this step's.
+    expect(screen.queryByRole('button', { name: /claim/i })).toBeNull();
+    // Rust decides the burn: the button stays live.
+    expect(screen.getByRole('button', { name: 'Burn ERA' })).toBeEnabled();
+  });
+
+  it('says nothing more when the ERA held pays the fee', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(100n, true));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+
+    expect(screen.getByText('1.00 ERA')).toBeInTheDocument();
+    expect(screen.queryByText(/This burns/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Burn ERA' })).toBeEnabled();
+  });
+
+  // The busy label names what is being made, and is short enough to clear the
+  // button's edges (measured on the A54: 115px of text in the wider action).
+  it('names the burn in progress "Publishing token"', async () => {
+    (getTokenCreationFee as jest.Mock).mockResolvedValue(standing(100n, true));
+    (createToken as jest.Mock).mockReturnValue(new Promise(() => {}));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Burn ERA' }));
+    expect(await screen.findByRole('button', { name: 'Publishing token' })).toBeDisabled();
+    expect(createToken).toHaveBeenCalledTimes(1);
+  });
+
+  // ERA can arrive or leave while the wizard is open; the review reads it again.
+  it('reads the standing again each time the review is reached', async () => {
+    (getTokenCreationFee as jest.Mock)
+      .mockResolvedValueOnce(standing(0n, false))
+      .mockResolvedValueOnce(standing(100n, true));
+    render(<TokenCreationDialog onClose={jest.fn()} />);
+    await toReview();
+    expect(screen.getByText('0.00 ERA')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/i }));
+    expect(await screen.findByText('1.00 ERA')).toBeInTheDocument();
+    expect(screen.queryByText(/This burns/)).toBeNull();
+    expect(getTokenCreationFee).toHaveBeenCalledTimes(2);
   });
 });

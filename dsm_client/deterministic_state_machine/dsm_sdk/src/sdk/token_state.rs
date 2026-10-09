@@ -27,7 +27,6 @@
 pub struct TransferFields {
     pub amount: u64,
     pub token_id: String,
-    pub recipient: Vec<u8>,
     pub to_device_id: Vec<u8>,
 }
 

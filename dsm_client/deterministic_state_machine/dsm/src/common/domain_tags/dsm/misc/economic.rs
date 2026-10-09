@@ -37,14 +37,6 @@ pub const TAG_DSM_ECONOMIC_LEAF_STATE: TaggedHashDomain<'static> =
 /// `balance` leaf key: `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ policy_commit)`.
 pub const TAG_DSM_ECONOMIC_BALANCE_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-balance-key/v1");
-/// `vault_reserve` leaf key:
-/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ vault_id ‖ policy_commit)`.
-pub const TAG_DSM_ECONOMIC_VAULT_RESERVE_KEY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/economic-vault-reserve-key/v1");
-/// `settlement_receipt` leaf key:
-/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ vault_id ‖ receipt_id)`.
-pub const TAG_DSM_ECONOMIC_SETTLEMENT_RECEIPT_KEY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/economic-settlement-receipt-key/v1");
 /// `consumed_source` leaf key: `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ source_id)`.
 ///
 /// Every key derivation binds `G ‖ DevID`, so one identity's economic tree
@@ -52,22 +44,11 @@ pub const TAG_DSM_ECONOMIC_SETTLEMENT_RECEIPT_KEY: TaggedHashDomain<'static> =
 /// construction rather than by the tree being private.
 pub const TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-consumed-source-key/v1");
+/// `R_econ` key of a token-creation record:
+/// `H_dom(tag, G ‖ DevID ‖ policy_commit)`.
+pub const TAG_DSM_ECONOMIC_TOKEN_CREATION_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-token-creation-key/v1");
 
-/// The signed preimage of an issuance authorization (class `0x0029`):
-/// `m = H(tag ‖ 0x00 ‖ CCB(IssuanceAuthorizationBody))`.
-///
-/// The body commits the issuer's write-once economic position and the exact
-/// operation digest, so one authorization funds exactly one issuance rather
-/// than a standing permission to mint that amount repeatedly.
-pub const TAG_DSM_ISSUANCE_AUTHORIZATION_SIGN: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/issuance-authorization-sign/v1");
-/// Immutable namespace of the issuance-authorization evidence bundle — the
-/// object `CreditSourceAuthorizedIssuance.issuance_authorization_addr` names.
-pub const TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/issuance-authorization-evidence/v1");
-/// `SourceId` of an authorized-issuance credit.
-pub const TAG_DSM_ECON_SOURCE_AUTHORIZED_ISSUANCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/authorized-issuance/v1");
 /// The signed preimage of an economic root claim:
 /// `m = H(tag ‖ 0x00 ‖ CCB(EconomicRootClaimBody))`.
 pub const TAG_DSM_ECONOMIC_ROOT_CLAIM_SIGN: TaggedHashDomain<'static> =
@@ -97,32 +78,22 @@ pub const TAG_DSM_ECONOMIC_ADMISSION_MANIFEST: TaggedHashDomain<'static> =
 pub const TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/trader-economic-root-register-key/v1");
 
-/// `SourceId` for an intra-transition move:
-/// `H(tag ‖ 0x00 ‖ economic_operation_id ‖ u32_be(debit_mutation_index))`.
-///
-/// Scoped to the operation that contains it, because the move exists only
-/// inside that transition. Two transitions moving value at the same mutation
-/// index are different sources, and must not collide in the consumed-source
-/// space.
-/// SourceId for a DLV reserve consumption (0x0026):
-/// `H(tag ‖ 0x00 ‖ vault_id ‖ parent_sequence_be ‖ x)` — one consumption of
-/// one vault generation by one trade; the write-once settlement-receipt leaf
-/// is the non-reuse marker, so no consumed-source leaf exists for this arm.
-pub const TAG_DSM_ECON_SOURCE_DLV_RESERVE_CONSUMPTION: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/dlv-reserve-consumption/v1");
+/// The seed of a trader position's cells (Part II §7.2):
+/// `s(q) = H(tag ‖ 0x00 ‖ G ‖ DevID ‖ u64be(q) ‖ R_p)`, where `R_p` is the
+/// validated economic root at `p = q - 1`, or the genesis root for the first
+/// position. `K_ful(q)` and `K_root(q)` take their leader from it, so a writer
+/// cannot choose where its position is decided, and a verifier computes the
+/// leader from a root it validated — never from a root carried in the value
+/// it reads.
+pub const TAG_DSM_ECONOMIC_POSITION_SEED: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic/position-seed/v1");
+
 /// Immutable namespace for the 0x0026 evidence bundle
 /// (`ReserveConsumptionEvidenceV1`: exact CCB(V_n) + the owner's vault-bound
 /// authority evidence + both reserve pre-leaves with their 256-sibling
 /// inclusion witnesses). Transport proto — no CCB class.
 pub const TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-reserve-consumption-evidence/v1");
-/// SourceId for a validated DLV settlement payment (0x0027):
-/// `H(tag ‖ 0x00 ‖ vault_id ‖ settlement_receipt_id)` — one receipt funds
-/// the owner's input-reserve credit exactly once; the non-reuse mechanism
-/// is the reserve-sequence Merkle CAS (after the first apply the reserve
-/// pre-state at n no longer exists in the owner's validated lineage).
-pub const TAG_DSM_ECON_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/validated-dlv-settlement-payment/v1");
 /// Immutable namespace for the 0x0027 evidence bundle
 /// (`SettlementPaymentEvidenceV1`: the trader's receipt leaf + inclusion
 /// witness). Transport proto — no CCB class.
@@ -137,8 +108,6 @@ pub const TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE: TaggedHashDomain<'static> =
 /// use the same object.
 pub const TAG_DSM_ECONOMIC_PROOF_ARTIFACT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-proof-artifact/v1");
-pub const TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/same-transition-move/v1");
 
 /// `SourceId` for a peer's validated debit:
 /// `H(tag ‖ 0x00 ‖ peer_genesis ‖ peer_devid ‖ u64_be(peer_economic_position)
@@ -151,37 +120,45 @@ pub const TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE: TaggedHashDomain<'static> =
 pub const TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/econ-source/validated-peer-debit/v1");
 
-/// The canonical, NETWORK-SCOPED ERA faucet identity:
-/// `era_faucet_id(network_id) = H(tag ‖ 0x00 ‖ network_id ‖ ERA_POLICY_COMMIT)`.
+/// The canonical, NETWORK-SCOPED native ERA reserve identity:
+/// `era_reserve_id(network_id) = H(tag ‖ 0x00 ‖ network_id ‖ ERA_POLICY_COMMIT)`.
 ///
-/// Network-scoped because claims are won in the register set the claimant's
-/// `network_id` resolves: an asset-only id would let two networks each consume
-/// ticket `i` and each validate +100 ERA — the 80B cap silently multiplied by
-/// the number of networks. One finite allocation PER DSM network; the verifier
-/// derives `network_id` from the AUTHENTICATED Genesis v3, never from the
-/// claimant.
-pub const TAG_DSM_ERA_FAUCET_ID: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/era-faucet-id/v1");
-/// The signed preimage of a faucet ticket claim:
-/// `m = H(tag ‖ 0x00 ‖ canonical FaucetTicketClaimBodyV1 bytes)`.
-pub const TAG_DSM_ERA_FAUCET_TICKET_CLAIM_SIGN: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/era-faucet-ticket-claim-sign/v1");
-/// Immutable-store namespace for the EXACT signed `FaucetTicketClaimV1`
-/// envelope bytes — what `faucet_claim_evidence_addr` addresses.
-pub const TAG_DSM_ERA_FAUCET_TICKET_CLAIM: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/era-faucet-ticket-claim/v1");
-/// Client-side ticket SEARCH seed (strategy, not validity — any in-range
-/// ticket is valid; this only decides where a claimant looks first):
-/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ u64_be(target_economic_position) ‖ u64_be(attempt))`.
-/// The position is in the seed so each admitted position gets its own
-/// deterministic sequence rather than re-walking every consumed ticket.
-pub const TAG_DSM_ERA_FAUCET_TICKET_SELECT: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/era-faucet-ticket-select/v1");
-/// `SourceId` for a consumed faucet ticket:
-/// `H(tag ‖ 0x00 ‖ faucet_id ‖ u64_be(ticket_index))`. Inherits the network
-/// scope through `faucet_id`.
-pub const TAG_DSM_ECON_SOURCE_ERA_FAUCET_TICKET: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/era-faucet-ticket/v1");
+/// One reserve per DSM network. Network-scoped because the reserve's cells
+/// live in the register set the network pins; an asset-only id would let two
+/// networks release the same genesis supply twice. The verifier derives
+/// `network_id` from the AUTHENTICATED Genesis v3, never from the claimant.
+pub const TAG_DSM_NATIVE_RESERVE_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-id/v1");
+/// The root of a native reserve state:
+/// `R_n = H(tag ‖ 0x00 ‖ reserve_id ‖ policy_commit ‖ u64_be(remaining) ‖ u64_be(generation) ‖ storage_set_id)`.
+pub const TAG_DSM_NATIVE_RESERVE_STATE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-state/v1");
+/// The successor cell of a reserve state: `K = H(tag ‖ 0x00 ‖ reserve_id ‖ R_n)`.
+/// Its source bytes are also the cell namespace at a member.
+pub const TAG_DSM_NATIVE_RESERVE_CELL: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-cell/v1");
+/// The seed of a reserve state's successor cell (Part II §7):
+/// `s = H(tag ‖ 0x00 ‖ reserve_id ‖ R_n)`; the leader is `FisherYates(s, S)[0]`.
+pub const TAG_DSM_NATIVE_RESERVE_SEED: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-seed/v1");
+/// The signed preimage of a reserve release:
+/// `m = H(tag ‖ 0x00 ‖ canonical NativeReserveReleaseBodyV1 bytes)`.
+pub const TAG_DSM_NATIVE_RESERVE_RELEASE_SIGN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-release-sign/v1");
+/// Immutable-store namespace for the EXACT signed `NativeReserveReleaseV1`
+/// envelope bytes — what `release_evidence_addr` addresses.
+pub const TAG_DSM_NATIVE_RESERVE_RELEASE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-release/v1");
+/// `SourceId` for a reserve release:
+/// `H(tag ‖ 0x00 ‖ reserve_id ‖ u64_be(generation))`. Inherits the network
+/// scope through `reserve_id`; one generation releases exactly once.
+pub const TAG_DSM_ECON_SOURCE_NATIVE_RESERVE_RELEASE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/native-reserve-release/v1");
+/// `SourceId` for a genesis release (`0x005F`):
+/// `H(tag ‖ 0x00 ‖ creator_genesis ‖ creator_devid ‖ u64_be(position) ‖ policy_commit)`.
+/// One per creation (SoFi §51).
+pub const TAG_DSM_ECON_SOURCE_GENESIS_RELEASE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/genesis-release/v1");
 /// Digest of an ordinary DSM operation for economic binding:
 /// `operation_digest_dsm = H(tag ‖ 0x00 ‖ exact Operation::to_bytes())`.
 pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM: TaggedHashDomain<'static> =

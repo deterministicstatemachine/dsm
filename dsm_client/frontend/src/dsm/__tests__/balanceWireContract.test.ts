@@ -44,6 +44,21 @@ describe('balance wire contract (Rust -> TypeScript)', () => {
     // the transfer proof, and looked exactly like an unpublished policy.
     expect(row.policyAnchorB32).toBe('B9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D0');
     expect(row.policyAnchorB32.startsWith(row.anchorFingerprint)).toBe(true);
+    // The policy's icon field, which the wallet draws the token's coin from.
+    expect(row.iconUrl).toBe('dsm:coin:v1:FIXTURE');
+    // What the token is and what its committed policy fixes and permits. The
+    // permissions arrive PRESENT for a created token; absent means Rust holds
+    // no policy, which a defaulted pair of booleans could not say.
+    expect(row.protocolDefined).toBe(false);
+    expect(row.genesisSupplyDisplay).toBe('1000000.00');
+    expect(row.permissions).toBeDefined();
+    expect(row.permissions.burnEnabled).toBe(true);
+    expect(row.permissions.transferable).toBe(false);
+    // The offline allocation, PRESENT with its rendered form. Absent would
+    // mean no appliance has stated a bundle, and the wallet prints nothing.
+    expect(row.offlineAllocation).toBeDefined();
+    expect(row.offlineAllocation.baseUnits).toBe(2500n);
+    expect(row.offlineAllocation.displayAmount).toBe('25.00');
   });
 
   /// decimals must arrive as a real number, since the mapper's guard is

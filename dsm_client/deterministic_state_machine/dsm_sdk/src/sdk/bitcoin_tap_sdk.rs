@@ -560,6 +560,46 @@ struct WithdrawalSelectorInput {
     eligible_advertisements: Vec<generated::DbtcVaultAdvertisementV1>,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// BITCOIN STUB — OWNER-AUTHORIZED (2026-09-24). NOT A STORAGE IMPLEMENTATION.
+//
+// The dBTC storage calls in this module used the path-keyed object store the
+// storage specification removed (put / get / delete / list by key prefix).
+// Bitcoin is out of scope this round and is not rewired (owner). So the SDK
+// builds, every production storage call in this module fails with
+// `bitcoin_storage_stub`, whose error names itself. Nothing here stores,
+// reads, lists or deletes anything. The two types below are the shapes the
+// removed store returned, kept only so this module compiles.
+//
+// Every stubbed site is marked `BITCOIN STUB`. Grep for it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// BITCOIN STUB: one item of the removed store's prefix listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObjectListItemV1 {
+    pub key: String,
+    pub dlv_id_b32: String,
+    pub size_bytes: i64,
+}
+
+/// BITCOIN STUB: a page of the removed store's prefix listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObjectListResponseV1 {
+    pub items: Vec<ObjectListItemV1>,
+    pub next_cursor: Option<String>,
+}
+
+/// BITCOIN STUB: the error every production dBTC storage call returns.
+#[cfg(not(any(test, feature = "demos")))]
+fn bitcoin_storage_stub(operation: &str) -> DsmError {
+    DsmError::NotImplemented(format!(
+        "BITCOIN STUB (owner-authorized 2026-09-24): dBTC storage is not rewired onto the \
+         committed storage set; {operation} is unavailable"
+    ))
+}
+
+// ═══════════════════════════ END BITCOIN STUB ═══════════════════════════════
+
 // In-process mock storage backend.  Active under `#[cfg(test)]` for
 // crate-internal tests AND under `--features demos` so example
 // binaries (notably `cargo run --example sofi_demo`) can drive the
@@ -569,7 +609,7 @@ struct WithdrawalSelectorInput {
 #[cfg(any(test, feature = "demos"))]
 #[derive(Default)]
 struct DbtcStorageTestState {
-    list_results: std::collections::VecDeque<Result<generated::ObjectListResponseV1, String>>,
+    list_results: std::collections::VecDeque<Result<ObjectListResponseV1, String>>,
     put_failures: HashMap<String, String>,
     get_failures: HashMap<String, String>,
     object_store: HashMap<String, Vec<u8>>,
@@ -580,6 +620,9 @@ struct DbtcStorageTestState {
     /// "never published the stale bytes" from "published them and fixed it".
     /// A test that must prove what went over the wire reads this log.
     op_log: Vec<(String, DbtcStorageOp)>,
+    /// Every key a GET asked for, in order — what a test reads to prove a
+    /// body was never fetched.
+    get_log: Vec<String>,
     /// Fires once, just after a PUT on that key lands. The interleaving seam:
     /// it lets a test perform the database write production would perform
     /// concurrently, at an exact point inside a sweep, without threads.
@@ -865,17 +908,6 @@ impl BitcoinTapSdk {
         &self,
         vault_id: &str,
     ) -> Result<(), DsmError> {
-        // Integration tests set DSM_SDK_TEST_MODE=1 but compile the library
-        // without #[cfg(test)], so storage_put_bytes hits real storage nodes.
-        // Skip network publication in test mode — the vault is still persisted
-        // storage_nodely and the test can verify storage_node state.
-        if std::env::var("DSM_SDK_TEST_MODE").is_ok_and(|v| v == "1") {
-            log::info!(
-                "[bitcoin_tap] Skipping mandatory vault publication in test mode for {vault_id}"
-            );
-            return Ok(());
-        }
-
         let device_id_bytes =
             crate::sdk::app_state::AppState::get_device_id().ok_or_else(|| {
                 DsmError::invalid_operation(
@@ -1328,7 +1360,6 @@ impl BitcoinTapSdk {
             DBTC_DECIMALS,
             TokenType::Wrapped,
             tap_identity,
-            0,
             Some(format!(
                 "dsm:policy:{}",
                 crate::util::text_id::encode_base32_crockford(
@@ -2801,7 +2832,7 @@ impl BitcoinTapSdk {
     /// Deletes every vault advertisement and proto under the current AND any known
     /// stale manifold prefixes (from prior policy commits), then wipes local
     /// vault_store, vault_records, in_flight_withdrawals, in_flight_withdrawal_legs,
-    /// dBTC token_balances, and dlv_receipts.
+    /// dBTC token_balances.
     /// Also clears in-memory pending_ops.
     ///
     /// Use after policy commit migration or to reset dBTC state to zero.
@@ -2896,10 +2927,6 @@ impl BitcoinTapSdk {
     pub(crate) fn reset_dbtc_storage_test_state() {
         let mut state = dbtc_storage_test_state();
         *state = DbtcStorageTestState::default();
-        // The per-member fake fleet is the other half of "storage" in tests
-        // (frozen-artifact fan-out lands there; reads fall back to it). Reset
-        // both together so deterministic vault ids cannot leak across tests.
-        crate::sdk::storage_io::fake_fleet::reset();
     }
 
     /// Every PUT and DELETE attempted against the object store, in order.
@@ -2923,25 +2950,11 @@ impl BitcoinTapSdk {
 
     #[cfg(test)]
     pub(crate) fn set_dbtc_storage_list_results(
-        results: impl IntoIterator<Item = Result<generated::ObjectListResponseV1, String>>,
+        results: impl IntoIterator<Item = Result<ObjectListResponseV1, String>>,
     ) {
         let mut state = dbtc_storage_test_state();
         state.list_results.clear();
         state.list_results.extend(results);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_dbtc_storage_put_failure(key: impl Into<String>, message: impl Into<String>) {
-        dbtc_storage_test_state()
-            .put_failures
-            .insert(key.into(), message.into());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_dbtc_storage_get_failure(key: impl Into<String>, message: impl Into<String>) {
-        dbtc_storage_test_state()
-            .get_failures
-            .insert(key.into(), message.into());
     }
 
     pub(crate) async fn storage_put_bytes(key: &str, payload: &[u8]) -> Result<String, DsmError> {
@@ -2969,9 +2982,11 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
-            // Production fan-out + per-node auth lives in the neutral storage I/O module
-            // (shared with recovery and other subsystems).
-            crate::sdk::storage_io::put_bytes(key, payload).await
+            // BITCOIN STUB — see the fence above.
+            Err(bitcoin_storage_stub(&format!(
+                "put {key} ({} bytes)",
+                payload.len()
+            )))
         }
     }
 
@@ -2979,6 +2994,7 @@ impl BitcoinTapSdk {
         #[cfg(any(test, feature = "demos"))]
         {
             let mut state = dbtc_storage_test_state();
+            state.get_log.push(key.to_string());
             if let Some(message) = state.get_failures.remove(key) {
                 return Err(DsmError::storage(
                     format!("load {key}: {message}"),
@@ -2989,14 +3005,6 @@ impl BitcoinTapSdk {
                 return Ok(bytes);
             }
             drop(state);
-            // A reader on the real fleet fetches from ANY node; in tests, the
-            // frozen-artifact fan-out lands on the per-member fake fleet rather
-            // than this flat store, so a get falls back to any member holding
-            // the key (test-only seam; production reads go through storage_io).
-            #[cfg(test)]
-            if let Some(bytes) = crate::sdk::storage_io::fake_fleet::any_member_holding(key) {
-                return Ok(bytes);
-            }
             Err(DsmError::storage(
                 format!("load {key}: object not found"),
                 None::<std::io::Error>,
@@ -3005,38 +3013,8 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
-            crate::sdk::storage_io::get_bytes(key).await
-        }
-    }
-
-    /// `storage_get_bytes`, with absence TYPED. `Ok(None)` is the key not
-    /// being present where this reader looked; `Err` is a fault. The test
-    /// seam models absence the same way the production path does, so a caller
-    /// never has to match an error's Display text to tell the two apart.
-    pub(crate) async fn storage_get_bytes_opt(key: &str) -> Result<Option<Vec<u8>>, DsmError> {
-        #[cfg(any(test, feature = "demos"))]
-        {
-            let mut state = dbtc_storage_test_state();
-            if let Some(message) = state.get_failures.remove(key) {
-                return Err(DsmError::storage(
-                    format!("load {key}: {message}"),
-                    None::<std::io::Error>,
-                ));
-            }
-            if let Some(bytes) = state.object_store.get(key).cloned() {
-                return Ok(Some(bytes));
-            }
-            drop(state);
-            #[cfg(test)]
-            if let Some(bytes) = crate::sdk::storage_io::fake_fleet::any_member_holding(key) {
-                return Ok(Some(bytes));
-            }
-            Ok(None)
-        }
-
-        #[cfg(not(any(test, feature = "demos")))]
-        {
-            crate::sdk::storage_io::get_bytes_opt(key).await
+            // BITCOIN STUB — see the fence above.
+            Err(bitcoin_storage_stub(&format!("get {key}")))
         }
     }
 
@@ -3051,35 +3029,8 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
-            // Mirror storage_put_bytes: fan-out the DELETE to every
-            // node with each request authenticated by that node's own
-            // token.  Single-node delete would leave the object
-            // reachable from the other 5 replicas a trader might
-            // query.
-            let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
-                .await
-                .map_err(|e| {
-                    DsmError::storage(
-                        format!("load storage node config: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-            let sdk = crate::sdk::storage_node_sdk::StorageNodeSDK::new(config.clone())
-                .await
-                .map_err(|e| {
-                    DsmError::storage(
-                        format!("construct storage node sdk: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-            let mut auths = std::collections::HashMap::new();
-            for url in &config.node_urls {
-                if let Some(auth) = crate::sdk::storage_io::resolve_storage_auth(url) {
-                    auths.insert(url.clone(), auth);
-                }
-            }
-            let sdk = sdk.with_per_node_auth(&auths);
-            sdk.delete_at_all_replicas(key).await
+            // BITCOIN STUB — see the fence above.
+            Err(bitcoin_storage_stub(&format!("delete {key}")))
         }
     }
 
@@ -3087,7 +3038,7 @@ impl BitcoinTapSdk {
         prefix: &str,
         cursor: Option<&str>,
         limit: u32,
-    ) -> Result<generated::ObjectListResponseV1, DsmError> {
+    ) -> Result<ObjectListResponseV1, DsmError> {
         #[cfg(any(test, feature = "demos"))]
         {
             let mut state = dbtc_storage_test_state();
@@ -3113,7 +3064,7 @@ impl BitcoinTapSdk {
                 .collect();
             let items = page_keys
                 .iter()
-                .map(|key| generated::ObjectListItemV1 {
+                .map(|key| ObjectListItemV1 {
                     key: key.clone(),
                     dlv_id_b32: String::new(),
                     size_bytes: state
@@ -3123,7 +3074,7 @@ impl BitcoinTapSdk {
                         .unwrap_or(0),
                 })
                 .collect();
-            Ok(generated::ObjectListResponseV1 {
+            Ok(ObjectListResponseV1 {
                 next_cursor: page_keys.last().cloned(),
                 items,
             })
@@ -3131,7 +3082,10 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
-            crate::sdk::storage_io::list_objects(prefix, cursor, limit).await
+            // BITCOIN STUB — see the fence above.
+            Err(bitcoin_storage_stub(&format!(
+                "list objects under {prefix} from {cursor:?} (at most {limit})"
+            )))
         }
     }
 
@@ -4342,12 +4296,18 @@ impl BitcoinTapSdk {
         };
 
         // Fees come out of the delivered amount — they are not a shortfall.
-        // Shortfall only reflects genuinely unroutable liquidity.
-        let shortfall_sats = if candidate.total_gross_exit_sats >= requested_net_sats {
-            0
-        } else {
-            requested_net_sats.saturating_sub(candidate.total_gross_exit_sats)
-        };
+        // Shortfall is what the RECIPIENT does not get: the delivery this plan
+        // could not route, and nothing else.
+        //
+        // Both sides must therefore be net. Comparing the gross exit against the
+        // net request mixed the two and read as zero whenever the fee covered the
+        // gap: a 198_950 net request answered by sweeping a 200_000 vault routes
+        // 197_900 and burns 200_000 gross, which is "not short" by that measure
+        // while the recipient is 1_050 light. Candidates are already classified on
+        // exactly this quantity (`planned_net_sats` equal to, or below,
+        // `requested_net_sats`), so saturating_sub is zero for an exact plan by
+        // construction.
+        let shortfall_sats = requested_net_sats.saturating_sub(candidate.planned_net_sats);
         let mut plan_class = Self::classify_withdrawal_plan(&candidate.legs).to_string();
         let plan_id = Self::compute_withdrawal_plan_id(
             requested_net_sats,
@@ -5068,9 +5028,7 @@ mod tests {
     }
 
     fn init_withdrawal_test_db() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         BitcoinTapSdk::reset_dbtc_storage_test_state();
         crate::storage::client_db::init_database()
@@ -5700,6 +5658,50 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn plan_withdrawal_reports_what_the_recipient_is_short() {
+        init_withdrawal_test_db();
+
+        let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
+        let full_fee = estimated_full_withdrawal_fee_sats();
+
+        // One vault, and a request slightly larger than it can deliver. The vault
+        // sweeps in full, so the fee is the only thing between the two figures:
+        // the gross exit clears the net request while the recipient still comes
+        // up short. That is the gap a gross-to-net comparison reported as zero.
+        let vault_sats = 200_000;
+        let vid = vid_from_label("vault-short");
+        put_active_vault(vid, vault_sats);
+        put_active_vault_record(vid, vault_sats, "btc_to_dbtc");
+
+        // The net request sits between what the sweep delivers (vault - fee) and
+        // what it burns (vault). No route lands on it exactly, and no partial one
+        // can either: a partial would have to leave a remainder under the floor.
+        let requested_net = vault_sats - full_fee / 2;
+        let plan = bridge
+            .plan_withdrawal(requested_net + full_fee, "tb1qshortfall", &[0x11; 32])
+            .await
+            .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
+
+        assert_eq!(plan.requested_net_sats, requested_net);
+        assert_eq!(plan.planned_net_sats, vault_sats - full_fee);
+        assert_eq!(plan.total_gross_exit_sats, vault_sats);
+        assert!(
+            plan.total_gross_exit_sats >= requested_net,
+            "the gross exit covers the net request — the old comparison stopped \
+             there and called it whole: gross {} vs requested net {}",
+            plan.total_gross_exit_sats,
+            requested_net
+        );
+        assert_eq!(
+            plan.shortfall_sats,
+            requested_net - plan.planned_net_sats,
+            "shortfall is the delivery this plan could not route"
+        );
+        assert!(plan.shortfall_sats > 0);
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn plan_withdrawal_ignores_stale_in_memory_vaults_not_in_sqlite() {
         init_withdrawal_test_db();
 
@@ -5818,9 +5820,7 @@ mod tests {
 
     /// Set up identity + an existing dBTC LockedRecovery lock for the reconcile tests.
     fn dbtc_reconcile_test_identity() {
-        let _ = crate::storage_utils::set_storage_base_dir(
-            std::env::temp_dir().join("dsm_dbtc_reconcile_test"),
-        );
+        crate::economic_fixtures::use_test_storage_dir();
         crate::sdk::app_state::AppState::reset_memory_for_testing();
         crate::sdk::app_state::AppState::prime_memory_for_testing();
         crate::sdk::app_state::AppState::set_identity_info(
@@ -5828,8 +5828,9 @@ mod tests {
             vec![0x01; 32],
             vec![0x6E; 32],
             vec![0x02; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+        )
+        .expect("AppState identity");
+        crate::sdk::app_state::AppState::set_has_identity(true).expect("AppState identity");
         // dBTC starts LockedRecovery (as generic recovery-time locking would leave it).
         crate::storage::client_db::recovery::lock_restored_bearer_asset(DBTC_TOKEN_ID.as_bytes())
             .expect("lock dBTC");

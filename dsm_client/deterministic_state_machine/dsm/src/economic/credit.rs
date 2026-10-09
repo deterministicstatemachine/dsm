@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The six credit-source descriptors — CCB classes `0x0023`–`0x0028`.
+//! The credit-source descriptors — CCB classes `0x0025`, `0x005D` and
+//! `0x005F`.
 //!
 //! ## Why these are inline, not addressed
 //!
@@ -33,7 +34,7 @@
 //!
 //! ## No `Custom` arm
 //!
-//! The algebra is closed. A credit that names none of these seven is unfunded,
+//! The algebra is closed. A credit that names none of these three is unfunded,
 //! and there is deliberately no escape hatch — an open arm would be where
 //! every future "just this once" credit went.
 //!
@@ -42,40 +43,6 @@
 //! here.
 
 use crate::ccb::{class, push_digest32, push_envelope, push_u32, push_u64, CcbError, CcbObject};
-
-/// `0x0023` schema 1 — funded by an authorized issuance transition.
-///
-/// The authorization itself is addressed rather than inline: class `0x0029`
-/// (`IssuanceAuthorizationBody`) defines the issuance predicate, and the
-/// descriptor names the evidence bundle carrying it by INNER content identity.
-/// Inlining the bundle here would put one fact in two encodings; the arm
-/// fetches and re-verifies the addressed bytes instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceAuthorizedIssuance {
-    pub credit_mutation_index: u32,
-    pub issuance_authorization_addr: [u8; 32],
-}
-
-impl CcbObject for CreditSourceAuthorizedIssuance {
-    const CLASS: u16 = class::CREDIT_SOURCE_AUTHORIZED_ISSUANCE;
-    const SCHEMA: u16 = 1;
-}
-
-/// `0x0024` schema 1 — funded by a debit in the SAME transition.
-///
-/// The only arm with no external evidence address, and the reason the inline
-/// design matters: both endpoints are indices into the witness that carries
-/// this descriptor, so it is fully checkable with nothing fetched.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceSameTransitionMove {
-    pub credit_mutation_index: u32,
-    pub debit_mutation_index: u32,
-}
-
-impl CcbObject for CreditSourceSameTransitionMove {
-    const CLASS: u16 = class::CREDIT_SOURCE_SAME_TRANSITION_MOVE;
-    const SCHEMA: u16 = 1;
-}
 
 /// `0x0025` schema 1 — funded by a peer's validated debit.
 ///
@@ -97,110 +64,55 @@ impl CcbObject for CreditSourceValidatedPeerDebit {
     const SCHEMA: u16 = 1;
 }
 
-/// `0x0026` schema 2 — the trader's output credit, funded by consuming an
-/// owner vault reserve. Schema 1 is BURNED (3.6, owner ruling 2026-08-28):
-/// it carried no locator for the owner's validated economic ancestry, and
-/// zero producers ever shipped it — the strict decoder refuses its bytes.
+/// `0x005D` schema 1 — the recipient credit of one native reserve release.
 ///
-/// `(vault_id, parent_sequence, x)` names *which* consumption. `receipt_id`
-/// is deliberately absent: it derives from `(vault_id, x)`, and carrying a
-/// derived name beside its inputs is a place for the two to disagree.
-/// `owner_economic_position` is an UNTRUSTED LOCATOR, never authority — the
-/// verifier uses it only to locate the claimed owner lineage position, then
-/// independently derives `ValidatedEconomicRoot(position)` and proves the
-/// reserve facts against that exact root (the 0x0025 discipline).
+/// Deliberately carries NO asset and NO amount: both are read from the
+/// release the walk established as final at `generation` of the reserve —
+/// a copy here would be a second place for one fact to disagree with itself.
+/// `reserve_id` is compared against the CANONICAL `era_reserve_id(network_id)`
+/// by the verifier; the descriptor and the release agreeing with each other
+/// proves nothing about the supply.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceDlvReserveConsumption {
+pub struct CreditSourceNativeReserveRelease {
     pub credit_mutation_index: u32,
-    pub vault_id: [u8; 32],
-    pub parent_sequence: u64,
-    pub x: [u8; 32],
-    pub owner_economic_position: u64,
-    pub reserve_consumption_evidence_addr: [u8; 32],
+    pub reserve_id: [u8; 32],
+    /// The generation the release installed: `R_{generation}` succeeds
+    /// `R_{generation − 1}` by exactly this release.
+    pub generation: u64,
+    /// Content address of the EXACT signed `NativeReserveReleaseV1` bytes.
+    pub release_evidence_addr: [u8; 32],
 }
 
-impl CcbObject for CreditSourceDlvReserveConsumption {
-    const CLASS: u16 = class::CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION;
-    const SCHEMA: u16 = 2;
-}
-
-/// `0x0027` schema 2 — the owner's input-reserve credit, funded by a trader's
-/// already-admitted settlement payment. Schema 1 is BURNED (3.6, owner
-/// ruling 2026-08-28): it carried no locator for the trader's validated
-/// economic ancestry, and zero producers ever shipped it.
-/// `trader_economic_position` is an UNTRUSTED LOCATOR, never authority —
-/// exactly the 0x0025 peer-position discipline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceValidatedDlvSettlementPayment {
-    pub credit_mutation_index: u32,
-    pub vault_id: [u8; 32],
-    pub settlement_receipt_id: [u8; 32],
-    pub parent_sequence: u64,
-    pub trader_genesis: [u8; 32],
-    pub trader_devid: [u8; 32],
-    pub trader_economic_position: u64,
-    pub payment_evidence_addr: [u8; 32],
-}
-
-impl CcbObject for CreditSourceValidatedDlvSettlementPayment {
-    const CLASS: u16 = class::CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT;
-    const SCHEMA: u16 = 2;
-}
-
-/// `0x0028` schema 1 — funded by value returning from the offline regime.
-///
-/// `prior_boundary_id` is the **checkpoint being consumed**, and it is the
-/// anti-fork field. Deriving the source from the terminal offline state
-/// instead would be an inflation bug: two forks of one branch derive two
-/// distinct source ids and both reenter, so 100 exported returns as 130. Both
-/// forks satisfy "complete valid branch", because the offline protocol does
-/// not promise global branch uniqueness. Consuming the PRIOR checkpoint makes
-/// the second sibling collide on a leaf that is no longer ZERO.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceVerifiedOfflineReentry {
-    pub credit_mutation_index: u32,
-    pub prior_boundary_id: [u8; 32],
-    pub unload_boundary_id: [u8; 32],
-    pub branch_evidence_addr: [u8; 32],
-}
-
-impl CcbObject for CreditSourceVerifiedOfflineReentry {
-    const CLASS: u16 = class::CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY;
+impl CcbObject for CreditSourceNativeReserveRelease {
+    const CLASS: u16 = class::CREDIT_SOURCE_NATIVE_RESERVE_RELEASE;
     const SCHEMA: u16 = 1;
 }
 
-/// `0x0030` schema 1 — the recipient credit of a consumed ERA faucet ticket.
+/// `0x005F` schema 1 — the creator's credit of a native token's whole genesis
+/// supply, released in the transition that creates the token
+/// (`ReleaseRule::AllAtCreation`, SoFi §51).
 ///
-/// Deliberately carries NO asset and NO amount: both are protocol-derived
-/// (builtin ERA, the fixed payout) and already established by the credit
-/// mutation and the addressed evidence — a copy here would be a second place
-/// for one fact to disagree with itself. `faucet_id` is compared against the
-/// CANONICAL `era_faucet_id(network_id)` by the verifier; the descriptor and
-/// the winner agreeing with each other proves nothing about the cap.
+/// Deliberately carries NO asset, NO amount and NO address: the asset is the
+/// accepted `CreateToken`'s own `policy_commit`, the policy bytes are fetched
+/// under that commit (`H(TAG_DSM_POLICY, bytes)`), and the amount must equal
+/// the genesis supply those bytes commit. A copy here would be a second place
+/// for one fact to disagree with itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreditSourceValidatedFaucetDistribution {
+pub struct CreditSourceGenesisRelease {
     pub credit_mutation_index: u32,
-    pub faucet_id: [u8; 32],
-    pub ticket_index: u64,
-    /// Content address of the EXACT signed `FaucetTicketClaimV1` bytes.
-    pub faucet_claim_evidence_addr: [u8; 32],
 }
 
-impl CcbObject for CreditSourceValidatedFaucetDistribution {
-    const CLASS: u16 = class::CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION;
+impl CcbObject for CreditSourceGenesisRelease {
+    const CLASS: u16 = class::CREDIT_SOURCE_GENESIS_RELEASE;
     const SCHEMA: u16 = 1;
 }
 
-/// One funding statement for one credit. Closed: seven arms, no `Custom`.
+/// One funding statement for one credit. Closed: three arms, no `Custom`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreditSource {
-    AuthorizedIssuance(CreditSourceAuthorizedIssuance),
-    SameTransitionMove(CreditSourceSameTransitionMove),
     ValidatedPeerDebit(CreditSourceValidatedPeerDebit),
-    DlvReserveConsumption(CreditSourceDlvReserveConsumption),
-    ValidatedDlvSettlementPayment(CreditSourceValidatedDlvSettlementPayment),
-    VerifiedOfflineReentry(CreditSourceVerifiedOfflineReentry),
-    ValidatedFaucetDistribution(CreditSourceValidatedFaucetDistribution),
+    NativeReserveRelease(CreditSourceNativeReserveRelease),
+    GenesisRelease(CreditSourceGenesisRelease),
 }
 
 impl CreditSource {
@@ -209,15 +121,9 @@ impl CreditSource {
     /// without a separate discriminant field.
     pub fn class(&self) -> u16 {
         match self {
-            Self::AuthorizedIssuance(_) => CreditSourceAuthorizedIssuance::CLASS,
-            Self::SameTransitionMove(_) => CreditSourceSameTransitionMove::CLASS,
             Self::ValidatedPeerDebit(_) => CreditSourceValidatedPeerDebit::CLASS,
-            Self::DlvReserveConsumption(_) => CreditSourceDlvReserveConsumption::CLASS,
-            Self::ValidatedDlvSettlementPayment(_) => {
-                CreditSourceValidatedDlvSettlementPayment::CLASS
-            }
-            Self::VerifiedOfflineReentry(_) => CreditSourceVerifiedOfflineReentry::CLASS,
-            Self::ValidatedFaucetDistribution(_) => CreditSourceValidatedFaucetDistribution::CLASS,
+            Self::NativeReserveRelease(_) => CreditSourceNativeReserveRelease::CLASS,
+            Self::GenesisRelease(_) => CreditSourceGenesisRelease::CLASS,
         }
     }
 
@@ -225,31 +131,25 @@ impl CreditSource {
     /// what makes the bijection expressible.
     pub fn credit_mutation_index(&self) -> u32 {
         match self {
-            Self::AuthorizedIssuance(s) => s.credit_mutation_index,
-            Self::SameTransitionMove(s) => s.credit_mutation_index,
             Self::ValidatedPeerDebit(s) => s.credit_mutation_index,
-            Self::DlvReserveConsumption(s) => s.credit_mutation_index,
-            Self::ValidatedDlvSettlementPayment(s) => s.credit_mutation_index,
-            Self::VerifiedOfflineReentry(s) => s.credit_mutation_index,
-            Self::ValidatedFaucetDistribution(s) => s.credit_mutation_index,
+            Self::NativeReserveRelease(s) => s.credit_mutation_index,
+            Self::GenesisRelease(s) => s.credit_mutation_index,
         }
     }
 
-    /// The direct external evidence address this source references, if any.
+    /// Every direct external evidence address this source references, in field
+    /// order.
     ///
-    /// `SameTransitionMove` returns `None` — it is intra-transition and has no
-    /// external evidence at all. The manifest's `provenance_evidence_addrs` is
-    /// derived from exactly these, which is why it is a publication index
-    /// rather than a second description of provenance.
-    pub fn external_evidence_addr(&self) -> Option<[u8; 32]> {
+    /// The manifest's `provenance_evidence_addrs` is derived from exactly
+    /// these, which is why it is a publication index rather than a second
+    /// description of provenance.
+    pub fn external_evidence_addrs(&self) -> Vec<[u8; 32]> {
         match self {
-            Self::AuthorizedIssuance(s) => Some(s.issuance_authorization_addr),
-            Self::SameTransitionMove(_) => None,
-            Self::ValidatedPeerDebit(s) => Some(s.acceptance_evidence_addr),
-            Self::DlvReserveConsumption(s) => Some(s.reserve_consumption_evidence_addr),
-            Self::ValidatedDlvSettlementPayment(s) => Some(s.payment_evidence_addr),
-            Self::VerifiedOfflineReentry(s) => Some(s.branch_evidence_addr),
-            Self::ValidatedFaucetDistribution(s) => Some(s.faucet_claim_evidence_addr),
+            Self::ValidatedPeerDebit(s) => vec![s.acceptance_evidence_addr],
+            Self::NativeReserveRelease(s) => vec![s.release_evidence_addr],
+            // The policy it releases under is addressed by the operation's own
+            // policy_commit, not by the descriptor: nothing external to index.
+            Self::GenesisRelease(_) => vec![],
         }
     }
 
@@ -257,21 +157,6 @@ impl CreditSource {
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
         match self {
-            Self::AuthorizedIssuance(s) => {
-                push_envelope::<CreditSourceAuthorizedIssuance>(&mut out);
-                push_u32(&mut out, s.credit_mutation_index); // 1
-                push_digest32(&mut out, &s.issuance_authorization_addr); // 2
-            }
-            Self::SameTransitionMove(s) => {
-                if s.credit_mutation_index == s.debit_mutation_index {
-                    return Err(CcbError::SameTransitionMoveIsSelfFunding {
-                        index: s.credit_mutation_index,
-                    });
-                }
-                push_envelope::<CreditSourceSameTransitionMove>(&mut out);
-                push_u32(&mut out, s.credit_mutation_index); // 1
-                push_u32(&mut out, s.debit_mutation_index); // 2
-            }
             Self::ValidatedPeerDebit(s) => {
                 push_envelope::<CreditSourceValidatedPeerDebit>(&mut out);
                 push_u32(&mut out, s.credit_mutation_index); // 1
@@ -281,42 +166,16 @@ impl CreditSource {
                 push_u32(&mut out, s.peer_debit_mutation_index); // 5
                 push_digest32(&mut out, &s.acceptance_evidence_addr); // 6
             }
-            Self::DlvReserveConsumption(s) => {
-                push_envelope::<CreditSourceDlvReserveConsumption>(&mut out);
+            Self::NativeReserveRelease(s) => {
+                push_envelope::<CreditSourceNativeReserveRelease>(&mut out);
                 push_u32(&mut out, s.credit_mutation_index); // 1
-                push_digest32(&mut out, &s.vault_id); // 2
-                push_u64(&mut out, s.parent_sequence); // 3
-                push_digest32(&mut out, &s.x); // 4
-                push_u64(&mut out, s.owner_economic_position); // 5
-                push_digest32(&mut out, &s.reserve_consumption_evidence_addr); // 6
+                push_digest32(&mut out, &s.reserve_id); // 2
+                push_u64(&mut out, s.generation); // 3
+                push_digest32(&mut out, &s.release_evidence_addr); // 4
             }
-            Self::ValidatedDlvSettlementPayment(s) => {
-                push_envelope::<CreditSourceValidatedDlvSettlementPayment>(&mut out);
+            Self::GenesisRelease(s) => {
+                push_envelope::<CreditSourceGenesisRelease>(&mut out);
                 push_u32(&mut out, s.credit_mutation_index); // 1
-                push_digest32(&mut out, &s.vault_id); // 2
-                push_digest32(&mut out, &s.settlement_receipt_id); // 3
-                push_u64(&mut out, s.parent_sequence); // 4
-                push_digest32(&mut out, &s.trader_genesis); // 5
-                push_digest32(&mut out, &s.trader_devid); // 6
-                push_u64(&mut out, s.trader_economic_position); // 7
-                push_digest32(&mut out, &s.payment_evidence_addr); // 8
-            }
-            Self::ValidatedFaucetDistribution(s) => {
-                push_envelope::<CreditSourceValidatedFaucetDistribution>(&mut out);
-                push_u32(&mut out, s.credit_mutation_index); // 1
-                push_digest32(&mut out, &s.faucet_id); // 2
-                push_u64(&mut out, s.ticket_index); // 3
-                push_digest32(&mut out, &s.faucet_claim_evidence_addr); // 4
-            }
-            Self::VerifiedOfflineReentry(s) => {
-                if s.prior_boundary_id == s.unload_boundary_id {
-                    return Err(CcbError::OfflineReentryBoundaryIsItsOwnParent);
-                }
-                push_envelope::<CreditSourceVerifiedOfflineReentry>(&mut out);
-                push_u32(&mut out, s.credit_mutation_index); // 1
-                push_digest32(&mut out, &s.prior_boundary_id); // 2
-                push_digest32(&mut out, &s.unload_boundary_id); // 3
-                push_digest32(&mut out, &s.branch_evidence_addr); // 4
             }
         }
         Ok(out)

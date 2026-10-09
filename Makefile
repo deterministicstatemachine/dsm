@@ -18,7 +18,7 @@
 #
 # Windows developers: use scripts/dev.ps1 instead of this Makefile.
 #   .\scripts\dev.ps1 help
-# Android builds on Windows require WSL2 — see docs/book/03-development-setup.md#windows-setup.
+# Android builds on Windows require WSL2 — see QUICKSTART.md.
 # ---------------------------------------------------------------------------
 
 # Prefer homebrew bash (4+) for associative arrays used by SBOM scripts.
@@ -313,7 +313,7 @@ test: ## Run Rust workspace tests + frontend jest tests
 	# --test-threads=1: dsm_sdk/storage suites share process-global singletons; a
 	# non-serial test racing a #[serial] one flakes nondeterministically. Match CI.
 	cargo test --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
-	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+	cargo test -p dsm_storage_node -- --nocapture --test-threads=1
 	@echo "==> Running frontend tests..."
 	cd $(FRONTEND_DIR) && \
 		[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
@@ -322,11 +322,10 @@ test: ## Run Rust workspace tests + frontend jest tests
 
 .PHONY: test-rust
 test-rust: ## Run Rust tests only
-	# Most of the workspace uses the default (postgres-feature) build.
-	# dsm_storage_node integration tests use the local-dev (SQLite) build so
-	# they run without a live PostgreSQL instance.
-	cargo test --workspace --exclude dsm_storage_node -- --nocapture
-	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+	# Node-backed tests run on Postgres: set DSM_TEST_DATABASE_URL to a
+	# database on a running server (they refuse to run without one).
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
+	cargo test -p dsm_storage_node -- --nocapture --test-threads=1
 
 .PHONY: test-frontend
 test-frontend: ## Run frontend jest tests only
@@ -345,6 +344,111 @@ typecheck: ## Run frontend TypeScript type-check
 # ---------------------------------------------------------------------------
 # LINT / QUALITY
 # ---------------------------------------------------------------------------
+
+.PHONY: requirement-map
+MAP ?= target/requirement-map
+SOURCES := '*.rs' '*.kt' '*.kts' '*.java' '*.ts' '*.tsx' '*.js' '*.mjs' '*.proto'
+# What the indexes depend on besides the sources: each is hashed into the tree
+# fingerprint, so a map is refused against any other configuration.
+MAP_INPUTS := ci/requirement_map.android.rust-analyzer.json ci/requirement_map.node.rust-analyzer.json ci/requirement_map.tests.rust-analyzer.json Cargo.lock rust-toolchain.toml
+# The NDK Gradle pins; the Android index is built for the real target with it.
+NDK_PIN := $(shell sed -n 's/.*ndkVersion = "\([^"]*\)".*/\1/p' dsm_client/android/app/build.gradle.kts | head -1)
+NDK_BIN = $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(shell uname -s | tr A-Z a-z)-x86_64/bin
+requirement-map: requirement-map-indexes requirement-map-tables ## Code map (MAP=dir): every source file hashed; each shipped build's call graph (Android: aarch64-linux-android; storage node: Linux, built on Linux only) and the host test build, each definition reached, dead or indeterminate with a reason code; MAP/code-map.html
+
+.PHONY: requirement-map-indexes requirement-map-tables
+# The map in two halves. The indexes read code and configuration only, never
+# specs/; they are the expensive half, and CI keeps them between commits whose
+# code and configuration are the same (.github/workflows/code-map.yml). The
+# tables read the indexes and the intent manifest's root questions, and run
+# every time.
+requirement-map-indexes: ## The code map's indexes (MAP=dir): each build's features and packages, and a rust-analyzer index of each build
+	@test -n "$(ANDROID_NDK_HOME)" || { echo "requirement-map: set ANDROID_NDK_HOME to the NDK Gradle pins ($(NDK_PIN)): the Android index is built for the real aarch64-linux-android target"; exit 1; }
+	@test -x "$(NDK_BIN)/aarch64-linux-android23-clang" || { echo "requirement-map: no aarch64-linux-android23-clang in $(NDK_BIN)"; exit 1; }
+	rustup component add rust-analyzer --toolchain $(RUST_PIN)
+	rustup target add aarch64-linux-android --toolchain $(RUST_PIN)
+	mkdir -p $(MAP)
+	rm -f $(MAP)/node.scip $(MAP)/node.log $(MAP)/node-features.txt $(MAP)/node-features-indexed.txt
+	# Each build's features, and the ones the index resolves (cargo metadata
+	# unifies dev-dependencies): the difference is what the index compiles that
+	# the build does not.
+	rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_sdk --features jni,bluetooth --target aarch64-linux-android -e normal,build --prefix none -f '{p} {f}' > $(MAP)/android-features.txt
+	rustup run $(RUST_PIN) cargo tree --locked --color never --workspace --features dsm_sdk/jni,dsm_sdk/bluetooth --target aarch64-linux-android -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/android-features-indexed.txt
+	# Each build's linked packages (normal dependencies: what the artifact
+	# holds) are its crates; resolution only, so the node's reads on any host.
+	rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_sdk --features jni,bluetooth --target aarch64-linux-android -e normal --prefix none -f '{p}' > $(MAP)/android-packages.txt
+	rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_storage_node --target x86_64-unknown-linux-gnu -e normal --prefix none -f '{p}' > $(MAP)/node-packages.txt
+	env CC_aarch64_linux_android=$(NDK_BIN)/aarch64-linux-android23-clang AR_aarch64_linux_android=$(NDK_BIN)/llvm-ar \
+		rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.android.rust-analyzer.json --output $(MAP)/android.scip > $(MAP)/android.log 2>&1
+	if [ "$$(uname -s)" = Linux ]; then \
+		rustup target add x86_64-unknown-linux-gnu --toolchain $(RUST_PIN) && \
+		rustup run $(RUST_PIN) cargo tree --locked --color never -p dsm_storage_node --target x86_64-unknown-linux-gnu -e normal,build --prefix none -f '{p} {f}' > $(MAP)/node-features.txt && \
+		rustup run $(RUST_PIN) cargo tree --locked --color never --workspace --target x86_64-unknown-linux-gnu -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/node-features-indexed.txt && \
+		rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.node.rust-analyzer.json --output $(MAP)/node.scip > $(MAP)/node.log 2>&1; \
+	fi
+	rustup run $(RUST_PIN) rust-analyzer scip . --config-path ci/requirement_map.tests.rust-analyzer.json --output $(MAP)/tests.scip > $(MAP)/tests.log 2>&1
+
+requirement-map-tables: ## The code map's tables from its indexes (after make requirement-map-indexes): the tree's fingerprint, the intent manifest's root questions, every definition's reading; MAP/code-map.html
+	rustup component add rust-analyzer --toolchain $(RUST_PIN)
+	mkdir -p $(MAP)
+	git ls-files --cached --others --exclude-standard -- $(SOURCES) > $(MAP)/sources.txt
+	rustup run $(RUST_PIN) rust-analyzer --version > $(MAP)/analyzer.txt
+	printf '%s\n' $(MAP_INPUTS) $(MAP)/analyzer.txt > $(MAP)/inputs.txt
+	rustup run $(RUST_PIN) cargo build --locked --release -p requirement_map
+	target/release/requirement_map fingerprint --root . --files $(MAP)/sources.txt --inputs $(MAP)/inputs.txt --out $(MAP)/tree
+	# The intent manifest's root questions, answered by the map itself.
+	python3 ci/intent_comparator.py root-queries --manifest specs/requirements/INTENT_MANIFEST.tsv > $(MAP)/root-queries.txt
+	target/release/requirement_map index --root . --files $(MAP)/sources.txt --inputs $(MAP)/inputs.txt --fingerprint $(MAP)/tree \
+		--root-queries $(MAP)/root-queries.txt \
+		--android $(MAP)/android.scip --android-log $(MAP)/android.log \
+		--android-features $(MAP)/android-features.txt --android-features-indexed $(MAP)/android-features-indexed.txt \
+		--android-packages $(MAP)/android-packages.txt --node-packages $(MAP)/node-packages.txt \
+		$$(if [ -f $(MAP)/node.scip ]; then echo --node $(MAP)/node.scip --node-log $(MAP)/node.log --node-features $(MAP)/node-features.txt --node-features-indexed $(MAP)/node-features-indexed.txt; fi) \
+		--tests $(MAP)/tests.scip --tests-log $(MAP)/tests.log \
+		--jni-declarations dsm_client/android/app/src/main --unindexed-consumer crates/dsm-android-anchor/src \
+		--out $(MAP)
+	python3 ci/requirement_map.py --map $(MAP) --report $(MAP)/code-map.html
+
+.PHONY: requirement-map-fixture
+requirement-map-fixture: ## The map's adversarial fixture read through the real pipeline: dispatch, receivers, paths, trait objects, scopes, macros, entry points and gates (tools/requirement_map/fixture/expected.tsv)
+	rustup component add rust-analyzer --toolchain $(RUST_PIN)
+	mkdir -p $(MAP)/fixture
+	rustup run $(RUST_PIN) cargo build --locked --release -p requirement_map
+	# The fixture is a real program: it builds as shipped, and its test build
+	# (with the feature its dev-dependency turns on) passes its test.
+	rustup run $(RUST_PIN) cargo build --locked --manifest-path tools/requirement_map/fixture/Cargo.toml
+	rustup run $(RUST_PIN) cargo test --locked --manifest-path tools/requirement_map/fixture/Cargo.toml
+	rustup run $(RUST_PIN) cargo tree --locked --color never --manifest-path tools/requirement_map/fixture/Cargo.toml -p probe -e normal,build --prefix none -f '{p} {f}' > $(MAP)/fixture/features.txt
+	rustup run $(RUST_PIN) cargo tree --locked --color never --manifest-path tools/requirement_map/fixture/Cargo.toml --workspace -e normal,build,dev --prefix none -f '{p} {f}' > $(MAP)/fixture/features-indexed.txt
+	rustup run $(RUST_PIN) rust-analyzer scip tools/requirement_map/fixture --config-path ci/requirement_map.fixture.rust-analyzer.json --output $(MAP)/fixture/index.scip > $(MAP)/fixture/index.log 2>&1
+	python3 ci/intent_comparator.py root-queries --manifest tools/requirement_map/fixture/intent.tsv > $(MAP)/fixture/root-queries.txt
+	target/release/requirement_map fixture --root tools/requirement_map/fixture --scip $(MAP)/fixture/index.scip --log $(MAP)/fixture/index.log \
+		--jni-declarations kotlin --crate probe/src/ --package probe \
+		--features $(MAP)/fixture/features.txt --features-indexed $(MAP)/fixture/features-indexed.txt \
+		--root-queries $(MAP)/fixture/root-queries.txt \
+		--expect tools/requirement_map/fixture/expected.tsv --out $(MAP)/fixture/map
+	# Every comparator outcome, from the fixture's manifest against its map.
+	python3 ci/intent_comparator.py --map $(MAP)/fixture/map --manifest tools/requirement_map/fixture/intent.tsv \
+		--requirements tools/requirement_map/fixture/requirements.tsv --expect tools/requirement_map/fixture/intent-expected.tsv
+
+.PHONY: requirement-map-intent
+INTENT_BUILT ?=
+requirement-map-intent: ## The intent manifest (specs/requirements/INTENT_MANIFEST.tsv) against the map (after make requirement-map): each row's outcome, the action it asks for, and a failure for every gap whose requirement is Met in CONFORMANCE §8; then every requirement row's pin (specs/requirements/INTENT_PINS.tsv), read only over a map of every build; MAP/intent.tsv, MAP/unspecified.tsv, MAP/pins.tsv. INTENT_BUILT=android,node requires both builds indexed (CI)
+	python3 ci/intent_comparator.py --map $(MAP) $(if $(INTENT_BUILT),--built $(INTENT_BUILT)) \
+		--pins specs/requirements/INTENT_PINS.tsv --tool target/release/requirement_map
+
+.PHONY: requirement-map-pin-tests
+requirement-map-pin-tests: ## The evidence pins' own tests (ci/test_intent_pins.py), after make requirement-map-fixture and make requirement-map (MAP=dir): each pin state planted in copies of the fixture's manifest, requirements and pins, the repin and bootstrap rules, board evidence and test names
+	MAP=$(MAP) python3 ci/test_intent_pins.py
+
+.PHONY: requirement-map-check requirement-map-mutations
+requirement-map-check: ## The map against itself and the committed facts (after make requirement-map): no contradiction, every sentinel, entry point and count as ci/requirement_map.*.tsv hold them; MAP/committed.tsv is what this map reads, for review
+	python3 ci/requirement_map.py --map $(MAP) print-committed > $(MAP)/committed.tsv
+	python3 ci/requirement_map.py --map $(MAP) check --sentinels ci/requirement_map.sentinels.tsv --roots ci/requirement_map.roots.tsv --counts ci/requirement_map.counts.tsv
+
+requirement-map-mutations: ## Every case in tools/requirement_map/fixture/mutations.toml, each in a temporary copy (after make requirement-map-fixture and requirement-map; the re-index case needs ANDROID_NDK_HOME)
+	@test -n "$(ANDROID_NDK_HOME)" || { echo "requirement-map-mutations: set ANDROID_NDK_HOME (the re-index case builds the Android index again)"; exit 1; }
+	python3 ci/requirement_map_mutations.py --cases tools/requirement_map/fixture/mutations.toml --map $(MAP)
 
 .PHONY: lint
 # THE canonical toolchain, read from rust-toolchain.toml — never hardcoded here.
@@ -380,9 +484,9 @@ fmt: ## Auto-format Rust code
 	cargo fmt --all
 
 .PHONY: audit
-audit: ## Security audit (cargo-audit + cargo-deny)
+audit: ## Security audit (cargo-audit on every tracked Cargo.lock + cargo-deny)
 	cargo install cargo-audit --quiet || true
-	cargo audit
+	bash ci/audit_every_lockfile.sh
 	cargo install cargo-deny --quiet || true
 	cargo deny check
 
@@ -396,9 +500,8 @@ deny: ## Run cargo-deny license and advisory checks
 # ---------------------------------------------------------------------------
 
 .PHONY: nodes-up
-nodes-up: ## Set up the dev database and start the 5 local storage nodes
-	@bash $(REPO_ROOT)/scripts/setup_dev_db.sh
-	@cd $(STORAGE_NODE_DIR) && ./scripts/dev/start_dev_nodes.sh
+nodes-up: ## Start the 5 local storage dev nodes (TLS under a local dev CA)
+	@$(STORAGE_NODE_DIR)/scripts/dev/start_dev_nodes.sh
 
 .PHONY: nodes-down
 nodes-down: ## Stop the 5 local storage dev nodes
@@ -451,12 +554,12 @@ release-preflight: ## Run the full pre-tag release gate (lint, test, audit, CI s
 	cargo clippy --all-targets -- -D warnings
 	@echo ""
 	@echo "── [2/8] Rust tests ────────────────────────────────────────"
-	cargo test --workspace --exclude dsm_storage_node -- --nocapture
-	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
+	cargo test -p dsm_storage_node -- --nocapture --test-threads=1
 	@echo ""
 	@echo "── [3/8] Security audit ────────────────────────────────────"
 	cargo deny check
-	cargo audit
+	bash ci/audit_every_lockfile.sh
 	@echo ""
 	@echo "── [4/8] Protocol purity (CI scan) ─────────────────────────"
 	bash scripts/ci_scan.sh

@@ -13,14 +13,8 @@ pub const TAG_DSM_EXTERNAL_COMMIT_HASH: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/external-commit-hash");
 pub const TAG_DSM_EXTERNAL_COMMIT_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/external-commit-id");
-pub const TAG_DSM_FLC_HASH_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/flc/hash/v2");
 pub const TAG_DSM_MERKLE_PATH: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/merkle-path");
-pub const TAG_DSM_NETWORK_HASH: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/network-hash");
-pub const TAG_DSM_PAYLOAD_DIGEST: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/payload-digest");
 pub const TAG_DSM_PK_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/pk-hash");
 pub const TAG_DSM_PRECOMMIT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/precommit");
 pub const TAG_DSM_PRECOMMIT_INVALIDATION_PROOF_V2: TaggedHashDomain<'static> =
@@ -32,24 +26,6 @@ pub const TAG_DSM_SCRIPT_COMMIT: TaggedHashDomain<'static> =
 pub const TAG_DSM_SDK_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/sdk-hash");
 pub const TAG_DSM_SIGNING_PREIMAGE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/signing-preimage");
-pub const TAG_DSM_SMART_COMMIT: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit");
-pub const TAG_DSM_SMART_COMMIT_CONDITION: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit-condition");
-pub const TAG_DSM_SMART_COMMIT_EVAL: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit-eval");
-pub const TAG_DSM_SMART_COMMIT_EVIDENCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit-evidence");
-pub const TAG_DSM_SMART_COMMIT_HASH: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit-hash");
-pub const TAG_DSM_SMART_COMMIT_HASH_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit/hash/v2");
-pub const TAG_DSM_SMART_COMMIT_ID_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit/id/v2");
-pub const TAG_DSM_SMART_COMMIT_NONCE_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit/nonce/v2");
-pub const TAG_DSM_SMART_COMMIT_PREDICATE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/smart-commit-predicate");
 pub const TAG_DSM_TLS_CERT_HASH: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/tls-cert-hash");
 pub const TAG_DSM_TOKEN_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/token-hash");

@@ -12,9 +12,10 @@
 //! Authentication split (REUSE, do not reinvent):
 //! - The new `(A_new,C)` establishment receipt is a normal **bilateral** stitched
 //!   receipt (co-signed by A_new — alive — and C — syncing), authenticated by
-//!   [`crate::verification::receipt_verification::verify_stitched_receipt`]
-//!   (both sigs + EK-cert chains + inclusion + parent adjacency + uniqueness). That is
-//!   the integration layer's job (it supplies `ReceiptVerificationContext`).
+//!   the offline bilateral decisions ([`crate::bilateral::offline::decide_confirm`],
+//!   [`crate::bilateral::offline::decide_commit_ack`]: signatures, EK-cert chains,
+//!   the state rules and the held relationship tip). That is the integration
+//!   layer's job.
 //! - This module verifies the **recovery-specific overlay**: device-pair `rel_key`
 //!   derivation, the tombstone/succession successor proof, the old-chain
 //!   forward-ancestry `h^cap ⟶* T_old_current`, the carry-forward commitment, the
@@ -230,7 +231,7 @@ pub fn verify_recovery_reestablish_request(
     }
 
     // 2. A_new is the mnemonic-authorized successor of A_old (genesis-anchored authority).
-    let a_old_str = crate::types::identifiers::encode_crockford(a_old);
+    let a_old_str = crate::utils::text_id::encode_base32_crockford(a_old);
     if tombstone.device_id != a_old_str {
         return Err(DsmError::verification(
             "reestablish: tombstone is not for A_old",
@@ -342,7 +343,7 @@ impl CrossRelationshipSuccessionEvidence {
         }
 
         // 2. A_new is the mnemonic-authorized successor of A_old (genesis-anchored auth).
-        let a_old_str = crate::types::identifiers::encode_crockford(&self.a_old);
+        let a_old_str = crate::utils::text_id::encode_base32_crockford(&self.a_old);
         if self.tombstone.device_id != a_old_str {
             return Err(DsmError::verification(
                 "succession: tombstone is not for A_old",
@@ -454,8 +455,8 @@ impl CrossRelationshipSuccessionEvidence {
     /// posted (genesis-authenticated) root. Returns the verified new tip.
     ///
     /// NOTE: bilateral authentication of the new establishment receipt itself
-    /// (signatures + EK-cert chains + adjacency) is performed by
-    /// `verify_stitched_receipt` at the integration layer; this method assumes the
+    /// (signatures + EK-cert chains + the held tip) is performed by the offline
+    /// bilateral decisions at the integration layer; this method assumes the
     /// receipt's tips are the values verified there.
     pub fn verify(&self, recovery_authority_pubkey: &[u8]) -> Result<[u8; 32], DsmError> {
         self.verify_succession_semantics(recovery_authority_pubkey)?;
@@ -517,7 +518,7 @@ mod tests {
     /// Build a fully-valid evidence (recovery semantics) + the authority pubkey.
     fn fixture() -> (CrossRelationshipSuccessionEvidence, Vec<u8>) {
         let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
-        let a_old_str = crate::types::identifiers::encode_crockford(&A_OLD);
+        let a_old_str = crate::utils::text_id::encode_base32_crockford(&A_OLD);
 
         let tombstone = create_tombstone(&[0x01; 32], 0, &[0x02; 32], &a_old_str, &kp.secret_key)
             .expect("tombstone");
@@ -661,7 +662,7 @@ mod tests {
         // Rebuild succession binding a different successor.
         let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
         let (mut ev, pk) = fixture();
-        let a_old_str = crate::types::identifiers::encode_crockford(&A_OLD);
+        let a_old_str = crate::utils::text_id::encode_base32_crockford(&A_OLD);
         ev.succession = create_succession(
             &ev.tombstone.tombstone_hash,
             [0xBB; 32].as_ref(),
@@ -771,10 +772,9 @@ mod tests {
     /// SparseMerkleTree root.
     fn with_real_inclusion(ev: &mut CrossRelationshipSuccessionEvidence) {
         use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
-        let mut pd = SparseMerkleTree::new(256);
-        pd.update_leaf(&ev.old_rel_key, &ev.t_old_current).unwrap();
-        pd.update_leaf(&ev.new_rel_key, &ev.t_new_established)
-            .unwrap();
+        let mut pd = SparseMerkleTree::new();
+        pd.update_leaf(&ev.old_rel_key, &ev.t_old_current);
+        pd.update_leaf(&ev.new_rel_key, &ev.t_new_established);
         ev.counterparty_root = *pd.root();
         ev.old_inclusion_proof = pd
             .get_inclusion_proof(&ev.old_rel_key, 256)

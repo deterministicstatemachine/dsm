@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 #![allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-#![cfg(feature = "local-dev")]
 
 //! The step-6 gate, verbatim: *"given a Genesis v3 state and an owner key,
 //! can the implementation construct `V_n`, encode it canonically, publish it
@@ -20,7 +19,7 @@
 //! the path the composer resumes onto, demonstrated before the composer
 //! moves.
 
-use std::sync::{Arc, Mutex};
+mod common;
 
 use dsm::ccb::{
     delegation_genesis_sentinel, role, sigalg, transition_genesis_sentinel, vault_state_commitment,
@@ -125,18 +124,15 @@ async fn the_milestone_path_works_end_to_end_with_no_legacy_anywhere() {
 
     // ── Publish immutably, through the real store. The address the client
     // computes and the address the node computes are one derivation. ─────
-    let conn = rusqlite::Connection::open_in_memory().expect("sqlite");
-    let pool = Arc::new(Mutex::new(conn));
-    db::init_db(&pool).await.expect("schema");
+    let pool = common::fresh_store("identity_milestone").await;
 
     let addr = immutable_addr(TAG_DSM_VAULT_STATE, &ccb);
-    let addr_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&addr);
+    let addr_b32 = dsm::utils::text_id::encode_base32_crockford(&addr);
     let outcome = db::insert_immutable_object_if_absent(
         &pool,
         &addr_b32,
         TAG_DSM_VAULT_STATE.source_bytes(),
         &ccb,
-        1,
     )
     .await
     .expect("put");
@@ -147,8 +143,7 @@ async fn the_milestone_path_works_end_to_end_with_no_legacy_anywhere() {
             &pool,
             &addr_b32,
             TAG_DSM_VAULT_STATE.source_bytes(),
-            &ccb,
-            2
+            &ccb
         )
         .await
         .expect("replay"),
@@ -162,7 +157,7 @@ async fn the_milestone_path_works_end_to_end_with_no_legacy_anywhere() {
     assert_eq!(fetch_addr, addr, "identity → address, no index anywhere");
     let (ns, fetched) = db::get_immutable_object(
         &pool,
-        &dsm_sdk::util::text_id::encode_base32_crockford(&fetch_addr),
+        &dsm::utils::text_id::encode_base32_crockford(&fetch_addr),
     )
     .await
     .expect("get")

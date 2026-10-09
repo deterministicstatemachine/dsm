@@ -23,22 +23,19 @@ class SinglePathWebViewBridgeFuzzTest {
     @Test
     fun testFuzzBridgePayloads() {
         val methods = listOf(
-            "hasNativeQrScanner",
-            "getDeviceIdBin",
-            "getSigningPublicKeyBin",
+            "getTransportHeadersV3Bin",
+            "getArchitectureInfo",
+            "getDiagnosticsLog",
             "getPersistedDeviceId",
             "getPersistedGenesisHash",
             "getBluetoothStatus",
-            "hasIdentityDirect",
             "getPreference",
             "setPreference",
-            "nativeBoundaryStartup",
             "nativeBoundaryIngress",
             "nativeHostRequest",
-            "resolveBleAddressForDeviceId",
             "initiateBleContactPairing",
             "getTransportHeadersV3Bin",
-            "processEnvelopeV3",
+            "acceptBilateralByCommitment",
             "unknownMethod" // Test unknown methods too
         )
 
@@ -74,10 +71,9 @@ class SinglePathWebViewBridgeFuzzTest {
 
         malformedEnvelopes.forEach { envelope ->
             try {
-                // Try to parse - should not crash
-                SinglePathWebViewBridge.handleBinaryRpcRaw("processEnvelopeV3", envelope)
-                // Result should be empty for invalid envelopes (error case)
-                // We don't assert emptiness since error handling may vary
+                // Every failure is answered as a protobuf error envelope, never as empty bytes.
+                val result = SinglePathWebViewBridge.handleBinaryRpc("processEnvelopeV3", envelope)
+                assert(isValidProtobufEnvelope(result)) { "expected a protobuf response envelope" }
             } catch (e: Exception) {
                 // Should handle gracefully, not crash
                 println("Envelope parsing handled exception: ${e.message}")
@@ -95,7 +91,7 @@ class SinglePathWebViewBridgeFuzzTest {
         malformedProtos.forEach { proto ->
             try {
                 // Try various methods that parse protobuf
-                val methods = listOf("nativeBoundaryStartup", "nativeBoundaryIngress", "nativeHostRequest")
+                val methods = listOf("nativeBoundaryIngress", "nativeHostRequest")
                 methods.forEach { method ->
                     val result = SinglePathWebViewBridge.handleBinaryRpc(method, proto)
                     // Bridge is not initialized in unit tests, so all responses
@@ -154,7 +150,7 @@ class SinglePathWebViewBridgeFuzzTest {
         payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x05, 0x41, 0x42, 0x43)) // methodLen=5 but truncated
         payloads.add(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())) // huge method length
 
-        // For resolveBleAddressForDeviceId: wrong sizes
+        // Ids of the wrong size
         payloads.add(ByteArray(31)) // 31 bytes instead of 32
         payloads.add(ByteArray(33)) // 33 bytes instead of 32
         payloads.add(ByteArray(32) { 0x00 }) // 32 zero bytes
@@ -290,7 +286,7 @@ class SinglePathWebViewBridgeFuzzTest {
     @Test
     fun testValidPayloadsStillWork() {
         // Test methods that should work with empty payloads
-        val emptyMethods = listOf("hasNativeQrScanner", "getDeviceIdBin", "hasIdentityDirect")
+        val emptyMethods = listOf("getTransportHeadersV3Bin", "getPreference")
 
         emptyMethods.forEach { method ->
             val result = SinglePathWebViewBridge.handleBinaryRpc(method, ByteArray(0))
@@ -308,7 +304,7 @@ class SinglePathWebViewBridgeFuzzTest {
         // Test with extremely large payloads
         val hugePayload = ByteArray(10 * 1024 * 1024) { it.toByte() } // 10MB
 
-        val methods = listOf("nativeBoundaryStartup", "nativeBoundaryIngress", "nativeHostRequest")
+        val methods = listOf("nativeBoundaryIngress", "nativeHostRequest")
 
         methods.forEach { method ->
             try {

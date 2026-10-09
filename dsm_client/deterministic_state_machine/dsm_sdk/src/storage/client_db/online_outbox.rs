@@ -6,7 +6,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 use super::types::PendingOnlineOutboxRecord;
-use crate::util::deterministic_time::tick;
 
 pub fn store_pending_online_outbox(
     counterparty_device_id: &[u8],
@@ -61,15 +60,9 @@ pub fn store_pending_online_outbox(
 
     conn.execute(
         "INSERT INTO pending_online_outbox (
-            counterparty_device_id, message_id, parent_tip, next_tip, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            counterparty_device_id,
-            message_id,
-            parent_tip,
-            next_tip,
-            tick() as i64,
-        ],
+            counterparty_device_id, message_id, parent_tip, next_tip
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![counterparty_device_id, message_id, parent_tip, next_tip,],
     )?;
 
     Ok(())
@@ -198,7 +191,8 @@ pub fn record_pending_online_transition_with_conn(
         }
     };
 
-    let stored_parent = current_chain_tip.unwrap_or_else(|| vec![0u8; 32]);
+    let stored_parent: Vec<u8> =
+        current_chain_tip.ok_or_else(|| anyhow!("the contact has no finalized chain tip"))?;
     if stored_parent.len() != 32 {
         return Err(anyhow!(
             "Stored finalized chain tip has invalid length {}",
@@ -240,15 +234,9 @@ pub fn record_pending_online_transition_with_conn(
     if existing_gate.is_none() {
         tx.execute(
             "INSERT INTO pending_online_outbox (
-                counterparty_device_id, message_id, parent_tip, next_tip, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                counterparty_device_id,
-                message_id,
-                parent_tip,
-                next_tip,
-                tick() as i64,
-            ],
+                counterparty_device_id, message_id, parent_tip, next_tip
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![counterparty_device_id, message_id, parent_tip, next_tip,],
         )?;
     }
 
@@ -269,7 +257,7 @@ pub fn get_pending_online_outbox(
     });
 
     let row = conn.query_row(
-        "SELECT counterparty_device_id, message_id, parent_tip, next_tip, created_at
+        "SELECT counterparty_device_id, message_id, parent_tip, next_tip
            FROM pending_online_outbox
           WHERE counterparty_device_id = ?1",
         params![counterparty_device_id],
@@ -279,7 +267,6 @@ pub fn get_pending_online_outbox(
                 message_id: row.get(1)?,
                 parent_tip: row.get(2)?,
                 next_tip: row.get(3)?,
-                created_at: row.get::<_, i64>(4)? as u64,
             })
         },
     );
@@ -300,7 +287,7 @@ pub fn get_all_pending_online_outbox() -> Result<Vec<PendingOnlineOutboxRecord>>
     });
 
     let mut stmt = conn.prepare(
-        "SELECT counterparty_device_id, message_id, parent_tip, next_tip, created_at
+        "SELECT counterparty_device_id, message_id, parent_tip, next_tip
            FROM pending_online_outbox",
     )?;
 
@@ -310,7 +297,6 @@ pub fn get_all_pending_online_outbox() -> Result<Vec<PendingOnlineOutboxRecord>>
             message_id: row.get(1)?,
             parent_tip: row.get(2)?,
             next_tip: row.get(3)?,
-            created_at: row.get::<_, i64>(4)? as u64,
         })
     })?;
 
@@ -430,7 +416,7 @@ pub fn clear_stale_pending_online_gate(counterparty_device_id: &[u8]) -> Result<
 
     let pending: Option<PendingOnlineOutboxRecord> = tx
         .query_row(
-            "SELECT counterparty_device_id, message_id, parent_tip, next_tip, created_at
+            "SELECT counterparty_device_id, message_id, parent_tip, next_tip
                FROM pending_online_outbox
               WHERE counterparty_device_id = ?1",
             params![counterparty_device_id],
@@ -440,7 +426,6 @@ pub fn clear_stale_pending_online_gate(counterparty_device_id: &[u8]) -> Result<
                     message_id: row.get(1)?,
                     parent_tip: row.get(2)?,
                     next_tip: row.get(3)?,
-                    created_at: row.get::<_, i64>(4)? as u64,
                 })
             },
         )
@@ -620,7 +605,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }

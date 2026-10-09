@@ -10,93 +10,10 @@
 //! inclusion in state hashes and Envelope v3 payloads. No JSON or serde is used
 //! on the canonical path; all encoding uses length-prefixed binary with fixed
 //! variant tags.
-//!
-//! Trait hierarchies ([`Ops`], [`IdOps`], [`TokenOps`], [`GenericOps`],
-//! [`SmartCommitOps`]) provide domain-specific validation and execution
-//! interfaces that [`Operation`] implements.
 
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 
-use crate::{
-    commitments::precommit::SecurityParameters,
-    types::{error::DsmError, token_types::Balance},
-};
-
-/// Base operations trait that all specific operation traits inherit from.
-///
-/// Provides the fundamental interface for validating, executing, identifying,
-/// and serialising any state transition operation.
-pub trait Ops: Debug {
-    /// Validate that this operation's fields are internally consistent.
-    fn validate(&self) -> Result<bool, DsmError>;
-    /// Execute the operation and return its canonical byte output.
-    fn execute(&self) -> Result<Vec<u8>, DsmError>;
-    /// Return a string identifier for this operation type.
-    fn get_id(&self) -> &str;
-    /// Encode this operation to its canonical, deterministic byte representation.
-    fn to_bytes(&self) -> Vec<u8>;
-}
-
-/// Identity management operations.
-///
-/// Extended trait for operations that create, update, verify, or revoke
-/// cryptographic identities anchored to the genesis state.
-pub trait IdOps: Ops {
-    /// Verify an identity against the given SPHINCS+ public key.
-    fn verify_identity(&self, public_key: &[u8]) -> Result<bool, DsmError>;
-    /// Update the identity data associated with this operation.
-    fn update_identity(&mut self, new_data: &[u8]) -> Result<(), DsmError>;
-    /// Revoke this identity, rendering it permanently invalid.
-    fn revoke_identity(&mut self) -> Result<(), DsmError>;
-    /// Generate a cryptographic proof of identity for external verification.
-    fn get_identity_proof(&self) -> Result<Vec<u8>, DsmError>;
-}
-
-/// Token management operations.
-///
-/// Extended trait for operations that manipulate token balances, including
-/// transfer, mint, burn, lock, and unlock. Expiration is enforced by state
-/// progression (logical ticks), not wall-clock time.
-pub trait TokenOps: Ops {
-    /// Check whether this token operation references a valid, non-zero amount.
-    fn is_valid(&self) -> bool;
-    /// Check whether this token has expired based on state progression.
-    fn has_expired(&self) -> bool;
-    /// Verify the token operation against the given SPHINCS+ public key.
-    fn verify_token(&self, public_key: &[u8]) -> Result<bool, DsmError>;
-    /// Extend the validity window by a number of logical ticks.
-    fn extend_validity(&mut self, duration: u64) -> Result<(), DsmError>;
-}
-
-/// Generic operations for protocol extensibility.
-///
-/// Provides a type-erased interface for operations that do not fit the
-/// identity or token categories, allowing application-specific extensions.
-pub trait GenericOps: Ops {
-    /// Return the application-defined operation type label.
-    fn get_operation_type(&self) -> &str;
-    /// Return the raw payload data for this generic operation.
-    fn get_data(&self) -> &[u8];
-    /// Replace the payload data for this generic operation.
-    fn set_data(&mut self, data: Vec<u8>) -> Result<(), DsmError>;
-    /// Merge this operation's data with another generic operation's data.
-    fn merge(&self, other: &dyn GenericOps) -> Result<Vec<u8>, DsmError>;
-}
-
-/// Smart commitment operations.
-///
-/// Extended trait for operations that create, verify, update, and finalise
-/// deterministic smart commitments in the DSM protocol.
-pub trait SmartCommitOps: Ops {
-    /// Verify the commitment against the given SPHINCS+ public key.
-    fn verify_commitment(&self, public_key: &[u8]) -> Result<bool, DsmError>;
-    /// Update the commitment data with new material.
-    fn update_commitment(&mut self, new_data: &[u8]) -> Result<(), DsmError>;
-    /// Finalise the commitment and return its canonical byte representation.
-    fn finalize_commitment(&mut self) -> Result<Vec<u8>, DsmError>;
-    /// Generate a cryptographic proof of commitment for external verification.
-    fn get_commitment_proof(&self) -> Result<Vec<u8>, DsmError>;
-}
+use crate::types::{error::DsmError, token_types::Balance};
 
 /// State transition execution mode (canonical encoded; no Serde).
 ///
@@ -109,31 +26,6 @@ pub enum TransactionMode {
     Bilateral,
     /// Only the initiating party signs; used for self-directed operations.
     Unilateral,
-}
-
-/// Verification strategy for a state transition (canonical encoded; no Serde).
-///
-/// Specifies which verification path is used to validate the state transition,
-/// ranging from simple standard checks to full bilateral verification with
-/// pre-committed parameters.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VerificationType {
-    /// Default verification using hash chain adjacency.
-    Standard,
-    /// Enhanced verification with additional cryptographic proofs.
-    Enhanced,
-    /// Full bilateral verification requiring both parties' signatures.
-    Bilateral,
-    /// Verification through decentralized directory lookup.
-    Directory,
-    /// Standard verification within a bilateral relationship context.
-    StandardBilateral,
-    /// Verification against a previously submitted forward commitment.
-    PreCommitted,
-    /// Unilateral verification anchored to the initiator's identity.
-    UnilateralIdentityAnchor,
-    /// Application-defined custom verification with raw parameter bytes.
-    Custom(Vec<u8>),
 }
 
 /// The authority-proof requirement for a value operation — WHAT proof of authority a transition
@@ -212,6 +104,165 @@ pub fn canonical_offline_bearer_policy() -> AuthorityPolicy {
     }
 }
 
+/// Version tag leading the canonical bytes of [`TransferTerms`].
+pub const TRANSFER_TERMS_V1: u8 = 1;
+
+/// The least salt a transfer's terms may carry: 128 bits.
+pub const TRANSFER_TERMS_MIN_SALT: usize = 16;
+
+/// What a transfer says beyond what admits it (security pre-audit item 4,
+/// owner ruling 2026-10-02: one shape, BLE carries the terms).
+///
+/// The signed [`Operation::Transfer`] keeps what an admission needs: the
+/// recipient, the amount, the asset's policy commit and the authority policy.
+/// Everything else is here, and the operation carries only
+/// [`TransferTerms::commitment`]. Terms travel inside the sealed spool payload
+/// online and beside the operation on BLE, never in any public object, so
+/// public evidence of a transfer holds no memo, ticker or nonce.
+///
+/// `salt` is secret: drawn fresh for each transfer and carried only with the
+/// terms. Without it a memo or nonce could be confirmed against the public
+/// commitment by guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferTerms {
+    /// The token's id (its ticker).
+    pub token_id: Vec<u8>,
+    /// The transfer's nonce, spent in its relationship.
+    pub nonce: Vec<u8>,
+    /// Bilateral or unilateral execution mode.
+    pub mode: TransactionMode,
+    /// The sender's memo.
+    pub memo: String,
+    /// The secret salt, at least [`TRANSFER_TERMS_MIN_SALT`] bytes.
+    pub salt: Vec<u8>,
+}
+
+impl TransferTerms {
+    /// Terms under a fresh 256-bit salt from the operating system's RNG.
+    pub fn new(token_id: Vec<u8>, nonce: Vec<u8>, mode: TransactionMode, memo: String) -> Self {
+        Self {
+            token_id,
+            nonce,
+            mode,
+            memo,
+            salt: crate::crypto::rng::random_bytes(32),
+        }
+    }
+
+    /// Canonical bytes: the version tag, then the salt, ticker, nonce, mode and
+    /// memo, each length-prefixed as in [`Operation::to_bytes`].
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use crate::types::serialization::{put_bytes, put_str, put_u8};
+        let mut out = Vec::new();
+        put_u8(&mut out, TRANSFER_TERMS_V1);
+        put_bytes(&mut out, &self.salt);
+        put_bytes(&mut out, &self.token_id);
+        put_bytes(&mut out, &self.nonce);
+        put_u8(
+            &mut out,
+            match self.mode {
+                TransactionMode::Bilateral => 0,
+                TransactionMode::Unilateral => 1,
+            },
+        );
+        put_str(&mut out, &self.memo);
+        out
+    }
+
+    /// Decode canonical terms. Every byte must be consumed, and a salt shorter
+    /// than [`TRANSFER_TERMS_MIN_SALT`] is refused.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DsmError> {
+        fn take<'a>(inp: &mut &'a [u8], n: usize) -> Result<&'a [u8], DsmError> {
+            if inp.len() < n {
+                return Err(DsmError::invalid_operation(format!(
+                    "transfer terms end early: {n} bytes wanted, {} held",
+                    inp.len()
+                )));
+            }
+            let (head, rest) = inp.split_at(n);
+            *inp = rest;
+            Ok(head)
+        }
+        fn get_u8(inp: &mut &[u8]) -> Result<u8, DsmError> {
+            Ok(take(inp, 1)?[0])
+        }
+        fn get_bytes(inp: &mut &[u8]) -> Result<Vec<u8>, DsmError> {
+            let mut len = [0u8; 4];
+            len.copy_from_slice(take(inp, 4)?);
+            Ok(take(inp, u32::from_le_bytes(len) as usize)?.to_vec())
+        }
+        fn get_str(inp: &mut &[u8]) -> Result<String, DsmError> {
+            String::from_utf8(get_bytes(inp)?).map_err(|e| {
+                DsmError::invalid_operation(format!("transfer terms memo is not UTF-8: {e}"))
+            })
+        }
+        let mut input = data;
+        if get_u8(&mut input)? != TRANSFER_TERMS_V1 {
+            return Err(DsmError::invalid_operation(
+                "unknown transfer terms version",
+            ));
+        }
+        let salt = get_bytes(&mut input)?;
+        if salt.len() < TRANSFER_TERMS_MIN_SALT {
+            return Err(DsmError::invalid_operation(format!(
+                "transfer terms salt is {} bytes; at least {TRANSFER_TERMS_MIN_SALT} are required",
+                salt.len()
+            )));
+        }
+        let token_id = get_bytes(&mut input)?;
+        let nonce = get_bytes(&mut input)?;
+        let mode = match get_u8(&mut input)? {
+            0 => TransactionMode::Bilateral,
+            1 => TransactionMode::Unilateral,
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "transfer terms mode {other} is not a mode"
+                )))
+            }
+        };
+        let memo = get_str(&mut input)?;
+        if !input.is_empty() {
+            return Err(DsmError::invalid_operation(format!(
+                "trailing bytes after transfer terms: {} leftover",
+                input.len()
+            )));
+        }
+        Ok(Self {
+            token_id,
+            nonce,
+            mode,
+            memo,
+            salt,
+        })
+    }
+
+    /// `C = H(DSM/transfer-terms; salt ‖ terms)`, over the canonical bytes.
+    pub fn commitment(&self) -> [u8; 32] {
+        crate::crypto::blake3::domain_hash_bytes(
+            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/transfer-terms/v1"),
+            &self.to_bytes(),
+        )
+    }
+
+    /// Open `operation`'s commitment with these terms: it must be a transfer
+    /// whose `terms_commitment` is exactly [`Self::commitment`]. Terms that do
+    /// not open it say nothing about the transfer, and the transfer is refused.
+    pub fn open(&self, operation: &Operation) -> Result<(), DsmError> {
+        match operation {
+            Operation::Transfer {
+                terms_commitment, ..
+            } if *terms_commitment == self.commitment() => Ok(()),
+            Operation::Transfer { .. } => Err(DsmError::invalid_operation(
+                "the transfer's terms do not open its signed commitment",
+            )),
+            other => Err(DsmError::invalid_operation(format!(
+                "terms open a transfer, not a {}",
+                other.get_operation_type()
+            ))),
+        }
+    }
+}
+
 /// Primary state transition operation enum (no Serde in canonical path).
 ///
 /// Each variant represents a distinct kind of state transition in the DSM
@@ -261,32 +312,24 @@ pub enum Operation {
         forward_link: Option<Vec<u8>>,
     },
     /// Transfer tokens from the current device to a recipient.
+    ///
+    /// Only what an admission needs is public; the ticker, nonce, mode and
+    /// memo are the [`TransferTerms`] the operation commits to (pre-audit
+    /// item 4). Canonical tag 37; tag 3, the shape that carried them in the
+    /// clear, is retired and never reassigned.
     Transfer {
         /// Raw 32-byte recipient device identifier (canonical bytes; no text encodings on op path).
         to_device_id: Vec<u8>,
         /// Token amount to transfer (must be > 0 for validity).
         amount: Balance,
-        /// Binary identifier of the token type being transferred.
-        token_id: Vec<u8>,
         /// CPTA policy commitment (32B) binding this transfer to the token's
         /// canonical policy (§9.5: "All TokenOps MUST include policy_commit;
         /// verifiers reject if it differs from the token's creation
         /// policy_commit"). See token-policy-readiness doctrine §4.
         policy_commit: [u8; 32],
-        /// Bilateral (3-phase commit) or unilateral execution mode.
-        mode: TransactionMode,
-        /// Unique nonce preventing replay of this transfer.
-        nonce: Vec<u8>,
-        /// Verification strategy for validating this transfer.
-        verification: VerificationType,
-        /// Optional pre-commitment parameters binding this transfer to a prior commitment.
-        pre_commit: Option<PreCommitmentOp>,
-        /// Raw recipient identifier for policy/precommit matching (kept as bytes).
-        recipient: Vec<u8>,
-        /// Binary recipient address or alias.
-        to: Vec<u8>,
-        /// Human-readable transfer description.
-        message: String,
+        /// [`TransferTerms::commitment`] of the terms that travel beside this
+        /// operation and nowhere public.
+        terms_commitment: [u8; 32],
         /// Sender's SPHINCS+ signature authorizing this transfer.
         signature: Vec<u8>,
         /// Authority-proof requirement for this transfer. `Some` opts into the offline-bearer
@@ -296,53 +339,38 @@ pub enum Operation {
         /// [`AuthorityPolicy`].
         authority_policy: Option<AuthorityPolicy>,
     },
-    /// Consume ONE single-use ERA faucet ticket, crediting the fixed payout.
+    /// The beta faucet: one credit of the beta payout of builtin ERA, funded
+    /// by ONE release of the network's native reserve (Part IX §51).
     ///
     /// MINIMAL by design: no token id, no policy commit, no amount, no nonce.
-    /// The economics are DERIVED in Rust (builtin ERA, `ERA_FAUCET_PAYOUT`),
-    /// so "no caller-supplied amount anywhere" is literally true, and the
-    /// operation is completely reconstructible from the retained claim
-    /// envelope — which closes the crash window between winning the ticket
-    /// and committing the advance. Canonical tag 31, mode Unilateral (there
-    /// is no counterparty; the ticket register is the other party).
-    ///
-    /// This is NOT a mint. The units come from the network's finite bootstrap
-    /// allocation (800M tickets × 100 ERA); consuming the ticket is the
-    /// source depletion, and the accepting transition refuses this operation
-    /// unless a matching economic admission is already pending — see
-    /// `DeviceState::advance`.
+    /// The asset and the amount are the claim policy's, the release names
+    /// this device as its recipient and binds this operation's digest, and
+    /// the reserve's own state moves by exactly the amount released. This is
+    /// NOT a mint: the units leave the fixed genesis supply, and the accepting
+    /// transition refuses this operation unless a matching economic admission
+    /// is already pending — see `DeviceState::advance`.
     FaucetClaim {
-        /// The canonical network-scoped faucet identity,
-        /// `era_faucet_id(network_id)`.
-        faucet_id: [u8; 32],
-        /// Which ticket. Must be `< ERA_FAUCET_TICKET_COUNT`.
-        ticket_index: u64,
+        /// The canonical network-scoped reserve identity,
+        /// `era_reserve_id(network_id)`.
+        reserve_id: [u8; 32],
+        /// The reserve generation this claim's release installs (`≥ 1`).
+        generation: u64,
     },
-    /// Mint new tokens into existence.
+    /// Adopt a token's public policy on THIS device.
     ///
-    /// NOTHING IN THIS OPERATION ASSERTS ISSUANCE AUTHORITY. The legacy
-    /// `authorized_by` / `proof_of_authorization` channel is deleted: those
-    /// bytes participated in the operation digest, and the `0x0029`
-    /// authorization signs a body that COMMITS that digest — so authorization
-    /// material inside the operation has no fixed point. Authority comes only
-    /// from the attached economic admission: this operation's exact digest is
-    /// named by a policy-signed `IssuanceAuthorizationBody`, resolved by the
-    /// `0x0023 AuthorizedIssuance` arm during validation.
-    Mint {
-        /// Quantity of tokens to mint (must be > 0).
-        amount: Balance,
-        /// Binary identifier of the token type to mint.
-        token_id: Vec<u8>,
-        /// CPTA commit of the asset being minted.
-        ///
-        /// The conservation guard binds the applied `BalanceDelta` to THIS
-        /// value, so a mint cannot credit an asset other than the one the
-        /// signed operation names. Without it the guard could only check the
-        /// delta's count/direction/amount, and a mint for token X could credit
-        /// ERA. Mirrors `Transfer.policy_commit`.
+    /// The authenticated state transition behind "ADD TOKEN". Applying it
+    /// writes the adoption leaf (`TAG_DSM_TOKEN_ADOPTION`) into the device's
+    /// SMT, and `DeviceState::advance` refuses to CREDIT a non-builtin token
+    /// whose leaf is absent from the pre-state. That is what makes a later
+    /// receipt of the token verifiable offline: the policy the receiver
+    /// validates against is already committed in its own state, not fetched
+    /// at acceptance time. Rooting performed on the receiver's behalf by an
+    /// online settlement path is not adoption and cannot substitute for it.
+    AdoptToken {
+        /// CPTA commit (BLAKE3 `DSM/policy` digest) of the adopted policy.
         policy_commit: [u8; 32],
-        /// Human-readable description of the minting event.
-        message: String,
+        /// SPHINCS+ signature over the canonical operation bytes.
+        signature: Vec<u8>,
     },
     /// Burn (destroy) tokens, permanently removing them from circulation.
     Burn {
@@ -353,8 +381,6 @@ pub enum Operation {
         /// CPTA commit of the asset being burned. Binds the applied debit to
         /// the asset the signed operation names.
         policy_commit: [u8; 32],
-        /// Cryptographic proof that the burner owns these tokens.
-        proof_of_ownership: Vec<u8>,
         /// Human-readable description of the burn event.
         message: String,
     },
@@ -551,8 +577,6 @@ pub enum Operation {
         mode: TransactionMode,
         /// Unique nonce matching the sender's Transfer nonce.
         nonce: Vec<u8>,
-        /// Verification strategy matching the sender's Transfer verification.
-        verification: VerificationType,
         /// Hash of the sender's state at the time of transfer (for cross-chain verification).
         sender_state_hash: Option<Vec<u8>>,
     },
@@ -560,7 +584,8 @@ pub enum Operation {
     CreateToken {
         /// Binary unique identifier for the new token type.
         token_id: Vec<u8>,
-        /// Initial supply minted at creation. May be zero.
+        /// The whole supply, released to the creator at creation (SoFi §51).
+        /// Never zero: a token with no genesis supply is not a token (§50).
         initial_supply: Balance,
         /// CPTA commit of the NEW asset — mandatory.
         ///
@@ -592,9 +617,8 @@ pub enum Operation {
     /// Create a new STATE-ONLY Deterministic Limbo Vault, binding it to the
     /// hash chain. Structurally tokenless (owner directive 2026-08-28: the
     /// legacy value-bearing fields `token_id`/`locked_amount` are DELETED, so
-    /// the value-bearing legacy shape can no longer be expressed — every
-    /// funded vault is a `DlvCreateFundedV2`). Moves no economic value and
-    /// may never carry a `Fund` reserve mutation.
+    /// the value-bearing legacy shape can no longer be expressed). Moves no
+    /// economic value.
     DlvCreate {
         /// 32-byte deterministic vault identifier.
         vault_id: Vec<u8>,
@@ -609,163 +633,6 @@ pub enum Operation {
         /// SPHINCS+ signature by the creator over canonical bytes.
         signature: Vec<u8>,
         /// Execution mode (typically Unilateral for vault creation).
-        mode: TransactionMode,
-    },
-    /// FUNDED vault creation, v2 (3.6): the ONLY supported value-bearing
-    /// vault-creation path. Commits BOTH exact funding legs — canonical order
-    /// (`leg_a < leg_b`), both non-zero — so the signed operation states the
-    /// complete economic effect and the `Fund` reserve mutation that rides the
-    /// same advance can be checked against it field-for-field. The legacy
-    /// `DlvCreate` (tag 22) carries a singular display token/amount and stays
-    /// `UnsupportedValueTransition` for any value-bearing shape; its exact
-    /// tokenless shape (no token, no amount, no reserve mutation) classifies
-    /// `EconomicEffect::None` (owner ruling 2026-08-28).
-    DlvCreateFundedV2 {
-        /// 32-byte deterministic vault identifier.
-        vault_id: Vec<u8>,
-        /// SPHINCS+ public key of the vault creator (the owner device's AK).
-        creator_public_key: Vec<u8>,
-        /// BLAKE3("DSM/dlv-params\0" || ...) commitment to vault parameters.
-        parameters_hash: Vec<u8>,
-        /// Serialized FulfillmentMechanism (protobuf bytes).
-        fulfillment_condition: Vec<u8>,
-        /// The lex-lower and lex-higher legs of the pair, as canonical policy
-        /// commits with the exact amounts being encumbered at generation 0.
-        leg_a_policy_commit: [u8; 32],
-        leg_a_amount: u64,
-        leg_b_policy_commit: [u8; 32],
-        leg_b_amount: u64,
-        /// The vault's market fee in basis points — part of the birth state
-        /// the reserves digest derives from.
-        fee_bps: u32,
-        /// SPHINCS+ signature by the creator over the canonical operation
-        /// bytes — signed locally by the owner device, never caller-supplied.
-        signature: Vec<u8>,
-        /// Execution mode (Unilateral: the owner's self-loop).
-        mode: TransactionMode,
-    },
-    /// A trader settling a routed swap against a funded vault.
-    ///
-    /// The two balance deltas this operation carries are the ONLY value movement
-    /// on the trader's chain, and `DeviceState::advance` is the sole guard against
-    /// value creation *regardless of caller* — so everything needed to judge them
-    /// travels here, inside the signed operation, rather than being checked by a
-    /// handler an alternate caller could skip. Two correctly-shaped deltas must not
-    /// be sufficient to mint the output.
-    ///
-    /// The authorization is self-contained by construction: every field is either
-    /// re-derivable from published bytes or a signature over them, so the chokepoint
-    /// can verify it with no network and no local vault.
-    DlvSettle {
-        /// 32-byte vault being settled against, and whose funds are moving.
-        vault_id: Vec<u8>,
-        /// SPHINCS+ public key of the vault owner, and the device id its reserve
-        /// leaves are keyed under.
-        owner_public_key: Vec<u8>,
-        owner_devid: [u8; 32],
-        owner_genesis: [u8; 32],
-        /// The pair, as canonical policy commits — a ticker is not an identity and
-        /// cannot name a reserve leaf.
-        input_policy_commit: [u8; 32],
-        output_policy_commit: [u8; 32],
-        /// The exact vault state consumed: its generation, and its canonical
-        /// identity `c_n = H(DSM/vault-state, CCB(V_n))`. One binding replaces
-        /// the old (reserves digest, SMT root, predicate digest) triple — the
-        /// reserves, the pair and the market policy are FIELDS of the `V_n`
-        /// that `c_n` identifies, so restating any of them here would create a
-        /// second source of truth.
-        parent_sequence: u64,
-        parent_binding: [u8; 32],
-        /// The signed quote and the external commitment it derives.
-        route_commit_bytes: Vec<u8>,
-        external_commitment_x: [u8; 32],
-        /// Exact amounts, base units. The deltas must realize precisely these.
-        input_amount: u64,
-        output_amount: u64,
-        /// Fee in basis points, and the DLV unlock proof σ.
-        fee_bps: u32,
-        sigma: [u8; 32],
-        /// Who is being credited.
-        settler_public_key: Vec<u8>,
-        settler_devid: [u8; 32],
-        /// Identity of the canonical settlement receipt this advance produces —
-        /// the value a pending pointer commits to, and the thing that makes the
-        /// settlement visible to everyone else.
-        settlement_receipt_id: [u8; 32],
-        /// SPHINCS+ signature by the settler over the canonical operation bytes.
-        signature: Vec<u8>,
-        mode: TransactionMode,
-    },
-    /// An owner recording a settlement it has already verified (v2 — the
-    /// legacy tag-27 `DlvOwnerApply` is DELETED and its tag burned; it carried
-    /// neither `fee_bps` nor the parent vault-state binding, so it could not
-    /// be equality-checked against the reserve mutation riding the same
-    /// advance).
-    ///
-    /// Authorizes NO balance movement — the trader's credit was final at the
-    /// trader's own advance; the fee accrues inside the reserves as LP yield.
-    /// This operation states the COMPLETE reserve effect — the pair legs, the
-    /// exact amounts, the one-step generation advance, the fee, and the exact
-    /// parent vault state `c_n` it consumes — so `ApplySettlement` is DERIVED
-    /// from it (never a trusted sidecar) and cross-checked field-for-field.
-    DlvOwnerApplyV2 {
-        /// 32-byte vault whose reserves are being reconciled.
-        vault_id: Vec<u8>,
-        /// The receipt being recorded, and the pointer that committed to it.
-        settlement_receipt_id: [u8; 32],
-        pending_pointer_x: [u8; 32],
-        /// The sequence this advances from, and to. Exactly one step.
-        parent_sequence: u64,
-        new_sequence: u64,
-        /// The exact parent vault state consumed:
-        /// `c_n = H(DSM/vault-state, CCB(V_n))` at `parent_sequence`.
-        parent_binding: [u8; 32],
-        /// The pair whose leaves move, and by how much: reserve[input] gains
-        /// `input_amount`, reserve[output] loses `output_amount`.
-        input_policy_commit: [u8; 32],
-        output_policy_commit: [u8; 32],
-        input_amount: u64,
-        output_amount: u64,
-        /// The vault's market fee in basis points.
-        fee_bps: u32,
-        /// SPHINCS+ signature by the owner over the canonical operation bytes.
-        signature: Vec<u8>,
-        mode: TransactionMode,
-    },
-    /// The owner CLOSES its AMM vault: the complete remaining reserve set (both
-    /// legs of the pair, exactly, at the current generation) moves back to
-    /// ordinary spendable balance atomically, exactly once, and the vault's
-    /// leaves become `0 @ parent + 1` — the terminal generation. A closed vault
-    /// id is single-use: `Fund` refuses it forever (its leaves exist).
-    ///
-    /// The SIGNED operation binds the WHOLE transition — vault, both legs with
-    /// their amounts, the parent and child generation, and the pair/fee that
-    /// determine the terminal vault-state digest — so no unsigned mutation
-    /// metadata decides what moves. The `Withdraw` reserve mutation that rides
-    /// the same advance must equal these fields field-for-field.
-    ///
-    /// The app request is only `DlvCloseV1 { vault_id }`: every field here is
-    /// DERIVED by the handler from the owner's verified frontier (composition
-    /// at exactly this generation with exactly these reserves), never supplied.
-    DlvClose {
-        /// 32-byte vault being closed.
-        vault_id: Vec<u8>,
-        /// The lex-lower and lex-higher legs of the vault's pair, with the
-        /// amounts being withdrawn — the FULL remaining reserves. Both present,
-        /// canonical order.
-        leg_a_policy_commit: [u8; 32],
-        leg_a_amount: u64,
-        leg_b_policy_commit: [u8; 32],
-        leg_b_amount: u64,
-        /// The generation consumed and the terminal generation produced.
-        /// Exactly one step.
-        parent_sequence: u64,
-        new_sequence: u64,
-        /// The vault's fee (its pair is `leg_a/leg_b`); together they derive
-        /// the terminal reserves digest `digest(a, b, 0, 0, fee)`.
-        fee_bps: u32,
-        /// SPHINCS+ signature by the owner over the canonical operation bytes.
-        signature: Vec<u8>,
         mode: TransactionMode,
     },
     /// Attempt to unlock a vault by providing a fulfillment proof.
@@ -795,6 +662,103 @@ pub enum Operation {
         mode: TransactionMode,
     },
     /// Invalidate a vault, returning any locked tokens to the creator.
+    /// SoFi v8: the relationship setup claim (F1). Non-economic — it inserts
+    /// exactly one relationship leaf at `h⁰` and moves no value — but signed,
+    /// because the setup binds `(G, DevID, p, v)` to this identity's key.
+    SofiSetup {
+        /// Canonical `SofiSetupBody` bytes (class `0x0036`).
+        setup_body: Vec<u8>,
+        /// SPHINCS+ over `m_setup`, the body's own signing digest — and NOT
+        /// additionally over the operation. The same body reaches a storage
+        /// member with no operation around it, and `m_setup` is what the
+        /// member checks there.
+        signature: Vec<u8>,
+    },
+    /// SoFi v8: the owner's vault creation at `p_create` (P15-12). It debits
+    /// the funding and inserts the creation record; the vault's own genesis
+    /// lives in its tree, not in this operation.
+    SofiVaultCreate {
+        /// Canonical `VaultGenesisPreimage` bytes (class `0x005A`).
+        genesis_preimage: Vec<u8>,
+        /// Canonical `VaultCreation` bytes (class `0x005B`).
+        creation: Vec<u8>,
+        /// Canonical `MarketPolicy` bytes (class `0x0007`) — the EXACT policy
+        /// object the genesis state names by content address.
+        ///
+        /// CARRIED, so that acceptance is a function of the operation's bytes
+        /// and the authenticated pre-state alone. `semantic_write_set` is
+        /// pure: it cannot resolve `VaultStateLeaf.market_policy` to a pair,
+        /// and making it fetch would put a resolver, storage availability and
+        /// foreign-walk liveness between a local acceptance decision and its
+        /// answer. 72 fixed-width bytes against the ~50KB signature this
+        /// operation already carries.
+        ///
+        /// NOT a second source of market truth: Core re-addresses these bytes
+        /// under the market-policy namespace and refuses unless the address is
+        /// the one `state.market_policy` commits. Bytes that do not
+        /// authenticate to what the state named establish nothing.
+        market_policy_preimage: Vec<u8>,
+        /// The two assets the funding is debited from, in canonical order
+        /// (`a < b`).
+        ///
+        /// SIGNED EXECUTION COORDINATES, not a second source of market truth.
+        /// Without them the debit P15-12 requires could not be derived from
+        /// the operation at all, and balances would move outside any declared
+        /// write set.
+        ///
+        /// The authority is the market policy the vault state commits:
+        /// `semantic_write_set` decodes `market_policy_preimage` — after
+        /// holding it to that address — and refuses unless these two equal
+        /// the pair it reads out. Until that binding landed the check lived
+        /// only in the SDK producer, so a different producer could name any
+        /// two assets and Core refused nothing.
+        funding_a_policy_commit: [u8; 32],
+        funding_b_policy_commit: [u8; 32],
+        /// SPHINCS+ over the operation's canonical unsigned bytes. A creation
+        /// is the ONE SoFi operation that signs those: `vault_id` and `R_0`
+        /// are derivations of the preimage it carries, so it has no protocol
+        /// object digest of its own to sign.
+        signature: Vec<u8>,
+    },
+    /// SoFi v8: the trader's fulfillment `F` — the exercise (F2 stage 3).
+    ///
+    /// One variant covers a trade, a route and a close: which of those it is
+    /// lives in `B°`'s branch inside `P(E)`, never in the operation's name.
+    /// It installs `C_q` at `K_root(q)`; whether the route realizes is decided
+    /// afterwards, by resolution.
+    SofiFulfill {
+        /// Canonical `TraderFulfillmentBody` bytes (class `0x0039`).
+        fulfillment_body: Vec<u8>,
+        /// `PrecommitId` — the `P` this exercises, fetched by content address.
+        precommit_id: Vec<u8>,
+        /// SPHINCS+ over `m_F`, the body's own signing digest, under P's key —
+        /// and NOT additionally over the operation. `K_ful` ingress checks
+        /// exactly this digest on the bare object.
+        signature: Vec<u8>,
+    },
+    /// An escrow vault's creation at `p_create` (SoFi Amendment S21). It
+    /// debits the held amount of the terms' token and inserts the creation
+    /// record, as `SofiVaultCreate` does for a market; the vault's genesis
+    /// lives in its tree, not in this operation.
+    EscrowVaultCreate {
+        /// Canonical `VaultGenesisPreimage` bytes (class `0x005A`), whose
+        /// state's three policy slots all name `terms`.
+        genesis_preimage: Vec<u8>,
+        /// Canonical `VaultCreation` bytes (class `0x005B`).
+        creation: Vec<u8>,
+        /// Canonical escrow terms: `EscrowTerms` (class `0x0063`) or
+        /// `ComputedEscrowTerms` (class `0x0067`, SoFi Amendment S22), whose
+        /// class decides the vault's kind. The EXACT object
+        /// the genesis state's slots name, carried for the reason
+        /// `SofiVaultCreate` carries its market policy, so acceptance is a
+        /// function of the operation's bytes. Core re-addresses them under the
+        /// terms namespace and refuses unless the address is the one the state
+        /// commits; the token they name is the one debited.
+        terms: Vec<u8>,
+        /// SPHINCS+ over the operation's canonical unsigned bytes, as for
+        /// `SofiVaultCreate`: a creation has no object digest of its own.
+        signature: Vec<u8>,
+    },
     DlvInvalidate {
         /// 32-byte vault identifier.
         vault_id: Vec<u8>,
@@ -820,6 +784,13 @@ pub enum EgressAsset {
     /// egress quantity used for the `Reduced`-frontier cap; `u64::MAX` when an egress op
     /// cannot be sized (treated as exceeding any reduced frontier — fail-closed).
     Asset { token_id: Vec<u8>, amount: u64 },
+    /// Egress of the asset whose CPTA policy commit is `policy_commit`, of
+    /// `amount` units: a transfer, which names its asset by commit only. The
+    /// gate resolves the commit to the token it locks under.
+    Committed {
+        policy_commit: [u8; 32],
+        amount: u64,
+    },
     /// A value-egress operation whose canonical bearer-asset id cannot be determined
     /// (e.g. a vault-keyed DLV unlock/claim, or a tokenless DLV). The gate FAILS CLOSED on
     /// this whenever any recovery lock is present — it cannot prove the op avoids a locked
@@ -838,7 +809,7 @@ impl Operation {
     /// could both move the same pre-recovery value — the split-acceptance
     /// recovery double-spend (spec vector V1).
     ///
-    /// Pure value *ingress* (receiving, minting) and identity / relationship /
+    /// Pure value *ingress* (receiving, token creation) and identity / relationship /
     /// recovery / link / neutral operations are NOT egress and proceed normally — recovery itself must be able to advance, and
     /// receiving value can never create a double-spend of the owner's funds.
     ///
@@ -861,17 +832,15 @@ impl Operation {
             | DlvUnlock { .. }
             | DlvClaim { .. }
             | DlvInvalidate { .. }
-            // A settling trader pays its input out. Egress despite also
-            // receiving the output: value leaves this device's control.
-            | DlvSettle { .. }
-            // A close moves the vault's reserves OUT of the encumbrance and
-            // back to the owner's spendable balance: value-bearing.
-            | DlvClose { .. }
-            // The funded v2 create encumbers both legs out of spendable
-            // balance; the v2 apply moves the OUTPUT leg out of the vault
-            // reserves — egress for the same reasons as their predecessors.
-            | DlvCreateFundedV2 { .. }
-            | DlvOwnerApplyV2 { .. }
+            // A vault creation moves the owner's funding out of its spendable
+            // balance, and a fulfillment commits a position whose write set
+            // debits the trader. Both are egress; the setup is not, because it
+            // writes a relationship leaf and nothing else.
+            | SofiVaultCreate { .. }
+            | SofiFulfill { .. }
+            // An escrow vault's creation moves the stake out of the owner's
+            // spendable balance (SoFi Amendment S21).
+            | EscrowVaultCreate { .. }
             // Token creation DESTROYS ERA to pay its fee, so it moves the
             // owner's existing funds outward — egress, despite also issuing a
             // new asset. Classifying it as ingress (as it was while nothing
@@ -879,12 +848,11 @@ impl Operation {
             // egress gate and the per-asset bearer gate entirely.
             | CreateToken { .. } => true,
 
-            // Not value egress: ingress (Receive / Mint), identity,
+            // Not value egress: ingress (Receive), identity,
             // relationship, recovery, links, invalidation, generic, and no-op.
             Genesis
             | Create { .. }
             | Update { .. }
-            | Mint { .. }
             | AddRelationship { .. }
             | CreateRelationship { .. }
             | RemoveRelationship { .. }
@@ -896,8 +864,13 @@ impl Operation {
             | Generic { .. }
             | Receive { .. }
             // Structurally state-only since the legacy value-bearing fields
-            // were deleted; funded creation is DlvCreateFundedV2 (egress).
+            // were deleted.
             | DlvCreate { .. }
+            // Adoption commits a policy leaf; no value moves.
+            | AdoptToken { .. }
+            // A SoFi setup inserts one relationship leaf at `h⁰`. Nothing
+            // leaves the device: it is the right to trade, not a trade.
+            | SofiSetup { .. }
             | Noop => false,
         }
     }
@@ -913,7 +886,7 @@ impl Operation {
     /// relationships that never carried value are excluded from the gate-set.
     ///
     /// This is strictly broader than [`Self::is_value_egress`]: it ALSO counts value
-    /// *ingress* (`Mint` / `Receive` / `CreateToken`), because a relationship that
+    /// *ingress* (`Receive` / `CreateToken`), because a relationship that
     /// only ever received value still holds reconcilable value at recovery time and
     /// must be in the gate-set. Egress and ingress are kept in one classifier (egress
     /// via `is_value_egress`, plus the ingress arm here) so the two cannot drift.
@@ -922,12 +895,12 @@ impl Operation {
         if self.is_value_egress() {
             return true;
         }
-        // Value ingress: receiving, minting, and token creation bring value INTO the
+        // Value ingress: receiving and token creation bring value INTO the
         // relationship without being egress. Everything else (identity, relationship,
         // recovery, links, invalidation, generic, no-op) is non-value.
         matches!(
             self,
-            Mint { .. } | Receive { .. } | CreateToken { .. } | FaucetClaim { .. }
+            Receive { .. } | CreateToken { .. } | FaucetClaim { .. }
         )
     }
 
@@ -943,10 +916,14 @@ impl Operation {
         match self {
             // Ingress-only; the invariant is_value_egress() == !NotEgress holds.
             FaucetClaim { .. } => EgressAsset::NotEgress,
+            // A transfer names its asset by policy commit only: its ticker is
+            // in its terms, which no public object carries (pre-audit item 4).
             Transfer {
-                token_id, amount, ..
-            } => EgressAsset::Asset {
-                token_id: token_id.clone(),
+                policy_commit,
+                amount,
+                ..
+            } => EgressAsset::Committed {
+                policy_commit: *policy_commit,
                 amount: amount.value(),
             },
             Burn {
@@ -976,55 +953,21 @@ impl Operation {
                     amount: (*amount).max(0) as u64,
                 }
             }
-            // A state-only create moves nothing — not egress (the funded
-            // path is DlvCreateFundedV2, which names its lex-lower leg).
+            // A state-only create moves nothing — not egress.
             DlvCreate { .. } => EgressAsset::NotEgress,
             // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
             DlvUnlock { .. } | DlvClaim { .. } | DlvInvalidate { .. } => EgressAsset::Unidentified,
-            // Settlement names its asset exactly: the trader's INPUT leg is what
-            // leaves. Unlike the vault-keyed ops above, this is not
-            // `Unidentified` — the authorization carries the policy commit and
-            // the amount, so the recovery egress gate can see precisely what
-            // moved.
-            DlvSettle {
-                input_policy_commit,
-                input_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: input_policy_commit.to_vec(),
-                amount: *input_amount,
-            },
-            // The owner's OUTPUT leg leaves its reserves.
-            DlvOwnerApplyV2 {
-                output_policy_commit,
-                output_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: output_policy_commit.to_vec(),
-                amount: *output_amount,
-            },
-            // The funded v2 create encumbers both legs; name the lex-lower
-            // leg, the same convention as DlvClose below.
-            DlvCreateFundedV2 {
-                leg_a_policy_commit,
-                leg_a_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: leg_a_policy_commit.to_vec(),
-                amount: *leg_a_amount,
-            },
-            // A close releases BOTH legs from the vault's reserves back to the
-            // owner's own spendable balance. Nothing leaves the device's
-            // control, but the encumbrance is what the recovery/bearer gates
-            // watch: name the lex-lower leg so the gate sees a reserve move.
-            DlvClose {
-                leg_a_policy_commit,
-                leg_a_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: leg_a_policy_commit.to_vec(),
-                amount: *leg_a_amount,
-            },
+            // A SoFi setup moves nothing.
+            SofiSetup { .. } => EgressAsset::NotEgress,
+            // The asset a creation funds, and the one a fulfillment debits,
+            // are inside `VaultGenesisPreimage` and `P(E)` respectively —
+            // named by their own canonical bytes, not by the operation. The
+            // spend gate therefore cannot name them here, and saying
+            // otherwise would be inventing a token id the operation does not
+            // carry.
+            SofiVaultCreate { .. } | SofiFulfill { .. } | EscrowVaultCreate { .. } => {
+                EgressAsset::Unidentified
+            }
 
             // Token creation: the asset that LEAVES is ERA (the burned fee) —
             // NOT the new token, which is issued, not spent. Naming the new
@@ -1038,7 +981,6 @@ impl Operation {
             Genesis
             | Create { .. }
             | Update { .. }
-            | Mint { .. }
             | AddRelationship { .. }
             | CreateRelationship { .. }
             | RemoveRelationship { .. }
@@ -1049,6 +991,7 @@ impl Operation {
             | Invalidate { .. }
             | Generic { .. }
             | Receive { .. }
+            | AdoptToken { .. }
             | Noop => EgressAsset::NotEgress,
         }
     }
@@ -1059,7 +1002,7 @@ impl Operation {
     /// - Strings/bytes: u32 LE length prefix + raw bytes
     /// - `Vec<Vec<u8>>`: u32 count + each encoded as above
     /// - `Option<Vec<u8>>`: 1 byte tag (0/1) + payload when present
-    /// - Balance: Balance::to_le_bytes() (fixed length canonical)
+    /// - Balance: `Balance::canonical_amount_bytes()` — value and lock, 16 bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         use Operation::*;
         let mut out = Vec::new();
@@ -1077,22 +1020,6 @@ impl Operation {
             put_u8(out, enc_mode(m));
         }
 
-        fn put_verification(out: &mut Vec<u8>, v: &VerificationType) {
-            match v {
-                VerificationType::Standard => put_u8(out, 0),
-                VerificationType::Enhanced => put_u8(out, 1),
-                VerificationType::Bilateral => put_u8(out, 2),
-                VerificationType::Directory => put_u8(out, 3),
-                VerificationType::StandardBilateral => put_u8(out, 4),
-                VerificationType::PreCommitted => put_u8(out, 5),
-                VerificationType::UnilateralIdentityAnchor => put_u8(out, 6),
-                VerificationType::Custom(b) => {
-                    put_u8(out, 255);
-                    put_bytes(out, b);
-                }
-            }
-        }
-
         fn put_vec_bytes(out: &mut Vec<u8>, v: &Vec<Vec<u8>>) {
             put_u32(out, v.len() as u32);
             for item in v {
@@ -1100,44 +1027,70 @@ impl Operation {
             }
         }
 
-        // PreCommitmentOp canonical encoding
-        fn put_precommit_op(out: &mut Vec<u8>, pc: &PreCommitmentOp) {
-            // fixed_parameters: sort by key
-            let mut keys: Vec<_> = pc.fixed_parameters.keys().collect();
-            keys.sort();
-            put_u32(out, keys.len() as u32);
-            for k in keys {
-                put_str(out, k);
-                if let Some(v) = pc.fixed_parameters.get(k) {
-                    put_bytes(out, v);
-                } else {
-                    put_u32(out, 0);
-                }
-            }
-            // variable_parameters: already Vec<String>; encode in lexicographic order for determinism
-            let mut vars = pc.variable_parameters.clone();
-            vars.sort();
-            put_u32(out, vars.len() as u32);
-            for v in vars {
-                put_str(out, &v);
-            }
-            // Note: security_params intentionally not included in canonical op bytes
-        }
-
         match self {
+            // SoFi v8, tags 34-36. Each carries the canonical CCB bytes of the
+            // object it is about, so the operation adds no second encoding of
+            // anything. What each signature COVERS is the object's own rule,
+            // not these bytes — see `sofi::signature`. Only a vault creation,
+            // which has no object digest of its own, signs the operation.
+            SofiSetup {
+                setup_body,
+                signature,
+            } => {
+                put_u8(&mut out, 34);
+                put_bytes(&mut out, setup_body);
+                put_bytes(&mut out, signature);
+            }
+            SofiVaultCreate {
+                genesis_preimage,
+                creation,
+                market_policy_preimage,
+                funding_a_policy_commit,
+                funding_b_policy_commit,
+                signature,
+            } => {
+                put_u8(&mut out, 35);
+                put_bytes(&mut out, genesis_preimage);
+                put_bytes(&mut out, creation);
+                put_bytes(&mut out, market_policy_preimage);
+                put_bytes(&mut out, funding_a_policy_commit);
+                put_bytes(&mut out, funding_b_policy_commit);
+                put_bytes(&mut out, signature);
+            }
+            SofiFulfill {
+                fulfillment_body,
+                precommit_id,
+                signature,
+            } => {
+                put_u8(&mut out, 36);
+                put_bytes(&mut out, fulfillment_body);
+                put_bytes(&mut out, precommit_id);
+                put_bytes(&mut out, signature);
+            }
+            EscrowVaultCreate {
+                genesis_preimage,
+                creation,
+                terms,
+                signature,
+            } => {
+                put_u8(&mut out, 38);
+                put_bytes(&mut out, genesis_preimage);
+                put_bytes(&mut out, creation);
+                put_bytes(&mut out, terms);
+                put_bytes(&mut out, signature);
+            }
             Genesis => {
                 put_u8(&mut out, 0);
             }
             FaucetClaim {
-                faucet_id,
-                ticket_index,
+                reserve_id,
+                generation,
             } => {
-                // Canonical tag 31. Tags 29/30 belong to
-                // DlvCreateFundedV2 / DlvOwnerApplyV2 by the frozen economic
-                // plan — landing first does not confer the right to take them.
+                // Canonical tag 31. Tags 26, 28, 29, 30 and 33 were the old
+                // market's operations and are burned: retired, never reassigned.
                 put_u8(&mut out, 31);
-                put_bytes(&mut out, faucet_id.as_slice());
-                put_u64(&mut out, *ticket_index);
+                put_bytes(&mut out, reserve_id.as_slice());
+                put_u64(&mut out, *generation);
             }
             Create {
                 message,
@@ -1180,39 +1133,22 @@ impl Operation {
             Transfer {
                 to_device_id,
                 amount,
-                token_id,
                 policy_commit,
-                mode,
-                nonce,
-                verification,
-                pre_commit,
-                recipient,
-                to,
-                message,
+                terms_commitment,
                 signature,
                 authority_policy,
             } => {
-                put_u8(&mut out, 3);
+                // Tag 3 carried the ticker, nonce, mode, memo and recipient
+                // key in the clear; it is retired (pre-audit item 4).
+                put_u8(&mut out, 37);
                 put_bytes(&mut out, to_device_id);
                 // Balance canonical
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
-                put_bytes(&mut out, token_id);
                 // CPTA policy commitment (§9.5) — bound into the signed bytes.
                 put_bytes(&mut out, policy_commit);
-                put_mode(&mut out, mode);
-                put_bytes(&mut out, nonce);
-                put_verification(&mut out, verification);
-                match pre_commit {
-                    Some(pc) => {
-                        put_u8(&mut out, 1);
-                        put_precommit_op(&mut out, pc);
-                    }
-                    None => put_u8(&mut out, 0),
-                }
-                put_bytes(&mut out, recipient);
-                put_bytes(&mut out, to);
-                put_str(&mut out, message.as_str());
+                // The terms, by their salted commitment only.
+                put_bytes(&mut out, terms_commitment);
                 // Sender signature (online) or empty for bilateral (signatures in receipt)
                 put_bytes(&mut out, signature);
                 // Append-only authority-policy tail: None emits NOTHING (byte-identical to every
@@ -1223,33 +1159,17 @@ impl Operation {
                     ap.append_canonical(&mut out);
                 }
             }
-            Mint {
-                amount,
-                token_id,
-                policy_commit,
-                message,
-            } => {
-                put_u8(&mut out, 4);
-                let bal = amount.to_le_bytes();
-                put_bytes(&mut out, &bal);
-                put_bytes(&mut out, token_id);
-                // CPTA policy commitment — same length-prefixed convention as Transfer.
-                put_bytes(&mut out, policy_commit);
-                put_str(&mut out, message);
-            }
             Burn {
                 amount,
                 token_id,
                 policy_commit,
-                proof_of_ownership,
                 message,
             } => {
                 put_u8(&mut out, 5);
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
                 put_bytes(&mut out, policy_commit);
-                put_bytes(&mut out, proof_of_ownership);
                 put_str(&mut out, message);
             }
             LockToken {
@@ -1290,7 +1210,7 @@ impl Operation {
             } => {
                 put_u8(&mut out, 8);
                 put_bytes(&mut out, token_id);
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, purpose);
                 put_bytes(&mut out, owner);
@@ -1307,7 +1227,7 @@ impl Operation {
             } => {
                 put_u8(&mut out, 9);
                 put_bytes(&mut out, token_id);
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, purpose);
                 put_bytes(&mut out, owner);
@@ -1452,19 +1372,17 @@ impl Operation {
                 message,
                 mode,
                 nonce,
-                verification,
                 sender_state_hash,
             } => {
                 put_u8(&mut out, 19);
                 put_bytes(&mut out, token_id);
                 put_bytes(&mut out, from_device_id);
-                let bal = amount.to_le_bytes();
+                let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, recipient);
                 put_str(&mut out, message);
                 put_mode(&mut out, mode);
                 put_bytes(&mut out, nonce);
-                put_verification(&mut out, verification);
                 match sender_state_hash {
                     Some(h) => {
                         put_u8(&mut out, 1);
@@ -1472,6 +1390,15 @@ impl Operation {
                     }
                     None => put_u8(&mut out, 0),
                 }
+            }
+            AdoptToken {
+                policy_commit,
+                signature,
+            } => {
+                // 27 is a burned code; 32 is the next free one.
+                put_u8(&mut out, 32);
+                put_bytes(&mut out, policy_commit);
+                put_bytes(&mut out, signature);
             }
             CreateToken {
                 token_id,
@@ -1486,7 +1413,7 @@ impl Operation {
             } => {
                 put_u8(&mut out, 20);
                 put_bytes(&mut out, token_id);
-                let bal = initial_supply.to_le_bytes();
+                let bal = initial_supply.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
                 // Mandatory now: the issued asset and the ERA destroyed for it
                 // are both part of what gets signed.
@@ -1576,131 +1503,6 @@ impl Operation {
                 put_bytes(&mut out, signature);
                 put_mode(&mut out, mode);
             }
-            // Every authorization field is in the canonical bytes, so the
-            // settler's signature covers all of it and none can be swapped
-            // after signing.
-            DlvSettle {
-                vault_id,
-                owner_public_key,
-                owner_devid,
-                owner_genesis,
-                input_policy_commit,
-                output_policy_commit,
-                parent_sequence,
-                parent_binding,
-                route_commit_bytes,
-                external_commitment_x,
-                input_amount,
-                output_amount,
-                fee_bps,
-                sigma,
-                settler_public_key,
-                settler_devid,
-                settlement_receipt_id,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 26);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, owner_public_key);
-                put_bytes(&mut out, owner_devid);
-                put_bytes(&mut out, owner_genesis);
-                put_bytes(&mut out, input_policy_commit);
-                put_bytes(&mut out, output_policy_commit);
-                put_u64(&mut out, *parent_sequence);
-                put_bytes(&mut out, parent_binding);
-                put_bytes(&mut out, route_commit_bytes);
-                put_bytes(&mut out, external_commitment_x);
-                put_u64(&mut out, *input_amount);
-                put_u64(&mut out, *output_amount);
-                put_u32(&mut out, *fee_bps);
-                put_bytes(&mut out, sigma);
-                put_bytes(&mut out, settler_public_key);
-                put_bytes(&mut out, settler_devid);
-                put_bytes(&mut out, settlement_receipt_id);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            DlvClose {
-                vault_id,
-                leg_a_policy_commit,
-                leg_a_amount,
-                leg_b_policy_commit,
-                leg_b_amount,
-                parent_sequence,
-                new_sequence,
-                fee_bps,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 28);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, leg_a_policy_commit);
-                put_u64(&mut out, *leg_a_amount);
-                put_bytes(&mut out, leg_b_policy_commit);
-                put_u64(&mut out, *leg_b_amount);
-                put_u64(&mut out, *parent_sequence);
-                put_u64(&mut out, *new_sequence);
-                put_u32(&mut out, *fee_bps);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            DlvCreateFundedV2 {
-                vault_id,
-                creator_public_key,
-                parameters_hash,
-                fulfillment_condition,
-                leg_a_policy_commit,
-                leg_a_amount,
-                leg_b_policy_commit,
-                leg_b_amount,
-                fee_bps,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 29);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, creator_public_key);
-                put_bytes(&mut out, parameters_hash);
-                put_bytes(&mut out, fulfillment_condition);
-                put_bytes(&mut out, leg_a_policy_commit);
-                put_u64(&mut out, *leg_a_amount);
-                put_bytes(&mut out, leg_b_policy_commit);
-                put_u64(&mut out, *leg_b_amount);
-                put_u32(&mut out, *fee_bps);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            DlvOwnerApplyV2 {
-                vault_id,
-                settlement_receipt_id,
-                pending_pointer_x,
-                parent_sequence,
-                new_sequence,
-                parent_binding,
-                input_policy_commit,
-                output_policy_commit,
-                input_amount,
-                output_amount,
-                fee_bps,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 30);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, settlement_receipt_id);
-                put_bytes(&mut out, pending_pointer_x);
-                put_u64(&mut out, *parent_sequence);
-                put_u64(&mut out, *new_sequence);
-                put_bytes(&mut out, parent_binding);
-                put_bytes(&mut out, input_policy_commit);
-                put_bytes(&mut out, output_policy_commit);
-                put_u64(&mut out, *input_amount);
-                put_u64(&mut out, *output_amount);
-                put_u32(&mut out, *fee_bps);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
         }
 
         out
@@ -1775,87 +1577,36 @@ impl Operation {
                 _ => Err(DsmError::invalid_operation("bad mode")),
             }
         }
-        fn dec_verification(inp: &mut &[u8]) -> Result<VerificationType, DsmError> {
-            Ok(match get_u8(inp)? {
-                0 => VerificationType::Standard,
-                1 => VerificationType::Enhanced,
-                2 => VerificationType::Bilateral,
-                3 => VerificationType::Directory,
-                4 => VerificationType::StandardBilateral,
-                5 => VerificationType::PreCommitted,
-                6 => VerificationType::UnilateralIdentityAnchor,
-                255 => {
-                    let b = get_bytes(inp)?;
-                    VerificationType::Custom(b)
-                }
-                _ => return Err(DsmError::invalid_operation("bad verification tag")),
-            })
-        }
         fn dec_vec_bytes(inp: &mut &[u8]) -> Result<Vec<Vec<u8>>, DsmError> {
             let n = get_u32(inp)? as usize;
-            let mut v = Vec::with_capacity(n);
+            // Not preallocated from `n`: the count is the sender's, and every
+            // element must still decode from bytes in hand, so the vector
+            // grows only as far as the input carries it.
+            let mut v = Vec::new();
             for _ in 0..n {
                 v.push(get_bytes(inp)?);
             }
             Ok(v)
         }
-        // Balance decoding: mirror `Balance::to_le_bytes()` wrapped by a length prefix in to_bytes
+        // Balance decoding: an operation's amount is exactly
+        // `Balance::canonical_amount_bytes()` behind a length prefix.
         fn dec_balance(inp: &mut &[u8]) -> Result<Balance, DsmError> {
-            let blob = get_bytes(inp)?; // length-prefixed canonical balance bytes
-            let mut cur: &[u8] = &blob;
-            let value = {
-                let mut a = [0u8; 8];
-                a.copy_from_slice(take(&mut cur, 8)?);
-                u64::from_le_bytes(a)
-            };
-            let locked = {
-                let mut a = [0u8; 8];
-                a.copy_from_slice(take(&mut cur, 8)?);
-                u64::from_le_bytes(a)
-            };
-            // Per §4.3 no counter is part of canonical Balance encoding.
-            let state_hash = if !cur.is_empty() {
-                if cur.len() != 32 {
-                    return Err(DsmError::SerializationError(
-                        "Invalid state hash length".into(),
-                    ));
-                }
-                let mut h = [0u8; 32];
-                h.copy_from_slice(cur);
-                Some(h)
-            } else {
-                None
-            };
-            Ok(Balance::from_parts(value, locked, state_hash))
-        }
-        #[allow(dead_code)]
-        fn dec_option_bytes(inp: &mut &[u8]) -> Result<Option<Vec<u8>>, DsmError> {
-            match get_u8(inp)? {
-                0 => Ok(None),
-                1 => Ok(Some(get_bytes(inp)?)),
-                _ => Err(DsmError::invalid_operation("bad opt tag")),
+            let blob = get_bytes(inp)?;
+            if blob.len() != 16 {
+                return Err(DsmError::SerializationError(format!(
+                    "an operation amount is 16 bytes, got {}",
+                    blob.len()
+                )));
             }
-        }
-        fn dec_precommit_op(inp: &mut &[u8]) -> Result<PreCommitmentOp, DsmError> {
-            // fixed_parameters
-            let mut fixed = HashMap::new();
-            let cnt = get_u32(inp)? as usize;
-            for _ in 0..cnt {
-                let k = get_str(inp)?;
-                let v = get_bytes(inp)?;
-                fixed.insert(k, v);
-            }
-            // variable_parameters (encoded sorted; here we just read in order)
-            let vcnt = get_u32(inp)? as usize;
-            let mut vars = Vec::with_capacity(vcnt);
-            for _ in 0..vcnt {
-                vars.push(get_str(inp)?);
-            }
-            Ok(PreCommitmentOp {
-                fixed_parameters: fixed,
-                variable_parameters: vars,
-                security_params: SecurityParameters::default(),
-            })
+            let mut value = [0u8; 8];
+            value.copy_from_slice(&blob[..8]);
+            let mut locked = [0u8; 8];
+            locked.copy_from_slice(&blob[8..]);
+            Ok(Balance::from_parts(
+                u64::from_le_bytes(value),
+                u64::from_le_bytes(locked),
+                None,
+            ))
         }
 
         let tag = get_u8(&mut input)?;
@@ -1897,32 +1648,24 @@ impl Operation {
                     forward_link,
                 }
             }
+            // Retired: the transfer shape that carried its terms in the clear.
             3 => {
+                return Err(DsmError::invalid_operation(
+                    "op tag 3 is retired: a transfer carries its terms by commitment (tag 37)",
+                ))
+            }
+            37 => {
                 let to_device_id = get_bytes(&mut input)?;
                 let amount = dec_balance(&mut input)?;
-                let token_id = get_bytes(&mut input)?;
                 // CPTA policy commitment (§9.5) — required, exactly 32 bytes.
                 let policy_commit: [u8; 32] =
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("transfer policy_commit must be 32 bytes")
                     })?;
-                let mode = dec_mode(&mut input)?;
-                let nonce = get_bytes(&mut input)?;
-                let verification = dec_verification(&mut input)?;
-                let pre_commit = match get_u8(&mut input)? {
-                    0 => None,
-                    1 => Some(dec_precommit_op(&mut input)?),
-                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
-                };
-                let recipient = get_bytes(&mut input)?;
-                let to = get_bytes(&mut input)?;
-                let message = get_str(&mut input)?;
-                // Signature: try to read if available; empty if not present (backwards compat)
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                let terms_commitment = get_arr32(&mut input)?;
+                // The signature field is always encoded (empty when the
+                // signatures ride in the receipt): one transfer, one encoding.
+                let signature = get_bytes(&mut input)?;
                 // Append-only authority-policy tail (symmetric with
                 // `AuthorityPolicy::append_canonical`). Absent (no remaining bytes) => None, so
                 // every pre-existing transfer round-trips byte-identically; present => the
@@ -1960,32 +1703,10 @@ impl Operation {
                 Transfer {
                     to_device_id,
                     amount,
-                    token_id,
                     policy_commit,
-                    mode,
-                    nonce,
-                    verification,
-                    pre_commit,
-                    recipient,
-                    to,
-                    message,
+                    terms_commitment,
                     signature,
                     authority_policy,
-                }
-            }
-            4 => {
-                let amount = dec_balance(&mut input)?;
-                let token_id = get_bytes(&mut input)?;
-                let policy_commit: [u8; 32] =
-                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
-                        DsmError::invalid_operation("mint policy_commit must be 32 bytes")
-                    })?;
-                let message = get_str(&mut input)?;
-                Mint {
-                    amount,
-                    token_id,
-                    policy_commit,
-                    message,
                 }
             }
             5 => {
@@ -1995,13 +1716,11 @@ impl Operation {
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("burn policy_commit must be 32 bytes")
                     })?;
-                let proof_of_ownership = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
                 Burn {
                     amount,
                     token_id,
                     policy_commit,
-                    proof_of_ownership,
                     message,
                 }
             }
@@ -2255,7 +1974,6 @@ impl Operation {
                 let message = get_str(&mut input)?;
                 let mode = dec_mode(&mut input)?;
                 let nonce = get_bytes(&mut input)?;
-                let verification = dec_verification(&mut input)?;
                 let sender_state_hash = match get_u8(&mut input)? {
                     0 => None,
                     1 => Some(get_bytes(&mut input)?),
@@ -2269,7 +1987,6 @@ impl Operation {
                     message,
                     mode,
                     nonce,
-                    verification,
                     sender_state_hash,
                 }
             }
@@ -2307,6 +2024,21 @@ impl Operation {
                 }
             }
             21 => Noop,
+            32 => {
+                let policy_commit: [u8; 32] =
+                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                        DsmError::invalid_operation("adopt_token policy_commit must be 32 bytes")
+                    })?;
+                let signature = if input.is_empty() {
+                    vec![]
+                } else {
+                    get_bytes(&mut input)?
+                };
+                AdoptToken {
+                    policy_commit,
+                    signature,
+                }
+            }
             22 => {
                 let vault_id = get_bytes(&mut input)?;
                 let creator_public_key = get_bytes(&mut input)?;
@@ -2371,153 +2103,60 @@ impl Operation {
                     mode,
                 }
             }
-            // Mirrors the encode order exactly. A decoder that drifted from its
-            // encoder by one field would produce an operation that reads as
-            // valid and describes a different trade.
-            26 => {
-                let vault_id = get_bytes(&mut input)?;
-                let owner_public_key = get_bytes(&mut input)?;
-                let owner_devid = get_arr32(&mut input)?;
-                let owner_genesis = get_arr32(&mut input)?;
-                let input_policy_commit = get_arr32(&mut input)?;
-                let output_policy_commit = get_arr32(&mut input)?;
-                let parent_sequence = get_u64(&mut input)?;
-                let parent_binding = get_arr32(&mut input)?;
-                let route_commit_bytes = get_bytes(&mut input)?;
-                let external_commitment_x = get_arr32(&mut input)?;
-                let input_amount = get_u64(&mut input)?;
-                let output_amount = get_u64(&mut input)?;
-                let fee_bps = get_u32(&mut input)?;
-                let sigma = get_arr32(&mut input)?;
-                let settler_public_key = get_bytes(&mut input)?;
-                let settler_devid = get_arr32(&mut input)?;
-                let settlement_receipt_id = get_arr32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvSettle {
-                    vault_id,
-                    owner_public_key,
-                    owner_devid,
-                    owner_genesis,
-                    input_policy_commit,
-                    output_policy_commit,
-                    parent_sequence,
-                    parent_binding,
-                    route_commit_bytes,
-                    external_commitment_x,
-                    input_amount,
-                    output_amount,
-                    fee_bps,
-                    sigma,
-                    settler_public_key,
-                    settler_devid,
-                    settlement_receipt_id,
-                    signature,
-                    mode,
-                }
-            }
-            // Tag 27 (legacy DlvOwnerApply) is BURNED (owner directive
-            // 2026-08-28): the shape carried neither fee_bps nor c_n and is
-            // deleted, not deprecated. Its bytes decode as unknown-op-tag.
-            28 => {
-                let vault_id = get_bytes(&mut input)?;
-                let leg_a_policy_commit = get_arr32(&mut input)?;
-                let leg_a_amount = get_u64(&mut input)?;
-                let leg_b_policy_commit = get_arr32(&mut input)?;
-                let leg_b_amount = get_u64(&mut input)?;
-                let parent_sequence = get_u64(&mut input)?;
-                let new_sequence = get_u64(&mut input)?;
-                let fee_bps = get_u32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvClose {
-                    vault_id,
-                    leg_a_policy_commit,
-                    leg_a_amount,
-                    leg_b_policy_commit,
-                    leg_b_amount,
-                    parent_sequence,
-                    new_sequence,
-                    fee_bps,
-                    signature,
-                    mode,
-                }
-            }
-            // Mirrors the v2 encoders exactly — same one-field-drift hazard as
-            // tag 26 above.
-            29 => {
-                let vault_id = get_bytes(&mut input)?;
-                let creator_public_key = get_bytes(&mut input)?;
-                let parameters_hash = get_bytes(&mut input)?;
-                let fulfillment_condition = get_bytes(&mut input)?;
-                let leg_a_policy_commit = get_arr32(&mut input)?;
-                let leg_a_amount = get_u64(&mut input)?;
-                let leg_b_policy_commit = get_arr32(&mut input)?;
-                let leg_b_amount = get_u64(&mut input)?;
-                let fee_bps = get_u32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvCreateFundedV2 {
-                    vault_id,
-                    creator_public_key,
-                    parameters_hash,
-                    fulfillment_condition,
-                    leg_a_policy_commit,
-                    leg_a_amount,
-                    leg_b_policy_commit,
-                    leg_b_amount,
-                    fee_bps,
-                    signature,
-                    mode,
-                }
-            }
-            30 => {
-                let vault_id = get_bytes(&mut input)?;
-                let settlement_receipt_id = get_arr32(&mut input)?;
-                let pending_pointer_x = get_arr32(&mut input)?;
-                let parent_sequence = get_u64(&mut input)?;
-                let new_sequence = get_u64(&mut input)?;
-                let parent_binding = get_arr32(&mut input)?;
-                let input_policy_commit = get_arr32(&mut input)?;
-                let output_policy_commit = get_arr32(&mut input)?;
-                let input_amount = get_u64(&mut input)?;
-                let output_amount = get_u64(&mut input)?;
-                let fee_bps = get_u32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvOwnerApplyV2 {
-                    vault_id,
-                    settlement_receipt_id,
-                    pending_pointer_x,
-                    parent_sequence,
-                    new_sequence,
-                    parent_binding,
-                    input_policy_commit,
-                    output_policy_commit,
-                    input_amount,
-                    output_amount,
-                    fee_bps,
-                    signature,
-                    mode,
-                }
-            }
             31 => {
                 // FaucetClaim mirrors its encoder exactly: length-prefixed
-                // 32-byte faucet_id, then the u64 ticket index. This arm was
+                // 32-byte reserve_id, then the u64 generation. This arm was
                 // MISSING from B1 — `to_bytes` existed without its inverse,
                 // and nothing crossed the decode until the successor-evidence
                 // replay path did. Recovery and foreign replay both decode
                 // the exact frozen operation bytes through here.
-                let faucet_id_bytes = get_len_bytes(&mut input)?;
-                let faucet_id: [u8; 32] = faucet_id_bytes.try_into().map_err(|_| {
-                    DsmError::invalid_operation("faucet claim: faucet_id is not 32 bytes")
+                let reserve_id_bytes = get_len_bytes(&mut input)?;
+                let reserve_id: [u8; 32] = reserve_id_bytes.try_into().map_err(|_| {
+                    DsmError::invalid_operation("faucet claim: reserve_id is not 32 bytes")
                 })?;
-                let ticket_index = get_u64(&mut input)?;
+                let generation = get_u64(&mut input)?;
                 FaucetClaim {
-                    faucet_id,
-                    ticket_index,
+                    reserve_id,
+                    generation,
                 }
             }
+            // SOFI v8, TAGS 34-36. The SAME defect tag 31 records above, in
+            // the same function: `to_bytes` shipped without its inverse, so
+            // these operations could be encoded and committed and then not
+            // reconstructed. `economic/successor_evidence.rs` decodes the
+            // exact frozen bytes through here during foreign and replay
+            // verification, so a missing arm is not cosmetic — it is a
+            // committed operation no verifier can read back.
+            //
+            // Each arm mirrors its encoder field for field, in order.
+            34 => SofiSetup {
+                setup_body: get_bytes(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
+            35 => SofiVaultCreate {
+                genesis_preimage: get_bytes(&mut input)?,
+                creation: get_bytes(&mut input)?,
+                // In the encoder's order. The policy object the genesis state
+                // names, carried so acceptance needs no resolver.
+                market_policy_preimage: get_bytes(&mut input)?,
+                // Both funding commits, in the encoder's order. Dropping
+                // either would decode to an operation that debits different
+                // assets than the one whose signature was checked.
+                funding_a_policy_commit: get_arr32(&mut input)?,
+                funding_b_policy_commit: get_arr32(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
+            36 => SofiFulfill {
+                fulfillment_body: get_bytes(&mut input)?,
+                precommit_id: get_bytes(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
+            38 => EscrowVaultCreate {
+                genesis_preimage: get_bytes(&mut input)?,
+                creation: get_bytes(&mut input)?,
+                terms: get_bytes(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
         };
         // Canonical decode requires full byte exhaustion: a valid operation must
@@ -2533,56 +2172,13 @@ impl Operation {
         Ok(op)
     }
 
-    pub fn get_state_number(&self) -> Option<u64> {
-        None
-    }
-
-    /// Get proof of authorization if available
-    pub fn get_proof_of_authorization(&self) -> Option<Vec<u8>> {
-        match self {
-            // Mint carries NO authorization bytes: its authority is the 0x0029
-            // evidence bundle resolved during economic admission, never a
-            // field inside the operation whose digest that evidence signs.
-            // For Transfer, the signature IS the proof of authorization
-            Operation::Transfer { signature, .. } if !signature.is_empty() => {
-                Some(signature.clone())
-            }
-            Operation::Create { proof, .. } => Some(proof.clone()),
-            Operation::Update { proof, .. } => Some(proof.clone()),
-            Operation::AddRelationship { proof, .. } => Some(proof.clone()),
-            Operation::CreateRelationship { proof, .. } => Some(proof.clone()),
-            Operation::RemoveRelationship { proof, .. } => Some(proof.clone()),
-            Operation::Delete { proof, .. } => Some(proof.clone()),
-            Operation::Link { proof, .. } => Some(proof.clone()),
-            Operation::Unlink { proof, .. } => Some(proof.clone()),
-            Operation::Invalidate { proof, .. } => Some(proof.clone()),
-            Operation::Recovery {
-                compromise_proof, ..
-            } => Some(compromise_proof.clone()),
-            Operation::CreateToken { signature, .. }
-            | Operation::Lock { signature, .. }
-            | Operation::Unlock { signature, .. }
-            | Operation::LockToken { signature, .. }
-            | Operation::UnlockToken { signature, .. }
-            | Operation::Generic { signature, .. }
-            | Operation::DlvCreate { signature, .. }
-            | Operation::DlvUnlock { signature, .. }
-            | Operation::DlvClaim { signature, .. }
-            | Operation::DlvInvalidate { signature, .. }
-                if !signature.is_empty() =>
-            {
-                Some(signature.clone())
-            }
-            _ => None,
-        }
-    }
-
     /// Get signature if available.
     /// Per whitepaper: receipts are signed by both parties with SPHINCS+ ephemeral keys.
     pub fn get_signature(&self) -> Option<Vec<u8>> {
         match self {
             Operation::Transfer { signature, .. }
             | Operation::CreateToken { signature, .. }
+            | Operation::AdoptToken { signature, .. }
             | Operation::Lock { signature, .. }
             | Operation::Unlock { signature, .. }
             | Operation::LockToken { signature, .. }
@@ -2592,10 +2188,10 @@ impl Operation {
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
-            | Operation::DlvSettle { signature, .. }
-            | Operation::DlvClose { signature, .. }
-            | Operation::DlvCreateFundedV2 { signature, .. }
-            | Operation::DlvOwnerApplyV2 { signature, .. }
+            | Operation::SofiSetup { signature, .. }
+            | Operation::SofiVaultCreate { signature, .. }
+            | Operation::SofiFulfill { signature, .. }
+            | Operation::EscrowVaultCreate { signature, .. }
                 if !signature.is_empty() =>
             {
                 Some(signature.clone())
@@ -2612,7 +2208,6 @@ impl Operation {
             Operation::Create { .. } => "create",
             Operation::Update { .. } => "update",
             Operation::Transfer { .. } => "transfer",
-            Operation::Mint { .. } => "mint",
             Operation::Burn { .. } => "burn",
             Operation::LockToken { .. } => "lock_token",
             Operation::UnlockToken { .. } => "unlock_token",
@@ -2629,16 +2224,27 @@ impl Operation {
             Operation::Generic { .. } => "generic",
             Operation::Receive { .. } => "receive",
             Operation::CreateToken { .. } => "create_token",
+            Operation::AdoptToken { .. } => "adopt_token",
             Operation::Noop => "noop",
             Operation::DlvCreate { .. } => "dlv_create",
             Operation::DlvUnlock { .. } => "dlv_unlock",
             Operation::DlvClaim { .. } => "dlv_claim",
-            Operation::DlvSettle { .. } => "dlv_settle",
-            Operation::DlvClose { .. } => "dlv_close",
-            Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
-            Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
+            Operation::SofiSetup { .. } => "sofi_setup",
+            Operation::SofiVaultCreate { .. } => "sofi_vault_create",
+            Operation::SofiFulfill { .. } => "sofi_fulfill",
+            Operation::EscrowVaultCreate { .. } => "escrow_vault_create",
         }
+    }
+
+    /// The EXACT bytes an operation's signature covers: its canonical encoding
+    /// with the signature field cleared.
+    ///
+    /// One rule, in one place. A producer that hashed or framed these bytes
+    /// differently would be a second definition of "signed", and the verifier
+    /// only implements this one.
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        self.with_cleared_signature().to_bytes()
     }
 
     /// Return a clone of this operation with all signature/proof fields cleared.
@@ -2649,6 +2255,7 @@ impl Operation {
         match &mut clone {
             Operation::Transfer { signature, .. }
             | Operation::CreateToken { signature, .. }
+            | Operation::AdoptToken { signature, .. }
             | Operation::Lock { signature, .. }
             | Operation::Unlock { signature, .. }
             | Operation::LockToken { signature, .. }
@@ -2658,10 +2265,10 @@ impl Operation {
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
-            | Operation::DlvSettle { signature, .. }
-            | Operation::DlvClose { signature, .. }
-            | Operation::DlvCreateFundedV2 { signature, .. }
-            | Operation::DlvOwnerApplyV2 { signature, .. } => {
+            | Operation::SofiSetup { signature, .. }
+            | Operation::SofiVaultCreate { signature, .. }
+            | Operation::SofiFulfill { signature, .. }
+            | Operation::EscrowVaultCreate { signature, .. } => {
                 signature.clear();
             }
             _ => {}
@@ -2678,6 +2285,7 @@ impl Operation {
         match &mut clone {
             Operation::Transfer { signature, .. }
             | Operation::CreateToken { signature, .. }
+            | Operation::AdoptToken { signature, .. }
             | Operation::Lock { signature, .. }
             | Operation::Unlock { signature, .. }
             | Operation::LockToken { signature, .. }
@@ -2687,10 +2295,10 @@ impl Operation {
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
-            | Operation::DlvSettle { signature, .. }
-            | Operation::DlvClose { signature, .. }
-            | Operation::DlvCreateFundedV2 { signature, .. }
-            | Operation::DlvOwnerApplyV2 { signature, .. } => {
+            | Operation::SofiSetup { signature, .. }
+            | Operation::SofiVaultCreate { signature, .. }
+            | Operation::SofiFulfill { signature, .. }
+            | Operation::EscrowVaultCreate { signature, .. } => {
                 *signature = sig;
             }
             _ => {}
@@ -2701,9 +2309,10 @@ impl Operation {
     /// §4.2.1 Authoritative binding: decode the sender's signed canonical
     /// preimage and bind it to the verified signature. This is the SINGLE
     /// trusted source for an inbound signed operation — callers MUST route
-    /// every value read (amount/token_id/recipient/nonce/message) off the
-    /// returned [`Operation`], never off any parallel structured field that
-    /// traveled alongside the signed bytes.
+    /// every value read (recipient/amount/policy commit) off the returned
+    /// [`Operation`], and a transfer's token, nonce and memo off
+    /// [`TransferTerms`] that open its commitment, never off any parallel
+    /// structured field that traveled alongside the signed bytes.
     ///
     /// Steps:
     /// 1. SPHINCS+ verify `signature` over `canonical_operation_bytes` under
@@ -2746,263 +2355,38 @@ impl Operation {
     }
 }
 
-impl Ops for Operation {
-    fn validate(&self) -> Result<bool, DsmError> {
-        match self {
-            Operation::Generic { .. } => Ok(true),
-            Operation::Transfer { amount, .. } => Ok(amount.value() > 0),
-            Operation::Mint { amount, .. } => Ok(amount.value() > 0),
-            Operation::Burn { amount, .. } => Ok(amount.value() > 0),
-            Operation::LockToken { .. } => Ok(true),
-            Operation::UnlockToken { .. } => Ok(true),
-            Operation::Lock { .. } => Ok(true),
-            Operation::Unlock { .. } => Ok(true),
-            _ => Ok(true),
-        }
-    }
-
-    fn execute(&self) -> Result<Vec<u8>, DsmError> {
-        Ok(self.to_bytes())
-    }
-
-    fn get_id(&self) -> &str {
-        match self {
-            Operation::Genesis => "genesis",
-            Operation::FaucetClaim { .. } => "faucet_claim",
-            Operation::Generic { .. } => "generic",
-            Operation::Transfer { .. } => "transfer",
-            Operation::Mint { .. } => "mint",
-            Operation::Burn { .. } => "burn",
-            Operation::Create { .. } => "create",
-            Operation::Update { .. } => "update",
-            Operation::AddRelationship { .. } => "add_relationship",
-            Operation::CreateRelationship { .. } => "create_relationship",
-            Operation::RemoveRelationship { .. } => "remove_relationship",
-            Operation::Recovery { .. } => "recovery",
-            Operation::Delete { .. } => "delete",
-            Operation::Link { .. } => "link",
-            Operation::Unlink { .. } => "unlink",
-            Operation::Invalidate { .. } => "invalidate",
-            Operation::LockToken { .. } => "lock_token",
-            Operation::UnlockToken { .. } => "unlock_token",
-            Operation::Lock { .. } => "lock",
-            Operation::Unlock { .. } => "unlock",
-            Operation::Receive { .. } => "receive",
-            Operation::CreateToken { .. } => "create_token",
-            Operation::Noop => "noop",
-            Operation::DlvCreate { .. } => "dlv_create",
-            Operation::DlvUnlock { .. } => "dlv_unlock",
-            Operation::DlvClaim { .. } => "dlv_claim",
-            Operation::DlvSettle { .. } => "dlv_settle",
-            Operation::DlvClose { .. } => "dlv_close",
-            Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
-            Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
-            Operation::DlvInvalidate { .. } => "dlv_invalidate",
-        }
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        self.to_bytes()
-    }
-}
-
-impl TokenOps for Operation {
-    fn is_valid(&self) -> bool {
-        match self {
-            Operation::Transfer { amount, .. } => amount.value() > 0,
-            Operation::Mint { amount, .. } => amount.value() > 0,
-            Operation::Burn { amount, .. } => amount.value() > 0,
-            Operation::Lock { amount, .. } => amount.value() > 0,
-            Operation::Unlock { amount, .. } => amount.value() > 0,
-            _ => false,
-        }
-    }
-
-    fn has_expired(&self) -> bool {
-        false
-    }
-
-    fn verify_token(&self, _public_key: &[u8]) -> Result<bool, DsmError> {
-        match self {
-            Operation::Transfer { .. }
-            | Operation::Mint { .. }
-            | Operation::Burn { .. }
-            | Operation::Lock { .. }
-            | Operation::Unlock { .. } => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
-    fn extend_validity(&mut self, _duration: u64) -> Result<(), DsmError> {
-        Err(DsmError::generic(
-            "Cannot extend validity of an operation",
-            None::<std::io::Error>,
-        ))
-    }
-}
-
-impl GenericOps for Operation {
-    fn get_operation_type(&self) -> &str {
-        match self {
-            Operation::Genesis => "genesis",
-            Operation::Generic { .. } => "generic",
-            _ => self.get_id(),
-        }
-    }
-
-    fn get_data(&self) -> &[u8] {
-        match self {
-            Operation::Generic { data, .. } => data,
-            _ => &[],
-        }
-    }
-
-    fn set_data(&mut self, data: Vec<u8>) -> Result<(), DsmError> {
-        match self {
-            Operation::Generic {
-                data: ref mut d, ..
-            } => {
-                *d = data;
-                Ok(())
-            }
-            _ => Err(DsmError::generic(
-                "Cannot set data on non-generic operation",
-                None::<std::io::Error>,
-            )),
-        }
-    }
-
-    fn merge(&self, other: &dyn GenericOps) -> Result<Vec<u8>, DsmError> {
-        let mut merged = Vec::new();
-        merged.extend_from_slice(self.get_data());
-        merged.extend_from_slice(other.get_data());
-        Ok(merged)
-    }
-}
-
-impl IdOps for Operation {
-    fn verify_identity(&self, _public_key: &[u8]) -> Result<bool, DsmError> {
-        match self {
-            Operation::Create { .. } | Operation::Update { .. } => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
-    fn update_identity(&mut self, _new_data: &[u8]) -> Result<(), DsmError> {
-        match self {
-            Operation::Update { .. } => Ok(()),
-            _ => Err(DsmError::generic(
-                "Cannot update identity with this operation",
-                None::<std::io::Error>,
-            )),
-        }
-    }
-
-    fn revoke_identity(&mut self) -> Result<(), DsmError> {
-        Err(DsmError::generic(
-            "Identity revocation not implemented for operations",
-            None::<std::io::Error>,
-        ))
-    }
-
-    fn get_identity_proof(&self) -> Result<Vec<u8>, DsmError> {
-        match self {
-            Operation::Create { .. } | Operation::Update { .. } => Ok(Vec::new()),
-            _ => Err(DsmError::generic(
-                "No identity proof for this operation",
-                None::<std::io::Error>,
-            )),
-        }
-    }
-}
-
-impl SmartCommitOps for Operation {
-    fn verify_commitment(&self, _public_key: &[u8]) -> Result<bool, DsmError> {
-        Ok(true)
-    }
-
-    fn update_commitment(&mut self, _new_data: &[u8]) -> Result<(), DsmError> {
-        Err(DsmError::generic(
-            "Cannot update commitment for operation",
-            None::<std::io::Error>,
-        ))
-    }
-
-    fn finalize_commitment(&mut self) -> Result<Vec<u8>, DsmError> {
-        Ok(self.to_bytes())
-    }
-
-    fn get_commitment_proof(&self) -> Result<Vec<u8>, DsmError> {
-        Ok(self.to_bytes())
-    }
-}
-
-/// Pre-commitment parameters for binding a future state transition.
-///
-/// A pre-commitment constrains a future operation by fixing certain parameters
-/// at commitment time while leaving others variable. This enables deterministic
-/// verification without requiring all values to be known in advance.
-#[derive(Debug, Clone, Default)]
-pub struct PreCommitmentOp {
-    /// Parameters whose values are fixed at commitment time (sorted by key for determinism).
-    pub fixed_parameters: HashMap<String, Vec<u8>>,
-    /// Parameter names whose values will be provided at execution time.
-    pub variable_parameters: Vec<String>,
-    /// Security parameters governing the commitment (not included in canonical bytes).
-    pub security_params: SecurityParameters,
-}
-
-// Implement PartialEq, Eq, PartialOrd and Ord for consistent ordering
-impl PartialEq for PreCommitmentOp {
-    fn eq(&self, other: &Self) -> bool {
-        self.fixed_parameters == other.fixed_parameters
-            && self.variable_parameters == other.variable_parameters
-    }
-}
-
-impl PartialOrd for PreCommitmentOp {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Eq for PreCommitmentOp {}
-
-impl Ord for PreCommitmentOp {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let fixed_params_cmp = self
-            .fixed_parameters
-            .len()
-            .cmp(&other.fixed_parameters.len());
-        if fixed_params_cmp != std::cmp::Ordering::Equal {
-            return fixed_params_cmp;
-        }
-
-        let var_params_cmp = self.variable_parameters.cmp(&other.variable_parameters);
-        if var_params_cmp != std::cmp::Ordering::Equal {
-            return var_params_cmp;
-        }
-
-        std::cmp::Ordering::Equal
-    }
-}
-
-// Implement conversion from StateTransition to Operation
-use crate::core::state_machine::transition::StateTransition;
-
-impl From<StateTransition> for Operation {
-    fn from(transition: StateTransition) -> Self {
-        // Simply extract the operation from the transition
-        transition.operation
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A count the bytes that follow cannot carry is refused, and decoding it
+    /// allocates nothing from the count: a recovery operation claiming
+    /// `u32::MAX` authority signatures and carrying none.
+    #[test]
+    fn a_count_the_remaining_bytes_cannot_carry_is_refused() {
+        let op = Operation::Recovery {
+            message: String::new(),
+            state_number: 0,
+            state_hash: Vec::new(),
+            state_entropy: Vec::new(),
+            invalidation_data: Vec::new(),
+            new_state_data: Vec::new(),
+            new_state_number: 0,
+            new_state_hash: Vec::new(),
+            new_state_entropy: Vec::new(),
+            compromise_proof: Vec::new(),
+            authority_sigs: Vec::new(),
+        };
+        let mut bytes = op.to_bytes();
+        let n = bytes.len();
+        bytes[n - 4..].copy_from_slice(&u32::MAX.to_be_bytes());
+        let refused = Operation::from_bytes(&bytes)
+            .expect_err("no signature follows the count, so nothing decodes");
+        assert!(refused.to_string().contains("short input"), "{refused}");
+    }
+
     fn test_balance(value: u64) -> Balance {
-        Balance::from_parts(value, 0, Some([0xAB; 32]))
+        Balance::amount(value)
     }
 
     #[test]
@@ -3010,15 +2394,15 @@ mod tests {
         let make = |ap: Option<AuthorityPolicy>| Operation::Transfer {
             to_device_id: b"rcpt".to_vec(),
             amount: test_balance(100),
-            token_id: b"ERA".to_vec(),
             policy_commit: [7u8; 32],
-            mode: TransactionMode::Bilateral,
-            nonce: vec![1, 2, 3],
-            verification: VerificationType::Bilateral,
-            pre_commit: None,
-            recipient: b"rcpt".to_vec(),
-            to: b"rcpt".to_vec(),
-            message: "m".to_string(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![1, 2, 3],
+                mode: TransactionMode::Bilateral,
+                memo: "m".to_string(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: vec![9, 9, 9],
             authority_policy: ap,
         };
@@ -3064,165 +2448,129 @@ mod tests {
         decoded
     }
 
-    #[test]
-    fn is_value_egress_classifies_owner_value_movement() {
-        // Egress: owner value movement must be gated during identity recovery.
-        assert!(Operation::Burn {
-            amount: test_balance(1),
-            token_id: vec![1],
-            policy_commit: [0u8; 32],
-            proof_of_ownership: vec![],
-            message: String::new(),
-        }
-        .is_value_egress());
-        assert!(Operation::LockToken {
-            token_id: vec![1],
-            amount: 1,
-            purpose: b"dlv_collateral".to_vec(),
-            mode: TransactionMode::Unilateral,
-            signature: vec![],
-        }
-        .is_value_egress());
-
-        // Not egress: ingress + identity/neutral operations proceed during recovery.
-        assert!(!Operation::Genesis.is_value_egress());
-        assert!(!Operation::Noop.is_value_egress());
-        assert!(!Operation::default().is_value_egress());
-        assert!(!Operation::Mint {
-            amount: test_balance(1),
-            token_id: vec![1],
-            policy_commit: [0u8; 32],
-            message: String::new(),
-        }
-        .is_value_egress());
-    }
-
-    #[test]
-    fn is_value_bearing_classifies_value_capable_relationships() {
-        // Egress ops are value-bearing (superset of is_value_egress).
-        let burn = Operation::Burn {
-            amount: test_balance(1),
-            token_id: vec![1],
-            policy_commit: [0u8; 32],
-            proof_of_ownership: vec![],
-            message: String::new(),
-        };
-        assert!(burn.is_value_egress() && burn.is_value_bearing());
-
-        // Ingress ops are value-bearing but NOT egress — a relationship that only
-        // received value is still value-capable (must be in the recovery gate-set).
-        let mint = Operation::Mint {
-            amount: test_balance(1),
-            token_id: vec![1],
-            policy_commit: [0u8; 32],
-            message: String::new(),
-        };
-        assert!(!mint.is_value_egress() && mint.is_value_bearing());
-        let receive = Operation::Receive {
-            token_id: b"TKN".to_vec(),
-            from_device_id: vec![0xAA; 32],
-            amount: test_balance(1),
-            recipient: vec![],
-            message: String::new(),
-            mode: TransactionMode::Unilateral,
-            nonce: vec![],
-            verification: VerificationType::Standard,
-            sender_state_hash: None,
-        };
-        assert!(!receive.is_value_egress() && receive.is_value_bearing());
-
-        // Pure contact/social/neutral relationships are NOT value-capable.
-        assert!(!Operation::Genesis.is_value_bearing());
-        assert!(!Operation::Noop.is_value_bearing());
-        assert!(!Operation::default().is_value_bearing());
-        assert!(!Operation::AddRelationship {
-            from_id: [1; 32],
-            to_id: [2; 32],
-            relationship_type: b"bilateral_transfer".to_vec(),
-            metadata: vec![],
-            proof: vec![],
-            mode: TransactionMode::Bilateral,
-            message: String::new(),
-        }
-        .is_value_bearing());
-    }
-
-    #[test]
-    fn egress_asset_matches_is_value_egress_and_extracts_token() {
-        // P5: egress_asset is the canonical asset-id companion to is_value_egress. The
-        // invariant `is_value_egress() == (egress_asset() != NotEgress)` must hold for every
-        // variant — a representative sample across egress / ingress / neutral.
-        let burn = Operation::Burn {
-            amount: test_balance(7),
-            token_id: b"ERA".to_vec(),
-            policy_commit: [0u8; 32],
-            proof_of_ownership: vec![],
-            message: String::new(),
-        };
-        assert_eq!(
-            burn.egress_asset(),
-            EgressAsset::Asset {
-                token_id: b"ERA".to_vec(),
-                amount: 7
-            }
-        );
-
-        let lt = Operation::LockToken {
-            token_id: b"ERA".to_vec(),
-            amount: -5, // negative i64 clamps to 0 (no canonical egress size)
-            purpose: b"dlv".to_vec(),
-            mode: TransactionMode::Unilateral,
-            signature: vec![],
-        };
-        assert_eq!(
-            lt.egress_asset(),
-            EgressAsset::Asset {
-                token_id: b"ERA".to_vec(),
-                amount: 0
-            }
-        );
-
-        // Vault-keyed DLV claim → asset can't be named here → Unidentified (fail-closed gate).
-        let claim = Operation::DlvClaim {
-            vault_id: vec![1, 2, 3],
-            claim_proof: vec![],
-            claimant_public_key: vec![],
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        };
-        assert_eq!(claim.egress_asset(), EgressAsset::Unidentified);
-        assert!(claim.is_value_egress());
-
-        // Non-egress → NotEgress.
-        assert_eq!(Operation::Noop.egress_asset(), EgressAsset::NotEgress);
-        assert_eq!(Operation::Genesis.egress_asset(), EgressAsset::NotEgress);
-
-        // The invariant, across a representative set.
-        let mint = Operation::Mint {
-            amount: test_balance(1),
-            token_id: b"ERA".to_vec(),
-            policy_commit: [0u8; 32],
-            message: String::new(),
-        };
-        for op in [
-            &burn,
-            &lt,
-            &claim,
-            &mint,
-            &Operation::Noop,
-            &Operation::Genesis,
-        ] {
-            assert_eq!(
-                op.is_value_egress(),
-                !matches!(op.egress_asset(), EgressAsset::NotEgress),
-                "egress_asset must agree with is_value_egress for {op:?}"
-            );
-        }
-    }
-
     // ------------------------------------------------------------------ //
     //  Round-trip tests for every variant
     // ------------------------------------------------------------------ //
+    /// Pre-audit item 4 (owner ruling 2026-10-02): a transfer carries its
+    /// ticker, nonce, mode and memo only by a salted commitment, and the
+    /// terms open it or say nothing about it.
+    mod transfer_terms {
+        use super::*;
+
+        fn terms() -> TransferTerms {
+            TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![0x4E; 32],
+                mode: TransactionMode::Unilateral,
+                memo: "rent, october".to_string(),
+                salt: vec![0x5A; 32],
+            }
+        }
+
+        fn committing(terms: &TransferTerms) -> Operation {
+            Operation::Transfer {
+                to_device_id: vec![0x11; 32],
+                amount: test_balance(42),
+                policy_commit: [0x0F; 32],
+                terms_commitment: terms.commitment(),
+                signature: Vec::new(),
+                authority_policy: None,
+            }
+        }
+
+        #[test]
+        fn terms_round_trip_and_open_the_transfer_that_commits_to_them() {
+            let t = terms();
+            assert_eq!(
+                TransferTerms::from_bytes(&t.to_bytes()).expect("decodes"),
+                t
+            );
+            t.open(&committing(&t))
+                .expect("the terms open their transfer");
+        }
+
+        /// Every term is bound: a change to any one of them, the salt
+        /// included, is terms that do not open the transfer.
+        #[test]
+        fn terms_that_differ_in_anything_do_not_open_the_transfer() {
+            let op = committing(&terms());
+            let changed: [fn(&mut TransferTerms); 5] = [
+                |t| t.token_id = b"dBTC".to_vec(),
+                |t| t.nonce[0] ^= 1,
+                |t| t.mode = TransactionMode::Bilateral,
+                |t| t.memo.push('!'),
+                |t| t.salt[31] ^= 1,
+            ];
+            for change in changed {
+                let mut other = terms();
+                change(&mut other);
+                let refused = other.open(&op).expect_err("other terms");
+                assert!(refused.to_string().contains("do not open"), "{refused}");
+            }
+            let refused = terms().open(&Operation::Noop).expect_err("not a transfer");
+            assert!(refused.to_string().contains("not a noop"), "{refused}");
+        }
+
+        /// The salt is drawn fresh for each transfer, never from what the
+        /// transfer makes public: the same ticker, nonce, mode and memo commit
+        /// differently every time, so a guessed memo cannot be confirmed
+        /// against the public commitment.
+        #[test]
+        fn a_salt_is_fresh_for_every_transfer() {
+            let new = || {
+                TransferTerms::new(
+                    b"ERA".to_vec(),
+                    Vec::new(),
+                    TransactionMode::Unilateral,
+                    "rent, october".to_string(),
+                )
+            };
+            let (one, two) = (new(), new());
+            assert!(one.salt.len() >= TRANSFER_TERMS_MIN_SALT);
+            assert_ne!(one.salt, two.salt, "a salt is drawn for each transfer");
+            assert_ne!(one.commitment(), two.commitment());
+        }
+
+        #[test]
+        fn a_short_salt_trailing_bytes_or_an_unknown_version_do_not_decode() {
+            let mut short = terms();
+            short.salt = vec![0x5A; TRANSFER_TERMS_MIN_SALT - 1];
+            let refused = TransferTerms::from_bytes(&short.to_bytes()).expect_err("short salt");
+            assert!(refused.to_string().contains("salt"), "{refused}");
+
+            let mut trailing = terms().to_bytes();
+            trailing.push(0);
+            TransferTerms::from_bytes(&trailing).expect_err("trailing bytes");
+
+            let mut version = terms().to_bytes();
+            version[0] = TRANSFER_TERMS_V1 + 1;
+            TransferTerms::from_bytes(&version).expect_err("an unknown version");
+        }
+
+        /// The operation's bytes hold the commitment and none of the terms.
+        #[test]
+        fn a_transfer_operation_carries_no_term_in_the_clear() {
+            let t = terms();
+            let bytes = committing(&t).to_bytes();
+            assert_eq!(bytes[0], 37, "a transfer is tag 37");
+            let holds = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+            assert!(!holds(t.memo.as_bytes()), "the memo");
+            assert!(!holds(&t.nonce), "the nonce");
+            assert!(!holds(&t.salt), "the salt");
+            assert!(holds(&t.commitment()), "the commitment");
+        }
+
+        /// Tag 3 carried the terms in the clear; it is retired, so no
+        /// operation of that shape decodes.
+        #[test]
+        fn the_retired_transfer_tag_does_not_decode() {
+            let mut bytes = committing(&terms()).to_bytes();
+            bytes[0] = 3;
+            let refused = Operation::from_bytes(&bytes).expect_err("tag 3");
+            assert!(refused.to_string().contains("retired"), "{refused}");
+        }
+    }
+
     mod roundtrip {
         use super::*;
 
@@ -3275,74 +2623,18 @@ mod tests {
         fn transfer_no_precommit() {
             roundtrip(&Operation::Transfer {
                 policy_commit: [0u8; 32],
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![0xFF; 16],
+                    mode: TransactionMode::Bilateral,
+                    memo: "send tokens".into(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(500),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![0xFF; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![0x02; 32],
-                to: vec![0x03; 32],
-                message: "send tokens".into(),
                 signature: vec![0xAA; 64],
                 authority_policy: None,
-            });
-        }
-
-        #[test]
-        fn transfer_with_precommit() {
-            let mut fixed = HashMap::new();
-            fixed.insert("recipient".into(), vec![0x01; 32]);
-            fixed.insert("amount".into(), vec![0, 0, 0, 100]);
-            let pc = PreCommitmentOp {
-                fixed_parameters: fixed,
-                variable_parameters: vec!["nonce".into(), "timestamp".into()],
-                security_params: SecurityParameters::default(),
-            };
-            roundtrip(&Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(1000),
-                token_id: b"TKN".to_vec(),
-                mode: TransactionMode::Unilateral,
-                nonce: vec![0x11; 8],
-                verification: VerificationType::PreCommitted,
-                pre_commit: Some(pc),
-                recipient: vec![0x02; 32],
-                to: vec![0x03; 32],
-                message: "pre-committed transfer".into(),
-                signature: vec![0xBB; 48],
-                authority_policy: None,
-            });
-        }
-
-        #[test]
-        fn transfer_custom_verification() {
-            roundtrip(&Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(42),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![0x99],
-                verification: VerificationType::Custom(vec![0xDE, 0xAD]),
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            });
-        }
-
-        #[test]
-        fn mint() {
-            roundtrip(&Operation::Mint {
-                amount: test_balance(10_000),
-                token_id: b"ERA".to_vec(),
-                policy_commit: [0u8; 32],
-                message: "mint tokens".into(),
             });
         }
 
@@ -3352,7 +2644,6 @@ mod tests {
                 amount: test_balance(200),
                 token_id: b"TKN".to_vec(),
                 policy_commit: [0u8; 32],
-                proof_of_ownership: vec![0xCC; 64],
                 message: "burn tokens".into(),
             });
         }
@@ -3514,7 +2805,6 @@ mod tests {
                 message: "receive tokens".into(),
                 mode: TransactionMode::Bilateral,
                 nonce: vec![0x03; 16],
-                verification: VerificationType::StandardBilateral,
                 sender_state_hash: Some(vec![0x04; 32]),
             });
         }
@@ -3529,8 +2819,19 @@ mod tests {
                 message: String::new(),
                 mode: TransactionMode::Unilateral,
                 nonce: vec![],
-                verification: VerificationType::Standard,
                 sender_state_hash: None,
+            });
+        }
+
+        #[test]
+        fn adopt_token_roundtrip() {
+            roundtrip(&Operation::AdoptToken {
+                policy_commit: [0x5A; 32],
+                signature: vec![0xCD; 64],
+            });
+            roundtrip(&Operation::AdoptToken {
+                policy_commit: [0x5A; 32],
+                signature: vec![],
             });
         }
 
@@ -3590,52 +2891,23 @@ mod tests {
             });
         }
 
-        /// Tag 27 (legacy DlvOwnerApply) is BURNED (owner directive
-        /// 2026-08-28): the byte no longer names an operation. A tag can be
-        /// retired but never reassigned with a different meaning.
+        /// Tag 27 (legacy DlvOwnerApply, owner directive 2026-08-28) and tags
+        /// 26, 28, 29, 30 and 33 (the old market's settle, close, funded
+        /// create, owner apply and route settle) are BURNED: the bytes no
+        /// longer name an operation. A tag can be retired but never
+        /// reassigned with a different meaning.
         #[test]
-        fn the_burned_tag_27_decodes_as_unknown() {
-            let mut bytes = vec![27u8];
-            bytes.extend_from_slice(&(32u32).to_le_bytes());
-            bytes.extend_from_slice(&[0x11; 32]);
-            let err = Operation::from_bytes(&bytes).expect_err("burned tag must not decode");
-            assert!(err.to_string().contains("unknown op tag"), "got: {err}");
-        }
-
-        #[test]
-        fn dlv_create_funded_v2() {
-            roundtrip(&Operation::DlvCreateFundedV2 {
-                vault_id: vec![0x01; 32],
-                creator_public_key: vec![0x02; 64],
-                parameters_hash: vec![0x03; 32],
-                fulfillment_condition: vec![0x04; 16],
-                leg_a_policy_commit: [0x0A; 32],
-                leg_a_amount: 10_000,
-                leg_b_policy_commit: [0x0B; 32],
-                leg_b_amount: 5_000,
-                fee_bps: 30,
-                signature: vec![0x06; 48],
-                mode: TransactionMode::Unilateral,
-            });
-        }
-
-        #[test]
-        fn dlv_owner_apply_v2() {
-            roundtrip(&Operation::DlvOwnerApplyV2 {
-                vault_id: vec![0x01; 32],
-                settlement_receipt_id: [0x11; 32],
-                pending_pointer_x: [0x12; 32],
-                parent_sequence: 7,
-                new_sequence: 8,
-                parent_binding: [0x13; 32],
-                input_policy_commit: [0x0A; 32],
-                output_policy_commit: [0x0B; 32],
-                input_amount: 100,
-                output_amount: 90,
-                fee_bps: 30,
-                signature: vec![0x06; 48],
-                mode: TransactionMode::Unilateral,
-            });
+        fn the_burned_market_tags_decode_as_unknown() {
+            for tag in [26u8, 27, 28, 29, 30, 33] {
+                let mut bytes = vec![tag];
+                bytes.extend_from_slice(&(32u32).to_le_bytes());
+                bytes.extend_from_slice(&[0x11; 32]);
+                let err = Operation::from_bytes(&bytes).expect_err("burned tag must not decode");
+                assert!(
+                    err.to_string().contains("unknown op tag"),
+                    "tag {tag}: {err}"
+                );
+            }
         }
 
         #[test]
@@ -3670,172 +2942,6 @@ mod tests {
                 mode: TransactionMode::Unilateral,
             });
         }
-
-        #[test]
-        fn all_verification_types() {
-            let types = vec![
-                VerificationType::Standard,
-                VerificationType::Enhanced,
-                VerificationType::Bilateral,
-                VerificationType::Directory,
-                VerificationType::StandardBilateral,
-                VerificationType::PreCommitted,
-                VerificationType::UnilateralIdentityAnchor,
-                VerificationType::Custom(vec![0xCA, 0xFE]),
-            ];
-            for vt in types {
-                roundtrip(&Operation::Transfer {
-                    policy_commit: [0u8; 32],
-                    to_device_id: vec![0x01; 32],
-                    amount: test_balance(1),
-                    token_id: b"ERA".to_vec(),
-                    mode: TransactionMode::Bilateral,
-                    nonce: vec![],
-                    verification: vt,
-                    pre_commit: None,
-                    recipient: vec![],
-                    to: vec![],
-                    message: String::new(),
-                    signature: vec![],
-                    authority_policy: None,
-                });
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------ //
-    //  Ops trait tests
-    // ------------------------------------------------------------------ //
-    mod ops_trait {
-        use super::*;
-
-        #[test]
-        fn validate_transfer_zero_amount() {
-            let op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(0),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(!Ops::validate(&op).unwrap());
-        }
-
-        #[test]
-        fn validate_transfer_positive_amount() {
-            let op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(100),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(Ops::validate(&op).unwrap());
-        }
-
-        #[test]
-        fn validate_genesis_is_true() {
-            assert!(Ops::validate(&Operation::Genesis).unwrap());
-        }
-
-        #[test]
-        fn validate_noop_is_true() {
-            assert!(Ops::validate(&Operation::Noop).unwrap());
-        }
-
-        #[test]
-        fn get_id_returns_correct_strings() {
-            let cases: Vec<(Operation, &str)> = vec![
-                (Operation::Genesis, "genesis"),
-                (Operation::Noop, "noop"),
-                (
-                    Operation::Create {
-                        message: String::new(),
-                        identity_data: vec![],
-                        public_key: vec![],
-                        metadata: vec![],
-                        commitment: vec![],
-                        proof: vec![],
-                        mode: TransactionMode::Bilateral,
-                    },
-                    "create",
-                ),
-                (
-                    Operation::Update {
-                        message: String::new(),
-                        identity_id: vec![],
-                        updated_data: vec![],
-                        proof: vec![],
-                        forward_link: None,
-                    },
-                    "update",
-                ),
-                (
-                    Operation::Delete {
-                        reason: String::new(),
-                        proof: vec![],
-                        mode: TransactionMode::Bilateral,
-                        id: vec![],
-                    },
-                    "delete",
-                ),
-                (
-                    Operation::Recovery {
-                        message: String::new(),
-                        state_number: 0,
-                        state_hash: vec![],
-                        state_entropy: vec![],
-                        invalidation_data: vec![],
-                        new_state_data: vec![],
-                        new_state_number: 0,
-                        new_state_hash: vec![],
-                        new_state_entropy: vec![],
-                        compromise_proof: vec![],
-                        authority_sigs: vec![],
-                    },
-                    "recovery",
-                ),
-                (
-                    Operation::DlvCreate {
-                        vault_id: vec![],
-                        creator_public_key: vec![],
-                        parameters_hash: vec![],
-                        fulfillment_condition: vec![],
-                        intended_recipient: None,
-                        signature: vec![],
-                        mode: TransactionMode::Unilateral,
-                    },
-                    "dlv_create",
-                ),
-            ];
-            for (op, expected) in cases {
-                assert_eq!(Ops::get_id(&op), expected);
-            }
-        }
-
-        #[test]
-        fn execute_returns_bytes() {
-            let op = Operation::Genesis;
-            let result = Ops::execute(&op).unwrap();
-            assert!(!result.is_empty());
-            assert_eq!(result, op.to_bytes());
-        }
     }
 
     // ------------------------------------------------------------------ //
@@ -3851,34 +2957,25 @@ mod tests {
 
             let transfer = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: vec![],
+                    nonce: vec![],
+                    mode: TransactionMode::Bilateral,
+                    memo: String::new(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: vec![],
                 amount: test_balance(1),
-                token_id: vec![],
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
                 signature: vec![],
                 authority_policy: None,
             };
             assert_eq!(transfer.get_operation_type(), "transfer");
 
-            let mint = Operation::Mint {
-                amount: test_balance(1),
-                token_id: vec![],
-                policy_commit: [0u8; 32],
-                message: String::new(),
-            };
-            assert_eq!(mint.get_operation_type(), "mint");
-
             let burn = Operation::Burn {
                 amount: test_balance(1),
                 token_id: vec![],
                 policy_commit: [0u8; 32],
-                proof_of_ownership: vec![],
                 message: String::new(),
             };
             assert_eq!(burn.get_operation_type(), "burn");
@@ -3955,16 +3052,16 @@ mod tests {
         fn clears_transfer_signature() {
             let op = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![0xFF; 16],
+                    mode: TransactionMode::Bilateral,
+                    memo: String::new(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![0xFF; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
                 signature: vec![0xAA; 64],
                 authority_policy: None,
             };
@@ -4081,15 +3178,15 @@ mod tests {
             let mut bytes = Operation::Transfer {
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
-                token_id: b"ERA".to_vec(),
                 policy_commit: [0u8; 32],
-                mode: TransactionMode::Unilateral,
-                nonce: vec![0xFF; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![0x02; 32],
-                to: vec![0x03; 32],
-                message: "x".into(),
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![0xFF; 16],
+                    mode: TransactionMode::Unilateral,
+                    memo: "x".into(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 signature: vec![0xAA; 32],
                 authority_policy: None,
             }
@@ -4129,21 +3226,24 @@ mod tests {
         /// sign over `signing_op.to_bytes()` with an EMPTY signature field, and
         /// that exact buffer is the `canonical_operation_bytes` preimage.
         /// Returns `(canonical_bytes, signature, signer_public_key)`.
+        fn unit_terms() -> TransferTerms {
+            TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![0xAB; 16],
+                mode: TransactionMode::Unilateral,
+                memo: "unit".into(),
+                salt: vec![0x5A; 32],
+            }
+        }
+
         fn signed_transfer() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             let kp =
                 generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
             let signing_op = Operation::Transfer {
                 to_device_id: vec![0x11; 32],
                 amount: test_balance(42),
-                token_id: b"ERA".to_vec(),
                 policy_commit: [0u8; 32],
-                mode: TransactionMode::Unilateral,
-                nonce: vec![0xAB; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![0x22; 32],
-                to: vec![0x33; 32],
-                message: "unit".into(),
+                terms_commitment: unit_terms().commitment(),
                 signature: Vec::new(),
                 authority_policy: None,
             };
@@ -4168,16 +3268,17 @@ mod tests {
             if let Operation::Transfer {
                 to_device_id,
                 amount,
-                token_id,
-                nonce,
+                terms_commitment,
                 ..
             } = &bound
             {
                 assert_eq!(to_device_id, &vec![0x11; 32]);
                 assert_eq!(amount.value(), 42);
-                assert_eq!(token_id, &b"ERA".to_vec());
-                assert_eq!(nonce, &vec![0xAB; 16]);
+                assert_eq!(terms_commitment, &unit_terms().commitment());
             }
+            unit_terms()
+                .open(&bound)
+                .expect("the signed terms open the bound transfer");
 
             // Signature re-attached, and re-clearing reproduces the exact preimage.
             assert_eq!(bound.get_signature(), Some(sig));
@@ -4210,188 +3311,58 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ //
-    //  TokenOps trait tests
-    // ------------------------------------------------------------------ //
-    mod token_ops {
-        use super::*;
-
-        #[test]
-        fn is_valid_transfer_positive() {
-            let op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(100),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(TokenOps::is_valid(&op));
-        }
-
-        #[test]
-        fn is_valid_transfer_zero() {
-            let op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![0x01; 32],
-                amount: test_balance(0),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(!TokenOps::is_valid(&op));
-        }
-
-        #[test]
-        fn is_valid_genesis_returns_false() {
-            assert!(!TokenOps::is_valid(&Operation::Genesis));
-        }
-
-        #[test]
-        fn is_valid_noop_returns_false() {
-            assert!(!TokenOps::is_valid(&Operation::Noop));
-        }
-
-        #[test]
-        fn is_valid_mint_positive() {
-            let op = Operation::Mint {
-                amount: test_balance(50),
-                token_id: b"ERA".to_vec(),
-                policy_commit: [0u8; 32],
-                message: String::new(),
-            };
-            assert!(TokenOps::is_valid(&op));
-        }
-
-        #[test]
-        fn is_valid_lock_positive() {
-            let op = Operation::Lock {
-                token_id: b"ERA".to_vec(),
-                amount: test_balance(10),
-                purpose: vec![],
-                owner: vec![],
-                message: String::new(),
-                signature: vec![],
-            };
-            assert!(TokenOps::is_valid(&op));
-        }
-
-        #[test]
-        fn has_expired_returns_false() {
-            assert!(!TokenOps::has_expired(&Operation::Genesis));
-            let transfer = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                to_device_id: vec![],
-                amount: test_balance(1),
-                token_id: vec![],
-                mode: TransactionMode::Bilateral,
-                nonce: vec![],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            };
-            assert!(!TokenOps::has_expired(&transfer));
-        }
-    }
-
-    // ------------------------------------------------------------------ //
-    //  GenericOps trait tests
-    // ------------------------------------------------------------------ //
-    mod generic_ops {
-        use super::*;
-
-        #[test]
-        fn get_data_returns_data_for_generic() {
-            let op = Operation::Generic {
-                operation_type: b"test".to_vec(),
-                data: vec![10, 20, 30],
-                message: String::new(),
-                signature: vec![],
-            };
-            assert_eq!(GenericOps::get_data(&op), &[10, 20, 30]);
-        }
-
-        #[test]
-        fn get_data_returns_empty_for_non_generic() {
-            assert!(GenericOps::get_data(&Operation::Genesis).is_empty());
-            assert!(GenericOps::get_data(&Operation::Noop).is_empty());
-        }
-
-        #[test]
-        fn set_data_works_for_generic() {
-            let mut op = Operation::Generic {
-                operation_type: b"test".to_vec(),
-                data: vec![1],
-                message: String::new(),
-                signature: vec![],
-            };
-            GenericOps::set_data(&mut op, vec![99, 100]).unwrap();
-            assert_eq!(GenericOps::get_data(&op), &[99, 100]);
-        }
-
-        #[test]
-        fn set_data_errors_for_non_generic() {
-            let mut op = Operation::Genesis;
-            assert!(GenericOps::set_data(&mut op, vec![1]).is_err());
-        }
-
-        #[test]
-        fn merge_concatenates_data() {
-            let a = Operation::Generic {
-                operation_type: b"t".to_vec(),
-                data: vec![1, 2],
-                message: String::new(),
-                signature: vec![],
-            };
-            let b = Operation::Generic {
-                operation_type: b"t".to_vec(),
-                data: vec![3, 4],
-                message: String::new(),
-                signature: vec![],
-            };
-            let merged = GenericOps::merge(&a, &b).unwrap();
-            assert_eq!(merged, vec![1, 2, 3, 4]);
-        }
-    }
-
-    // ------------------------------------------------------------------ //
     //  Balance round-trip through Operation encoding
     // ------------------------------------------------------------------ //
     mod balance_encoding {
         use super::*;
 
-        #[test]
-        fn balance_with_state_hash_roundtrips() {
-            let bal = Balance::from_parts(12345, 0, Some([0xFE; 32]));
-            let op = Operation::Mint {
-                amount: bal.clone(),
+        fn burn_of(amount: Balance) -> Operation {
+            Operation::Burn {
+                amount,
                 token_id: b"T".to_vec(),
                 policy_commit: [0u8; 32],
                 message: String::new(),
-            };
-            let decoded = roundtrip(&op);
-            if let Operation::Mint { amount, .. } = decoded {
-                assert_eq!(amount.value(), bal.value());
-            } else {
-                panic!("wrong variant");
             }
+        }
+
+        /// Ruling #7: an operation signs an amount's value and lock, never a
+        /// state reference the amount may carry — two operations that differ
+        /// only there have the same signed bytes, and the decoded amount
+        /// references no state.
+        #[test]
+        fn an_amounts_state_reference_is_not_signed() {
+            let referencing = burn_of(Balance::from_parts(12345, 0, Some([0xFE; 32])));
+            let plain = burn_of(Balance::amount(12345));
+            assert_eq!(referencing.to_bytes(), plain.to_bytes());
+            assert_eq!(referencing.signing_bytes(), plain.signing_bytes());
+            match Operation::from_bytes(&referencing.to_bytes()).expect("decodes") {
+                Operation::Burn { amount, .. } => {
+                    assert_eq!(amount.value(), 12345);
+                    assert_eq!(amount.state_hash(), None);
+                }
+                other => panic!("wrong variant: {other:?}"),
+            }
+        }
+
+        /// An amount encoded with a state reference — the 48-byte form signed
+        /// before ruling #7 — is not an operation amount.
+        #[test]
+        fn an_amount_carrying_a_state_reference_does_not_decode() {
+            let plain = burn_of(Balance::amount(12345));
+            let bytes = plain.to_bytes();
+            let mut blob = vec![16u8, 0, 0, 0];
+            blob.extend_from_slice(&Balance::amount(12345).canonical_amount_bytes());
+            let at = bytes
+                .windows(blob.len())
+                .position(|w| w == blob.as_slice())
+                .expect("the amount blob");
+            let mut widened = bytes[..at].to_vec();
+            widened.extend_from_slice(&[48u8, 0, 0, 0]);
+            widened.extend_from_slice(&blob[4..]);
+            widened.extend_from_slice(&[0xFE; 32]);
+            widened.extend_from_slice(&bytes[at + blob.len()..]);
+            let err = Operation::from_bytes(&widened).expect_err("a 48-byte amount is refused");
+            assert!(err.to_string().contains("amount is 16 bytes"), "{err}");
         }
 
         #[test]
@@ -4401,7 +3372,6 @@ mod tests {
                 amount: bal,
                 token_id: b"X".to_vec(),
                 policy_commit: [0u8; 32],
-                proof_of_ownership: vec![],
                 message: String::new(),
             };
             roundtrip(&op);
@@ -4409,7 +3379,7 @@ mod tests {
 
         #[test]
         fn balance_with_locked_roundtrips() {
-            let bal = Balance::from_parts(1000, 200, Some([0x01; 32]));
+            let bal = Balance::from_parts(1000, 200, None);
             let op = Operation::Lock {
                 token_id: b"ERA".to_vec(),
                 amount: bal.clone(),
@@ -4438,54 +3408,22 @@ mod tests {
         fn encoding_is_deterministic() {
             let op = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                terms_commitment: crate::types::operations::TransferTerms {
+                    token_id: b"ERA".to_vec(),
+                    nonce: vec![0xAA; 16],
+                    mode: TransactionMode::Bilateral,
+                    memo: "test".into(),
+                    salt: vec![0x5A; 32],
+                }
+                .commitment(),
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(42),
-                token_id: b"ERA".to_vec(),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![0xAA; 16],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![0x02; 32],
-                to: vec![0x03; 32],
-                message: "test".into(),
                 signature: vec![0xBB; 64],
                 authority_policy: None,
             };
             let b1 = op.to_bytes();
             let b2 = op.to_bytes();
             assert_eq!(b1, b2);
-        }
-
-        #[test]
-        fn precommit_map_order_independent() {
-            let make_op = |insert_order: &[(&str, Vec<u8>)]| {
-                let mut fixed = HashMap::new();
-                for (k, v) in insert_order {
-                    fixed.insert(k.to_string(), v.clone());
-                }
-                Operation::Transfer {
-                    policy_commit: [0u8; 32],
-                    to_device_id: vec![],
-                    amount: test_balance(1),
-                    token_id: vec![],
-                    mode: TransactionMode::Bilateral,
-                    nonce: vec![],
-                    verification: VerificationType::Standard,
-                    pre_commit: Some(PreCommitmentOp {
-                        fixed_parameters: fixed,
-                        variable_parameters: vec![],
-                        security_params: SecurityParameters::default(),
-                    }),
-                    recipient: vec![],
-                    to: vec![],
-                    message: String::new(),
-                    signature: vec![],
-                    authority_policy: None,
-                }
-            };
-            let a = make_op(&[("alpha", vec![1]), ("beta", vec![2])]);
-            let b = make_op(&[("beta", vec![2]), ("alpha", vec![1])]);
-            assert_eq!(a.to_bytes(), b.to_bytes());
         }
     }
 }

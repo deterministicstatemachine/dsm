@@ -10,47 +10,42 @@ use dsm::types::proto as generated;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
-use super::response_helpers::{pack_envelope_ok, err};
+use super::response_helpers::{err, pack_bytes_ok, pack_envelope_ok};
 use super::app_router_impl::{collect_tagged_inbox_addresses, RouteFreshness};
+
+/// The most items one `inbox.pull` returns.
+const INBOX_PULL_MAX: u32 = 200;
 
 impl AppRouterImpl {
     pub(crate) async fn handle_inbox_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "inbox.pull" => {
-                log::info!("[DSM_SDK] inbox.pull called");
-                // Decode InboxRequest (optional limit)
-                let limit: u32 = match generated::ArgPack::decode(&*q.params) {
-                    Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
-                        match generated::InboxRequest::decode(&*pack.body) {
-                            Ok(req) => req.limit.clamp(1, 200), // clamp to 1-200
-                            Err(_) => 100,                      // default
-                        }
+                let pack = match generated::ArgPack::decode(&*q.params) {
+                    Ok(pack) => pack,
+                    Err(e) => return err(format!("inbox.pull: decode ArgPack failed: {e}")),
+                };
+                if pack.codec != generated::Codec::Proto as i32 {
+                    return err("inbox.pull: ArgPack.codec must be PROTO".into());
+                }
+                let limit = match generated::InboxRequest::decode(&*pack.body) {
+                    Ok(req) if (1..=INBOX_PULL_MAX).contains(&req.limit) => req.limit as usize,
+                    Ok(req) => {
+                        return err(format!(
+                            "inbox.pull: limit {} is outside 1..={INBOX_PULL_MAX}",
+                            req.limit
+                        ))
                     }
-                    _ => 100, // default limit
+                    Err(e) => return err(format!("inbox.pull: decode InboxRequest failed: {e}")),
                 };
 
-                // Get storage endpoints from config
-                let storage_endpoints =
-                    match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-                        Ok(cfg) => cfg.node_urls,
-                        Err(e) => {
-                            return err(format!(
-                                "inbox.pull: no storage node config available: {}",
-                                e
-                            ));
-                        }
-                    };
-                if storage_endpoints.is_empty() {
-                    return err("inbox.pull: no storage endpoints configured".into());
-                }
-
-                // Get device identity for B0x query (MUST be base32 to match storage node auth)
+                let storage_endpoints = match crate::sdk::storage_set::pinned_endpoints() {
+                    Ok(endpoints) => endpoints,
+                    Err(e) => return err(format!("inbox.pull: no pinned storage set: {e}")),
+                };
                 let device_id_b32 =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-
-                // Create B0xSDK and retrieve inbox items
                 let mut b0x_sdk = match crate::sdk::b0x_sdk::B0xSDK::new(
-                    device_id_b32.clone(),
+                    device_id_b32,
                     self.core_sdk.clone(),
                     storage_endpoints,
                 ) {
@@ -58,176 +53,133 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("inbox.pull: b0x init failed: {e}")),
                 };
 
-                // Proactively register this device on all storage endpoints to ensure
-                // valid tokens before attempting any inbox retrieval. This mirrors the
-                // storage.sync handler and avoids 401/InboxTokenInvalid failures when
-                // storage nodes have been reset or tokens have expired.
-                match b0x_sdk.register_device().await {
-                    Ok(_) => log::info!(
-                        "[inbox.pull] device registration succeeded on storage endpoints"
-                    ),
-                    Err(e) => log::warn!(
-                        "[inbox.pull] device registration failed (continuing): {}",
-                        e
-                    ),
-                }
-
-                // §16.4: Poll per-contact rotated addresses only.
-                // Mirrors the same address computation that storage.sync uses, so both
-                // Transfer entries AND Generic (message) entries are discovered.
-                let my_genesis: [u8; 32] = self
-                    .core_sdk
-                    .local_genesis_hash()
-                    .await
-                    .ok()
-                    .and_then(|v| v.as_slice().try_into().ok())
-                    .unwrap_or([0u8; 32]);
-
-                let contacts = crate::storage::client_db::get_all_contacts().unwrap_or_default();
-
-                let genesis_display = if my_genesis == [0u8; 32] {
-                    "ZERO".to_string()
-                } else {
-                    let full = crate::util::text_id::encode_base32_crockford(&my_genesis);
-                    full[..8.min(full.len())].to_string()
+                // §16.4: poll the per-contact rotated addresses — the same
+                // addresses storage.sync polls, so transfers and messages are
+                // both found.
+                let my_genesis = match self.core_sdk.local_genesis_hash().await {
+                    Ok(genesis) => match <[u8; 32]>::try_from(genesis.as_slice()) {
+                        Ok(genesis) => genesis,
+                        Err(e) => {
+                            return err(format!("inbox.pull: local genesis is not 32 bytes: {e}"))
+                        }
+                    },
+                    Err(e) => return err(format!("inbox.pull: local genesis unavailable: {e}")),
                 };
-                log::info!(
-                    "[inbox.pull] genesis={} device_prefix={}.. contacts={} limit={}",
-                    genesis_display,
-                    &device_id_b32[..8.min(device_id_b32.len())],
-                    contacts.len(),
-                    limit,
-                );
-
-                let tagged_addresses =
-                    collect_tagged_inbox_addresses(my_genesis, self.device_id_bytes, &contacts);
-
-                log::info!(
-                    "[inbox.pull] polling {} tagged b0x addresses",
-                    tagged_addresses.len(),
-                );
-                for (i, tagged) in tagged_addresses.iter().enumerate() {
-                    log::info!(
-                        "[inbox.pull]   addr[{}] = {}... ({:?})",
-                        i,
-                        &tagged.address[..16.min(tagged.address.len())],
-                        tagged.freshness,
-                    );
-                }
-
-                if tagged_addresses.is_empty() {
-                    log::warn!(
-                        "[inbox.pull] no addresses to poll (genesis_zero={}, contacts={})",
-                        my_genesis == [0u8; 32],
-                        contacts.len(),
-                    );
-                }
+                let contacts = match crate::storage::client_db::get_all_contacts() {
+                    Ok(contacts) => contacts,
+                    Err(e) => return err(format!("inbox.pull: load contacts failed: {e}")),
+                };
+                let tagged_addresses = match collect_tagged_inbox_addresses(
+                    my_genesis,
+                    self.device_id_bytes,
+                    &contacts,
+                ) {
+                    Ok(addresses) => addresses,
+                    Err(e) => return err(format!("inbox.pull: {e}")),
+                };
 
                 let mut all_items: Vec<(crate::sdk::b0x_sdk::B0xEntry, RouteFreshness)> =
                     Vec::new();
                 let mut poll_errors: Vec<String> = Vec::new();
                 for tagged in &tagged_addresses {
-                    if all_items.len() >= limit as usize {
+                    if all_items.len() >= limit {
                         break;
                     }
-                    let remaining = (limit as usize) - all_items.len();
-                    let entries_res = match tokio::runtime::Handle::try_current() {
-                        Ok(handle) => tokio::task::block_in_place(|| {
-                            handle
-                                .block_on(b0x_sdk.retrieve_from_b0x_v2(&tagged.address, remaining))
-                        }),
-                        Err(_) => {
-                            if let Ok(rt) = tokio::runtime::Runtime::new() {
-                                rt.block_on(
-                                    b0x_sdk.retrieve_from_b0x_v2(&tagged.address, remaining),
-                                )
-                            } else {
-                                Err(dsm::types::error::DsmError::internal(
-                                    "runtime failed",
-                                    None::<std::io::Error>,
-                                ))
+                    match b0x_sdk.retrieve_from_b0x_v2(&tagged.address).await {
+                        Ok(outcome) => {
+                            if let crate::sdk::b0x_sdk::SpoolCoverage::Partial {
+                                responded,
+                                needed,
+                            } = outcome.coverage
+                            {
+                                poll_errors.push(format!(
+                                    "{}: partial read, {responded} of {} members answered, \
+                                     {needed} needed",
+                                    &tagged.address[..16.min(tagged.address.len())],
+                                    outcome.members
+                                ));
                             }
-                        }
-                    };
-                    match entries_res {
-                        Ok(items) => {
-                            log::info!(
-                                "[inbox.pull] addr {}...: {} items retrieved ({:?})",
-                                &tagged.address[..16.min(tagged.address.len())],
-                                items.len(),
-                                tagged.freshness,
-                            );
-                            all_items.extend(items.into_iter().map(|e| (e, tagged.freshness)));
-                        }
-                        Err(e) => {
-                            poll_errors.push(self.format_inbox_error(&e));
-                            log::warn!(
-                                "[inbox.pull] b0x retrieve failed for addr {}: {}",
-                                &tagged.address[..16.min(tagged.address.len())],
-                                e
+                            let remaining = limit - all_items.len();
+                            all_items.extend(
+                                outcome
+                                    .entries
+                                    .into_iter()
+                                    .take(remaining)
+                                    .map(|entry| (entry, tagged.freshness)),
                             );
                         }
+                        Err(e) => poll_errors.push(format!(
+                            "{}: {e}",
+                            &tagged.address[..16.min(tagged.address.len())]
+                        )),
                     }
                 }
-
                 if all_items.is_empty() && !poll_errors.is_empty() {
-                    return err(format!("inbox.pull: {}", poll_errors[0]));
+                    return err(format!(
+                        "inbox.pull: retrieve failed: {}",
+                        poll_errors.join("; ")
+                    ));
                 }
 
-                log::info!(
-                    "[inbox.pull] total items retrieved: {} (from {} addresses, {} errors)",
-                    all_items.len(),
-                    tagged_addresses.len(),
-                    poll_errors.len(),
-                );
-
-                let inbox_items: Vec<generated::InboxItem> = all_items
-                    .iter()
-                    .map(|(e, freshness)| generated::InboxItem {
+                // A transfer is listed with its sender and terms only once the
+                // boundary's read-only stages recognize it: SIG A verified under
+                // the stored key of the contact its header names, addressed to
+                // this device. Its sender is that contact, and its amount and
+                // token are read from the signed operation. A copy that is not
+                // recognized is listed as unverified, with the reason and no
+                // sender, and nothing is taken from it; a store that cannot be
+                // read fails the pull.
+                let mut inbox_items: Vec<generated::InboxItem> = Vec::new();
+                for (e, freshness) in &all_items {
+                    let (preview, sender_id) = match &e.kind {
+                        crate::sdk::b0x_sdk::B0xEntryKind::Transfer => {
+                            use crate::handlers::recipient_dispatch::{
+                                recognize_transfer, TransferRecognition,
+                            };
+                            match recognize_transfer(&e.transfer_wire_bytes, &e.sender_device_id) {
+                                Err(why) => return err(format!("inbox.pull: {why}")),
+                                Ok(TransferRecognition::NotRecognized(why)) => {
+                                    (format!("Unverified: {why}"), None)
+                                }
+                                Ok(TransferRecognition::Recognized(recognized)) => {
+                                    let sender = crate::util::text_id::encode_base32_crockford(
+                                        &recognized.staged.sender,
+                                    );
+                                    let terms = &recognized.terms;
+                                    // The amount in the token's own decimals when
+                                    // they are known here; otherwise the exact
+                                    // base units, and why.
+                                    let amount =
+                                        match super::wallet_routes::token_decimals(&terms.token_id)
+                                        {
+                                            Ok(decimals) => format!(
+                                                "{} {}",
+                                                super::wallet_routes::format_base_units_for_display(
+                                                    terms.amount,
+                                                    decimals
+                                                ),
+                                                terms.token_id
+                                            ),
+                                            Err(e) => format!(
+                                                "{} base units of {} ({e})",
+                                                terms.amount, terms.token_id
+                                            ),
+                                        };
+                                    (format!("From: {sender} Amount: {amount}"), Some(sender))
+                                }
+                            }
+                        }
+                        crate::sdk::b0x_sdk::B0xEntryKind::Unrecognized { reason } => {
+                            (format!("Unverified: {reason}"), None)
+                        }
+                    };
+                    inbox_items.push(generated::InboxItem {
                         id: e.transaction_id.clone(),
-                        preview: match &e.transaction {
-                            dsm::types::operations::Operation::Transfer {
-                                amount,
-                                token_id,
-                                ..
-                            } => {
-                                let raw = amount.value();
-                                let tid_str = if token_id.is_empty() {
-                                    "ERA".to_string()
-                                } else {
-                                    String::from_utf8_lossy(token_id).into_owned()
-                                };
-                                let tid_upper = tid_str.to_uppercase();
-                                let formatted = if tid_upper == "DBTC" || tid_upper == "BTC" {
-                                    let scale: u64 = 100_000_000;
-                                    let whole = raw / scale;
-                                    let frac = raw % scale;
-                                    if frac == 0 {
-                                        format!("{}.0", whole)
-                                    } else {
-                                        let frac_str = format!("{:08}", frac);
-                                        let trimmed = frac_str.trim_end_matches('0');
-                                        format!("{}.{}", whole, trimmed)
-                                    }
-                                } else {
-                                    raw.to_string()
-                                };
-                                format!(
-                                    "From: {} Amount: {} {}",
-                                    e.sender_device_id, formatted, tid_upper
-                                )
-                            }
-                            dsm::types::operations::Operation::Generic { data, .. } => {
-                                format!("From: {} message:{} bytes", e.sender_device_id, data.len())
-                            }
-                            _ => format!("From: {} Amount: N/A", e.sender_device_id),
-                        },
-                        tick: e.tick,
-                        sender_id: Some(e.sender_device_id.clone()),
-                        payload: vec![],
+                        preview,
+                        sender_id,
                         is_stale_route: *freshness == RouteFreshness::PreviousTip,
-                    })
-                    .collect();
+                    });
+                }
 
                 let resp = generated::InboxResponse { items: inbox_items };
                 pack_envelope_ok(generated::envelope::Payload::InboxResponse(resp))
@@ -243,44 +195,29 @@ impl AppRouterImpl {
             "inbox.startPoller" => {
                 log::info!("[DSM_SDK] inbox.startPoller called");
                 crate::sdk::inbox_poller::start_poller();
-                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
-                    generated::StorageSyncResponse {
-                        success: true,
-                        pulled: 0,
-                        processed: 0,
-                        pushed: 0,
-                        errors: vec![],
-                    },
-                ))
+                // A connected application's requests are fetched beside the
+                // inbox (DSM Amendment A11).
+                if let Err(e) = crate::sdk::connect::wallet::resume_listener() {
+                    return err(format!("inbox.startPoller: the connect listener: {e}"));
+                }
+                pack_bytes_ok(Vec::new())
             }
             "inbox.stopPoller" => {
                 // Lifecycle stop (Activity.onStop). Declines while a transfer is
                 // mid-settlement so money in flight is never blocked on the user
                 // keeping the app on screen.
                 log::info!("[DSM_SDK] inbox.stopPoller called (lifecycle)");
-                crate::sdk::inbox_poller::stop_poller_for_lifecycle();
-                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
-                    generated::StorageSyncResponse {
-                        success: true,
-                        pulled: 0,
-                        processed: 0,
-                        pushed: 0,
-                        errors: vec![],
-                    },
-                ))
+                if let Err(e) = crate::sdk::inbox_poller::stop_poller_for_lifecycle() {
+                    return err(format!(
+                        "inbox.stopPoller: settlement state unreadable, the poller keeps running: {e}"
+                    ));
+                }
+                pack_bytes_ok(Vec::new())
             }
             "inbox.resume" => {
                 log::info!("[DSM_SDK] inbox.resume called");
                 crate::sdk::inbox_poller::resume_poller();
-                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
-                    generated::StorageSyncResponse {
-                        success: true,
-                        pulled: 0,
-                        processed: 0,
-                        pushed: 0,
-                        errors: vec![],
-                    },
-                ))
+                pack_bytes_ok(Vec::new())
             }
             other => err(format!("inbox invoke: unknown method '{other}'")),
         }

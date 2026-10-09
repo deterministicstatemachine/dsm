@@ -3,21 +3,18 @@
 //! # DSM SDK — Platform Integration Layer
 //!
 //! The `dsm_sdk` crate bridges the pure, deterministic [`dsm`] core library to
-//! platform-specific runtimes (Android/JNI, iOS/FFI, desktop test harnesses).
+//! platform-specific runtimes (Android/JNI, desktop test harnesses).
 //!
 //! ## Architecture: One Agnostic Ingress
 //!
 //! The crate is organised into three tiers:
 //!
-//! 1. **ABI shims** - platform-specific marshalling only, no semantic logic:
+//! 1. **ABI shim** - platform-specific marshalling only, no semantic logic:
 //!    - Android: `jni/unified_protobuf_bridge.rs` - `extern "system"` JNI exports
-//!    - iOS: `platform/ios/transport.rs` - `extern "C"` FFI exports
 //!
 //! 2. **Shared ingress** (`ingress`) - the single semantic boundary:
-//!    - Both shims translate ABI inputs into [`generated::IngressRequest`] and
-//!      call [`ingress::dispatch_ingress`].
-//!    - Equivalent Android and iOS operations map to the same `IngressRequest`
-//!      and produce the same `IngressResponse`.
+//!    - The shim translates ABI inputs into [`generated::IngressRequest`] and
+//!      calls [`ingress::dispatch_ingress`].
 //!
 //! 3. **SDK internals** - `sdk`, `handlers`, `bluetooth`, `bridge`, etc.
 //!
@@ -33,8 +30,6 @@
 //!                                              v
 //!                                        IngressRequest
 //!                                              |
-//! iOS:     Swift caller -> FFI shim -----------+
-//!                                              |
 //!                                              v
 //!                              ingress::dispatch_ingress
 //!                                              |
@@ -49,7 +44,7 @@
 //! | [`ingress`] | Shared platform-agnostic ingress dispatch |
 //! | [`sdk`] | High-level SDK facades (wallet, token, bilateral, DLV, Bitcoin tap) |
 //! | `jni` | Android JNI ABI shim (87+ `extern "system"` functions, cfg-gated) |
-//! | [`handlers`] | `AppRouter`, `BilateralHandler`, `UnilateralHandler` implementations |
+//! | [`handlers`] | `AppRouter` implementation and the BLE runtime |
 //! | [`bluetooth`] | BLE bilateral sessions, frame chunking, pairing orchestration |
 //! | [`bridge`] | Trait-object dispatch layer connecting handlers to core |
 //! | [`envelope`] | Envelope v3 construction, framing (`0x03` prefix), guard rails |
@@ -84,7 +79,6 @@
 //! - `jni` — Enables Android JNI entry points (`extern "system"` functions).
 //! - `bluetooth` — Enables BLE bilateral transport and pairing orchestration.
 //! - `storage` — Enables storage-node sync SDK and genesis publisher.
-//! - `dev-discovery` — Enables mDNS/network auto-discovery (development only).
 
 // DSM SDK Library – strict, fail-closed posture.
 #![deny(warnings)]
@@ -96,22 +90,14 @@
 // Clippy policy: minimal allows for legitimate reasons only.
 #![allow(clippy::module_inception)] // Style preference for mod naming
 #![allow(non_snake_case)] // Required: JNI function naming convention
-#![allow(dead_code)] // SDK surface area includes pre-wired handlers
 #![allow(clippy::type_complexity)] // Complex JNI/trait object signatures
 #![allow(clippy::macro_use_imports)] // Workaround for nightly clippy ICE on prost-generated repr attrs
 
 // Producer-side fused-anchor appliance client (offline-bearer release builder).
 pub mod anchor;
 
-// Expose policy module and enforce builtin integrity at library load.
+// Built-in token policies.
 pub mod policy;
-
-#[allow(dead_code)]
-#[ctor::ctor(unsafe)]
-fn _dsm_builtins_guard() {
-    // Zero-cost unless placeholder commit replaced; hash runs once on load.
-    crate::policy::builtins::assert_builtins_sound();
-}
 
 pub mod prelude;
 
@@ -119,9 +105,6 @@ pub mod prelude;
 pub mod jni;
 
 pub mod bridge;
-// crypto_performance module deleted: orphan benchmark helpers that only
-// referenced HashChainSDK + IdentitySDK, with no consumers outside the
-// orphaned performance_demo.rs file (also deleted).
 pub mod envelope;
 pub mod handlers;
 pub mod ingress;
@@ -137,13 +120,16 @@ pub mod wire;
 // Expose the file-based storage module (storage/mod.rs) so that `crate::storage::*`
 // works everywhere. Do not shadow it with an inline module.
 pub mod storage;
-// BLE backend registry (simple trait + OnceCell) for platform integration
-pub mod ble;
-// comprehensive_validation + crypto_performance_tests modules deleted:
-// orphaned HashChainSDK/IdentitySDK demos with no consumers.
 #[cfg(test)]
 pub(crate) mod test_support {
-    pub mod fake_node;
+    // Tests run against storage nodes on Postgres, never a fake one (owner,
+    // 2026-09-23, 2026-09-24).
+    pub mod appliance;
+    pub mod arrivals;
+    pub mod nodes;
+    mod nodes_tests;
+    pub mod one_device;
+    pub mod receipts;
     pub mod two_device;
 }
 #[cfg(test)]
@@ -154,8 +140,6 @@ mod envelope_tests;
 mod integration_tests;
 #[cfg(test)]
 mod tests;
-// encoding module removed per binary-only policy (no Base64/hex helpers in SDK)
-// b64 re-export removed per binary-only policy
 
 // Generated protobuf types
 #[cfg(any(test, feature = "test-utils"))]
@@ -173,20 +157,9 @@ pub use dsm::commitments;
 
 pub use logging::*;
 pub mod bluetooth;
-pub mod platform;
-
-// iOS protobuf-native transport functions (extern "C" for Swift bridging)
-#[cfg(target_os = "ios")]
-pub use platform::ios::transport::{
-    dsm_configure_env, dsm_dispatch_ingress_request, dsm_dispatch_startup_request,
-    dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk, dsm_initialize_sdk_context,
-    dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
-};
 
 pub mod runtime;
 
-// #[cfg(feature = "ffi")]
-// pub use runtime::dsm_init_runtime;
 use crate::storage_utils::ensure_storage_base_dir;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -197,8 +170,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 static BILATERAL_READY: AtomicBool = AtomicBool::new(false);
 
-/// STRICT init (default): requires storage dir + explicit env config.
-/// Allowed bypass ONLY when DSM_SDK_TEST_MODE=1 (hermetic tests).
+/// STRICT init: requires the storage dir and the env config.
 pub async fn init_dsm_sdk() -> Result<(), dsm::types::error::DsmError> {
     logging::init_android_device_logging();
     logging::init_panic_handler();
@@ -206,6 +178,18 @@ pub async fn init_dsm_sdk() -> Result<(), dsm::types::error::DsmError> {
     // Enforce storage base dir first.
     let base = ensure_storage_base_dir()?;
     log::info!("DSM storage base: {base:?}");
+
+    // The client store is a precondition of everything the SDK does, so it is
+    // opened here. A store this build refuses (a schema an older build left;
+    // beta does not migrate) fails startup in the store's own words. Unopened,
+    // the refusal surfaced later through whatever read the store first: on a
+    // phone that was the sealed-seed read, which reported a locked wallet.
+    crate::storage::client_db::init_database().map_err(|e| {
+        dsm::types::error::DsmError::storage(
+            format!("the client store: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
 
     // Load strict network config (or hermetic test config),
     // then install the multi-node registry.
@@ -323,14 +307,6 @@ pub(crate) fn derive_production_entropy(
     h.finalize().as_bytes().to_vec()
 }
 
-/// Seed the wallet-seed session cache (tests only). Replaces the legacy
-/// `set_cdevice_birth_binding_key_for_testing`: identity/EK/coins/at-rest derivations all re-root on
-/// this seed exactly as production re-roots on the mnemonic-derived seed.
-#[cfg(not(target_os = "android"))]
-pub fn set_wallet_seed_for_testing(seed: Vec<u8>) {
-    crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(seed);
-}
-
 /// The session-cached BIP39 wallet seed (unlocked via the mnemonic). Fails closed when the
 /// wallet is locked — the SDK context cannot be brought up without it.
 pub(crate) fn fetch_wallet_seed() -> Result<Vec<u8>, dsm::types::error::DsmError> {
@@ -350,7 +326,7 @@ pub fn is_sdk_context_initialized() -> bool {
 #[cfg(any(test, feature = "test-utils"))]
 pub fn reset_sdk_context_for_testing() {
     get_sdk_context().reset_for_testing();
-    crate::sdk::recovery_sdk::RecoverySDK::clear_cached_wallet_seed_for_testing();
+    crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
 }
 
 /// Get transport headers from SDK context for envelope v3
@@ -381,27 +357,20 @@ pub fn get_transport_headers_v3_bytes() -> Result<Vec<u8>, dsm::types::error::Ds
 
     let device_id = SDK_CONTEXT.device_id();
     let genesis_hash = SDK_CONTEXT.genesis_hash();
-    let seq = SDK_CONTEXT.sequence_number();
-
-    // chain_tip is a bilateral relationship-specific value owned entirely by the SDK.
-    // It must never be sent to the frontend or accepted back from it — doing so
-    // confuses the global device tip with the per-relationship h_n (§4 spec).
-    // The Headers.chain_tip field is reserved/ignored; always emit zeros.
-    let chain_tip = vec![0u8; 32];
-
-    // Validate field lengths
-    if device_id.len() != 32 {
-        return Err(dsm::types::error::DsmError::invalid_parameter(format!(
-            "device_id must be 32 bytes, got {}",
-            device_id.len()
-        )));
+    for (name, value) in [("device_id", &device_id), ("genesis_hash", &genesis_hash)] {
+        if value.len() != 32 {
+            return Err(dsm::types::error::DsmError::invalid_parameter(format!(
+                "{name} must be 32 bytes, got {}",
+                value.len()
+            )));
+        }
     }
 
+    // The headers name this device as a sender and nothing else: a
+    // relationship's tip is the SDK's own, never the frontend's.
     let headers = Headers {
         device_id,
-        chain_tip,
         genesis_hash,
-        seq,
     };
 
     let mut buf = Vec::new();
@@ -412,10 +381,8 @@ pub fn get_transport_headers_v3_bytes() -> Result<Vec<u8>, dsm::types::error::Ds
     Ok(buf)
 }
 
-/// Initialize bilateral SDK preconditions.
-///
-/// Enforces that SDK context and bilateral handler are installed,
-/// then performs device calibration for tick-rate normalization.
+/// Mark the bilateral SDK ready once its preconditions hold: the SDK context
+/// is initialized and the BLE stack is live.
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmError> {
     use dsm::types::error::DsmError;
@@ -426,29 +393,29 @@ pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmErro
         ));
     }
 
-    if crate::bridge::bilateral_handler().is_none() {
+    // Ready means the BLE stack is live — the handler steps run on — not only
+    // that the slot it is injected into exists: init installs that slot before
+    // any identity does.
+    if crate::bluetooth::get_global_bluetooth_manager().is_none() {
         return Err(DsmError::invalid_operation(
-            "Bilateral handler not installed (BiImpl)",
+            "the BLE stack is not built yet: init builds it once the identity exists",
         ));
     }
 
-    // Calibration: Hardware-specific tick rate normalization (Anti-Tick Drift)
-    // We force a calibration run to ensure the tick rate is adapted to the current device speed.
-    // This protects against "fast phone bans slow phone" scenarios.
-    log::info!("Running initialization calibration...");
-    let _ = dsm::utils::timeout::calibrate_device_performance().await;
-
     log::info!(
-        "Bilateral SDK preconditions satisfied (context + handler). Marking bilateral ready."
+        "Bilateral SDK preconditions satisfied (context + BLE stack). Marking bilateral ready."
     );
     BILATERAL_READY.store(true, Ordering::SeqCst);
     Ok(())
 }
 
+/// A build without the Android BLE stack has no bilateral runtime to make
+/// ready, and says so rather than reporting one.
 #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
 pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmError> {
-    log::debug!("initialize_bilateral_sdk: not available on this platform");
-    Ok(())
+    Err(dsm::types::error::DsmError::invalid_operation(
+        "no bilateral stack on this build: the offline protocol runs on Android with the bluetooth feature",
+    ))
 }
 
 /// Returns true once bilateral preconditions have been verified (context + handler).
@@ -465,10 +432,10 @@ pub fn is_sdk_fully_ready() -> bool {
 
 #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
 pub fn is_bilateral_ready() -> bool {
-    true
+    false
 }
 
 #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
 pub fn is_sdk_fully_ready() -> bool {
-    is_sdk_context_initialized()
+    is_sdk_context_initialized() && is_bilateral_ready()
 }

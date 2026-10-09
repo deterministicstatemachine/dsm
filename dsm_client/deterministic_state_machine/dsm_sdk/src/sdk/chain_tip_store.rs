@@ -24,8 +24,10 @@ impl SqliteChainTipStore {
 }
 
 impl ChainTipStore for SqliteChainTipStore {
-    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]> {
-        client_db::get_contact_chain_tip_raw(device_id)
+    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Result<Option<[u8; 32]>, DsmError> {
+        client_db::get_contact_chain_tip(device_id).map_err(|e| {
+            DsmError::storage(format!("contact chain tip: {e}"), None::<std::io::Error>)
+        })
     }
 
     fn set_contact_chain_tip(
@@ -44,7 +46,15 @@ impl ChainTipStore for SqliteChainTipStore {
                 client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
                 | client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
                 | client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => Ok(true),
-                _ => Ok(false),
+                client_db::bilateral_tip_sync::TipSyncOutcome::ParentMismatch { .. }
+                | client_db::bilateral_tip_sync::TipSyncOutcome::CanonicalMovedToDifferentTip {
+                    ..
+                } => Ok(false),
+                client_db::bilateral_tip_sync::TipSyncOutcome::InvariantViolation { message } => {
+                    Err(DsmError::InvalidState(format!(
+                        "SqliteChainTipStore: the stored relationship state is not usable: {message}"
+                    )))
+                }
             },
             Err(e) => Err(DsmError::InvalidState(format!(
                 "SqliteChainTipStore persist failed: {e}"

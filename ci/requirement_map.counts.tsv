@@ -1,0 +1,30 @@
+# Each shipped build's readings per state and code. `ci/requirement_map.py
+# check --counts` refuses a jump in an Indeterminate count larger than a tenth
+# (at least 3) until this file is changed in the same pull request, saying why;
+# every run prints the counts before and after. The node's rows come from a
+# Linux map (CI's). `no-definition` rows count the distinct symbols the
+# build's edges name that the map holds no definition of: other crates'
+# (OUTSIDE_SYMBOL), and the workspace's generated or macro-written code
+# (WORKSPACE_SYMBOL), which no check can read; a jump in either fails too.
+artifact	state	code	count
+android	dead	DEAD_NO_ROOT_PATH	1640
+android	indeterminate	IND_AMBIGUOUS_SELF_TYPE	14
+android	indeterminate	IND_DISPATCH_SELF_TYPE	8
+android	indeterminate	IND_NOT_CONSTRUCTED	2
+android	indeterminate	IND_NOT_DISPATCHED	12
+android	indeterminate	IND_UNINDEXED_ARTIFACT	34
+android	indeterminate	IND_UNLINKED_IMPL	12
+android	indeterminate	IND_UNRESOLVED_CALL	65
+android	no-definition	OUTSIDE_SYMBOL	2181
+android	no-definition	WORKSPACE_SYMBOL	2823
+android	not-in-artifact	NOT_IN_ARTIFACT	4596
+android	reached	REACHED	3450
+android	reached	REACHED_VIA_DISPATCH	8322
+node	dead	DEAD_NO_ROOT_PATH	6628
+node	indeterminate	IND_AMBIGUOUS_SELF_TYPE	10
+node	indeterminate	IND_UNLINKED_IMPL	291
+node	no-definition	OUTSIDE_SYMBOL	2107
+node	no-definition	WORKSPACE_SYMBOL	2760
+node	not-in-artifact	NOT_IN_ARTIFACT	2361
+node	reached	REACHED	310
+node	reached	REACHED_VIA_DISPATCH	50

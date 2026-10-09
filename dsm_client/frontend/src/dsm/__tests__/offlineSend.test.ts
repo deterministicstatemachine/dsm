@@ -37,13 +37,16 @@ function decodeRouterInvoke(reqBytes: Uint8Array): { route: string; args: Uint8A
   };
 }
 
-function prepareResponseBytes(commitmentHash: Uint8Array): Uint8Array {
+/** The SDK's answer to wallet.sendOffline: the prepare went out under this commitment. */
+function sendAnswerBytes(commitmentHash: Uint8Array): Uint8Array {
   const env = new pb.Envelope({
     version: 3,
     payload: {
-      case: 'bilateralPrepareResponse',
-      value: new pb.BilateralPrepareResponse({
-        commitmentHash: new pb.Hash32({ v: commitmentHash }),
+      case: 'bilateralTransferResponse',
+      value: new pb.BilateralTransferResponse({
+        success: true,
+        transactionHash: new pb.Hash32({ v: new Uint8Array(commitmentHash) }),
+        message: 'prepare sent over BLE',
       }),
     },
   });
@@ -64,21 +67,23 @@ describe('offlineSend', () => {
     warnSpy.mockRestore();
   });
 
-  test('delegates missing BLE address resolution to wallet.sendOffline', async () => {
+  // The send is what the user asked for, byte for byte, and nothing else:
+  // where the counterparty's appliance is over BLE is Rust's to know.
+  test('an offline send reaches wallet.sendOffline as what the user asked for, and nothing else', async () => {
     const to = new Uint8Array(32).fill(0x22);
     const commitmentHash = new Uint8Array(32).fill(0x99);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { route, args } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
       const argPack = pb.ArgPack.fromBinary(args);
-      const request = pb.BilateralPrepareRequest.fromBinary(argPack.body);
-      expect(request.counterpartyDeviceId).toEqual(to);
-      expect(request.transferAmountDisplay).toBe('1');
-      expect(request.tokenIdHint).toBe('ERA');
-      expect(request.memoHint).toBe('');
-      expect(request.bleAddress).toBe('');
-      return prepareResponseBytes(commitmentHash);
+      expect(argPack.body).toEqual(new pb.OfflineTransferRequest({
+        counterpartyDeviceId: to,
+        tokenId: 'ERA',
+        amount: '1',
+        memo: '',
+      }).toBinary());
+      return sendAnswerBytes(commitmentHash);
     };
 
     const promise = dsm.offlineSend({ to, amount: 1n, tokenId: 'ERA' });
@@ -93,36 +98,52 @@ describe('offlineSend', () => {
     await expect(promise).resolves.toEqual(expect.objectContaining({ accepted: true }));
   });
 
-  test('passes provided BLE address to wallet.sendOffline', async () => {
-    const to = new Uint8Array(32).fill(0x33);
-    const bleAddress = 'AA:BB:CC:DD:EE:FF';
-    const commitmentHash = new Uint8Array(32).fill(0x55);
+  // A transport error is liveness, never a failed transfer: the frame Kotlin
+  // raises for a failed connection names no step and may be about another
+  // peer. The send used to report any such frame as its own failure.
+  test("a BLE transport error fails no send; the send ends on Rust's word", async () => {
+    const to = new Uint8Array(32).fill(0x66);
+    const commitmentHash = new Uint8Array(32).fill(0x67);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { route, args } = decodeRouterInvoke(reqBytes);
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
+      const { route } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
-      const request = pb.BilateralPrepareRequest.fromBinary(pb.ArgPack.fromBinary(args).body);
-      expect(request.counterpartyDeviceId).toEqual(to);
-      expect(request.bleAddress).toBe(bleAddress);
-      return prepareResponseBytes(commitmentHash);
+      return sendAnswerBytes(commitmentHash);
     };
 
-    const promise = dsm.offlineSend({ to, amount: 7n, tokenId: 'ERA', bleAddress });
+    let settled = false;
+    const promise = dsm.offlineSend({ to, amount: 1n, tokenId: 'ERA' });
+    void promise.then(() => { settled = true; });
     await new Promise((resolve) => setTimeout(resolve, 0));
+
+    emit('ble.envelope.bin', frameEnvelope(new pb.Envelope({
+      version: 3,
+      payload: {
+        case: 'dsmBtMessage',
+        value: new pb.DsmBtMessage({
+          messageType: pb.BtMessageType.BTMSG_TYPE_ERROR,
+          payload: new Uint8Array(new pb.BleTransactionError({ errorCode: 133, message: 'connect failed' }).toBinary()),
+        }),
+      },
+    })));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
     emit('bilateral.event', new pb.BilateralEventNotification({
       eventType: pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE,
       commitmentHash,
       status: 'completed',
       message: 'done',
     }).toBinary());
-
     await expect(promise).resolves.toEqual(expect.objectContaining({ accepted: true }));
   });
 
-  test('surfaces bilateral prepare rejects from wallet.sendOffline', async () => {
+  // The peer's reject is a BLE event, never wallet.sendOffline's own answer:
+  // an answer of any other shape is refused as what it is.
+  test("an answer that is not the SDK's send answer is refused", async () => {
     const to = new Uint8Array(32).fill(0x44);
 
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { route } = decodeRouterInvoke(reqBytes);
       expect(route).toBe('wallet.sendOffline');
       const env = new pb.Envelope({
@@ -136,7 +157,10 @@ describe('offlineSend', () => {
     };
 
     await expect(dsm.offlineSend({ to, amount: 1n, tokenId: 'ERA' })).resolves.toEqual(
-      expect.objectContaining({ accepted: false, result: 'offline rejected' }),
+      expect.objectContaining({
+        accepted: false,
+        result: 'offlineSend: unexpected payload case bilateralPrepareReject',
+      }),
     );
   });
 });

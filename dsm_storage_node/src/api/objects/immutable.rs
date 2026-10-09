@@ -104,29 +104,26 @@ async fn put_immutable(
     // never the storage key; when present it is compared, and disagreement is
     // the caller's encoder disagreeing with the registry — a storage error.
     let addr = immutable_addr(namespace, body.as_ref());
-    let addr_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&addr);
+    let addr_b32 = dsm::utils::text_id::encode_base32_crockford(&addr);
 
     if let Some(expected) = headers.get("x-expected-addr").and_then(|v| v.to_str().ok()) {
-        let expected_bytes = dsm_sdk::util::text_id::decode_base32_crockford(expected.trim())
+        let expected_bytes = dsm::utils::text_id::decode_base32_crockford(expected.trim())
             .ok_or(StatusCode::BAD_REQUEST)?;
         if expected_bytes != addr {
+            // The caller's text is not logged: what it sent is its own, and
+            // the node's log records only what the node computed.
             log::warn!(
-                "immutable put: expected-addr mismatch (caller encoder disagrees): \
-                 expected={} computed={}",
-                expected,
-                addr_b32
+                "immutable put: expected-addr mismatch (caller encoder disagrees): computed={addr_b32}"
             );
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
-    let now_tick = state.current_tick.load(std::sync::atomic::Ordering::SeqCst);
     let outcome = crate::db::insert_immutable_object_if_absent(
         &state.db_pool,
         &addr_b32,
         &ns_raw,
         body.as_ref(),
-        now_tick.max(0) as u64,
     )
     .await
     .map_err(|e| {
@@ -160,12 +157,12 @@ async fn get_immutable(
     Extension(state): Extension<Arc<AppState>>,
     Path(addr): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let addr_bytes = dsm_sdk::util::text_id::decode_base32_crockford(addr.trim())
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let addr_bytes =
+        dsm::utils::text_id::decode_base32_crockford(addr.trim()).ok_or(StatusCode::BAD_REQUEST)?;
     if addr_bytes.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let addr_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&addr_bytes);
+    let addr_b32 = dsm::utils::text_id::encode_base32_crockford(&addr_bytes);
 
     let Some((namespace, payload)) = crate::db::get_immutable_object(&state.db_pool, &addr_b32)
         .await

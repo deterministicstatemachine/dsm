@@ -44,12 +44,10 @@
 //! another. This is where a plausible-looking provenance object stops being
 //! sufficient.
 
-use crate::common::domain_tags::{
-    TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE, TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT,
-};
+use crate::common::domain_tags::{TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::economic::credit::CreditSource;
-use crate::economic::lineage::ValidatedEconomicRoot;
+use crate::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::state::EconomicLeafState;
 use crate::economic::witness::EconomicTransitionWitness;
@@ -63,28 +61,180 @@ pub struct FundedCredit {
     pub amount: u64,
 }
 
-/// A peer transition this verifier has **already validated**.
+/// A peer transition this verifier has **already validated**, carrying the
+/// lineage it descends from.
 ///
 /// Holding one is evidence: it contains a [`ValidatedEconomicRoot`], which
 /// cannot be constructed except by validating. That is what makes the
 /// acyclicity rule a type property rather than a convention.
+///
+/// There are exactly TWO arms, and the absence of a third is the point. An
+/// unresolved SoFi position has selected no root, so it can never be a
+/// *validated* transition at all: the walk refuses it with
+/// `PeerLineageFailure::Unresolved` and produces no value of this type. An
+/// `UnresolvedSofi` arm would make "a validated transition whose root was
+/// never selected" representable — a contradiction, not a state. The boundary
+/// divides cleanly instead:
+///
+/// ```text
+/// unresolved SoFi -> the walk refuses; no ValidatedPeerTransition exists
+/// resolved SoFi   -> a transition may exist; peer debit REFUSES it (P15-9)
+/// single root     -> a transition exists; peer debit may proceed
+/// ```
+///
+/// **The lineage is authoritative, not advisory.** Both arms wrap one opaque
+/// [`PeerTransitionFacts`] rather than carrying named fields, because Rust
+/// gives an enum's variant fields the visibility of the enum itself: named
+/// public fields would let any caller assemble a `SingleRoot` around a genuine
+/// root and a genuine witness, which is exactly the forgery the discriminant
+/// exists to prevent. No accessor yields an OWNED payload either, so facts
+/// cannot be lifted out of one arm and re-wrapped in the other.
 #[derive(Debug, Clone)]
-pub struct ValidatedPeerTransition {
-    pub peer_genesis: [u8; 32],
-    pub peer_devid: [u8; 32],
-    pub validated_root: ValidatedEconomicRoot,
-    pub witness: EconomicTransitionWitness,
+pub enum ValidatedPeerTransition {
+    /// An ordinary single-root lineage — the only lineage eligible to be a
+    /// peer-debit source.
+    SingleRoot(PeerTransitionFacts),
+    /// A position whose SoFi route resolved and selected a concrete root.
+    ///
+    /// The root is genuine and the transition is fully validated, and it is
+    /// STILL refused as a debit source: P15-9 rules on lineage, not on whether
+    /// resolution happened. A boolean `is_unresolved` would get this wrong.
+    ///
+    /// **Nothing constructs this arm (E1c-3).** `validate_peer_step`
+    /// refuses every conditional claim, resolved or not, because a resolved
+    /// position's register cell still holds `C_q` — resolution is
+    /// verifier-local and never rewrites the cell. The arm exists so that when
+    /// the walk learns to traverse a resolved SoFi position, the refusal in
+    /// [`prevalidate_sender_debit`] is already there; until then no input can
+    /// reach that refusal, and it has no test that performs the forbidden
+    /// debit.
+    ResolvedSofi(PeerTransitionFacts),
+}
+
+/// The provenance a validated peer transition carries, whatever its lineage.
+///
+/// Its fields are private and it has no public constructor. That is what makes
+/// [`ValidatedPeerTransition`]'s variants unconstructible outside this module,
+/// and it is the whole reason the payload is a separate type.
+#[derive(Debug, Clone)]
+pub struct PeerTransitionFacts {
+    peer_genesis: [u8; 32],
+    peer_devid: [u8; 32],
+    validated_root: ValidatedEconomicRoot,
+    witness: EconomicTransitionWitness,
     /// The peer's P0–P6-proven AK, recovered during the walk — what the
     /// acceptance evidence's sender side must chain to.
-    pub proven_ak: Vec<u8>,
+    proven_ak: Vec<u8>,
     /// The peer's verified successor commitment — what the acceptance
     /// evidence's receipt `child_tip` must equal ("same bilateral step").
-    pub c_dsm_plus: [u8; 32],
+    c_dsm_plus: [u8; 32],
+    /// The verified successor's own parent on the peer's bilateral chain —
+    /// the other half of the `(embedded_parent, C_dsm+)` pair CORR.1 compares
+    /// with a bundle's `(trader_parent, trader_successor)`. From the VERIFIED
+    /// substrate, never from the bundle.
+    embedded_parent: [u8; 32],
     /// The exact operation the peer's VERIFIED successor evidence carried.
     /// The peer-debit predicate reasons about it directly (Transfer-only,
     /// online mode, addressed to the consumer) instead of trusting the
     /// descriptor's story about what the peer did.
-    pub verified_operation: crate::types::operations::Operation,
+    verified_operation: crate::types::operations::Operation,
+    /// The admission manifest the registered claim at this position names,
+    /// as the walk verified it. A release that names another manifest for
+    /// the same root is refused against this, not against a re-read cell.
+    admission_manifest_addr: [u8; 32],
+    /// The claim `advance_validated` accepted at this position: what a
+    /// setup of this peer names by `claim_ref` (SoFi Amendment S9).
+    accepted_claim: AcceptedClaim,
+}
+
+impl ValidatedPeerTransition {
+    /// The step verifier's constructor for an ordinary single-root step.
+    ///
+    /// **Only `peer_lineage`'s step verifier may call this.** It is the one
+    /// place that has proven every conjunct the label asserts: that the claim
+    /// final at the step's position decoded as a single-root claim, named
+    /// these coordinates, and advanced validation from its parent. A second
+    /// caller would be asserting a lineage rather than establishing one, and
+    /// `ci/peer_debit_lineage_authoritative.sh` fails the build if one appears.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn single_root_from_walk(
+        peer_genesis: [u8; 32],
+        peer_devid: [u8; 32],
+        validated_root: ValidatedEconomicRoot,
+        witness: EconomicTransitionWitness,
+        proven_ak: Vec<u8>,
+        c_dsm_plus: [u8; 32],
+        embedded_parent: [u8; 32],
+        verified_operation: crate::types::operations::Operation,
+        admission_manifest_addr: [u8; 32],
+        accepted_claim: AcceptedClaim,
+    ) -> Self {
+        Self::SingleRoot(PeerTransitionFacts {
+            peer_genesis,
+            peer_devid,
+            validated_root,
+            witness,
+            proven_ak,
+            c_dsm_plus,
+            embedded_parent,
+            verified_operation,
+            admission_manifest_addr,
+            accepted_claim,
+        })
+    }
+
+    /// PRIVATE on purpose: handing out `&PeerTransitionFacts` would let a
+    /// caller clone it and re-wrap it in the other arm.
+    fn facts(&self) -> &PeerTransitionFacts {
+        match self {
+            Self::SingleRoot(f) | Self::ResolvedSofi(f) => f,
+        }
+    }
+
+    pub fn peer_genesis(&self) -> &[u8; 32] {
+        &self.facts().peer_genesis
+    }
+
+    pub fn peer_devid(&self) -> &[u8; 32] {
+        &self.facts().peer_devid
+    }
+
+    /// The selected root. Both arms have one — that is why there is no third
+    /// arm.
+    pub fn validated_root(&self) -> &ValidatedEconomicRoot {
+        &self.facts().validated_root
+    }
+
+    /// The admission manifest the walk verified at this position.
+    pub fn admission_manifest_addr(&self) -> [u8; 32] {
+        self.facts().admission_manifest_addr
+    }
+
+    /// The claim the walk accepted at this position, as `advance_validated`
+    /// produced it.
+    pub fn accepted_claim(&self) -> &AcceptedClaim {
+        &self.facts().accepted_claim
+    }
+
+    pub fn witness(&self) -> &EconomicTransitionWitness {
+        &self.facts().witness
+    }
+
+    pub fn proven_ak(&self) -> &[u8] {
+        &self.facts().proven_ak
+    }
+
+    pub fn c_dsm_plus(&self) -> &[u8; 32] {
+        &self.facts().c_dsm_plus
+    }
+
+    pub fn embedded_parent(&self) -> &[u8; 32] {
+        &self.facts().embedded_parent
+    }
+
+    pub fn verified_operation(&self) -> &crate::types::operations::Operation {
+        &self.facts().verified_operation
+    }
 }
 
 /// The authenticated facts about the identity whose transition is being
@@ -120,11 +270,16 @@ pub struct ProvenanceContext<'a> {
     pub verified_operation: Option<&'a crate::types::operations::Operation>,
 }
 
-/// The live-quorum answer for one faucet ticket cell: the exact envelope
-/// bytes a quorum of the canonical set holds as the winner.
+/// The release that installed one generation of the native reserve: the
+/// exact envelope bytes a walk of the reserve lineage established as FINAL at
+/// that generation's cell (Part II §13), with the reserve state it succeeded.
+/// The verifier re-runs the construction predicate over both; nothing here is
+/// believed because a member returned it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FaucetTicketWin {
+pub struct ReserveReleaseWin {
     pub envelope_bytes: Vec<u8>,
+    /// `R_{generation − 1}`, validated by the walk from `R_0`.
+    pub parent: crate::economic::native_reserve::NativeReserveState,
 }
 
 /// Why a peer's lineage could not be resolved to a validated transition.
@@ -136,11 +291,20 @@ pub struct FaucetTicketWin {
 /// exhaust a budget into `Incomplete`, never into `Invalid`); `Invalid` is
 /// evidence that verified as wrong; `Quarantined` is a divergent write-once
 /// register cell — never retried, never hash-ordered, never overwritten.
+///
+/// `Unresolved` is the fourth answer, and it is none of the other three. The
+/// peer's claim at that position is present and authentic and has selected no
+/// root: a conditional SoFi position (`C_q`) whose route has not resolved.
+/// Calling that `Invalid` would report an honest counterparty as an
+/// authenticated forgery — a verdict that is permanent and quarantining —
+/// and calling it `Incomplete` would say a fetch might fix it, when nothing
+/// this verifier can fetch will. What resolves it is the route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerLineageFailure {
     Incomplete(String),
     Invalid(String),
     Quarantined(String),
+    Unresolved(String),
 }
 
 impl core::fmt::Display for PeerLineageFailure {
@@ -149,6 +313,7 @@ impl core::fmt::Display for PeerLineageFailure {
             Self::Incomplete(m) => write!(f, "peer lineage incomplete: {m}"),
             Self::Invalid(m) => write!(f, "peer lineage INVALID: {m}"),
             Self::Quarantined(m) => write!(f, "peer lineage QUARANTINED: {m}"),
+            Self::Unresolved(m) => write!(f, "peer lineage UNRESOLVED: {m}"),
         }
     }
 }
@@ -169,48 +334,16 @@ pub trait ProvenanceResolver {
         peer_economic_position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure>;
 
-    /// The winning claim for one faucet ticket, from a LIVE quorum read
-    /// against the CANONICAL set — q members returning byte-identical winner
-    /// bytes. `None` when no quorum-agreed winner exists, and the verifier
-    /// fails closed on it: a credit is not funded by a ticket nobody can
-    /// show was won.
-    fn winning_faucet_ticket(
+    /// The release that installed `generation` of the native reserve
+    /// `reserve_id`, final at its cell on a walk from the reserve's genesis
+    /// state. `Incomplete` while the lineage has not reached that generation
+    /// or its evidence cannot be read: a credit is not funded by a release
+    /// nobody can show was final, and not showing it yet is not a forgery.
+    fn native_reserve_release(
         &self,
-        faucet_id: &[u8; 32],
-        ticket_index: u64,
-    ) -> Option<FaucetTicketWin>;
-
-    /// The winning claim for one settlement slot `(vault_id,
-    /// parent_sequence)`, from a LIVE quorum read against THE SET THE VAULT
-    /// COMMITTED AT BIRTH, counted at the quorum it committed.
-    ///
-    /// The set is a parameter because the verifier's own configured fleet is
-    /// its opinion, not the vault's rule: a resolver holding some default set
-    /// would answer about a different register than the one this vault's
-    /// claims were written to. The caller must have required that quorum to be
-    /// canonical before calling.
-    ///
-    /// Returns the OBSERVATION, not an `Option`. The five answers mean
-    /// different things and carry different verdicts — a divergence is a
-    /// quarantine, an outage and an undecided binding are retryable, and none
-    /// of them is evidence that a credit was forged — so there is deliberately
-    /// no adapter here that could turn `Conflict` into "no winner".
-    ///
-    /// `resource_key` is the ONLY coordinate, and the caller derives it:
-    /// `k_v = H(DSM/binding-keyset ‖ c_n)`, where `c_n` already commits the
-    /// vault id and the generation. Passing those separately would admit a
-    /// triple that disagrees with itself, and would let a resolver answer
-    /// about a different key than the verifier asked about.
-    ///
-    /// This returns the RECORD's value identity, never the bundle bytes. The
-    /// verifier fetches those itself through `immutable_evidence` and re-hashes
-    /// them, so the resolver supplies bytes and never verdicts.
-    fn parent_binding_observation(
-        &self,
-        resource_key: &[u8; 32],
-        storage_set: &crate::ccb::StorageSetMembers,
-        quorum: u32,
-    ) -> crate::dlv::binding_observation::BindingObservation;
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure>;
 
     /// The network's root-register set as the local catalog resolves it.
     ///
@@ -236,6 +369,16 @@ pub trait ProvenanceResolver {
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
 
+    /// The certified key of the EK step at `addr` in `signer`'s chain, when
+    /// this verifier is a party to that relationship and holds the step: its
+    /// own record, written as each bilateral step completed. `None` when it
+    /// does not hold it. An acceptance check runs forward from a held step.
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
+
     /// The canonical `TokenPolicyV3` bytes rooted under `policy_commit` —
     /// the VERIFIER'S OWN anchoring in the token's public anchor, never
     /// counterparty-supplied bytes. Anchors are public identifiers (the
@@ -252,13 +395,36 @@ pub trait ProvenanceResolver {
     ) -> Result<Vec<u8>, PeerLineageFailure>;
 }
 
+/// A resolver's EK steps: the ones it holds, and the immutable store.
+struct ResolverEkSteps<'r>(&'r dyn ProvenanceResolver);
+
+impl crate::economic::peer_acceptance::EkSteps for ResolverEkSteps<'_> {
+    fn held(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.0.held_ek_step(signer, addr)
+    }
+
+    fn fetch(&self, addr: &[u8; 32]) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.0
+            .immutable_evidence(crate::common::domain_tags::TAG_DSM_EK_CERT_STEP, addr)
+    }
+}
+
 /// Why a credit is not funded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvenanceError {
-    /// A `0x0023` authorized-issuance credit failed one of the conjuncts:
-    /// the policy bytes, the signed body, the V1 support matrix, or the
-    /// k-of-N threshold over the exact issuance.
-    AuthorizedIssuanceInvalid(String),
+    /// A `0x005F` genesis-release credit failed one of its conjuncts: it
+    /// rides no `CreateToken`, the token's committed policy does not parse,
+    /// its release rule is not all-at-creation, or its genesis supply is not
+    /// a balance.
+    GenesisReleaseInvalid(String),
+    /// The token's committed policy could not be established for a
+    /// genesis release: not fetched, or the bytes did not re-hash to the
+    /// commit. The taxonomy survives, so an outage is retried.
+    GenesisReleasePolicy(PeerLineageFailure),
     /// A DLV successor's leg fails the applicable token policy — the SoFi
     /// Def 4.1 / Req 4.4 / Req 4.6 conjunct on every market movement and
     /// every release. The anchored bytes did not re-hash to the committed
@@ -283,12 +449,6 @@ pub enum ProvenanceError {
     PeerDebitIndexIsNotTheOperationDebit,
     /// The acceptance evidence failed to resolve or verify.
     AcceptanceEvidence(PeerLineageFailure),
-    /// A 0x0026 reserve-consumption clause failed — the message names the
-    /// exact clause.
-    DlvReserveConsumptionInvalid(String),
-    /// A 0x0027 settlement-payment clause failed — the message names the
-    /// exact clause.
-    DlvSettlementPaymentInvalid(String),
     /// The OWNER's economic lineage could not be resolved/validated at the
     /// descriptor's locator position (taxonomy preserved: an outage retries,
     /// a forgery does not).
@@ -296,6 +456,10 @@ pub enum ProvenanceError {
     /// The supplied peer transition's witness does not belong to the validated
     /// root it was handed with.
     PeerWitnessDoesNotMatchValidatedRoot,
+    /// P15-9: the peer's position descends from a SoFi conditional route, so
+    /// it is not an eligible debit source — regardless of whether that route
+    /// resolved and selected a concrete root.
+    SofiLineageNotEligible,
     /// The named peer mutation is not a debit of anything.
     PeerMutationIsNotADebit { index: u32 },
     /// The source funds a different asset than the credit it claims to fund.
@@ -315,41 +479,57 @@ pub enum ProvenanceError {
     /// The consumed-source leaf names a different consumer than this
     /// transition.
     ConsumedByAnotherOperation,
-    /// The source is defined but its semantics land in a later cut.
-    NotYetImplemented { class: u16 },
-    /// The descriptor names a faucet other than THE canonical one for the
+    /// The descriptor names a reserve other than THE canonical one for the
     /// claimant's authenticated network. The stop-the-line check: without it,
-    /// an invented faucet id is a fresh 800M-ticket universe.
-    NotTheCanonicalFaucet {
+    /// an invented reserve id is a second genesis supply.
+    NotTheCanonicalReserve {
         named: [u8; 32],
         canonical: [u8; 32],
     },
-    /// A ticket coordinate that does not exist in the protocol.
-    TicketIndexOutOfRange { index: u64 },
-    /// No quorum-agreed winner for this ticket. Fails closed.
-    FaucetTicketNotEstablished { ticket_index: u64 },
-    /// The winning envelope is not a valid claim, or names different
-    /// coordinates than the descriptor.
-    FaucetWinnerInvalid(&'static str),
-    /// The winner's claimant is not the identity under validation, or its
-    /// key is not the P0–P6-proven AK.
-    FaucetClaimantMismatch,
-    /// The winner binds a different economic position or operation digest
+    /// A release is never the genesis generation.
+    GenerationIsGenesis,
+    /// No final release at this generation could be established: the
+    /// reserve lineage has not reached it yet, or its evidence could not be
+    /// read. The taxonomy survives in `failure`, so an outage is retried and
+    /// never read as a forgery.
+    ReleaseNotEstablished {
+        generation: u64,
+        failure: PeerLineageFailure,
+    },
+    /// The established envelope is not a valid release, is not the successor
+    /// of the state the walk validated, or names different coordinates than
+    /// the descriptor.
+    ReleaseInvalid(&'static str),
+    /// The release's recipient is not the identity under validation, or the
+    /// claimant key is not the P0–P6-proven AK.
+    ReleaseRecipientMismatch,
+    /// The release binds a different economic position or operation digest
     /// than the transition under validation. Position + digest binding IS the
     /// non-reuse mechanism.
-    FaucetBindingMismatch,
-    /// The winner names a storage set other than the canonical one for the
-    /// claimant's network — a claim from a foreign register masquerading.
-    FaucetForeignSet,
-    /// The winner's bytes do not hash to the descriptor's evidence address.
-    FaucetEvidenceAddrMismatch,
+    ReleaseBindingMismatch,
+    /// The release names a storage set other than the canonical one for the
+    /// claimant's network — a release from a foreign register masquerading.
+    ReleaseForeignSet,
+    /// The release's bytes do not hash to the descriptor's evidence address.
+    ReleaseEvidenceAddrMismatch,
+    /// The claimant's network has no resolvable pinned register, decided
+    /// from what is in hand: an unknown network, or a candidate set that does
+    /// not re-derive the pinned id.
+    RegisterNotResolvable(&'static str),
+    /// The resolver could not establish the network's register set. Its
+    /// class is kept: an outage stays `Incomplete` and is retried, never read
+    /// as a verdict about the claimant (storage spec §4).
+    RegisterNotEstablished(PeerLineageFailure),
 }
 
 impl core::fmt::Display for ProvenanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::AuthorizedIssuanceInvalid(m) => {
-                write!(f, "authorized-issuance credit is invalid: {m}")
+            Self::GenesisReleaseInvalid(m) => {
+                write!(f, "genesis-release credit is invalid: {m}")
+            }
+            Self::GenesisReleasePolicy(e) => {
+                write!(f, "genesis-release token policy: {e}")
             }
             Self::MarketLegPolicy(m) => {
                 write!(f, "market leg token policy: {m}")
@@ -376,6 +556,11 @@ impl core::fmt::Display for ProvenanceError {
                 "named debit mutation is not THE balance debit the peer's operation performed"
             ),
             Self::AcceptanceEvidence(e) => write!(f, "acceptance evidence: {e}"),
+            Self::SofiLineageNotEligible => write!(
+                f,
+                "peer position descends from a SoFi route, which is not an eligible debit \
+                 source even once resolved (P15-9)"
+            ),
             Self::PeerWitnessDoesNotMatchValidatedRoot => write!(
                 f,
                 "credit provenance: the peer witness does not produce the validated root it was \
@@ -418,126 +603,169 @@ impl core::fmt::Display for ProvenanceError {
                 f,
                 "credit provenance: the consumed-source leaf names a different consuming operation"
             ),
-            Self::NotYetImplemented { class } => write!(
+            Self::NotTheCanonicalReserve { .. } => write!(
                 f,
-                "credit provenance: source class {class:#06x} has no acceptance semantics yet"
+                "credit provenance: not THE canonical native ERA reserve for the claimant's \
+                 authenticated network — an invented reserve id would be a second genesis \
+                 supply, and the descriptor agreeing with the release proves nothing"
             ),
-            Self::NotTheCanonicalFaucet { .. } => write!(
+            Self::GenerationIsGenesis => write!(
                 f,
-                "credit provenance: not THE canonical ERA faucet for the claimant's \
-                 authenticated network — an invented faucet id would be a fresh 800M-ticket \
-                 universe, and the descriptor agreeing with the winner proves nothing"
+                "credit provenance: generation 0 is the reserve's genesis state, never a release"
             ),
-            Self::TicketIndexOutOfRange { index } => write!(
+            Self::ReleaseNotEstablished {
+                generation,
+                failure,
+            } => write!(
                 f,
-                "credit provenance: ticket {index} is not a coordinate that exists"
+                "credit provenance: no final release established at reserve generation \
+                 {generation}: {failure}"
             ),
-            Self::FaucetTicketNotEstablished { ticket_index } => write!(
-                f,
-                "credit provenance: no quorum-agreed winner for ticket {ticket_index} — fail \
-                 closed; a credit is not funded by a ticket nobody can show was won"
-            ),
-            Self::FaucetWinnerInvalid(why) => {
-                write!(f, "credit provenance: faucet winner invalid: {why}")
+            Self::ReleaseInvalid(why) => {
+                write!(f, "credit provenance: reserve release invalid: {why}")
             }
-            Self::FaucetClaimantMismatch => write!(
+            Self::ReleaseRecipientMismatch => write!(
                 f,
-                "credit provenance: the winning claim's claimant is not the identity under \
-                 validation (or its key is not the P0–P6-proven AK — storage-node bearer \
+                "credit provenance: the release's recipient is not the identity under \
+                 validation (or the claimant key is not the P0–P6-proven AK — storage \
                  attribution is not this binding)"
             ),
-            Self::FaucetBindingMismatch => write!(
+            Self::ReleaseBindingMismatch => write!(
                 f,
-                "credit provenance: the winning claim binds a different economic position or \
+                "credit provenance: the release binds a different economic position or \
                  operation digest than this transition — position + digest binding is the \
-                 non-reuse mechanism, so a mismatch is a reuse attempt or a stale claim"
+                 non-reuse mechanism, so a mismatch is a reuse attempt or a stale release"
             ),
-            Self::FaucetForeignSet => write!(
+            Self::ReleaseForeignSet => write!(
                 f,
-                "credit provenance: the winning claim names a storage set other than the \
-                 canonical one for the claimant's network"
+                "credit provenance: the release names a storage set other than the canonical \
+                 one for the claimant's network"
             ),
-            Self::DlvReserveConsumptionInvalid(m) => {
-                write!(f, "credit provenance: reserve consumption refused: {m}")
-            }
-            Self::DlvSettlementPaymentInvalid(m) => {
-                write!(f, "credit provenance: settlement payment refused: {m}")
-            }
             Self::OwnerLineage(e) => {
                 write!(f, "credit provenance: owner lineage: {e}")
             }
-            Self::FaucetEvidenceAddrMismatch => write!(
+            Self::ReleaseEvidenceAddrMismatch => write!(
                 f,
-                "credit provenance: the winner's bytes do not hash to the descriptor's \
+                "credit provenance: the release's bytes do not hash to the descriptor's \
                  evidence address"
             ),
+            Self::RegisterNotResolvable(why) => {
+                write!(
+                    f,
+                    "credit provenance: the network's register is not resolvable: {why}"
+                )
+            }
+            Self::RegisterNotEstablished(e) => {
+                write!(
+                    f,
+                    "credit provenance: the network's register set is not established: {e}"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for ProvenanceError {}
 
-/// `SourceId` for an intra-transition move.
-pub fn same_transition_move_source_id(
-    economic_operation_id: &[u8; 32],
-    debit_mutation_index: u32,
-) -> [u8; 32] {
-    let mut h = dsm_domain_hasher(TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE);
-    h.update(economic_operation_id);
-    h.update(&debit_mutation_index.to_be_bytes());
-    *h.finalize().as_bytes()
-}
-
-/// SourceId for a DLV reserve consumption (0x0026):
-/// `H(tag ‖ 0x00 ‖ vault_id ‖ parent_sequence_be ‖ x)`. Derived from
-/// authenticated coordinates; the write-once settlement-receipt leaf is the
-/// non-reuse marker, so `requires_consumed_source_record` stays false.
-pub fn dlv_reserve_consumption_source_id(
-    vault_id: &[u8; 32],
-    parent_sequence: u64,
-    x: &[u8; 32],
-) -> [u8; 32] {
-    let mut h =
-        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_DLV_RESERVE_CONSUMPTION);
-    h.update(vault_id);
-    h.update(&parent_sequence.to_be_bytes());
-    h.update(x);
-    *h.finalize().as_bytes()
-}
-
-/// SourceId for a validated DLV settlement payment (0x0027):
-/// `H(tag ‖ 0x00 ‖ vault_id ‖ settlement_receipt_id)`. Non-reuse is the
-/// reserve-sequence Merkle CAS, so `requires_consumed_source_record` stays
-/// false.
-pub fn validated_dlv_settlement_payment_source_id(
-    vault_id: &[u8; 32],
-    settlement_receipt_id: &[u8; 32],
-) -> [u8; 32] {
-    let mut h = dsm_domain_hasher(
-        crate::common::domain_tags::TAG_DSM_ECON_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT,
-    );
-    h.update(vault_id);
-    h.update(settlement_receipt_id);
-    *h.finalize().as_bytes()
-}
-
-/// `SourceId` for a policy-authorized issuance.
+/// `SourceId` for a genesis release: one per creation.
 ///
-/// Derived only from authenticated coordinates, all of which the verifier has
-/// already required to equal the operation and the position under validation.
-/// The position and the operation digest are what make it unique per issuance
-/// event rather than per (asset, amount) pair.
-pub fn authorized_issuance_source_id(
-    body: &crate::economic::issuance::IssuanceAuthorizationBody,
+/// `H(tag ‖ 0x00 ‖ creator_genesis ‖ creator_devid ‖ u64_be(creator_position) ‖
+/// policy_commit)`. Every input is authenticated: the creator's coordinates
+/// are the position under validation, and `policy_commit` is the accepted
+/// `CreateToken`'s own. A token is created once, at one position of one
+/// lineage, so its release has exactly one source id.
+pub fn genesis_release_source_id(
+    creator_genesis: &[u8; 32],
+    creator_devid: &[u8; 32],
+    creator_economic_position: u64,
+    policy_commit: &[u8; 32],
 ) -> [u8; 32] {
-    let mut h =
-        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_AUTHORIZED_ISSUANCE);
-    h.update(&body.policy_commit);
-    h.update(&body.issuer_genesis);
-    h.update(&body.issuer_devid);
-    h.update(&body.issuer_economic_position.to_be_bytes());
-    h.update(&body.recipient_operation_digest);
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_GENESIS_RELEASE);
+    h.update(creator_genesis);
+    h.update(creator_devid);
+    h.update(&creator_economic_position.to_be_bytes());
+    h.update(policy_commit);
     *h.finalize().as_bytes()
+}
+
+/// Establish what a genesis release (`0x005F`, SoFi §51, Amendment S8) funds.
+///
+/// The asset is the accepted `CreateToken`'s own `policy_commit`, and the
+/// amount is the genesis supply the policy under that commit states — so the
+/// generic asset/amount equality in [`verify_credit_source`] forces the credit
+/// to be exactly the whole supply of exactly the new token. The policy names
+/// its creator, and only the creator's own transition releases it; the write
+/// set of that transition inserts the creation record from zero, so the
+/// creator's lineage releases it once.
+fn verify_genesis_release(
+    resolver: &dyn ProvenanceResolver,
+    ctx: &ProvenanceContext<'_>,
+) -> Result<FundedCredit, ProvenanceError> {
+    // The operation is the verified substrate's, never the descriptor's: the
+    // descriptor carries no asset and no amount to disagree with it.
+    let Some(crate::types::operations::Operation::CreateToken { policy_commit, .. }) =
+        ctx.verified_operation
+    else {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "a genesis release rides only the CreateToken that creates its token".into(),
+        ));
+    };
+    let policy_commit = *policy_commit;
+    // ERA's policy is Core's own (Amendment S11): answered from its bytes,
+    // never asked of a resolver, so a creation naming it is refused at once.
+    let bytes = if policy_commit == crate::core::token::era_policy::era_policy_commit() {
+        crate::core::token::era_policy::era_policy_bytes().to_vec()
+    } else {
+        resolver
+            .anchored_policy_bytes(&policy_commit)
+            .map_err(ProvenanceError::GenesisReleasePolicy)?
+    };
+    // Bytes that do not re-hash to the commit are not the policy; they supply
+    // nothing and prove nothing about the token.
+    if crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, &bytes)
+        != policy_commit
+    {
+        return Err(ProvenanceError::GenesisReleasePolicy(
+            PeerLineageFailure::Incomplete(
+                "policy bytes do not re-hash to the token's policy commit".into(),
+            ),
+        ));
+    }
+    let policy = crate::economic::token_policy::parse_token_policy(&bytes)
+        .map_err(|e| ProvenanceError::GenesisReleaseInvalid(format!("policy: {e}")))?;
+    // Only a device-created policy releases its supply at creation, and only
+    // to the creator it names (Amendment S8). A network-anchored policy names
+    // no creator and releases only through the network's reserve (S11).
+    let crate::economic::token_policy::Release::AllAtCreation {
+        creator_genesis,
+        creator_device_id,
+        ..
+    } = &policy.release
+    else {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's release rule does not release its supply at creation".into(),
+        ));
+    };
+    if (*creator_genesis, *creator_device_id) != (*ctx.genesis, *ctx.device_id) {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's policy names another creator".into(),
+        ));
+    }
+    let amount = u64::try_from(policy.genesis_supply).map_err(|_| {
+        ProvenanceError::GenesisReleaseInvalid(
+            "the genesis supply exceeds what one balance can hold".into(),
+        )
+    })?;
+    Ok(FundedCredit {
+        source_id: genesis_release_source_id(
+            ctx.genesis,
+            ctx.device_id,
+            ctx.economic_position,
+            &policy_commit,
+        ),
+        policy_commit,
+        amount,
+    })
 }
 
 /// `SourceId` for a peer's validated debit.
@@ -555,14 +783,34 @@ pub fn validated_peer_debit_source_id(
     *h.finalize().as_bytes()
 }
 
-/// What sender-side prevalidation establishes: the peer's validated debit is
-/// THE debit of an online Transfer addressed to the consumer, with these
-/// exact coordinates. Everything here comes from the peer's VERIFIED
-/// operation and witness — never from a descriptor's story about them.
+/// A peer debit proven ELIGIBLE: it is the debit of an online Transfer
+/// addressed to the consumer, with these exact coordinates, **and it descends
+/// from an ordinary single-root lineage**.
+///
+/// The lineage half is why this type is opaque. Downstream code should not
+/// have to remember P15-9 and re-derive it; holding one of these already means
+/// the question was asked and answered. Everything in it comes from the peer's
+/// VERIFIED operation and witness — never from a descriptor's story about
+/// them.
+///
+/// Named `EligiblePeerDebit` rather than `ValidatedPeerDebit` because that name
+/// is already taken by the wire-level `CreditSource::ValidatedPeerDebit` and
+/// its `CreditSourceValidatedPeerDebit` body; those are a claim, this is the
+/// proof, and they must not read as the same thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SenderDebitPrevalidated {
-    pub debit_asset: [u8; 32],
-    pub debit_amount: u64,
+pub struct EligiblePeerDebit {
+    debit_asset: [u8; 32],
+    debit_amount: u64,
+}
+
+impl EligiblePeerDebit {
+    pub fn debit_asset(&self) -> [u8; 32] {
+        self.debit_asset
+    }
+
+    pub fn debit_amount(&self) -> u64 {
+        self.debit_amount
+    }
 }
 
 /// The sender-side conjuncts of the `ValidatedPeerDebit` predicate — ONE
@@ -581,17 +829,35 @@ pub fn prevalidate_sender_debit(
     expected_peer_devid: &[u8; 32],
     peer_debit_mutation_index: u32,
     consumer_devid: &[u8; 32],
-) -> Result<SenderDebitPrevalidated, ProvenanceError> {
+) -> Result<EligiblePeerDebit, ProvenanceError> {
+    // ── P15-9, BEFORE any other conjunct ──────────────────────────────────
+    // Lineage, not resolution state. A `ResolvedSofi` peer has a perfectly
+    // good concrete root and a fully validated transition, and it is refused
+    // anyway: the rule is about where the position came from, so a boolean
+    // like `is_unresolved` would let exactly the resolved case through.
+    //
+    // This runs first so the refusal cannot be mistaken for a failure of one
+    // of the conjuncts below — and so it still holds for a SoFi transition
+    // whose witness and operation are impeccable.
+    //
+    // The match is exhaustive on purpose. A future arm cannot be added to
+    // `ValidatedPeerTransition` without the compiler forcing a ruling here.
+    let peer = match peer {
+        ValidatedPeerTransition::SingleRoot(_) => peer,
+        ValidatedPeerTransition::ResolvedSofi(_) => {
+            return Err(ProvenanceError::SofiLineageNotEligible)
+        }
+    };
     // A genuine validated root paired with an unrelated witness is the one
     // forgery the type system cannot prevent on its own.
-    if peer.witness.post_economic_root != peer.validated_root.economic_root()
-        || peer.peer_genesis != *expected_peer_genesis
-        || peer.peer_devid != *expected_peer_devid
+    if peer.witness().post_economic_root != peer.validated_root().economic_root()
+        || peer.peer_genesis() != expected_peer_genesis
+        || peer.peer_devid() != expected_peer_devid
     {
         return Err(ProvenanceError::PeerWitnessDoesNotMatchValidatedRoot);
     }
     let debit = peer
-        .witness
+        .witness()
         .mutations
         .get(peer_debit_mutation_index as usize)
         .ok_or(ProvenanceError::IndexOutOfRange {
@@ -604,7 +870,7 @@ pub fn prevalidate_sender_debit(
     // "Some peer had a validated debit" is not the semantics. The debit must
     // be the sender's ONLINE Transfer, addressed to THIS consumer, and the
     // named mutation must be THE debit that operation performed.
-    let (op_recipient, op_amount, op_asset) = match &peer.verified_operation {
+    let (op_recipient, op_amount, op_asset) = match peer.verified_operation() {
         crate::types::operations::Operation::Transfer {
             to_device_id,
             amount,
@@ -620,7 +886,7 @@ pub fn prevalidate_sender_debit(
     if op_asset != debit_asset || op_amount != debit_amount {
         return Err(ProvenanceError::PeerDebitIndexIsNotTheOperationDebit);
     }
-    Ok(SenderDebitPrevalidated {
+    Ok(EligiblePeerDebit {
         debit_asset,
         debit_amount,
     })
@@ -634,7 +900,6 @@ fn credit_delta(m: &EconomicLeafMutation) -> Option<([u8; 32], u64)> {
     let post = m.post_state.as_ref()?;
     let asset = match post {
         EconomicLeafState::Balance(b) => b.policy_commit,
-        EconomicLeafState::VaultReserve(r) => r.policy_commit,
         _ => return None,
     };
     let before = m
@@ -663,7 +928,6 @@ fn debit_delta(m: &EconomicLeafMutation) -> Option<([u8; 32], u64)> {
     }
     let asset = match m.pre_state.as_ref()? {
         EconomicLeafState::Balance(b) => b.policy_commit,
-        EconomicLeafState::VaultReserve(r) => r.policy_commit,
         _ => return None,
     };
     Some((asset, before - after))
@@ -690,190 +954,16 @@ pub fn verify_credit_source(
         })?;
 
     let funded = match source {
-        // ── 0x0023: POLICY-AUTHORIZED ISSUANCE (V1) ───────────────────────
+        // ── 0x005F: GENESIS RELEASE (SoFi §51) ───────────────────────────
         //
-        // Answers WHO HAD THE RIGHT TO CREATE THESE UNITS, from the committed
-        // token policy rather than the issuer's assertion.
-        //
-        // It does NOT answer whether the units are backed. There is no backing
-        // condition in the policy vocabulary to enforce, so "authorized" must
-        // never be read as "collateralized" — here or anywhere downstream.
-        CreditSource::AuthorizedIssuance(d) => {
-            let invalid = |m: String| ProvenanceError::AuthorizedIssuanceInvalid(m);
-            let op = ctx
-                .verified_operation
-                .ok_or_else(|| invalid("issuance requires the verified operation".into()))?;
-
-            // 1. The exact accepted operation's own issuance coordinates. Read
-            //    from the AUTHENTICATED successor, never from the descriptor.
-            let (op_policy_commit, op_amount, op_kind) = match op {
-                // THE AUTHORIZATION NEVER RIDES INSIDE THE OPERATION IT
-                // AUTHORIZES — and since the producer cut this is structural,
-                // not a check: Mint has no authorization fields at all. The
-                // `0x0029` signatures cover this operation's digest and live
-                // only in the evidence bundle the descriptor addresses.
-                crate::types::operations::Operation::Mint {
-                    policy_commit,
-                    amount,
-                    ..
-                } => (*policy_commit, amount.value(), "mint"),
-                // Reachable only if supply-at-creation is later enabled; today
-                // the route, the write-set table and the accepting layer all
-                // refuse it. Handled here so the arm covers the operations the
-                // descriptor may legitimately accompany rather than silently
-                // depending on which of the three refuses first.
-                crate::types::operations::Operation::CreateToken {
-                    policy_commit,
-                    initial_supply,
-                    ..
-                } => (*policy_commit, initial_supply.value(), "create_token"),
-                _ => {
-                    return Err(invalid(
-                        "an authorized-issuance credit requires a Mint or CreateToken".into(),
-                    ))
-                }
-            };
-            if op_amount == 0 {
-                return Err(invalid("issuance of zero units authorizes nothing".into()));
-            }
-
-            // 2. The evidence bundle, by exact content address.
-            let bundle_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
-                    &d.issuance_authorization_addr,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            // The descriptor's address is the INNER content identity —
-            // `H_dom(namespace, payload)` — the same form every other object
-            // in the evidence DAG (witness, manifest, authority, successor
-            // evidence) is addressed by, and the form the resolver's fetch
-            // path derives its store key from. The outer storage-object addr
-            // exists too, but an arm that committed to it would name an
-            // address no resolver can dereference.
-            if crate::storage_object::immutable_inner(
-                crate::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
-                &bundle_bytes,
-            ) != d.issuance_authorization_addr
-            {
-                return Err(invalid(
-                    "issuance evidence bytes do not hash to the descriptor's address".into(),
-                ));
-            }
-            let ev = crate::economic::issuance_authorization_evidence::
-                decode_issuance_authorization_evidence(&bundle_bytes)
-                .map_err(invalid)?;
-
-            // 3. The policy bytes ARE the policy: re-hash them to the commit
-            //    the OPERATION names. Nothing is fetched and nothing mutable
-            //    is trusted — the commit is the content hash.
-            let recomputed = crate::crypto::blake3::domain_hash_bytes(
-                crate::common::domain_tags::TAG_DSM_POLICY,
-                &ev.canonical_policy_bytes,
-            );
-            if recomputed != op_policy_commit {
-                return Err(invalid(
-                    "the carried policy bytes do not hash to the operation's policy commit".into(),
-                ));
-            }
-
-            // 4. The signed body states THIS issuance, on THIS lineage, at
-            //    THIS write-once position. Position + operation digest are the
-            //    non-reuse mechanism: the same bytes replayed at another
-            //    position carry the earlier one and fail here.
-            let b = &ev.body;
-            if b.policy_commit != op_policy_commit
-                || b.amount != op_amount
-                || b.issuer_genesis != *ctx.genesis
-                || b.issuer_devid != *ctx.device_id
-            {
-                return Err(invalid(
-                    "the issuance authorization states a different issuance".into(),
-                ));
-            }
-            if b.issuer_economic_position != ctx.economic_position {
-                return Err(invalid(
-                    "the issuance authorization is for a different economic position".into(),
-                ));
-            }
-            if b.recipient_operation_digest != witness.operation_digest {
-                return Err(invalid(
-                    "the issuance authorization is for a different operation".into(),
-                ));
-            }
-
-            // 5. The policy's issuance conditions, decided by the V1 support
-            //    matrix. Anything not independently foreign-verifiable refuses
-            //    rather than being ignored.
-            let policy =
-                crate::economic::issuance::parse_issuance_policy(&ev.canonical_policy_bytes)
-                    .map_err(|e| invalid(format!("issuance policy: {e}")))?;
-            crate::economic::issuance::check_issuance_permitted(
-                &policy,
-                op_kind,
-                op_amount,
-                ctx.device_id,
-            )
-            .map_err(|e| invalid(format!("issuance policy: {e}")))?;
-
-            // 6. k of N DISTINCT policy-named signers over the exact body.
-            //    Keys come from the POLICY; a key presented in the bundle that
-            //    the policy does not name is not a signer, however valid its
-            //    signature.
-            let digest = b
-                .signing_digest()
-                .map_err(|e| invalid(format!("issuance signing digest: {e}")))?;
-            let mut satisfied: Vec<usize> = Vec::new();
-            for (pk, sig) in &ev.signatures {
-                let Some(idx) = policy.signers.iter().position(|s| s == pk) else {
-                    continue;
-                };
-                if satisfied.contains(&idx) {
-                    continue;
-                }
-                if matches!(
-                    crate::crypto::sphincs::sphincs_verify(pk, &digest, sig),
-                    Ok(true)
-                ) {
-                    satisfied.push(idx);
-                }
-            }
-            if (satisfied.len() as u32) < policy.threshold {
-                return Err(invalid(format!(
-                    "issuance authorized by {} distinct policy signer(s), threshold is {}",
-                    satisfied.len(),
-                    policy.threshold
-                )));
-            }
-
-            FundedCredit {
-                source_id: authorized_issuance_source_id(b),
-                policy_commit: op_policy_commit,
-                amount: op_amount,
-            }
-        }
-
-        // Intra-transition, and the ONLY arm that reaches nothing outside.
-        CreditSource::SameTransitionMove(m) => {
-            let debit = witness
-                .mutations
-                .get(m.debit_mutation_index as usize)
-                .ok_or(ProvenanceError::IndexOutOfRange {
-                    index: m.debit_mutation_index,
-                })?;
-            let (debit_asset, debit_amount) =
-                debit_delta(debit).ok_or(ProvenanceError::PeerMutationIsNotADebit {
-                    index: m.debit_mutation_index,
-                })?;
-            FundedCredit {
-                source_id: same_transition_move_source_id(
-                    &witness.economic_operation_id,
-                    m.debit_mutation_index,
-                ),
-                policy_commit: debit_asset,
-                amount: debit_amount,
-            }
-        }
+        // The creator's credit of a native token's whole genesis supply, in
+        // the transition that creates the token. Established from the
+        // accepted `CreateToken` and the policy its `policy_commit` names,
+        // fetched under `TAG_DSM_POLICY` and re-hashed to that commit: the
+        // credit goes to the creating device, its asset is the new token, its
+        // amount is exactly the policy's genesis supply, and the policy's
+        // release rule is `AllAtCreation`. No signer authorizes it.
+        CreditSource::GenesisRelease(_) => verify_genesis_release(resolver, ctx)?,
 
         CreditSource::ValidatedPeerDebit(p) => {
             // The resolver returns a VALIDATED transition or nothing. It
@@ -895,7 +985,8 @@ pub fn verify_credit_source(
                 p.peer_debit_mutation_index,
                 ctx.device_id,
             )?;
-            let (debit_asset, debit_amount) = (prevalidated.debit_asset, prevalidated.debit_amount);
+            let (debit_asset, debit_amount) =
+                (prevalidated.debit_asset(), prevalidated.debit_amount());
             // ── The acceptance — recipient-produced, never the proposal ────
             // The bundle's bytes are fetched by content address and verified
             // HERE: sender chain to the peer's proven AK, recipient chain to
@@ -916,9 +1007,6 @@ pub fn verify_credit_source(
                     ),
                 ));
             }
-            let mut fetch_step = |addr: &[u8; 32]| {
-                resolver.immutable_evidence(crate::common::domain_tags::TAG_DSM_EK_CERT_STEP, addr)
-            };
             // The consuming transition's OWN successor pair — a peer-debit
             // credit can only ride a DSM successor, and the bundle's B-side
             // pair must be exactly that successor's, never self-selected.
@@ -931,7 +1019,7 @@ pub fn verify_credit_source(
                 &bundle_bytes,
                 &crate::economic::peer_acceptance::AcceptanceParty {
                     devid: p.peer_devid,
-                    proven_ak: &peer.proven_ak,
+                    proven_ak: peer.proven_ak(),
                 },
                 &crate::economic::peer_acceptance::AcceptanceParty {
                     devid: *ctx.device_id,
@@ -940,10 +1028,13 @@ pub fn verify_credit_source(
                 // The wire carries the UNSIGNED canonical preimage; the
                 // walker verified the SIGNED operation — clear before
                 // comparing or the equality can never hold.
-                &peer.verified_operation.with_cleared_signature().to_bytes(),
-                &peer.c_dsm_plus,
+                &peer
+                    .verified_operation()
+                    .with_cleared_signature()
+                    .to_bytes(),
+                peer.c_dsm_plus(),
                 &expected_b_pair,
-                &mut fetch_step,
+                &ResolverEkSteps(resolver),
             )
             .map_err(ProvenanceError::AcceptanceEvidence)?;
             FundedCredit {
@@ -958,655 +1049,87 @@ pub fn verify_credit_source(
             }
         }
 
-        CreditSource::DlvReserveConsumption(d) => {
-            let invalid = |m: String| ProvenanceError::DlvReserveConsumptionInvalid(m);
-            // ── 0. The operation IS the settle ─────────────────────────────
-            // Everything the descriptor claims is cross-checked against the
-            // VERIFIED substrate operation — one source, derived inside
-            // `advance_validated`, never a caller assertion.
-            let op = ctx.verified_operation.ok_or_else(|| {
-                invalid("a reserve consumption requires the verified settle operation".into())
-            })?;
-            let crate::types::operations::Operation::DlvSettle {
-                vault_id: op_vault,
-                owner_public_key,
-                owner_devid,
-                owner_genesis,
-                input_policy_commit,
-                output_policy_commit,
-                parent_sequence,
-                parent_binding,
-                route_commit_bytes,
-                external_commitment_x,
-                input_amount,
-                output_amount,
-                fee_bps,
-                settler_public_key,
-                settler_devid,
-                ..
-            } = op
-            else {
-                return Err(invalid(
-                    "a reserve consumption funds only a DlvSettle output".into(),
-                ));
-            };
-            let vault: [u8; 32] = op_vault
-                .as_slice()
-                .try_into()
-                .map_err(|_| invalid("vault id is not 32 bytes".into()))?;
-            // ── 1. Descriptor ↔ operation coordinate equality ─────────────
-            if d.vault_id != vault
-                || d.parent_sequence != *parent_sequence
-                || d.x != *external_commitment_x
-            {
-                return Err(invalid(
-                    "descriptor coordinates do not equal the operation's".into(),
-                ));
-            }
-            // The transition under validation IS the trader's: the settler
-            // named by the signed operation must be the authenticated
-            // identity whose lineage this is.
-            // VDS.COMMON.12 through the ONE typed check. A wrong-width key is
-            // refused at construction: DevID bytes can never be an AK here.
-            {
-                use crate::dlv::successor_validity::{
-                    check_settler_correspondence, AuthorityPublicKey, DevId,
-                };
-                let embedded = AuthorityPublicKey::try_new(settler_public_key);
-                let proven = AuthorityPublicKey::try_new(ctx.proven_ak);
-                let ok = match (embedded, proven) {
-                    (Ok(e), Ok(p)) => check_settler_correspondence(
-                        &e,
-                        &DevId(*settler_devid),
-                        &p,
-                        &DevId(*ctx.device_id),
-                    )
-                    .is_ok(),
-                    _ => false,
-                };
-                if !ok {
-                    return Err(invalid(
-                        "the settle's settler is not the identity under validation".into(),
-                    ));
-                }
-            }
-            // ── 2. The evidence bundle, by exact content address ──────────
-            let bundle_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
-                    &d.reserve_consumption_evidence_addr,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            // INNER content identity — `H_dom(namespace, payload)` — the form
-            // every object in the evidence DAG is addressed by, and the form
-            // the resolver's fetch derives its store key from. The outer
-            // storage-object addr exists too, but an arm committing to it
-            // names an address no resolver can dereference, which made this
-            // arm unsatisfiable by any producer emission. Matches the 0x0023
-            // arm above.
-            if crate::storage_object::immutable_inner(
-                crate::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
-                &bundle_bytes,
-            ) != d.reserve_consumption_evidence_addr
-            {
-                return Err(invalid(
-                    "evidence bytes do not hash to the descriptor's address".into(),
-                ));
-            }
-            let ev =
-                crate::economic::reserve_consumption_evidence::decode_reserve_consumption_evidence(
-                    &bundle_bytes,
-                )
-                .map_err(invalid)?;
-            // ── 3. The exact parent vault state: hash-to-c_n, then decode ──
-            {
-                let mut h = crate::crypto::blake3::dsm_domain_hasher(
-                    crate::common::domain_tags::TAG_DSM_VAULT_STATE,
-                );
-                h.update(&ev.exact_vault_state_ccb);
-                if *h.finalize().as_bytes() != *parent_binding {
-                    return Err(invalid(
-                        "the carried CCB(V_n) does not hash to the settle's parent binding".into(),
-                    ));
-                }
-            }
-            let vn = crate::ccb::decode::decode_vault_state(&ev.exact_vault_state_ccb)
-                .map_err(|e| invalid(format!("V_n does not decode: {e}")))?;
-            if vn.vault_id != vault || vn.generation != *parent_sequence {
-                return Err(invalid(
-                    "V_n names a different vault or generation than the settle".into(),
-                ));
-            }
-            // Pair identity: {input, output} must BE V_n's market pair.
-            let (lo, hi) = if input_policy_commit < output_policy_commit {
-                (input_policy_commit, output_policy_commit)
-            } else {
-                (output_policy_commit, input_policy_commit)
-            };
-            if vn.market_policy.token_a() != lo || vn.market_policy.token_b() != hi {
-                return Err(invalid(
-                    "the settle's assets are not V_n's market pair".into(),
-                ));
-            }
-            if vn.fee_policy.fee_bps() != *fee_bps {
-                return Err(invalid("the settle's fee is not V_n's fee".into()));
-            }
-            // THE VAULT'S EXCLUSIVITY RULE, checked as soon as `V_n` is
-            // decoded and before anything downstream relies on it. The
-            // committed quorum must BE the canonical strict majority of the
-            // committed set: a smaller one lets two disjoint claims each reach
-            // quorum, which is two winners for one generation.
-            crate::economic::cell_observation::require_canonical_quorum(
-                vn.storage_set.len(),
-                vn.quorum,
-            )
-            .map_err(|e| invalid(format!("the vault's committed quorum: {e}")))?;
-            // ── 4. THE TWO-AXIS OWNER JOIN ────────────────────────────────
-            // Axis A: V_n itself names the owner identity.
-            if vn.owner_genesis_id != *owner_genesis || vn.owner_device_id != *owner_devid {
-                return Err(invalid(
-                    "V_n names a different owner than the settle".into(),
-                ));
-            }
-            // Axis B: the VAULT-BOUND authority (invariant across market
-            // successors) must independently resolve under the same
-            // (G, DevID) at V_n's own bound position. This is a DIFFERENT
-            // coordinate from the owner's economic-manifest authority
-            // position — the owner's device-authority lineage may advance
-            // after vault creation, and collapsing the axes would make a
-            // long-lived vault unspendable.
-            let vault_authority = crate::economic::authority_evidence::verify_authority_evidence(
-                &ev.owner_authority_evidence,
-                owner_genesis,
-                owner_devid,
-                &vn.owner_authority_transition_digest,
-            )
-            .map_err(|e| invalid(format!("vault-bound owner authority: {e}")))?;
-            if vault_authority.proven_ak.as_slice() != owner_public_key.as_slice() {
-                return Err(invalid(
-                    "the settle's owner key is not the vault-bound proven authority".into(),
-                ));
-            }
-            // ── 5. The owner's VALIDATED economic root at the locator ─────
-            // The locator is untrusted; the walk independently derives
-            // ValidatedEconomicRoot(position), and the reserve facts are
-            // proven against exactly that root.
-            let owner = resolver
-                .validated_peer_transition(owner_genesis, owner_devid, d.owner_economic_position)
-                .map_err(ProvenanceError::OwnerLineage)?;
-            let owner_root = owner.validated_root.economic_root();
-            // THE PROOF SOURCE IS THE GENERIC ARTIFACT — one object, shared
-            // by both directions of a settlement, rather than a second copy
-            // of the same leaves inside this bundle. Fetched by the INNER
-            // content identity like every object in this DAG, re-hashed to
-            // the address the bundle names, and then verified against the
-            // owner, position and root THIS ARM derived. Nothing a locator
-            // said is an input to that check.
-            let proof_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-                    &ev.economic_proof_addr,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            if crate::storage_object::immutable_inner(
-                crate::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-                &proof_bytes,
-            ) != ev.economic_proof_addr
-            {
-                return Err(invalid(
-                    "economic proof bytes do not hash to the bundle's address".into(),
-                ));
-            }
-            let artifact =
-                crate::economic::proof_artifact::decode_economic_proof_artifact(&proof_bytes)
-                    .map_err(invalid)?;
-            artifact
-                .verify_against(
-                    owner_genesis,
-                    owner_devid,
-                    d.owner_economic_position,
-                    &owner_root,
-                )
-                .map_err(invalid)?;
-            // EXACTLY the two leaves this settlement consumes: this vault, at
-            // the generation it names. An artifact proving a different
-            // generation, or another vault of the same owner, is a valid proof
-            // of something else — it says nothing about this trade, so the
-            // selection is an equality on both coordinates and a count, never
-            // a search for something usable.
-            let mut legs: Vec<&crate::economic::state::EconomicVaultReserveState> = artifact
-                .states()
-                .filter_map(|s| match s {
-                    crate::economic::state::EconomicLeafState::VaultReserve(v)
-                        if v.vault_id == vault && v.vault_sequence == *parent_sequence =>
-                    {
-                        Some(v)
-                    }
-                    _ => None,
-                })
-                .collect();
-            if legs.len() != 2 {
-                return Err(invalid(format!(
-                    "the owner's proof carries {} reserve leaves for this vault at generation \
-                     {parent_sequence}, not the pair this settlement consumes",
-                    legs.len()
-                )));
-            }
-            legs.sort_by_key(|l| l.policy_commit);
-            let (pc_a, amount_a) = (legs[0].policy_commit, legs[0].amount);
-            let (pc_b, amount_b) = (legs[1].policy_commit, legs[1].amount);
-            if pc_a != *lo || pc_b != *hi {
-                return Err(invalid(
-                    "the proven reserve legs are not V_n's pair in canonical order".into(),
-                ));
-            }
-            // The PROVEN leaves must equal V_n's own reserve statement — the
-            // two representations of one fact may not disagree.
-            if amount_a != vn.reserve_a || amount_b != vn.reserve_b {
-                return Err(invalid(
-                    "the proven reserve leaves disagree with V_n's reserves".into(),
-                ));
-            }
-            let (reserve_in, reserve_out) = if *input_policy_commit == pc_a {
-                (amount_a, amount_b)
-            } else {
-                (amount_b, amount_a)
-            };
-            // ── 6. Sufficiency ────────────────────────────────────────────
-            if reserve_out < *output_amount {
-                return Err(invalid(
-                    "the vault cannot pay that settlement output".into(),
-                ));
-            }
-            // ── 7. The RouteCommit: pure verification + exact re-simulation
-            let hop = crate::dlv::route_commit::verify_route_commit_hop(
-                route_commit_bytes,
-                &vault,
-                parent_binding,
-            )
-            .map_err(|e| invalid(format!("route commit: {e}")))?;
-            let rc = <crate::types::proto::RouteCommitV1 as prost::Message>::decode(
-                route_commit_bytes.as_slice(),
-            )
-            .map_err(|_| invalid("route commit does not decode".into()))?;
-            if crate::dlv::route_commit::compute_external_commitment(&rc) != *external_commitment_x
-            {
-                return Err(invalid(
-                    "the route commit does not derive the settle's X".into(),
-                ));
-            }
-            if hop.token_in != *input_policy_commit
-                || hop.token_out != *output_policy_commit
-                || hop.input_amount != *input_amount
-                || hop.expected_output != *output_amount
-                || hop.fee_bps != *fee_bps
-            {
-                return Err(invalid(
-                    "the bound hop does not state the settle's exact trade".into(),
-                ));
-            }
-            match crate::dlv::route_commit::constant_product_output(
-                *input_amount,
-                reserve_in,
-                reserve_out,
-                *fee_bps,
-            ) {
-                Some(out) if out == *output_amount => {}
-                _ => {
-                    return Err(invalid(
-                        "re-simulation does not yield the settle's exact output".into(),
-                    ))
-                }
-            }
-            // ── 8. THE BINDING: exclusivity's liveness anchor ────────────
-            // EVERY ANSWER MEANS SOMETHING DIFFERENT, and the verdicts differ.
-            // The taxonomy this file states — an outage retries, a forgery does
-            // not — is only true if it is preserved here: a divergence is a
-            // QUARANTINE, an unreadable or undecided key is RETRYABLE, and
-            // neither is evidence that this credit was forged. Collapsing them
-            // into "no winner" reports a network fault as a forgery and a
-            // forgery as a network fault.
-            //
-            // The key is derived HERE, from the parent state this settle names,
-            // so the resolver cannot answer about a different key than the one
-            // under validation.
-            let k_v = crate::dlv::settlement_bundle::resource_key(parent_binding);
-            let chosen = match resolver.parent_binding_observation(&k_v, &vn.storage_set, vn.quorum)
-            {
-                crate::dlv::binding_observation::BindingObservation::BoundFinal(c) => c,
-                crate::dlv::binding_observation::BindingObservation::Conflict {
-                    chosen, ..
-                } => {
-                    return Err(ProvenanceError::OwnerLineage(
-                        PeerLineageFailure::Quarantined(format!(
-                            "the binding key for this parent holds {} chosen values",
-                            chosen.len()
-                        )),
-                    ))
-                }
-                crate::dlv::binding_observation::BindingObservation::Unavailable {
-                    attributed,
-                    required,
-                } => {
-                    return Err(ProvenanceError::OwnerLineage(
-                        PeerLineageFailure::Incomplete(format!(
-                            "only {attributed} of the vault's members answered the \
-                             binding key ({required} required)"
-                        )),
-                    ))
-                }
-                // THE ARM THAT IS EASY TO GET BACKWARDS. A promise in flight, or
-                // an accepted record held by fewer members than THIS reader's
-                // quorum, is not a forgery: two quorums intersect, but one READ
-                // need not see the intersection, so a value already chosen
-                // behind a down member lands here. Mapping it to Invalid would
-                // make every concurrent settle permanently invalid.
-                crate::dlv::binding_observation::BindingObservation::Undetermined {
-                    attributed,
-                    ..
-                } => {
-                    return Err(ProvenanceError::OwnerLineage(
-                        PeerLineageFailure::Incomplete(format!(
-                            "the binding for this parent is not yet decided \
-                             ({attributed} members answered)"
-                        )),
-                    ))
-                }
-                // A quorum of members each explicitly hold NOTHING at this key.
-                // That IS evidence, and it says this settle never won
-                // exclusivity over the parent it names.
-                crate::dlv::binding_observation::BindingObservation::Free => {
-                    return Err(invalid("no binding was established for this parent".into()))
-                }
-            };
-            // The record's two identity fields must agree with each other
-            // before either is used to fetch anything.
-            if crate::storage_object::immutable_addr_from_inner(
-                crate::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
-                &chosen.value_digest,
-            ) != chosen.value_addr
-            {
-                return Err(invalid(
-                    "the bound record's digest and address disagree".into(),
-                ));
-            }
-            // The bundle, by the record's own value identity — BYTES, re-hashed
-            // here. The resolver never gets to assert what the bundle says.
-            //
-            // Evidence locality: the resolver fetches through its own configured
-            // fleet, while the bundle was written to the VAULT's committed set.
-            // In the beta deployment those are the same members. If they can
-            // diverge, this fetch is looking at the wrong fleet — which is why a
-            // miss is Incomplete (retryable), never Invalid.
-            let bundle_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
-                    &chosen.value_digest,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            // Strict decode and the whole-bundle round trip under the frozen
-            // encoder (2c-A.1 ruling 8); the identity is over exactly these
-            // bytes, which are the bytes that were fetched.
-            let decoded = crate::dlv::settlement_bundle::decode_canonical(&bundle_bytes)
-                .map_err(|e| invalid(format!("bound bundle: {e}")))?;
-            let bundle = decoded.bundle;
-            if crate::dlv::settlement_bundle::bundle_digest(&bundle_bytes) != chosen.value_digest
-                || crate::dlv::settlement_bundle::bundle_addr(&bundle_bytes) != chosen.value_addr
-            {
-                return Err(invalid(
-                    "the bound bundle does not hash to the record's identity".into(),
-                ));
-            }
-            // The bundle carries no storage set and no quorum (registry §5.19):
-            // binding authority is `V_n`'s own fields 14 and 15, which is the
-            // set this key was read at.
-            //
-            // AND IT NAMES THIS SETTLE'S PARENT. The register is
-            // application-blind (§22 #12) and never inspects the value it
-            // holds, so a proposer can bind a bundle at k(c_n) whose
-            // transition names some other parent. The transition is located by
-            // `parent_binding == c_n` (2c-A.1 ruling 7); the successor's own
-            // `vault_id` and generation must be this vault's next.
-            let transition = bundle
-                .transition_for_parent(parent_binding)
-                .ok_or_else(|| {
-                    invalid("the bound bundle does not name this settle's parent state".into())
-                })?;
-            if transition.successor.vault_id != vault {
-                return Err(invalid(
-                    "the bound bundle consumes no leg of this vault".into(),
-                ));
-            }
-            if transition.successor.generation != parent_sequence.saturating_add(1) {
-                return Err(invalid(
-                    "the bound bundle's successor is not this parent's next generation".into(),
-                ));
-            }
-            // THE TRADE IDENTITY. A close bundle has no market terms and is
-            // not a settle at all.
-            let terms = bundle.market_terms().ok_or_else(|| {
-                invalid("the bound bundle is an owner close, not a settle".into())
-            })?;
-            if terms.route_set_commitment != d.x {
-                return Err(invalid(
-                    "the bound bundle commits a different route set than this settle".into(),
-                ));
-            }
-            // AUTHORSHIP, without a claimant field to read. A SettlementBundle
-            // has none, and it does not need one: the bundle commits X, section
-            // 7 recomputed X from the RouteCommit's own bytes, that RouteCommit
-            // carries the initiator's signature, and section 1 established the
-            // settler IS `ctx.proven_ak`. So WHO pushed the bytes into the
-            // register is irrelevant — a third party binding this bundle binds
-            // THIS trade, to this trader. That content chain is strictly
-            // stronger than a self-asserted claimant field.
-            if hop.initiator_public_key.as_slice() != ctx.proven_ak {
-                return Err(invalid(
-                    "the bound route was not signed by the settling trader".into(),
-                ));
-            }
-            FundedCredit {
-                source_id: dlv_reserve_consumption_source_id(&vault, *parent_sequence, &d.x),
-                policy_commit: *output_policy_commit,
-                amount: *output_amount,
-            }
-        }
-        CreditSource::ValidatedDlvSettlementPayment(d) => {
-            let invalid = |m: String| ProvenanceError::DlvSettlementPaymentInvalid(m);
-            // ── 0. The operation IS the v2 owner apply ────────────────────
-            let op = ctx.verified_operation.ok_or_else(|| {
-                invalid("a settlement payment requires the verified apply operation".into())
-            })?;
-            let crate::types::operations::Operation::DlvOwnerApplyV2 {
-                vault_id: op_vault,
-                settlement_receipt_id,
-                pending_pointer_x,
-                parent_sequence,
-                new_sequence,
-                input_policy_commit,
-                output_policy_commit,
-                input_amount,
-                output_amount,
-                ..
-            } = op
-            else {
-                return Err(invalid(
-                    "a settlement payment funds only a DlvOwnerApplyV2 input credit".into(),
-                ));
-            };
-            let vault: [u8; 32] = op_vault
-                .as_slice()
-                .try_into()
-                .map_err(|_| invalid("vault id is not 32 bytes".into()))?;
-            // ── 1. Descriptor ↔ operation coordinate equality ─────────────
-            if d.vault_id != vault
-                || d.settlement_receipt_id != *settlement_receipt_id
-                || d.parent_sequence != *parent_sequence
-            {
-                return Err(invalid(
-                    "descriptor coordinates do not equal the operation's".into(),
-                ));
-            }
-            // ── 2. The trader's VALIDATED economic root at the locator ────
-            // The locator is untrusted; the walk independently derives
-            // ValidatedEconomicRoot(position). The trader's admitted payment
-            // — the receipt leaf — is then proven against exactly that root.
-            let trader = resolver
-                .validated_peer_transition(
-                    &d.trader_genesis,
-                    &d.trader_devid,
-                    d.trader_economic_position,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            let trader_root = trader.validated_root.economic_root();
-            // ── 3. The evidence bundle, by exact content address ──────────
-            let bundle_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
-                    &d.payment_evidence_addr,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            // INNER content identity, as in the 0x0023 and 0x0026 arms.
-            if crate::storage_object::immutable_inner(
-                crate::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
-                &bundle_bytes,
-            ) != d.payment_evidence_addr
-            {
-                return Err(invalid(
-                    "evidence bytes do not hash to the descriptor's address".into(),
-                ));
-            }
-            let ev =
-                crate::economic::settlement_payment_evidence::decode_settlement_payment_evidence(
-                    &bundle_bytes,
-                )
-                .map_err(invalid)?;
-            let receipt = &ev.receipt;
-            // ── 4. The receipt leaf IS the trader's admitted payment ──────
-            // (Its own constructor already re-derived receipt_id from
-            // (vault, x) and enforced the sequence/amount/asset rules at
-            // decode.) It must name exactly this settlement:
-            if receipt.vault_id != vault
-                || receipt.receipt_id != *settlement_receipt_id
-                || receipt.x != *pending_pointer_x
-                || receipt.parent_sequence != *parent_sequence
-                || receipt.new_sequence != *new_sequence
-                || receipt.input_policy_commit != *input_policy_commit
-                || receipt.input_amount != *input_amount
-                || receipt.output_policy_commit != *output_policy_commit
-                || receipt.output_amount != *output_amount
-            {
-                return Err(invalid(
-                    "the trader's receipt does not state this apply's exact settlement".into(),
-                ));
-            }
-            // Proven INCLUDED under the trader's validated root, at the
-            // trader's own leaf key.
-            let state =
-                crate::economic::state::EconomicLeafState::SettlementReceipt(receipt.clone());
-            let key = state.leaf_key(&d.trader_genesis, &d.trader_devid);
-            let value = state
-                .leaf_value()
-                .map_err(|e| invalid(format!("receipt leaf value: {e}")))?;
-            let derived = crate::economic::tree::root_from_path(
-                &key,
-                &crate::economic::tree::leaf_node(&key, Some(&value)),
-                &ev.receipt_siblings,
-            );
-            if derived != trader_root {
-                return Err(invalid(
-                    "the receipt does not prove into the trader's validated root".into(),
-                ));
-            }
-            // The INPUT the trader paid is what funds the owner's input-
-            // reserve credit. Non-reuse: after the first apply, the reserve
-            // pre-state at `parent_sequence` no longer exists in the owner's
-            // validated lineage — the Merkle CAS, not a consumed-source leaf.
-            FundedCredit {
-                source_id: validated_dlv_settlement_payment_source_id(
-                    &vault,
-                    settlement_receipt_id,
-                ),
-                policy_commit: *input_policy_commit,
-                amount: *input_amount,
-            }
-        }
-        CreditSource::VerifiedOfflineReentry(_) => {
-            return Err(ProvenanceError::NotYetImplemented { class: 0x0028 })
-        }
-
-        CreditSource::ValidatedFaucetDistribution(d) => {
-            use crate::economic::faucet;
+        CreditSource::NativeReserveRelease(d) => {
+            use crate::economic::native_reserve::{self, ReleaseSource};
 
             // 1. THE CANONICAL-ID RULE, first and unconditionally. The
             //    canonical id is DERIVED from the claimant's authenticated
-            //    network; comparing descriptor to winner proves nothing.
-            let canonical = faucet::era_faucet_id(ctx.network_id);
-            if d.faucet_id != canonical {
-                return Err(ProvenanceError::NotTheCanonicalFaucet {
-                    named: d.faucet_id,
+            //    network; comparing descriptor to release proves nothing.
+            let canonical = native_reserve::era_reserve_id(ctx.network_id);
+            if d.reserve_id != canonical {
+                return Err(ProvenanceError::NotTheCanonicalReserve {
+                    named: d.reserve_id,
                     canonical,
                 });
             }
-            // 2. The coordinate must exist.
-            if d.ticket_index >= faucet::ERA_FAUCET_TICKET_COUNT {
-                return Err(ProvenanceError::TicketIndexOutOfRange {
-                    index: d.ticket_index,
-                });
+            // 2. A release is never the genesis state.
+            if d.generation == 0 {
+                return Err(ProvenanceError::GenerationIsGenesis);
             }
-            // 3. A quorum-agreed winner, live, from the canonical set.
+            // 3. The final release at that generation, on a walk of the ONE
+            //    reserve lineage from R_0 — leader first over the committed
+            //    set, nothing counted.
             let win = resolver
-                .winning_faucet_ticket(&d.faucet_id, d.ticket_index)
-                .ok_or(ProvenanceError::FaucetTicketNotEstablished {
-                    ticket_index: d.ticket_index,
+                .native_reserve_release(&d.reserve_id, d.generation)
+                .map_err(|failure| ProvenanceError::ReleaseNotEstablished {
+                    generation: d.generation,
+                    failure,
                 })?;
-            // 4. The winner is a strictly valid claim for THESE coordinates.
-            let claim = faucet::decode_and_verify_faucet_ticket_claim(&win.envelope_bytes)
-                .map_err(|_| ProvenanceError::FaucetWinnerInvalid("does not verify"))?;
-            if claim.body.faucet_id != d.faucet_id || claim.body.ticket_index != d.ticket_index {
-                return Err(ProvenanceError::FaucetWinnerInvalid(
-                    "winner names different coordinates than the descriptor",
+            // 4. The release verifies and IS the successor of the state the
+            //    walk validated: `remaining' = remaining − amount`, so the
+            //    amount below cannot exceed what the reserve held.
+            let release = native_reserve::decode_and_verify_release(&win.envelope_bytes)
+                .map_err(|_| ProvenanceError::ReleaseInvalid("does not verify"))?;
+            native_reserve::release_constructible(&win.parent, &release).map_err(|_| {
+                ProvenanceError::ReleaseInvalid("is not the successor of its parent")
+            })?;
+            if release.body.reserve_id != d.reserve_id || release.body.generation != d.generation {
+                return Err(ProvenanceError::ReleaseInvalid(
+                    "release names different coordinates than the descriptor",
                 ));
             }
-            // 5. The winner's claimant IS the identity under validation, and
-            //    its key IS the P0–P6-proven AK.
-            if claim.body.claimant_genesis != *ctx.genesis
-                || claim.body.claimant_devid != *ctx.device_id
-                || claim.body.claimant_public_key != ctx.proven_ak
+            // 5. THE RECIPIENT IS THE CLAIMANT: the release names the identity
+            //    under validation, and the claimant key that signed it IS the
+            //    P0–P6-proven AK. `FaucetClaim(A, x) ⇒ recipient = A`.
+            let ReleaseSource::FaucetClaimant {
+                claimant_public_key,
+                ..
+            } = &release.body.source;
+            if release.body.recipient_genesis != *ctx.genesis
+                || release.body.recipient_devid != *ctx.device_id
+                || claimant_public_key != ctx.proven_ak
             {
-                return Err(ProvenanceError::FaucetClaimantMismatch);
+                return Err(ProvenanceError::ReleaseRecipientMismatch);
             }
-            // 6. NON-REUSE: the envelope commits ONE target position (whose
-            //    register cell is itself write-once) and ONE exact operation.
+            // 6. NON-REUSE: the release commits ONE target position (whose
+            //    register cell is itself final once) and ONE exact operation.
             //    Digest alone would be circular for a minimal no-nonce
             //    operation — two claims' bytes can be identical — so the
             //    position is what makes it sound; the digest pins WHICH
             //    transition.
-            if claim.body.claimant_economic_position != ctx.economic_position
-                || claim.body.recipient_operation_digest != witness.operation_digest
+            if release.body.recipient_economic_position != ctx.economic_position
+                || release.body.recipient_operation_digest != witness.operation_digest
             {
-                return Err(ProvenanceError::FaucetBindingMismatch);
+                return Err(ProvenanceError::ReleaseBindingMismatch);
             }
-            // 7. The claim was won in the CANONICAL set for this network —
-            //    accepting whatever set the winner names would let a foreign
-            //    register masquerade.
-            if claim.body.storage_set_id != ctx.canonical_storage_set_id {
-                return Err(ProvenanceError::FaucetForeignSet);
+            // 7. The release was won in the CANONICAL set for this network —
+            //    accepting whatever set it names would let a foreign register
+            //    masquerade.
+            if release.body.storage_set_id != ctx.canonical_storage_set_id {
+                return Err(ProvenanceError::ReleaseForeignSet);
             }
-            // 8. The bytes the quorum holds are the bytes the DAG addresses.
-            if faucet::faucet_claim_evidence_addr(&win.envelope_bytes)
-                != d.faucet_claim_evidence_addr
+            // 8. The bytes the members hold are the bytes the DAG addresses.
+            if native_reserve::release_evidence_addr(&win.envelope_bytes) != d.release_evidence_addr
             {
-                return Err(ProvenanceError::FaucetEvidenceAddrMismatch);
+                return Err(ProvenanceError::ReleaseEvidenceAddrMismatch);
             }
-            // The derived funding: exactly the fixed payout of builtin ERA.
-            // The generic asset/amount equality below then forces the credit
-            // mutation to be exactly +100 ERA.
-            let era = crate::core::token::token_state_manager::era_policy_commit();
+            // The derived funding: exactly what the reserve released, of the
+            // reserve's own asset. The generic asset/amount equality below
+            // then forces the credit mutation to be exactly that.
             FundedCredit {
-                source_id: faucet::faucet_ticket_source_id(&d.faucet_id, d.ticket_index),
-                policy_commit: era,
-                amount: faucet::ERA_FAUCET_PAYOUT,
+                source_id: native_reserve::release_source_id(&d.reserve_id, d.generation),
+                policy_commit: win.parent.policy_commit,
+                amount: release.body.amount,
             }
         }
     };
@@ -1634,92 +1157,30 @@ pub fn verify_credit_source(
 /// it is consumed by construction and could never be presented again. The
 /// external arms can, so their consumption has to be written down.
 fn requires_consumed_source_record(source: &CreditSource) -> bool {
-    // ValidatedFaucetDistribution deliberately does NOT require one: non-reuse
-    // is the envelope's position + digest binding (the ticket commits ONE
-    // target position, itself a write-once register cell, and ONE exact
-    // operation), so a consumed-source leaf would be bookkeeping for an
+    // NativeReserveRelease deliberately does NOT require one: non-reuse is
+    // the release's position + digest binding (the release commits ONE
+    // target position, itself a register cell that is final once, and ONE
+    // exact operation), and one generation of the reserve is final exactly
+    // once — so a consumed-source leaf would be bookkeeping for an
     // impossibility.
-    matches!(
-        source,
-        CreditSource::ValidatedPeerDebit(_) | CreditSource::VerifiedOfflineReentry(_)
-    )
-}
-
-/// THE MARKET-LEG TOKEN-POLICY CONJUNCT (SoFi Def 4.1, Req 4.4, Req 4.6):
-/// every DLV successor's legs must satisfy the applicable token policy, and
-/// this is where a foreign verifier reruns that decision — centrally, on the
-/// VERIFIED operation, so fund and close are covered even though their
-/// credits are `SameTransitionMove` and carry no evidence channel.
-///
-/// Per leg: a builtin commit (ERA, dBTC) is pre-rooted on every device by
-/// construction and passes; any other commit requires the verifier's OWN
-/// anchoring — `resolver.anchored_policy_bytes` — whose bytes must re-hash
-/// under `TAG_DSM_POLICY` to the committed leg (the resolver locates, never
-/// authorizes), parse as a v3 policy, and pass
-/// [`crate::economic::issuance::check_market_leg_permitted`].
-///
-/// Non-DLV operations have no market legs and pass vacuously; their policy
-/// conjuncts live elsewhere (0x0023 for issuance, the transfer path's
-/// enforcement for sends).
-/// The market-leg policy commits a DLV value operation moves — empty for
-/// every non-DLV operation. ONE extraction, shared by the core conjunct, the
-/// SDK advance funnel and the route pre-flights, so the four ops cannot
-/// drift apart across layers.
-pub fn market_leg_commits(operation: &crate::types::operations::Operation) -> Vec<[u8; 32]> {
-    use crate::types::operations::Operation;
-    match operation {
-        Operation::DlvCreateFundedV2 {
-            leg_a_policy_commit,
-            leg_b_policy_commit,
-            ..
-        }
-        | Operation::DlvClose {
-            leg_a_policy_commit,
-            leg_b_policy_commit,
-            ..
-        } => vec![*leg_a_policy_commit, *leg_b_policy_commit],
-        Operation::DlvSettle {
-            input_policy_commit,
-            output_policy_commit,
-            ..
-        }
-        | Operation::DlvOwnerApplyV2 {
-            input_policy_commit,
-            output_policy_commit,
-            ..
-        } => vec![*input_policy_commit, *output_policy_commit],
-        _ => Vec::new(),
+    // EXHAUSTIVE ON PURPOSE. As a `matches!` allowlist this defaulted a new
+    // arm to `false` — no consumed-source leaf, so the source stays
+    // re-spendable — with no compile error anywhere. Every other function
+    // over `CreditSource` in this module forces an arm; this one now does too,
+    // and the permissive answer has to be written down to be chosen.
+    match source {
+        CreditSource::ValidatedPeerDebit(_) => true,
+        CreditSource::NativeReserveRelease(_) => false,
+        // The remaining arms answer `false`, exactly as the allowlist did.
+        // Each is bound to a coordinate that cannot be replayed: a
+        // same-transition move is internal to the witness being verified, and
+        // an issuance names the position-and-root pair its evidence is
+        // proven against. Listing
+        // them is the point — the answer is now written down rather than
+        // inherited from whichever arm a `matches!` happened to omit.
+        // Bound to the one `CreateToken` that carries it: creation happens once.
+        CreditSource::GenesisRelease(_) => false,
     }
-}
-
-pub fn verify_market_leg_policies(
-    operation: &crate::types::operations::Operation,
-    resolver: &dyn ProvenanceResolver,
-) -> Result<(), ProvenanceError> {
-    for pc in market_leg_commits(operation) {
-        if crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc)
-            .is_some()
-        {
-            continue;
-        }
-        let bytes = resolver
-            .anchored_policy_bytes(&pc)
-            .map_err(ProvenanceError::OwnerLineage)?;
-        if crate::crypto::blake3::domain_hash_bytes(
-            crate::common::domain_tags::TAG_DSM_POLICY,
-            &bytes,
-        ) != pc
-        {
-            return Err(ProvenanceError::MarketLegPolicy(
-                "anchored policy bytes do not hash to the committed leg".into(),
-            ));
-        }
-        let policy = crate::economic::issuance::parse_issuance_policy(&bytes)
-            .map_err(|e| ProvenanceError::MarketLegPolicy(format!("leg policy: {e}")))?;
-        crate::economic::issuance::check_market_leg_permitted(&policy)
-            .map_err(|e| ProvenanceError::MarketLegPolicy(e.to_string()))?;
-    }
-    Ok(())
 }
 
 /// Verify provenance for an entire transition.

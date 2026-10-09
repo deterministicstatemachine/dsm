@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Bilateral Transfer Accept/Reject Dialog and Status Display
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { on as eventBridgeOn } from '../dsm/EventBridge';
 import { acceptIncomingTransfer, BilateralEventType, BilateralTransferEvent, decodeBilateralEvent, rejectIncomingTransfer } from '../services/bilateral/bilateralEventService';
 import { useWallet } from '../contexts/WalletContext';
@@ -9,19 +9,27 @@ import { contactsStore } from '../stores/contactsStore';
 import '../styles/BilateralTransfer.css';
 import { emitWalletRefresh } from '../dsm/events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
-import { presentDisplayAmount } from '../utils/tokenMeta';
+import { useFx } from './fx/FxProvider';
+import { getPendingBilateralListStrictBridge } from '../dsm/WebViewBridge';
+import { decodeOfflinePendingList } from '../domain/bilateral';
 
 interface BilateralTransferDialogProps {
   /** Optional: limit to specific contact alias */
   contactAlias?: string;
+  /** The wallet is up: an incoming step still awaiting this user is shown again. */
+  walletReady?: boolean;
 }
 
-export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = ({ contactAlias: _contactAlias }) => {
+export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = ({ contactAlias: _contactAlias, walletReady = false }) => {
   const [incomingTransfer, setIncomingTransfer] = useState<BilateralTransferEvent | null>(null);
   const [outgoingTransfer, setOutgoingTransfer] = useState<BilateralTransferEvent | null>(null);
   const [processing, setProcessing] = useState(false);
   const { refreshAll } = useWallet();
   const { hideComplexity, notifyToast } = useUX();
+  const fx = useFx();
+  // The bilateral subscription is installed once; it reads the live fx actions.
+  const fxRef = useRef(fx);
+  fxRef.current = fx;
   const [inboxOpen, setInboxOpen] = useState(false);
 
   // Resolve a friendly name for a counterparty device id (base32) from the contacts store,
@@ -32,6 +40,39 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
     if (c?.alias) return c.alias;
     return deviceIdB32 ? `${deviceIdB32.slice(0, 8)}…` : 'a contact';
   }, []);
+
+  // An incoming step waiting for this user's decision outlives an app restart
+  // in the SDK's session store, but its PREPARE_RECEIVED event does not: a
+  // prepare delivered again is answered from the stored step and announces
+  // nothing. So once the wallet is up, the first incoming step the SDK lists
+  // as awaiting this user is shown again, as the SDK states it.
+  useEffect(() => {
+    if (!walletReady) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const pending = await decodeOfflinePendingList(await getPendingBilateralListStrictBridge());
+        const waiting = pending.find((p) => p.direction === 'incoming' && p.phase === 'pending_user_action');
+        if (!alive || !waiting) return;
+        setIncomingTransfer((current) => current ?? {
+          eventType: BilateralEventType.PREPARE_RECEIVED,
+          counterpartyDeviceId: waiting.counterpartyDeviceId,
+          commitmentHash: waiting.commitmentHash,
+          amount: waiting.amount,
+          displayAmount: waiting.displayAmount,
+          tokenId: waiting.tokenId,
+          status: 'pending_user_action',
+          message: 'Incoming transfer awaiting your decision',
+          senderBleAddress: waiting.bleAddress,
+        });
+      } catch (e) {
+        if (alive) {
+          notifyToast('error', `Offline transfers awaiting you could not be read: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    })();
+    return () => { alive = false; };
+  }, [walletReady, notifyToast]);
 
   // Hide bilateral overlay when inbox is open
   useEffect(() => {
@@ -102,6 +143,13 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
               `Security: the trusted offline identity for ${aliasFor(event.counterpartyDeviceId)} changed — transfer refused.`,
               { persistent: true }
             );
+            fxRef.current.play({
+              anim: 'tamper',
+              title: 'Clone refused',
+              caption: `The offline identity for ${aliasFor(event.counterpartyDeviceId)} changed, so the transfer was refused.`,
+              tone: 'bad',
+              okLabel: 'Dismiss',
+            });
             setIncomingTransfer(null);
             setOutgoingTransfer(null);
             break;
@@ -127,30 +175,34 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
       if (result.success) {
         setIncomingTransfer(null);
       } else {
-        alert('Failed to accept transfer');
+        notifyToast('error', `Failed to accept transfer: ${result.error}`);
       }
     } catch (err) {
       console.error('[BilateralTransfer] Accept error:', err);
-      alert(`Error accepting transfer: ${err}`);
+      notifyToast('error', `Error accepting transfer: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setProcessing(false);
     }
-  }, [incomingTransfer]);
+  }, [incomingTransfer, notifyToast]);
 
   const handleReject = useCallback(async () => {
     if (!incomingTransfer) return;
     setProcessing(true);
     try {
       const result = await rejectIncomingTransfer(incomingTransfer, 'User rejected transfer');
-      if (!result.success) alert('Failed to reject transfer');
-      setIncomingTransfer(null);
+      if (result.success) {
+        setIncomingTransfer(null);
+      } else {
+        // The proposal still awaits a decision; the dialog stays.
+        notifyToast('error', `Failed to reject transfer: ${result.error}`);
+      }
     } catch (err) {
       console.error('[BilateralTransfer] Reject error:', err);
-      alert(`Error rejecting transfer: ${err}`);
+      notifyToast('error', `Error rejecting transfer: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setProcessing(false);
     }
-  }, [incomingTransfer]);
+  }, [incomingTransfer, notifyToast]);
 
   // Don't render if no active transfers or inbox is open
   if ((!incomingTransfer && !outgoingTransfer) || inboxOpen) {
@@ -172,19 +224,20 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
               </div>
             </div>
             
-            {incomingTransfer.amount !== undefined && incomingTransfer.amount !== null && (
+            {incomingTransfer.amount !== undefined && (
               <div className="bilateral-transfer-info">
                 <div className="bilateral-transfer-label">Amount:</div>
                 <div className="bilateral-transfer-value">
                   {(() => {
-                    const raw = incomingTransfer.amount;
-                    const tid = (incomingTransfer.tokenId || 'ERA').toUpperCase();
-                    const abs = typeof raw === 'bigint' ? raw : BigInt(String(raw));
-                    // What the sender's device says this amount is, rendered
-                    // from the token's own decimals. Accepting a transfer is a
-                    // decision about a quantity, so the quantity shown must be
-                    // the one the protocol moved.
-                    return `${presentDisplayAmount(incomingTransfer.displayAmount, abs)} ${tid}`;
+                    // What the sender's device says this amount is, rendered by
+                    // Rust from the token's own decimals. Accepting a transfer
+                    // is a decision about a quantity, so the quantity shown must
+                    // be the one the protocol moved: when this device does not
+                    // know the token's decimals, the base units, named as such.
+                    const token = incomingTransfer.tokenId ?? '(token not named)';
+                    return incomingTransfer.displayAmount
+                      ? `${incomingTransfer.displayAmount} ${token}`
+                      : `${incomingTransfer.amount.toString()} ${token} base units`;
                   })()}
                 </div>
               </div>

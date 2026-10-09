@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::merkle::sparse_merkle_tree::{SmtReplaceResult, SparseMerkleTree};
+use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 
@@ -76,9 +76,8 @@ pub struct DeviceState {
 
     /// Non-relationship SMT leaves that also commit into the device root `r_A`:
     /// offline-bearer anchor-state leaves ([`Self::with_anchor_state_leaf`], and the
-    /// `anchor_leaf` replaced inside [`Self::advance`]), SoFi vault reserve leaves and the
-    /// derived vault-state leaf (both written by [`Self::advance`] when a
-    /// [`VaultReserveMutation`] rides it). The [`SparseMerkleTree`] is the canonical source
+    /// `anchor_leaf` replaced inside [`Self::advance`]) and the token adoption leaves
+    /// [`Self::advance`] writes. The [`SparseMerkleTree`] is the canonical source
     /// of truth for their VALUE, but — exactly like [`Self::tips`] — this map is the
     /// enumerable record needed to REPLAY them in [`Self::restore`]. Without it a state that
     /// has any such leaf recomputes a different root on reload (the leaf is in the stored root
@@ -96,17 +95,6 @@ pub struct DeviceState {
     /// deterministic iteration during persistence.
     offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
 
-    /// Vault reserves: value the owner has ENCUMBERED into a specific SoFi vault. Keyed by
-    /// `vault_reserve_key(genesis, devid, vault_id, policy_commit)`; the value is the
-    /// extractable `(amount, sequence)` behind the committed reserve leaf (whose hash lives
-    /// in [`Self::extra_leaves`]). The leaf hash is not reversible to the amount, so this map
-    /// is the enumerable, persisted record.
-    ///
-    /// Deliberately NOT an entry in [`Self::balances`]. Keeping reserves out of the
-    /// balance map is what makes the encumbrance real:
-    /// `BalanceDelta` can only reach `balances`, so no transfer, mint or burn can spend a
-    /// reserve — only the vault chokepoints can. `BTreeMap` for deterministic iteration.
-    vault_reserves: BTreeMap<[u8; 32], VaultReserve>,
     /// The economic admission in flight, if any — the authoritative fence
     /// state for [`Self::advance`].
     ///
@@ -122,27 +110,6 @@ pub struct DeviceState {
     /// its own table and re-attached on load; [`Self::restore`] requires it as
     /// an argument so every rebuild path must supply it or fail to compile.
     pending_economic_admission: Option<crate::economic::admission::PendingEconomicAdmission>,
-}
-
-/// Extractable state of one vault reserve leg (see [`DeviceState::vault_reserves`]).
-/// The committed leaf value is `vault_reserve_value(amount, sequence)`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct VaultReserve {
-    /// Encumbered balance for this `(vault, asset)`, in the asset's base units.
-    pub amount: u64,
-    /// The VAULT's sequence at the point this reserve was written — not a per-leaf counter.
-    /// Sharing the vault's sequence lets a verifier cross-check this leaf against the
-    /// vault-state leaf at the same root.
-    pub sequence: u64,
-}
-
-/// Result of a vault funding or withdrawal: the advanced state, its root, and one inclusion
-/// proof per leg in the order the legs were supplied.
-#[derive(Clone, Debug)]
-pub struct VaultReserveOutcome {
-    pub new_device_state: DeviceState,
-    pub new_root: [u8; 32],
-    pub proofs: Vec<Vec<u8>>,
 }
 
 /// Extractable state of one offline-cash allocation (see [`DeviceState::offline_allocations`]).
@@ -272,9 +239,10 @@ pub struct RelChainTip {
     ///
     /// This is the ONLY part of the tip state that later operations consume,
     /// which is why it is retained explicitly instead of being recovered from
-    /// a 50 KB state copy. Empty ONLY for a digest-only tip restored from a
-    /// recovery capsule that never carried one; an advance on such a tip
-    /// falls back to the SMT-root derivation, exactly as a fresh chain does.
+    /// a 50 KB state copy. Empty for a relationship established but not yet
+    /// stepped (its tip is `h_0`, which no transition produced) and for a
+    /// digest-only tip restored from a recovery capsule; an advance on such a
+    /// tip falls back to the SMT-root derivation.
     pub tip_entropy: Vec<u8>,
 
     /// Canonical value-capability (R4 anti-shrink). Witnessed-birth relationships are
@@ -376,7 +344,7 @@ impl RelationshipChainState {
 }
 
 /// A balance mutation to apply during [`DeviceState::advance`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BalanceDelta {
     /// CPTA `policy_commit` (32B) identifying the token.
     pub policy_commit: [u8; 32],
@@ -405,7 +373,7 @@ pub enum BalanceDirection {
 /// online balance is NOT touched (it was already debited when the cash was loaded) and
 /// `deltas` MUST be empty. The allocation debit and the relationship + anchor-state advance land in
 /// ONE atomic device-root replacement, so the value move and the transition are inseparable.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OfflineSpend {
     /// Chip-rooted anchor bundle `B` binding the allocation to this device's offline-bearer island.
     pub anchor_bundle_b: [u8; 32],
@@ -419,10 +387,9 @@ pub struct OfflineSpend {
 ///
 /// Validates that `deltas` exactly realize `operation` for the device identified
 /// by `local_devid`, so a caller cannot apply a balance mutation that diverges
-/// from the (authenticated) signed operation. Mirrors the reference semantics of
-/// `core::state_machine::transition::verify_token_balance_consistency`, lifted to
-/// operate on `&[BalanceDelta]` (code correspondence: lean4
-/// `DSMOfflineFinality.lean` `commitTransfer` / `commit_conservation`).
+/// from the (authenticated) signed operation. It is the one balance-consistency
+/// rule of a step (code correspondence: lean4 `DSMOfflineFinality.lean`
+/// `commitTransfer` / `commit_conservation`).
 ///
 /// - `Transfer` (online): exactly one delta, `amount == op.amount`, direction is `Credit`
 ///   iff this device is the recipient (`op.to_device_id == local_devid`) else
@@ -432,8 +399,12 @@ pub struct OfflineSpend {
 ///   touched) and the allocation debit must equal `op.amount`. The operation must be a bearer
 ///   transfer (`OfflineBearerRequired`). This keeps ONE conservation chokepoint across both
 ///   value regimes — the allocation debit is the conserved source, exactly as an online `Debit` is.
-/// - `Mint`: exactly one `Credit` delta of `amount`.
 /// - `Burn`: exactly one `Debit` delta of `amount`.
+/// - `CreateToken`: the ERA fee debit, if any, then the release of the whole
+///   genesis supply.
+/// - `SofiVaultCreate`: exactly the debits of its two funded legs.
+/// - `EscrowVaultCreate`: exactly the debit of the held amount of the terms'
+///   token (SoFi Amendment S21).
 /// - Every other operation: no balance deltas, and no `offline_spend`.
 fn validate_conservation(
     local_devid: &[u8; 32],
@@ -453,13 +424,13 @@ fn validate_conservation(
     match operation {
         Operation::FaucetClaim { .. } => {
             // The economics are DERIVED, never carried: exactly one credit of
-            // exactly the fixed payout of exactly builtin ERA. The operation
+            // exactly the beta payout of exactly builtin ERA. The operation
             // has no amount/asset fields to lie with, and this arm is what
             // stops a delta smuggling a different quantity in beside it.
             let era = crate::core::token::token_state_manager::era_policy_commit();
             if deltas.len() != 1
                 || deltas[0].direction != BalanceDirection::Credit
-                || deltas[0].amount != crate::economic::faucet::ERA_FAUCET_PAYOUT
+                || deltas[0].amount != crate::economic::native_reserve::ERA_FAUCET_PAYOUT
                 || deltas[0].policy_commit != era
             {
                 return Err(DsmError::invalid_operation(
@@ -519,30 +490,6 @@ fn validate_conservation(
             }
             Ok(())
         }
-        Operation::Mint {
-            amount,
-            policy_commit,
-            ..
-        } => {
-            if deltas.len() != 1
-                || deltas[0].direction != BalanceDirection::Credit
-                || deltas[0].amount != amount.value()
-            {
-                return Err(DsmError::invalid_operation(
-                    "conservation: mint must apply exactly one credit delta of the mint amount",
-                ));
-            }
-            // Bind the credited ASSET to the one the signed operation names.
-            // Without this the guard checks only count/direction/amount, so a
-            // mint for token X could credit a different asset entirely (e.g.
-            // ERA) — the delta's policy_commit was unconstrained.
-            if &deltas[0].policy_commit != policy_commit {
-                return Err(DsmError::invalid_operation(
-                    "conservation: mint delta policy_commit != operation policy_commit",
-                ));
-            }
-            Ok(())
-        }
         Operation::Burn {
             amount,
             policy_commit,
@@ -563,186 +510,118 @@ fn validate_conservation(
             }
             Ok(())
         }
-        // Token creation is the ONLY multi-asset operation. It destroys ERA to
-        // pay the creation fee and issues the new asset, in ONE advance — so
-        // either the token exists and the fee was paid, or neither happened.
-        //
-        // The rule is POSITIONAL and exact rather than set-membership: with a
-        // fixed order, a reordered or duplicated delta cannot satisfy it, and
-        // the whole rule stays a total function of the operation.
-        //
-        // Conservation holds per-asset. ERA: a strict destruction of
-        // `fee_amount` with no counterparty credit — the same semantics as
-        // `Burn`. New asset: genesis issuance of `initial_supply` against a
-        // commit proven distinct from every existing asset. It is the `Mint`
-        // rule generalized to two legs over two provably different assets.
+        // Token creation is the only multi-asset operation. It destroys ERA to
+        // pay the creation fee and releases the new token's whole genesis
+        // supply to its creator (`ReleaseRule::AllAtCreation`, SoFi §51) in one
+        // advance, so either the token exists and the fee was paid, or neither
+        // happened. The rule is positional and exact: the ERA fee debit when
+        // there is a fee, then the release credit, and nothing else.
         Operation::CreateToken {
             initial_supply,
             policy_commit,
             fee_amount,
             ..
         } => {
-            // A create may NEVER issue an existing asset. This is a second,
-            // independent barrier against a colliding anchor: even if one
-            // reached the guard, it could not mint a builtin here.
+            // A builtin asset is never created: its units come only from its
+            // own reserve or backing.
             if crate::core::token::builtin_token_id_for_policy_commit(policy_commit).is_some() {
                 return Err(DsmError::invalid_operation(
                     "conservation: create-token policy_commit collides with a builtin asset",
                 ));
             }
-
-            let era_commit = crate::core::token::builtin_policy_commit_for_token("ERA")
-                .ok_or_else(|| DsmError::invalid_operation("conservation: ERA commit missing"))?;
-
-            let mut i = 0usize;
-            if *fee_amount > 0 {
-                let d = deltas.get(i).ok_or_else(|| {
-                    DsmError::invalid_operation("conservation: create-token fee delta missing")
-                })?;
-                // The fee is always ERA. The caller has no field with which to
-                // point it at another asset.
-                if d.policy_commit != era_commit
-                    || d.direction != BalanceDirection::Debit
-                    || d.amount != *fee_amount
-                {
-                    return Err(DsmError::invalid_operation(
-                        "conservation: create-token fee must be exactly one ERA debit of fee_amount",
-                    ));
-                }
-                i += 1;
-            }
-            if initial_supply.value() > 0 {
-                let d = deltas.get(i).ok_or_else(|| {
-                    DsmError::invalid_operation("conservation: create-token issuance delta missing")
-                })?;
-                if &d.policy_commit != policy_commit
-                    || d.direction != BalanceDirection::Credit
-                    || d.amount != initial_supply.value()
-                {
-                    return Err(DsmError::invalid_operation(
-                        "conservation: create-token issuance must be exactly one credit of \
-                         initial_supply under the token's own policy_commit",
-                    ));
-                }
-                i += 1;
-            }
-            if deltas.len() != i {
+            // A token with no genesis supply is not a token (SoFi §50).
+            if initial_supply.value() == 0 {
                 return Err(DsmError::invalid_operation(
-                    "conservation: create-token carries unexpected extra balance deltas",
+                    "conservation: a token with no genesis supply is not a token",
+                ));
+            }
+            let mut expected = Vec::with_capacity(2);
+            if *fee_amount > 0 {
+                expected.push(BalanceDelta {
+                    policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
+                    direction: BalanceDirection::Debit,
+                    amount: *fee_amount,
+                });
+            }
+            expected.push(BalanceDelta {
+                policy_commit: *policy_commit,
+                direction: BalanceDirection::Credit,
+                amount: initial_supply.value(),
+            });
+            if deltas != expected.as_slice() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: create-token must apply exactly its ERA fee debit, if any, \
+                     then the release of its whole initial supply under its own policy_commit",
                 ));
             }
             Ok(())
         }
-        // SETTLEMENT: two POSITIONAL deltas, each cross-checked against the
-        // signed authorization.
-        //
-        // Positional and exact, in the shape `CreateToken` already uses — never
-        // set-membership. A rule that merely required "a debit of x and a credit
-        // of y somewhere in the vector" would accept them reordered, duplicated,
-        // or accompanied by a third delta; this accepts exactly one arrangement.
-        //
-        // And they are checked against the AUTHORIZATION, not merely against
-        // each other. Generic zero-sum arithmetic would let a caller move a
-        // different pair, or different amounts, as long as the two sides
-        // balanced — the deltas must realize the trade that was actually
-        // authorized, not merely *a* trade.
-        Operation::DlvSettle {
-            input_policy_commit,
-            output_policy_commit,
-            input_amount,
-            output_amount,
+
+        // A vault creation (P15-12) debits exactly its two funded legs: the
+        // creation record's amounts, of the two assets the operation names,
+        // in the pair's canonical order, and nothing else. Whether that pair
+        // and those amounts are the authorized ones is the economic write
+        // set's check (`semantic_write_set`); this arm holds the deltas to the
+        // operation's own legs.
+        Operation::SofiVaultCreate {
+            creation,
+            funding_a_policy_commit,
+            funding_b_policy_commit,
             ..
         } => {
-            if input_policy_commit == output_policy_commit {
+            let record = crate::sofi::wire::VaultCreation::decode(creation).map_err(|_| {
+                DsmError::invalid_operation(
+                    "conservation: a vault creation record that is not canonical moves nothing",
+                )
+            })?;
+            let expected = [
+                BalanceDelta {
+                    policy_commit: *funding_a_policy_commit,
+                    direction: BalanceDirection::Debit,
+                    amount: record.amount_a,
+                },
+                BalanceDelta {
+                    policy_commit: *funding_b_policy_commit,
+                    direction: BalanceDirection::Debit,
+                    amount: record.amount_b,
+                },
+            ];
+            if deltas != expected.as_slice() {
                 return Err(DsmError::invalid_operation(
-                    "conservation: DlvSettle input and output name the same asset",
-                ));
-            }
-            if *input_amount == 0 || *output_amount == 0 {
-                return Err(DsmError::invalid_operation(
-                    "conservation: DlvSettle amounts must both be non-zero",
-                ));
-            }
-            if deltas.len() != 2 {
-                return Err(DsmError::invalid_operation(format!(
-                    "conservation: DlvSettle must carry exactly 2 deltas, got {}",
-                    deltas.len()
-                )));
-            }
-            let d_in = &deltas[0];
-            let d_out = &deltas[1];
-            if d_in.policy_commit != *input_policy_commit
-                || d_in.direction != BalanceDirection::Debit
-                || d_in.amount != *input_amount
-            {
-                return Err(DsmError::invalid_operation(
-                    "conservation: DlvSettle delta[0] must debit the authorized input exactly",
-                ));
-            }
-            if d_out.policy_commit != *output_policy_commit
-                || d_out.direction != BalanceDirection::Credit
-                || d_out.amount != *output_amount
-            {
-                return Err(DsmError::invalid_operation(
-                    "conservation: DlvSettle delta[1] must credit the authorized output exactly",
+                    "conservation: a vault creation must apply exactly the debits of its two \
+                     funded legs",
                 ));
             }
             Ok(())
         }
 
-        // The owner RECORDS a settlement it has already verified. It authorizes
-        // no value movement of its own: the trader's credit was final at the
-        // trader's advance, and the fee accrues inside the reserves as LP yield,
-        // so the owner's spendable balance is untouched. Only reserve leaves
-        // move, and those are checked by `validate_vault_reserve_conservation`.
-        Operation::DlvOwnerApplyV2 { .. } => {
-            if !deltas.is_empty() {
+        // An escrow vault's creation (SoFi Amendment S21) debits exactly the
+        // held amount, of the one token its terms name, and nothing else.
+        // Whether those terms are the ones the genesis state commits is the
+        // economic write set's check; this arm holds the deltas to them.
+        Operation::EscrowVaultCreate {
+            creation, terms, ..
+        } => {
+            let record = crate::sofi::wire::VaultCreation::decode(creation).map_err(|e| {
+                DsmError::invalid_operation(format!(
+                    "conservation: an escrow creation record that is not canonical moves \
+                     nothing: {e}"
+                ))
+            })?;
+            let terms = crate::sofi::wire::EscrowKind::decode(terms).map_err(|e| {
+                DsmError::invalid_operation(format!(
+                    "conservation: escrow terms that are not canonical name no token: {e}"
+                ))
+            })?;
+            let expected = [BalanceDelta {
+                policy_commit: *terms.token(),
+                direction: BalanceDirection::Debit,
+                amount: record.amount_a,
+            }];
+            if deltas != expected.as_slice() {
                 return Err(DsmError::invalid_operation(
-                    "conservation: an owner apply records a verified receipt and must not move balances",
-                ));
-            }
-            Ok(())
-        }
-
-        // Closing a vault is a RESERVE move back to `balances`: the release and
-        // the credit are computed together from the same leg amounts inside the
-        // `Withdraw` arm of `advance`, so a delta riding along would be a second,
-        // unconserved movement.
-        Operation::DlvClose { .. } => {
-            if !deltas.is_empty() {
-                return Err(DsmError::invalid_operation(
-                    "conservation: DlvClose releases reserves through the Withdraw mutation, not \
-                     balance deltas",
-                ));
-            }
-            Ok(())
-        }
-
-        // Funding a vault is a RESERVE move, not a balance delta. The value leaves
-        // `balances` and lands in a vault-reserve leaf, and both halves are computed from
-        // one amount inside `fund_vault_reserves` — so a delta accompanying this operation
-        // would be a second, unconserved movement riding along with it.
-        //
-        // Stated explicitly rather than left to the catch-all because this operation used
-        // to build a Debit delta and be rejected by that catch-all: the value-bearing DLV
-        // path has never worked, for any vault type, and nothing noticed because the DLV
-        // suite asserted on the text of the handler rather than its behaviour.
-        Operation::DlvCreate { .. } => {
-            if !deltas.is_empty() {
-                return Err(DsmError::invalid_operation(
-                    "conservation: DlvCreate funds a vault through reserve leaves, not balance deltas",
-                ));
-            }
-            Ok(())
-        }
-        // The funded v2 create states BOTH legs in the signed operation; the
-        // value still moves through the `Fund` reserve mutation (balances
-        // debited inside that arm), never through deltas.
-        Operation::DlvCreateFundedV2 { .. } => {
-            if !deltas.is_empty() {
-                return Err(DsmError::invalid_operation(
-                    "conservation: DlvCreateFundedV2 funds a vault through reserve leaves, not \
-                     balance deltas",
+                    "conservation: an escrow vault creation must apply exactly the debit of its \
+                     stake",
                 ));
             }
             Ok(())
@@ -769,227 +648,10 @@ fn validate_conservation(
 /// SUCCESSOR commit `H("DSM/fused-anchor-state/v1" ‖ B ‖ A_{i+1} ‖ J_{b'} ‖ uᵢ+1)`. The key is
 /// stable; only the value changes, so the successor root changes because the value changes and a
 /// receiver verifies both roots independently.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchorLeafUpdate {
     pub key: [u8; 32],
     pub new_value: [u8; 32],
-}
-
-/// Assets to ENCUMBER into a vault as part of a `DlvCreate` transition.
-///
-/// Rides the same [`DeviceState::advance`] as the transition, so the debit, the
-/// reserve leaves and the state transition share one device root. A separate
-/// advance would leave a window in which the vault exists, is discoverable and
-/// holds nothing — and would give the reserve proof and the vault-state proof
-/// two different roots, which `compose_vault_state` requires to be equal, so
-/// every quote against that vault would fail closed forever.
-///
-/// Carries AMOUNTS, never leaf values. The caller is spending its own balance so
-/// the amounts are its to state, but each leaf value is derived here from
-/// `(amount, vault_sequence)`. Accepting a precomputed leaf would be the same
-/// "magnitudes supplied rather than proven" shape that was removed from reserve
-/// composition.
-/// The vault-state leaf `advance` derived for this batch: what it will prove
-/// after `post_root` is taken.
-struct DerivedVaultStateLeaf {
-    vault_id: [u8; 32],
-    sequence: u64,
-    reserves_digest: [u8; 32],
-    key: [u8; 32],
-}
-
-/// Borrowed view of the `Fund` variant, so the encumbrance body reads the same
-/// as it did before the mutation type grew a second case.
-struct FundingView<'a> {
-    vault_id: [u8; 32],
-    legs: &'a [([u8; 32], u64)],
-    vault_sequence: u64,
-}
-
-/// The AMM vault's asset pair and fee, carried on every reserve mutation so
-/// [`DeviceState::advance`] can DERIVE the vault-state leaf
-/// (`compute_vault_smt_value(sequence, reserves_digest)`) from the reserves it
-/// has just moved, in the SAME SMT batch. A vault-state leaf therefore never
-/// exists without the reserve move it describes, and its digest is computed
-/// from the post-mutation leaves — never accepted from a caller.
-///
-/// The two sides are 32-byte POLICY COMMITMENTS — the keys the reserve legs are
-/// stored under — in canonical (lex-ascending) order, exactly what
-/// [`crate::dlv::pair_identity::CanonicalPair`] produces. They are not token
-/// labels. The reserves digest is always computed over this canonical order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VaultStatePair {
-    policy_commit_a: [u8; 32],
-    policy_commit_b: [u8; 32],
-    fee_bps: u32,
-}
-
-impl VaultStatePair {
-    /// Build from an already-canonical pair (the only production source).
-    pub fn from_pair(pair: &crate::dlv::pair_identity::CanonicalPair, fee_bps: u32) -> Self {
-        Self {
-            policy_commit_a: pair.a(),
-            policy_commit_b: pair.b(),
-            fee_bps,
-        }
-    }
-
-    /// Build from two raw policy commits. Refuses a non-canonical or degenerate
-    /// pair so a caller cannot smuggle an unordered or single-asset "pair" into
-    /// the digest.
-    pub fn new(
-        policy_commit_a: [u8; 32],
-        policy_commit_b: [u8; 32],
-        fee_bps: u32,
-    ) -> Result<Self, DsmError> {
-        if policy_commit_a >= policy_commit_b {
-            return Err(DsmError::invalid_operation(
-                "vault-state pair: policy commits must be distinct and lex-ascending (a < b)",
-            ));
-        }
-        Ok(Self {
-            policy_commit_a,
-            policy_commit_b,
-            fee_bps,
-        })
-    }
-
-    /// The lex-lower asset's policy commit.
-    pub fn a(&self) -> [u8; 32] {
-        self.policy_commit_a
-    }
-
-    /// The lex-higher asset's policy commit.
-    pub fn b(&self) -> [u8; 32] {
-        self.policy_commit_b
-    }
-
-    pub fn fee_bps(&self) -> u32 {
-        self.fee_bps
-    }
-
-    /// The reserves digest for `(reserve_a, reserve_b)` over this pair — the one
-    /// definition every anchor, inclusion proof and quote agree on.
-    pub fn reserves_digest(&self, reserve_a: u64, reserve_b: u64) -> [u8; 32] {
-        crate::dlv::vault_smt_leaf::compute_reserves_digest(
-            &self.policy_commit_a,
-            &self.policy_commit_b,
-            reserve_a,
-            reserve_b,
-            self.fee_bps,
-        )
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum VaultReserveMutation {
-    /// `DlvCreate`: value leaves `balances` and enters the vault's reserve
-    /// leaves.
-    Fund {
-        vault_id: [u8; 32],
-        /// `(policy_commit, amount)` — exactly the vault's pair, in canonical
-        /// order, every amount non-zero. Checked here rather than trusted.
-        legs: Vec<([u8; 32], u64)>,
-        /// The vault's sequence at creation. `0` is a real genesis sequence, not
-        /// an absence.
-        vault_sequence: u64,
-        /// The vault's pair + fee; the vault-state leaf is derived from it.
-        pair: VaultStatePair,
-    },
-    /// `DlvOwnerApply`: the owner records a settlement it has verified. The
-    /// input the trader paid arrives, the output it took leaves, and `balances`
-    /// is untouched — the fee accrues inside the reserves as LP yield, so the
-    /// owner's spendable balance is not part of a settlement.
-    ApplySettlement {
-        vault_id: [u8; 32],
-        input_policy_commit: [u8; 32],
-        input_amount: u64,
-        output_policy_commit: [u8; 32],
-        output_amount: u64,
-        /// The vault generation this settlement consumes. The output reserve leg
-        /// MUST currently sit at exactly this sequence or the advance is refused:
-        /// two settlements racing one parent both name `parent_sequence = N`, the
-        /// first moves the vault to `N + 1`, and the second now finds a generation
-        /// it cannot consume. This is the hard parent-consumption claim — exactly
-        /// one settlement succeeds a given generation, whatever a receipt claims.
-        parent_sequence: u64,
-        /// `parent_sequence + 1`. Every reserve write stamps it, so a stale proof
-        /// cannot be replayed against the new state.
-        new_sequence: u64,
-        /// The vault's pair + fee; `{input, output}` must BE this pair, and the
-        /// vault-state leaf at `new_sequence` is derived from it.
-        pair: VaultStatePair,
-        /// `CCB(V_n)` of the parent vault state this settlement consumes —
-        /// UNSIGNED metadata, bound by the signed operation's `parent_binding`:
-        /// `advance` requires `vault_state_commitment(parent_state) ==
-        /// parent_binding`, and requires the state's leaf-visible members
-        /// (vault, generation, both reserves, pair, fee, owner) to equal the
-        /// leaves and pair it is about to consume. The head holds no `V_n`; it
-        /// holds the leaves `V_n` commits, and this is how the two are tied.
-        parent_state: Vec<u8>,
-    },
-    /// `DlvClose`: the COMPLETE remaining reserve set — both legs of the pair,
-    /// exactly, at exactly `parent_sequence` — returns to `balances` atomically,
-    /// exactly once; the leaves become `0 @ new_sequence` (terminal, never
-    /// deleted, so the vault id can never be re-funded or re-withdrawn). Must
-    /// equal the signed `DlvClose` operation field-for-field: the signature
-    /// binds the whole transition, unsigned mutation metadata decides nothing.
-    Withdraw {
-        vault_id: [u8; 32],
-        /// `(policy_commit, amount)` — exactly `[pair.a, pair.b]`, in canonical
-        /// order, each amount equal to the leaf it drains.
-        legs: Vec<([u8; 32], u64)>,
-        /// The generation consumed (both leaves must sit at exactly this) and
-        /// the terminal generation produced (`parent + 1`).
-        parent_sequence: u64,
-        new_sequence: u64,
-        /// The vault's pair + fee; the terminal vault-state leaf derives
-        /// `digest(a, b, 0, 0, fee)` at `new_sequence`.
-        pair: VaultStatePair,
-    },
-}
-
-impl VaultReserveMutation {
-    /// The vault this mutation moves reserves for.
-    pub fn vault_id(&self) -> [u8; 32] {
-        match self {
-            VaultReserveMutation::Fund { vault_id, .. }
-            | VaultReserveMutation::ApplySettlement { vault_id, .. }
-            | VaultReserveMutation::Withdraw { vault_id, .. } => *vault_id,
-        }
-    }
-
-    /// The vault's pair + fee.
-    pub fn pair(&self) -> VaultStatePair {
-        match self {
-            VaultReserveMutation::Fund { pair, .. }
-            | VaultReserveMutation::ApplySettlement { pair, .. }
-            | VaultReserveMutation::Withdraw { pair, .. } => *pair,
-        }
-    }
-
-    /// The vault generation the reserves sit at AFTER this mutation.
-    pub fn resulting_sequence(&self) -> u64 {
-        match self {
-            VaultReserveMutation::Fund { vault_sequence, .. } => *vault_sequence,
-            VaultReserveMutation::ApplySettlement { new_sequence, .. }
-            | VaultReserveMutation::Withdraw { new_sequence, .. } => *new_sequence,
-        }
-    }
-}
-
-/// The vault-state leaf witness an advance produced, `Some` iff a
-/// [`VaultReserveMutation`] rode it. `siblings` (exactly 256) bind the leaf
-/// under `AdvanceOutcome::child_r_a`; `sequence` and `reserves_digest` are the
-/// values that actually LANDED (derived inside `advance`), so a caller signs
-/// what the root commits rather than what it hoped for. Feed straight into
-/// [`crate::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof`].
-#[derive(Clone, Debug)]
-pub struct VaultStateLeafProof {
-    pub vault_id: [u8; 32],
-    pub sequence: u64,
-    pub reserves_digest: [u8; 32],
-    pub siblings: Vec<[u8; 32]>,
 }
 
 /// Inclusion proofs for the anchor-state leaf across a bearer advance (`Π_i`/`Π_{i+1}`): `parent`
@@ -1012,10 +674,9 @@ pub struct AdvanceOutcome {
     /// receipt flow (§4.2) before CAS.
     pub new_chain_state: RelationshipChainState,
 
-    /// SMT replace proofs for the stitched receipt: parent inclusion
-    /// (`h_n ∈ r_A`) and child inclusion (`h_{n+1} ∈ r'_A`), plus the
-    /// pre/post root pair (§4.2).
-    pub smt_proofs: SmtReplaceResult,
+    /// Every leaf the step wrote, with its path against `parent_r_a`, and
+    /// both roots: what the step's receipt proves.
+    pub transition: crate::types::step_transition::StepTransition,
 
     /// Parent device root `r_A` at the time the outcome was built. Used
     /// by the caller to CAS-check the current head.
@@ -1025,19 +686,39 @@ pub struct AdvanceOutcome {
     pub child_r_a: [u8; 32],
 
     /// Fused-anchor-state leaf inclusion proofs, `Some` iff an [`AnchorLeafUpdate`] was applied
-    /// (a bearer advance). `parent` binds the old commit under `parent_r_a`/`smt_proofs.pre_root`;
+    /// (a bearer advance). `parent` binds the old commit under `parent_r_a`;
     /// `child` binds the successor commit under `child_r_a`. `None` for ordinary transitions.
     pub anchor_proofs: Option<AnchorLeafProofs>,
 
-    /// Vault-state leaf witness, `Some` iff a [`VaultReserveMutation`] rode this
-    /// advance. Its siblings bind the (derived) leaf under `child_r_a` — the same
-    /// root the reserve leaves and the relationship leaf landed under — so an
-    /// owner-published inclusion proof and reserve proof share one root by
-    /// construction.
-    pub vault_state_proof: Option<VaultStateLeafProof>,
+    /// The transition's one entropy, as `advance` derived it. Only `advance`
+    /// sets it.
+    transition_entropy: [u8; 32],
 }
 
 impl AdvanceOutcome {
+    /// The one entropy of this transition, exactly as Core derived it inside
+    /// `advance` (Part VII step 3). This is the value that sits in the
+    /// relationship tip and that the SDK carries — unchanged — into both
+    /// receipt hashes, `C_pre` and the symmetric tip (§39.3).
+    pub fn transition_entropy(&self) -> [u8; 32] {
+        self.transition_entropy
+    }
+
+    /// This outcome with its successor holding `admission` as its pending
+    /// economic admission: the one change a caller makes to an outcome before
+    /// committing it.
+    pub fn with_pending_economic_admission(
+        self,
+        admission: Option<crate::economic::admission::PendingEconomicAdmission>,
+    ) -> Self {
+        Self {
+            new_device_state: self
+                .new_device_state
+                .with_pending_economic_admission(admission),
+            ..self
+        }
+    }
+
     /// This device's canonical relationship pair for the advanced step: the
     /// lineage head it consumed (`embedded_parent` — the prior SMT leaf, or the
     /// shared initial tip on a first-ever advance) and the head it produced
@@ -1056,47 +737,69 @@ impl DeviceState {
     /// Construct a fresh, empty device state at genesis.
     ///
     /// The SMT starts empty (root = empty-leaf default), balances are
-    /// zero, and no relationship tips exist. `max_relationships` bounds
-    /// the SMT's leaf cache (FIFO eviction).
-    pub fn new(
-        genesis: [u8; 32],
-        devid: [u8; 32],
-        public_key: Vec<u8>,
-        max_relationships: usize,
-    ) -> Self {
-        Self {
+    /// zero, and no relationship tips exist.
+    pub fn new(genesis: [u8; 32], devid: [u8; 32], public_key: Vec<u8>) -> Self {
+        let mut state = Self {
             genesis,
             devid,
             public_key,
-            smt: SparseMerkleTree::new(max_relationships),
+            smt: SparseMerkleTree::new(),
             balances: BTreeMap::new(),
             tips: BTreeMap::new(),
             legacy_anchor: None,
             extra_leaves: BTreeMap::new(),
             offline_allocations: BTreeMap::new(),
-            vault_reserves: BTreeMap::new(),
             pending_economic_admission: None,
-        }
+        };
+        // A device's own relationship exists from its creation.
+        state.insert_relationship_leaf(devid);
+        state
     }
 
-    /// Reconstruct a `DeviceState` from previously-encoded fields, replaying
-    /// the per-relationship tips into the SMT to recompute the canonical root.
-    ///
-    /// Phase 4.1 codec roundtrip path. The caller supplies the device-level
-    /// fields plus the sorted-by-`rel_key` tip list and this constructor:
-    ///
-    /// 1. Builds a fresh `DeviceState::new(...)` with empty SMT and balances.
-    /// 2. Replays each tip via `smt_replace(&rel_key, &tip.chain_tip)` in
-    ///    the supplied order. Determinism is guaranteed because
-    ///    `SparseMerkleTree` is purely functional in its leaf-replace path.
-    /// 3. Installs `balances`, `tips`, and `legacy_anchor` directly.
-    ///
-    /// The caller is responsible for verifying that the resulting `root()`
-    /// matches the stored sanity-check digest.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` on any SMT replace failure.
+    /// Write the relationship with `counterparty_devid` into this device's
+    /// tree at its `h_0` (§26: the leaf holds the chain's current head, from
+    /// the first). `h_0` is derived here, never supplied.
+    fn insert_relationship_leaf(&mut self, counterparty_devid: [u8; 32]) {
+        let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(
+            &self.devid,
+            &counterparty_devid,
+        );
+        let h0 = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &self.devid,
+            &counterparty_devid,
+        );
+        self.smt.update_leaf(&rel_key, &h0);
+        self.tips.insert(
+            rel_key,
+            RelChainTip {
+                chain_tip: h0,
+                counterparty_devid,
+                tip_entropy: Vec::new(),
+                value_capability: ValueCapability::No,
+            },
+        );
+    }
+
+    /// Establish the relationship with `counterparty_devid`: its leaf enters
+    /// this device's tree at `h_0`, a root advance of its own that moves no
+    /// value. Every step on the relationship then replaces a leaf the device
+    /// committed, so the step's parent root is one the device held. Refused
+    /// when the relationship is already established.
+    pub fn establish_relationship(&self, counterparty_devid: [u8; 32]) -> Result<Self, DsmError> {
+        let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(
+            &self.devid,
+            &counterparty_devid,
+        );
+        if self.tips.contains_key(&rel_key) {
+            return Err(DsmError::invalid_operation(
+                "establish_relationship: the relationship is already established on this device",
+            ));
+        }
+        let mut next = self.clone();
+        next.insert_relationship_leaf(counterparty_devid);
+        Ok(next)
+    }
+
     /// The admission in flight, if any. Read by [`Self::advance`]'s fence.
     pub fn pending_economic_admission(
         &self,
@@ -1118,6 +821,21 @@ impl DeviceState {
         next
     }
 
+    /// Reconstruct a `DeviceState` from previously-encoded fields, building
+    /// the SMT over its leaves to recompute the canonical root.
+    ///
+    /// The caller supplies the device-level fields plus the sorted-by-`rel_key`
+    /// tip list and this constructor:
+    ///
+    /// 1. Builds a fresh `DeviceState::new(...)` with empty SMT and balances.
+    /// 2. Takes each relationship tip, then every other leaf, in the supplied
+    ///    order (a later leaf at a key replaces an earlier one), and builds the
+    ///    tree over them once. The tree is a pure function of its leaves, so
+    ///    the root is determined.
+    /// 3. Installs `balances`, `tips`, and `legacy_anchor` directly.
+    ///
+    /// The caller is responsible for verifying that the resulting `root()`
+    /// matches the stored sanity-check digest.
     #[allow(clippy::too_many_arguments)]
     pub fn restore(
         genesis: [u8; 32],
@@ -1128,15 +846,13 @@ impl DeviceState {
         tips_in_order: Vec<([u8; 32], RelChainTip)>,
         extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
         offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
-        vault_reserves: BTreeMap<[u8; 32], VaultReserve>,
         // The admission in flight, from its own durable table. REQUIRED, not
         // defaulted: every rebuild path must state it or fail to compile. A
         // defaulted `None` here would be a silent fence-open on any path that
         // forgot — a gate precondition with no mandatory producer.
         pending_economic_admission: Option<crate::economic::admission::PendingEconomicAdmission>,
-        max_relationships: usize,
     ) -> Result<Self, DsmError> {
-        let mut state = Self::new(genesis, devid, public_key, max_relationships);
+        let mut state = Self::new(genesis, devid, public_key);
         state.legacy_anchor = legacy_anchor;
         state.balances = balances;
         state.offline_allocations = offline_allocations;
@@ -1144,32 +860,26 @@ impl DeviceState {
         // rebuilds the root; this map carries the amounts behind them, which the
         // leaf hash cannot yield. A funded vault that reloaded without it would
         // recompute a root that does not match the stored one.
-        state.vault_reserves = vault_reserves;
         state.pending_economic_admission = pending_economic_admission;
 
         for (rel_key, tip) in tips_in_order.into_iter() {
-            state
-                .smt
-                .smt_replace(&rel_key, &tip.chain_tip)
-                .map_err(|e| {
-                    DsmError::invalid_operation(format!(
-                        "DeviceState::restore: SMT replace failed for rel_key: {e}"
-                    ))
-                })?;
             state.tips.insert(rel_key, tip);
         }
 
-        // Replay non-tip leaves (offline-bearer anchor-state, SoFi vault-state) so the recomputed
-        // root matches the stored one. Omitting these was the reload-brick bug: a state with any
-        // such leaf recomputed a different root after a restart.
-        for (key, value) in extra_leaves.into_iter() {
-            state.smt.update_leaf(&key, &value).map_err(|e| {
-                DsmError::invalid_operation(format!(
-                    "DeviceState::restore: extra-leaf update failed: {e}"
-                ))
-            })?;
-            state.extra_leaves.insert(key, value);
-        }
+        // Non-tip leaves (offline-bearer anchor-state, SoFi vault-state) go into the tree after
+        // the tips, so the recomputed root matches the stored one. Omitting these was the
+        // reload-brick bug: a state with any such leaf recomputed a different root after a restart.
+        state.extra_leaves = extra_leaves;
+
+        // One build over every leaf, each node hashed once: the device's own relationship `new`
+        // wrote, each tip, then each other leaf.
+        state.smt = SparseMerkleTree::from_leaves(
+            state
+                .tips
+                .iter()
+                .map(|(rel_key, tip)| (*rel_key, tip.chain_tip))
+                .chain(state.extra_leaves.iter().map(|(key, value)| (*key, *value))),
+        );
 
         Ok(state)
     }
@@ -1210,6 +920,27 @@ impl DeviceState {
         self.genesis
     }
 
+    /// Install the canonical genesis authority root `G` on an ALREADY
+    /// CONSTRUCTED head.
+    ///
+    /// Only the constructor used to write `genesis`, which made
+    /// `CoreSDK::write_genesis_device_head` silently unable to honour its own
+    /// contract: it takes the existing head when one is present, so on that
+    /// branch `genesis` kept whatever the head was built with. Genesis install
+    /// always hits that branch — `StateMachine::set_state` materialises a head
+    /// first — so every freshly created wallet ended up with a head whose
+    /// `genesis` was the `[0u8; 32]` that `set_state` invented. Every consumer
+    /// reading `genesis_digest()` as the authority root then compared against
+    /// zeros: the ERA faucet's authority evidence re-derived the real seed-rooted
+    /// `v3.g` and fail-closed on every device, correctly.
+    ///
+    /// This is the narrow repair for that: a head that HAS the canonical root
+    /// can be told it. It does not make the root optional and does not add a
+    /// second notion of `G` — there is one, the seed-derived `v3.g`.
+    pub fn set_genesis_digest(&mut self, genesis: [u8; 32]) {
+        self.genesis = genesis;
+    }
+
     /// Device identifier.
     pub fn devid(&self) -> [u8; 32] {
         self.devid
@@ -1220,63 +951,6 @@ impl DeviceState {
     /// [`Self::devid`].
     pub fn genesis(&self) -> [u8; 32] {
         self.genesis
-    }
-
-    /// Sibling path for any leaf in this device's SMT.
-    ///
-    /// Needed to sign a settlement receipt: the receipt leaf is written by the
-    /// settling advance, and proving it to a third party means carrying its path
-    /// against the post-advance root.
-    pub fn inclusion_siblings(&self, key: &[u8; 32]) -> Result<Vec<[u8; 32]>, DsmError> {
-        Ok(self
-            .smt
-            .get_inclusion_proof(key, 256)
-            .map_err(|e| DsmError::merkle(format!("inclusion path: {e}")))?
-            .siblings)
-    }
-
-    /// Build the per-leg inclusion proofs that let a third party VERIFY this
-    /// vault's encumbered reserves, rather than take the owner's word for them.
-    ///
-    /// The amounts come out of the leaves, never from an argument. A caller that
-    /// could pass the magnitudes in would be signing its own claim — which is
-    /// exactly the self-declared-reserve shape the vault-reserve leaf replaced.
-    ///
-    /// Legs come back lex-sorted by `policy_commit`, the canonical order the
-    /// proof's signature payload is built over.
-    ///
-    /// Fails closed on an asset this vault does not hold: an absent leg would
-    /// otherwise be indistinguishable from a proven zero.
-    pub fn vault_reserve_leg_proofs(
-        &self,
-        vault_id: &[u8; 32],
-        policy_commits: &[[u8; 32]],
-    ) -> Result<Vec<crate::dlv::vault_reserve_inclusion::ReserveLegProof>, DsmError> {
-        let mut legs = Vec::with_capacity(policy_commits.len());
-        for policy_commit in policy_commits {
-            let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-                &self.genesis,
-                &self.devid,
-                vault_id,
-                policy_commit,
-            );
-            let entry = self.vault_reserves.get(&key).ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "vault_reserve_leg_proofs: this vault holds no reserve for that asset",
-                )
-            })?;
-            let proof = self
-                .smt
-                .get_inclusion_proof(&key, 256)
-                .map_err(|e| DsmError::merkle(format!("vault-reserve leg proof: {e}")))?;
-            legs.push(crate::dlv::vault_reserve_inclusion::ReserveLegProof {
-                policy_commit: *policy_commit,
-                amount: entry.amount,
-                smt_siblings: proof.siblings,
-            });
-        }
-        legs.sort_by_key(|l| l.policy_commit);
-        Ok(legs)
     }
 
     /// Device SPHINCS+ public key.
@@ -1302,6 +976,30 @@ impl DeviceState {
         &self.extra_leaves
     }
 
+    /// SMT key of the leaf committing this device's adoption of `policy_commit`.
+    pub fn token_adoption_leaf_key(policy_commit: &[u8; 32]) -> [u8; 32] {
+        crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_TOKEN_ADOPTION,
+            policy_commit,
+        )
+    }
+
+    /// Whether this device's committed state carries the adoption of
+    /// `policy_commit`. Builtin ERA and dBTC are pre-adopted: every device
+    /// holds their policies by construction.
+    pub fn has_adopted(&self, policy_commit: &[u8; 32]) -> bool {
+        if crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(
+            policy_commit,
+        )
+        .is_some()
+        {
+            return true;
+        }
+        self.extra_leaves
+            .get(&Self::token_adoption_leaf_key(policy_commit))
+            .is_some_and(|v| v == policy_commit)
+    }
+
     /// Current chain tip for a relationship, if one exists. Returns
     /// `None` for first-ever transactions on an unseen relationship —
     /// the caller must supply a spec-canonical initial tip.
@@ -1320,6 +1018,34 @@ impl DeviceState {
             .get(rel_key)
             .map(|t| t.tip_entropy.as_slice())
             .filter(|e| !e.is_empty())
+    }
+
+    /// The one entropy of a transition (Part VII, order inside the transition,
+    /// step 3): `e_{n+1} = H(DSM/state-entropy; e_n ‖ op ‖ h_n)` from this
+    /// relationship's tip. With no tip, `e_n = H(DSM/genesis-entropy; root)`
+    /// and `h_n = root`.
+    ///
+    /// Core derives it here and nowhere else. No caller supplies entropy to
+    /// an advance; the SDK has no parameter to put one through. The transfer
+    /// nonce, where an operation has one, stays in the operation bytes, which
+    /// are hashed here.
+    pub fn derive_transition_entropy(&self, rel_key: &[u8; 32], operation: &Operation) -> [u8; 32] {
+        let (prior_entropy, prior_hash): (Vec<u8>, [u8; 32]) =
+            match (self.tip_entropy(rel_key), self.chain_tip(rel_key)) {
+                (Some(entropy), Some(tip)) => (entropy.to_vec(), tip),
+                _ => {
+                    let root = self.root();
+                    let mut h =
+                        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
+                    h.update(&root);
+                    (h.finalize().as_bytes().to_vec(), root)
+                }
+            };
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STATE_ENTROPY);
+        hasher.update(&prior_entropy);
+        hasher.update(&operation.to_bytes());
+        hasher.update(&prior_hash);
+        *hasher.finalize().as_bytes()
     }
 
     /// Retrieve the cached tip metadata for a relationship, if present.
@@ -1343,239 +1069,46 @@ impl DeviceState {
         self.tips.len()
     }
 
-    /// The FULL accepting-gate discipline (3.5b, owner correction 11b): an
-    /// economically-gated operation requires an admission ALREADY attached to
-    /// this head that is (1) `DsmBacked`, (2) still `Prepared` (attached for
-    /// exactly this advance — a fencing state means it belongs to an earlier
-    /// acceptance), and (3) bound to exactly this operation's digest. Never
-    /// "some pending record": each miss is its own named refusal.
-    fn require_attached_dsm_admission(
-        &self,
-        operation: &Operation,
-        what: &str,
-    ) -> Result<(), DsmError> {
-        let pending = self.pending_economic_admission.as_ref().ok_or_else(|| {
-            DsmError::invalid_operation(format!(
-                "advance: refusing {what} with no pending economic admission — installing \
-                 balance without the admission fence would be a raw local credit, spendable \
-                 before any foreign verifier could refuse it",
-            ))
-        })?;
-        if pending.kind != crate::economic::admission::PendingAdmissionKind::DsmBacked {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} — the pending admission is not DSM-backed",
-            )));
-        }
-        if pending.state != crate::economic::admission::EconomicAdmissionState::Prepared {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} — the pending admission is not Prepared; a \
-                 fencing admission belongs to an earlier acceptance and authorizes nothing \
-                 new",
-            )));
-        }
-        let op_digest = crate::economic::faucet::dsm_operation_digest(&operation.to_bytes());
-        if pending.operation_digest != op_digest {
-            return Err(DsmError::invalid_operation(format!(
-                "advance: refusing {what} whose digest does not match the pending economic \
-                 admission — the admission authorizes exactly one operation",
-            )));
-        }
-        Ok(())
-    }
-
-    /// TEST-ONLY: advance with the Prepared economic admission that the
-    /// accepting fences require for an economically-originating operation.
+    /// The head once a SoFi position it registered resolves: the trader
+    /// balances the installed root holds.
     ///
-    /// This is the INPUT SHAPE production hands `advance`: the admission
-    /// producer (`stage_admission` -> `AdmissionPlan`) attaches a Prepared
-    /// DSM-backed admission bound to exactly this operation's digest, then
-    /// advances. Whether the admission is TRUE — whether a register accepted
-    /// the position, whether the evidence verifies — is established one layer
-    /// up, by the producer and the economic verifier, and is proven there.
-    /// At this layer there is no other way a credit enters the head, which is
-    /// what makes this the legitimate origin for a core test rather than a
-    /// bypass: every gate `advance` owns still runs. It is not asserting that
-    /// an unadmitted origin is acceptable;
-    /// `a_funded_create_is_refused_without_its_own_attached_admission` pins
-    /// that it is not.
-    #[cfg(any(test, feature = "testing"))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn advance_admitted(
+    /// A SoFi fulfillment's advance moves no balance — it installs the
+    /// conditional claim, and the claim commits two roots (§38). The balance
+    /// leaves the resolution selects are what this device's balances must now
+    /// be: `P.R_realize`'s for a Realized position, unchanged for a Void one.
+    /// The changes come only from [`advance_resolved`], which derives them
+    /// from the settlement and the evidence its verdict was reached on, so no
+    /// caller names an amount.
+    ///
+    /// Each balance must be the one the change starts from. The pre values
+    /// are the leaves of the validated root the position was built on, and
+    /// the fence held every other economic write while it was pending, so a
+    /// head that holds anything else is not the head that registered the
+    /// position.
+    ///
+    /// [`advance_resolved`]: crate::sofi::lineage::advance_resolved
+    pub fn with_resolved_position(
         &self,
-        rel_key: [u8; 32],
-        counterparty_devid: [u8; 32],
-        operation: Operation,
-        entropy: Vec<u8>,
-        encapsulated_entropy: Option<Vec<u8>>,
-        deltas: &[BalanceDelta],
-        initial_chain_tip: Option<[u8; 32]>,
-        anchor_leaf: Option<AnchorLeafUpdate>,
-        offline_spend: Option<OfflineSpend>,
-        reserve_mutation: Option<VaultReserveMutation>,
-    ) -> Result<AdvanceOutcome, DsmError> {
-        let mut staged = self.clone();
-        staged.pending_economic_admission = Some(
-            crate::economic::admission::PendingEconomicAdmission::prepared(
-                crate::economic::admission::PendingAdmissionKind::DsmBacked,
-                1,
-                [0u8; 32],
-                crate::economic::faucet::dsm_operation_digest(&operation.to_bytes()),
-            ),
-        );
-        staged.advance(
-            rel_key,
-            counterparty_devid,
-            operation,
-            entropy,
-            encapsulated_entropy,
-            deltas,
-            initial_chain_tip,
-            anchor_leaf,
-            offline_spend,
-            reserve_mutation,
-        )
-    }
-
-    /// TEST-ONLY. ERA through the faucet, at the core layer: one admitted
-    /// `FaucetClaim` on this device's self-loop, crediting exactly the
-    /// protocol payout (`ERA_FAUCET_PAYOUT`) of builtin ERA. A test that
-    /// needs more claims more tickets — there is no amount to ask for,
-    /// because the faucet has none.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_faucet_claim(
-        &self,
-        ticket_index: u64,
-        entropy_seed: u8,
+        balances: &crate::sofi::lineage::ResolvedBalances,
     ) -> Result<Self, DsmError> {
-        let (rel_key, initial_tip) = self.self_loop_coordinates();
-        self.advance_admitted(
-            rel_key,
-            self.devid,
-            Operation::FaucetClaim {
-                faucet_id: crate::economic::faucet::era_faucet_id(b"dsm-testnet"),
-                ticket_index,
-            },
-            vec![entropy_seed; 32],
-            None,
-            &[BalanceDelta {
-                policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
-                direction: BalanceDirection::Credit,
-                amount: crate::economic::faucet::ERA_FAUCET_PAYOUT,
-            }],
-            Some(initial_tip),
-            None,
-            None,
-            None,
-        )
-        .map(|o| o.new_device_state)
-    }
-
-    /// TEST-ONLY. A user asset through authorized issuance, at the core
-    /// layer: one admitted `Mint` of `amount` units of `policy_commit` on the
-    /// self-loop. A builtin commit is refused exactly as in production — ERA
-    /// comes only from [`Self::admitted_faucet_claim`].
-    #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_mint(
-        &self,
-        policy_commit: [u8; 32],
-        amount: u64,
-        entropy_seed: u8,
-    ) -> Result<Self, DsmError> {
-        let (rel_key, initial_tip) = self.self_loop_coordinates();
-        self.advance_admitted(
-            rel_key,
-            self.devid,
-            Operation::Mint {
-                amount: crate::types::token_types::Balance::from_state(amount, [0u8; 32]),
-                token_id: b"TEST".to_vec(),
-                policy_commit,
-                message: String::new(),
-            },
-            vec![entropy_seed; 32],
-            None,
-            &[BalanceDelta {
-                policy_commit,
-                direction: BalanceDirection::Credit,
-                amount,
-            }],
-            Some(initial_tip),
-            None,
-            None,
-            None,
-        )
-        .map(|o| o.new_device_state)
-    }
-
-    /// TEST-ONLY. A funded vault through the production transition, at the
-    /// core layer: one admitted, SIGNED `DlvCreateFundedV2` on the self-loop
-    /// carrying a `Fund` reserve mutation for exactly `legs`. `secret_key`
-    /// must be the mate of this head's `public_key` — `advance` verifies the
-    /// creator's signature against the head, as it does for every creator.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_funded_create(
-        &self,
-        vault_id: [u8; 32],
-        legs: [([u8; 32], u64); 2],
-        fee_bps: u32,
-        secret_key: &[u8],
-        entropy_seed: u8,
-    ) -> Result<Self, DsmError> {
-        let (rel_key, initial_tip) = self.self_loop_coordinates();
-        let [(x, xa), (y, ya)] = legs;
-        let ((a, ra), (b, rb)) = if x < y {
-            ((x, xa), (y, ya))
-        } else {
-            ((y, ya), (x, xa))
-        };
-        let pair = VaultStatePair::new(a, b, fee_bps)?;
-        let unsigned = Operation::DlvCreateFundedV2 {
-            vault_id: vault_id.to_vec(),
-            creator_public_key: self.public_key.clone(),
-            parameters_hash: vec![0u8; 32],
-            fulfillment_condition: Vec::new(),
-            leg_a_policy_commit: a,
-            leg_a_amount: ra,
-            leg_b_policy_commit: b,
-            leg_b_amount: rb,
-            fee_bps,
-            signature: Vec::new(),
-            mode: crate::types::operations::TransactionMode::Unilateral,
-        };
-        let signature = crate::crypto::sphincs::sphincs_sign(
-            secret_key,
-            &unsigned.with_cleared_signature().to_bytes(),
-        )?;
-        self.advance_admitted(
-            rel_key,
-            self.devid,
-            unsigned.with_signature(signature),
-            vec![entropy_seed; 32],
-            None,
-            &[],
-            Some(initial_tip),
-            None,
-            None,
-            Some(VaultReserveMutation::Fund {
-                vault_id,
-                legs: vec![(a, ra), (b, rb)],
-                vault_sequence: 0,
-                pair,
-            }),
-        )
-        .map(|o| o.new_device_state)
-    }
-
-    /// The device's self-loop relationship key and its spec-canonical initial
-    /// tip — where every self-authored economic origin lands.
-    #[cfg(any(test, feature = "testing"))]
-    fn self_loop_coordinates(&self) -> ([u8; 32], [u8; 32]) {
-        (
-            crate::core::bilateral_transaction_manager::compute_smt_key(&self.devid, &self.devid),
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &self.devid,
-                &self.devid,
-            ),
-        )
+        let mut next = self.clone();
+        for change in balances.changes() {
+            let held = self.balance(&change.policy_commit);
+            if held != change.before {
+                return Err(DsmError::invalid_operation(format!(
+                    "resolved position: this head holds {held} of token {}, and the root the \
+                     position was built on holds {} — the head is not the one that registered it",
+                    crate::utils::text_id::encode_base32_crockford(&change.policy_commit),
+                    change.before
+                )));
+            }
+            if change.after == 0 {
+                next.balances.remove(&change.policy_commit);
+            } else {
+                next.balances.insert(change.policy_commit, change.after);
+            }
+        }
+        Ok(next)
     }
 
     /// Attempt to build an advance by one transition on `rel_key`.
@@ -1594,13 +1127,11 @@ impl DeviceState {
     /// - `entropy` — fresh per-transition entropy (§11 eq. 14)
     /// - `encapsulated_entropy` — optional ML-KEM ciphertext (§11 eq. 12)
     /// - `deltas` — balance mutations to apply to device-level `B^T`
-    /// - `initial_chain_tip` — spec-canonical initial tip, used ONLY if
-    ///   `rel_key` has no prior entry in the SMT (first-ever tx)
     ///
     /// # Errors
     ///
+    /// - A relationship not established on this device
     /// - Balance underflow or overflow (§8 eq. 10)
-    /// - First-ever tx without `initial_chain_tip`
     /// - SMT replace failure
     ///
     /// # Concurrency
@@ -1615,35 +1146,23 @@ impl DeviceState {
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: Operation,
-        entropy: Vec<u8>,
-        encapsulated_entropy: Option<Vec<u8>>,
         deltas: &[BalanceDelta],
-        initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<AnchorLeafUpdate>,
         offline_spend: Option<OfflineSpend>,
-        // Assets to encumber into a vault as part of THIS transition. `Some`
-        // only for `DlvCreate`; every other advance passes `None`.
-        reserve_mutation: Option<VaultReserveMutation>,
     ) -> Result<AdvanceOutcome, DsmError> {
-        // Resolve embedded_parent: prior SMT leaf, or the initial tip for
-        // first-ever advances on this relationship. For first-ever advances
-        // we additionally seed the SMT leaf to that initial tip BEFORE the
-        // replace so the parent inclusion proof carries a real value
-        // (matching the historical behaviour of `initialize_contact_chain_tip`
-        // on the retired `SHARED_SMT`). Without the seed, the first-ever
-        // parent proof would be a non-inclusion proof with value=None, which
-        // §4.3 `verify_receipt_bytes` rejects.
-        let (embedded_parent, seed_first_ever) = match self.chain_tip(&rel_key) {
-            Some(tip) => (tip, false),
-            None => {
-                let seed = initial_chain_tip.ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "advance: first-ever transaction requires initial_chain_tip",
-                    )
-                })?;
-                (seed, true)
-            }
-        };
+        // The one entropy of this transition, derived from the tip before
+        // anything else reads the relationship (Part VII step 3).
+        let transition_entropy = self.derive_transition_entropy(&rel_key, &operation);
+        let entropy: Vec<u8> = transition_entropy.to_vec();
+        // The step extends the relationship's committed leaf. A relationship
+        // is established before its first step (`establish_relationship`), so
+        // the parent path always authenticates a leaf the device holds under
+        // the root it holds.
+        let embedded_parent = self.chain_tip(&rel_key).ok_or_else(|| {
+            DsmError::invalid_operation(
+                "advance: the relationship is not established on this device",
+            )
+        })?;
 
         // §9.5 + balance conservation (token-policy doctrine §4; code
         // correspondence: lean4 DSMOfflineFinality.lean commit_conservation /
@@ -1660,82 +1179,36 @@ impl DeviceState {
             offline_spend.map(|o| o.amount),
         )?;
 
-        // AUTHORIZATION ON THE REAL PATH (§ canonical rule, transition.rs).
+        // SOFI v8 SIGNS ITS PROTOCOL OBJECTS, NOT A SECOND COPY OF THEM.
         //
-        // `DlvSettle` and `DlvOwnerApply` are value-moving egress (`EgressAsset::Asset`)
-        // and are not among the rule's no-signature exemptions (`Genesis`, `Noop`,
-        // `Receive`). They used to reach this point unverified: the rule's own helper,
-        // `enforce_operation_authorization`, is only wired into the legacy
-        // `create_transition` / `execute_relationship_transition` paths, and neither is
-        // on the device-head advance every DLV route actually takes. The signature was
-        // therefore hashed into `compute_chain_tip()` — into the SMT leaf and the device
-        // root `r_A` — whether or not anyone had produced it.
+        // A setup signs `m_setup` and a fulfillment signs `m_F` — the digests
+        // of the objects themselves, which is what a storage member checks
+        // when the same object arrives with no operation wrapped around it.
+        // Verifying an additional generic operation signature here would
+        // demand a second signature nobody else can check, over bytes that
+        // exist only on this path.
         //
-        // Both are SELF-LOOP transitions (`rel_key = compute_smt_key(actor, actor)`), so
-        // the authorizing key is this device's own AK. It is deliberately NOT read out of
-        // the operation (`DlvSettle` carries a `settler_public_key`): a key travelling
-        // inside the material it authorizes proves nothing, and a caller could name any
-        // key it liked. Verifying against `self.public_key()` is what makes the signature
-        // bind to the actor whose head is advancing.
-        //
-        // Fail-closed and BEFORE the chain tip is computed: the signature is part of the
-        // committed operation bytes, so an unsigned transition cannot be repaired later
-        // without rewriting this tip and every descendant.
+        // A vault creation has no object digest of its own and signs the
+        // operation, so `sofi::signature::verify_operation` is the one place
+        // that knows which rule each of the three follows. Every one of them
+        // is fail-closed and BEFORE the chain tip is computed: the signature
+        // is part of the committed operation bytes.
         if matches!(
             operation,
-            Operation::DlvSettle { .. }
-                | Operation::DlvClose { .. }
-                | Operation::DlvCreateFundedV2 { .. }
-                | Operation::DlvOwnerApplyV2 { .. }
+            Operation::SofiSetup { .. }
+                | Operation::SofiVaultCreate { .. }
+                | Operation::SofiFulfill { .. }
+                | Operation::EscrowVaultCreate { .. }
         ) {
-            let op_name = operation.get_operation_type();
-            crate::core::state_machine::transition::verify_operation_signature(
-                &operation,
-                &self.public_key,
-                op_name,
-            )?;
+            crate::sofi::signature::verify_operation(&operation, &self.public_key)?;
         }
 
-        // BUILTIN ISSUANCE IS NOT SELF-AUTHORIZABLE.
-        //
-        // A `Mint` naming a builtin policy commit (ERA, dBTC) creates units of a
-        // supply nobody may unilaterally expand. Every check that used to stand
-        // between a caller and that credit was satisfiable by the caller alone:
-        // the route builds its own authorization and stamps `authorized_by` with
-        // the caller's own device id; ERA's preloaded policy carries zero
-        // conditions and zero roles, so the enforcer iterates nothing and
-        // returns "allowed"; dBTC has no registered policy at all and takes the
-        // builtin escape hatch; and `validate_conservation` only checks that the
-        // single credit delta matches the amount and asset the same caller
-        // signed. Nothing anywhere established a right to issue.
-        //
-        // The gate lives HERE, at the accepting transition, and not on the route,
-        // because a route guard binds only the callers that go through it: any
-        // future route, or any direct `advance` caller, would silently reopen the
-        // hole. This is the chokepoint every mint must cross.
-        //
-        // Fail-closed with no exemption for BUILTINS: class 0x0029 exists and
-        // authorizes user-token issuance, but a builtin's issuance is not
-        // self-authorizable under any policy signature — ERA enters through
-        // the faucet's bootstrap tickets, dBTC through the Bitcoin tap. A
-        // `SupplyCap` condition would NOT be an issuance predicate either: it
-        // reads `circulating_le` from caller-supplied enforcement context, and
-        // no canonical producer authenticates that number.
-        // Keyed on `policy_commit`, which is the identity that actually moves
-        // value: `validate_conservation` binds the credit delta to it, `balances`
-        // is keyed by it, and the compat projection resolves a ticker FROM it.
-        // The `token_id` string is metadata — a mint carrying the ticker "ERA"
-        // with a non-builtin commit credits that non-builtin asset and can never
-        // project as ERA, so rejecting on the string would refuse honest mints
-        // without closing anything.
         // THE PENDING-ADMISSION FENCE.
         //
         // Reads `self`, not an argument. A caller-supplied `pending: bool`
         // would move the bypass one argument inward — anyone wanting to spend
         // fenced value would pass `false`. The state rides on the head, so
-        // every route AND every direct internal caller crosses this same gate,
-        // which is the invariant that matters (the builtin-mint incident found
-        // three suites calling `advance` directly, bypassing the route).
+        // every route AND every direct internal caller crosses this same gate.
         //
         // The predicate is the exhaustive economic classifier, NOT
         // `Operation::is_value_bearing`: that gate exists for recovery and is
@@ -1747,132 +1220,17 @@ impl DeviceState {
                 .map_err(|blocked| DsmError::invalid_operation(format!("advance: {blocked}")))?;
         }
 
-        // THE FAUCET-CLAIM ACCEPTING GATE. A faucet claim must not be a raw
-        // local-balance mint: it is refused unless a matching economic
-        // admission is ALREADY attached to this head (attached in `Prepared`,
-        // which does not fence), binding this exact operation's digest. The
-        // only way core installs the +100 is with the fence already riding
-        // the head, and the commit seam makes head+row atomic. A modified
-        // client that skips the attach gets this refusal; one that fakes and
-        // locally clears it holds value NO FOREIGN VERIFIER accepts — which
-        // is the economic-root guarantee doing its job.
-        //
-        // Range is enforced here too; the CANONICAL faucet_id is enforced
-        // where the authenticated network_id exists (the provenance verifier,
-        // and the register node) — this layer has only the genesis DIGEST and
-        // cannot recompute era_faucet_id(network_id) without un-hashing it.
-        if let Operation::FaucetClaim { ticket_index, .. } = &operation {
-            if *ticket_index >= crate::economic::faucet::ERA_FAUCET_TICKET_COUNT {
-                return Err(DsmError::invalid_operation(format!(
-                    "advance: faucet ticket_index {ticket_index} is not a coordinate that \
-                     exists — the allocation is exactly {} tickets",
-                    crate::economic::faucet::ERA_FAUCET_TICKET_COUNT
-                )));
-            }
-            self.require_attached_dsm_admission(&operation, "a faucet claim")?;
-        }
-
-        // THE CREDIT-DIRECTION TRANSFER ACCEPTING GATE (3.5b PR4). An online
-        // credit-direction Transfer — `authority_policy: None`, addressed to
-        // THIS device — installs a positive balance the recipient never held;
-        // without an attached economic admission it would be a raw local
-        // credit, spendable before any foreign verifier could refuse it. Same
-        // discipline as the faucet gate, same reason, TOTAL: the BLE/USB
-        // bilateral receiver crosses this exact seam with an
-        // indistinguishable operation and is refused fail-closed until its
-        // own admission wiring lands (owner ruling 2026-08-27 — no transport
-        // exemption; bearer-tier transfers carry `authority_policy: Some` and
-        // are untouched). Debit-direction stays un-gated in core: a raw local
-        // debit is self-harm, and a skipped debit admission strands only the
-        // skipper's own lineage.
-        if let Operation::Transfer {
-            to_device_id,
-            authority_policy: Option::None,
-            ..
-        } = &operation
-        {
-            if to_device_id.len() == 32 && to_device_id.as_slice() == self.devid.as_slice() {
-                self.require_attached_dsm_admission(
-                    &operation,
-                    "an online credit-direction transfer",
-                )?;
-            }
-        }
-
-        // THE MINT GATE. A positive mint CREATES units — the one operation
-        // whose whole effect is a credit with no prior holder — so it may
-        // enter canonical device state only through the economic-admission
-        // fence, exactly like a faucet claim or an online credit-direction
-        // transfer. This layer does NOT parse the 0x0029 evidence; its job is
-        // narrower and load-bearing: no raw local positive credit without an
-        // attached admission. The economic verifier proves the admission's
-        // 0x0023 AuthorizedIssuance source during validation.
-        //
-        // The builtin arm stays UNCONDITIONAL and is keyed on the COMMIT, not
-        // the ticker: builtin issuance is not self-authorizable under any
-        // admission — ERA enters through the faucet's bootstrap tickets, and
-        // dBTC arrives with the Bitcoin tap integration.
-        if let Operation::Mint {
-            policy_commit,
-            amount,
-            ..
-        } = &operation
-        {
-            if let Some(name) =
-                crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(
-                    policy_commit,
-                )
-            {
-                return Err(DsmError::invalid_operation(format!(
-                    "advance: refusing to mint the builtin token {name} — builtin issuance is not \
-                     self-authorizable; ERA is distributed by the faucet's bootstrap tickets and \
-                     dBTC issuance arrives with the Bitcoin tap integration"
-                )));
-            }
-            if amount.value() > 0 {
-                self.require_attached_dsm_admission(&operation, "an authorized issuance mint")?;
-            }
-        }
-
-        // THE FUNDED VAULT CREATION. `DlvCreateFundedV2` moves spendable
-        // balance into vault reserve leaves, which is an economically
-        // ORIGINATING effect — it creates the reserve position every later
-        // settlement proves against. It classifies `ClosedWriteSet` and has a
-        // complete write set, producer and verifier, yet until now nothing
-        // required its admission at the chokepoint: a caller could submit the
-        // raw operation and encumber reserves the economic lineage never saw,
-        // leaving a head whose reserves `R_econ` cannot account for.
-        //
-        // Deliberately NARROW. Settle, close and owner-apply are not fenced
-        // here: they consume or return an existing position rather than
-        // originating one, and their admission wiring is a separate cut with a
-        // separate evidence story. Widening this gate before those producers
-        // exist would strand the trader path with no replacement.
-        if matches!(operation, Operation::DlvCreateFundedV2 { .. }) {
-            self.require_attached_dsm_admission(&operation, "a funded vault creation")?;
-        }
-
-        // THE SECOND ISSUANCE OPERATION. `CreateToken` carries an issuance leg,
-        // and `validate_conservation` deliberately PERMITS it (the arm requires
-        // exactly one credit of `initial_supply` under the new token's own
-        // commit). Refusing it only in the route and only in the write-set
-        // builder leaves the chokepoint itself open — precisely the shape that
-        // made `Mint` a live defect, since a route guard binds one caller and
-        // the write-set rule binds only paths that build one.
-        //
-        // No production caller can reach it today: `Operation::CreateToken` has
-        // a single constructor, which passes only the ERA fee debit, so
-        // conservation would refuse a supply leg for want of the delta. That is
-        // an argument for fencing it now rather than later — the gap is
-        // currently free to close, and it is exactly the kind that a future
-        // caller closes by accident in the wrong direction.
-        if let Operation::CreateToken { initial_supply, .. } = &operation {
-            if initial_supply.value() > 0 {
+        // A faucet claim names the reserve generation its release installs,
+        // and generation 0 is the reserve's genesis state, which no release
+        // installs. The canonical reserve id and the release itself are
+        // established by the provenance verifier (0x005D), where the
+        // authenticated network id exists; this layer holds only the genesis
+        // digest.
+        if let Operation::FaucetClaim { generation, .. } = &operation {
+            if *generation == 0 {
                 return Err(DsmError::invalid_operation(
-                    "advance: refusing to create a token with initial supply — supply at \
-                     creation has no issuance source. Create the token with zero supply and \
-                     issue through token.mint, whose credit is funded by a 0x0029 issuance \
-                     authorization the verifier reruns",
+                    "advance: a faucet claim names the reserve generation its release \
+                     installs, which is never the genesis generation 0",
                 ));
             }
         }
@@ -1888,30 +1246,75 @@ impl DeviceState {
                         "advance: offline-bearer spend requires an anchor-state leaf advance",
                     ));
                 }
+                // The allocation drawn from is the one for the operation's own
+                // asset: its receipt's verifier derives the key from it.
+                if !matches!(
+                    &operation,
+                    Operation::Transfer { policy_commit, .. } if *policy_commit == os.asset
+                ) {
+                    return Err(DsmError::invalid_operation(
+                        "advance: an offline-cash spend draws from the allocation of the operation's own asset",
+                    ));
+                }
                 let key = crate::types::offline_allocation_leaf::offline_allocation_key(
                     &self.genesis,
                     &self.devid,
                     &os.anchor_bundle_b,
                     &os.asset,
                 );
-                let cur = self
-                    .offline_allocations
-                    .get(&key)
-                    .copied()
-                    .unwrap_or_default();
+                let cur = self.offline_allocations.get(&key).copied().ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: this device holds no offline-cash allocation for the anchor bundle and asset",
+                    )
+                })?;
                 let new_amount = cur.amount.checked_sub(os.amount).ok_or_else(|| {
                     DsmError::invalid_operation(
                         "advance: offline-cash allocation underflow (insufficient offline cash)",
                     )
                 })?;
-                let new_sequence = cur.sequence + 1;
+                let new_sequence = cur.sequence.checked_add(1).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: offline-cash allocation sequence overflow",
+                    )
+                })?;
                 let value = crate::types::offline_allocation_leaf::offline_allocation_value(
                     new_amount,
                     new_sequence,
                 );
-                Some((key, value, new_amount, new_sequence))
+                let before = crate::types::step_transition::AllocationBefore {
+                    key,
+                    amount: cur.amount,
+                    sequence: cur.sequence,
+                };
+                Some((key, value, new_amount, new_sequence, before))
             }
         };
+
+        // ADOPTION GATE. A credit of a non-builtin token is accepted only if
+        // this device's PRE-state already commits the token's adoption leaf —
+        // the authenticated fact that its public policy was installed here
+        // before any value under it arrived. This is what keeps receipt
+        // verifiable offline: nothing about the token is fetched at acceptance
+        // time. The creator adopts in the same advance that creates (the leaf
+        // is written below, from the signed operation); every other device
+        // adopts through `AdoptToken` first. A settlement path that roots the
+        // token on the receiver's behalf does not satisfy this, by design.
+        for d in deltas {
+            if d.direction == BalanceDirection::Credit
+                && !self.has_adopted(&d.policy_commit)
+                && !matches!(
+                    &operation,
+                    Operation::CreateToken { policy_commit, .. } if *policy_commit == d.policy_commit
+                )
+            {
+                return Err(DsmError::invalid_operation(format!(
+                    "advance: refusing to credit token {} — this device has not adopted its \
+                     policy; adoption (ADD TOKEN) must precede receipt so the policy is \
+                     verifiable from local state",
+                    crate::utils::text_id::encode_base32_crockford(&d.policy_commit)
+                )));
+            }
+        }
 
         // Apply deltas to a working copy. Failures leave self untouched. (For an offline-bearer
         // spend, `deltas` is empty — conservation enforced above — so the online balance is
@@ -1936,686 +1339,22 @@ impl DeviceState {
             }
         }
 
-        // FUNDING: value leaves `balances` and enters this vault's reserve
-        // leaves, in the SAME advance as the transition that creates the vault.
-        //
-        // Only `DlvCreate` may fund. Every other operation carrying funding is a
-        // caller mistake serious enough to refuse rather than ignore: an advance
-        // that silently dropped the legs would report success on a vault holding
-        // nothing, which is the exact failure this whole path exists to end.
-        //
-        // Not expressed as `BalanceDelta`s, deliberately. A delta can only reach
-        // `balances`, and that is what makes an encumbered reserve unspendable by
-        // any transfer, mint or burn — only the vault chokepoints can move it.
-        // Routing funding through deltas would give it back.
-        let mut new_vault_reserves = self.vault_reserves.clone();
-        // Every non-relationship leaf this advance writes: reserve leaves and the
-        // vault-state leaf. ONE vector, consumed by every batch arm and by the
-        // `extra_leaves` replay, so no arm can forget a leaf.
+        // Every non-relationship leaf this advance writes. ONE vector, consumed
+        // by every batch arm and by the `extra_leaves` replay, so no arm can
+        // forget a leaf.
         let mut batch_leaves: Vec<([u8; 32], [u8; 32])> = Vec::new();
-        if let Some(VaultReserveMutation::Fund {
-            vault_id: funding_vault,
-            legs: funding_legs_in,
-            vault_sequence,
-            pair,
-        }) = &reserve_mutation
-        {
-            let funding = FundingView {
-                vault_id: *funding_vault,
-                legs: funding_legs_in,
-                vault_sequence: *vault_sequence,
-            };
-            // Only the funded v2 create may encumber reserves. DlvCreate is
-            // structurally state-only (`EconomicEffect::None`), and `None`
-            // must be IMPOSSIBLE for any transition that moves reserve state
-            // — so ANY DlvCreate carrying a Fund mutation is refused here.
-            match &operation {
-                Operation::DlvCreate { .. } => {
-                    return Err(DsmError::invalid_operation(
-                        "advance: DlvCreate is state-only and may not encumber reserves — \
-                         funded vaults are created with DlvCreateFundedV2",
-                    ));
-                }
-                Operation::DlvCreateFundedV2 {
-                    vault_id: op_vault,
-                    leg_a_policy_commit,
-                    leg_a_amount,
-                    leg_b_policy_commit,
-                    leg_b_amount,
-                    ..
-                } => {
-                    // The SIGNED operation states the complete funding; the
-                    // mutation must equal it field-for-field (the Withdraw
-                    // discipline) — unsigned mutation metadata never decides
-                    // what moves.
-                    let op_legs = [
-                        (*leg_a_policy_commit, *leg_a_amount),
-                        (*leg_b_policy_commit, *leg_b_amount),
-                    ];
-                    if op_vault.as_slice() != funding.vault_id.as_slice()
-                        || funding.legs != op_legs
-                        || funding.vault_sequence != 0
-                    {
-                        return Err(DsmError::invalid_operation(
-                            "advance: the Fund mutation does not equal the signed \
-                             DlvCreateFundedV2 (vault, legs or sequence) — refusing",
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(DsmError::invalid_operation(
-                        "advance: only a value-bearing vault creation may encumber reserves",
-                    ));
-                }
+        // ADOPTION LEAF. Written from the signed operation, never from a
+        // caller-supplied leaf: `AdoptToken` adopts the named policy, and
+        // `CreateToken` adopts the token it issues (the creator must be able
+        // to receive its own token back). Idempotent — re-adopting rewrites
+        // the same value.
+        match &operation {
+            Operation::AdoptToken { policy_commit, .. }
+            | Operation::CreateToken { policy_commit, .. } => {
+                batch_leaves.push((Self::token_adoption_leaf_key(policy_commit), *policy_commit));
             }
-            // PAIR COMPLETENESS. An AMM vault's legs ARE its pair — exactly the
-            // two assets the vault-state digest is derived over. A third asset,
-            // a single leg, or an asset outside the pair would be silently
-            // omitted from `digest(a, b, ra, rb, fee)`, giving a signed vault
-            // state that describes different reserves than the leaves hold.
-            let expected_legs = [pair.a(), pair.b()];
-            let actual_legs: Vec<[u8; 32]> = funding.legs.iter().map(|(pc, _)| *pc).collect();
-            if actual_legs.as_slice() != expected_legs {
-                return Err(DsmError::invalid_operation(
-                    "advance: funding legs must be exactly the vault's pair, in canonical order",
-                ));
-            }
-            for (i, (policy_commit, amount)) in funding.legs.iter().enumerate() {
-                if *amount == 0 {
-                    return Err(DsmError::invalid_operation(
-                        "advance: a funding leg must carry a non-zero amount",
-                    ));
-                }
-                // Canonical order and distinctness, checked rather than trusted:
-                // a repeated asset would debit twice into one leaf, and an
-                // unordered pair would disagree with the order the reserve proof
-                // and the advertisement are built in.
-                if i > 0 && funding.legs[i - 1].0 >= *policy_commit {
-                    return Err(DsmError::invalid_operation(
-                        "advance: funding legs must be lex-ascending by policy_commit and distinct",
-                    ));
-                }
-
-                let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-                    &self.genesis,
-                    &self.devid,
-                    &funding.vault_id,
-                    policy_commit,
-                );
-                // ORPHANED ENCUMBRANCE. A leaf already here means a prior
-                // creation for this vault got as far as encumbering. Refuse:
-                // completing someone else's half-finished creation from inside a
-                // value-moving constructor would be a repair, and a repair
-                // belongs in an explicit recovery operation where it can be
-                // audited.
-                if self.vault_reserves.contains_key(&key) {
-                    return Err(DsmError::invalid_operation(
-                        "advance: this vault already holds a reserve for that asset — \
-                         refusing to encumber again",
-                    ));
-                }
-
-                // The debit. `checked_sub` is the structural guarantee; a
-                // handler-side balance check is only there to name the shortfall
-                // more readably.
-                let cur = new_balances.get(policy_commit).copied().unwrap_or(0);
-                let next = cur.checked_sub(*amount).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "advance: insufficient balance to encumber (funding leg exceeds holdings)",
-                    )
-                })?;
-                if next == 0 {
-                    new_balances.remove(policy_commit);
-                } else {
-                    new_balances.insert(*policy_commit, next);
-                }
-
-                let leaf_value = crate::dlv::vault_reserve_leaf::vault_reserve_value(
-                    *amount,
-                    funding.vault_sequence,
-                );
-                batch_leaves.push((key, leaf_value));
-                new_vault_reserves.insert(
-                    key,
-                    VaultReserve {
-                        amount: *amount,
-                        sequence: funding.vault_sequence,
-                    },
-                );
-            }
+            _ => {}
         }
-
-        // THE OWNER RECORDS A SETTLEMENT it has already verified. The input the
-        // trader paid arrives, the output it took leaves, and `balances` is
-        // untouched: the trader's credit was final at the trader's own advance,
-        // and the fee accrues inside the reserves as LP yield.
-        //
-        // Rides the same batch as the `DlvOwnerApply` transition, for the same
-        // reason funding does — a reserve move in a separate advance would leave
-        // a root in which the vault's state and its reserves disagree.
-        if let Some(VaultReserveMutation::ApplySettlement {
-            vault_id: apply_vault,
-            input_policy_commit,
-            input_amount,
-            output_policy_commit,
-            output_amount,
-            parent_sequence,
-            new_sequence,
-            pair,
-            parent_state,
-        }) = &reserve_mutation
-        {
-            let signed_parent_binding: [u8; 32] = match &operation {
-                Operation::DlvOwnerApplyV2 {
-                    vault_id: op_vault,
-                    parent_sequence: op_parent,
-                    new_sequence: op_new,
-                    input_policy_commit: op_in_pc,
-                    output_policy_commit: op_out_pc,
-                    input_amount: op_in_amt,
-                    output_amount: op_out_amt,
-                    parent_binding: op_parent_binding,
-                    ..
-                } => {
-                    // The SIGNED v2 operation states the complete reserve
-                    // effect; the mutation must equal it field-for-field (the
-                    // Withdraw discipline) — the legacy arm has no such check
-                    // because the legacy op lacks the fields, which is exactly
-                    // why it is UnsupportedValueTransition in the economic
-                    // profile.
-                    if op_vault.as_slice() != apply_vault.as_slice()
-                        || op_parent != parent_sequence
-                        || op_new != new_sequence
-                        || op_in_pc != input_policy_commit
-                        || op_out_pc != output_policy_commit
-                        || op_in_amt != input_amount
-                        || op_out_amt != output_amount
-                    {
-                        return Err(DsmError::invalid_operation(
-                            "advance: the ApplySettlement mutation does not equal the signed \
-                             DlvOwnerApplyV2 (vault, legs, amounts or generation) — refusing",
-                        ));
-                    }
-                    *op_parent_binding
-                }
-                _ => {
-                    return Err(DsmError::invalid_operation(
-                        "advance: only an owner apply may apply a settlement to reserves",
-                    ));
-                }
-            };
-            if input_policy_commit == output_policy_commit {
-                return Err(DsmError::invalid_operation(
-                    "advance: a settlement cannot name one asset on both legs",
-                ));
-            }
-            // PAIR COMPLETENESS. `{input, output}` must BE the vault's pair: a
-            // settlement introducing a third asset would move a leg the vault-
-            // state digest never sees, so the signed state and the leaves would
-            // silently disagree.
-            {
-                let (lo, hi) = if input_policy_commit < output_policy_commit {
-                    (*input_policy_commit, *output_policy_commit)
-                } else {
-                    (*output_policy_commit, *input_policy_commit)
-                };
-                if [lo, hi] != [pair.a(), pair.b()] {
-                    return Err(DsmError::invalid_operation(
-                        "advance: a settlement's input and output must be exactly the vault's pair",
-                    ));
-                }
-            }
-            if *input_amount == 0 || *output_amount == 0 {
-                return Err(DsmError::invalid_operation(
-                    "advance: settlement amounts must both be non-zero",
-                ));
-            }
-            // THE HARD PARENT-CONSUMPTION CLAIM. `new_sequence` is a strict unit
-            // step, and the vault must currently sit at exactly the generation
-            // this settlement names. Two individually-valid settlements racing one
-            // parent both carry `parent_sequence = N`; whichever advances first
-            // moves every touched leg to `N + 1`, and the second now finds the
-            // vault a generation ahead and is refused HERE, in the canonical state
-            // transition. Exactly one settlement consumes a generation — a stale or
-            // already-consumed parent cannot be folded again, whatever a receipt
-            // says. This is the reserve analog of the relationship layer's
-            // `UNIQUE(relationship_key, parent_tip)` consume-once tripwire, enforced
-            // where the vault's generation actually lives: the device root.
-            if *new_sequence
-                != parent_sequence.checked_add(1).ok_or_else(|| {
-                    DsmError::invalid_operation("advance: settlement sequence overflow")
-                })?
-            {
-                return Err(DsmError::invalid_operation(
-                    "advance: a settlement must advance the vault by exactly one generation \
-                     (new_sequence must be parent_sequence + 1)",
-                ));
-            }
-
-            let key_in = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-                &self.genesis,
-                &self.devid,
-                apply_vault,
-                input_policy_commit,
-            );
-            let key_out = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-                &self.genesis,
-                &self.devid,
-                apply_vault,
-                output_policy_commit,
-            );
-            // The output leg is the vault's liquidity being paid out: it must exist
-            // AND sit at exactly the parent generation. This is the consume-once
-            // check — a leg already at `parent + 1` (or beyond) means the generation
-            // was consumed by an earlier settlement.
-            match self.vault_reserves.get(&key_out) {
-                Some(e) if e.sequence == *parent_sequence => {}
-                Some(_) => {
-                    return Err(DsmError::invalid_operation(
-                        "advance: this settlement targets a vault generation that is not \
-                         current — the parent has already been consumed (a second settlement \
-                         racing the same parent) or the proof is stale",
-                    ))
-                }
-                None => {
-                    return Err(DsmError::invalid_operation(
-                        "advance: the vault holds no output reserve for that settlement",
-                    ))
-                }
-            }
-            // The input leg may be a first-time asset (created at `new_sequence`);
-            // but if it already exists it shares the vault's generation — two legs of
-            // one vault are never at different generations.
-            if let Some(e) = self.vault_reserves.get(&key_in) {
-                if e.sequence != *parent_sequence {
-                    return Err(DsmError::invalid_operation(
-                        "advance: the settlement input reserve is at a different vault \
-                         generation than the parent it names",
-                    ));
-                }
-            }
-            let cur_in = self
-                .vault_reserves
-                .get(&key_in)
-                .copied()
-                .unwrap_or_default();
-            let cur_out = self
-                .vault_reserves
-                .get(&key_out)
-                .copied()
-                .unwrap_or_default();
-
-            // THE OWNER PROVES THE EXACT TRANSITION FROM THE STATE IT OWNS.
-            //
-            // Everything above checks shape and generation. Nothing above checks
-            // that the amounts are a trade this vault's curve produces, or that
-            // the parent the signed operation claims to consume is the state
-            // these leaves hold. The trader's receipt is a witness of what the
-            // trader committed; it is not evidence about the owner's reserves.
-            // So, from the head's own commitment outward:
-            //
-            //   authoritative parent vault state (the leaf at `parent_sequence`)
-            //     → committed pair + committed fee
-            //     → authoritative reserve_in / reserve_out (by ASSET IDENTITY:
-            //       the leaf of the input asset is the input reserve, never a
-            //       caller's "a"/"b" declaration)
-            //     → canonical constant_product_output(input)
-            //     → must equal the proposed output, exactly
-            //     → the signed parent_binding must name exactly this state.
-            //
-            // Reserves in pair order, for the leaf digest and the parent state.
-            let (cur_a, cur_b) = if *input_policy_commit == pair.a() {
-                (cur_in.amount, cur_out.amount)
-            } else {
-                (cur_out.amount, cur_in.amount)
-            };
-            // 1. The head's OWN vault-state leaf at `parent_sequence` commits
-            //    (pair, fee, both reserves). The pair and fee this mutation
-            //    carries, over the reserves this arm read, must reproduce it —
-            //    otherwise the curve below would run on a fee or reserves the
-            //    head never committed. No leaf ⇒ no committed state to consume;
-            //    refused, never synthesised.
-            {
-                let state_key = crate::dlv::vault_smt_leaf::compute_vault_smt_key(apply_vault);
-                let committed = crate::dlv::vault_smt_leaf::compute_vault_smt_value(
-                    *parent_sequence,
-                    &pair.reserves_digest(cur_a, cur_b),
-                );
-                match self.extra_leaves.get(&state_key) {
-                    Some(leaf) if *leaf == committed => {}
-                    Some(_) => {
-                        return Err(DsmError::invalid_operation(
-                            "advance: the pair, fee or reserves this settlement folds are not \
-                             what the vault's committed state leaf holds at the parent \
-                             generation — refusing",
-                        ))
-                    }
-                    None => {
-                        return Err(DsmError::invalid_operation(
-                            "advance: the vault has no committed state leaf to consume — \
-                             refusing",
-                        ))
-                    }
-                }
-            }
-            // 2. The signed `parent_binding` names the parent state, and that
-            //    state IS the one these leaves hold. `CCB(V_n)` rides the
-            //    mutation as unsigned bytes; the signature covers its commitment,
-            //    and every member the leaves can see must agree with the leaves.
-            {
-                let parent = crate::ccb::decode::decode_vault_state(parent_state).map_err(|e| {
-                    DsmError::invalid_operation(format!(
-                        "advance: the settlement's parent vault state does not decode: {e}"
-                    ))
-                })?;
-                let c_n = crate::ccb::vault_state_commitment(&parent).map_err(|e| {
-                    DsmError::invalid_operation(format!(
-                        "advance: the settlement's parent vault state does not commit: {e}"
-                    ))
-                })?;
-                if c_n != signed_parent_binding {
-                    return Err(DsmError::invalid_operation(
-                        "advance: the signed parent_binding does not name the parent vault \
-                         state this settlement supplies — refusing",
-                    ));
-                }
-                if parent.vault_id != *apply_vault
-                    || parent.generation != *parent_sequence
-                    || parent.reserve_a != cur_a
-                    || parent.reserve_b != cur_b
-                    || *parent.market_policy.token_a() != pair.a()
-                    || *parent.market_policy.token_b() != pair.b()
-                    || parent.fee_policy.fee_bps() != pair.fee_bps
-                    || parent.owner_device_id != self.devid
-                    || parent.owner_genesis_id != self.genesis
-                {
-                    return Err(DsmError::invalid_operation(
-                        "advance: the parent vault state the signed parent_binding names is \
-                         not the state these reserve leaves hold (vault, generation, reserves, \
-                         pair, fee or owner differ) — refusing",
-                    ));
-                }
-            }
-            // 3. THE CURVE. One implementation, shared with the trader's quote
-            //    and the economic verifier; exact equality, no band.
-            {
-                let simulated = crate::dlv::route_commit::constant_product_output(
-                    *input_amount,
-                    cur_in.amount,
-                    cur_out.amount,
-                    pair.fee_bps,
-                )
-                .ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "advance: the settlement does not simulate against the reserves it \
-                         consumes (empty reserve, overflow or zero output) — refusing",
-                    )
-                })?;
-                if simulated != *output_amount {
-                    return Err(DsmError::invalid_operation(format!(
-                        "advance: the settlement's output is not what the vault's curve yields \
-                         from the reserves it consumes (curve {simulated}, proposed \
-                         {output_amount}) — refusing"
-                    )));
-                }
-            }
-
-            let next_in = cur_in.amount.checked_add(*input_amount).ok_or_else(|| {
-                DsmError::invalid_operation("advance: settlement overflows the input reserve")
-            })?;
-            // Fails closed rather than wrapping: a vault that cannot pay the
-            // output has not settled this trade, whatever a receipt says.
-            let next_out = cur_out.amount.checked_sub(*output_amount).ok_or_else(|| {
-                DsmError::invalid_operation("advance: the vault cannot pay that settlement output")
-            })?;
-
-            for (key, amount) in [(key_in, next_in), (key_out, next_out)] {
-                let leaf_value =
-                    crate::dlv::vault_reserve_leaf::vault_reserve_value(amount, *new_sequence);
-                batch_leaves.push((key, leaf_value));
-                new_vault_reserves.insert(
-                    key,
-                    VaultReserve {
-                        amount,
-                        sequence: *new_sequence,
-                    },
-                );
-            }
-        }
-
-        // THE OWNER CLOSES THE VAULT: the complete remaining reserve set moves
-        // back to `balances` atomically, exactly once, and the leaves become
-        // `0 @ parent + 1` — a terminal generation that can neither be funded
-        // (the leaves exist) nor withdrawn (both are already zero) again.
-        //
-        // The signed `DlvClose` operation binds the WHOLE transition; the
-        // mutation is checked against it FIELD FOR FIELD before anything moves,
-        // the same discipline the `ApplySettlement` arm above applies to
-        // `DlvOwnerApplyV2`.
-        if let Some(VaultReserveMutation::Withdraw {
-            vault_id: close_vault,
-            legs: close_legs,
-            parent_sequence: close_parent,
-            new_sequence: close_new,
-            pair: close_pair,
-        }) = &reserve_mutation
-        {
-            let Operation::DlvClose {
-                vault_id: op_vault,
-                leg_a_policy_commit,
-                leg_a_amount,
-                leg_b_policy_commit,
-                leg_b_amount,
-                parent_sequence: op_parent,
-                new_sequence: op_new,
-                fee_bps: op_fee,
-                ..
-            } = &operation
-            else {
-                return Err(DsmError::invalid_operation(
-                    "advance: only DlvClose may withdraw reserves",
-                ));
-            };
-            // WITHDRAW == OP, field for field.
-            if op_vault.as_slice() != close_vault.as_slice()
-                || *op_parent != *close_parent
-                || *op_new != *close_new
-                || *op_fee != close_pair.fee_bps()
-                || close_legs.as_slice()
-                    != [
-                        (*leg_a_policy_commit, *leg_a_amount),
-                        (*leg_b_policy_commit, *leg_b_amount),
-                    ]
-            {
-                return Err(DsmError::invalid_operation(
-                    "advance: the Withdraw mutation does not equal the signed DlvClose \
-                     (vault, legs, generation or pair) — refusing",
-                ));
-            }
-            // PAIR COMPLETENESS: the legs are exactly the vault's pair, canonical
-            // order, no duplicates, nothing else. A one-leg or foreign-leg close
-            // would leave the other asset encumbered forever while the vault
-            // reads as closed.
-            let close_expected = [close_pair.a(), close_pair.b()];
-            let close_actual: Vec<[u8; 32]> = close_legs.iter().map(|(pc, _)| *pc).collect();
-            if close_actual.as_slice() != close_expected {
-                return Err(DsmError::invalid_operation(
-                    "advance: a close must drain exactly the vault's pair, in canonical order",
-                ));
-            }
-            if *close_new
-                != close_parent.checked_add(1).ok_or_else(|| {
-                    DsmError::invalid_operation("advance: close sequence overflow")
-                })?
-            {
-                return Err(DsmError::invalid_operation(
-                    "advance: a close must advance the vault by exactly one generation",
-                ));
-            }
-            // Every named leaf must EXIST at exactly the parent generation, and
-            // its amount must EQUAL the leg — a partial or over-withdraw is
-            // refused; a leaf at another generation is a stale or already-
-            // consumed parent.
-            let mut all_zero = true;
-            let mut keys = Vec::with_capacity(2);
-            for (pc, amount) in close_legs.iter() {
-                let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-                    &self.genesis,
-                    &self.devid,
-                    close_vault,
-                    pc,
-                );
-                let entry = self.vault_reserves.get(&key).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "advance: the vault holds no reserve leaf for a leg named by the close",
-                    )
-                })?;
-                if entry.sequence != *close_parent {
-                    return Err(DsmError::invalid_operation(
-                        "advance: this close targets a vault generation that is not current — \
-                         the parent was consumed by a settlement, or the close is stale",
-                    ));
-                }
-                if entry.amount != *amount {
-                    return Err(DsmError::invalid_operation(
-                        "advance: a close must withdraw exactly the leaf's amount (no partial \
-                         or over-withdraw)",
-                    ));
-                }
-                if entry.amount != 0 {
-                    all_zero = false;
-                }
-                keys.push((key, *pc, *amount));
-            }
-            // A vault whose complete reserve set is already zero is already
-            // closed: refuse rather than mint a second terminal generation.
-            if all_zero {
-                return Err(DsmError::invalid_operation(
-                    "advance: this vault is already closed (both reserves are zero)",
-                ));
-            }
-            // THE RELEASE: credit `balances` by exactly the leg amounts (checked),
-            // and leave the leaves at `0 @ new_sequence` — never deleted, so a
-            // future `Fund` for this vault id refuses ("already holds a reserve")
-            // and a future close refuses ("already closed").
-            for (key, pc, amount) in keys {
-                let cur = new_balances.get(&pc).copied().unwrap_or(0);
-                let next = cur.checked_add(amount).ok_or_else(|| {
-                    DsmError::invalid_operation("advance: close credit overflows the balance")
-                })?;
-                new_balances.insert(pc, next);
-                let leaf_value = crate::dlv::vault_reserve_leaf::vault_reserve_value(0, *close_new);
-                batch_leaves.push((key, leaf_value));
-                new_vault_reserves.insert(
-                    key,
-                    VaultReserve {
-                        amount: 0,
-                        sequence: *close_new,
-                    },
-                );
-            }
-        }
-
-        // THE VAULT-STATE LEAF, DERIVED — never accepted. Every reserve mutation
-        // updates the vault's state leaf in the SAME batch as the reserve leaves,
-        // and its value is computed HERE from the post-mutation reserves: the
-        // sequence the mutation produced and the digest of the amounts the leaves
-        // now hold. So the vault-state proof an owner publishes and the reserve
-        // proof it publishes bind ONE root by construction, and no caller can
-        // commit a vault-state leaf that disagrees with the leaves (which is
-        // worse than two roots: it would be signed and self-consistent).
-        //
-        // Domain-disjoint from relationship and reserve leaves
-        // (`DSM/vault-smt-key\0`), so it shares the tree without colliding.
-        let vault_state_leaf: Option<DerivedVaultStateLeaf> = match &reserve_mutation {
-            None => None,
-            Some(m) => {
-                let vault_id = m.vault_id();
-                let pair = m.pair();
-                let sequence = m.resulting_sequence();
-                let reserve_at = |pc: &[u8; 32]| -> Result<u64, DsmError> {
-                    let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-                        &self.genesis,
-                        &self.devid,
-                        &vault_id,
-                        pc,
-                    );
-                    match new_vault_reserves.get(&key) {
-                        Some(e) if e.sequence == sequence => Ok(e.amount),
-                        // Both pair legs are written by the arms above at exactly
-                        // `sequence`; anything else is an internal contradiction,
-                        // refused rather than papered over with a zero.
-                        _ => Err(DsmError::invalid_operation(
-                            "advance: vault-state leaf cannot be derived — a pair leg is missing \
-                             or at a different generation than the mutation produced",
-                        )),
-                    }
-                };
-                let ra = reserve_at(&pair.a())?;
-                let rb = reserve_at(&pair.b())?;
-                let reserves_digest = pair.reserves_digest(ra, rb);
-                let key = crate::dlv::vault_smt_leaf::compute_vault_smt_key(&vault_id);
-                let value =
-                    crate::dlv::vault_smt_leaf::compute_vault_smt_value(sequence, &reserves_digest);
-                batch_leaves.push((key, value));
-                Some(DerivedVaultStateLeaf {
-                    vault_id,
-                    sequence,
-                    reserves_digest,
-                    key,
-                })
-            }
-        };
-
-        // A settling advance WRITES ITS OWN RECEIPT, derived from the operation's
-        // fields rather than from anything the caller passes alongside.
-        //
-        // That derivation is the security property. If recording a receipt were
-        // a separate entry point, a trader could write a receipt leaf for a
-        // settlement it never paid for, and the leaf would verify — which is the
-        // forgery the receipt exists to make impossible. Deriving it here means
-        // a receipt can only come into existence through an advance that already
-        // satisfied the positional conservation arm, so the leaf cannot describe
-        // a different trade than the deltas that moved.
-        let settlement_leaf: Option<([u8; 32], [u8; 32])> = match &operation {
-            Operation::DlvSettle {
-                vault_id,
-                settlement_receipt_id,
-                external_commitment_x,
-                parent_sequence,
-                input_policy_commit,
-                output_policy_commit,
-                input_amount,
-                output_amount,
-                ..
-            } => {
-                let vid: [u8; 32] = vault_id.as_slice().try_into().map_err(|_| {
-                    DsmError::invalid_operation("DlvSettle: vault_id must be 32 bytes")
-                })?;
-                let new_sequence = parent_sequence.checked_add(1).ok_or_else(|| {
-                    DsmError::invalid_operation("DlvSettle: parent sequence cannot advance")
-                })?;
-                let trade = crate::dlv::settlement_receipt_leaf::SettledTrade {
-                    x: *external_commitment_x,
-                    parent_sequence: *parent_sequence,
-                    new_sequence,
-                    input_policy_commit: *input_policy_commit,
-                    input_amount: *input_amount,
-                    output_policy_commit: *output_policy_commit,
-                    output_amount: *output_amount,
-                };
-                Some((
-                    crate::dlv::settlement_receipt_leaf::settlement_receipt_key(
-                        &self.genesis,
-                        &self.devid,
-                        &vid,
-                        settlement_receipt_id,
-                    ),
-                    crate::dlv::settlement_receipt_leaf::settlement_receipt_value(&trade),
-                ))
-            }
-            _ => None,
-        };
 
         // Build the successor chain state with the updated witness.
         let new_chain_state = RelationshipChainState {
@@ -2624,7 +1363,7 @@ impl DeviceState {
             counterparty_devid,
             operation,
             entropy,
-            encapsulated_entropy,
+            encapsulated_entropy: None,
             entity_sig: None,
             counterparty_sig: None,
         };
@@ -2632,191 +1371,59 @@ impl DeviceState {
         // Derive h_{n+1} = H(canonical_bytes(new_chain_state)).
         let child_chain_tip = new_chain_state.compute_chain_tip();
 
-        // Atomic SMT-replace on a working copy of the SMT. For first-ever
-        // advances, seed the leaf with `embedded_parent` (= initial_chain_tip)
-        // before the replace so the parent proof is an inclusion proof.
-        //
-        // `parent_r_a` is the CAS-layer view of the device head entering this
-        // advance — the root BEFORE any seeding. Seeding is an internal helper
-        // to build a valid Merkle pre-image for `smt_replace`; it must remain
-        // invisible to the CAS compare-and-swap. The Merkle `pre_root`
-        // (post-seed) lives on `smt_proofs.pre_root` instead.
+        // Atomic SMT-replace on a working copy of the SMT. `parent_r_a` is the
+        // device head entering this advance, the root the CAS compares and the
+        // receipt's pre-state root.
         let parent_r_a = *self.smt.root();
         let mut new_smt = self.smt.clone();
-        if seed_first_ever {
-            new_smt
-                .update_leaf(&rel_key, &embedded_parent)
-                .map_err(|e| {
-                    DsmError::invalid_operation(format!(
-                        "advance: first-ever seed update_leaf failed: {e}"
-                    ))
-                })?;
+        // One move of the tree over every leaf the step writes: the
+        // relationship leaf; for a bearer transition the anchor-state leaf and,
+        // for an offline-bearer spend, the allocation leaf (§9: the counter and
+        // the value source are inside the root); and any adoption or reserve
+        // leaves. Every write's path is against the one pre-root, and the
+        // transition proves its own move before it is returned.
+        let mut writes: Vec<([u8; 32], [u8; 32])> = vec![(rel_key, child_chain_tip)];
+        if let Some(al) = &anchor_leaf {
+            writes.push((al.key, al.new_value));
         }
-        // Ordinary transitions: a single relationship-leaf replace (unchanged bytes). Bearer
-        // transitions with an `anchor_leaf`: replace the relationship leaf AND the stable
-        // per-device anchor-state leaf as ONE atomic root update — all four inclusion proofs are
-        // taken against the true pre/post roots (never an intermediate root), so both the
-        // relationship and anchor-state proofs bind the same `child_r_a` the transfer commits.
-        let (smt_proofs, anchor_proofs) = match (&anchor_leaf, &settlement_leaf) {
-            // The ordinary path, and the only one that keeps `smt_replace`: no
-            // anchor leaf, no receipt leaf, no reserve/vault-state leaves. Every
-            // transfer.
-            (None, None) if batch_leaves.is_empty() => {
-                let p = new_smt
-                    .smt_replace(&rel_key, &child_chain_tip)
-                    .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
-                (p, None)
-            }
-            // A reserve-moving advance (funding or owner-apply): the reserve
-            // leaves AND the derived vault-state leaf ride the SAME batch as the
-            // relationship leaf, so the encumbrance/settlement, the vault state
-            // and the transition share one device root. `smt_replace` cannot
-            // express this — its child proof binds a root taken before the extra
-            // leaves land — and two roots would put the reserve proof and the
-            // vault-state proof out of agreement, which `compose_vault_state`
-            // requires to be equal.
-            (None, None) => {
-                let pre_root = *new_smt.root();
-                let rel_parent = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel parent proof: {e}")))?;
-                new_smt
-                    .update_leaf(&rel_key, &child_chain_tip)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel leaf replace: {e}")))?;
-                for (k, v) in &batch_leaves {
-                    new_smt.update_leaf(k, v).map_err(|e| {
-                        DsmError::invalid_operation(format!("vault reserve/state leaf: {e}"))
-                    })?;
-                }
-                let post_root = *new_smt.root();
-                let rel_child = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel child proof: {e}")))?;
-                (
-                    crate::merkle::sparse_merkle_tree::SmtReplaceResult {
-                        pre_root,
-                        post_root,
-                        parent_proof: rel_parent,
-                        child_proof: rel_child,
-                    },
-                    None,
-                )
-            }
-            // A settling advance with no anchor leaf: the receipt leaf rides the
-            // SAME batch as the relationship leaf, so the settlement and its
-            // witness share one device root. `smt_replace` cannot express this —
-            // its child proof binds a root taken before the receipt leaf lands —
-            // so the pre/post roots and both proofs are taken by hand, exactly as
-            // the anchor-leaf branch below does.
-            (None, Some((rk, rv))) => {
-                let pre_root = *new_smt.root();
-                let rel_parent = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel parent proof: {e}")))?;
-                new_smt
-                    .update_leaf(&rel_key, &child_chain_tip)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel leaf replace: {e}")))?;
-                new_smt.update_leaf(rk, rv).map_err(|e| {
-                    DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
+        if let Some((k, v, _, _, _)) = &allocation_update {
+            writes.push((*k, *v));
+        }
+        writes.extend(batch_leaves.iter().copied());
+        let transition = crate::types::step_transition::StepTransition::apply(
+            &mut new_smt,
+            &writes,
+            allocation_update
+                .as_ref()
+                .map(|(_, _, _, _, before)| *before),
+        )?;
+
+        // The anchor appliance's release hashes the anchor-state leaf's paths
+        // at both roots into its transition digest (`Π_i`, `Π_{i+1}`); until
+        // its firmware takes the counter record from the receipt, they are
+        // given to it. `Π_i` is the transition's own path for the leaf.
+        let anchor_proofs = match &anchor_leaf {
+            None => None,
+            Some(al) => {
+                let pre = transition.write_at(&al.key).ok_or_else(|| {
+                    DsmError::invalid_operation("advance: the anchor-state leaf was not written")
                 })?;
-                for (k, v) in &batch_leaves {
-                    new_smt.update_leaf(k, v).map_err(|e| {
-                        DsmError::invalid_operation(format!("vault reserve/state leaf: {e}"))
-                    })?;
-                }
-                let post_root = *new_smt.root();
-                let rel_child = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel child proof: {e}")))?;
-                (
-                    crate::merkle::sparse_merkle_tree::SmtReplaceResult {
-                        pre_root,
-                        post_root,
-                        parent_proof: rel_parent,
-                        child_proof: rel_child,
-                    },
-                    None,
-                )
-            }
-            (Some(al), _) => {
-                let pre_root = *new_smt.root();
-                let rel_parent = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel parent proof: {e}")))?;
-                let anchor_parent = new_smt.get_inclusion_proof(&al.key, 256).map_err(|e| {
-                    DsmError::invalid_operation(format!("anchor parent proof: {e}"))
-                })?;
-                new_smt
-                    .update_leaf(&rel_key, &child_chain_tip)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel leaf replace: {e}")))?;
-                new_smt.update_leaf(&al.key, &al.new_value).map_err(|e| {
-                    DsmError::invalid_operation(format!("anchor leaf replace: {e}"))
-                })?;
-                // Offline-bearer spend: the allocation debit's allocation leaf rides the SAME atomic
-                // batch, so the allocation draw-down and the transition share one device root. Updated
-                // before `post_root`/child proofs so the rel + anchor child proofs bind the final
-                // root (the receiver verifies rel + anchor against it; the allocation leaf need not be
-                // proven to the receiver — it is the sender's own accounting).
-                if let Some((k, v, _, _)) = &allocation_update {
-                    new_smt.update_leaf(k, v).map_err(|e| {
-                        DsmError::invalid_operation(format!("offline-allocation leaf replace: {e}"))
-                    })?;
-                }
-                if let Some((rk, rv)) = &settlement_leaf {
-                    new_smt.update_leaf(rk, rv).map_err(|e| {
-                        DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
-                    })?;
-                }
-                for (k, v) in &batch_leaves {
-                    new_smt.update_leaf(k, v).map_err(|e| {
-                        DsmError::invalid_operation(format!("vault reserve/state leaf: {e}"))
-                    })?;
-                }
-                let post_root = *new_smt.root();
-                let rel_child = new_smt
-                    .get_inclusion_proof(&rel_key, 256)
-                    .map_err(|e| DsmError::invalid_operation(format!("rel child proof: {e}")))?;
-                let anchor_child = new_smt
+                let parent = crate::merkle::sparse_merkle_tree::SmtInclusionProof {
+                    key: al.key,
+                    value: pre.pre,
+                    siblings: pre.path.to_vec(),
+                };
+                let child = new_smt
                     .get_inclusion_proof(&al.key, 256)
                     .map_err(|e| DsmError::invalid_operation(format!("anchor child proof: {e}")))?;
-                (
-                    crate::merkle::sparse_merkle_tree::SmtReplaceResult {
-                        pre_root,
-                        post_root,
-                        parent_proof: rel_parent,
-                        child_proof: rel_child,
-                    },
-                    Some(AnchorLeafProofs {
-                        parent: anchor_parent.to_bytes(),
-                        child: anchor_child.to_bytes(),
-                    }),
-                )
-            }
-        };
-
-        let child_r_a = smt_proofs.post_root;
-
-        // The vault-state witness is taken off the FINAL tree, after every arm
-        // has landed all its leaves, so its siblings bind exactly `child_r_a`.
-        let vault_state_proof = match vault_state_leaf {
-            None => None,
-            Some(DerivedVaultStateLeaf {
-                vault_id,
-                sequence,
-                reserves_digest,
-                key,
-            }) => {
-                let proof = new_smt.get_inclusion_proof(&key, 256).map_err(|e| {
-                    DsmError::invalid_operation(format!("vault-state leaf proof: {e}"))
-                })?;
-                Some(VaultStateLeafProof {
-                    vault_id,
-                    sequence,
-                    reserves_digest,
-                    siblings: proof.siblings,
+                Some(AnchorLeafProofs {
+                    parent: parent.to_bytes(),
+                    child: child.to_bytes(),
                 })
             }
         };
+
+        let child_r_a = transition.post_root();
 
         // Update the tip cache with the new state. value_capability is sticky-monotone:
         // a missing prior means we are witnessing this relationship's birth, so we start
@@ -2851,16 +1458,13 @@ impl DeviceState {
         if let Some(al) = &anchor_leaf {
             new_extra_leaves.insert(al.key, al.new_value);
         }
-        if let Some((rk, rv)) = settlement_leaf {
-            new_extra_leaves.insert(rk, rv);
-        }
-        // Reserve and vault-state leaves replay through `extra_leaves` too, or a
-        // reloaded device recomputes a root missing them and refuses to start.
+        // Adoption leaves replay through `extra_leaves` too, or a reloaded
+        // device recomputes a root missing them and refuses to start.
         for (k, v) in &batch_leaves {
             new_extra_leaves.insert(*k, *v);
         }
         let mut new_offline_allocations = self.offline_allocations.clone();
-        if let Some((k, v, amount, sequence)) = allocation_update {
+        if let Some((k, v, amount, sequence, _)) = allocation_update {
             new_extra_leaves.insert(k, v);
             new_offline_allocations.insert(k, OfflineAllocation { amount, sequence });
         }
@@ -2874,18 +1478,17 @@ impl DeviceState {
             legacy_anchor: self.legacy_anchor,
             extra_leaves: new_extra_leaves,
             offline_allocations: new_offline_allocations,
-            vault_reserves: new_vault_reserves,
             pending_economic_admission: self.pending_economic_admission.clone(),
         };
 
         Ok(AdvanceOutcome {
             new_device_state,
             new_chain_state,
-            smt_proofs,
+            transition,
             parent_r_a,
             child_r_a,
             anchor_proofs,
-            vault_state_proof,
+            transition_entropy,
         })
     }
 
@@ -2900,9 +1503,7 @@ impl DeviceState {
         value: &[u8; 32],
     ) -> Result<Self, DsmError> {
         let mut new_smt = self.smt.clone();
-        new_smt.update_leaf(key, value).map_err(|e| {
-            DsmError::invalid_operation(format!("anchor-state leaf bootstrap: {e}"))
-        })?;
+        new_smt.update_leaf(key, value);
         let mut new_extra_leaves = self.extra_leaves.clone();
         new_extra_leaves.insert(*key, *value);
         Ok(Self {
@@ -2915,7 +1516,6 @@ impl DeviceState {
             legacy_anchor: self.legacy_anchor,
             extra_leaves: new_extra_leaves,
             offline_allocations: self.offline_allocations.clone(),
-            vault_reserves: self.vault_reserves.clone(),
             pending_economic_admission: self.pending_economic_admission.clone(),
         })
     }
@@ -2959,9 +1559,7 @@ impl DeviceState {
             new_sequence,
         );
         let mut new_smt = self.smt.clone();
-        new_smt.update_leaf(&key, &leaf_value).map_err(|e| {
-            DsmError::invalid_operation(format!("offline-allocation leaf update: {e}"))
-        })?;
+        new_smt.update_leaf(&key, &leaf_value);
         let new_root = *new_smt.root();
         let proof = new_smt
             .get_inclusion_proof(&key, 256)
@@ -2989,7 +1587,6 @@ impl DeviceState {
             legacy_anchor: self.legacy_anchor,
             extra_leaves: new_extra_leaves,
             offline_allocations: new_offline_allocations,
-            vault_reserves: self.vault_reserves.clone(),
             pending_economic_admission: self.pending_economic_admission.clone(),
         };
         Ok(OfflineAllocationOutcome {
@@ -2999,397 +1596,6 @@ impl DeviceState {
             amount: new_amount,
             sequence: new_sequence,
         })
-    }
-
-    /// Move value between the online balance and a vault's encumbered reserves.
-    ///
-    /// THE SOLE CHOKEPOINT for reserve movement, and the reason a vault's advertised
-    /// liquidity means anything. Funding debits `balances` and credits the per-`(vault,
-    /// asset)` reserve leaf by the same amount; withdrawal is the exact inverse. Both legs
-    /// of an AMM vault move in ONE call, so a two-asset vault is funded in one advance
-    /// against one root rather than two states where the vault is half-funded.
-    ///
-    /// `vault_sequence` is supplied by the caller because the VAULT owns it, not this leaf:
-    /// funding writes at the vault's genesis sequence 0, and a later withdrawal writes at
-    /// whatever sequence the vault has reached. Sharing that number with the vault-state
-    /// leaf is what lets a verifier tie reserves to a specific vault state.
-    ///
-    /// Pure: on `Err` nothing is mutated and the caller's state is untouched.
-    // Private, and now test-only by construction: both callers
-    // (`fund_vault_reserves`, `withdraw_vault_reserves`) are gated, because
-    // the production doors for moving reserves are the SIGNED transitions
-    // `DlvCreateFundedV2` and `DlvClose`. With this gated too, no unsigned
-    // reserve-movement path exists in a shipped artifact at all.
-    #[cfg(any(test, feature = "testing"))]
-    fn move_vault_reserves(
-        &self,
-        vault_id: &[u8; 32],
-        legs: &[([u8; 32], u64)],
-        vault_sequence: u64,
-        fund: bool,
-    ) -> Result<VaultReserveOutcome, DsmError> {
-        let op = if fund { "fund" } else { "withdraw" };
-        if legs.is_empty() {
-            return Err(DsmError::invalid_operation(format!(
-                "{op}_vault_reserves: at least one leg is required"
-            )));
-        }
-        // Two legs naming the same asset would let one silently overwrite the other's
-        // leaf, so the pair would be funded with less than the caller asked for.
-        for (i, (pc, _)) in legs.iter().enumerate() {
-            if legs[..i].iter().any(|(prev, _)| prev == pc) {
-                return Err(DsmError::invalid_operation(format!(
-                    "{op}_vault_reserves: the same asset appears twice"
-                )));
-            }
-        }
-
-        let mut new_balances = self.balances.clone();
-        let mut new_smt = self.smt.clone();
-        let mut new_extra_leaves = self.extra_leaves.clone();
-        let mut new_vault_reserves = self.vault_reserves.clone();
-        let mut keys = Vec::with_capacity(legs.len());
-
-        for (policy_commit, amount) in legs {
-            if *amount == 0 {
-                return Err(DsmError::invalid_operation(format!(
-                    "{op}_vault_reserves: amount must be > 0"
-                )));
-            }
-            let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-                &self.genesis,
-                &self.devid,
-                vault_id,
-                policy_commit,
-            );
-            let cur = new_vault_reserves.get(&key).copied().unwrap_or_default();
-            let cur_bal = new_balances.get(policy_commit).copied().unwrap_or(0);
-
-            let (new_bal, new_amount) = if fund {
-                (
-                    cur_bal.checked_sub(*amount).ok_or_else(|| {
-                        DsmError::invalid_operation(
-                            "fund_vault_reserves: insufficient balance to encumber",
-                        )
-                    })?,
-                    cur.amount.checked_add(*amount).ok_or_else(|| {
-                        DsmError::invalid_operation("fund_vault_reserves: reserve overflow")
-                    })?,
-                )
-            } else {
-                (
-                    cur_bal.checked_add(*amount).ok_or_else(|| {
-                        DsmError::invalid_operation("withdraw_vault_reserves: balance overflow")
-                    })?,
-                    cur.amount.checked_sub(*amount).ok_or_else(|| {
-                        DsmError::invalid_operation(
-                            "withdraw_vault_reserves: the vault does not hold that much",
-                        )
-                    })?,
-                )
-            };
-
-            if new_bal == 0 {
-                new_balances.remove(policy_commit);
-            } else {
-                new_balances.insert(*policy_commit, new_bal);
-            }
-
-            let leaf_value =
-                crate::dlv::vault_reserve_leaf::vault_reserve_value(new_amount, vault_sequence);
-            new_smt.update_leaf(&key, &leaf_value).map_err(|e| {
-                DsmError::invalid_operation(format!("vault-reserve leaf update: {e}"))
-            })?;
-            new_extra_leaves.insert(key, leaf_value);
-            // Kept even at amount 0 so the sequence stays monotone and an emptied
-            // reserve cannot be replayed from an older leaf.
-            new_vault_reserves.insert(
-                key,
-                VaultReserve {
-                    amount: new_amount,
-                    sequence: vault_sequence,
-                },
-            );
-            keys.push(key);
-        }
-
-        // Every proof is taken against the FINAL root, after all legs are written, so no
-        // proof binds an intermediate state in which the vault was half-funded.
-        let new_root = *new_smt.root();
-        let mut proofs = Vec::with_capacity(keys.len());
-        for key in &keys {
-            let proof = new_smt
-                .get_inclusion_proof(key, 256)
-                .map_err(|e| DsmError::merkle(format!("vault-reserve proof: {e}")))?;
-            proofs.push(proof.to_bytes());
-        }
-
-        Ok(VaultReserveOutcome {
-            new_device_state: Self {
-                genesis: self.genesis,
-                devid: self.devid,
-                public_key: self.public_key.clone(),
-                smt: new_smt,
-                balances: new_balances,
-                tips: self.tips.clone(),
-                legacy_anchor: self.legacy_anchor,
-                extra_leaves: new_extra_leaves,
-                offline_allocations: self.offline_allocations.clone(),
-                vault_reserves: new_vault_reserves,
-                pending_economic_admission: self.pending_economic_admission.clone(),
-            },
-            new_root,
-            proofs,
-        })
-    }
-
-    /// TEST-ONLY. The parent `VaultStateV2` this head holds for `vault_id`
-    /// under `pair` at the vault's current generation — reserves and
-    /// generation read from the head's own leaves, owner from the head's own
-    /// identity, and every member the leaves cannot see fixed to a structural
-    /// constant. Fixtures use it to name the exact state their owner apply
-    /// consumes (`parent_binding = vault_state_commitment(..)`, `parent_state
-    /// = encode()`). Production never calls this: the route names the parent
-    /// from the verified composition, and `advance` checks that against the
-    /// leaves either way.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn parent_vault_state_for_tests(
-        &self,
-        vault_id: &[u8; 32],
-        pair: &VaultStatePair,
-    ) -> Result<crate::ccb::VaultStateV2, DsmError> {
-        let leaf = |pc: &[u8; 32]| {
-            self.vault_reserves
-                .get(&crate::dlv::vault_reserve_leaf::vault_reserve_key(
-                    &self.genesis,
-                    &self.devid,
-                    vault_id,
-                    pc,
-                ))
-                .copied()
-                .unwrap_or_default()
-        };
-        let (a, b) = (leaf(&pair.a()), leaf(&pair.b()));
-        let ccb = |e: crate::ccb::CcbError| {
-            DsmError::invalid_operation(format!("test parent vault state: {e:?}"))
-        };
-        Ok(crate::ccb::VaultStateV2 {
-            owner_genesis_id: self.genesis,
-            owner_device_id: self.devid,
-            vault_id: *vault_id,
-            generation: a.sequence,
-            reserve_a: a.amount,
-            reserve_b: b.amount,
-            market_policy: crate::ccb::MarketPolicy::beta_constant_product(pair.a(), pair.b())
-                .map_err(ccb)?,
-            release_policy: crate::ccb::ReleasePolicy::beta_owner_local_full_close(),
-            fee_policy: crate::ccb::FeePolicy::new(pair.fee_bps).map_err(ccb)?,
-            encumbrances: crate::ccb::EncumbranceSet::empty(),
-            iteration_budget: None,
-            parent_state_commitment: [0u8; 32],
-            owner_authority_transition_digest: [0u8; 32],
-            storage_set: crate::ccb::StorageSetMembers::new(&[(&b"test-node"[..], [0xD1; 32])])
-                .map_err(ccb)?,
-            quorum: 1,
-        })
-    }
-
-    /// Apply a settlement to a vault's reserves: input leg in, output leg out.
-    ///
-    /// The THIRD reserve chokepoint, and deliberately distinct from the other
-    /// two. Funding moves value from `balances` into a vault; withdrawal moves
-    /// it back. This moves value only WITHIN the vault — the input the trader
-    /// paid arrives, the output it took leaves — and touches `balances` not at
-    /// all, because the fee accrues inside the reserves as LP yield and the
-    /// owner's spendable balance is not part of a settlement.
-    ///
-    /// That is why it exists rather than being expressed as a fund+withdraw
-    /// pair: those would each move the owner's spendable balance through an
-    /// intermediate state that never actually occurs.
-    ///
-    /// Pure: on `Err` nothing is mutated. Fails closed when the vault cannot pay
-    /// the output.
-    ///
-    /// TEST-ONLY, like its two siblings `fund_vault_reserves` and
-    /// `withdraw_vault_reserves`. Production folds a settlement inside the
-    /// `ApplySettlement` arm of `advance`, which verifies the owner's signed
-    /// `DlvOwnerApplyV2` first; this entry point moves reserves with no
-    /// operation and no signature behind it, so it must not exist in a
-    /// shipping build. It was the last unfenced one of the three.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn apply_settlement_to_reserves(
-        &self,
-        vault_id: &[u8; 32],
-        input_policy_commit: &[u8; 32],
-        input_amount: u64,
-        output_policy_commit: &[u8; 32],
-        output_amount: u64,
-        new_sequence: u64,
-    ) -> Result<VaultReserveOutcome, DsmError> {
-        if input_policy_commit == output_policy_commit {
-            return Err(DsmError::invalid_operation(
-                "apply_settlement_to_reserves: input and output name the same asset",
-            ));
-        }
-        if input_amount == 0 || output_amount == 0 {
-            return Err(DsmError::invalid_operation(
-                "apply_settlement_to_reserves: amounts must both be > 0",
-            ));
-        }
-
-        let key_in = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-            &self.genesis,
-            &self.devid,
-            vault_id,
-            input_policy_commit,
-        );
-        let key_out = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-            &self.genesis,
-            &self.devid,
-            vault_id,
-            output_policy_commit,
-        );
-
-        let cur_in = self
-            .vault_reserves
-            .get(&key_in)
-            .copied()
-            .unwrap_or_default();
-        let cur_out = self
-            .vault_reserves
-            .get(&key_out)
-            .copied()
-            .unwrap_or_default();
-
-        let new_in = cur_in.amount.checked_add(input_amount).ok_or_else(|| {
-            DsmError::invalid_operation("apply_settlement_to_reserves: input reserve overflow")
-        })?;
-        let new_out = cur_out.amount.checked_sub(output_amount).ok_or_else(|| {
-            DsmError::invalid_operation(
-                "apply_settlement_to_reserves: the vault cannot pay that output",
-            )
-        })?;
-
-        let mut new_smt = self.smt.clone();
-        let mut new_extra_leaves = self.extra_leaves.clone();
-        let mut new_vault_reserves = self.vault_reserves.clone();
-
-        for (key, amount) in [(key_in, new_in), (key_out, new_out)] {
-            let leaf_value =
-                crate::dlv::vault_reserve_leaf::vault_reserve_value(amount, new_sequence);
-            new_smt.update_leaf(&key, &leaf_value).map_err(|e| {
-                DsmError::invalid_operation(format!("vault-reserve leaf update: {e}"))
-            })?;
-            new_extra_leaves.insert(key, leaf_value);
-            new_vault_reserves.insert(
-                key,
-                VaultReserve {
-                    amount,
-                    sequence: new_sequence,
-                },
-            );
-        }
-
-        // Proofs against the FINAL root, so neither binds a state in which only
-        // one side of the swap had landed.
-        let new_root = *new_smt.root();
-        let mut proofs = Vec::with_capacity(2);
-        for key in [key_in, key_out] {
-            let proof = new_smt
-                .get_inclusion_proof(&key, 256)
-                .map_err(|e| DsmError::merkle(format!("vault-reserve proof: {e}")))?;
-            proofs.push(proof.to_bytes());
-        }
-
-        Ok(VaultReserveOutcome {
-            new_device_state: Self {
-                genesis: self.genesis,
-                devid: self.devid,
-                public_key: self.public_key.clone(),
-                smt: new_smt,
-                // Untouched: a settlement moves nothing spendable.
-                balances: self.balances.clone(),
-                tips: self.tips.clone(),
-                legacy_anchor: self.legacy_anchor,
-                extra_leaves: new_extra_leaves,
-                offline_allocations: self.offline_allocations.clone(),
-                vault_reserves: new_vault_reserves,
-                pending_economic_admission: self.pending_economic_admission.clone(),
-            },
-            new_root,
-            proofs,
-        })
-    }
-
-    /// Encumber `legs` into `vault_id`, debiting the online balance. Fails closed on
-    /// insufficient funds, leaving this state untouched.
-    ///
-    /// TEST-ONLY, and gated so it cannot ship. The one production door for
-    /// encumbering is the signed `DlvCreateFundedV2` transition (a `Fund`
-    /// reserve mutation riding `advance`, now behind an attached DSM-backed
-    /// economic admission); an UNSIGNED funding path must not exist in a
-    /// production build, exactly as its sibling `withdraw_vault_reserves`
-    /// already says of un-encumbering. It had zero production callers — every
-    /// one is a test — and the file already called it "a test-only shim"
-    /// while leaving it `pub` and ungated.
-    ///
-    /// The gate is `any(test, feature = "testing")` rather than plain `test`
-    /// because `dsm_sdk`'s integration tests are a separate crate. `testing` is
-    /// a non-default feature enabled only through dev-dependencies, so it does
-    /// not unify into `cargo build`.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn fund_vault_reserves(
-        &self,
-        vault_id: &[u8; 32],
-        legs: &[([u8; 32], u64)],
-        vault_sequence: u64,
-    ) -> Result<VaultReserveOutcome, DsmError> {
-        self.move_vault_reserves(vault_id, legs, vault_sequence, true)
-    }
-
-    /// Release `legs` from `vault_id` back to the online balance. TEST-ONLY: the
-    /// one production door for un-encumbering is the signed `DlvClose` transition
-    /// (a `Withdraw` reserve mutation riding `advance`); an unsigned withdrawal
-    /// path must not exist in a production build.
-    #[cfg(test)]
-    pub fn withdraw_vault_reserves(
-        &self,
-        vault_id: &[u8; 32],
-        legs: &[([u8; 32], u64)],
-        vault_sequence: u64,
-    ) -> Result<VaultReserveOutcome, DsmError> {
-        self.move_vault_reserves(vault_id, legs, vault_sequence, false)
-    }
-
-    /// Encumbered balance for one `(vault, asset)`, in base units.
-    pub fn vault_reserve(&self, vault_id: &[u8; 32], policy_commit: &[u8; 32]) -> u64 {
-        let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-            &self.genesis,
-            &self.devid,
-            vault_id,
-            policy_commit,
-        );
-        self.vault_reserves.get(&key).map(|r| r.amount).unwrap_or(0)
-    }
-
-    /// The full reserve record for one `(vault, asset)`, including its sequence.
-    pub fn vault_reserve_entry(
-        &self,
-        vault_id: &[u8; 32],
-        policy_commit: &[u8; 32],
-    ) -> Option<VaultReserve> {
-        let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
-            &self.genesis,
-            &self.devid,
-            vault_id,
-            policy_commit,
-        );
-        self.vault_reserves.get(&key).copied()
-    }
-
-    /// Every reserve leaf this device holds, for persistence.
-    pub fn vault_reserves_snapshot(&self) -> BTreeMap<[u8; 32], VaultReserve> {
-        self.vault_reserves.clone()
     }
 
     /// **Load** `amount` of `asset` from the online balance into this device's offline-cash allocation
@@ -3520,6 +1726,92 @@ pub struct OfflineAllocationOutcome {
     pub sequence: u64,
 }
 
+/// Test-only transitions on a device, built through the real `advance`.
+#[cfg(test)]
+impl DeviceState {
+    /// TEST-ONLY. ERA through the faucet, at the core layer: one admitted
+    /// `FaucetClaim` on this device's self-loop, crediting exactly the beta
+    /// payout (`ERA_FAUCET_PAYOUT`) of builtin ERA, as the release at
+    /// `generation` of the reserve. A test that needs more claims more
+    /// generations — there is no amount to ask for, because the claim has
+    /// none.
+    pub fn admitted_faucet_claim(&self, generation: u64) -> Result<Self, DsmError> {
+        let rel_key = self.self_loop_key();
+        self.advance(
+            rel_key,
+            self.devid,
+            Operation::FaucetClaim {
+                reserve_id: crate::economic::native_reserve::era_reserve_id(b"dsm-testnet"),
+                generation: generation.max(1),
+            },
+            &[BalanceDelta {
+                policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
+                direction: BalanceDirection::Credit,
+                amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            }],
+            None,
+            None,
+        )
+        .map(|o| o.new_device_state)
+    }
+
+    /// TEST-ONLY. A native token created on this device's self-loop by the
+    /// `CreateToken` advance its creator makes: the whole genesis supply
+    /// released to this device, with no creation fee (Core fixes no fee
+    /// amount; the fee schedule is the SDK's).
+    pub fn created_token(&self, policy_commit: [u8; 32], supply: u64) -> Result<Self, DsmError> {
+        let rel_key = self.self_loop_key();
+        self.advance(
+            rel_key,
+            self.devid,
+            Operation::CreateToken {
+                token_id: b"TEST".to_vec(),
+                initial_supply: crate::types::token_types::Balance::amount(supply),
+                policy_commit,
+                fee_amount: 0,
+                name: "Test Token".to_string(),
+                symbol: "TEST".to_string(),
+                decimals: 0,
+                metadata_uri: None,
+                signature: Vec::new(),
+            },
+            &[BalanceDelta {
+                policy_commit,
+                direction: BalanceDirection::Credit,
+                amount: supply,
+            }],
+            None,
+            None,
+        )
+        .map(|o| o.new_device_state)
+    }
+
+    /// TEST-ONLY. Adopt `policy_commit` on this device: the authenticated
+    /// transition behind ADD TOKEN, as a no-delta self-loop advance. Idempotent.
+    pub fn adopt_token(&self, policy_commit: [u8; 32]) -> Result<Self, DsmError> {
+        let rel_key = self.self_loop_key();
+        self.clone()
+            .advance(
+                rel_key,
+                self.devid,
+                Operation::AdoptToken {
+                    policy_commit,
+                    signature: Vec::new(),
+                },
+                &[],
+                None,
+                None,
+            )
+            .map(|o| o.new_device_state)
+    }
+
+    /// The device's self-loop relationship key — where every self-authored
+    /// economic origin lands.
+    fn self_loop_key(&self) -> [u8; 32] {
+        crate::core::bilateral_transaction_manager::compute_smt_key(&self.devid, &self.devid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3531,9 +1823,9 @@ mod tests {
     /// The test device's ACTUAL signing keypair, cached — SPHINCS+ keygen is slow.
     ///
     /// `pubkey()` used to be `vec![0xAA; 64]`, which was fine while nothing verified
-    /// anything. Now that `advance` verifies `DlvSettle` / `DlvOwnerApply` against the
-    /// advancing device's own key, a head whose public key is not a real SPX256f key
-    /// cannot authorize its own transitions — and a test that cannot sign is a test that
+    /// anything. `advance` verifies the signed SoFi operations against the advancing
+    /// device's own key, so a head whose public key is not a real SPX256f key cannot
+    /// authorize its own transitions — and a test that cannot sign is a test that
     /// cannot exercise the gate. Same 64-byte length (SPX256f pk = 2n), so every other
     /// fixture is unaffected.
     fn test_keypair() -> &'static crate::crypto::signatures::SignatureKeyPair {
@@ -3549,14 +1841,6 @@ mod tests {
         test_keypair().public_key.clone()
     }
 
-    /// Sign `op` with the test device's key over the canonical preimage
-    /// (`with_cleared_signature().to_bytes()`), exactly as production does.
-    fn sign_op(op: Operation) -> Operation {
-        let payload = op.with_cleared_signature().to_bytes();
-        let sig = crate::crypto::sphincs::sphincs_sign(&test_keypair().secret_key, &payload)
-            .expect("sign test operation");
-        op.with_signature(sig)
-    }
     fn pc(b: u8) -> [u8; 32] {
         [b; 32]
     }
@@ -3567,1744 +1851,154 @@ mod tests {
     // condition: the owner asserted it, nothing held it, and a settled swap
     // moved no value. These pin the accounting that makes the claim real.
 
-    /// THE REPRODUCTION: funding moves value OUT of `balances` and into the
-    /// vault's reserve leaves, conserved per asset, in one advance.
-    #[test]
-    fn funding_a_vault_conserves_value_per_asset() {
-        let mut dev = fresh_device(0xA1);
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 50_000);
-        dev.balances.insert(rigb, 20_000);
-        let vault = [0x77u8; 32];
-
-        let out = dev
-            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 0)
-            .expect("funding");
-        let after = &out.new_device_state;
-
-        assert_eq!(
-            after.balance(&era),
-            40_000,
-            "spendable ERA falls by the leg"
-        );
-        assert_eq!(after.balance(&rigb), 15_000);
-        assert_eq!(
-            after.vault_reserve(&vault, &era),
-            10_000,
-            "and lands in the vault"
-        );
-        assert_eq!(after.vault_reserve(&vault, &rigb), 5_000);
-
-        // Per asset: spendable + encumbered is unchanged.
-        assert_eq!(
-            after.balance(&era) + after.vault_reserve(&vault, &era),
-            50_000
-        );
-        assert_eq!(
-            after.balance(&rigb) + after.vault_reserve(&vault, &rigb),
-            20_000
-        );
-        assert_eq!(out.proofs.len(), 2, "one proof per leg");
-    }
-
-    /// Both legs land under ONE root. A half-funded intermediate state must not
-    /// be observable, or a trader could quote against a vault holding one side.
-    #[test]
-    fn both_legs_are_committed_under_one_root() {
-        let mut dev = fresh_device(0xA2);
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 50_000);
-        dev.balances.insert(rigb, 20_000);
-        let vault = [0x77u8; 32];
-
-        let out = dev
-            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 0)
-            .expect("funding");
-
-        // Every proof verifies against the SAME final root — none was taken
-        // part-way through the batch.
-        for (i, (asset, amount)) in [(era, 10_000u64), (rigb, 5_000u64)].iter().enumerate() {
-            assert!(
-                crate::dlv::vault_reserve_leaf::verify_vault_reserve_leaf(
-                    &out.new_root,
-                    &out.new_device_state.genesis,
-                    &out.new_device_state.devid,
-                    &vault,
-                    asset,
-                    *amount,
-                    0,
-                    &out.proofs[i],
-                ),
-                "leg {i} must verify against the final root"
-            );
-        }
-        assert_eq!(out.new_root, *out.new_device_state.smt.root());
-    }
-
-    /// Insufficient funds reject BEFORE anything moves, and the caller's state
-    /// is byte-identical afterwards.
-    #[test]
-    fn insufficient_balance_at_funding_leaves_the_head_untouched() {
-        let mut dev = fresh_device(0xA3);
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 50_000);
-        dev.balances.insert(rigb, 1_000);
-        let vault = [0x77u8; 32];
-        let root_before = *dev.smt.root();
-
-        // The SECOND leg is short: the first must not have moved either.
-        let err = dev
-            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 0)
-            .expect_err("must refuse");
-        assert!(format!("{err}").contains("insufficient"), "got: {err}");
-
-        assert_eq!(*dev.smt.root(), root_before, "root unchanged");
-        assert_eq!(dev.balance(&era), 50_000, "the affordable leg did not move");
-        assert_eq!(dev.balance(&rigb), 1_000);
-        assert_eq!(dev.vault_reserve(&vault, &era), 0);
-    }
-
-    /// THE ENCUMBRANCE. Once funded, the value is unreachable through the
-    /// ordinary spend path — `BalanceDelta` can only reach `balances`.
-    #[test]
-    fn funded_reserves_are_unspendable_by_transfer() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let vault = [0x77u8; 32];
-
-        // The value is admitted (issued through the accepting transition) and
-        // then encumbered through the production funded-create, which takes
-        // exactly the vault's pair: the second leg rides along; the claim under
-        // test is about the first.
-        let funded = fresh_device(0xA4)
-            .admitted_mint(era, 10_000, 0xA0)
-            .expect("admitted issuance")
-            .admitted_mint(rigb, 10, 0xA1)
-            .expect("admitted issuance")
-            .admitted_funded_create(
-                vault,
-                [(era, 10_000), (rigb, 10)],
-                30,
-                &test_keypair().secret_key,
-                0xA2,
-            )
-            .expect("funding")
-            .with_pending_economic_admission(None);
-        assert_eq!(funded.balance(&era), 0, "all of it is encumbered");
-        assert_eq!(funded.vault_reserve(&vault, &era), 10_000);
-
-        // Spending even one base unit must now fail: the reserve is not spendable.
-        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
-            &funded.devid,
-            &funded.devid,
-        );
-        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &funded.devid,
-            &funded.devid,
-        );
-        let outcome = funded.advance(
-            rk,
-            funded.devid,
-            Operation::Transfer {
-                to_device_id: devid(0xBB).to_vec(),
-                amount: crate::types::token_types::Balance::from_state(1, [0u8; 32]),
-                token_id: b"ERA".to_vec(),
-                policy_commit: era,
-                mode: crate::types::operations::TransactionMode::Unilateral,
-                nonce: vec![],
-                verification: crate::types::operations::VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![],
-                to: vec![],
-                message: String::new(),
-                signature: vec![],
-                authority_policy: None,
-            },
-            entropy(9),
-            None,
-            &[BalanceDelta {
-                policy_commit: era,
-                direction: BalanceDirection::Debit,
-                amount: 1,
-            }],
-            Some(tip),
-            None,
-            None,
-            None,
-        );
-        // Fail for the RIGHT reason. A test that merely asserts `is_err()` passes
-        // just as happily on an unrelated error, which is how a guard gets
-        // credited for work it is not doing.
-        let err = format!(
-            "{}",
-            outcome.expect_err("an encumbered reserve must not be spendable")
-        );
-        assert!(
-            err.contains("underflow") || err.to_lowercase().contains("insufficient"),
-            "must fail as a balance shortfall, got: {err}"
-        );
-    }
-
-    /// BUILTIN ISSUANCE IS REFUSED AT THE ACCEPTING TRANSITION.
+    /// A builtin asset is never created: ERA's units come only from its
+    /// reserve and dBTC's only from its backing, so a `CreateToken` naming a
+    /// builtin commit is refused at the accepting transition.
     ///
-    /// Not at the route — at `advance`, the chokepoint every mint must cross.
-    /// Before this gate, `token.mint {token_id: "ERA", amount: <any>}` was a live
-    /// production route that credited the caller: the handler signs its own
-    /// authorization and stamps `authorized_by` with the caller's own device id;
-    /// ERA's preloaded policy has zero conditions and zero roles, so enforcement
-    /// returns "allowed"; dBTC has no policy at all and takes the builtin escape
-    /// hatch; and conservation only checks that the single credit matches the
-    /// amount and asset the same caller signed.
-    ///
-    /// MUTATION CONTROL: delete the builtin-issuance block in `advance` and this
-    /// test goes green by minting ERA from air — which is precisely the defect.
+    /// MUTATION CONTROL: delete the builtin check in the `CreateToken` arm of
+    /// `validate_conservation` and this goes red by creating ERA.
     #[test]
-    fn a_builtin_token_cannot_be_minted_from_air_at_the_accepting_transition() {
+    fn a_builtin_token_cannot_be_created_at_the_accepting_transition() {
         for ticker in ["ERA", "dBTC"] {
             let pc = crate::core::token::builtin_policy_commit_for_token(ticker)
                 .expect("builtin commit");
-            let dev = DeviceState::new(devid(0xA1), devid(0xA1), vec![0x01; 32], 64);
-            let rk =
-                crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
-            let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &dev.devid, &dev.devid,
-            );
-            let outcome = dev.advance(
-                rk,
-                dev.devid,
-                mint_op_for(u64::MAX, pc),
-                entropy(7),
-                None,
-                &[BalanceDelta {
-                    policy_commit: pc,
-                    direction: BalanceDirection::Credit,
-                    amount: u64::MAX,
-                }],
-                Some(tip),
-                None,
-                None,
-                None,
-            );
-            // Fail for the RIGHT reason — an `is_err()` assertion would pass just
-            // as happily on an unrelated error.
+            let dev = DeviceState::new(devid(0xA1), devid(0xA1), vec![0x01; 32]);
             let err = format!(
                 "{}",
-                outcome.expect_err("minting a builtin token from air must be refused")
+                dev.created_token(pc, 1_000)
+                    .expect_err("creating a builtin token must be refused")
             );
             assert!(
-                err.contains("builtin issuance is not self-authorizable") && err.contains(ticker),
-                "must fail as unauthorized builtin issuance naming {ticker}, got: {err}"
+                err.contains("collides with a builtin asset"),
+                "must fail as a builtin collision for {ticker}, got: {err}"
             );
+            assert_eq!(dev.balance(&pc), 0);
         }
     }
 
-    /// NO ASSET MINTS FROM AIR — and the two refusals stay distinguishable.
-    ///
-    /// This used to pin the opposite: a builtin ticker carrying a NON-builtin
-    /// `policy_commit` credited that asset, on the reasoning that refusing it
-    /// would reject honest issuance. That reasoning assumed honest issuance was
-    /// expressible. It is not: `R_econ` funds a credit only through a
-    /// `CreditSource`, and AT THE TIME the issuance arm (`0x0023`) failed
-    /// closed with class `0x0029` unwritten (it exists now; the builtin
-    /// refusal here is unconditional regardless). So the units were not
-    /// honest issuance — they were
-    /// unadmittable, they became DLV vault reserves through the head-gated
-    /// funding path, and holding them permanently blocked `activate`.
-    ///
-    /// The gate is still keyed on the ASSET rather than the ticker: both assets
-    /// refuse, but for different reasons, and this pins that they do not
-    /// collapse into one blanket refusal. Since the 0x0029 producer cut, the
-    /// non-builtin reason is the ADMISSION FENCE: a positive mint may enter
-    /// only with an attached DsmBacked admission whose digest names exactly
-    /// this operation — a raw local credit is refused before any balance
-    /// changes, and the economic verifier proves the admission's issuance
-    /// source separately.
-    ///
-    /// THE MUTATION CONTROL for the issuance gate: replace the
-    /// `require_attached_dsm_admission` call in the Mint arm of `advance` with
-    /// `Ok(())` and this test goes red by actually crediting 1_000 units of a
-    /// non-builtin asset into the head.
+    /// Creation releases the whole genesis supply to the creator and pays the
+    /// ERA fee in the same advance (SoFi §51), and the creator adopts the
+    /// token it creates.
     #[test]
-    fn no_asset_mints_from_air_and_the_two_refusals_stay_distinct() {
-        let pc = [0x5Au8; 32];
-        assert!(
-            crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc)
-                .is_none(),
-            "fixture must not accidentally name a builtin"
-        );
-        let dev = DeviceState::new(devid(0xA2), devid(0xA2), vec![0x02; 32], 64);
-        let rk =
-            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
-        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &dev.devid,
-        );
-        // `mint_op_for` hard-codes the ticker "ERA" while naming this commit.
-        let err = format!(
-            "{}",
-            dev.advance(
-                rk,
-                dev.devid,
-                mint_op_for(1_000, pc),
-                entropy(8),
-                None,
-                &[BalanceDelta {
-                    policy_commit: pc,
-                    direction: BalanceDirection::Credit,
-                    amount: 1_000,
-                }],
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-            .expect_err("an unadmitted mint must be refused at the accepting layer")
-        );
-        assert!(
-            err.contains("no pending economic admission"),
-            "the non-builtin refusal is the ADMISSION FENCE, got: {err}"
-        );
-        assert!(
-            !err.contains("builtin issuance is not self-authorizable"),
-            "…and is NOT the builtin refusal — the two reasons stay distinct: {err}"
-        );
-        // Nothing was credited. This is the half a deleted gate would break.
-        assert_eq!(
-            dev.balance(&pc),
-            0,
-            "a refused mint credits nothing, so the device can still activate"
-        );
-    }
-
-    /// THE SECOND ISSUANCE OPERATION IS FENCED AT THE CHOKEPOINT TOO.
-    ///
-    /// `validate_conservation` deliberately PERMITS `CreateToken`'s issuance
-    /// leg, and until this gate existed the only refusals were a route guard
-    /// and the write-set builder — both outside `advance`, i.e. exactly the
-    /// shape that made `Mint` a live defect. No production caller can reach it
-    /// (the single constructor passes only the fee debit), which is why it was
-    /// free to close now.
-    ///
-    /// MUTATION CONTROL: delete the `CreateToken` block in `advance` and this
-    /// goes red by creating 500 units of a brand-new asset from air.
-    #[test]
-    fn creating_a_token_with_initial_supply_is_refused_at_the_accepting_layer() {
-        let pc_new = [0x7Cu8; 32];
-        assert!(
-            crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc_new)
-                .is_none(),
-            "the new asset must not collide with a builtin"
-        );
+    fn creating_a_token_releases_its_supply_to_the_creator_and_pays_the_fee() {
+        const PC: [u8; 32] = [0x7C; 32];
+        const SUPPLY: u64 = 500;
+        const FEE: u64 = 100;
         let era = crate::core::token::token_state_manager::era_policy_commit();
-        // ERA from the faucet: one admitted claim, the protocol payout — enough
-        // for the creation fee, which is all this refusal needs to get past.
-        let dev = DeviceState::new(devid(0xA4), devid(0xA4), vec![0x04; 32], 64)
-            .admitted_faucet_claim(0, 0xA4)
+        let dev = DeviceState::new(devid(0xA4), devid(0xA4), vec![0x04; 32])
+            .admitted_faucet_claim(0)
             .expect("faucet claim");
-        let rk =
-            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
-        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &dev.devid,
-        );
+        let rk = dev.self_loop_key();
         let op = Operation::CreateToken {
             token_id: b"NEWCOIN".to_vec(),
-            initial_supply: bal(500),
-            policy_commit: pc_new,
-            fee_amount: 100,
+            initial_supply: bal(SUPPLY),
+            policy_commit: PC,
+            fee_amount: FEE,
             name: "New Coin".to_string(),
             symbol: "NEW".to_string(),
             decimals: 0,
             metadata_uri: None,
             signature: Vec::new(),
         };
-        let err = format!(
-            "{}",
-            dev.advance(
-                rk,
-                dev.devid,
-                op,
-                entropy(11),
-                None,
-                &[
-                    BalanceDelta {
-                        policy_commit: era,
-                        direction: BalanceDirection::Debit,
-                        amount: 100,
-                    },
-                    BalanceDelta {
-                        policy_commit: pc_new,
-                        direction: BalanceDirection::Credit,
-                        amount: 500,
-                    },
-                ],
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-            .expect_err("issuance at creation has no predicate either")
-        );
-        assert!(
-            err.contains("0x0029"),
-            "the refusal names the missing issuance predicate, got: {err}"
-        );
-        // The half a deleted gate would break: no units of the new asset exist.
-        assert_eq!(dev.balance(&pc_new), 0, "a refused creation issues nothing");
-    }
-
-    /// Zero-supply creation is NOT issuance and stays available — the fee debit
-    /// is an ordinary spend. This is what keeps the refusal narrow.
-    #[test]
-    fn creating_a_token_with_zero_supply_is_still_allowed() {
-        let pc_new = [0x7Du8; 32];
-        let era = crate::core::token::token_state_manager::era_policy_commit();
-        // ERA from the faucet: one admitted claim, exactly the creation fee.
-        let dev = DeviceState::new(devid(0xA5), devid(0xA5), vec![0x05; 32], 64)
-            .admitted_faucet_claim(0, 0xA5)
-            .expect("faucet claim");
-        let rk =
-            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
-        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &dev.devid,
-        );
-        let op = Operation::CreateToken {
-            token_id: b"NEWCOIN".to_vec(),
-            initial_supply: bal(0),
-            policy_commit: pc_new,
-            fee_amount: 100,
-            name: "New Coin".to_string(),
-            symbol: "NEW".to_string(),
-            decimals: 0,
-            metadata_uri: None,
-            signature: Vec::new(),
+        let fee = BalanceDelta {
+            policy_commit: era,
+            direction: BalanceDirection::Debit,
+            amount: FEE,
         };
-        let out = dev
+        let release = BalanceDelta {
+            policy_commit: PC,
+            direction: BalanceDirection::Credit,
+            amount: SUPPLY,
+        };
+        let created = dev
             .advance(
-                rk,
-                dev.devid,
-                op,
-                entropy(12),
-                None,
-                &[BalanceDelta {
-                    policy_commit: era,
-                    direction: BalanceDirection::Debit,
-                    amount: 100,
-                }],
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-            .expect("a zero-supply creation is an ordinary fee spend");
-        assert_eq!(
-            out.new_device_state.balance(&era),
-            crate::economic::faucet::ERA_FAUCET_PAYOUT - 100,
-            "the fee is an ordinary debit of the claimed ERA"
-        );
-        assert_eq!(out.new_device_state.balance(&pc_new), 0);
-    }
-
-    /// A zero-amount mint is not issuance, so the issuance refusal does not
-    /// claim it — the gate is on units created, not on the operation's name.
-    #[test]
-    fn a_zero_amount_mint_is_not_refused_as_issuance() {
-        let pc = [0x5Au8; 32];
-        let dev = DeviceState::new(devid(0xA3), devid(0xA3), vec![0x03; 32], 64);
-        let rk =
-            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
-        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &dev.devid,
-        );
-        let outcome = dev.advance(
-            rk,
-            dev.devid,
-            mint_op_for(0, pc),
-            entropy(9),
-            None,
-            &[BalanceDelta {
-                policy_commit: pc,
-                direction: BalanceDirection::Credit,
-                amount: 0,
-            }],
-            Some(tip),
-            None,
-            None,
-            None,
-        );
-        if let Err(e) = &outcome {
-            let msg = format!("{e}");
-            assert!(
-                !msg.contains("0x0029"),
-                "a zero mint creates no units, so the issuance refusal must not be the reason: \
-                 {msg}"
-            );
-        }
-    }
-
-    // ── reserve authority: the PRODUCTION funding path ─────────────────────
-    //
-    // The tests above fund through `fund_vault_reserves`, a test-only shim that
-    // writes the reserve leaves directly. Production funding never takes that
-    // door: it rides a signed `DlvCreate` transition through `advance`, and the
-    // value is debited from `balances` inside that same advance, under one root,
-    // with the operation's signature committed to the tip. These pin the model
-    // — "value cannot be both free wallet balance and delegated vault liquidity"
-    // — on that real path.
-
-    /// The self-loop relationship key and genesis tip for a device's own vault
-    /// transitions (funding is a `Unilateral` self-loop: the owner encumbers its
-    /// own holdings).
-    fn self_loop(dev: &DeviceState) -> ([u8; 32], [u8; 32]) {
-        (
-            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid),
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &dev.devid, &dev.devid,
-            ),
-        )
-    }
-
-    /// A signed `DlvCreate` for `vault`. Funding legs are NOT carried here — they
-    /// ride the `Fund` reserve mutation — because a `BalanceDelta` can only reach
-    /// `balances`, and routing funding through deltas would hand the value back.
-    fn dlv_create(vault: [u8; 32]) -> Operation {
-        sign_op(Operation::DlvCreate {
-            vault_id: vault.to_vec(),
-            creator_public_key: pubkey(),
-            parameters_hash: vec![0u8; 32],
-            fulfillment_condition: vec![],
-            intended_recipient: None,
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        })
-    }
-
-    /// A signed `DlvCreateFundedV2` for `vault` with the exact legs the `Fund`
-    /// mutation will carry — the 3.6 funded-creation shape, cross-checked
-    /// field-for-field by `advance`.
-    fn dlv_create_funded(vault: [u8; 32], a: [u8; 32], ra: u64, b: [u8; 32], rb: u64) -> Operation {
-        sign_op(Operation::DlvCreateFundedV2 {
-            vault_id: vault.to_vec(),
-            creator_public_key: pubkey(),
-            parameters_hash: vec![0u8; 32],
-            fulfillment_condition: vec![],
-            leg_a_policy_commit: a,
-            leg_a_amount: ra,
-            leg_b_policy_commit: b,
-            leg_b_amount: rb,
-            fee_bps: 30,
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        })
-    }
-
-    /// The vault's canonical pair + a 30 bps fee, the way production builds it
-    /// from `CanonicalPair`. `a` must be lex-lower than `b`.
-    fn vault_pair(a: [u8; 32], b: [u8; 32]) -> VaultStatePair {
-        VaultStatePair::new(a, b, 30).expect("canonical test pair")
-    }
-
-    /// A `Unilateral` transfer of `amount` of `asset`, with the matching debit
-    /// delta the conservation guard requires.
-    fn transfer_op(asset: [u8; 32], amount: u64) -> Operation {
-        Operation::Transfer {
-            to_device_id: devid(0xBB).to_vec(),
-            amount: crate::types::token_types::Balance::from_state(amount, [0u8; 32]),
-            token_id: b"ERA".to_vec(),
-            policy_commit: asset,
-            mode: crate::types::operations::TransactionMode::Unilateral,
-            nonce: vec![],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: vec![],
-            to: vec![],
-            message: String::new(),
-            signature: vec![],
-            authority_policy: None,
-        }
-    }
-
-    /// THE FUNDED-CREATE ACCEPTING FENCE, mutation-tested. A signed, funded
-    /// `DlvCreateFundedV2` is refused by the RAW `advance` unless a Prepared
-    /// DSM-backed admission bound to exactly its digest is attached — the
-    /// discipline every economically-originating operation crosses. The head
-    /// holds admitted value (a faucet claim, an admitted issuance) and, as an
-    /// admitted head does after `finish_admission`, carries no pending
-    /// admission: so the only thing missing is the fence's own precondition.
-    ///
-    /// MUTATION CONTROL: delete the `DlvCreateFundedV2` arm of the fence in
-    /// `advance` and the first assertion goes red by encumbering reserves the
-    /// economic lineage never saw.
-    #[test]
-    fn a_funded_create_is_refused_without_its_own_attached_admission() {
-        let (era, rigb) = (
-            crate::core::token::token_state_manager::era_policy_commit(),
-            pc(0xF0),
-        );
-        let dev = fresh_device(0xC7)
-            .admitted_faucet_claim(0, 0x71)
-            .expect("faucet claim")
-            .admitted_mint(rigb, 10, 0x72)
-            .expect("admitted issuance")
-            .with_pending_economic_admission(None);
-        let vault = [0x73u8; 32];
-        let (rk, tip) = self_loop(&dev);
-        let op = dlv_create_funded(vault, era, 60, rigb, 10);
-        let fund = || VaultReserveMutation::Fund {
-            vault_id: vault,
-            legs: vec![(era, 60), (rigb, 10)],
-            vault_sequence: 0,
-            pair: vault_pair(era, rigb),
-        };
-
-        // (1) No admission attached at all.
-        let err = format!(
-            "{}",
-            dev.advance(
                 rk,
                 dev.devid,
                 op.clone(),
-                entropy(1),
-                None,
-                &[],
-                Some(tip),
+                &[fee.clone(), release.clone()],
                 None,
                 None,
-                Some(fund()),
             )
-            .expect_err("a raw funded create must not encumber reserves")
+            .expect("a creation with its fee and its release")
+            .new_device_state;
+        assert_eq!(created.balance(&PC), SUPPLY);
+        assert_eq!(
+            created.balance(&era),
+            crate::economic::native_reserve::ERA_FAUCET_PAYOUT - FEE
         );
-        assert!(
-            err.contains("no pending economic admission"),
-            "the refusal is the fence's own, got: {err}"
-        );
-        assert_eq!(dev.vault_reserve(&vault, &era), 0, "nothing was encumbered");
+        assert!(created.has_adopted(&PC));
+        // Positional and exact: reordered, short, or a release of another
+        // amount is refused.
+        for deltas in [
+            vec![release.clone(), fee.clone()],
+            vec![fee.clone()],
+            vec![
+                fee.clone(),
+                BalanceDelta {
+                    amount: SUPPLY - 1,
+                    ..release.clone()
+                },
+            ],
+        ] {
+            assert!(
+                dev.advance(rk, dev.devid, op.clone(), &deltas, None, None)
+                    .is_err(),
+                "{deltas:?} is not this creation's exact effect"
+            );
+        }
+    }
 
-        // (2) An admission attached, but bound to a DIFFERENT operation.
-        let other = dlv_create_funded([0x74u8; 32], era, 60, rigb, 10);
-        let staged = dev.with_pending_economic_admission(Some(
-            crate::economic::admission::PendingEconomicAdmission::prepared(
-                crate::economic::admission::PendingAdmissionKind::DsmBacked,
-                1,
-                [0u8; 32],
-                crate::economic::faucet::dsm_operation_digest(&other.to_bytes()),
-            ),
-        ));
+    /// A token with no genesis supply is not a token (SoFi §50): a zero-supply
+    /// creation is refused, and its fee is not spent.
+    #[test]
+    fn creating_a_token_with_zero_supply_is_refused() {
+        const PC: [u8; 32] = [0x7D; 32];
+        const SUPPLY: u64 = 0;
+        const FEE: u64 = 100;
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let dev = DeviceState::new(devid(0xA5), devid(0xA5), vec![0x05; 32])
+            .admitted_faucet_claim(0)
+            .expect("faucet claim");
+        let rk = dev.self_loop_key();
         let err = format!(
             "{}",
-            staged
-                .advance(
-                    rk,
-                    staged.devid,
-                    op.clone(),
-                    entropy(2),
-                    None,
-                    &[],
-                    Some(tip),
-                    None,
-                    None,
-                    Some(fund()),
-                )
-                .expect_err("an admission for another operation authorizes nothing here")
-        );
-        assert!(
-            err.contains("digest does not match"),
-            "the refusal names the digest binding, got: {err}"
-        );
-
-        // (3) POSITIVE CONTROL: the same create, with ITS OWN admission, lands.
-        let funded = dev
-            .advance_admitted(
+            dev.advance(
                 rk,
                 dev.devid,
-                op,
-                entropy(3),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(fund()),
-            )
-            .expect("the admitted create is accepted")
-            .new_device_state;
-        assert_eq!(funded.vault_reserve(&vault, &era), 60);
-        assert_eq!(funded.vault_reserve(&vault, &rigb), 10);
-    }
-
-    /// USER MODEL, TEST 1 — `100 ERA -> lock 60 into a DLV -> spendable is 40,
-    /// not 100`, driven through the production `advance(DlvCreate, Fund)` path.
-    ///
-    /// "Spendable" is proven two ways so the number is not just a reader's
-    /// opinion: `balance()` reports 40, AND the ordinary transfer ceiling is
-    /// exactly 40 — a 41-unit transfer underflows while a 40-unit transfer
-    /// clears and leaves the 60 still encumbered.
-    #[test]
-    fn funding_via_production_dlvcreate_advance_reduces_spendable_to_the_remainder() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let dev = fresh_device(0xC1)
-            .admitted_mint(era, 100, 0xA0)
-            .expect("admitted issuance")
-            .admitted_mint(rigb, 10, 0xA1)
-            .expect("admitted issuance")
-            .with_pending_economic_admission(None);
-        let vault = [0x71u8; 32];
-        let (rk, tip) = self_loop(&dev);
-
-        // Lock 60 through the real funding transition (empty deltas; legs in Fund).
-        // An AMM vault is funded with exactly its pair, so the other side rides
-        // along; the claim under test is about the ERA remainder.
-        let funded = dev
-            .advance_admitted(
-                rk,
-                dev.devid,
-                dlv_create_funded(vault, era, 60, rigb, 10),
-                entropy(1),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::Fund {
-                    vault_id: vault,
-                    legs: vec![(era, 60), (rigb, 10)],
-                    vault_sequence: 0,
-                    pair: vault_pair(era, rigb),
-                }),
-            )
-            .expect("production funding must succeed")
-            .new_device_state;
-
-        assert_eq!(
-            funded.balance(&era),
-            40,
-            "free balance is the remainder, not 100"
-        );
-        assert_eq!(
-            funded.vault_reserve(&vault, &era),
-            60,
-            "the 60 is encumbered"
-        );
-
-        // The transfer ceiling IS the spendable: 41 must underflow.
-        let over = funded.advance(
-            rk,
-            funded.devid,
-            transfer_op(era, 41),
-            entropy(2),
-            None,
-            &[BalanceDelta {
-                policy_commit: era,
-                direction: BalanceDirection::Debit,
-                amount: 41,
-            }],
-            Some(tip),
-            None,
-            None,
-            None,
-        );
-        let err = format!("{}", over.expect_err("41 exceeds the 40 free units"));
-        assert!(
-            err.contains("underflow") || err.to_lowercase().contains("insufficient"),
-            "must fail as a shortfall, got: {err}"
-        );
-
-        // 40 clears, and the reserve is untouched by draining every free unit.
-        let after = funded
-            .advance(
-                rk,
-                funded.devid,
-                transfer_op(era, 40),
-                entropy(3),
-                None,
+                Operation::CreateToken {
+                    token_id: b"NEWCOIN".to_vec(),
+                    initial_supply: bal(SUPPLY),
+                    policy_commit: PC,
+                    fee_amount: FEE,
+                    name: "New Coin".to_string(),
+                    symbol: "NEW".to_string(),
+                    decimals: 0,
+                    metadata_uri: None,
+                    signature: Vec::new(),
+                },
                 &[BalanceDelta {
                     policy_commit: era,
                     direction: BalanceDirection::Debit,
-                    amount: 40,
+                    amount: FEE,
                 }],
-                Some(tip),
-                None,
                 None,
                 None,
             )
-            .expect("spending exactly the free remainder must clear")
-            .new_device_state;
-        assert_eq!(after.balance(&era), 0, "every free unit is spent");
+            .expect_err("a zero-supply creation is refused")
+        );
+        assert!(err.contains("no genesis supply"), "got: {err}");
         assert_eq!(
-            after.vault_reserve(&vault, &era),
-            60,
-            "draining free balance does not reach the reserve"
-        );
-    }
-
-    /// USER MODEL, TEST 2 (the inverse) — `spend 50 first -> attempt to fund 60
-    /// -> reject`. With 50 already gone the vault cannot be over-funded, and the
-    /// refusal leaves the head byte-identical: no half-encumbrance.
-    #[test]
-    fn spending_first_then_funding_beyond_the_remainder_is_refused() {
-        let era = pc(0xE0);
-        let dev = fresh_device(0xC2)
-            .admitted_mint(era, 100, 0xA0)
-            .expect("admitted issuance")
-            .with_pending_economic_admission(None);
-        let (rk, tip) = self_loop(&dev);
-
-        let spent = dev
-            .advance(
-                rk,
-                dev.devid,
-                transfer_op(era, 50),
-                entropy(1),
-                None,
-                &[BalanceDelta {
-                    policy_commit: era,
-                    direction: BalanceDirection::Debit,
-                    amount: 50,
-                }],
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-            .expect("spend 50 first")
-            .new_device_state;
-        assert_eq!(spent.balance(&era), 50);
-
-        let vault = [0x72u8; 32];
-        let rigb = pc(0xF0);
-        let root_before = *spent.smt.root();
-        let err = spent.advance_admitted(
-            rk,
-            spent.devid,
-            dlv_create_funded(vault, era, 60, rigb, 10),
-            entropy(2),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(VaultReserveMutation::Fund {
-                vault_id: vault,
-                legs: vec![(era, 60), (rigb, 10)],
-                vault_sequence: 0,
-                pair: vault_pair(era, rigb),
-            }),
-        );
-        let err = format!("{}", err.expect_err("cannot encumber 60 out of 50"));
-        assert!(
-            err.to_lowercase().contains("insufficient"),
-            "must name the shortfall, got: {err}"
-        );
-        assert_eq!(
-            *spent.smt.root(),
-            root_before,
-            "a refused funding moves nothing"
-        );
-        assert_eq!(spent.balance(&era), 50, "balance intact");
-        assert_eq!(spent.vault_reserve(&vault, &era), 0, "no leaf was written");
-    }
-
-    /// STALE-STATE GUARD, funding side — an already-encumbered vault asset cannot
-    /// be re-encumbered through the production path. This is the device-level
-    /// analog of "reject a move made against stale vault state": completing a
-    /// second encumbrance for a vault that already holds one would be a silent
-    /// repair inside a value-moving constructor. Refused (device_state.rs
-    /// "already holds a reserve"), head untouched.
-    ///
-    /// NOTE — this is NOT the user's test 3 ("owner withdraws from stale v40
-    /// while the market advanced to v42"). That scenario has no production
-    /// operation to drive: there is no withdraw / unencumber / close (only
-    /// `Fund` and `ApplySettlement`), so encumbered liquidity has no path back
-    /// to free `balances` at all — stale or fresh. The succession stale-guard
-    /// (parent-consumption / reconcile-first) lives at the SDK layer, not here.
-    #[test]
-    fn refunding_an_already_encumbered_vault_asset_is_refused() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let dev = fresh_device(0xC3)
-            .admitted_mint(era, 100, 0xA0)
-            .expect("admitted issuance of era")
-            .admitted_mint(rigb, 100, 0xA1)
-            .expect("admitted issuance of rigb")
-            .with_pending_economic_admission(None);
-        let vault = [0x73u8; 32];
-        let (rk, tip) = self_loop(&dev);
-
-        let funded = dev
-            .advance_admitted(
-                rk,
-                dev.devid,
-                dlv_create_funded(vault, era, 60, rigb, 10),
-                entropy(1),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::Fund {
-                    vault_id: vault,
-                    legs: vec![(era, 60), (rigb, 10)],
-                    vault_sequence: 0,
-                    pair: vault_pair(era, rigb),
-                }),
-            )
-            .expect("first funding")
-            .new_device_state;
-        let root_before = *funded.smt.root();
-
-        // A second funding of the same assets for the same vault — refused.
-        let err = funded.advance_admitted(
-            rk,
-            funded.devid,
-            dlv_create_funded(vault, era, 10, rigb, 5),
-            entropy(2),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(VaultReserveMutation::Fund {
-                vault_id: vault,
-                legs: vec![(era, 10), (rigb, 5)],
-                vault_sequence: 0,
-                pair: vault_pair(era, rigb),
-            }),
-        );
-        let err = format!("{}", err.expect_err("must refuse a second encumbrance"));
-        assert!(
-            err.contains("already holds a reserve"),
-            "must refuse re-encumbrance, got: {err}"
-        );
-        assert_eq!(*funded.smt.root(), root_before, "the refusal moved nothing");
-        assert_eq!(funded.balance(&era), 40, "balance unchanged by the refusal");
-        assert_eq!(funded.vault_reserve(&vault, &era), 60, "reserve unchanged");
-    }
-
-    /// END TO END: a really-funded vault produces a proof a stranger can check,
-    /// and the amounts come OUT of the leaves rather than from an argument.
-    ///
-    /// This is the join the primitive's own unit tests cannot make — they build
-    /// their tree by hand. If `fund_vault_reserves` and the proof format ever
-    /// drift, this is what fails.
-    #[test]
-    fn a_funded_vault_proves_its_reserves_to_a_stranger() {
-        use crate::dlv::vault_reserve_inclusion::{
-            proven_amount, sign_vault_reserve_inclusion_proof, verify_vault_reserve_inclusion_proof,
-        };
-
-        let mut owner = fresh_device(0xA9);
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        owner.balances.insert(era, 50_000);
-        owner.balances.insert(rigb, 20_000);
-        let vault = [0x77u8; 32];
-        let owner = owner
-            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 3)
-            .expect("funding")
-            .new_device_state;
-
-        let legs = owner
-            .vault_reserve_leg_proofs(&vault, &[era, rigb])
-            .expect("the owner can prove what it encumbered");
-        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
-        let proof = sign_vault_reserve_inclusion_proof(
-            &vault,
-            3,
-            owner.smt.root(),
-            &owner.genesis(),
-            &owner.devid(),
-            legs,
-            &pk,
-            &sk,
-        )
-        .expect("sign");
-
-        verify_vault_reserve_inclusion_proof(&proof)
-            .expect("a stranger must be able to verify real encumbrance");
-        assert_eq!(proven_amount(&proof, &era), Some(10_000));
-        assert_eq!(proven_amount(&proof, &rigb), Some(5_000));
-
-        // The owner cannot prove an asset this vault does not hold — an absent
-        // leg would otherwise be indistinguishable from a proven zero.
-        let err = owner
-            .vault_reserve_leg_proofs(&vault, &[era, pc(0xD0)])
-            .expect_err("an unheld asset must not yield a leg");
-        assert!(format!("{err}").contains("no reserve for that asset"));
-    }
-
-    /// After a settlement the proof tracks the NEW amounts at the NEW sequence,
-    /// so a trader cannot be shown pre-trade reserves against a post-trade state.
-    #[test]
-    fn a_settled_vault_proves_its_new_reserves_and_not_the_old_ones() {
-        use crate::dlv::vault_reserve_inclusion::{
-            proven_amount, sign_vault_reserve_inclusion_proof, verify_vault_reserve_inclusion_proof,
-        };
-
-        let mut owner = fresh_device(0xAA);
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        owner.balances.insert(era, 50_000);
-        owner.balances.insert(rigb, 20_000);
-        let vault = [0x77u8; 32];
-        let owner = owner
-            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 3)
-            .expect("funding")
-            .new_device_state;
-        let owner = owner
-            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 970, 4)
-            .expect("settle")
-            .new_device_state;
-
-        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
-        let legs = owner
-            .vault_reserve_leg_proofs(&vault, &[era, rigb])
-            .expect("legs");
-        let proof = sign_vault_reserve_inclusion_proof(
-            &vault,
-            4,
-            owner.smt.root(),
-            &owner.genesis(),
-            &owner.devid(),
-            legs,
-            &pk,
-            &sk,
-        )
-        .expect("sign");
-        verify_vault_reserve_inclusion_proof(&proof).expect("post-settlement proof verifies");
-        assert_eq!(proven_amount(&proof, &era), Some(11_000));
-        assert_eq!(proven_amount(&proof, &rigb), Some(4_030));
-
-        // The same legs cannot be presented at the pre-settlement sequence.
-        let stale_legs = owner
-            .vault_reserve_leg_proofs(&vault, &[era, rigb])
-            .expect("legs");
-        let stale = sign_vault_reserve_inclusion_proof(
-            &vault,
-            3,
-            owner.smt.root(),
-            &owner.genesis(),
-            &owner.devid(),
-            stale_legs,
-            &pk,
-            &sk,
-        )
-        .expect("sign");
-        assert!(
-            verify_vault_reserve_inclusion_proof(&stale).is_err(),
-            "reserves at sequence 4 must not verify as sequence 3"
+            dev.balance(&era),
+            crate::economic::native_reserve::ERA_FAUCET_PAYOUT
         );
     }
 
     // ── settlement: positional movement ────────────────────────────────────
 
-    /// A settlement authorization naming `x` of `in` for `y` of `out`.
-    fn settle_op(
-        vault: [u8; 32],
-        input_pc: [u8; 32],
-        input_amount: u64,
-        output_pc: [u8; 32],
-        output_amount: u64,
-    ) -> Operation {
-        sign_op(Operation::DlvSettle {
-            vault_id: vault.to_vec(),
-            owner_public_key: vec![0xAA; 64],
-            owner_devid: devid(0xA1),
-            owner_genesis: [0u8; 32],
-            input_policy_commit: input_pc,
-            output_policy_commit: output_pc,
-            parent_sequence: 0,
-            parent_binding: [0x11; 32],
-            route_commit_bytes: vec![0x44; 8],
-            external_commitment_x: [0x55; 32],
-            input_amount,
-            output_amount,
-            fee_bps: 30,
-            sigma: [0x66; 32],
-            settler_public_key: vec![0xBB; 64],
-            settler_devid: devid(0xB1),
-            settlement_receipt_id: [0x77; 32],
-            signature: Vec::new(),
-            mode: TransactionMode::Bilateral,
-        })
-    }
-
-    fn delta(policy_commit: [u8; 32], direction: BalanceDirection, amount: u64) -> BalanceDelta {
-        BalanceDelta {
-            policy_commit,
-            direction,
-            amount,
-        }
-    }
-
-    /// The deltas must realize THE TRADE THAT WAS AUTHORIZED — not merely a
-    /// balanced pair of moves.
-    ///
-    /// Generic zero-sum arithmetic ("something out, something in, the books
-    /// balance") is satisfied by a completely different trade: another asset,
-    /// another amount, the two sides swapped. Each case below balances in that
-    /// weaker sense and must still reject, because it does not match the signed
-    /// authorization sitting in the same operation.
-    #[test]
-    fn dlv_settle_deltas_must_match_the_authorization_positionally() {
-        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        let vault = [0x77u8; 32];
-        let op = settle_op(vault, era, 1_000, rigb, 970);
-
-        // The one arrangement that is accepted.
-        let ok = [
-            delta(era, BalanceDirection::Debit, 1_000),
-            delta(rigb, BalanceDirection::Credit, 970),
-        ];
-        validate_conservation(&devid(0xB1), &op, &ok, None)
-            .expect("the authorized trade must pass");
-
-        for (why, deltas) in [
-            ("no deltas at all", vec![]),
-            (
-                "only the credit — the output without paying the input",
-                vec![delta(rigb, BalanceDirection::Credit, 970)],
-            ),
-            (
-                "only the debit",
-                vec![delta(era, BalanceDirection::Debit, 1_000)],
-            ),
-            (
-                "a third delta riding along",
-                vec![
-                    delta(era, BalanceDirection::Debit, 1_000),
-                    delta(rigb, BalanceDirection::Credit, 970),
-                    delta(dbtc, BalanceDirection::Credit, 1),
-                ],
-            ),
-            (
-                "REORDERED — set-membership would accept this",
-                vec![
-                    delta(rigb, BalanceDirection::Credit, 970),
-                    delta(era, BalanceDirection::Debit, 1_000),
-                ],
-            ),
-            (
-                "directions inverted: paid in the output, took the input",
-                vec![
-                    delta(era, BalanceDirection::Credit, 1_000),
-                    delta(rigb, BalanceDirection::Debit, 970),
-                ],
-            ),
-            (
-                "a different asset credited than the one authorized",
-                vec![
-                    delta(era, BalanceDirection::Debit, 1_000),
-                    delta(dbtc, BalanceDirection::Credit, 970),
-                ],
-            ),
-            (
-                "a different asset debited",
-                vec![
-                    delta(dbtc, BalanceDirection::Debit, 1_000),
-                    delta(rigb, BalanceDirection::Credit, 970),
-                ],
-            ),
-            (
-                "paying LESS than the authorized input",
-                vec![
-                    delta(era, BalanceDirection::Debit, 999),
-                    delta(rigb, BalanceDirection::Credit, 970),
-                ],
-            ),
-            (
-                "taking MORE than the authorized output",
-                vec![
-                    delta(era, BalanceDirection::Debit, 1_000),
-                    delta(rigb, BalanceDirection::Credit, 971),
-                ],
-            ),
-            (
-                "both sides scaled up — still zero-sum in the weak sense",
-                vec![
-                    delta(era, BalanceDirection::Debit, 10_000),
-                    delta(rigb, BalanceDirection::Credit, 9_700),
-                ],
-            ),
-            (
-                "duplicated debit",
-                vec![
-                    delta(era, BalanceDirection::Debit, 1_000),
-                    delta(era, BalanceDirection::Debit, 1_000),
-                ],
-            ),
-        ] {
-            assert!(
-                validate_conservation(&devid(0xB1), &op, &deltas, None).is_err(),
-                "must reject: {why}"
-            );
-        }
-    }
-
-    /// An authorization that names one asset on both legs, or a zero amount, is
-    /// rejected on its own terms — before any delta is considered.
-    #[test]
-    fn dlv_settle_authorization_must_name_two_assets_and_non_zero_amounts() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let vault = [0x77u8; 32];
-
-        let same_asset = settle_op(vault, era, 1_000, era, 970);
-        assert!(validate_conservation(
-            &devid(0xB1),
-            &same_asset,
-            &[
-                delta(era, BalanceDirection::Debit, 1_000),
-                delta(era, BalanceDirection::Credit, 970),
-            ],
-            None,
-        )
-        .is_err());
-
-        for (x, y) in [(0u64, 970u64), (1_000, 0), (0, 0)] {
-            let op = settle_op(vault, era, x, rigb, y);
-            assert!(
-                validate_conservation(
-                    &devid(0xB1),
-                    &op,
-                    &[
-                        delta(era, BalanceDirection::Debit, x),
-                        delta(rigb, BalanceDirection::Credit, y),
-                    ],
-                    None,
-                )
-                .is_err(),
-                "zero-amount authorization ({x}, {y}) must reject"
-            );
-        }
-    }
-
-    /// AT THE ADVANCE, not just at the guard: exactly two balances move, by
-    /// exactly the authorized amounts, and every unrelated balance and reserve
-    /// leaf is byte-identical afterwards.
-    ///
-    /// `validate_conservation` sees only the delta vector — it cannot observe
-    /// what the advance did to the rest of the map. This is the assertion the
-    /// user's conservation rule actually asks for, and it needs a real advance.
-    #[test]
-    fn dlv_settle_advance_moves_two_balances_and_leaves_everything_else_identical() {
-        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        let trader = fresh_device(0xB1)
-            .admitted_mint(era, 50_000, 0xA0)
-            .expect("admitted issuance of era")
-            .admitted_mint(rigb, 2_000, 0xA1)
-            .expect("admitted issuance of rigb")
-            .admitted_mint(dbtc, 7_777, 0xA2)
-            .expect("admitted issuance of dbtc");
-
-        // The trader also runs a vault of its own. A settlement it performs as a
-        // TRADER must not touch reserves it holds as an OWNER.
-        let own_vault = [0x99u8; 32];
-        let trader = trader
-            .admitted_funded_create(
-                own_vault,
-                [(era, 10_000), (dbtc, 1_000)],
-                30,
-                &test_keypair().secret_key,
-                0xA3,
-            )
-            .expect("trader funds its own vault")
-            .with_pending_economic_admission(None);
-
-        let before_dbtc = trader.balance(&dbtc);
-        let before_reserves = trader.vault_reserves_snapshot();
-
-        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
-            &trader.devid,
-            &trader.devid,
-        );
-        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &trader.devid,
-            &trader.devid,
-        );
-        let vault = [0x77u8; 32];
-        let out = trader
-            .advance(
-                rk,
-                trader.devid,
-                settle_op(vault, era, 1_000, rigb, 970),
-                entropy(11),
-                None,
-                &[
-                    delta(era, BalanceDirection::Debit, 1_000),
-                    delta(rigb, BalanceDirection::Credit, 970),
-                ],
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-            .expect("the authorized settlement must advance");
-        let after = &out.new_device_state;
-
-        // 50_000 held, 10_000 already encumbered in the trader's own vault.
-        assert_eq!(after.balance(&era), 39_000, "input debited exactly");
-        assert_eq!(after.balance(&rigb), 2_970, "output credited exactly");
-        assert_eq!(
-            after.balance(&dbtc),
-            before_dbtc,
-            "an unrelated balance must not move"
-        );
-        assert_eq!(
-            after.vault_reserves_snapshot(),
-            before_reserves,
-            "a trader-side settlement must not touch the trader's own reserve leaves"
-        );
-    }
-
-    /// END TO END: a settling advance writes its own receipt leaf, and a
-    /// receipt built from that advance's post-root verifies for a third party.
-    ///
-    /// This is the join between the two halves. The conservation arm proves the
-    /// right balances moved; the receipt is what lets the VAULT OWNER — who
-    /// never saw this advance — know that they did. Without the leaf landing in
-    /// the same root, the owner would be back to trusting a published claim.
-    #[test]
-    fn a_settling_advance_emits_a_verifiable_receipt() {
-        use crate::dlv::settlement_receipt_leaf::{
-            settlement_receipt_key, sign_trader_settlement_receipt,
-            verify_trader_settlement_receipt, SettledTrade,
-        };
-
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let trader = fresh_device(0xB7)
-            .admitted_mint(era, 50_000, 0xA0)
-            .expect("admitted issuance of era")
-            .with_pending_economic_admission(None);
-
-        let vault = [0x77u8; 32];
-        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
-            &trader.devid,
-            &trader.devid,
-        );
-        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &trader.devid,
-            &trader.devid,
-        );
-        let op = settle_op(vault, era, 1_000, rigb, 970);
-        let (receipt_id, x, parent_seq) = match &op {
-            Operation::DlvSettle {
-                settlement_receipt_id,
-                external_commitment_x,
-                parent_sequence,
-                ..
-            } => (
-                *settlement_receipt_id,
-                *external_commitment_x,
-                *parent_sequence,
-            ),
-            _ => unreachable!(),
-        };
-
-        let out = trader
-            .advance(
-                rk,
-                trader.devid,
-                op,
-                entropy(21),
-                None,
-                &[
-                    delta(era, BalanceDirection::Debit, 1_000),
-                    delta(rigb, BalanceDirection::Credit, 970),
-                ],
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-            .expect("settlement advances");
-        let after = &out.new_device_state;
-
-        // The receipt leaf is in the post-advance root, under the SAME root the
-        // relationship leaf binds — one batch, not two.
-        let trade = SettledTrade {
-            x,
-            parent_sequence: parent_seq,
-            new_sequence: parent_seq + 1,
-            input_policy_commit: era,
-            input_amount: 1_000,
-            output_policy_commit: rigb,
-            output_amount: 970,
-        };
-        let key = settlement_receipt_key(&after.genesis, &after.devid, &vault, &receipt_id);
-        let post_root = *after.smt.root();
-        let siblings = after
-            .smt
-            .get_inclusion_proof(&key, 256)
-            .expect("receipt proof")
-            .siblings;
-
-        let (tpk, tsk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
-        let receipt = sign_trader_settlement_receipt(
-            &vault,
-            &receipt_id,
-            trade,
-            &after.genesis,
-            &after.devid,
-            &post_root,
-            siblings,
-            &tpk,
-            &tsk,
-        )
-        .expect("sign the receipt");
-
-        verify_trader_settlement_receipt(&receipt)
-            .expect("a third party must be able to verify a settlement that really happened");
-
-        // And the leaf replays on restore, or a reloaded device would root-mismatch.
-        assert_eq!(
-            after.extra_leaves_snapshot().get(&key).copied(),
-            Some(crate::dlv::settlement_receipt_leaf::settlement_receipt_value(&trade)),
-            "the receipt leaf must replay through extra_leaves"
-        );
-    }
-
-    /// A settlement the trader never made has no leaf, so no receipt over it can
-    /// be produced from that device's root. This is what stops a published
-    /// pointer from consuming liquidity for free.
-    #[test]
-    fn a_device_that_did_not_settle_has_no_receipt_leaf_to_prove() {
-        use crate::dlv::settlement_receipt_leaf::{
-            settlement_receipt_key, settlement_receipt_value, SettledTrade,
-        };
-
-        let mut griefer = fresh_device(0xB8);
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        griefer.balances.insert(era, 50_000);
-        let vault = [0x77u8; 32];
-        let receipt_id = [0x77u8; 32];
-
-        // No settling advance — just a device holding funds.
-        let key = settlement_receipt_key(&griefer.genesis, &griefer.devid, &vault, &receipt_id);
-        let trade = SettledTrade {
-            x: [0x55; 32],
-            parent_sequence: 0,
-            new_sequence: 1,
-            input_policy_commit: era,
-            input_amount: 1_000,
-            output_policy_commit: rigb,
-            output_amount: 970,
-        };
-        let proof = griefer
-            .smt
-            .get_inclusion_proof(&key, 256)
-            .expect("a proof is always producible");
-        assert_ne!(
-            proof.value,
-            Some(settlement_receipt_value(&trade)),
-            "an unsettled device cannot present the settled value at that slot"
-        );
-    }
-
-    /// The owner RECORDS a settlement it verified. It authorizes no value
-    /// movement of its own, so any balance delta rejects.
-    #[test]
-    fn dlv_owner_apply_authorizes_no_balance_movement() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let op = Operation::DlvOwnerApplyV2 {
-            vault_id: vec![0x77; 32],
-            settlement_receipt_id: [0x77; 32],
-            pending_pointer_x: [0x55; 32],
-            parent_sequence: 0,
-            new_sequence: 1,
-            input_policy_commit: era,
-            output_policy_commit: rigb,
-            input_amount: 1_000,
-            output_amount: 970,
-            parent_binding: [0x23; 32],
-            fee_bps: 30,
-            signature: vec![0xCC; 64],
-            mode: TransactionMode::Bilateral,
-        };
-
-        validate_conservation(&devid(0xB1), &op, &[], None)
-            .expect("empty deltas are the only accepted shape");
-
-        for deltas in [
-            vec![delta(era, BalanceDirection::Credit, 1_000)],
-            vec![delta(rigb, BalanceDirection::Debit, 970)],
-            vec![
-                delta(era, BalanceDirection::Credit, 1_000),
-                delta(rigb, BalanceDirection::Debit, 970),
-            ],
-            // Even a self-cancelling pair: the owner's spendable balance is not
-            // part of a settlement at all.
-            vec![
-                delta(era, BalanceDirection::Credit, 1),
-                delta(era, BalanceDirection::Debit, 1),
-            ],
-        ] {
-            assert!(
-                validate_conservation(&devid(0xB1), &op, &deltas, None).is_err(),
-                "owner-apply must not carry balance deltas"
-            );
-        }
-    }
-
-    /// The owner's reserve legs move positionally: the input the trader paid
-    /// arrives, the output it took leaves, and NOTHING else changes — not the
-    /// owner's spendable balances, not another vault's leaves, not the other
-    /// assets in the same vault.
-    #[test]
-    fn owner_apply_moves_two_reserve_legs_and_leaves_everything_else_identical() {
-        let mut owner = fresh_device(0xA1);
-        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        owner.balances.insert(era, 50_000);
-        owner.balances.insert(rigb, 20_000);
-        owner.balances.insert(dbtc, 9_000);
-
-        let vault = [0x77u8; 32];
-        let other_vault = [0x88u8; 32];
-        let owner = owner
-            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 0)
-            .expect("fund the traded vault")
-            .new_device_state;
-        let owner = owner
-            .fund_vault_reserves(&other_vault, &[(era, 1_000), (dbtc, 500)], 0)
-            .expect("fund an unrelated vault")
-            .new_device_state;
-
-        let balances_before = owner.balances.clone();
-
-        let after = owner
-            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 970, 1)
-            .expect("apply the settlement")
-            .new_device_state;
-
-        assert_eq!(
-            after.vault_reserve(&vault, &era),
-            11_000,
-            "the input the trader paid arrives in the reserve"
-        );
-        assert_eq!(
-            after.vault_reserve(&vault, &rigb),
-            4_030,
-            "the output the trader took leaves the reserve"
-        );
-        assert_eq!(
-            after.balances, balances_before,
-            "the owner's SPENDABLE balances are untouched — the fee accrues as LP yield inside the reserves"
-        );
-        assert_eq!(
-            after.vault_reserve(&other_vault, &era),
-            1_000,
-            "an unrelated vault over the same asset is untouched"
-        );
-        assert_eq!(after.vault_reserve(&other_vault, &dbtc), 500);
-
-        // The sequence steps on BOTH moved legs, so a proof of either at the old
-        // sequence no longer verifies.
-        assert_eq!(after.vault_reserve_entry(&vault, &era).unwrap().sequence, 1);
-        assert_eq!(
-            after.vault_reserve_entry(&vault, &rigb).unwrap().sequence,
-            1
-        );
-        assert_eq!(
-            after
-                .vault_reserve_entry(&other_vault, &era)
-                .unwrap()
-                .sequence,
-            0,
-            "the untraded vault keeps its own sequence"
-        );
-    }
-
-    /// A vault that cannot pay the output fails closed with ZERO mutation —
-    /// the alternative is a reserve that wraps to a near-u64::MAX balance.
-    #[test]
-    fn a_vault_that_cannot_pay_the_output_rejects_with_zero_mutation() {
-        let mut owner = fresh_device(0xA6);
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        owner.balances.insert(era, 50_000);
-        owner.balances.insert(rigb, 1_000);
-        let vault = [0x77u8; 32];
-        let owner = owner
-            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 1_000)], 0)
-            .expect("funding")
-            .new_device_state;
-
-        let root_before = *owner.smt.root();
-        let reserves_before = owner.vault_reserves_snapshot();
-
-        let err = owner
-            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 1_001, 1)
-            .expect_err("the vault holds 1_000 RIGB and cannot pay 1_001");
-        assert!(
-            format!("{err}").contains("cannot pay"),
-            "must fail as an unpayable output, got: {err}"
-        );
-
-        assert_eq!(*owner.smt.root(), root_before, "zero mutation on the root");
-        assert_eq!(owner.vault_reserves_snapshot(), reserves_before);
-
-        // Exactly the reserve is payable — the boundary is not off by one.
-        owner
-            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 1_000, 1)
-            .expect("draining the leg to zero is legitimate");
-    }
-
-    /// The settlement move refuses degenerate authorizations at the chokepoint
-    /// itself, not only at the guard above it.
-    #[test]
-    fn settlement_reserve_move_refuses_same_asset_and_zero_amounts() {
-        let mut owner = fresh_device(0xA7);
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        owner.balances.insert(era, 50_000);
-        owner.balances.insert(rigb, 50_000);
-        let vault = [0x77u8; 32];
-        let owner = owner
-            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 10_000)], 0)
-            .expect("funding")
-            .new_device_state;
-
-        assert!(
-            owner
-                .apply_settlement_to_reserves(&vault, &era, 1_000, &era, 970, 1)
-                .is_err(),
-            "one asset on both legs is not a trade"
-        );
-        assert!(owner
-            .apply_settlement_to_reserves(&vault, &era, 0, &rigb, 970, 1)
-            .is_err());
-        assert!(owner
-            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 0, 1)
-            .is_err());
-    }
-
-    /// Encumbrance is reversible, or funding a vault is a one-way door.
-    #[test]
-    fn withdrawal_returns_the_exact_reserve_to_spendable() {
-        let mut dev = fresh_device(0xA5);
-        let era = pc(0xE0);
-        dev.balances.insert(era, 10_000);
-        let vault = [0x77u8; 32];
-
-        let funded = dev
-            .fund_vault_reserves(&vault, &[(era, 10_000)], 0)
-            .expect("fund")
-            .new_device_state;
-        let back = funded
-            .withdraw_vault_reserves(&vault, &[(era, 10_000)], 7)
-            .expect("withdraw")
-            .new_device_state;
-
-        assert_eq!(back.balance(&era), 10_000, "exactly what went in comes out");
-        assert_eq!(back.vault_reserve(&vault, &era), 0);
-        // The emptied leaf keeps its entry so the sequence stays monotone and an
-        // older proof cannot be replayed against it.
-        assert_eq!(
-            back.vault_reserve_entry(&vault, &era).map(|r| r.sequence),
-            Some(7)
-        );
-    }
-
-    /// Withdrawing more than the vault holds is refused rather than clamped.
-    #[test]
-    fn over_withdrawal_is_refused() {
-        let mut dev = fresh_device(0xA6);
-        let era = pc(0xE0);
-        dev.balances.insert(era, 10_000);
-        let vault = [0x77u8; 32];
-        let funded = dev
-            .fund_vault_reserves(&vault, &[(era, 4_000)], 0)
-            .expect("fund")
-            .new_device_state;
-
-        assert!(funded
-            .withdraw_vault_reserves(&vault, &[(era, 4_001)], 1)
-            .is_err());
-        assert_eq!(funded.vault_reserve(&vault, &era), 4_000, "unchanged");
-    }
-
-    /// Two vaults over the same asset keep separate reserves — otherwise an
-    /// owner could not attribute a settlement to the vault that produced it.
-    #[test]
-    fn two_vaults_over_one_asset_do_not_share_a_reserve() {
-        let mut dev = fresh_device(0xA7);
-        let era = pc(0xE0);
-        dev.balances.insert(era, 10_000);
-        let (v1, v2) = ([0x11u8; 32], [0x22u8; 32]);
-
-        let s = dev
-            .fund_vault_reserves(&v1, &[(era, 3_000)], 0)
-            .expect("v1")
-            .new_device_state;
-        let s = s
-            .fund_vault_reserves(&v2, &[(era, 2_000)], 0)
-            .expect("v2")
-            .new_device_state;
-
-        assert_eq!(s.vault_reserve(&v1, &era), 3_000);
-        assert_eq!(s.vault_reserve(&v2, &era), 2_000);
-        assert_eq!(s.balance(&era), 5_000);
-    }
-
-    /// A leg list naming one asset twice would let the second write clobber the
-    /// first, funding the vault with less than the caller asked for.
-    #[test]
-    fn a_duplicated_asset_in_the_legs_is_refused() {
-        let mut dev = fresh_device(0xA8);
-        let era = pc(0xE0);
-        dev.balances.insert(era, 10_000);
-        assert!(dev
-            .fund_vault_reserves(&[0x77u8; 32], &[(era, 1_000), (era, 2_000)], 0)
-            .is_err());
-    }
-
-    /// Zero-amount and empty leg lists are refused rather than producing a
-    /// no-op advance that looks like a funded vault.
-    #[test]
-    fn degenerate_leg_lists_are_refused() {
-        let mut dev = fresh_device(0xA9);
-        let era = pc(0xE0);
-        dev.balances.insert(era, 10_000);
-        let vault = [0x77u8; 32];
-        assert!(dev.fund_vault_reserves(&vault, &[], 0).is_err());
-        assert!(dev.fund_vault_reserves(&vault, &[(era, 0)], 0).is_err());
-    }
-
-    /// Funding is a RESERVE move, so `DlvCreate` must carry no balance delta.
-    ///
-    /// This arm exists because the operation previously fell to the catch-all,
-    /// which rejects ANY delta — so the single-asset lock the handler built
-    /// could never commit. The value-bearing DLV path has never worked, for any
-    /// vault type, and the DLV suite did not notice because it asserted on the
-    /// text of the handler rather than its behaviour.
-    #[test]
-    fn dlv_create_rejects_any_balance_delta() {
-        let me = devid(0xC1);
-        let era = pc(0xE0);
-        let op = Operation::DlvCreate {
-            vault_id: vec![0x77; 32],
-            creator_public_key: vec![0xAA; 32],
-            parameters_hash: vec![0x11; 32],
-            fulfillment_condition: Vec::new(),
-            intended_recipient: None,
-            signature: Vec::new(),
-            mode: crate::types::operations::TransactionMode::Unilateral,
-        };
-        assert!(
-            validate_conservation(&me, &op, &[], None).is_ok(),
-            "no deltas is the shape funding uses"
-        );
-        for d in [BalanceDirection::Credit, BalanceDirection::Debit] {
-            let err = validate_conservation(
-                &me,
-                &op,
-                &[BalanceDelta {
-                    policy_commit: era,
-                    direction: d,
-                    amount: 1,
-                }],
-                None,
-            )
-            .expect_err("a delta riding along with DlvCreate must be refused");
-            assert!(
-                format!("{err}").contains("reserve leaves"),
-                "the refusal should say where funding actually goes, got: {err}"
-            );
-        }
-    }
+    // ── amendment 2c-H: a route settle's movement and its receipt leaves ────
 
     fn fresh_device(b: u8) -> DeviceState {
-        DeviceState::new([0u8; 32], devid(b), pubkey(), 1024)
+        DeviceState::new([0u8; 32], devid(b), pubkey())
     }
 
     fn op() -> Operation {
@@ -5317,27 +2011,7 @@ mod tests {
     }
 
     fn bal(amount: u64) -> crate::types::token_types::Balance {
-        crate::types::token_types::Balance::from_state(amount, [0u8; 32])
-    }
-
-    /// A Mint op carrying one credit of `amount` — satisfies the conservation
-    /// guard for a single Credit `BalanceDelta` of the same amount.
-    /// Mint of ERA — the common fixture. Use `mint_op_for` when the test needs
-    /// the operation to name a specific asset.
-    fn mint_op(amount: u64) -> Operation {
-        mint_op_for(
-            amount,
-            crate::core::token::builtin_policy_commit_for_token("ERA").unwrap(),
-        )
-    }
-
-    fn mint_op_for(amount: u64, policy_commit: [u8; 32]) -> Operation {
-        Operation::Mint {
-            amount: bal(amount),
-            token_id: b"ERA".to_vec(),
-            policy_commit,
-            message: String::new(),
-        }
+        crate::types::token_types::Balance::amount(amount)
     }
 
     /// A Burn op carrying one debit of `amount` — satisfies the conservation
@@ -5347,19 +2021,14 @@ mod tests {
             amount: bal(amount),
             token_id: b"ERA".to_vec(),
             policy_commit,
-            proof_of_ownership: vec![],
             message: String::new(),
         }
     }
 
-    /// Value op matching a delta's direction, amount AND asset — the guard now
-    /// binds all three, so a fixture must name the asset its delta moves.
-    ///
-    /// The credit arm is a credit-direction `Transfer`, not a mint: a mint
-    /// requires an attached admission carrying `0x0029` issuance evidence,
-    /// and this fixture's subject is delta/asset binding, not issuance.
-    /// Callers driving the credit direction through `advance` must attach the
-    /// matching Prepared admission — see `prepared_for`.
+    /// Value op matching a delta's direction, amount AND asset: the guard
+    /// binds all three, so a fixture names the asset its delta moves. The
+    /// credit arm is a credit-direction `Transfer`, the online credit a
+    /// recipient accepts.
     fn value_op(dir: BalanceDirection, amount: u64, policy_commit: [u8; 32]) -> Operation {
         match dir {
             BalanceDirection::Credit => credit_transfer_op(amount, policy_commit),
@@ -5367,34 +2036,149 @@ mod tests {
         }
     }
 
-    /// A credit-direction `Transfer` addressed to `to` — the only online credit
-    /// the accepting layer takes, and only with its admission attached.
+    /// A credit-direction `Transfer` addressed to `to`.
     fn credit_transfer_op(amount: u64, policy_commit: [u8; 32]) -> Operation {
         Operation::Transfer {
             to_device_id: devid(0xAA).to_vec(),
             amount: bal(amount),
-            token_id: b"ERA".to_vec(),
             policy_commit,
-            mode: crate::types::operations::TransactionMode::Bilateral,
-            nonce: vec![0x11; 32],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: devid(0xAA).to_vec(),
-            to: Vec::new(),
-            message: String::new(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![0x11; 32],
+                mode: crate::types::operations::TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: Vec::new(),
             authority_policy: None,
         }
     }
 
-    /// The Prepared admission `advance` demands for a credit-direction transfer.
-    fn prepared_for(op: &Operation) -> crate::economic::admission::PendingEconomicAdmission {
-        crate::economic::admission::PendingEconomicAdmission::prepared(
-            crate::economic::admission::PendingAdmissionKind::DsmBacked,
-            1,
-            [0u8; 32],
-            crate::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+    /// An escrow vault's creation (SoFi Amendment S21) moves exactly its
+    /// stake out of the owner's balance: the record's amount, of the one
+    /// token its terms name. Anything more, less, or of another asset is
+    /// refused.
+    #[test]
+    fn an_escrow_creation_debits_exactly_its_stake() {
+        let me = devid(0xAA);
+        let held = pc(0x41);
+        let referee = crate::sofi::wire::EscrowSigner::new(
+            crate::ccb::sigalg::SPHINCS_PLUS_SPX256F,
+            &[0x5A; 64],
         )
+        .expect("a declared key");
+        let terms = crate::sofi::wire::EscrowTerms::new(
+            held,
+            [0x59; 32],
+            vec![crate::sofi::wire::EscrowBranch::new(
+                crate::sofi::wire::EscrowOutcome::new(b"void", vec![referee]).expect("outcome"),
+                [0x01; 32],
+                me,
+            )],
+        )
+        .expect("terms");
+        let creation = crate::sofi::wire::VaultCreation {
+            vault_id: [0x51; 32],
+            genesis_root: [0x52; 32],
+            amount_a: 700,
+            amount_b: 0,
+        };
+        let op = Operation::EscrowVaultCreate {
+            genesis_preimage: Vec::new(),
+            creation: creation.encode(),
+            terms: terms.encode(),
+            signature: Vec::new(),
+        };
+        let debit = |amount: u64, policy_commit: [u8; 32]| BalanceDelta {
+            policy_commit,
+            direction: BalanceDirection::Debit,
+            amount,
+        };
+        assert_eq!(
+            validate_conservation(&me, &op, &[debit(700, held)], None).map_err(|e| e.to_string()),
+            Ok(())
+        );
+        for (why, deltas) in [
+            ("no deltas", Vec::new()),
+            ("an amount changed", vec![debit(699, held)]),
+            ("another asset", vec![debit(700, pc(0x43))]),
+            ("a second debit", vec![debit(700, held), debit(1, pc(0x43))]),
+        ] {
+            let refused = validate_conservation(&me, &op, &deltas, None).map_err(|e| e.to_string());
+            assert!(
+                matches!(&refused, Err(why) if why.contains("exactly the debit of its stake")),
+                "{why}: an escrow creation applies exactly its stake's debit, got {refused:?}"
+            );
+        }
+    }
+
+    /// A vault creation moves exactly its two funded legs out of the owner's
+    /// balances: the record's amounts, of the operation's two assets, in
+    /// order. Anything more, less, or of another asset is refused.
+    #[test]
+    fn a_vault_creation_debits_exactly_its_two_funded_legs() {
+        let me = devid(0xAA);
+        let (asset_a, asset_b) = (pc(0x41), pc(0x42));
+        let creation = crate::sofi::wire::VaultCreation {
+            vault_id: [0x51; 32],
+            genesis_root: [0x52; 32],
+            amount_a: 700,
+            amount_b: 300,
+        };
+        let op = Operation::SofiVaultCreate {
+            genesis_preimage: Vec::new(),
+            creation: creation.encode(),
+            market_policy_preimage: Vec::new(),
+            funding_a_policy_commit: asset_a,
+            funding_b_policy_commit: asset_b,
+            signature: Vec::new(),
+        };
+        let debit = |amount: u64, policy_commit: [u8; 32]| BalanceDelta {
+            policy_commit,
+            direction: BalanceDirection::Debit,
+            amount,
+        };
+        assert!(
+            validate_conservation(&me, &op, &[debit(700, asset_a), debit(300, asset_b)], None)
+                .is_ok()
+        );
+        for (why, deltas) in [
+            ("no deltas", vec![]),
+            ("one leg", vec![debit(700, asset_a)]),
+            (
+                "legs swapped",
+                vec![debit(300, asset_b), debit(700, asset_a)],
+            ),
+            (
+                "an amount changed",
+                vec![debit(700, asset_a), debit(301, asset_b)],
+            ),
+            (
+                "another asset",
+                vec![debit(700, asset_a), debit(300, pc(0x43))],
+            ),
+            (
+                "a credit",
+                vec![
+                    debit(700, asset_a),
+                    BalanceDelta {
+                        policy_commit: asset_b,
+                        direction: BalanceDirection::Credit,
+                        amount: 300,
+                    },
+                ],
+            ),
+            (
+                "an extra delta",
+                vec![debit(700, asset_a), debit(300, asset_b), debit(1, asset_a)],
+            ),
+        ] {
+            assert!(
+                validate_conservation(&me, &op, &deltas, None).is_err(),
+                "{why} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -5405,15 +2189,15 @@ mod tests {
         let xfer = |to: [u8; 32], amt: u64, pcv: [u8; 32]| Operation::Transfer {
             to_device_id: to.to_vec(),
             amount: bal(amt),
-            token_id: b"ERA".to_vec(),
             policy_commit: pcv,
-            mode: crate::types::operations::TransactionMode::Unilateral,
-            nonce: vec![],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: vec![],
-            to: vec![],
-            message: String::new(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![],
+                mode: crate::types::operations::TransactionMode::Unilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: vec![],
             authority_policy: None,
         };
@@ -5446,18 +2230,30 @@ mod tests {
             None
         )
         .is_err());
-        // Mint: one credit==amount; Burn: one debit==amount.
-        assert!(validate_conservation(&me, &mint_op_for(9, pcx), &[credit(9, pcx)], None).is_ok());
-        assert!(validate_conservation(&me, &mint_op_for(9, pcx), &[debit(9, pcx)], None).is_err());
-        assert!(validate_conservation(&me, &mint_op_for(9, pcx), &[credit(8, pcx)], None).is_err());
+        // CreateToken: the release of its whole supply under its own commit;
+        // Burn: one debit==amount.
+        let create = |supply: u64| Operation::CreateToken {
+            token_id: b"NEW".to_vec(),
+            initial_supply: bal(supply),
+            policy_commit: pcx,
+            fee_amount: 0,
+            name: "New".to_string(),
+            symbol: "NEW".to_string(),
+            decimals: 0,
+            metadata_uri: None,
+            signature: Vec::new(),
+        };
+        assert!(validate_conservation(&me, &create(9), &[credit(9, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &create(9), &[debit(9, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &create(9), &[credit(8, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &create(0), &[], None).is_err());
         assert!(validate_conservation(&me, &burn_op_for(9, pcx), &[debit(9, pcx)], None).is_ok());
         assert!(validate_conservation(&me, &burn_op_for(9, pcx), &[credit(9, pcx)], None).is_err());
-        // ASSET BINDING: a mint/burn may not move an asset other than the one
-        // the signed operation names. Without this the guard checked only
-        // count/direction/amount, so a mint for token X could credit ERA.
+        // ASSET BINDING: a creation or burn may not move an asset other than
+        // the one the signed operation names.
         assert!(
-            validate_conservation(&me, &mint_op_for(9, pcx), &[credit(9, pc(0xEE))], None).is_err(),
-            "mint delta must be bound to the operation's policy_commit"
+            validate_conservation(&me, &create(9), &[credit(9, pc(0xEE))], None).is_err(),
+            "the release must be bound to the operation's policy_commit"
         );
         assert!(
             validate_conservation(&me, &burn_op_for(9, pcx), &[debit(9, pc(0xEE))], None).is_err(),
@@ -5468,7 +2264,7 @@ mod tests {
         assert!(validate_conservation(&me, &op(), &[credit(1, pcx)], None).is_err());
         // offline_spend is only valid on a bearer transfer, and forbids online deltas.
         assert!(
-            validate_conservation(&me, &mint_op(9), &[], Some(9)).is_err(),
+            validate_conservation(&me, &burn_op_for(9, pcx), &[], Some(9)).is_err(),
             "allocation spend on a non-bearer op must be rejected"
         );
         assert!(
@@ -5484,29 +2280,15 @@ mod tests {
                 Operation::Transfer {
                     to_device_id,
                     amount,
-                    token_id,
                     policy_commit,
-                    mode,
-                    nonce,
-                    verification,
-                    pre_commit,
-                    recipient,
-                    to,
-                    message,
+                    terms_commitment,
                     signature,
                     ..
                 } => Operation::Transfer {
                     to_device_id,
                     amount,
-                    token_id,
                     policy_commit,
-                    mode,
-                    nonce,
-                    verification,
-                    pre_commit,
-                    recipient,
-                    to,
-                    message,
+                    terms_commitment,
                     signature,
                     authority_policy: Some(AuthorityPolicy {
                         mode: AuthorityMode::OfflineBearerRequired,
@@ -5535,25 +2317,136 @@ mod tests {
         );
     }
 
-    fn entropy(seed: u8) -> Vec<u8> {
-        let mut h = crate::crypto::blake3::dsm_domain_hasher(
-            crate::common::domain_tags::TAG_DSM_TEST_ENTROPY,
-        );
-        h.update(&[seed]);
-        h.finalize().as_bytes().to_vec()
+    /// The credit shape the recipient path builds for a custom token: a
+    /// credit-direction Transfer addressed to `to`.
+    fn custom_credit_op(to: &DeviceState, policy_commit: [u8; 32], amount: u64) -> Operation {
+        Operation::Transfer {
+            to_device_id: to.devid.to_vec(),
+            amount: bal(amount),
+            policy_commit,
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"CUSTOM".to_vec(),
+                nonce: vec![0x5C; 32],
+                mode: TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
+            signature: Vec::new(),
+            authority_policy: None,
+        }
     }
 
-    /// I5.0 gate (plan Part J): `advance` MUST materialise a new `policy_commit`
-    /// entry on Credit when the device has zero prior exposure to that
-    /// commit — the "Bob claims Alice's custom-token vault on his own chain"
-    /// path.  Semantically equivalent to `entry().or_insert(0) += amount`.
-    ///
-    /// Without this, DlvClaim on a claimant who has never held the custom
-    /// token would silently no-op instead of crediting the locked balance.
+    /// THE OFFLINE-RECEIPT INVARIANT (owner ruling 2026-09-13). A receiver
+    /// must already hold the token's public policy in its OWN authenticated
+    /// state before any value under it arrives — it cannot fetch the policy
+    /// later, and no online path may root it on the receiver's behalf. Proven
+    /// on hardware the other way round: a device that never adopted SOFI was
+    /// credited 44.56 SOFI by a routed settlement and could neither see nor
+    /// spend it.
+    #[test]
+    fn a_credit_of_an_unadopted_token_is_refused_at_advance() {
+        let bob = fresh_device(0xBB);
+        let custom_token = pc(0xF1);
+        assert!(!bob.has_adopted(&custom_token));
+        let rk_self =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&bob.devid, &bob.devid);
+        let credit_op = custom_credit_op(&bob, custom_token, 50);
+        let err = bob
+            .advance(
+                rk_self,
+                bob.devid,
+                credit_op,
+                &[BalanceDelta {
+                    policy_commit: custom_token,
+                    direction: BalanceDirection::Credit,
+                    amount: 50,
+                }],
+                None,
+                None,
+            )
+            .expect_err("a credit of a token this device never adopted must be refused");
+        assert!(
+            format!("{err}").contains("has not adopted"),
+            "the refusal names adoption, got: {err}"
+        );
+        // Nothing moved: the working copy was discarded with the error.
+        assert!(!bob.balances.contains_key(&custom_token));
+    }
+
+    /// Positive control for the gate above: adoption first, then the SAME
+    /// credit lands. The adoption is a committed leaf, so a reloaded device
+    /// recomputes the same root with it.
+    #[test]
+    fn adoption_precedes_receipt_and_is_committed() {
+        let bob = fresh_device(0xBB);
+        let custom_token = pc(0xF1);
+        let bob = bob.adopt_token(custom_token).expect("adopt");
+        assert!(bob.has_adopted(&custom_token));
+        assert_eq!(
+            bob.extra_leaves
+                .get(&DeviceState::token_adoption_leaf_key(&custom_token)),
+            Some(&custom_token),
+            "adoption is a committed extra leaf, replayed on restore"
+        );
+        // Builtins are pre-adopted; an unrelated commit is not.
+        assert!(
+            bob.has_adopted(&crate::core::token::builtin_policy_commit_for_token("ERA").unwrap())
+        );
+        assert!(!bob.has_adopted(&pc(0xF2)));
+
+        let rk_self =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&bob.devid, &bob.devid);
+        let credit_op = custom_credit_op(&bob, custom_token, 50);
+        let outcome = bob
+            .advance(
+                rk_self,
+                bob.devid,
+                credit_op,
+                &[BalanceDelta {
+                    policy_commit: custom_token,
+                    direction: BalanceDirection::Credit,
+                    amount: 50,
+                }],
+                None,
+                None,
+            )
+            .expect("after adoption the same credit is accepted");
+        assert_eq!(
+            outcome
+                .new_device_state
+                .balances
+                .get(&custom_token)
+                .copied(),
+            Some(50)
+        );
+        // Re-adopting is idempotent: same leaf, same value, no refusal.
+        let again = outcome
+            .new_device_state
+            .adopt_token(custom_token)
+            .expect("adopt");
+        assert!(again.has_adopted(&custom_token));
+    }
+
+    #[test]
+    fn create_token_adopts_the_token_it_issues() {
+        let bob = fresh_device(0xBB);
+        let new_token = pc(0xF3);
+        assert!(!bob.has_adopted(&new_token));
+        let created = bob.created_token(new_token, 1).expect("token created");
+        assert!(created.has_adopted(&new_token));
+    }
+
+    /// `advance` materialises a new `policy_commit` entry on a credit when the
+    /// device has never held that commit: a claimant crediting a custom token
+    /// for the first time gets the balance, not a silent no-op.
     #[test]
     fn advance_credit_materialises_new_policy_commit_entry() {
         let bob = fresh_device(0xBB);
         let custom_token = pc(0xF1);
+        // Adoption is the precondition of receipt (see the tests above); this
+        // test is about the balance entry, so adopt first.
+        let bob = bob.adopt_token(custom_token).expect("adopt");
 
         // Bob starts with zero exposure to this policy_commit.
         assert!(
@@ -5561,56 +2454,19 @@ mod tests {
             "precondition: fresh device has no entry for the custom token"
         );
 
-        // Simulate the DlvClaim credit landing on Bob's self-loop.
         let rk_self =
             crate::core::bilateral_transaction_manager::compute_smt_key(&bob.devid, &bob.devid);
-        let init_tip =
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &bob.devid, &bob.devid,
-            );
-
-        // THE CREDIT SHAPE PRODUCTION ACTUALLY USES. A mint is no longer a
-        // credit vehicle — issuance is refused at this layer until class
-        // 0x0029 exists — so this drives the only online credit that reaches
-        // `advance`: a credit-direction Transfer with its DSM-backed admission
-        // already attached, exactly as the recipient path builds it.
-        let credit_op = Operation::Transfer {
-            to_device_id: bob.devid.to_vec(),
-            amount: bal(50),
-            token_id: b"CUSTOM".to_vec(),
-            policy_commit: custom_token,
-            mode: TransactionMode::Bilateral,
-            nonce: vec![0x5C; 32],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: bob.devid.to_vec(),
-            to: Vec::new(),
-            message: String::new(),
-            signature: Vec::new(),
-            authority_policy: None,
-        };
-        let bob = bob.with_pending_economic_admission(Some(
-            crate::economic::admission::PendingEconomicAdmission::prepared(
-                crate::economic::admission::PendingAdmissionKind::DsmBacked,
-                1,
-                [0u8; 32],
-                crate::economic::faucet::dsm_operation_digest(&credit_op.to_bytes()),
-            ),
-        ));
+        let credit_op = custom_credit_op(&bob, custom_token, 50);
         let outcome = bob
             .advance(
                 rk_self,
                 bob.devid,
                 credit_op,
-                entropy(42),
-                None,
                 &[BalanceDelta {
                     policy_commit: custom_token,
                     direction: BalanceDirection::Credit,
                     amount: 50,
                 }],
-                Some(init_tip),
-                None,
                 None,
                 None,
             )
@@ -5639,9 +2495,9 @@ mod tests {
         let token = pc(0xA1);
         let bundle = [0x7B; 32];
 
-        // 100 of the token from an admitted issuance; the subject is what
+        // 100 of the token, created on this device; the subject is what
         // happens to the funds afterwards.
-        let funded = dev.admitted_mint(token, 100, 0xC1).expect("admitted mint");
+        let funded = dev.created_token(token, 100).expect("token created");
 
         let key = offline_allocation_key(&funded.genesis, &funded.devid, &bundle, &token);
         let online = |s: &DeviceState| s.balances.get(&token).copied().unwrap_or(0);
@@ -5750,8 +2606,7 @@ mod tests {
     #[test]
     fn bearer_advance_commits_fused_anchor_leaf_into_real_device_roots() {
         use crate::core::bilateral_transaction_manager::{
-            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
-            verify_anchor_state_leaf,
+            anchor_state_leaf_key, compute_smt_key, verify_anchor_state_leaf,
         };
         // Fused anchor identity + two opaque v2 anchor-state leaf VALUES (the anchor-core leaf
         // `anchor_state_leaf(B, h_i, u_i)` — dsm treats them as opaque 32-byte values).
@@ -5761,22 +2616,22 @@ mod tests {
         let commit1 = [0xC1u8; 32];
 
         // (bootstrap) The admitted device SMT carries commit_0 at the stable anchor-state key.
-        // Three admitted issuances to burn from: a burn is value-bearing without
-        // being issuance, so it exercises the same advance path this test is about.
+        // Three created tokens to burn from: a burn is value-bearing, so it
+        // exercises the same advance path this test is about.
         let dev = fresh_device(0xAB)
-            .admitted_mint(pc(0xF1), 1_000, 0xF1)
-            .expect("admitted mint")
-            .admitted_mint(pc(0xF2), 1_000, 0xF2)
-            .expect("admitted mint")
-            .admitted_mint(pc(0xF3), 1_000, 0xF3)
-            .expect("admitted mint");
+            .created_token(pc(0xF1), 1_000)
+            .expect("token created")
+            .created_token(pc(0xF2), 1_000)
+            .expect("token created")
+            .created_token(pc(0xF3), 1_000)
+            .expect("token created");
         let dev = dev
             .with_anchor_state_leaf(&key, &commit0)
             .expect("bootstrap");
 
         let cp = devid(0xC0);
         let rk = compute_smt_key(&dev.devid, &cp);
-        let init = initial_chain_tip_from_device_ids(&dev.devid, &cp);
+        let dev = dev.establish_relationship(cp).expect("establish");
 
         // (bearer advance) updates the SAME anchor leaf key old→successor in the same root batch.
         let out = dev
@@ -5784,19 +2639,15 @@ mod tests {
                 rk,
                 cp,
                 burn_op_for(10, pc(0xF1)),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF1),
                     direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
-                Some(init),
                 Some(AnchorLeafUpdate {
                     key,
                     new_value: commit1,
                 }),
-                None,
                 None,
             )
             .expect("bearer advance");
@@ -5808,7 +2659,7 @@ mod tests {
         // prev proof verifies commit_0 ONLY against the prev root; next proof verifies commit_1
         // ONLY against the next root — and each rejects the other root/value pairing.
         assert!(verify_anchor_state_leaf(
-            &out.smt_proofs.pre_root,
+            &out.transition.pre_root(),
             &b,
             &commit0,
             &ap.parent
@@ -5826,7 +2677,7 @@ mod tests {
             &ap.parent
         ));
         assert!(!verify_anchor_state_leaf(
-            &out.smt_proofs.pre_root,
+            &out.transition.pre_root(),
             &b,
             &commit1,
             &ap.child
@@ -5845,21 +2696,17 @@ mod tests {
         // mutate the fused anchor state — a subsequent bearer advance still sees commit_0 as parent.
         let cp2 = devid(0xC2);
         let rk2 = compute_smt_key(&dev.devid, &cp2);
-        let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
+        let dev = dev.establish_relationship(cp2).expect("establish");
         let plain = dev
             .advance(
                 rk2,
                 cp2,
                 burn_op_for(5, pc(0xF2)),
-                entropy(2),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF2),
                     direction: BalanceDirection::Debit,
                     amount: 5,
                 }],
-                Some(init2),
-                None,
                 None,
                 None,
             )
@@ -5868,56 +2715,49 @@ mod tests {
 
         let cp3 = devid(0xC3);
         let rk3 = compute_smt_key(&dev.devid, &cp3);
-        let init3 = initial_chain_tip_from_device_ids(&dev.devid, &cp3);
         let out2 = plain
             .new_device_state
+            .establish_relationship(cp3)
+            .expect("establish")
             .advance(
                 rk3,
                 cp3,
                 burn_op_for(7, pc(0xF3)),
-                entropy(3),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF3),
                     direction: BalanceDirection::Debit,
                     amount: 7,
                 }],
-                Some(init3),
                 Some(AnchorLeafUpdate {
                     key,
                     new_value: commit1,
                 }),
                 None,
-                None,
             )
             .expect("bearer advance after a plain one");
         let ap2 = out2.anchor_proofs.clone().expect("anchor proofs");
         assert!(
-            verify_anchor_state_leaf(&out2.smt_proofs.pre_root, &b, &commit0, &ap2.parent),
+            verify_anchor_state_leaf(&out2.transition.pre_root(), &b, &commit0, &ap2.parent),
             "a non-bearer transition must not mutate the fused anchor state (commit_0 survives)"
         );
     }
 
     #[test]
     fn bearer_advance_draws_from_allocation_not_online_balance() {
-        use crate::core::bilateral_transaction_manager::{
-            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
-        };
+        use crate::core::bilateral_transaction_manager::{anchor_state_leaf_key, compute_smt_key};
         use crate::types::offline_allocation_leaf::offline_allocation_key;
-        use crate::types::operations::{
-            AuthorityMode, AuthorityPolicy, Operation, TransactionMode, VerificationType,
-        };
+        use crate::types::operations::{AuthorityMode, AuthorityPolicy, Operation, TransactionMode};
 
         let b = [0xB2u8; 32];
         let key = anchor_state_leaf_key(&b);
         let token = pc(0xA1);
 
-        // Bootstrap the anchor, hold 100 online from an admitted issuance, then
+        // Bootstrap the anchor, hold 100 online from the token's creation, then
         // load 40 into the offline allocation.
         let dev = fresh_device(0xD5)
             .with_anchor_state_leaf(&key, &[0xC0u8; 32])
             .expect("bootstrap");
-        let funded = dev.admitted_mint(token, 100, 0xD5).expect("admitted mint");
+        let funded = dev.created_token(token, 100).expect("token created");
         let loaded = funded
             .load_offline_cash(&b, &token, 40)
             .expect("load 40")
@@ -5929,7 +2769,7 @@ mod tests {
         // Build an offline-bearer transfer of `amt` to a counterparty.
         let cp = devid(0xC5);
         let rk = compute_smt_key(&loaded.devid, &cp);
-        let init = initial_chain_tip_from_device_ids(&loaded.devid, &cp);
+        let loaded = loaded.establish_relationship(cp).expect("establish");
         let anchor_leaf = AnchorLeafUpdate {
             key,
             new_value: [0xC1u8; 32],
@@ -5937,15 +2777,15 @@ mod tests {
         let bearer_op = |amt: u64| Operation::Transfer {
             to_device_id: cp.to_vec(),
             amount: bal(amt),
-            token_id: b"ERA".to_vec(),
             policy_commit: token,
-            mode: TransactionMode::Bilateral,
-            nonce: vec![],
-            verification: VerificationType::Standard,
-            pre_commit: None,
-            recipient: vec![],
-            to: vec![],
-            message: String::new(),
+            terms_commitment: crate::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![],
+                mode: TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: vec![],
             authority_policy: Some(AuthorityPolicy {
                 mode: AuthorityMode::OfflineBearerRequired,
@@ -5967,13 +2807,9 @@ mod tests {
                 rk,
                 cp,
                 bearer_op(25),
-                entropy(2),
-                None,
-                &[], // no online delta — value comes from the allocation
-                Some(init),
+                &[],
                 Some(anchor_leaf.clone()),
                 spend(25),
-                None,
             )
             .expect("bearer advance from allocation")
             .new_device_state;
@@ -5998,13 +2834,9 @@ mod tests {
                 rk,
                 cp,
                 bearer_op(25),
-                entropy(2),
-                None,
                 &[],
-                Some(init),
                 Some(anchor_leaf.clone()),
                 spend(25),
-                None,
             )
             .expect("re-run bearer advance from allocation")
             .new_device_state;
@@ -6021,17 +2853,13 @@ mod tests {
                     rk,
                     cp,
                     bearer_op(25),
-                    entropy(3),
-                    None,
                     &[BalanceDelta {
                         policy_commit: token,
                         direction: BalanceDirection::Debit,
                         amount: 25,
                     }],
-                    Some(init),
                     Some(anchor_leaf.clone()),
                     spend(25),
-                    None,
                 )
                 .is_err(),
             "bearer advance must reject an online delta alongside a allocation spend"
@@ -6044,13 +2872,9 @@ mod tests {
                     rk,
                     cp,
                     bearer_op(100),
-                    entropy(4),
-                    None,
                     &[],
-                    Some(init),
                     Some(anchor_leaf.clone()),
                     spend(100),
-                    None,
                 )
                 .is_err(),
             "bearer advance must reject a allocation underflow"
@@ -6059,18 +2883,7 @@ mod tests {
         // Fail-closed: a allocation spend without the anchor-state advance (anchor_leaf None) is rejected.
         assert!(
             loaded
-                .advance(
-                    rk,
-                    cp,
-                    bearer_op(10),
-                    entropy(5),
-                    None,
-                    &[],
-                    Some(init),
-                    None,
-                    spend(10),
-                    None,
-                )
+                .advance(rk, cp, bearer_op(10), &[], None, spend(10),)
                 .is_err(),
             "offline-bearer spend requires the anchor-state advance"
         );
@@ -6079,8 +2892,7 @@ mod tests {
     #[test]
     fn two_transfer_adoption_advances_receiver_frontier_and_rejects_replay() {
         use crate::core::bilateral_transaction_manager::{
-            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
-            verify_anchor_state_leaf,
+            anchor_state_leaf_key, compute_smt_key, verify_anchor_state_leaf,
         };
         let b = [0xB1u8; 32];
         let key = anchor_state_leaf_key(&b);
@@ -6090,8 +2902,7 @@ mod tests {
         // Sender device: bootstrap the anchor-state leaf at leaf_0.
         let dev = (0u8..8)
             .fold(fresh_device(0xAB), |d, u| {
-                d.admitted_mint(pc(0xF0 + u), 1_000, 0xF0 + u)
-                    .expect("admitted mint")
+                d.created_token(pc(0xF0 + u), 1_000).expect("token created")
             })
             .with_anchor_state_leaf(&key, &leaf0)
             .expect("bootstrap");
@@ -6100,21 +2911,17 @@ mod tests {
         let bearer = |dev: &DeviceState, cp_tag: u8, new_value: [u8; 32], u: u64| {
             let cp = devid(cp_tag);
             let rk = compute_smt_key(&dev.devid, &cp);
-            let init = initial_chain_tip_from_device_ids(&dev.devid, &cp);
+            let dev = dev.establish_relationship(cp).expect("establish");
             dev.advance(
                 rk,
                 cp,
                 burn_op_for(1, pc(0xF0 + u as u8)),
-                entropy(u as u8 + 1),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF0 + u as u8),
                     direction: BalanceDirection::Debit,
                     amount: 1,
                 }],
-                Some(init),
                 Some(AnchorLeafUpdate { key, new_value }),
-                None,
                 None,
             )
             .expect("bearer advance")
@@ -6127,7 +2934,7 @@ mod tests {
         let out1 = bearer(&dev, 0xC0, leaf1, 1);
         let ap1 = out1.anchor_proofs.clone().unwrap();
         assert!(
-            verify_anchor_state_leaf(&out1.smt_proofs.pre_root, &b, &accepted, &ap1.parent),
+            verify_anchor_state_leaf(&out1.transition.pre_root(), &b, &accepted, &ap1.parent),
             "transfer 1 consumes the accepted leaf frontier"
         );
         assert!(verify_anchor_state_leaf(
@@ -6140,7 +2947,7 @@ mod tests {
 
         // ---- Replay: presenting Transfer 1's parent proof against the ADOPTED frontier rejects ----
         assert!(
-            !verify_anchor_state_leaf(&out1.smt_proofs.pre_root, &b, &accepted, &ap1.parent),
+            !verify_anchor_state_leaf(&out1.transition.pre_root(), &b, &accepted, &ap1.parent),
             "after adoption the consumed leaf_0 state no longer matches the accepted frontier"
         );
 
@@ -6148,7 +2955,7 @@ mod tests {
         let out2 = bearer(&out1.new_device_state, 0xC1, leaf2, 2);
         let ap2 = out2.anchor_proofs.clone().unwrap();
         assert!(
-            verify_anchor_state_leaf(&out2.smt_proofs.pre_root, &b, &accepted, &ap2.parent),
+            verify_anchor_state_leaf(&out2.transition.pre_root(), &b, &accepted, &ap2.parent),
             "transfer 2 must consume exactly the successor the receiver adopted"
         );
         assert!(verify_anchor_state_leaf(
@@ -6163,37 +2970,31 @@ mod tests {
 
     #[test]
     fn advance_sets_value_capability_sticky_yes_and_birth_no() {
-        use crate::core::bilateral_transaction_manager::{
-            compute_smt_key, initial_chain_tip_from_device_ids,
-        };
-        // Three admitted issuances to burn from: a burn is value-bearing exactly
-        // as a mint is, and a debit needs no credit source of its own.
+        use crate::core::bilateral_transaction_manager::{compute_smt_key};
+        // Three created tokens to burn from: a burn is value-bearing, and a
+        // debit needs no credit source of its own.
         let dev = fresh_device(0xAB)
-            .admitted_mint(pc(0xF1), 1_000, 0xF1)
-            .expect("admitted mint")
-            .admitted_mint(pc(0xF2), 1_000, 0xF2)
-            .expect("admitted mint")
-            .admitted_mint(pc(0xF3), 1_000, 0xF3)
-            .expect("admitted mint");
+            .created_token(pc(0xF1), 1_000)
+            .expect("token created")
+            .created_token(pc(0xF2), 1_000)
+            .expect("token created")
+            .created_token(pc(0xF3), 1_000)
+            .expect("token created");
 
         // Relationship whose FIRST op is value-bearing → Yes.
         let cp = devid(0xC0);
         let rk = compute_smt_key(&dev.devid, &cp);
-        let init = initial_chain_tip_from_device_ids(&dev.devid, &cp);
+        let dev = dev.establish_relationship(cp).expect("establish");
         let o1 = dev
             .advance(
                 rk,
                 cp,
                 burn_op_for(10, pc(0xF1)),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF1),
                     direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
-                Some(init),
-                None,
                 None,
                 None,
             )
@@ -6210,7 +3011,7 @@ mod tests {
         // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
         let o2 = o1
             .new_device_state
-            .advance(rk, cp, op(), entropy(2), None, &[], None, None, None, None)
+            .advance(rk, cp, op(), &[], None, None)
             .expect("non-value advance");
         assert_eq!(
             o2.new_device_state
@@ -6223,20 +3024,9 @@ mod tests {
         // A DIFFERENT relationship whose first-ever op is non-value → `No` (witnessed birth).
         let cp2 = devid(0xD0);
         let rk2 = compute_smt_key(&dev.devid, &cp2);
-        let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
+        let dev = dev.establish_relationship(cp2).expect("establish");
         let o3 = dev
-            .advance(
-                rk2,
-                cp2,
-                op(),
-                entropy(3),
-                None,
-                &[],
-                Some(init2),
-                None,
-                None,
-                None,
-            )
+            .advance(rk2, cp2, op(), &[], None, None)
             .expect("first non-value advance");
         assert_eq!(
             o3.new_device_state
@@ -6260,68 +3050,86 @@ mod tests {
         let bob = devid(0xBB);
 
         let tip_with_balances = |seed: u64| {
-            // differing balance state, each reached through an admitted issuance
+            // differing balance state, each reached through a token creation
             let dev = fresh_device(0xAA)
-                .admitted_mint(token, 100 + seed, 0xA0 + seed as u8)
-                .expect("admitted issuance")
+                .created_token(token, 100 + seed)
+                .expect("token created")
                 .with_pending_economic_admission(None);
             let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-            let init =
-                crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                    &dev.devid, &bob,
-                );
-            let out = dev
-                .advance(
-                    rk,
-                    bob,
-                    burn_op_for(30, token),
-                    entropy(1),
-                    None,
-                    &[BalanceDelta {
-                        policy_commit: token,
-                        direction: BalanceDirection::Debit,
-                        amount: 30,
-                    }],
-                    Some(init),
-                    None,
-                    None,
-                    None,
-                )
-                .expect("advance");
-            out.new_chain_state.compute_chain_tip()
-        };
-
-        assert_eq!(
-            tip_with_balances(0),
-            tip_with_balances(7),
-            "identical succession facts must derive identical tips regardless of the \
-             device balance state — a difference means balances leaked back into the \
-             commitment"
-        );
-
-        // And the helper IS the commitment — one preimage, two entry points.
-        let dev = fresh_device(0xAA)
-            .admitted_mint(token, 100, 0xA8)
-            .expect("admitted issuance")
-            .with_pending_economic_admission(None);
-        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &bob,
-        );
-        let out = dev
-            .advance(
+            let dev = dev.establish_relationship(bob).expect("establish");
+            dev.advance(
                 rk,
                 bob,
                 burn_op_for(30, token),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
                     amount: 30,
                 }],
-                Some(init),
                 None,
+                None,
+            )
+            .expect("advance")
+        };
+
+        // Two devices with different balance portfolios, the same succession
+        // facts. The balance map is NOT an input to the tip: the only way the
+        // portfolio reaches it is through the transition entropy, which for a
+        // fresh relationship is seeded from the device root (Part VII step 3:
+        // `e_n = H(DSM/genesis-entropy; root)`, `h_n = root`). So the two tips
+        // differ, and swapping ONLY the entropy reproduces the other device's
+        // tip from this device's facts — nothing else about the portfolio is
+        // in the preimage.
+        let out0 = tip_with_balances(0);
+        let out7 = tip_with_balances(7);
+        let facts = |o: &AdvanceOutcome| {
+            let cs = &o.new_chain_state;
+            (
+                cs.rel_key,
+                cs.embedded_parent,
+                cs.counterparty_devid,
+                cs.operation.to_bytes(),
+            )
+        };
+        assert_eq!(
+            facts(&out0),
+            facts(&out7),
+            "the succession facts are identical"
+        );
+        assert_ne!(out0.transition_entropy(), out7.transition_entropy());
+        let (rk, parent, cp, op_bytes) = facts(&out0);
+        assert_eq!(
+            relationship_chain_tip_v2(
+                &rk,
+                &parent,
+                &cp,
+                &op_bytes,
+                &out7.transition_entropy(),
+                None
+            ),
+            out7.new_chain_state.compute_chain_tip(),
+            "with the other device's entropy and THIS device's facts the tip is the other \
+             device's tip — the balance portfolio enters through the entropy alone, never \
+             through the commitment"
+        );
+
+        // And the helper IS the commitment — one preimage, two entry points.
+        let dev = fresh_device(0xAA)
+            .created_token(token, 100)
+            .expect("token created")
+            .with_pending_economic_admission(None);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
+        let dev = dev.establish_relationship(bob).expect("establish");
+        let out = dev
+            .advance(
+                rk,
+                bob,
+                burn_op_for(30, token),
+                &[BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Debit,
+                    amount: 30,
+                }],
                 None,
                 None,
             )
@@ -6349,8 +3157,8 @@ mod tests {
     fn concurrent_advances_from_same_root_produce_different_children() {
         let token = pc(0xCC);
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, 100, 0xA0)
-            .expect("admitted issuance")
+            .created_token(token, 100)
+            .expect("token created")
             .with_pending_economic_admission(None);
 
         let bob = devid(0xBB);
@@ -6358,14 +3166,8 @@ mod tests {
         let rk_bob = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
         let rk_chrl =
             crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &charlie);
-        let init_bob =
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &dev.devid, &bob,
-            );
-        let init_chrl =
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &dev.devid, &charlie,
-            );
+        let dev = dev.establish_relationship(bob).expect("establish");
+        let dev = dev.establish_relationship(charlie).expect("establish");
 
         let parent_root = dev.root();
 
@@ -6375,15 +3177,11 @@ mod tests {
                 rk_bob,
                 bob,
                 burn_op_for(10, token),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
-                Some(init_bob),
-                None,
                 None,
                 None,
             )
@@ -6393,15 +3191,11 @@ mod tests {
                 rk_chrl,
                 charlie,
                 burn_op_for(20, token),
-                entropy(2),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
                     amount: 20,
                 }],
-                Some(init_chrl),
-                None,
                 None,
                 None,
             )
@@ -6433,30 +3227,27 @@ mod tests {
     fn tripwire_same_relationship_same_parent_different_children() {
         let token = pc(0xCC);
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, 100, 0xA0)
-            .expect("admitted issuance")
+            .created_token(token, 100)
+            .expect("token created")
             .with_pending_economic_admission(None);
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &bob,
-        );
+        let dev = dev.establish_relationship(bob).expect("establish");
+        let h0 = dev
+            .chain_tip(&rk)
+            .expect("the established relationship holds its h_0");
 
         let a = dev
             .advance(
                 rk,
                 bob,
                 burn_op_for(10, token),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
-                Some(init),
-                None,
                 None,
                 None,
             )
@@ -6466,23 +3257,19 @@ mod tests {
                 rk,
                 bob,
                 burn_op_for(20, token),
-                entropy(2),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
                     amount: 20,
                 }],
-                Some(init),
-                None,
                 None,
                 None,
             )
             .expect("advance B");
 
-        // Both consume the SAME embedded_parent (the initial tip).
-        assert_eq!(a.new_chain_state.embedded_parent, init);
-        assert_eq!(b.new_chain_state.embedded_parent, init);
+        // Both consume the SAME embedded_parent (the established h_0).
+        assert_eq!(a.new_chain_state.embedded_parent, h0);
+        assert_eq!(b.new_chain_state.embedded_parent, h0);
 
         // But produce DIFFERENT successor chain tips (different entropy/op).
         let h_a = a.new_chain_state.compute_chain_tip();
@@ -6501,29 +3288,23 @@ mod tests {
     fn advance_rejects_balance_underflow() {
         let token = pc(0xCC);
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, 5, 0xA0)
-            .expect("admitted issuance")
+            .created_token(token, 5)
+            .expect("token created")
             .with_pending_economic_admission(None);
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &bob,
-        );
+        let dev = dev.establish_relationship(bob).expect("establish");
 
         let r = dev.advance(
             rk,
             bob,
             burn_op_for(10, token),
-            entropy(1),
-            None,
             &[BalanceDelta {
                 policy_commit: token,
                 direction: BalanceDirection::Debit,
                 amount: 10,
             }],
-            Some(init),
-            None,
             None,
             None,
         );
@@ -6535,43 +3316,33 @@ mod tests {
 
     /// Phase 6 test: balance overflow rejected.
     ///
-    /// The credit MUST be one the accepting layer would otherwise take, or this
-    /// stops testing overflow. It used to mint, and the issuance refusal now
-    /// fires before the delta loop's `checked_add` is ever reached — the test
-    /// would still have been green while proving nothing. So it drives the
-    /// credit shape production actually admits, and asserts the failure is the
-    /// OVERFLOW rather than any earlier gate.
+    /// The credit is one the accepting layer would otherwise take, so the
+    /// failure it asserts is the overflow in the delta loop's `checked_add`
+    /// and not an earlier gate.
     #[test]
     fn advance_rejects_balance_overflow() {
         let token = pc(0xCC);
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, u64::MAX, 0xA0)
-            .expect("admitted issuance")
+            .created_token(token, u64::MAX)
+            .expect("token created")
             .with_pending_economic_admission(None);
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev.devid, &bob,
-        );
+        let dev = dev.establish_relationship(bob).expect("establish");
 
         let credit_op = credit_transfer_op(1, token);
-        let dev = dev.with_pending_economic_admission(Some(prepared_for(&credit_op)));
         let err = format!(
             "{}",
             dev.advance(
                 rk,
                 bob,
                 credit_op,
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Credit,
                     amount: 1,
                 }],
-                Some(init),
-                None,
                 None,
                 None,
             )
@@ -6588,11 +3359,10 @@ mod tests {
     /// the net change in the device-level balance scalar.
     #[test]
     fn balance_conservation_across_sequence() {
-        let _ = TransactionMode::Bilateral; // import keep-alive
         let token = pc(0xCC);
         let mut dev = fresh_device(0xAA)
-            .admitted_mint(token, 1000, 0xA0)
-            .expect("admitted issuance")
+            .created_token(token, 1000)
+            .expect("token created")
             .with_pending_economic_admission(None);
 
         let parties: Vec<[u8; 32]> = (0u8..5).map(|i| devid(0xB0 + i)).collect();
@@ -6612,34 +3382,19 @@ mod tests {
             net_delta += signed;
 
             let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, party);
-            let init =
-                crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                    &dev.devid, party,
-                );
+            dev = dev.establish_relationship(*party).expect("establish");
             let op = value_op(dir, amt, token);
-            // A credit needs its admission attached; a debit is self-harm and
-            // needs none. Both still move the same balance map, which is what
-            // this test conserves across.
-            let stepped = if matches!(dir, BalanceDirection::Credit) {
-                dev.clone()
-                    .with_pending_economic_admission(Some(prepared_for(&op)))
-            } else {
-                dev.clone()
-            };
-            let out = stepped
+            let out = dev
+                .clone()
                 .advance(
                     rk,
                     *party,
                     op,
-                    entropy(i as u8),
-                    None,
                     &[BalanceDelta {
                         policy_commit: token,
                         direction: dir,
                         amount: amt,
                     }],
-                    Some(init),
-                    None,
                     None,
                     None,
                 )
@@ -6659,1710 +3414,424 @@ mod tests {
     // The vault-state leaf rides the staged advance (one canonical root)
     // ─────────────────────────────────────────────────────────────
 
-    /// A funding advance writes the vault-state leaf in the SAME SMT batch as
-    /// the reserve leaves and the relationship leaf, so `outcome.vault_state_proof`
-    /// verifies against `child_r_a` == `new_device_state.root()`, and its digest
-    /// is DERIVED from the leaves that landed (canonical pair order), not
-    /// supplied.
+    // ─────────────────────────────────────────────────────────────
+    // A relationship is established before its first step (§26)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Establishing a relationship is a root advance that writes `h_0` into
+    /// the tree; a step on a relationship this device never established is
+    /// refused; and the first step's pre-state root is the root the device
+    /// committed, with its parent path authenticating `h_0` under it.
     #[test]
-    fn a_funding_advance_writes_the_vault_state_leaf_under_the_same_root() {
-        use crate::dlv::vault_smt_leaf::{compute_vault_smt_key, verify_vault_smt_inclusion};
+    fn a_relationship_steps_only_from_a_leaf_the_device_committed() {
+        let dev = fresh_device(0x71);
+        let cp = devid(0x72);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
 
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let dev = fresh_device(0xC5)
-            .admitted_mint(era, 50_000, 0xA0)
-            .expect("admitted issuance of era")
-            .admitted_mint(rigb, 20_000, 0xA1)
-            .expect("admitted issuance of rigb")
-            .with_pending_economic_admission(None);
-        let vault = [0x75u8; 32];
-        let (rk, tip) = self_loop(&dev);
-
-        let out = dev
-            .advance_admitted(
-                rk,
-                dev.devid,
-                dlv_create_funded(vault, era, 10_000, rigb, 5_000),
-                entropy(1),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::Fund {
-                    vault_id: vault,
-                    legs: vec![(era, 10_000), (rigb, 5_000)],
-                    vault_sequence: 0,
-                    pair: vault_pair(era, rigb),
-                }),
-            )
-            .expect("funding advance");
-
-        let proof = out
-            .vault_state_proof
-            .as_ref()
-            .expect("a reserve mutation must yield a vault-state witness");
-        assert_eq!(proof.vault_id, vault);
-        assert_eq!(proof.sequence, 0);
-        assert_eq!(
-            proof.reserves_digest,
-            vault_pair(era, rigb).reserves_digest(10_000, 5_000),
-            "the digest is derived from the amounts the leaves hold"
-        );
-        assert_eq!(proof.siblings.len(), 256);
-
-        // ONE root: the outcome's child root IS the new head's root, and the
-        // vault-state proof verifies against it — the same root the reserve
-        // leaves and the relationship leaf landed under.
-        assert_eq!(out.child_r_a, out.new_device_state.root());
-        verify_vault_smt_inclusion(
-            &vault,
-            0,
-            &proof.reserves_digest,
-            &out.child_r_a,
-            &proof.siblings,
-        )
-        .expect("vault-state proof binds child_r_a");
-        // ...and so does a reserve-leg proof taken off the SAME head.
-        let legs = out
-            .new_device_state
-            .vault_reserve_leg_proofs(&vault, &[era, rigb])
-            .expect("reserve legs provable");
-        assert_eq!(legs.len(), 2);
-        assert!(out
-            .new_device_state
-            .smt
-            .contains_key(&compute_vault_smt_key(&vault)));
-
-        // The leaf is in the replay record: a restored device recomputes the
-        // SAME root (the reload-brick guard).
-        let live = &out.new_device_state;
-        let restored = DeviceState::restore(
-            live.genesis,
-            live.devid,
-            live.public_key.clone(),
-            live.legacy_anchor,
-            live.balances.clone(),
-            live.tips.iter().map(|(k, v)| (*k, v.clone())).collect(),
-            live.extra_leaves.clone(),
-            live.offline_allocations.clone(),
-            live.vault_reserves.clone(),
-            None, // no admission pending in this fixture
-            1024,
-        )
-        .expect("restore");
-        assert_eq!(
-            restored.root(),
-            live.root(),
-            "restore replays the vault-state leaf"
-        );
-
-        // No mutation, no witness.
-        let plain = out
-            .new_device_state
-            .advance(
-                rk,
-                out.new_device_state.devid,
-                transfer_op(era, 1),
-                entropy(2),
-                None,
-                &[BalanceDelta {
-                    policy_commit: era,
-                    direction: BalanceDirection::Debit,
-                    amount: 1,
-                }],
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-            .expect("ordinary transfer");
-        assert!(plain.vault_state_proof.is_none());
-    }
-
-    /// PAIR COMPLETENESS on funding: legs must be exactly the vault's pair, in
-    /// canonical order. One leg, three legs, or an asset outside the pair is
-    /// refused — a leg the digest never sees would let a signed vault state
-    /// describe different reserves than the leaves hold.
-    #[test]
-    fn funding_legs_that_are_not_exactly_the_pair_are_refused() {
-        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        let dev = fresh_device(0xC6)
-            .admitted_mint(era, 50_000, 0xA0)
-            .expect("admitted issuance of era")
-            .admitted_mint(rigb, 20_000, 0xA1)
-            .expect("admitted issuance of rigb")
-            .admitted_mint(dbtc, 9_000, 0xA2)
-            .expect("admitted issuance of dbtc")
-            .with_pending_economic_admission(None);
-        let vault = [0x76u8; 32];
-        let (rk, tip) = self_loop(&dev);
-        let root_before = dev.root();
-
-        // With legacy value-bearing creates deleted, a malformed mutation is
-        // refused by ONE of two layers: legs that differ from the signed v2
-        // op hit the op↔mutation cross-check; legs that match the op but not
-        // the vault's pair hit pair completeness. Both layers named per case.
-        let honest = dlv_create_funded(vault, era, 10_000, rigb, 5_000);
-        for (name, op, legs, expect) in [
-            (
-                "one leg",
-                honest.clone(),
-                vec![(era, 10_000)],
-                "does not equal the signed DlvCreateFundedV2",
-            ),
-            (
-                "three legs",
-                honest.clone(),
-                vec![(dbtc, 1), (era, 10_000), (rigb, 5_000)],
-                "does not equal the signed DlvCreateFundedV2",
-            ),
-            (
-                "an asset outside the pair",
-                dlv_create_funded(vault, dbtc, 1_000, era, 10_000),
-                vec![(dbtc, 1_000), (era, 10_000)],
-                "exactly the vault's pair",
-            ),
-            (
-                "the pair out of order",
-                dlv_create_funded(vault, rigb, 5_000, era, 10_000),
-                vec![(rigb, 5_000), (era, 10_000)],
-                "exactly the vault's pair",
-            ),
-        ] {
-            let err = dev.advance_admitted(
-                rk,
-                dev.devid,
-                op,
-                entropy(1),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::Fund {
-                    vault_id: vault,
-                    legs,
-                    vault_sequence: 0,
-                    pair: vault_pair(era, rigb),
-                }),
-            );
-            let err = format!("{}", err.expect_err(name));
-            assert!(
-                err.contains(expect),
-                "{name}: expected the {expect:?} refusal, got: {err}"
-            );
-        }
-        assert_eq!(dev.root(), root_before, "refusals move nothing");
-        assert_eq!(dev.balance(&era), 50_000);
-    }
-
-    /// The owner-apply advance keeps the vault-state leaf in LOCKSTEP with the
-    /// reserve legs: after folding a settlement the leaf sits at `new_sequence`
-    /// carrying the digest of the folded amounts, under the same root as the
-    /// moved legs. And a settlement naming a third asset is refused.
-    #[test]
-    fn owner_apply_advance_keeps_the_vault_state_leaf_in_lockstep_and_refuses_a_third_asset() {
-        use crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion;
-
-        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        let owner = fresh_device(0xC7)
-            .admitted_mint(era, 50_000, 0xA0)
-            .expect("admitted issuance of era")
-            .admitted_mint(rigb, 20_000, 0xA1)
-            .expect("admitted issuance of rigb")
-            .with_pending_economic_admission(None);
-        let vault = [0x77u8; 32];
-        let (rk, tip) = self_loop(&owner);
-        let pair = vault_pair(era, rigb);
-
-        let funded = owner
-            .advance_admitted(
-                rk,
-                owner.devid,
-                dlv_create_funded(vault, era, 10_000, rigb, 5_000),
-                entropy(1),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::Fund {
-                    vault_id: vault,
-                    legs: vec![(era, 10_000), (rigb, 5_000)],
-                    vault_sequence: 0,
-                    pair,
-                }),
-            )
-            .expect("fund")
-            .new_device_state;
-        // Priced by the canonical curve from the reserves the head holds, and
-        // naming the head's own parent state — what `dlv.reconcile` supplies.
-        let out_amt = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
-            .expect("curve");
-        assert_eq!(out_amt, 453, "pin: 1 000 in against 10 000/5 000 at 30 bps");
-        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
-
-        let apply_op = |input: [u8; 32], output: [u8; 32], out_amt: u64| {
-            sign_op(Operation::DlvOwnerApplyV2 {
-                vault_id: vault.to_vec(),
-                settlement_receipt_id: [0x77; 32],
-                pending_pointer_x: [0x55; 32],
-                parent_sequence: 0,
-                new_sequence: 1,
-                input_policy_commit: input,
-                output_policy_commit: output,
-                input_amount: 1_000,
-                output_amount: out_amt,
-                parent_binding,
-                fee_bps: 30,
-                signature: vec![],
-                mode: TransactionMode::Bilateral,
-            })
-        };
-
-        // A third asset on the input side: refused, nothing moves.
-        let root_before = funded.root();
-        let err = funded.advance(
-            rk,
-            funded.devid,
-            apply_op(dbtc, rigb, out_amt),
-            entropy(2),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(VaultReserveMutation::ApplySettlement {
-                vault_id: vault,
-                input_policy_commit: dbtc,
-                input_amount: 1_000,
-                output_policy_commit: rigb,
-                output_amount: out_amt,
-                parent_sequence: 0,
-                new_sequence: 1,
-                pair,
-                parent_state: parent_state.clone(),
-            }),
-        );
-        let err = format!("{}", err.expect_err("third asset"));
+        let refused = dev.advance(rk, cp, op(), &[], None, None);
         assert!(
-            err.contains("exactly the vault's pair"),
-            "must refuse a settlement outside the pair, got: {err}"
+            refused.is_err(),
+            "a step on an unestablished relationship must be refused"
         );
-        assert_eq!(funded.root(), root_before);
 
-        // The real settlement: legs move AND the vault-state leaf follows.
-        let out = funded
-            .advance(
-                rk,
-                funded.devid,
-                apply_op(era, rigb, out_amt),
-                entropy(3),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::ApplySettlement {
-                    vault_id: vault,
-                    input_policy_commit: era,
-                    input_amount: 1_000,
-                    output_policy_commit: rigb,
-                    output_amount: out_amt,
-                    parent_sequence: 0,
-                    new_sequence: 1,
-                    pair,
-                    parent_state: parent_state.clone(),
-                }),
-            )
-            .expect("owner apply");
-        let after = &out.new_device_state;
-        assert_eq!(after.vault_reserve(&vault, &era), 11_000);
-        assert_eq!(after.vault_reserve(&vault, &rigb), 5_000 - out_amt);
-        let proof = out.vault_state_proof.as_ref().expect("witness");
-        assert_eq!(proof.sequence, 1, "the leaf advanced with the legs");
-        assert_eq!(
-            proof.reserves_digest,
-            pair.reserves_digest(11_000, 5_000 - out_amt),
-            "the leaf's digest is the folded amounts, in canonical pair order"
+        let established = dev.establish_relationship(cp).expect("establish");
+        assert_ne!(
+            established.root(),
+            dev.root(),
+            "establishing advances the root"
         );
-        verify_vault_smt_inclusion(
-            &vault,
-            1,
-            &proof.reserves_digest,
-            &out.child_r_a,
-            &proof.siblings,
-        )
-        .expect("lockstep leaf binds the post-settlement root");
-        // The stale seq-0 witness no longer verifies against the new root.
-        verify_vault_smt_inclusion(
-            &vault,
-            0,
-            &pair.reserves_digest(10_000, 5_000),
-            &out.child_r_a,
-            &proof.siblings,
-        )
-        .expect_err("stale generation must not verify against the new root");
+        let h0 = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev.devid, &cp,
+        );
+        assert_eq!(established.chain_tip(&rk), Some(h0));
+        assert!(
+            established.establish_relationship(cp).is_err(),
+            "a relationship is established once"
+        );
+
+        let first = established
+            .advance(rk, cp, op(), &[], None, None)
+            .expect("first step");
+        assert_eq!(first.parent_r_a, established.root());
+        assert_eq!(
+            first.transition.pre_root(),
+            established.root(),
+            "the step's pre-state root is the root the device committed"
+        );
+        let rel_write = first
+            .transition
+            .write_at(&rk)
+            .expect("the step writes its relationship");
+        assert_eq!(rel_write.pre, Some(h0));
+        let folded = crate::merkle::batch_fold::verify_batch::<
+            crate::merkle::sparse_merkle_tree::DeviceSmtHashes,
+        >(&established.root(), first.transition.writes())
+        .expect("the step's writes fold from the committed root");
+        assert_eq!(folded, first.child_r_a);
+    }
+
+    /// A relationship's leaf holds that relationship's current head, and the
+    /// device root authenticates it there: `h_0` once established, then each
+    /// step's new tip. The proof each earlier head had, as the device state
+    /// of its time produced it, proves nothing under the root after the
+    /// relationship moves on (MR-DSM-0116, MR-DSM-0121).
+    #[test]
+    fn a_relationships_leaf_holds_its_current_head() {
+        use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
+
+        fn holds_only_its_current_head(
+            head: &DeviceState,
+            rk: &[u8; 32],
+            earlier: &[SmtInclusionProof],
+        ) -> SmtInclusionProof {
+            let tip = head
+                .chain_tip(rk)
+                .expect("an established relationship has a head");
+            let proof = head.rel_inclusion_proof(rk).expect("a path for the leaf");
+            assert_eq!(proof.value, Some(tip), "the leaf holds the current head");
+            assert!(SparseMerkleTree::verify_proof_against_root(
+                &proof,
+                &head.root()
+            ));
+            for past in earlier {
+                assert!(
+                    !SparseMerkleTree::verify_proof_against_root(past, &head.root()),
+                    "the proof of a head the relationship has moved past proves nothing"
+                );
+            }
+            proof
+        }
+
+        let dev = fresh_device(0x73);
+        let cp = devid(0x74);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let mut head = dev.establish_relationship(cp).expect("establish");
+        let mut proofs = vec![holds_only_its_current_head(&head, &rk, &[])];
+        for _ in 0..2 {
+            head = head
+                .advance(rk, cp, op(), &[], None, None)
+                .expect("a step on the relationship")
+                .new_device_state;
+            let proof = holds_only_its_current_head(&head, &rk, &proofs);
+            proofs.push(proof);
+        }
+    }
+
+    /// The device tree has no capacity: every relationship the device
+    /// establishes stays in its root, however many follow it (MR-DSM-0116,
+    /// MR-DSM-0121). The tree once held 1,024 leaves and evicted the oldest
+    /// past that; this device holds its own relationship and 1,025 more.
+    /// Every key and every `h_0` is derived by `establish_relationship`; the
+    /// counterparty ids are the test's only input.
+    #[test]
+    fn every_relationship_stays_in_the_root_past_the_old_capacity() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        let dev = fresh_device(0x75);
+        let counterparties: Vec<[u8; 32]> = (0u16..1_025)
+            .map(|i| {
+                let mut id = devid(0x76);
+                id[..2].copy_from_slice(&i.to_be_bytes());
+                id
+            })
+            .collect();
+        let mut head = dev.clone();
+        for cp in &counterparties {
+            head = head.establish_relationship(*cp).expect("establish");
+        }
+
+        let own = compute_smt_key(&dev.devid, &dev.devid);
+        let heads: Vec<([u8; 32], [u8; 32])> = std::iter::once(own)
+            .chain(
+                counterparties
+                    .iter()
+                    .map(|cp| compute_smt_key(&dev.devid, cp)),
+            )
+            .map(|rk| {
+                (
+                    rk,
+                    head.chain_tip(&rk)
+                        .expect("every relationship keeps its head"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            &head.root(),
+            SparseMerkleTree::from_leaves(heads.iter().copied()).root(),
+            "the root commits every relationship the device established"
+        );
+        let first = compute_smt_key(&dev.devid, &counterparties[0]);
+        let proof = head
+            .rel_inclusion_proof(&first)
+            .expect("a path for the leaf");
+        assert_eq!(proof.value, head.chain_tip(&first));
+        assert!(SparseMerkleTree::verify_proof_against_root(
+            &proof,
+            &head.root()
+        ));
     }
 
     // ─────────────────────────────────────────────────────────────
     // Closing a vault: the complete reserve set returns, exactly once
     // ─────────────────────────────────────────────────────────────
 
-    /// A funded vault at generation 0, with `era`/`rigb` reserves, on a head
-    /// whose every unit entered through an admitted origin: one admitted
-    /// issuance per leg asset (`ra + 1_000` / `rb + 500`, so a spendable
-    /// remainder stays behind), then one admitted, signed funded create for
-    /// exactly `(era, ra), (rigb, rb)` at 30 bps. The head is returned as an
-    /// admitted head is after `finish_admission`: carrying no pending
-    /// admission.
-    fn funded_for_close(
-        b: u8,
-        era: [u8; 32],
-        rigb: [u8; 32],
-        ra: u64,
-        rb: u64,
-    ) -> (DeviceState, [u8; 32], [u8; 32], [u8; 32]) {
-        let vault = [b ^ 0x5A; 32];
-        let funded = fresh_device(b)
-            .admitted_mint(era, ra + 1_000, 0xA0)
-            .expect("admitted issuance of the first leg's asset")
-            .admitted_mint(rigb, rb + 500, 0xA1)
-            .expect("admitted issuance of the second leg's asset")
-            .admitted_funded_create(
-                vault,
-                [(era, ra), (rigb, rb)],
-                30,
-                &test_keypair().secret_key,
-                0xA2,
-            )
-            .expect("fund")
-            .with_pending_economic_admission(None);
-        let (rk, tip) = self_loop(&funded);
-        (funded, vault, rk, tip)
-    }
-
-    /// A signed `DlvClose` for the full reserve set at `parent`.
-    fn dlv_close_op(
-        vault: [u8; 32],
-        a: [u8; 32],
-        amt_a: u64,
-        b: [u8; 32],
-        amt_b: u64,
-        parent: u64,
-        new: u64,
-    ) -> Operation {
-        sign_op(Operation::DlvClose {
-            vault_id: vault.to_vec(),
-            leg_a_policy_commit: a,
-            leg_a_amount: amt_a,
-            leg_b_policy_commit: b,
-            leg_b_amount: amt_b,
-            parent_sequence: parent,
-            new_sequence: new,
-            fee_bps: 30,
-            signature: Vec::new(),
-            mode: TransactionMode::Unilateral,
-        })
-    }
-
-    fn withdraw_mutation(
-        vault: [u8; 32],
-        a: [u8; 32],
-        amt_a: u64,
-        b: [u8; 32],
-        amt_b: u64,
-        parent: u64,
-        new: u64,
-    ) -> VaultReserveMutation {
-        VaultReserveMutation::Withdraw {
-            vault_id: vault,
-            legs: vec![(a, amt_a), (b, amt_b)],
-            parent_sequence: parent,
-            new_sequence: new,
-            pair: vault_pair(a, b),
-        }
-    }
-
-    /// 3.6: the v2 vault operations are SIGNED value operations — an unsigned
-    /// one is refused by the advance signature gate, exactly like
-    /// `DlvSettle`/`DlvClose`.
-    #[test]
-    fn an_unsigned_v2_vault_operation_is_refused_by_advance() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let dev = fresh_device(0xC9)
-            .admitted_mint(era, 1_000, 0xA0)
-            .expect("admitted issuance of era")
-            .admitted_mint(rigb, 1_000, 0xA1)
-            .expect("admitted issuance of rigb")
-            .with_pending_economic_admission(None);
-        let vault = [0x79u8; 32];
-        let (rk, tip) = self_loop(&dev);
-        let unsigned = Operation::DlvCreateFundedV2 {
-            vault_id: vault.to_vec(),
-            creator_public_key: pubkey(),
-            parameters_hash: vec![0u8; 32],
-            fulfillment_condition: vec![],
-            leg_a_policy_commit: era,
-            leg_a_amount: 60,
-            leg_b_policy_commit: rigb,
-            leg_b_amount: 10,
-            fee_bps: 30,
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        };
-        let err = dev.advance(
-            rk,
-            dev.devid,
-            unsigned,
-            entropy(1),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(VaultReserveMutation::Fund {
-                vault_id: vault,
-                legs: vec![(era, 60), (rigb, 10)],
-                vault_sequence: 0,
-                pair: vault_pair(era, rigb),
-            }),
-        );
-        let err = format!("{}", err.expect_err("unsigned v2 create must be refused"));
-        assert!(
-            err.contains("signature"),
-            "the refusal must be the signature gate, got: {err}"
-        );
-    }
-
-    /// Owner directive (2026-08-28): `DlvCreate` is structurally state-only
-    /// and classifies `EconomicEffect::None`; `None` must be impossible for a
-    /// transition that moves reserve state — so ANY `DlvCreate` carrying a
-    /// Fund mutation is refused structurally.
-    #[test]
-    fn a_state_only_create_cannot_encumber_reserves() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let dev = fresh_device(0xCA)
-            .admitted_mint(era, 1_000, 0xA0)
-            .expect("admitted issuance of era")
-            .admitted_mint(rigb, 1_000, 0xA1)
-            .expect("admitted issuance of rigb")
-            .with_pending_economic_admission(None);
-        let vault = [0x7Au8; 32];
-        let (rk, tip) = self_loop(&dev);
-        let err = dev.advance(
-            rk,
-            dev.devid,
-            dlv_create(vault),
-            entropy(1),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(VaultReserveMutation::Fund {
-                vault_id: vault,
-                legs: vec![(era, 60), (rigb, 10)],
-                vault_sequence: 0,
-                pair: vault_pair(era, rigb),
-            }),
-        );
-        let err = format!("{}", err.expect_err("tokenless create must not encumber"));
-        assert!(
-            err.contains("state-only"),
-            "the refusal must name the tokenless rule, got: {err}"
-        );
-    }
-
-    /// MUTATION-VS-OPERATION: the Fund mutation must equal the signed
-    /// `DlvCreateFundedV2` field-for-field — unsigned mutation metadata never
-    /// decides what moves.
-    #[test]
-    fn a_fund_mutation_that_disagrees_with_the_signed_v2_create_is_refused() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let dev = fresh_device(0xCB)
-            .admitted_mint(era, 1_000, 0xA0)
-            .expect("admitted issuance of era")
-            .admitted_mint(rigb, 1_000, 0xA1)
-            .expect("admitted issuance of rigb")
-            .with_pending_economic_admission(None);
-        let vault = [0x7Bu8; 32];
-        let (rk, tip) = self_loop(&dev);
-        let err = dev.advance_admitted(
-            rk,
-            dev.devid,
-            dlv_create_funded(vault, era, 60, rigb, 10),
-            entropy(1),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(VaultReserveMutation::Fund {
-                vault_id: vault,
-                // One unit more than the SIGNED leg.
-                legs: vec![(era, 61), (rigb, 10)],
-                vault_sequence: 0,
-                pair: vault_pair(era, rigb),
-            }),
-        );
-        let err = format!("{}", err.expect_err("mutation/op mismatch must be refused"));
-        assert!(
-            err.contains("does not equal the signed DlvCreateFundedV2"),
-            "the refusal must be the cross-check, got: {err}"
-        );
-    }
-
-    /// Same discipline for the v2 owner apply: `ApplySettlement` is DERIVED
-    /// from the signed operation, and any disagreement is refused before any
-    /// reserve state is consulted.
-    #[test]
-    fn an_apply_mutation_that_disagrees_with_the_signed_v2_apply_is_refused() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xCE, era, rigb, 10_000, 5_000);
-        let op = sign_op(Operation::DlvOwnerApplyV2 {
-            vault_id: vault.to_vec(),
-            settlement_receipt_id: [0x21; 32],
-            pending_pointer_x: [0x22; 32],
-            parent_sequence: 0,
-            new_sequence: 1,
-            parent_binding: [0x23; 32],
-            input_policy_commit: era,
-            output_policy_commit: rigb,
-            input_amount: 100,
-            output_amount: 90,
-            fee_bps: 30,
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        });
-        let err = funded.advance(
-            rk,
-            funded.devid,
-            op,
-            entropy(2),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(VaultReserveMutation::ApplySettlement {
-                vault_id: vault,
-                input_policy_commit: era,
-                // One unit more than the SIGNED input.
-                input_amount: 101,
-                output_policy_commit: rigb,
-                output_amount: 90,
-                parent_sequence: 0,
-                new_sequence: 1,
-                pair: vault_pair(era, rigb),
-                parent_state: Vec::new(),
-            }),
-        );
-        let err = format!("{}", err.expect_err("mutation/op mismatch must be refused"));
-        assert!(
-            err.contains("does not equal the signed DlvOwnerApplyV2"),
-            "the refusal must be the cross-check, got: {err}"
-        );
-    }
-
-    /// And the v2 apply ADVANCES when the mutation equals the signed
-    /// operation — the positive control for the two refusals above.
-    #[test]
-    fn a_v2_owner_apply_advances_when_mutation_equals_the_signed_operation() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xCF, era, rigb, 10_000, 5_000);
-        let out_amt = crate::dlv::route_commit::constant_product_output(100, 10_000, 5_000, 30)
-            .expect("curve");
-        assert_eq!(out_amt, 49, "pin: 100 in against 10 000/5 000 at 30 bps");
-        let (parent_binding, parent_state) = parent_of(&funded, vault, vault_pair(era, rigb));
-        let op = sign_op(Operation::DlvOwnerApplyV2 {
-            vault_id: vault.to_vec(),
-            settlement_receipt_id: [0x21; 32],
-            pending_pointer_x: [0x22; 32],
-            parent_sequence: 0,
-            new_sequence: 1,
-            parent_binding,
-            input_policy_commit: era,
-            output_policy_commit: rigb,
-            input_amount: 100,
-            output_amount: out_amt,
-            fee_bps: 30,
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        });
-        let out = funded
-            .advance(
-                rk,
-                funded.devid,
-                op,
-                entropy(2),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::ApplySettlement {
-                    vault_id: vault,
-                    input_policy_commit: era,
-                    input_amount: 100,
-                    output_policy_commit: rigb,
-                    output_amount: out_amt,
-                    parent_sequence: 0,
-                    new_sequence: 1,
-                    pair: vault_pair(era, rigb),
-                    parent_state,
-                }),
-            )
-            .expect("a matching v2 apply advances")
-            .new_device_state;
-        assert_eq!(out.vault_reserve(&vault, &era), 10_100);
-        assert_eq!(out.vault_reserve(&vault, &rigb), 5_000 - out_amt);
-    }
-
-    /// The head's OWN parent state for `vault` under `pair`: its commitment
-    /// (what the owner signs as `parent_binding`) and its bytes (what the
-    /// mutation carries). Exactly what `dlv.reconcile` derives from the
-    /// verified composition.
-    fn parent_of(head: &DeviceState, vault: [u8; 32], pair: VaultStatePair) -> ([u8; 32], Vec<u8>) {
-        let parent = head
-            .parent_vault_state_for_tests(&vault, &pair)
-            .expect("parent state");
-        (
-            crate::ccb::vault_state_commitment(&parent).expect("c_n"),
-            parent.encode().expect("ccb"),
-        )
-    }
-
-    /// A signed owner apply and its mutation, as one pair: `input_amount` of
-    /// `input` for `output_amount` of `output`, consuming generation 0 → 1
-    /// under `pair`, naming `parent_binding` and carrying `parent_state`.
-    #[allow(clippy::too_many_arguments)]
-    fn owner_apply_at(
-        vault: [u8; 32],
-        pair: VaultStatePair,
-        input: [u8; 32],
-        output: [u8; 32],
-        input_amount: u64,
-        output_amount: u64,
-        parent_binding: [u8; 32],
-        parent_state: Vec<u8>,
-    ) -> (Operation, VaultReserveMutation) {
-        let op = sign_op(Operation::DlvOwnerApplyV2 {
-            vault_id: vault.to_vec(),
-            settlement_receipt_id: [0x21; 32],
-            pending_pointer_x: [0x22; 32],
-            parent_sequence: 0,
-            new_sequence: 1,
-            parent_binding,
-            input_policy_commit: input,
-            output_policy_commit: output,
-            input_amount,
-            output_amount,
-            fee_bps: pair.fee_bps,
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        });
-        let mutation = VaultReserveMutation::ApplySettlement {
-            vault_id: vault,
-            input_policy_commit: input,
-            input_amount,
-            output_policy_commit: output,
-            output_amount,
-            parent_sequence: 0,
-            new_sequence: 1,
-            pair,
-            parent_state,
-        };
-        (op, mutation)
-    }
-
-    fn try_owner_apply(
-        head: &DeviceState,
-        rk: [u8; 32],
-        tip: [u8; 32],
-        op: Operation,
-        mutation: VaultReserveMutation,
-    ) -> Result<AdvanceOutcome, DsmError> {
-        head.advance(
-            rk,
-            head.devid,
-            op,
-            entropy(2),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(mutation),
-        )
-    }
-
-    /// THE CURVE IS THE OWNER'S, NOT THE RECEIPT'S. An owner apply whose output
-    /// is one unit above OR below what the vault's own curve yields from the
-    /// reserves it consumes is refused by the core arm, and the root does not
-    /// move; the exact output advances. The trader's receipt witnesses what the
-    /// trader committed, never what the owner's reserves pay.
-    #[test]
-    fn an_owner_apply_off_the_curve_by_one_unit_either_way_is_refused_and_moves_nothing() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xE1, era, rigb, 10_000, 5_000);
-        let pair = vault_pair(era, rigb);
-        let exact = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
-            .expect("curve");
-        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
-        let root_before = funded.root();
-        for (name, out) in [
-            ("one above the curve", exact + 1),
-            ("one below the curve", exact - 1),
-        ] {
-            let (op, mutation) = owner_apply_at(
-                vault,
-                pair,
-                era,
-                rigb,
-                1_000,
-                out,
-                parent_binding,
-                parent_state.clone(),
-            );
-            let err = format!(
-                "{}",
-                try_owner_apply(&funded, rk, tip, op, mutation).expect_err(name)
-            );
-            assert!(
-                err.contains("not what the vault's curve yields"),
-                "{name}: the refusal must be the curve, got: {err}"
-            );
-            assert_eq!(funded.root(), root_before, "{name}: nothing moved");
-        }
-        let (op, mutation) = owner_apply_at(
-            vault,
-            pair,
-            era,
-            rigb,
-            1_000,
-            exact,
-            parent_binding,
-            parent_state,
-        );
-        let after = try_owner_apply(&funded, rk, tip, op, mutation)
-            .expect("the exact curve output advances")
-            .new_device_state;
-        assert_eq!(after.vault_reserve(&vault, &era), 11_000);
-        assert_eq!(after.vault_reserve(&vault, &rigb), 5_000 - exact);
-    }
-
-    /// RESERVE ORIENTATION IS BY ASSET IDENTITY. The input reserve is the leaf
-    /// of the asset the trader paid, never "reserve a" by pair order: selling
-    /// the pair's second asset into the vault is priced against (b → a), and
-    /// the (a → b) price for the same amount is refused for that direction.
-    #[test]
-    fn an_owner_apply_is_priced_by_the_input_assets_own_reserve_never_by_pair_order() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xE2, era, rigb, 10_000, 5_000);
-        let pair = vault_pair(era, rigb);
-        assert_eq!(
-            (pair.a(), pair.b()),
-            (era, rigb),
-            "era is the pair's first asset"
-        );
-        let b_to_a = crate::dlv::route_commit::constant_product_output(1_000, 5_000, 10_000, 30)
-            .expect("curve");
-        let a_to_b = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
-            .expect("curve");
-        assert_ne!(
-            b_to_a, a_to_b,
-            "the two directions must price differently for the test to bite"
-        );
-        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
-        // The wrong direction's price, for a rigb → era trade: refused.
-        let (op, mutation) = owner_apply_at(
-            vault,
-            pair,
-            rigb,
-            era,
-            1_000,
-            a_to_b,
-            parent_binding,
-            parent_state.clone(),
-        );
-        let err = format!(
-            "{}",
-            try_owner_apply(&funded, rk, tip, op, mutation).expect_err("pair-order price")
-        );
-        assert!(
-            err.contains("not what the vault's curve yields"),
-            "got: {err}"
-        );
-        // The input asset's own reserve prices it: advances.
-        let (op, mutation) = owner_apply_at(
-            vault,
-            pair,
-            rigb,
-            era,
-            1_000,
-            b_to_a,
-            parent_binding,
-            parent_state,
-        );
-        let after = try_owner_apply(&funded, rk, tip, op, mutation)
-            .expect("priced by the input asset's reserve")
-            .new_device_state;
-        assert_eq!(after.vault_reserve(&vault, &rigb), 6_000);
-        assert_eq!(after.vault_reserve(&vault, &era), 10_000 - b_to_a);
-    }
-
-    /// THE FEE IS THE COMMITTED ONE. A mutation carrying a fee the head's
-    /// vault-state leaf never committed — even with amounts priced correctly
-    /// under that fee — is refused before the curve runs: the leaf at the
-    /// parent generation commits pair, fee and reserves together.
-    #[test]
-    fn an_owner_apply_under_a_fee_the_vault_never_committed_is_refused() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xE3, era, rigb, 10_000, 5_000);
-        let wrong_fee = VaultStatePair::new(era, rigb, 31).expect("pair");
-        let priced_under_wrong_fee =
-            crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 31)
-                .expect("curve");
-        let (parent_binding, parent_state) = parent_of(&funded, vault, wrong_fee);
-        let root_before = funded.root();
-        let (op, mutation) = owner_apply_at(
-            vault,
-            wrong_fee,
-            era,
-            rigb,
-            1_000,
-            priced_under_wrong_fee,
-            parent_binding,
-            parent_state,
-        );
-        let err = format!(
-            "{}",
-            try_owner_apply(&funded, rk, tip, op, mutation).expect_err("fee")
-        );
-        assert!(
-            err.contains("committed state leaf"),
-            "the refusal must be the head's own commitment, got: {err}"
-        );
-        assert_eq!(funded.root(), root_before);
-    }
-
-    /// THE SIGNED PARENT BINDING NAMES THE STATE THESE LEAVES HOLD. Two ways to
-    /// lie, each refused: a binding that does not commit the supplied parent
-    /// bytes at all, and a binding that commits a well-formed parent state whose
-    /// reserves are not the leaves (one unit more in reserve a). Nothing moves.
-    #[test]
-    fn an_owner_apply_whose_parent_binding_names_another_state_is_refused() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xE4, era, rigb, 10_000, 5_000);
-        let pair = vault_pair(era, rigb);
-        let exact = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
-            .expect("curve");
-        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
-        let root_before = funded.root();
-
-        // (a) a binding that is not the commitment of the supplied bytes.
-        let (op, mutation) = owner_apply_at(
-            vault,
-            pair,
-            era,
-            rigb,
-            1_000,
-            exact,
-            [0x23; 32],
-            parent_state.clone(),
-        );
-        let err = format!(
-            "{}",
-            try_owner_apply(&funded, rk, tip, op, mutation).expect_err("free binding")
-        );
-        assert!(
-            err.contains("does not name the parent vault state"),
-            "got: {err}"
-        );
-        assert_eq!(funded.root(), root_before);
-
-        // (b) a binding that commits a state the leaves do not hold.
-        let mut other = funded
-            .parent_vault_state_for_tests(&vault, &pair)
-            .expect("parent state");
-        other.reserve_a += 1;
-        let other_c_n = crate::ccb::vault_state_commitment(&other).expect("c_n");
-        let (op, mutation) = owner_apply_at(
-            vault,
-            pair,
-            era,
-            rigb,
-            1_000,
-            exact,
-            other_c_n,
-            other.encode().expect("ccb"),
-        );
-        let err = format!(
-            "{}",
-            try_owner_apply(&funded, rk, tip, op, mutation).expect_err("other state")
-        );
-        assert!(
-            err.contains("not the state these reserve leaves hold"),
-            "got: {err}"
-        );
-        assert_eq!(funded.root(), root_before);
-
-        // Positive control: the real binding and bytes advance.
-        let (op, mutation) = owner_apply_at(
-            vault,
-            pair,
-            era,
-            rigb,
-            1_000,
-            exact,
-            parent_binding,
-            parent_state,
-        );
-        try_owner_apply(&funded, rk, tip, op, mutation).expect("the real parent advances");
-    }
-
-    /// THE CLOSE: the complete remaining reserve set returns to spendable
-    /// balance, exactly once; both leaves sit at `0 @ parent+1`; the vault-state
-    /// leaf follows with `digest(a, b, 0, 0, fee)`; and the vault id is
-    /// single-use afterwards — neither re-fundable nor re-closable.
-    #[test]
-    fn a_close_returns_the_whole_reserve_set_exactly_once_and_the_vault_id_is_single_use() {
-        use crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion;
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xD1, era, rigb, 10_000, 5_000);
-        let pair = vault_pair(era, rigb);
-        let (free_a_before, free_b_before) = (funded.balance(&era), funded.balance(&rigb));
-
-        let out = funded
-            .advance(
-                rk,
-                funded.devid,
-                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
-                entropy(2),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 1)),
-            )
-            .expect("close");
-        let after = &out.new_device_state;
-
-        // POST-TRADE ORACLE: the wallet grows by exactly the reserves at K.
-        assert_eq!(after.balance(&era), free_a_before + 10_000);
-        assert_eq!(after.balance(&rigb), free_b_before + 5_000);
-        // Leaves are zero at the terminal generation — present, not deleted.
-        assert_eq!(after.vault_reserve(&vault, &era), 0);
-        assert_eq!(after.vault_reserve(&vault, &rigb), 0);
-        assert_eq!(after.vault_reserve_entry(&vault, &era).unwrap().sequence, 1);
-        assert_eq!(
-            after.vault_reserve_entry(&vault, &rigb).unwrap().sequence,
-            1
-        );
-        // The vault-state leaf is the terminal one, under the SAME root.
-        let w = out.vault_state_proof.as_ref().expect("witness");
-        assert_eq!(w.sequence, 1);
-        assert_eq!(w.reserves_digest, pair.reserves_digest(0, 0));
-        verify_vault_smt_inclusion(&vault, 1, &w.reserves_digest, &out.child_r_a, &w.siblings)
-            .expect("terminal leaf binds the close's root");
-
-        // SINGLE USE. A second close is refused (already zero), and re-funding
-        // is refused because the leaves EXIST — not because an amount is
-        // non-zero.
-        let second = after.advance(
-            rk,
-            after.devid,
-            dlv_close_op(vault, era, 0, rigb, 0, 1, 2),
-            entropy(3),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(withdraw_mutation(vault, era, 0, rigb, 0, 1, 2)),
-        );
-        let e = format!("{}", second.expect_err("a closed vault cannot close again"));
-        assert!(e.contains("already closed"), "got: {e}");
-
-        let refund = after.advance_admitted(
-            rk,
-            after.devid,
-            dlv_create_funded(vault, era, 10, rigb, 5),
-            entropy(4),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(VaultReserveMutation::Fund {
-                vault_id: vault,
-                legs: vec![(era, 10), (rigb, 5)],
-                vault_sequence: 0,
-                pair,
-            }),
-        );
-        let e = format!("{}", refund.expect_err("a closed vault id is single use"));
-        assert!(
-            e.contains("already holds a reserve"),
-            "the refusal must be existence-based, got: {e}"
-        );
-    }
-
-    /// A close after a settlement withdraws the POST-TRADE reserves at the
-    /// current generation — never the funding-time amounts.
-    #[test]
-    fn a_close_after_a_settlement_withdraws_the_post_trade_reserves() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xD2, era, rigb, 10_000, 5_000);
-        let pair = vault_pair(era, rigb);
-        let out_amt = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
-            .expect("curve");
-        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
-        let apply = sign_op(Operation::DlvOwnerApplyV2 {
-            vault_id: vault.to_vec(),
-            settlement_receipt_id: [0x77; 32],
-            pending_pointer_x: [0x55; 32],
-            parent_sequence: 0,
-            new_sequence: 1,
-            input_policy_commit: era,
-            output_policy_commit: rigb,
-            input_amount: 1_000,
-            output_amount: out_amt,
-            parent_binding,
-            fee_bps: 30,
-            signature: Vec::new(),
-            mode: TransactionMode::Bilateral,
-        });
-        let traded = funded
-            .advance(
-                rk,
-                funded.devid,
-                apply,
-                entropy(2),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::ApplySettlement {
-                    vault_id: vault,
-                    input_policy_commit: era,
-                    input_amount: 1_000,
-                    output_policy_commit: rigb,
-                    output_amount: out_amt,
-                    parent_sequence: 0,
-                    new_sequence: 1,
-                    pair,
-                    parent_state,
-                }),
-            )
-            .expect("settle")
-            .new_device_state;
-        let (free_a, free_b) = (traded.balance(&era), traded.balance(&rigb));
-
-        // Closing at the FUNDING amounts is refused: they are not the leaves.
-        let stale = traded.advance(
-            rk,
-            traded.devid,
-            dlv_close_op(vault, era, 10_000, rigb, 5_000, 1, 2),
-            entropy(3),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 1, 2)),
-        );
-        let e = format!("{}", stale.expect_err("funding-time amounts are stale"));
-        assert!(e.contains("exactly the leaf's amount"), "got: {e}");
-
-        let after = traded
-            .advance(
-                rk,
-                traded.devid,
-                dlv_close_op(vault, era, 11_000, rigb, 5_000 - out_amt, 1, 2),
-                entropy(4),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(withdraw_mutation(
-                    vault,
-                    era,
-                    11_000,
-                    rigb,
-                    5_000 - out_amt,
-                    1,
-                    2,
-                )),
-            )
-            .expect("close at the post-trade generation")
-            .new_device_state;
-        assert_eq!(after.balance(&era), free_a + 11_000);
-        assert_eq!(after.balance(&rigb), free_b + 5_000 - out_amt);
-        assert_eq!(after.vault_reserve_entry(&vault, &era).unwrap().sequence, 2);
-    }
-
-    /// Structural refusals, every one with ZERO mutation: a stale generation, a
-    /// one-leg or foreign-leg drain, unordered legs, a non-unit step, an
-    /// unsigned operation, balance deltas, and a mutation that disagrees with
-    /// the signed operation.
-    #[test]
-    fn every_malformed_close_is_refused_with_zero_mutation() {
-        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        let (funded, vault, rk, tip) = funded_for_close(0xD3, era, rigb, 10_000, 5_000);
-        let root_before = funded.root();
-        let bal_before = funded.balances.clone();
-        let pair = vault_pair(era, rigb);
-
-        /// One refusal case: what it is, the phrase the refusal must name, and
-        /// the shape that must be refused.
-        struct BadClose {
-            name: &'static str,
-            needle: &'static str,
-            op: Operation,
-            mutation: Option<VaultReserveMutation>,
-            deltas: Vec<BalanceDelta>,
-        }
-        let bad = |name, needle, op, mutation, deltas| BadClose {
-            name,
-            needle,
-            op,
-            mutation,
-            deltas,
-        };
-        let attempts: Vec<BadClose> = vec![
-            bad(
-                "stale generation",
-                "not current",
-                dlv_close_op(vault, era, 10_000, rigb, 5_000, 1, 2),
-                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 1, 2)),
-                vec![],
-            ),
-            bad(
-                // A one-leg mutation cannot equal a signed op that names both,
-                // so the op-equality gate — the tighter one — refuses first.
-                "one leg only",
-                "does not equal the signed DlvClose",
-                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
-                Some(VaultReserveMutation::Withdraw {
-                    vault_id: vault,
-                    legs: vec![(era, 10_000)],
-                    parent_sequence: 0,
-                    new_sequence: 1,
-                    pair,
-                }),
-                vec![],
-            ),
-            bad(
-                // Op and mutation AGREE, and both name an asset the vault's
-                // pair does not contain: pair completeness is what catches it.
-                // Without that check the drain would leave the real second leg
-                // encumbered forever while the vault read as closed.
-                "op and mutation agree on legs that are not the pair",
-                "exactly the vault's pair",
-                dlv_close_op(vault, era, 10_000, dbtc, 5_000, 0, 1),
-                Some(VaultReserveMutation::Withdraw {
-                    vault_id: vault,
-                    legs: vec![(era, 10_000), (dbtc, 5_000)],
-                    parent_sequence: 0,
-                    new_sequence: 1,
-                    pair,
-                }),
-                vec![],
-            ),
-            bad(
-                "a leg outside the pair",
-                "does not equal the signed DlvClose",
-                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
-                Some(VaultReserveMutation::Withdraw {
-                    vault_id: vault,
-                    legs: vec![(dbtc, 1), (era, 10_000)],
-                    parent_sequence: 0,
-                    new_sequence: 1,
-                    pair,
-                }),
-                vec![],
-            ),
-            bad(
-                "legs out of canonical order",
-                "does not equal the signed DlvClose",
-                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
-                Some(VaultReserveMutation::Withdraw {
-                    vault_id: vault,
-                    legs: vec![(rigb, 5_000), (era, 10_000)],
-                    parent_sequence: 0,
-                    new_sequence: 1,
-                    pair,
-                }),
-                vec![],
-            ),
-            bad(
-                "a non-unit generation step",
-                "exactly one generation",
-                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 2),
-                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 2)),
-                vec![],
-            ),
-            bad(
-                "partial withdraw",
-                "exactly the leaf's amount",
-                dlv_close_op(vault, era, 9_000, rigb, 5_000, 0, 1),
-                Some(withdraw_mutation(vault, era, 9_000, rigb, 5_000, 0, 1)),
-                vec![],
-            ),
-            bad(
-                "over withdraw",
-                "exactly the leaf's amount",
-                dlv_close_op(vault, era, 10_001, rigb, 5_000, 0, 1),
-                Some(withdraw_mutation(vault, era, 10_001, rigb, 5_000, 0, 1)),
-                vec![],
-            ),
-            bad(
-                "mutation disagrees with the signed op",
-                "does not equal the signed DlvClose",
-                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
-                Some(withdraw_mutation(vault, era, 10_000, rigb, 4_999, 0, 1)),
-                vec![],
-            ),
-            bad(
-                "balance deltas riding along",
-                "not balance deltas",
-                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
-                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 1)),
-                vec![BalanceDelta {
-                    policy_commit: era,
-                    direction: BalanceDirection::Credit,
-                    amount: 10_000,
-                }],
-            ),
-            bad(
-                "a withdraw under another operation",
-                "only DlvClose may withdraw",
-                dlv_create(vault),
-                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 1)),
-                vec![],
-            ),
-        ];
-
-        for case in attempts {
-            let res = funded.advance(
-                rk,
-                funded.devid,
-                case.op,
-                entropy(9),
-                None,
-                &case.deltas,
-                Some(tip),
-                None,
-                None,
-                case.mutation,
-            );
-            let e = format!("{}", res.expect_err(case.name));
-            assert!(
-                e.contains(case.needle),
-                "{}: expected {:?}, got: {e}",
-                case.name,
-                case.needle
-            );
-        }
-
-        // An UNSIGNED close is refused by the signature gate.
-        let unsigned = funded.advance(
-            rk,
-            funded.devid,
-            Operation::DlvClose {
-                vault_id: vault.to_vec(),
-                leg_a_policy_commit: era,
-                leg_a_amount: 10_000,
-                leg_b_policy_commit: rigb,
-                leg_b_amount: 5_000,
-                parent_sequence: 0,
-                new_sequence: 1,
-                fee_bps: 30,
-                signature: Vec::new(),
-                mode: TransactionMode::Unilateral,
-            },
-            entropy(10),
-            None,
-            &[],
-            Some(tip),
-            None,
-            None,
-            Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 1)),
-        );
-        assert!(unsigned.is_err(), "an unsigned close must be refused");
-
-        assert_eq!(funded.root(), root_before, "every refusal moved nothing");
-        assert_eq!(funded.balances, bal_before);
-        assert_eq!(funded.vault_reserve(&vault, &era), 10_000);
-        assert_eq!(funded.vault_reserve(&vault, &rigb), 5_000);
-    }
-
-    /// THE WIRING TEST for the pending-admission fence.
+    /// THE DEVICE PATH VERIFIES A SOFI SIGNATURE, over the rule that
+    /// operation's object actually uses.
     ///
-    /// The fence predicate has its own suite, but a correct predicate that
-    /// `advance` never calls protects nothing. This drives the real
-    /// `advance()` on a head carrying a pending admission and asserts the
-    /// refusal comes from the gate — and that the SAME head advances fine once
-    /// the admission is cleared, so the refusal is the fence and not some
-    /// unrelated precondition.
+    /// Every other SoFi signature test checks the verifier directly. This one
+    /// drives `advance`, because that is the path a real transition takes —
+    /// and removing the check there left every one of those tests green.
     #[test]
-    fn advance_refuses_an_economic_write_while_an_admission_is_pending() {
-        use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
+    fn a_sofi_setup_advances_only_with_a_signature_over_its_own_digest() {
+        use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+        use crate::sofi::derive;
+        use crate::sofi::wire::SofiSetupBody;
 
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xD5, era, rigb, 7_000, 3_000);
-
-        let pending = PendingEconomicAdmission::prepared(
-            PendingAdmissionKind::DsmBacked,
-            9,
-            [1u8; 32],
-            [3u8; 32],
+        let (pk, sk) = generate_sphincs_keypair().unwrap();
+        let genesis = [0xA9u8; 32];
+        let devid = [0xB9u8; 32];
+        let head = DeviceState::new(genesis, devid, pk.clone());
+        let body = SofiSetupBody::new(
+            genesis,
+            devid,
+            5,
+            [0xC1; 32],
+            [0x66; 32],
+            [0x67; 32],
+            crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &pk,
         )
-        .into_locally_accepted(crate::economic::admission::AcceptedAdmissionCoords {
-            post_economic_root: [2u8; 32],
-            accepted_substrate_addr: [4u8; 32],
-            admission_manifest_addr: [5u8; 32],
-            embedded_parent: [0x5E; 32],
-            c_dsm_plus: [6u8; 32],
-        })
-        .expect("prepared -> accepted");
-        let fenced = funded.with_pending_economic_admission(Some(pending));
-
-        // DlvClose is a ClosedWriteSet operation: it moves reserves back to
-        // balances, which is exactly the kind of economic write that must not
-        // happen while the ancestry of earlier value is unregistered.
-        let err = fenced
-            .advance(
-                rk,
-                fenced.devid,
-                dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
-                entropy(2),
-                None,
+        .unwrap();
+        // A setup runs on the device's self-loop, as `admitted_self_loop_operation` runs it.
+        let self_loop = crate::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
+        let run = |signature: Vec<u8>| {
+            head.advance(
+                self_loop,
+                devid,
+                Operation::SofiSetup {
+                    setup_body: body.encode(),
+                    signature,
+                },
                 &[],
-                Some(tip),
                 None,
                 None,
-                Some(withdraw_mutation(vault, era, 7_000, rigb, 3_000, 0, 1)),
             )
-            .expect_err("the fence must refuse an economic write while pending");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("economic admission at position 9 is pending"),
-            "refusal must come from the FENCE, not an unrelated precondition: {msg}"
-        );
+        };
 
-        // Same head, same operation, no pending admission: it succeeds. This
-        // is what makes the assertion above about the fence specifically.
-        funded
-            .advance(
-                rk,
-                funded.devid,
-                dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
-                entropy(2),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(withdraw_mutation(vault, era, 7_000, rigb, 3_000, 0, 1)),
-            )
-            .expect("the identical advance succeeds once nothing is pending");
-    }
-
-    /// A credit-direction online Transfer addressed to self, exactly the
-    /// shape both the online recipient apply AND the BLE/USB bilateral
-    /// receiver hand to `advance`.
-    fn incoming_online_transfer(to: [u8; 32], amount: u64, asset: [u8; 32]) -> Operation {
-        Operation::Transfer {
-            to_device_id: to.to_vec(),
-            amount: crate::types::token_types::Balance::from_state(amount, [0u8; 32]),
-            token_id: b"ERA".to_vec(),
-            policy_commit: asset,
-            mode: crate::types::operations::TransactionMode::Bilateral,
-            nonce: vec![0x4E; 32],
-            verification: crate::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: to.to_vec(),
-            to: Vec::new(),
-            message: String::new(),
-            signature: Vec::new(),
-            authority_policy: None,
+        // Unsigned, and signed over the wrong message: the operation's own
+        // canonical bytes, which is the generic rule a setup does NOT use.
+        let over_the_operation = sphincs_sign(
+            &sk,
+            &(Operation::SofiSetup {
+                setup_body: body.encode(),
+                signature: Vec::new(),
+            })
+            .signing_bytes(),
+        )
+        .unwrap();
+        for (signature, case) in [
+            (Vec::new(), "unsigned"),
+            (vec![0xAB; 49_856], "garbage"),
+            (over_the_operation, "signed over the operation, not m_setup"),
+        ] {
+            assert!(
+                run(signature).is_err(),
+                "{case}: the device path must refuse it"
+            );
         }
-    }
 
-    /// THE CREDIT-DIRECTION TRANSFER ACCEPTING GATE (3.5b PR4), full
-    /// discipline: `None`, wrong kind, wrong state, and digest mismatch each
-    /// get their own named refusal, and the SAME advance succeeds with a
-    /// matching `Prepared`/`DsmBacked` admission attached. MUTATION CONTROL:
-    /// delete the gate block in `advance` and the first arm here credits a
-    /// transfer with no admission — this test goes red.
-    #[test]
-    fn a_credit_transfer_requires_the_full_admission_discipline() {
-        use crate::economic::admission::{
-            AcceptedAdmissionCoords, PendingAdmissionKind, PendingEconomicAdmission,
-        };
-
-        let era = pc(0xE7);
-        let devid = [0xB7u8; 32];
-        let head = DeviceState::new([0xA7; 32], devid, vec![0xC7; 32], 64);
-        let sender = [0x99u8; 32];
-        let rk = [0x33u8; 32];
-        let tip = [0x11u8; 32];
-        let op = incoming_online_transfer(devid, 10, era);
-        let credit = [BalanceDelta {
-            policy_commit: era,
-            direction: BalanceDirection::Credit,
-            amount: 10,
-        }];
-        let run = |h: &DeviceState| {
-            h.advance(
-                rk,
-                sender,
-                op.clone(),
-                entropy(4),
-                None,
-                &credit,
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-        };
-
-        // 1. No admission at all.
-        let msg = run(&head)
-            .expect_err("no admission must refuse")
-            .to_string();
+        // And `m_setup` — the object's own digest — advances the head.
+        let signed = sphincs_sign(&sk, &derive::setup_signing_digest(&body)).unwrap();
         assert!(
-            msg.contains("no pending economic admission"),
-            "named refusal for the absent admission, got: {msg}"
-        );
-
-        // 2. Wrong operation digest.
-        let wrong_digest =
-            head.clone()
-                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                    PendingAdmissionKind::DsmBacked,
-                    1,
-                    [0u8; 32],
-                    [0xDD; 32],
-                )));
-        let msg = run(&wrong_digest)
-            .expect_err("wrong digest must refuse")
-            .to_string();
-        assert!(
-            msg.contains("does not match the pending"),
-            "named refusal for the digest mismatch, got: {msg}"
-        );
-
-        // 3. Wrong kind: an offline-boundary admission authorizes no online
-        // credit.
-        let op_digest = crate::economic::faucet::dsm_operation_digest(&op.to_bytes());
-        let wrong_kind =
-            head.clone()
-                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                    PendingAdmissionKind::OfflineLoad {
-                        asset_policy_commit: era,
-                    },
-                    1,
-                    [0u8; 32],
-                    op_digest,
-                )));
-        let msg = run(&wrong_kind)
-            .expect_err("wrong kind must refuse")
-            .to_string();
-        assert!(
-            msg.contains("not DSM-backed"),
-            "named refusal for the wrong kind, got: {msg}"
-        );
-
-        // 4. Wrong state: a post-acceptance admission belongs to an EARLIER
-        // acceptance and authorizes nothing new. (`Admitted` does not fence,
-        // so this reaches the gate rather than the fence.)
-        let mut stale = PendingEconomicAdmission::prepared(
-            PendingAdmissionKind::DsmBacked,
-            1,
-            [0u8; 32],
-            op_digest,
-        )
-        .into_locally_accepted(AcceptedAdmissionCoords {
-            post_economic_root: [2u8; 32],
-            accepted_substrate_addr: [4u8; 32],
-            admission_manifest_addr: [5u8; 32],
-            c_dsm_plus: [6u8; 32],
-            embedded_parent: [7u8; 32],
-        })
-        .expect("prepared -> accepted");
-        stale.state = crate::economic::admission::EconomicAdmissionState::Admitted;
-        let wrong_state = head.clone().with_pending_economic_admission(Some(stale));
-        let msg = run(&wrong_state)
-            .expect_err("wrong state must refuse")
-            .to_string();
-        assert!(
-            msg.contains("not Prepared"),
-            "named refusal for the wrong state, got: {msg}"
-        );
-
-        // 5. Full discipline satisfied: the SAME advance succeeds — the
-        // refusals above are the gate, not an unrelated precondition.
-        let ok =
-            head.clone()
-                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
-                    PendingAdmissionKind::DsmBacked,
-                    1,
-                    [0u8; 32],
-                    op_digest,
-                )));
-        let outcome = run(&ok).expect("a matching Prepared DsmBacked admission admits the credit");
-        assert_eq!(outcome.new_device_state.balance(&era), 10);
-    }
-
-    /// Owner ruling (2026-08-27): NO transport exemption. The BLE/USB
-    /// bilateral receiver's online-credit op is byte-indistinguishable at
-    /// this seam and is refused fail-closed until its own admission wiring
-    /// lands; the bearer tier (`authority_policy: Some`) never crosses this
-    /// gate. MUTATION CONTROL: exempting the BLE shape (e.g. keying the gate
-    /// on anything transport-flavored) turns this red.
-    #[test]
-    fn a_ble_shaped_online_credit_is_refused_without_an_admission() {
-        let era = pc(0xE8);
-        let devid = [0xB8u8; 32];
-        let head = DeviceState::new([0xA8; 32], devid, vec![0xC8; 32], 64);
-        // Exactly what bilateral_ble_handler builds for the receiver commit:
-        // Bilateral mode, authority_policy None, one credit delta.
-        let op = incoming_online_transfer(devid, 5, era);
-        let msg = head
-            .advance(
-                [0x34u8; 32],
-                [0x9Au8; 32],
-                op,
-                entropy(5),
-                None,
-                &[BalanceDelta {
-                    policy_commit: era,
-                    direction: BalanceDirection::Credit,
-                    amount: 5,
-                }],
-                Some([0x12u8; 32]),
-                None,
-                None,
-                None,
-            )
-            .expect_err("the gate is total across transports")
-            .to_string();
-        assert!(
-            msg.contains("online credit-direction transfer"),
-            "the refusal names the gated shape, got: {msg}"
+            run(signed).is_ok(),
+            "a setup signed over m_setup must advance"
         );
     }
 
-    /// The fence SURVIVES a state derivation. If `advance` dropped it while
-    /// building the successor head, the very next operation would be unfenced
-    /// — a one-transition escape hatch.
+    // ── Part VII / §39: the one entropy of a transition ────────────────────
+    //
+    // MUTATION CONTROL (executed, not asserted): replace the derivation at the
+    // top of `advance` with any caller-independent constant (e.g. `vec![0u8; 32]`)
+    // and `advance_derives_the_one_entropy_and_nothing_else_supplies_it` goes
+    // red on its `derive_transition_entropy` equality; leave the derivation but
+    // stop hashing the operation bytes and
+    // `changing_a_carried_byte_changes_the_derived_value_and_the_tip` goes red.
+
+    fn seam_fixture() -> (DeviceState, [u8; 32], [u8; 32]) {
+        let dev = fresh_device(0xE1);
+        let cp = devid(0xE2);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let dev = dev.establish_relationship(cp).expect("establish");
+        (dev, cp, rk)
+    }
+
+    /// §39.1–39.2: applying one operation twice from one state gives byte-identical
+    /// results, and the entropy inside the outcome is exactly Core's own derivation
+    /// from the relationship tip — there is no argument through which anything
+    /// else could have supplied it.
     #[test]
-    fn the_fence_is_carried_forward_by_advance() {
-        use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
-
-        let (era, rigb) = (pc(0xE1), pc(0xF1));
-        let (funded, _vault, rk, tip) = funded_for_close(0xD6, era, rigb, 7_000, 3_000);
-        let pending = PendingEconomicAdmission::prepared(
-            PendingAdmissionKind::DsmBacked,
-            11,
-            [1u8; 32],
-            [3u8; 32],
-        )
-        .into_locally_accepted(crate::economic::admission::AcceptedAdmissionCoords {
-            post_economic_root: [2u8; 32],
-            accepted_substrate_addr: [4u8; 32],
-            admission_manifest_addr: [5u8; 32],
-            embedded_parent: [0x5E; 32],
-            c_dsm_plus: [6u8; 32],
-        })
-        .expect("prepared -> accepted");
-        let fenced = funded.with_pending_economic_admission(Some(pending.clone()));
-
-        // A Noop classifies as EconomicEffect::None, so the fence allows it.
-        let next = fenced
-            .advance(
-                rk,
-                fenced.devid,
-                Operation::Noop,
-                entropy(3),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                None,
-            )
-            .expect("non-economic activity continues during the fence")
-            .new_device_state;
-
+    fn advance_derives_the_one_entropy_and_nothing_else_supplies_it() {
+        let (dev, cp, rk) = seam_fixture();
+        let a = dev
+            .advance(rk, cp, op(), &[], None, None)
+            .expect("first advance");
+        let b = dev
+            .advance(rk, cp, op(), &[], None, None)
+            .expect("second advance from the same state");
+        assert_eq!(a.transition_entropy(), b.transition_entropy());
         assert_eq!(
-            next.pending_economic_admission(),
-            Some(&pending),
-            "the successor head must still be fenced"
+            a.new_chain_state.compute_chain_tip(),
+            b.new_chain_state.compute_chain_tip()
         );
-    }
-
-    /// The close's terminal state SURVIVES a reload: `restore` replays the zero
-    /// leaves and the terminal vault-state leaf and recomputes the same root.
-    #[test]
-    fn a_closed_vaults_terminal_state_survives_restore() {
-        let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let (funded, vault, rk, tip) = funded_for_close(0xD4, era, rigb, 7_000, 3_000);
-        let closed = funded
-            .advance(
-                rk,
-                funded.devid,
-                dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
-                entropy(2),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(withdraw_mutation(vault, era, 7_000, rigb, 3_000, 0, 1)),
-            )
-            .expect("close")
-            .new_device_state;
-        let restored = DeviceState::restore(
-            closed.genesis,
-            closed.devid,
-            closed.public_key.clone(),
-            closed.legacy_anchor,
-            closed.balances.clone(),
-            closed.tips.iter().map(|(k, v)| (*k, v.clone())).collect(),
-            closed.extra_leaves.clone(),
-            closed.offline_allocations.clone(),
-            closed.vault_reserves.clone(),
-            None, // no admission pending in this fixture
-            1024,
-        )
-        .expect("restore");
-        assert_eq!(restored.root(), closed.root(), "terminal state reloads");
-        assert_eq!(restored.vault_reserve(&vault, &era), 0);
+        assert_eq!(a.child_r_a, b.child_r_a);
+        assert_eq!(a.new_chain_state.entropy.len(), 32);
         assert_eq!(
-            restored
-                .vault_reserve_entry(&vault, &rigb)
-                .unwrap()
-                .sequence,
-            1
+            a.transition_entropy(),
+            dev.derive_transition_entropy(&rk, &op()),
+            "the outcome's entropy must be Core's derivation from the tip, nothing else"
+        );
+        // The derivation is the hash-adjacency formula itself, not merely stable.
+        let explicit = {
+            let root = dev.root();
+            let mut g = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
+            g.update(&root);
+            let prior_entropy = g.finalize();
+            let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STATE_ENTROPY);
+            h.update(prior_entropy.as_bytes());
+            h.update(&op().to_bytes());
+            h.update(&root);
+            *h.finalize().as_bytes()
+        };
+        assert_eq!(a.transition_entropy(), explicit);
+    }
+
+    /// §39 gate: changing any carried byte changes the derived value and the tip,
+    /// and consuming the tip changes the next derivation (hash adjacency).
+    #[test]
+    fn changing_a_carried_byte_changes_the_derived_value_and_the_tip() {
+        let (dev, cp, rk) = seam_fixture();
+        let base = dev.advance(rk, cp, op(), &[], None, None).expect("advance");
+        let flipped = Operation::Generic {
+            operation_type: b"test".to_vec(),
+            data: vec![1],
+            message: "t".to_string(),
+            signature: vec![],
+        };
+        let other = dev
+            .advance(rk, cp, flipped, &[], None, None)
+            .expect("advance with one more carried byte");
+        assert_ne!(base.transition_entropy(), other.transition_entropy());
+        assert_ne!(
+            base.new_chain_state.compute_chain_tip(),
+            other.new_chain_state.compute_chain_tip()
+        );
+        // Same operation again, one step later: e_n and h_n moved, so e_{n+1} moves.
+        let next = base
+            .new_device_state
+            .advance(rk, cp, op(), &[], None, None)
+            .expect("second step");
+        assert_ne!(base.transition_entropy(), next.transition_entropy());
+        assert_eq!(
+            next.new_chain_state.embedded_parent,
+            base.new_chain_state.compute_chain_tip()
         );
     }
 
-    /// `VaultStatePair` refuses a non-canonical or degenerate pair.
+    /// §39.3: the relationship tip and BOTH receipt hashes — `C_pre` and the
+    /// symmetric tip — contain the one derived value. The tip is recomputed from
+    /// the outcome's fields with that value and matches; each receipt hash moves
+    /// when that value moves and when nothing else does.
     #[test]
-    fn vault_state_pair_must_be_canonical_and_distinct() {
-        let (lo, hi) = (pc(0x10), pc(0x20));
-        assert!(VaultStatePair::new(lo, hi, 30).is_ok());
-        assert!(VaultStatePair::new(hi, lo, 30).is_err(), "unordered");
-        assert!(VaultStatePair::new(lo, lo, 30).is_err(), "single asset");
+    fn tip_and_both_receipt_hashes_contain_the_one_derived_value() {
+        use crate::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
+        let (dev, cp, rk) = seam_fixture();
+        let out = dev.advance(rk, cp, op(), &[], None, None).expect("advance");
+        let e = out.transition_entropy();
+        let op_bytes = out.new_chain_state.operation.to_bytes();
+        let parent = out.new_chain_state.embedded_parent;
+        assert_eq!(
+            Some(parent),
+            dev.chain_tip(&rk),
+            "the first step extends h_0"
+        );
+        // The relationship tip: exactly the v2 preimage over the derived value.
+        assert_eq!(
+            out.new_chain_state.compute_chain_tip(),
+            relationship_chain_tip_v2(&rk, &parent, &cp, &op_bytes, &e, None)
+        );
+        let mut e_other = e;
+        e_other[0] ^= 0x01;
+        assert_ne!(
+            out.new_chain_state.compute_chain_tip(),
+            relationship_chain_tip_v2(&rk, &parent, &cp, &op_bytes, &e_other, None)
+        );
+        // C_pre and the symmetric tip take the same value and nothing else.
+        let c_pre = compute_precommit(&parent, &op_bytes, &e);
+        let sym = compute_successor_tip(&parent, &op_bytes, &e, &c_pre);
+        let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other);
+        assert_ne!(c_pre, c_pre_other);
+        assert_ne!(
+            sym,
+            compute_successor_tip(&parent, &op_bytes, &e_other, &c_pre_other)
+        );
+        assert_eq!(c_pre, compute_precommit(&parent, &op_bytes, &e));
+        assert_eq!(sym, compute_successor_tip(&parent, &op_bytes, &e, &c_pre));
+    }
+
+    /// A head rebuilt from its persisted tips and other leaves recomputes the
+    /// root the live head committed, the tree built once over every leaf. A
+    /// tip or a leaf left out of the build moves the root, so the loader's
+    /// root check refuses the head.
+    #[test]
+    fn a_restored_head_recomputes_the_live_root() {
+        let mut live = DeviceState::new(devid(0xC1), devid(0xC2), vec![0x01; 32]);
+        for b in 0..40u8 {
+            live = live
+                .establish_relationship(devid(b))
+                .expect("a new relationship");
+        }
+        let live = live
+            .with_anchor_state_leaf(&pc(0xD1), &pc(0xD2))
+            .expect("an anchor-state leaf");
+        let tips: Vec<([u8; 32], RelChainTip)> = live
+            .relationship_keys()
+            .iter()
+            .map(|k| (*k, live.rel_chain_tip(k).expect("a held tip").clone()))
+            .collect();
+        let restore = |tips: Vec<([u8; 32], RelChainTip)>, extra: BTreeMap<[u8; 32], [u8; 32]>| {
+            DeviceState::restore(
+                live.genesis_digest(),
+                live.devid(),
+                live.public_key().to_vec(),
+                live.legacy_anchor(),
+                live.balances_snapshot().clone(),
+                tips,
+                extra,
+                live.offline_allocations_snapshot().clone(),
+                None,
+            )
+            .expect("restore")
+        };
+        let extra = live.extra_leaves_snapshot().clone();
+        assert_eq!(restore(tips.clone(), extra.clone()).root(), live.root());
+        let dropped =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&live.devid(), &devid(7));
+        let fewer: Vec<([u8; 32], RelChainTip)> = tips
+            .iter()
+            .filter(|(k, _)| *k != dropped)
+            .cloned()
+            .collect();
+        assert_eq!(fewer.len() + 1, tips.len());
+        assert_ne!(
+            restore(fewer, extra).root(),
+            live.root(),
+            "a tip left out of the build moves the root"
+        );
+        assert_ne!(
+            restore(tips, BTreeMap::new()).root(),
+            live.root(),
+            "an extra leaf left out of the build moves the root"
+        );
     }
 }

@@ -1,76 +1,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! # Receipt Primitives for Offline Bilateral Flows
+//! # Receipt construction and per-step signing
 //!
-//! Re-exports canonical receipt types and verification from `dsm::core`,
-//! adding SDK-level helpers for relationship key derivation and monotonic
-//! counter checking on stitched receipts.
+//! Builds the canonical stitched receipt of a relationship step and derives the
+//! per-step ephemeral keys that answer it. Verification is Core's
+//! (`dsm::verification::receipt_verification`); nothing here re-implements it.
 
 use dsm::types::error::DsmError;
-use dsm::common::domain_tags::TAG_RECEIPT_COMMIT;
-
-// Re-export canonical types from dsm core
-pub use dsm::types::receipt_types::{
-    DeviceTreeAcceptanceCommitment, ParentConsumptionTracker as ReceiptGuard, ReceiptAcceptance,
-    ReceiptVerificationContext, StitchedReceiptV2,
+use dsm::types::receipt_types::{
+    compute_receipt_challenge_response_target, DeviceTreeAcceptanceCommitment, StitchedReceiptV2,
 };
-
-/// Derive relationship key from counterparty public key.
-/// Domain-separated to prevent collision with other hash contexts.
-pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
-    dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_RELATIONSHIP_KEY,
-        counterparty_pk,
-    )
-}
-
-/// Compute the receipt challenge-response target.
-///
-/// `sig_a` and `sig_b` are the responses to the proposed transition
-/// challenge. The canonical receipt commitment carries the transition facts;
-/// production bilateral flows also pass the session `commitment_hash`, so the
-/// target becomes
-/// `BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
-/// commitment_hash)`. The fresh EK key that signs this target is derived from
-/// h_n, C_pre, k_step (keyed under Smaster), so a copied database cannot answer the
-/// next receipt challenge on different hardware.
-///
-/// The §4.2.1 canonical commit form remains unchanged in both modes — the
-/// session binding is added at the response-target level, not in the receipt body.
-pub fn compute_receipt_challenge_response_target(
-    receipt_commitment: &[u8; 32],
-    session_binding: &[u8; 32],
-) -> [u8; 32] {
-    // ONE preimage, ONE home: the construction lives in core beside the
-    // receipt type, where the foreign acceptance verifier also uses it.
-    dsm::types::receipt_types::compute_receipt_challenge_response_target(
-        receipt_commitment,
-        session_binding,
-    )
-}
-
-/// The ONLINE recipient's B-side response target: the standard session-bound
-/// target extended with the recipient's own canonical relationship pair for
-/// the applied step —
-/// `BLAKE3("DSM/receipt-b-canonical/v1" || standard_target || b_parent || b_child)`.
-///
-/// `sig_b` over this target authenticates the pair, so the sender can pin the
-/// peer's lineage head from the delta and a substituted pair fails the
-/// countersignature check. Used only by the online return leg; the BLE and
-/// A-side paths sign the standard target unchanged.
-pub fn compute_receipt_b_canonical_target(
-    receipt_commitment: &[u8; 32],
-    session_binding: &[u8; 32],
-    b_parent_tip: &[u8; 32],
-    b_child_tip: &[u8; 32],
-) -> [u8; 32] {
-    dsm::types::receipt_types::compute_receipt_b_canonical_target(
-        receipt_commitment,
-        session_binding,
-        b_parent_tip,
-        b_child_tip,
-    )
-}
+use dsm::types::device_state::AdvanceOutcome;
+use dsm::verification::receipt_verification::BearerLeaves;
+#[cfg(test)]
+use dsm::verification::receipt_verification::{verify_per_step_ek_signing, BilateralSide};
 
 /// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1/§12 Eq.14).
 ///
@@ -200,8 +143,8 @@ pub fn derive_kyber_k_step_for_verify(
 /// The helper handles the full whitepaper §11.1 per-step signing flow:
 /// loading the prior chain head SK (or the root AK at relationship genesis), deriving a
 /// fresh `EK_{n+1}` keypair, signing the cert, answering the receipt challenge,
-/// and returning all artifacts. Callers do post-acceptance advancement
-/// separately via `advance_local_chain_head_after_signing`.
+/// and returning all artifacts. The Local head moves to the new EK only in
+/// the step's commit, by compare-and-set on the head it was signed from.
 pub struct PerStepSigningInputs<'a> {
     /// The receipt commitment hash (output of
     /// `StitchedReceiptV2::compute_commitment`) — the transition commitment
@@ -246,8 +189,8 @@ pub struct PerStepSigningOutput {
     /// New EK public key — caller should set this on `receipt.ek_pk_a`
     /// (or `ek_pk_b` if they're co-signing on B's side).
     pub ek_pk: Vec<u8>,
-    /// New EK secret key — kept in memory for `advance_local_chain_head_after_signing`.
-    /// Caller MUST wipe this from memory after advancement.
+    /// New EK secret key — kept in memory until the step's commit records it
+    /// under the at-rest key. Caller MUST wipe this from memory afterwards.
     pub ek_sk: Vec<u8>,
     /// Cert chaining `EK_pk` back to the prior chain head — caller should
     /// set this on `receipt.ek_cert_a` (or `ek_cert_b`).
@@ -282,8 +225,8 @@ pub struct PerStepSigningOutput {
 /// 4. Sign `cert_{n+1} = Sign_{prior_SK}(BLAKE3("DSM/ek-cert\0" ||
 ///    EK_pk_{n+1} || h_n))`.
 /// 5. Sign `inputs.commitment` with the new `EK_sk_{n+1}` to produce sig.
-/// 6. Return all artifacts; caller stamps them onto the receipt and calls
-///    `advance_local_chain_head_after_signing` post-acceptance.
+/// 6. Return all artifacts; caller stamps them onto the receipt, and the
+///    step's commit moves the Local head to the new EK.
 pub fn sign_receipt_with_per_step_ek(
     inputs: &PerStepSigningInputs,
 ) -> Result<PerStepSigningOutput, DsmError> {
@@ -295,7 +238,7 @@ pub fn sign_receipt_with_per_step_ek(
 /// [`sign_receipt_with_per_step_ek`] over an EXPLICIT response target. The
 /// per-step EK derivation, Kyber encapsulation and cert are identical; only the
 /// bytes `EK_sk` signs differ. The online recipient passes
-/// [`compute_receipt_b_canonical_target`] so `sig_b` also authenticates its
+/// [`compute_receipt_b_canonical_target`](dsm::types::receipt_types::compute_receipt_b_canonical_target) so `sig_b` also authenticates its
 /// canonical pair; every other caller uses the standard-target wrapper.
 pub fn sign_receipt_with_per_step_ek_target(
     inputs: &PerStepSigningInputs,
@@ -371,666 +314,34 @@ pub fn sign_receipt_with_per_step_ek_target(
     })
 }
 
-/// Persist the new chain head after a receipt has been accepted.
+/// The stitched receipt of this device's step, in its canonical encoding:
+/// [`StitchedReceiptV2::of_step`] under this device's genesis. `bearer` is
+/// present exactly for this device's own offline-bearer spend.
 ///
-/// Distinguishes between the relationship-genesis case (where the chain
-/// head has never been initialized — caller passes `init = true`) and the
-/// steady-state case (caller passes `init = false`). In both cases the
-/// new `EK_pk_{n+1}` becomes the current chain head, encrypted SK stored
-/// for the next step's signing.
-///
-/// Caller MUST wipe `ek_sk_in_memory` (zeroize) after this returns.
-pub fn advance_local_chain_head_after_signing(
-    relationship_key: &[u8; 32],
-    new_ek_pk: &[u8],
-    new_ek_sk_in_memory: &[u8],
-    at_rest_key: &[u8; 32],
-    init: bool,
-) -> Result<(), DsmError> {
-    use crate::storage::client_db::{
-        advance_local_cert_chain_head_with_sk, init_cert_chain_head,
-        init_local_cert_chain_head_with_sk, CertChainSide,
-    };
-
-    if init {
-        // First-ever advance for this relationship — write Local row with the
-        // new EK as the chain head. Counterparty side still needs separate
-        // initialization with their AK_pk by the caller (typically at contact
-        // establishment time via init_cert_chain_for_relationship).
-        init_local_cert_chain_head_with_sk(
-            relationship_key,
-            new_ek_pk,
-            new_ek_sk_in_memory,
-            at_rest_key,
-        )
-        .map_err(|e| DsmError::invalid_operation(format!("chain-head SK init: {e}")))?;
-    } else {
-        advance_local_cert_chain_head_with_sk(
-            relationship_key,
-            new_ek_pk,
-            new_ek_sk_in_memory,
-            at_rest_key,
-        )
-        .map_err(|e| DsmError::invalid_operation(format!("chain-head SK advance: {e}")))?;
-    }
-    // Suppress unused-import in the init=false branch.
-    let _ = (init_cert_chain_head, CertChainSide::Local);
-    Ok(())
-}
-
-/// Which side of a bilateral receipt is being inspected for per-step EK
-/// signing verification.
-///
-/// Used by [`verify_per_step_ek_signing`] to select between the A-side
-/// (`ek_pk_a`/`ek_cert_a`/`sig_a`) and B-side fields on a stitched receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BilateralSide {
-    /// Sender / initiating party.
-    A,
-    /// Receiver / counter-signing party.
-    B,
-}
-
-/// Verify the per-step EK signing artifacts on one side of a stitched
-/// receipt (whitepaper §11.1).
-///
-/// Checks two cryptographic invariants for the requested `side`:
-///
-/// 1. **Cert chain link**: `ek_cert_{side}` is a valid SPHINCS+ signature by
-///    `expected_prev_pk` over `BLAKE3("DSM/ek-cert\0" || ek_pk_{side} || h_n)`.
-///    `expected_prev_pk` is the signer of the cert — AK_pk at relationship
-///    genesis (step 0) or `EK_pk_{n-1}` for steady-state transitions, loaded
-///    from `cert_chain_heads`.
-///
-/// 2. **Receipt response**: `sig_{side}` is a valid SPHINCS+ signature by
-///    `ek_pk_{side}` over
-///    `compute_receipt_challenge_response_target(receipt.compute_commitment(),
-///    session_binding)`. The signed target binds to the bilateral session's
-///    `commitment_hash`.
-///
-/// Returns `Ok(())` on success and a structured `DsmError` on the first
-/// failed check (cert link error vs. signature error are distinguished in the
-/// error message). The Kyber ciphertext (`kyber_ct_{side}`) is NOT checked
-/// here — it is consumed by recipient-side k_step recovery, not by the
-/// sender's signature verification.
-///
-/// Use this from the receiver's bilateral confirm handler to verify the
-/// sender's A-side signing before applying the advance, and symmetrically
-/// from the sender's commit-response handler when the protocol carries the
-/// counter-signed receipt back. Both BLE handler call sites should pass
-/// `&commitment_hash` for the session binding.
-pub fn verify_per_step_ek_signing(
-    receipt: &StitchedReceiptV2,
-    side: BilateralSide,
-    expected_prev_pk: &[u8],
-    h_n: &[u8; 32],
-    session_binding: &[u8; 32],
-) -> Result<(), DsmError> {
-    let commitment = receipt.compute_commitment()?;
-    let signing_target = compute_receipt_challenge_response_target(&commitment, session_binding);
-    verify_per_step_ek_signing_target(receipt, side, expected_prev_pk, h_n, &signing_target)
-}
-
-/// [`verify_per_step_ek_signing`] against an EXPLICIT response target: the
-/// cert-chain link is checked exactly as before; `sig_{side}` must verify
-/// under `ek_pk_{side}` over `signing_target`. The sender's online finalizer
-/// passes [`compute_receipt_b_canonical_target`] recomputed from the delta's
-/// pair, so a pair the recipient did not sign fails here.
-pub fn verify_per_step_ek_signing_target(
-    receipt: &StitchedReceiptV2,
-    side: BilateralSide,
-    expected_prev_pk: &[u8],
-    h_n: &[u8; 32],
-    signing_target: &[u8; 32],
-) -> Result<(), DsmError> {
-    use dsm::crypto::ephemeral_key::verify_ek_cert;
-    use dsm::crypto::sphincs::sphincs_verify;
-
-    let (ek_pk, ek_cert, sig, label) = match side {
-        BilateralSide::A => (&receipt.ek_pk_a, &receipt.ek_cert_a, &receipt.sig_a, "A"),
-        BilateralSide::B => (&receipt.ek_pk_b, &receipt.ek_cert_b, &receipt.sig_b, "B"),
-    };
-
-    if ek_pk.is_empty() {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: receipt missing ek_pk_{label}"
-        )));
-    }
-    if ek_cert.is_empty() {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: receipt missing ek_cert_{label}"
-        )));
-    }
-    if sig.is_empty() {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: receipt missing sig_{label}"
-        )));
-    }
-    if expected_prev_pk.is_empty() {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: expected_prev_pk for {label}-side is empty — \
-             caller must supply AK_pk at step 0 or the prior chain head EK_pk for steady state"
-        )));
-    }
-
-    // Step 1: cert chain link (prev_sk over hash(ek_pk_next || h_n)).
-    let cert_ok = verify_ek_cert(expected_prev_pk, ek_pk, h_n, ek_cert).map_err(|e| {
-        DsmError::crypto(
-            format!("verify_per_step_ek_signing: cert chain verify error ({label}-side): {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    if !cert_ok {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: ek_cert_{label} does NOT chain ek_pk_{label} \
-             back to expected_prev_pk over h_n — sig_{label} cannot be trusted"
-        )));
-    }
-
-    // Step 2: receipt response using ek_pk over the caller's response target.
-    // Bilateral ingress requires a session binding so signatures cannot be
-    // replayed across sessions.
-    let sig_ok = sphincs_verify(ek_pk, signing_target, sig).map_err(|e| {
-        DsmError::crypto(
-            format!("verify_per_step_ek_signing: sig verify error ({label}-side): {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    if !sig_ok {
-        return Err(DsmError::invalid_operation(format!(
-            "verify_per_step_ek_signing: sig_{label} does NOT verify under ek_pk_{label} \
-             over receipt challenge-response target — check that signer used the same \
-             commitment_hash"
-        )));
-    }
-
-    Ok(())
-}
-
-/// Outcome of [`verify_per_step_ek_signing_strict_aware`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PerStepEkVerifyOutcome {
-    /// Receipt carried per-step EK artifacts and they verified successfully.
-    Verified,
-}
-
-/// Required per-step EK verification wrapper.
-///
-/// Missing `ek_pk`, `ek_cert`, or receipt signature artifacts are always a
-/// protocol error. Parent/root inclusion alone is not spend authority.
-pub fn verify_per_step_ek_signing_strict_aware(
-    receipt: &StitchedReceiptV2,
-    side: BilateralSide,
-    expected_prev_pk: &[u8],
-    h_n: &[u8; 32],
-    session_binding: &[u8; 32],
-) -> Result<PerStepEkVerifyOutcome, DsmError> {
-    let (ek_pk, ek_cert, sig, label) = match side {
-        BilateralSide::A => (&receipt.ek_pk_a, &receipt.ek_cert_a, &receipt.sig_a, "A"),
-        BilateralSide::B => (&receipt.ek_pk_b, &receipt.ek_cert_b, &receipt.sig_b, "B"),
-    };
-
-    let has_artifacts = !ek_pk.is_empty() && !ek_cert.is_empty() && !sig.is_empty();
-    if !has_artifacts {
-        return Err(DsmError::invalid_operation(format!(
-            "receipt carries no §11.1 per-step EK {label}-side artifacts \
-             (ek_pk_{label} / ek_cert_{label} / sig_{label}); rejecting"
-        )));
-    }
-
-    verify_per_step_ek_signing(receipt, side, expected_prev_pk, h_n, session_binding)?;
-    Ok(PerStepEkVerifyOutcome::Verified)
-}
-
-/// Verify a stitched receipt with signatures.
-///
-/// Delegates to the canonical core verifier for cryptographic receipt checks.
-/// Replay protection is enforced by the `ParentConsumptionTracker`
-/// (one-time parent-tip lock per relationship), NOT by sequence numbers —
-/// the protocol is clockless (§4.3).
-///
-/// Token balance conservation and non-negativity are enforced when applying the
-/// state transition in core, not from receipt bytes alone.
-///
-/// Cert chain verification (whitepaper §11.1): the sender chain head is
-/// required for offline receipt acceptance. Parent/root inclusion proves state
-/// consistency, but it is not spend authority. The receipt challenge is the
-/// proposed transition context. The response is `sig_a` or `sig_b` under the
-/// fresh EK key derived from h_n, C_pre, k_step (keyed under Smaster), with `ek_cert`
-/// linking that key to AK at step 0 or the prior EK on later steps.
-#[allow(clippy::too_many_arguments)]
-pub fn verify_stitched_receipt(
-    receipt: &StitchedReceiptV2,
-    sig_a: &[u8],
-    sig_b: &[u8],
-    pk_a: &[u8],
-    pk_b: &[u8],
-    device_tree_commitment: DeviceTreeAcceptanceCommitment,
-    guard: Option<&mut ReceiptGuard>,
-) -> Result<(), DsmError> {
-    use crate::sdk::app_state::AppState;
-    use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
-    use dsm::verification::smt_replace_witness::compute_smt_key;
-
-    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
-    // Match receipt party (A vs B) to local-vs-counterparty roles by
-    // looking up the local device id. If we can't determine which side
-    // is local, fail closed rather than accepting a receipt without sender
-    // EK-cert-chain authorization.
-    let local_id = AppState::get_device_id();
-    let (head_for_a, head_for_b): (Option<Vec<u8>>, Option<Vec<u8>>) = match local_id.as_deref() {
-        Some(id) if id.len() == 32 && id == receipt.devid_a.as_slice() => {
-            // We are party A. Our chain head verifies our own cert (sig_a),
-            // counterparty's chain head verifies their cert (sig_b).
-            (
-                load_cert_chain_head_pubkey(&smt_key, CertChainSide::Local)
-                    .ok()
-                    .flatten(),
-                load_cert_chain_head_pubkey(&smt_key, CertChainSide::Counterparty)
-                    .ok()
-                    .flatten(),
-            )
-        }
-        Some(id) if id.len() == 32 && id == receipt.devid_b.as_slice() => {
-            // We are party B (counter-signer). Local side maps to B; A is
-            // the remote sender whose chain we track as Counterparty.
-            (
-                load_cert_chain_head_pubkey(&smt_key, CertChainSide::Counterparty)
-                    .ok()
-                    .flatten(),
-                load_cert_chain_head_pubkey(&smt_key, CertChainSide::Local)
-                    .ok()
-                    .flatten(),
-            )
-        }
-        _ => (None, None),
-    };
-
-    if head_for_a.is_none() {
-        return Err(DsmError::invalid_operation(
-            "Receipt verification failed: missing sender cert-chain head for cert-chain-bound \
-             receipt authorization",
-        ));
-    }
-
-    // Per-step Kyber consistency (whitepaper §11): if the receipt carries
-    // a per-step EK_pk_a, it MUST also carry the corresponding kyber_ct_a
-    // — they're the two halves of the per-step EK derivation context. A
-    // receipt with ek_pk_a but no kyber_ct_a is structurally malformed:
-    // either the sender skipped the Kyber encapsulation (spec violation)
-    // or the ct was stripped in transit. Same enforcement on the B side
-    // when sig_b is present.
-    if !receipt.ek_pk_a.is_empty() && receipt.kyber_ct_a.is_empty() {
-        return Err(DsmError::invalid_operation(
-            "Receipt verification failed: ek_pk_a is set but kyber_ct_a is missing — \
-             per-step EK derivation requires both halves of the Kyber context",
-        ));
-    }
-    if !sig_b.is_empty() && !receipt.ek_pk_b.is_empty() && receipt.kyber_ct_b.is_empty() {
-        return Err(DsmError::invalid_operation(
-            "Receipt verification failed: ek_pk_b is set but kyber_ct_b is missing — \
-             per-step EK derivation requires both halves of the Kyber context",
-        ));
-    }
-
-    // Per-step EK pubkey (whitepaper §11.1): when the receipt carries
-    // `ek_pk_a`/`ek_pk_b`, those override the externally-passed `pk_a`/`pk_b`.
-    // This is what makes `sig_a`/`sig_b` verifiable without out-of-band
-    // distribution of per-step keys: each receipt carries its own freshly-
-    // derived EK_pk, and the cert chain (already verified above via
-    // ek_cert_a/b) chains it back to AK_pk.
-    //
-    let pk_a_effective: Vec<u8> = if !receipt.ek_pk_a.is_empty() {
-        receipt.ek_pk_a.clone()
-    } else {
-        pk_a.to_vec()
-    };
-    let pk_b_effective: Vec<u8> = if !receipt.ek_pk_b.is_empty() {
-        receipt.ek_pk_b.clone()
-    } else {
-        pk_b.to_vec()
-    };
-
-    let mut ctx = ReceiptVerificationContext::new(
-        device_tree_commitment,
-        receipt.parent_root,
-        pk_a_effective,
-        pk_b_effective,
-    );
-    if let Some(head) = head_for_a {
-        ctx = ctx.with_chain_head_a(head);
-    }
-    if let Some(head) = head_for_b {
-        ctx = ctx.with_chain_head_b(head);
-    }
-
-    // Prepare signatures on the receipt
-    let mut receipt_with_sigs = receipt.clone();
-    receipt_with_sigs.add_sig_a(sig_a.to_vec());
-    receipt_with_sigs.add_sig_b(sig_b.to_vec());
-
-    // Use canonical verification
-    let mut local_tracker;
-    let tracker = if let Some(g) = guard {
-        g
-    } else {
-        local_tracker = ReceiptGuard::new();
-        &mut local_tracker
-    };
-
-    let result = dsm::verification::receipt_verification::verify_stitched_receipt(
-        &receipt_with_sigs,
-        &ctx,
-        tracker,
-    )?;
-
-    if result.valid {
-        Ok(())
-    } else {
-        Err(DsmError::invalid_operation(format!(
-            "Receipt verification failed: {}",
-            result.reason.unwrap_or_else(|| "unknown".to_string())
-        )))
-    }
-}
-
-/// Build receipt with **real** Per-Device SMT roots and inclusion proofs (§4.2).
-///
-/// This is the single authoritative stitched-receipt constructor in the SDK.
-/// Callers must supply the actual SMT roots and serialized inclusion proofs
-/// produced by `SparseMerkleTree` after an `update_leaf()` call.
-#[allow(clippy::too_many_arguments)]
-pub fn build_bilateral_receipt_with_smt(
+/// Refused when the app state holds no genesis, or when the core producer
+/// refuses (a leaf no receipt names; a receipt that fails the state rules
+/// against `device_tree_commitment`, this device's authenticated `R_G`).
+pub fn build_bilateral_receipt(
     devid_a: [u8; 32],
     devid_b: [u8; 32],
-    parent_tip: [u8; 32],
-    child_tip: [u8; 32],
-    parent_root: [u8; 32],
-    child_root: [u8; 32],
-    rel_proof_parent: Vec<u8>,
-    rel_proof_child: Vec<u8>,
-    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
-) -> Option<Vec<u8>> {
-    use dsm::common::device_tree;
-
-    // 1. Real genesis hash from AppState.
-    let genesis = {
-        let mut g = [0u8; 32];
-        if let Some(gh) = crate::sdk::app_state::AppState::get_genesis_hash() {
-            if gh.len() >= 32 {
-                g.copy_from_slice(&gh[..32]);
-            }
-        }
-        if g == [0u8; 32] {
-            log::warn!(
-                "[receipts] genesis hash unavailable from AppState — receipt will be unverifiable"
-            );
-            return None;
-        }
-        g
-    };
-
-    // 2. Build device tree proof via DeviceTree builder (§2.3).
-    //    The authenticated commitment used for `π_dev` MUST be supplied explicitly
-    //    by the caller. Today that commitment is the concrete root `R_G`.
-    let device_tree_commitment = match device_tree_commitment {
-        Some(commitment) => commitment,
-        None => {
-            log::error!(
-                "[receipts] build_bilateral_receipt_with_smt: authenticated device-tree commitment is required; refusing to derive a synthetic R_G"
-            );
-            return None;
-        }
-    };
-    let r_g = device_tree_commitment.root();
-    let dev_tree = device_tree::DeviceTree::single(devid_a);
-    let dev_proof_obj = dev_tree
-        .proof(&devid_a)
-        .unwrap_or(device_tree::DevTreeProof {
-            siblings: Vec::new(),
-            path_bits: Vec::new(),
-            leaf_to_root: true,
-        });
-    let dev_proof = dev_proof_obj.to_bytes();
-
-    // 3. Zero-depth replace witness (tripwire).
-    let witness: Vec<u8> = 0u32.to_le_bytes().to_vec();
-
-    // 4. Verify device proof against R_G before assembly.
-    let parsed_dev = device_tree::DevTreeProof::from_bytes(&dev_proof)?;
-    if !parsed_dev.verify(&devid_a, &r_g) {
-        log::warn!("[receipts] Device proof verification failed against R_G");
-        return None;
-    }
-
-    // 5. Assemble receipt with real SMT roots and proofs.
-    let mut receipt = StitchedReceiptV2::new(
+    outcome: &AdvanceOutcome,
+    bearer: Option<BearerLeaves>,
+    device_tree_commitment: &DeviceTreeAcceptanceCommitment,
+) -> Result<Vec<u8>, DsmError> {
+    let genesis = crate::sdk::app_state::AppState::get_genesis_hash()
+        .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+        .ok_or_else(|| {
+            DsmError::invalid_operation("receipt: the app state holds no 32-byte genesis hash")
+        })?;
+    StitchedReceiptV2::of_step(
         genesis,
         devid_a,
         devid_b,
-        parent_tip,
-        child_tip,
-        parent_root,
-        child_root,
-        rel_proof_parent,
-        rel_proof_child,
-        dev_proof,
-    );
-    receipt.set_rel_replace_witness(witness);
-    receipt.to_canonical_protobuf().ok()
-}
-
-/// Verify a stitched receipt from its canonical protobuf bytes (§4.3).
-///
-/// Both counterparties share an **identical chain tip** h_n for C_{A↔B}.
-/// Implements the normative verification rules from §4.3:
-///
-/// 1. Protobuf decodes the receipt
-/// 2. All 32-byte fixed fields (genesis, devids, tips, roots) must be non-zero
-/// 3. §4.3#2: π_rel proves h_n ∈ r_A and π'_rel proves h_{n+1} ∈ r'_A
-///    (SmtInclusionProof deserialization + root reconstruction)
-/// 4. §4.3#4: Leaf-replace recomputation — replacing h_n with h_{n+1} using
-///    the same sibling path must yield r'_A byte-exactly
-/// 5. §4.3#3: π_dev proves DevID_A ∈ R_G (Device Tree inclusion)
-///
-/// `device_tree_commitment`: explicit authenticated commitment for the sender's
-/// Device Tree path. `None` is rejected.
-/// Returns `true` only if all checks pass.
-pub fn verify_receipt_bytes(
-    receipt_bytes: &[u8],
-    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
-) -> bool {
-    use dsm::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
-    use dsm::common::device_tree;
-    use dsm::verification::smt_replace_witness::compute_smt_key;
-
-    // 1. Decode the canonical protobuf into a StitchedReceiptV2.
-    let receipt = match StitchedReceiptV2::from_canonical_protobuf(receipt_bytes) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-
-    // 2. Non-zero fixed fields.
-    let is_zero = |b: &[u8; 32]| b.iter().all(|&v| v == 0);
-    if is_zero(&receipt.genesis)
-        || is_zero(&receipt.devid_a)
-        || is_zero(&receipt.devid_b)
-        || is_zero(&receipt.parent_tip)
-        || is_zero(&receipt.child_tip)
-        || is_zero(&receipt.parent_root)
-        || is_zero(&receipt.child_root)
-    {
-        return false;
-    }
-
-    // 3–4. §4.3#2+#4: Both counterparties share an IDENTICAL chain tip.
-    //   π_rel proves h_n ∈ r_A, π'_rel proves h_{n+1} ∈ r'_A.
-    //   Leaf-replace recomputation (same siblings, swap h_n→h_{n+1}) must yield r'_A.
-    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
-
-    let parent_proof = deserialize_inclusion_proof(&receipt.rel_proof_parent).ok();
-    let child_proof = match deserialize_inclusion_proof(&receipt.rel_proof_child) {
-        Ok(p) => p,
-        Err(_) => return false, // child proof must always exist (post-update)
-    };
-
-    // §4.3#2: π'_rel proves h_{n+1} ∈ r'_A
-    if child_proof.key != smt_key {
-        return false;
-    }
-    if child_proof.value != Some(receipt.child_tip) {
-        return false;
-    }
-    if !SparseMerkleTree::verify_proof_against_root(&child_proof, &receipt.child_root) {
-        return false;
-    }
-
-    if let Some(pp) = parent_proof {
-        // Full verification: parent proof exists.
-        if pp.key != smt_key {
-            return false;
-        }
-        // §4.3#2: π_rel MUST prove inclusion of h_n in r_A.
-        // Fail closed: the proof value must be present and must equal parent_tip.
-        // A non-inclusion proof (value=None) or value mismatch both reject.
-        match pp.value {
-            Some(v) if v == receipt.parent_tip => { /* inclusion of correct tip */ }
-            _ => return false,
-        }
-
-        // §4.3#2: π_rel proves h_n ∈ r_A
-        if !SparseMerkleTree::verify_proof_against_root(&pp, &receipt.parent_root) {
-            return false;
-        }
-
-        // §4.3#4: Leaf-replace recomputation.
-        // Single leaf change ⇒ sibling path is identical.
-        // Replace h_n with h_{n+1} using parent's siblings → must yield r'_A.
-        let replace_proof = SmtInclusionProof {
-            key: smt_key,
-            value: Some(receipt.child_tip),
-            siblings: pp.siblings,
-        };
-        if !SparseMerkleTree::verify_proof_against_root(&replace_proof, &receipt.child_root) {
-            return false;
-        }
-    }
-    // If parent proof absent: first tx for this relationship (leaf was ZERO_LEAF).
-    // Child proof already verified above.
-
-    // 5. §4.3#3: Device proof must parse and verify against the authenticated
-    //    local commitment used for `π_dev`.
-    //    Today this is the raw root `R_G`, supplied by the caller from a trusted
-    //    external source (§2.3 commit path). If None, reject: acceptance predicates
-    //    must never derive `R_G` from the receipt itself.
-    let r_g = match device_tree_commitment {
-        Some(commitment) => commitment.root(),
-        None => {
-            log::error!(
-                "[receipts] §4.3#3 FATAL: authenticated device-tree commitment not provided — \
-                 R_G or an equivalent authenticated persisted commitment must be externally supplied, never derived from the receipt itself."
-            );
-            return false;
-        }
-    };
-    match device_tree::DevTreeProof::from_bytes(&receipt.dev_proof) {
-        Some(parsed) => {
-            if !parsed.verify(&receipt.devid_a, &r_g) {
-                return false;
-            }
-        }
-        None => return false,
-    }
-
-    true
-}
-
-/// Serialize a `SmtInclusionProof` to bytes for wire transport.
-///
-/// Format: [32-byte key][1-byte has_value][optional 32-byte value][4-byte LE sibling count][32-byte siblings...]
-pub fn serialize_inclusion_proof(
-    proof: &dsm::merkle::sparse_merkle_tree::SmtInclusionProof,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(32 + 1 + 32 + 4 + proof.siblings.len() * 32);
-    buf.extend_from_slice(&proof.key);
-    buf.push(proof.value.is_some() as u8);
-    if let Some(v) = &proof.value {
-        buf.extend_from_slice(v);
-    }
-    buf.extend_from_slice(&(proof.siblings.len() as u32).to_le_bytes());
-    for s in &proof.siblings {
-        buf.extend_from_slice(s);
-    }
-    buf
-}
-
-/// Deserialize a `SmtInclusionProof` from bytes.
-pub fn deserialize_inclusion_proof(
-    data: &[u8],
-) -> Result<dsm::merkle::sparse_merkle_tree::SmtInclusionProof, DsmError> {
-    if data.len() < 33 {
-        return Err(DsmError::invalid_operation(
-            "inclusion proof too short: need at least 33 bytes",
-        ));
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&data[..32]);
-    let has_value = data[32] != 0;
-    let mut offset = 33;
-    let value = if has_value {
-        if data.len() < offset + 32 {
-            return Err(DsmError::invalid_operation(
-                "inclusion proof truncated at value",
-            ));
-        }
-        let mut v = [0u8; 32];
-        v.copy_from_slice(&data[offset..offset + 32]);
-        offset += 32;
-        Some(v)
-    } else {
-        None
-    };
-    if data.len() < offset + 4 {
-        return Err(DsmError::invalid_operation(
-            "inclusion proof truncated at sibling count",
-        ));
-    }
-    let count =
-        u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap_or_default()) as usize;
-    offset += 4;
-    if data.len() < offset + count * 32 {
-        return Err(DsmError::invalid_operation(
-            "inclusion proof truncated at siblings",
-        ));
-    }
-    let mut siblings = Vec::with_capacity(count);
-    for i in 0..count {
-        let mut s = [0u8; 32];
-        s.copy_from_slice(&data[offset + i * 32..offset + (i + 1) * 32]);
-        siblings.push(s);
-    }
-    Ok(dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
-        key,
-        value,
-        siblings,
-    })
-}
-
-/// Deterministically derive a stitched receipt sigma from canonical input parts.
-///
-/// This uses the DSM receipt commitment domain tag and length-prefixes each input
-/// part to prevent ambiguity:
-/// `BLAKE3("DSM/receipt-commit\0" || len(part_0)||part_0 || ... )`.
-///
-/// Callers should prefer a true `StitchedReceiptV2::compute_commitment()` when
-/// available. This helper mirrors the same domain and deterministic framing.
-pub fn derive_stitched_receipt_sigma(parts: &[&[u8]]) -> [u8; 32] {
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(TAG_RECEIPT_COMMIT);
-    for part in parts {
-        hasher.update(&(part.len() as u32).to_le_bytes());
-        hasher.update(part);
-    }
-    *hasher.finalize().as_bytes()
+        outcome,
+        bearer,
+        device_tree_commitment,
+    )?
+    .to_canonical_protobuf()
 }
 
 /// Deterministically encode a protocol-only transition payload.
@@ -1062,11 +373,25 @@ pub fn compute_protocol_transition_commitment(payload_bytes: &[u8]) -> [u8; 32] 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
-    use dsm::types::device_state::DeviceState;
+    use crate::test_support::receipts::{transfer_chain, Party, Step};
     use dsm::types::operations::Operation;
+    use dsm::verification::receipt_verification::ReceiptStateContext;
 
     const TEST_SESSION_BINDING: [u8; 32] = [0x5A; 32];
+
+    /// The first four steps of a real relationship: the wallet
+    /// `setup_signing_identity` installs (seed 0x11) transferring to the
+    /// wallet of seed 0x12, each step from the tip the one before it left.
+    /// Derived once: SPHINCS+ keygen and signing are slow.
+    fn real_steps() -> &'static [Step] {
+        static STEPS: std::sync::OnceLock<Vec<Step>> = std::sync::OnceLock::new();
+        STEPS.get_or_init(|| transfer_chain(&Party::from_seed(0x11), &Party::from_seed(0x12), 7, 4))
+    }
+
+    /// The receipt of the relationship's `step`-th step.
+    fn real_receipt(step: usize) -> StitchedReceiptV2 {
+        real_steps()[step].receipt.clone()
+    }
 
     // ── derive_per_step_ek (whitepaper §11.1) ──
 
@@ -1251,26 +576,50 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── sign_receipt_with_per_step_ek + advance_local_chain_head_after_signing ──
+    // ── sign_receipt_with_per_step_ek + the committed head move ──
 
     /// Set up AppState identity (`G` + `DevID`) + a cached wallet seed so the per-step signing
     /// helpers can re-derive `Smaster` (EK/coins) and the chain-head at-rest key internally
-    /// (replaces the old explicit K_DBRW argument). Returns the at-rest key for
-    /// `advance_local_chain_head_after_signing` calls.
+    /// (replaces the old explicit K_DBRW argument). Returns the at-rest key the
+    /// committed head moves record the EK secret under.
     fn setup_signing_identity() -> [u8; 32] {
-        // Storage base dir is a process-global set-once; set it idempotently so the helper
-        // works regardless of test ordering (AppState::set_identity_info persists to disk).
-        let _ =
-            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
-        crate::sdk::app_state::AppState::reset_for_testing();
-        crate::sdk::app_state::AppState::set_identity_info(
-            vec![0x11; 32], // device_id (DevID)
-            vec![0xAB; 32], // device signing pubkey (placeholder; not folded into Smaster)
-            vec![0x22; 32], // genesis_hash (G)
-            vec![0u8; 32],  // smt root
+        crate::economic_fixtures::local_device(0x11);
+        crate::init::current_chain_head_at_rest_key().expect("the chain head's at-rest key")
+    }
+
+    /// Move the Local head from `prev` to the signed step's EK as a committed
+    /// step does: compare-and-set, the first step declared by `prev == None`.
+    fn commit_local_head(
+        rel_key: &[u8; 32],
+        prev: Option<&[u8]>,
+        ek_pk: &[u8],
+        ek_sk: &[u8],
+        wrap: &[u8; 32],
+    ) {
+        use crate::storage::client_db::{cas_advance_local_cert_chain_head_with_sk, CasHeadOutcome};
+        let outcome = cas_advance_local_cert_chain_head_with_sk(rel_key, prev, ek_pk, ek_sk, wrap)
+            .expect("the head write");
+        assert!(
+            matches!(
+                outcome,
+                CasHeadOutcome::Advanced { .. } | CasHeadOutcome::GenesisInit
+            ),
+            "the Local head did not move from its expected predecessor: {outcome:?}"
         );
-        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9C; 64]);
-        crate::init::current_chain_head_at_rest_key().expect("at-rest key for tests")
+    }
+
+    /// Move the Counterparty mirror from `prev` to the peer's step EK; returns
+    /// the mirror's step count.
+    fn commit_counterparty_head(rel_key: &[u8; 32], prev: &[u8], ek_pk: &[u8]) -> u64 {
+        use crate::storage::client_db::{cas_advance_counterparty_cert_chain_head, CasHeadOutcome};
+        match cas_advance_counterparty_cert_chain_head(rel_key, Some(prev), ek_pk)
+            .expect("the mirror write")
+        {
+            CasHeadOutcome::Advanced { step } => step,
+            other => panic!(
+                "the Counterparty mirror did not move from its expected predecessor: {other:?}"
+            ),
+        }
     }
 
     /// Helper: build minimal valid signing inputs for tests.
@@ -1356,8 +705,7 @@ mod tests {
         let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &kyber_pk);
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
         assert!(out0.used_root_ak);
-        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &at_rest, true)
-            .unwrap();
+        commit_local_head(&rel_key, None, &out0.ek_pk, &out0.ek_sk, &at_rest);
 
         // Step 1: chain head is EK_1 — root NOT used.
         let commit1 = [0xC1; 32];
@@ -1414,9 +762,8 @@ mod tests {
         let target0 = compute_receipt_challenge_response_target(&commit0, inputs0.session_binding);
         assert!(sphincs_verify(&out0.ek_pk, &target0, &out0.sig).unwrap());
 
-        // Persist EK_0 as new chain head.
-        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &at_rest, true)
-            .unwrap();
+        // Commit EK_0 as the chain head.
+        commit_local_head(&rel_key, None, &out0.ek_pk, &out0.ek_sk, &at_rest);
 
         // ────── Step 1 ──────
         let commit1 = [0xF1; 32];
@@ -1437,8 +784,13 @@ mod tests {
         // Distinct EK at step 1 vs step 0.
         assert_ne!(out0.ek_pk, out1.ek_pk);
 
-        advance_local_chain_head_after_signing(&rel_key, &out1.ek_pk, &out1.ek_sk, &at_rest, false)
-            .unwrap();
+        commit_local_head(
+            &rel_key,
+            Some(&out0.ek_pk),
+            &out1.ek_pk,
+            &out1.ek_sk,
+            &at_rest,
+        );
     }
 
     /// Property-style test (loop-based, no proptest dependency).
@@ -1507,15 +859,14 @@ mod tests {
                 };
                 let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
-                // Advance chain head so step+1 won't take the root AK.
-                advance_local_chain_head_after_signing(
+                // Commit the chain head so step+1 won't take the root AK.
+                commit_local_head(
                     &rel_key,
+                    chain_pubkeys.last().map(Vec::as_slice),
                     &out.ek_pk,
                     &out.ek_sk,
                     &at_rest,
-                    /*init=*/ step == 0,
-                )
-                .unwrap();
+                );
 
                 chain_pubkeys.push(out.ek_pk);
                 chain_certs.push(out.ek_cert);
@@ -1666,18 +1017,7 @@ mod tests {
 
         // Build a minimal receipt with deterministic content so
         // `compute_commitment` is stable.
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],     // genesis
-            [0x02; 32],     // devid_a
-            [0x03; 32],     // devid_b
-            [0xAA; 32],     // parent_tip == h_n the verifier will receive
-            [0x04; 32],     // child_tip
-            [0x05; 32],     // parent_root
-            [0x06; 32],     // child_root
-            vec![0x07; 16], // rel_proof_parent
-            vec![0x08; 16], // rel_proof_child
-            vec![0x09; 16], // dev_proof
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
 
         let inputs = PerStepSigningInputs {
@@ -1823,15 +1163,14 @@ mod tests {
     /// expected_prev_pk is loaded from `cert_chain_heads.Counterparty`
     /// (now the fresh EK_pk_0, not the stale AK_pk).
     ///
-    /// Without the post-commit `advance_cert_chain_head(Counterparty, ...)`
-    /// call, this test fails at step 1 because the cert chains to EK_pk_0
+    /// Without the committed step's Counterparty move, this test fails at step 1 because the cert chains to EK_pk_0
     /// while the verifier still reads AK_pk.
     #[test]
     #[serial_test::serial]
     fn verify_per_step_ek_signing_multi_step_with_counterparty_advance() {
         use crate::storage::client_db::{
-            advance_cert_chain_head, init_cert_chain_head, load_cert_chain_head_pubkey,
-            reset_database_for_tests, CertChainSide,
+            init_cert_chain_head, load_cert_chain_head_pubkey, reset_database_for_tests,
+            CertChainSide,
         };
         use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
 
@@ -1856,18 +1195,7 @@ mod tests {
         init_cert_chain_head(&sender_rel_key, CertChainSide::Counterparty, &sender_ak_pk).unwrap();
 
         // ────── Step 0 (sender signs) ──────
-        let mut receipt_step0 = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x08; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt_step0 = real_receipt(0);
         let commit0 = receipt_step0.compute_commitment().unwrap();
         let session0 = [0xF0; 32];
         let inputs0 = PerStepSigningInputs {
@@ -1886,17 +1214,8 @@ mod tests {
         receipt_step0.set_kyber_ct_a(out0.kyber_ct);
         receipt_step0.add_sig_a(out0.sig);
 
-        // Sender advances Local during signing (already done by
-        // sign_receipt_with_per_step_ek + advance_local_chain_head_after_signing
-        // in the BLE handler signer path).
-        advance_local_chain_head_after_signing(
-            &sender_rel_key,
-            &out0.ek_pk,
-            &out0.ek_sk,
-            &at_rest,
-            out0.used_root_ak,
-        )
-        .unwrap();
+        // The sender's step commits: its Local head moves to EK_0.
+        commit_local_head(&sender_rel_key, None, &out0.ek_pk, &out0.ek_sk, &at_rest);
 
         // Step 0 verifier check: the sender's chain head as observed by
         // the receiver (Counterparty side from receiver's POV) is
@@ -1909,7 +1228,7 @@ mod tests {
             load_cert_chain_head_pubkey(&sender_rel_key, CertChainSide::Counterparty)
                 .unwrap()
                 .expect("Counterparty row should be initialized");
-        verify_per_step_ek_signing_strict_aware(
+        verify_per_step_ek_signing(
             &receipt_step0,
             BilateralSide::A,
             &prev_pk_loaded,
@@ -1923,25 +1242,11 @@ mod tests {
         // outbound chain head in their own Counterparty row so step 1+
         // verification finds the fresh prev_pk (EK_pk_0), not the stale
         // genesis AK_pk.
-        let new_step =
-            advance_cert_chain_head(&sender_rel_key, CertChainSide::Counterparty, &out0.ek_pk)
-                .unwrap()
-                .expect("Counterparty advance must report new step number");
+        let new_step = commit_counterparty_head(&sender_rel_key, &sender_ak_pk, &out0.ek_pk);
         assert_eq!(new_step, 1, "Counterparty step counter should advance to 1");
 
         // ────── Step 1 (sender signs again with advanced Local head) ──────
-        let mut receipt_step1 = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xCC; 32], // new h_n
-            [0x44; 32],
-            [0x55; 32],
-            [0x66; 32],
-            vec![0x77; 16],
-            vec![0x88; 16],
-            vec![0x99; 16],
-        );
+        let mut receipt_step1 = real_receipt(1);
         let commit1 = receipt_step1.compute_commitment().unwrap();
         let session1 = [0xF1; 32];
         let inputs1 = PerStepSigningInputs {
@@ -1978,7 +1283,7 @@ mod tests {
             prev_pk_loaded_step1, out0.ek_pk,
             "Counterparty must now point to EK_pk_0, not AK_pk"
         );
-        verify_per_step_ek_signing_strict_aware(
+        verify_per_step_ek_signing(
             &receipt_step1,
             BilateralSide::A,
             &prev_pk_loaded_step1,
@@ -1989,7 +1294,7 @@ mod tests {
 
         // If step 1 is checked against the relationship-genesis AK_pk
         // instead of the advanced chain head, verification must fail.
-        let stale_check = verify_per_step_ek_signing_strict_aware(
+        let stale_check = verify_per_step_ek_signing(
             &receipt_step1,
             BilateralSide::A,
             &sender_ak_pk,
@@ -2024,18 +1329,7 @@ mod tests {
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
         let kyber_pk = kyber_kp.public_key.clone();
 
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x08; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
 
         let session_c1: [u8; 32] = [0xC1; 32];
@@ -2113,18 +1407,7 @@ mod tests {
         let (receiver_ak_pk, receiver_ak_sk) = generate_ephemeral_keypair(&[0xB1; 32]).unwrap();
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
 
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x08; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
         let b_out = sign_receipt_with_per_step_ek(&PerStepSigningInputs {
             commitment: &commitment,
@@ -2198,18 +1481,7 @@ mod tests {
         let receiver_rel_key = [0xDA; 32];
         setup_signing_identity();
 
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x08; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
 
         // A-side stamping (sender's chain).
@@ -2332,8 +1604,8 @@ mod tests {
     #[serial_test::serial]
     fn bilateral_three_step_chain_extension_e2e() {
         use crate::storage::client_db::{
-            advance_cert_chain_head, init_cert_chain_head, load_cert_chain_head_pubkey,
-            reset_database_for_tests, CertChainSide,
+            init_cert_chain_head, load_cert_chain_head_pubkey, reset_database_for_tests,
+            CertChainSide,
         };
         use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
 
@@ -2373,18 +1645,7 @@ mod tests {
             // ─── Receipt body (canonical, identical fields aside ───
             // from per-step h_n). The per-step EK signing only depends
             // on the commit hash + h_n + cert-chain context.
-            let mut receipt = StitchedReceiptV2::new(
-                [0x01; 32],
-                [0x02; 32],
-                [0x03; 32],
-                h_n_a, // parent_tip on A-side view
-                [0x04 | step; 32],
-                [0x05 | step; 32],
-                [0x06 | step; 32],
-                vec![0x07; 16],
-                vec![0x08; 16],
-                vec![0x09; 16],
-            );
+            let mut receipt = real_receipt(step as usize);
             let commitment = receipt.compute_commitment().unwrap();
             let session_binding = [0x90 | step; 32];
 
@@ -2416,14 +1677,13 @@ mod tests {
             receipt.set_ek_cert_a(a_out.ek_cert.clone());
             receipt.set_kyber_ct_a(a_out.kyber_ct.clone());
             receipt.add_sig_a(a_out.sig.clone());
-            advance_local_chain_head_after_signing(
+            commit_local_head(
                 &rel_a,
+                ek_pks_a.last().map(Vec::as_slice),
                 &a_out.ek_pk,
                 &a_out.ek_sk,
                 &at_rest,
-                a_out.used_root_ak,
-            )
-            .unwrap();
+            );
 
             // ─── B-side verification of A (Device B verifies A) ───
             let prev_pk_a_loaded = load_cert_chain_head_pubkey(&rel_a, CertChainSide::Counterparty)
@@ -2445,7 +1705,7 @@ mod tests {
                     step - 1
                 );
             }
-            verify_per_step_ek_signing_strict_aware(
+            verify_per_step_ek_signing(
                 &receipt,
                 BilateralSide::A,
                 &prev_pk_a_loaded,
@@ -2487,14 +1747,13 @@ mod tests {
             receipt.set_ek_cert_b(b_out.ek_cert.clone());
             receipt.set_kyber_ct_b(b_out.kyber_ct.clone());
             receipt.add_sig_b(b_out.sig.clone());
-            advance_local_chain_head_after_signing(
+            commit_local_head(
                 &rel_b,
+                ek_pks_b.last().map(Vec::as_slice),
                 &b_out.ek_pk,
                 &b_out.ek_sk,
                 &at_rest,
-                b_out.used_root_ak,
-            )
-            .unwrap();
+            );
 
             assert!(
                 receipt.is_fully_signed(),
@@ -2510,7 +1769,7 @@ mod tests {
             } else {
                 assert_eq!(prev_pk_b_loaded, ek_pks_b[(step - 1) as usize]);
             }
-            verify_per_step_ek_signing_strict_aware(
+            verify_per_step_ek_signing(
                 &receipt,
                 BilateralSide::B,
                 &prev_pk_b_loaded,
@@ -2521,14 +1780,8 @@ mod tests {
 
             // ─── Post-commit Counterparty advances ───
             // Both devices advance their mirrors of the other's chain.
-            let new_step_a =
-                advance_cert_chain_head(&rel_a, CertChainSide::Counterparty, &a_out.ek_pk)
-                    .unwrap()
-                    .expect("rel_a.Counterparty advance must succeed");
-            let new_step_b =
-                advance_cert_chain_head(&rel_b, CertChainSide::Counterparty, &b_out.ek_pk)
-                    .unwrap()
-                    .expect("rel_b.Counterparty advance must succeed");
+            let new_step_a = commit_counterparty_head(&rel_a, &prev_pk_a_loaded, &a_out.ek_pk);
+            let new_step_b = commit_counterparty_head(&rel_b, &prev_pk_b_loaded, &b_out.ek_pk);
             assert_eq!(
                 new_step_a,
                 step as u64 + 1,
@@ -2550,18 +1803,7 @@ mod tests {
         // then assert it does NOT verify under any earlier step's
         // chain head. This cryptographically pins the chain freshness
         // invariant.
-        let mut substitution_check_receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAF; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x08; 16],
-            vec![0x09; 16],
-        );
+        let mut substitution_check_receipt = real_receipt(3);
         let sub_commitment = substitution_check_receipt.compute_commitment().unwrap();
         let sub_inputs = PerStepSigningInputs {
             commitment: &sub_commitment,
@@ -2583,7 +1825,7 @@ mod tests {
         // (the head right before this signing). Any earlier head
         // (ak_pk_a, ek_pks_a[0], ek_pks_a[1]) MUST fail the cert link.
         for (idx, stale_pk) in [&ak_pk_a, &ek_pks_a[0], &ek_pks_a[1]].iter().enumerate() {
-            let result = verify_per_step_ek_signing_strict_aware(
+            let result = verify_per_step_ek_signing(
                 &substitution_check_receipt,
                 BilateralSide::A,
                 stale_pk,
@@ -2597,7 +1839,7 @@ mod tests {
         }
     }
 
-    // ── verify_per_step_ek_signing_strict_aware ────────────────────────
+    // ── verify_per_step_ek_signing ─────────────────────────────────────
 
     /// Session-bound verification accepts a correctly signed receipt.
     #[test]
@@ -2610,22 +1852,11 @@ mod tests {
         // EK signer can re-derive `Smaster` internally. Without this the test only
         // passed when an earlier test happened to leave `G` set in the process-global
         // AppState — an implicit ordering dependency that flakes under parallel runs.
-        let _ = setup_signing_identity();
+        setup_signing_identity();
 
         let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xC2; 32]).unwrap();
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
-        let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x08; 16],
-            vec![0x09; 16],
-        );
+        let mut receipt = real_receipt(0);
         let commitment = receipt.compute_commitment().unwrap();
         let session_binding = [0xD2; 32];
         let inputs = PerStepSigningInputs {
@@ -2644,7 +1875,7 @@ mod tests {
         receipt.set_kyber_ct_a(out.kyber_ct);
         receipt.add_sig_a(out.sig);
 
-        let outcome = verify_per_step_ek_signing_strict_aware(
+        verify_per_step_ek_signing(
             &receipt,
             BilateralSide::A,
             &ak_pk,
@@ -2652,7 +1883,6 @@ mod tests {
             &session_binding,
         )
         .expect("session-bound A-side must verify");
-        assert_eq!(outcome, PerStepEkVerifyOutcome::Verified);
     }
 
     /// A receipt without per-step EK artifacts always fails closed.
@@ -2662,20 +1892,9 @@ mod tests {
         use crate::storage::client_db::reset_database_for_tests;
         reset_database_for_tests();
 
-        let receipt = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x04; 32],
-            [0x05; 32],
-            [0x06; 32],
-            vec![0x07; 16],
-            vec![0x08; 16],
-            vec![0x09; 16],
-        );
+        let receipt = real_receipt(0);
 
-        let err = verify_per_step_ek_signing_strict_aware(
+        let err = verify_per_step_ek_signing(
             &receipt,
             BilateralSide::A,
             &[0x99u8; 32],
@@ -2699,7 +1918,7 @@ mod tests {
             build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC3; 32]);
         receipt.parent_root = [0xDE; 32];
 
-        let err = verify_per_step_ek_signing_strict_aware(
+        let err = verify_per_step_ek_signing(
             &receipt,
             BilateralSide::A,
             &ak_pk,
@@ -2734,7 +1953,7 @@ mod tests {
             &TEST_SESSION_BINDING,
         )
         .expect_err("empty sig_a must fail-closed");
-        assert!(err.to_string().contains("missing sig_A"));
+        assert!(err.to_string().contains("per-step EK A-side artifacts"));
 
         // B-side never signed for this receipt, so all B fields are empty.
         let err_b = verify_per_step_ek_signing(
@@ -2745,349 +1964,7 @@ mod tests {
             &TEST_SESSION_BINDING,
         )
         .expect_err("requesting B-side verification on an A-only receipt must fail-closed");
-        assert!(err_b.to_string().contains("missing ek_pk_B"));
-    }
-
-    // ── derive_relationship_key ──
-
-    #[test]
-    fn derive_relationship_key_deterministic() {
-        let pk = [0xABu8; 32];
-        let a = derive_relationship_key(&pk);
-        let b = derive_relationship_key(&pk);
-        assert_eq!(a, b, "same input must yield identical key");
-    }
-
-    #[test]
-    fn derive_relationship_key_varies_with_input() {
-        let k1 = derive_relationship_key(&[1u8; 32]);
-        let k2 = derive_relationship_key(&[2u8; 32]);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn derive_relationship_key_nonzero() {
-        let k = derive_relationship_key(b"any-counterparty-pk");
-        assert_ne!(k, [0u8; 32]);
-    }
-
-    // ── serialize / deserialize inclusion proof round-trip ──
-
-    fn sample_proof(with_value: bool, siblings: usize) -> SmtInclusionProof {
-        SmtInclusionProof {
-            key: [0x11u8; 32],
-            value: if with_value { Some([0x22u8; 32]) } else { None },
-            siblings: (0..siblings)
-                .map(|i| [(i as u8).wrapping_add(0x30); 32])
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn roundtrip_proof_with_value_no_siblings() {
-        let proof = sample_proof(true, 0);
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.key, proof.key);
-        assert_eq!(decoded.value, proof.value);
-        assert!(decoded.siblings.is_empty());
-    }
-
-    #[test]
-    fn roundtrip_proof_without_value_no_siblings() {
-        let proof = sample_proof(false, 0);
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.key, proof.key);
-        assert_eq!(decoded.value, None);
-        assert!(decoded.siblings.is_empty());
-    }
-
-    #[test]
-    fn roundtrip_proof_with_value_and_siblings() {
-        let proof = sample_proof(true, 4);
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.key, proof.key);
-        assert_eq!(decoded.value, proof.value);
-        assert_eq!(decoded.siblings.len(), 4);
-        assert_eq!(decoded.siblings, proof.siblings);
-    }
-
-    #[test]
-    fn roundtrip_proof_without_value_with_siblings() {
-        let proof = sample_proof(false, 3);
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.value, None);
-        assert_eq!(decoded.siblings.len(), 3);
-    }
-
-    #[test]
-    fn serialize_proof_expected_length_with_value() {
-        let proof = sample_proof(true, 2);
-        let bytes = serialize_inclusion_proof(&proof);
-        // 32 (key) + 1 (has_value) + 32 (value) + 4 (count) + 2*32 (siblings)
-        assert_eq!(bytes.len(), 32 + 1 + 32 + 4 + 64);
-    }
-
-    #[test]
-    fn serialize_proof_expected_length_without_value() {
-        let proof = sample_proof(false, 2);
-        let bytes = serialize_inclusion_proof(&proof);
-        // 32 (key) + 1 (has_value) + 4 (count) + 2*32 (siblings)
-        assert_eq!(bytes.len(), 32 + 1 + 4 + 64);
-    }
-
-    // ── deserialize error cases ──
-
-    #[test]
-    fn deserialize_too_short() {
-        let short = vec![0u8; 10];
-        assert!(deserialize_inclusion_proof(&short).is_err());
-    }
-
-    #[test]
-    fn deserialize_truncated_at_value() {
-        // 32 key + has_value=1, but no value bytes
-        let mut data = vec![0u8; 33];
-        data[32] = 1; // has_value = true
-        assert!(deserialize_inclusion_proof(&data).is_err());
-    }
-
-    #[test]
-    fn deserialize_truncated_at_sibling_count() {
-        // 32 key + has_value=0, missing sibling count bytes
-        let data = vec![0u8; 33]; // has_value=0, no count
-        assert!(deserialize_inclusion_proof(&data).is_err());
-    }
-
-    #[test]
-    fn deserialize_truncated_siblings() {
-        // valid header + count=2, but only 1 sibling worth of bytes
-        let proof = sample_proof(false, 2);
-        let bytes = serialize_inclusion_proof(&proof);
-        let truncated = &bytes[..bytes.len() - 16]; // remove half of second sibling
-        assert!(deserialize_inclusion_proof(truncated).is_err());
-    }
-
-    #[test]
-    fn deserialize_empty_is_err() {
-        assert!(deserialize_inclusion_proof(&[]).is_err());
-    }
-
-    // ── derive_stitched_receipt_sigma ──
-
-    #[test]
-    fn sigma_deterministic() {
-        let parts: Vec<&[u8]> = vec![b"hello", b"world"];
-        let a = derive_stitched_receipt_sigma(&parts);
-        let b = derive_stitched_receipt_sigma(&parts);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn sigma_varies_with_different_parts() {
-        let s1 = derive_stitched_receipt_sigma(&[b"a", b"b"]);
-        let s2 = derive_stitched_receipt_sigma(&[b"a", b"c"]);
-        assert_ne!(s1, s2);
-    }
-
-    #[test]
-    fn sigma_order_matters() {
-        let s1 = derive_stitched_receipt_sigma(&[b"first", b"second"]);
-        let s2 = derive_stitched_receipt_sigma(&[b"second", b"first"]);
-        assert_ne!(s1, s2);
-    }
-
-    #[test]
-    fn sigma_empty_parts() {
-        let s = derive_stitched_receipt_sigma(&[]);
-        assert_ne!(s, [0u8; 32]);
-    }
-
-    #[test]
-    fn sigma_nonzero() {
-        let s = derive_stitched_receipt_sigma(&[b"test"]);
-        assert_ne!(s, [0u8; 32]);
-    }
-
-    #[test]
-    fn sigma_length_prefixing_prevents_ambiguity() {
-        // "ab" + "cd" vs "abc" + "d" should differ due to length prefixes
-        let s1 = derive_stitched_receipt_sigma(&[b"ab", b"cd"]);
-        let s2 = derive_stitched_receipt_sigma(&[b"abc", b"d"]);
-        assert_ne!(s1, s2);
-    }
-
-    // #[serial] required: this test mutates the process-global `AppState`
-    // (via `set_identity_info`) and the `DSM_SDK_TEST_MODE` env var. Running
-    // concurrently with other identity/AppState-touching tests (e.g.
-    // `dlv_sdk::tests::*` and `bilateral_ble_handler::tests::test_register_
-    // sender_session_persists_canonical_sender_session`) produces intermittent
-    // CI failures where one test sees the other's identity.
-    #[test]
-    #[serial_test::serial]
-    fn first_ever_receipt_requires_merkle_pre_root_not_cas_parent_root() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-
-        let devid_a = [0x41u8; 32];
-        let devid_b = [0x42u8; 32];
-        let genesis = [0x43u8; 32];
-        let public_key = vec![0x44u8; 64];
-        let initial_tip = [0x45u8; 32];
-
-        let storage_dir =
-            std::env::temp_dir().join(format!("dsm_receipts_test_{}", std::process::id()));
-        let _ = crate::storage_utils::set_storage_base_dir(storage_dir);
-
-        crate::sdk::app_state::AppState::set_identity_info(
-            devid_a.to_vec(),
-            public_key.clone(),
-            genesis.to_vec(),
-            [0u8; 32].to_vec(),
-        );
-
-        let device_tree_commitment = Some(DeviceTreeAcceptanceCommitment::from_root(
-            dsm::common::device_tree::DeviceTree::single(devid_a).root(),
-        ));
-
-        let state = DeviceState::new(genesis, devid_a, public_key, 64);
-        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(&devid_a, &devid_b);
-        let outcome = state
-            .advance(
-                rel_key,
-                devid_b,
-                Operation::Noop,
-                vec![0x46; 32],
-                None,
-                &[],
-                Some(initial_tip),
-                None,
-                None,
-                None,
-            )
-            .expect("first-ever advance should succeed");
-
-        assert_ne!(
-            outcome.parent_r_a, outcome.smt_proofs.pre_root,
-            "first-ever advance must distinguish CAS parent root from Merkle proof pre_root"
-        );
-
-        let parent_tip = outcome
-            .smt_proofs
-            .parent_proof
-            .value
-            .expect("first-ever parent proof should carry seeded initial tip");
-        let child_tip = outcome.new_chain_state.compute_chain_tip();
-        let parent_proof = outcome.smt_proofs.parent_proof.to_bytes();
-        let child_proof = outcome.smt_proofs.child_proof.to_bytes();
-
-        let receipt_with_proof_root = build_bilateral_receipt_with_smt(
-            devid_a,
-            devid_b,
-            parent_tip,
-            child_tip,
-            outcome.smt_proofs.pre_root,
-            outcome.child_r_a,
-            parent_proof.clone(),
-            child_proof.clone(),
-            device_tree_commitment,
-        )
-        .expect("receipt with Merkle pre_root");
-        assert!(verify_receipt_bytes(
-            &receipt_with_proof_root,
-            device_tree_commitment,
-        ));
-
-        let receipt_with_cas_root = build_bilateral_receipt_with_smt(
-            devid_a,
-            devid_b,
-            parent_tip,
-            child_tip,
-            outcome.parent_r_a,
-            outcome.child_r_a,
-            parent_proof,
-            child_proof,
-            device_tree_commitment,
-        )
-        .expect("receipt with CAS parent root");
-        assert!(
-            !verify_receipt_bytes(&receipt_with_cas_root, device_tree_commitment),
-            "using parent_r_a should fail receipt verification on first-ever advances"
-        );
-    }
-
-    /// Receipt verification rejects relationships that have no recorded chain
-    /// heads. Parent/root inclusion alone is not spend authority.
-    #[test]
-    #[serial_test::serial]
-    fn rejects_receipt_without_chain_heads() {
-        use crate::storage::client_db::reset_database_for_tests;
-
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-
-        let devid_a = [0x71u8; 32];
-        let devid_b = [0x72u8; 32];
-        let genesis = [0x73u8; 32];
-        let public_key = vec![0x74u8; 64];
-
-        let storage_dir =
-            std::env::temp_dir().join(format!("dsm_strict_mode_test_{}", std::process::id()));
-        let _ = crate::storage_utils::set_storage_base_dir(storage_dir);
-        reset_database_for_tests();
-
-        crate::sdk::app_state::AppState::set_identity_info(
-            devid_a.to_vec(),
-            public_key.clone(),
-            genesis.to_vec(),
-            [0u8; 32].to_vec(),
-        );
-
-        // Build a minimal receipt; we don't need it to verify
-        // cryptographically — strict-mode rejection fires BEFORE the
-        // canonical core verifier runs.
-        let receipt = StitchedReceiptV2::new(
-            genesis,
-            devid_a,
-            devid_b,
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0x04; 32],
-            vec![],
-            vec![],
-            vec![],
-        );
-        let device_tree_commitment = DeviceTreeAcceptanceCommitment::from_root(
-            dsm::common::device_tree::DeviceTree::single(devid_a).root(),
-        );
-
-        let result = verify_stitched_receipt(
-            &receipt,
-            &[0xAA; 64],
-            &[0xBB; 64],
-            &public_key,
-            &public_key,
-            device_tree_commitment,
-            None,
-        );
-
-        assert!(
-            result.is_err(),
-            "verification without chain heads must reject"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("missing sender cert-chain head")
-                || err.contains("cert-chain-bound receipt authorization"),
-            "wrong rejection reason: {}",
-            err
-        );
+        assert!(err_b.to_string().contains("per-step EK B-side artifacts"));
     }
 
     // ── encode_protocol_transition_payload ──
@@ -3171,107 +2048,6 @@ mod tests {
         assert_ne!(c, [0u8; 32]);
     }
 
-    // ── serialize/deserialize: additional edge cases ──
-
-    #[test]
-    fn roundtrip_proof_many_siblings() {
-        let proof = SmtInclusionProof {
-            key: [0xFF; 32],
-            value: Some([0xEE; 32]),
-            siblings: (0..256).map(|i| [(i as u8); 32]).collect(),
-        };
-        let bytes = serialize_inclusion_proof(&proof);
-        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
-        assert_eq!(decoded.siblings.len(), 256);
-        assert_eq!(decoded.key, [0xFF; 32]);
-        assert_eq!(decoded.value, Some([0xEE; 32]));
-        for (i, sib) in decoded.siblings.iter().enumerate() {
-            assert_eq!(*sib, [(i as u8); 32]);
-        }
-    }
-
-    #[test]
-    fn serialize_proof_key_is_first_32_bytes() {
-        let proof = SmtInclusionProof {
-            key: [0xAB; 32],
-            value: None,
-            siblings: vec![],
-        };
-        let bytes = serialize_inclusion_proof(&proof);
-        assert_eq!(&bytes[..32], &[0xAB; 32]);
-    }
-
-    #[test]
-    fn serialize_has_value_byte_zero_when_none() {
-        let proof = SmtInclusionProof {
-            key: [0; 32],
-            value: None,
-            siblings: vec![],
-        };
-        let bytes = serialize_inclusion_proof(&proof);
-        assert_eq!(bytes[32], 0);
-    }
-
-    #[test]
-    fn serialize_has_value_byte_one_when_some() {
-        let proof = SmtInclusionProof {
-            key: [0; 32],
-            value: Some([0; 32]),
-            siblings: vec![],
-        };
-        let bytes = serialize_inclusion_proof(&proof);
-        assert_eq!(bytes[32], 1);
-    }
-
-    #[test]
-    fn deserialize_exact_minimum_no_value() {
-        // 32 key + 1 has_value(0) + 4 count(0) = 37 bytes
-        let mut data = vec![0u8; 37];
-        data[32] = 0; // has_value = false
-                      // count bytes already zero (0 siblings)
-        let proof = deserialize_inclusion_proof(&data).unwrap();
-        assert_eq!(proof.key, [0u8; 32]);
-        assert_eq!(proof.value, None);
-        assert!(proof.siblings.is_empty());
-    }
-
-    #[test]
-    fn deserialize_exact_minimum_with_value() {
-        // 32 key + 1 has_value(1) + 32 value + 4 count(0) = 69 bytes
-        let mut data = vec![0u8; 69];
-        data[32] = 1; // has_value = true
-        data[33..65].copy_from_slice(&[0xCC; 32]); // value
-                                                   // count bytes at 65..69 already zero
-        let proof = deserialize_inclusion_proof(&data).unwrap();
-        assert_eq!(proof.value, Some([0xCC; 32]));
-        assert!(proof.siblings.is_empty());
-    }
-
-    #[test]
-    fn deserialize_sibling_count_as_le_u32() {
-        let proof = sample_proof(false, 1);
-        let bytes = serialize_inclusion_proof(&proof);
-        // After key(32) + has_value(1) byte, count is at offset 33..37
-        let count = u32::from_le_bytes(bytes[33..37].try_into().unwrap());
-        assert_eq!(count, 1);
-    }
-
-    // ── sigma: additional edge cases ──
-
-    #[test]
-    fn sigma_single_empty_part_differs_from_no_parts() {
-        let s_empty = derive_stitched_receipt_sigma(&[]);
-        let s_one_empty = derive_stitched_receipt_sigma(&[b""]);
-        assert_ne!(s_empty, s_one_empty);
-    }
-
-    #[test]
-    fn sigma_large_input() {
-        let big = vec![0x42u8; 10_000];
-        let s = derive_stitched_receipt_sigma(&[&big]);
-        assert_ne!(s, [0u8; 32]);
-    }
-
     // ── encode_protocol_transition_payload: additional ──
 
     #[test]
@@ -3288,30 +2064,7 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    // ── derive_relationship_key: additional ──
-
-    #[test]
-    fn derive_relationship_key_empty_input() {
-        let k = derive_relationship_key(&[]);
-        assert_ne!(k, [0u8; 32]);
-    }
-
-    #[test]
-    fn derive_relationship_key_large_input() {
-        let big = vec![0xCC; 1024];
-        let k = derive_relationship_key(&big);
-        assert_ne!(k, [0u8; 32]);
-    }
-
     // ── compute_protocol_transition_commitment ──
-
-    #[test]
-    fn protocol_commitment_uses_different_domain_from_sigma() {
-        let data = b"same-payload";
-        let sigma = derive_stitched_receipt_sigma(&[data.as_slice()]);
-        let proto = compute_protocol_transition_commitment(data);
-        assert_ne!(sigma, proto);
-    }
 
     // ── encode + commit roundtrip ──
 
@@ -3330,5 +2083,73 @@ mod tests {
         let c1 = compute_protocol_transition_commitment(&p1);
         let c2 = compute_protocol_transition_commitment(&p2);
         assert_ne!(c1, c2);
+    }
+
+    // #[serial] required: this test mutates the process-global `AppState`
+    // (via `set_identity_info`). Running
+    // concurrently with other identity/AppState-touching tests (e.g.
+    // `dlv_sdk::tests::*` and `bilateral_ble_handler::tests::test_register_
+    // sender_session_persists_canonical_sender_session`) produces intermittent
+    // CI failures where one test sees the other's identity.
+    #[test]
+    #[serial_test::serial]
+    fn a_first_step_receipt_starts_from_the_root_the_device_committed() {
+        use crate::test_support::two_device::TestDevice;
+        let peer = TestDevice::create("B", 0x42);
+        let local = TestDevice::create("A", 0x41);
+        let (devid_a, devid_b) = (local.device_id, peer.device_id);
+        let h0 = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &devid_a, &devid_b,
+        );
+        let device_tree_commitment = DeviceTreeAcceptanceCommitment::from_root(
+            dsm::common::device_tree::DeviceTree::single(devid_a).root(),
+        );
+
+        let head = crate::storage::client_db::load_bcr_device_head(&devid_a)
+            .expect("load the head")
+            .expect("genesis installed the head");
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
+        assert!(
+            head.advance(rel_key, devid_b, Operation::Noop, &[], None, None)
+                .is_err(),
+            "a step on a relationship the device never established is refused"
+        );
+
+        let established = head.establish_relationship(devid_b).expect("establish");
+        let outcome = established
+            .advance(rel_key, devid_b, Operation::Noop, &[], None, None)
+            .expect("the first step");
+        assert_eq!(outcome.parent_r_a, established.root());
+        assert_eq!(
+            outcome.transition.pre_root(),
+            established.root(),
+            "the first step's pre-state root is the root the device committed"
+        );
+        assert_eq!(outcome.relationship_pair().0, h0);
+
+        let receipt =
+            build_bilateral_receipt(devid_a, devid_b, &outcome, None, &device_tree_commitment)
+                .expect("the first step's receipt");
+        let mut decoded = StitchedReceiptV2::from_canonical_protobuf(&receipt)
+            .expect("the built receipt decodes");
+        assert_eq!(decoded.parent_root, established.root());
+        let genesis = crate::sdk::app_state::AppState::get_genesis_hash()
+            .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+            .expect("the installed genesis");
+        let context = ReceiptStateContext {
+            device_tree_commitment: &device_tree_commitment,
+            author_genesis: genesis,
+            operation: &outcome.new_chain_state.operation,
+            bearer: None,
+        };
+        dsm::verification::receipt_verification::verify_receipt_state(&decoded, &context)
+            .expect("the first step's receipt holds its state rules");
+
+        decoded.parent_root = head.root();
+        assert!(
+            dsm::verification::receipt_verification::verify_receipt_state(&decoded, &context)
+                .is_err(),
+            "a root from before the relationship was established is not the step's parent"
+        );
     }
 }

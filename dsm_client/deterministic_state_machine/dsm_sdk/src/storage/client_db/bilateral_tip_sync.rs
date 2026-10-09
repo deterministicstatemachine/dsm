@@ -7,7 +7,7 @@
 //! follow-up writes to "finish" a repair.
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 
 use super::{get_connection, ObservedRemoteTipRecord, ObservedRemoteTipSource};
 
@@ -36,19 +36,6 @@ pub enum TipSyncOutcome {
     CanonicalMovedToDifferentTip { current_tip: [u8; 32] },
     /// Persisted state is malformed or helper detected impossible state.
     InvariantViolation { message: String },
-}
-
-/// Outcome of atomically recording a new pending online gate.
-#[derive(Debug, Clone)]
-pub enum RecordPendingGateOutcome {
-    /// New gate inserted.
-    Recorded,
-    /// Identical gate already exists (idempotent).
-    AlreadyExistsSameGate,
-    /// A different gate for this counterparty already exists.
-    ConflictingGateExists,
-    /// chain_tip != expected_parent — cannot create gate.
-    ParentMismatch { current_tip: [u8; 32] },
 }
 
 // ── Atomic tip sync ───────────────────────────────────────────────────────
@@ -123,8 +110,8 @@ pub(crate) fn sync_tip_projections_in_tx(
 ) -> Result<TipSyncOutcome> {
     // Step 1: Load current bilateral row
     let (chain_tip, local_tip, observed_remote_tip, observed_remote_tip_source): (
-        Vec<u8>,
-        Vec<u8>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<i64>,
     ) = {
@@ -134,8 +121,8 @@ pub(crate) fn sync_tip_projections_in_tx(
         )?;
         match stmt.query_row(params![&request.counterparty_device_id[..]], |row| {
             Ok((
-                row.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default(),
-                row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<Vec<u8>>>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
                 row.get::<_, Option<Vec<u8>>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
             ))
@@ -150,27 +137,25 @@ pub(crate) fn sync_tip_projections_in_tx(
         }
     };
 
-    let chain_tip_arr: [u8; 32] = match chain_tip.as_slice().try_into() {
-        Ok(a) => a,
-        Err(_) if chain_tip.is_empty() || chain_tip == vec![0u8; 32] => [0u8; 32],
-        Err(_) => {
-            return Ok(TipSyncOutcome::InvariantViolation {
-                message: format!("chain_tip is {} bytes, expected 32", chain_tip.len()),
-            });
-        }
+    // Every contact starts at its relationship's h_0: a missing tip, or one
+    // that is not 32 bytes, is a corrupt row.
+    let tip_of = |column: &str, tip: Option<Vec<u8>>| -> Result<[u8; 32], TipSyncOutcome> {
+        let tip = tip.ok_or_else(|| TipSyncOutcome::InvariantViolation {
+            message: format!("{column} is missing"),
+        })?;
+        tip.as_slice()
+            .try_into()
+            .map_err(|_| TipSyncOutcome::InvariantViolation {
+                message: format!("{column} is {} bytes, expected 32", tip.len()),
+            })
     };
-
-    let local_tip_arr: [u8; 32] = match local_tip.as_slice().try_into() {
-        Ok(a) => a,
-        Err(_) if local_tip.is_empty() || local_tip == vec![0u8; 32] => [0u8; 32],
-        Err(_) => {
-            return Ok(TipSyncOutcome::InvariantViolation {
-                message: format!(
-                    "local_bilateral_chain_tip is {} bytes, expected 32",
-                    local_tip.len()
-                ),
-            });
-        }
+    let chain_tip_arr = match tip_of("chain_tip", chain_tip) {
+        Ok(tip) => tip,
+        Err(violation) => return Ok(violation),
+    };
+    let local_tip_arr = match tip_of("local_bilateral_chain_tip", local_tip) {
+        Ok(tip) => tip,
+        Err(violation) => return Ok(violation),
     };
 
     let observed_remote_tip_record = match observed_remote_tip {
@@ -179,7 +164,6 @@ pub(crate) fn sync_tip_projections_in_tx(
             arr.copy_from_slice(&tip);
             Some(ObservedRemoteTipRecord {
                 tip: arr,
-                updated_at: 0,
                 source: ObservedRemoteTipSource::from_db(observed_remote_tip_source),
             })
         }
@@ -226,18 +210,17 @@ pub(crate) fn sync_tip_projections_in_tx(
             )?;
             TipSyncOutcome::RepairedAtTarget { tip: *target }
         }
-    } else if chain_tip_arr == *parent || (chain_tip_arr == [0u8; 32] && *parent == [0u8; 32]) {
+    } else if chain_tip_arr == *parent {
         // Case B: canonical at expected parent — advance both atomically
-        let tick_val = crate::util::deterministic_time::tick() as i64;
         tx.execute(
             "UPDATE contacts SET \
                 previous_chain_tip = chain_tip, \
                 chain_tip = ?1, \
                 local_bilateral_chain_tip = ?1, \
-                needs_online_reconcile = 0, \
-                last_seen_online_counter = ?2 \
-             WHERE device_id = ?3",
-            params![&target[..], tick_val, &request.counterparty_device_id[..]],
+                chain_tip_commitment = NULL, \
+                needs_online_reconcile = 0 \
+             WHERE device_id = ?2",
+            params![&target[..], &request.counterparty_device_id[..]],
         )?;
         clear_observed_remote_tip_in_tx(
             tx,
@@ -293,81 +276,6 @@ pub(crate) fn sync_tip_projections_in_tx(
     Ok(outcome)
 }
 
-/// Atomically record a new pending online gate. One SQLite write transaction.
-/// Only inserts if chain_tip == expected_parent and no conflicting gate exists.
-pub fn record_pending_online_transition_atomically(
-    counterparty_device_id: &[u8; 32],
-    expected_parent_tip: &[u8; 32],
-    next_tip: &[u8; 32],
-    message_id: &str,
-    payload: &[u8],
-) -> Result<RecordPendingGateOutcome> {
-    let binding = get_connection()?;
-    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let tx = conn.transaction()?;
-
-    // Step 1: Read current chain_tip
-    let chain_tip: Vec<u8> = tx
-        .prepare("SELECT chain_tip FROM contacts WHERE device_id = ?1")?
-        .query_row(params![&counterparty_device_id[..]], |row| {
-            Ok(row.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default())
-        })
-        .unwrap_or_default();
-
-    let chain_tip_arr: [u8; 32] = chain_tip.as_slice().try_into().unwrap_or([0u8; 32]);
-
-    if chain_tip_arr != *expected_parent_tip {
-        tx.rollback().ok();
-        return Ok(RecordPendingGateOutcome::ParentMismatch {
-            current_tip: chain_tip_arr,
-        });
-    }
-
-    // Step 2: Check existing gate
-    let existing: Option<(Vec<u8>, Vec<u8>)> = tx
-        .prepare("SELECT parent_tip, next_tip FROM pending_online_outbox WHERE counterparty_device_id = ?1")?
-        .query_row(params![&counterparty_device_id[..]], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })
-        .optional()?;
-
-    match existing {
-        Some((p, n))
-            if p.as_slice() == &expected_parent_tip[..] && n.as_slice() == &next_tip[..] =>
-        {
-            tx.rollback().ok();
-            return Ok(RecordPendingGateOutcome::AlreadyExistsSameGate);
-        }
-        Some(_) => {
-            tx.rollback().ok();
-            return Ok(RecordPendingGateOutcome::ConflictingGateExists);
-        }
-        None => {}
-    }
-
-    // Step 3: Insert new gate
-    let tick_val = crate::util::deterministic_time::tick() as i64;
-    tx.execute(
-        "INSERT INTO pending_online_outbox (counterparty_device_id, message_id, parent_tip, next_tip, payload, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            &counterparty_device_id[..],
-            message_id,
-            &expected_parent_tip[..],
-            &next_tip[..],
-            payload,
-            tick_val,
-        ],
-    )?;
-
-    tx.commit()?;
-    Ok(RecordPendingGateOutcome::Recorded)
-}
-
 // ── Internal helpers ──────────────────────────────────────────────────────
 
 fn should_clear_observed_tip_after_success(
@@ -393,7 +301,6 @@ fn clear_observed_remote_tip_in_tx(
     tx.execute(
         "UPDATE contacts
             SET observed_remote_chain_tip = NULL,
-                observed_remote_tip_updated_at = NULL,
                 observed_remote_tip_source = NULL
           WHERE device_id = ?1",
         params![&counterparty_device_id[..]],

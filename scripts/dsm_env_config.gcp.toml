@@ -6,11 +6,7 @@
 #   europe-west1:     35.205.9.157, 34.53.251.120
 #   asia-southeast1:  34.21.157.56, 34.87.93.29
 
-protocol = "https"
-lan_ip = "0.0.0.0"
 allow_localhost = false
-storage_node_mode = "remote"
-ports = [8080]
 
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1

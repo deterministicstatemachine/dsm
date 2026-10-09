@@ -4,20 +4,8 @@
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { AndroidBridgeV3 } from './bridgeTypes';
-import { encodeBase32Crockford } from '../utils/textId';
-import {
-  BridgeRpcRequest,
-  BridgeRpcResponse,
-  BytesPayload,
-  EmptyPayload,
-  EnvelopeOp,
-  IngressRequest,
-  IngressResponse,
-  RouterInvokeOp,
-  RouterQueryOp,
-  StartupRequest,
-  StartupResponse,
-} from '../proto/dsm_app_pb';
+import { IngressRequest, IngressResponse, RouterInvokeOp, RouterQueryOp } from '../proto/dsm_app_pb';
+import { emitDeterministicSafetyForError } from '../utils/deterministicSafety';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -34,82 +22,36 @@ function normalizeToBytes(data: unknown): Uint8Array {
   throw new Error('expected Uint8Array response from native boundary');
 }
 
-function buildBridgeRequest(method: string, payload: Uint8Array): Uint8Array {
-  const req = new BridgeRpcRequest({
-    method,
-    payload:
-      payload.length > 0
-        ? { case: 'bytes', value: new BytesPayload({ data: new Uint8Array(payload) }) }
-        : { case: 'empty', value: new EmptyPayload({}) },
-  });
-  return req.toBinary();
-}
-
-function unwrapBridgeRpcResponse(method: string, responseBytes: Uint8Array): Uint8Array {
-  let response: BridgeRpcResponse;
-  try {
-    response = BridgeRpcResponse.fromBinary(responseBytes);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`Bridge error: failed to decode response for ${method}: ${msg}`);
-  }
-  if (response.result.case === 'success') {
-    const data = response.result.value?.data;
-    return data instanceof Uint8Array ? data : new Uint8Array(0);
-  }
-  if (response.result.case === 'error') {
-    const errVal = response.result.value;
-    const message = errVal?.message || `bridge error while calling ${method}`;
-    const debugBytes = errVal ? errVal.toBinary() : new Uint8Array(0);
-    bridgeEvents.emit('bridge.error', {
-      code: errVal?.errorCode,
-      message,
-      debugB32: encodeBase32Crockford(debugBytes),
-    });
-    throw new Error(message);
-  }
-  throw new Error(`empty bridge response for ${method}`);
-}
-
-async function callBoundaryMethod(method: 'nativeBoundaryStartup' | 'nativeBoundaryIngress', payload: Uint8Array): Promise<Uint8Array> {
+async function callBoundaryMethod(method: 'nativeBoundaryIngress', payload: Uint8Array): Promise<Uint8Array> {
+  // `ingress` is the bridge object's own wrapper over the MessagePort
+  // (`index.html`); it answers the boundary's bytes or throws. The startup
+  // boundary is Kotlin's to cross, at app start; the WebView never crossed it.
   const bridge = mustBridge();
-  if (method === 'nativeBoundaryStartup' && typeof bridge.startup === 'function') {
-    return normalizeToBytes(await bridge.startup(payload));
+  const call = bridge.ingress;
+  if (typeof call !== 'function') {
+    throw new Error(`DSM bridge does not expose ${method}`);
   }
-  if (method === 'nativeBoundaryIngress' && typeof bridge.ingress === 'function') {
-    return normalizeToBytes(await bridge.ingress(payload));
+  try {
+    return normalizeToBytes(await call(payload));
+  } catch (e) {
+    // The wrapper reduces Kotlin's ErrorResponse to its message; that message
+    // reaches the diagnostics bus as the RPC path's failures do.
+    const message = e instanceof Error ? e.message : String(e);
+    bridgeEvents.emit('bridge.error', { code: 0, message, debugB32: '' });
+    throw e;
   }
-
-  const requestBytes = buildBridgeRequest(method, payload);
-  if (typeof bridge.__callBin === 'function') {
-    const responseBytes = await bridge.__callBin(requestBytes);
-    return unwrapBridgeRpcResponse(method, normalizeToBytes(responseBytes));
-  }
-  if (bridge.__binary === true && typeof bridge.sendMessageBin === 'function') {
-    const responseBytes = await bridge.sendMessageBin(requestBytes);
-    return unwrapBridgeRpcResponse(method, normalizeToBytes(responseBytes));
-  }
-  throw new Error('DSM bridge does not expose the native boundary transport');
-}
-
-function encodeStartupRequest(request: StartupRequest | Uint8Array): Uint8Array {
-  return request instanceof Uint8Array ? new Uint8Array(request) : request.toBinary();
 }
 
 function encodeIngressRequest(request: IngressRequest | Uint8Array): Uint8Array {
   return request instanceof Uint8Array ? new Uint8Array(request) : request.toBinary();
 }
 
-function unwrapStartupResponse(responseBytes: Uint8Array): Uint8Array {
-  const response = StartupResponse.fromBinary(responseBytes);
-  if (response.result.case === 'okBytes') {
-    return response.result.value;
-  }
-  if (response.result.case === 'error') {
-    throw new Error(response.result.value?.message || 'startup boundary error');
-  }
-  throw new Error('startup boundary returned no result');
-}
+/**
+ * Rust's refusal of a request: the request reached Rust and Rust answered no.
+ * Every other failure of a call (a dropped bridge, a timeout, a malformed
+ * reply) is not an answer, and a caller that must tell the two apart can.
+ */
+export class RustRefusal extends Error {}
 
 function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
   const response = IngressResponse.fromBinary(responseBytes);
@@ -117,21 +59,15 @@ function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
     return response.result.value;
   }
   if (response.result.case === 'error') {
-    throw new Error(response.result.value?.message || 'ingress boundary error');
+    // A refusal Rust tagged as deterministic safety is announced by its tag.
+    emitDeterministicSafetyForError(response.result.value);
+    throw new RustRefusal(response.result.value?.message || 'ingress boundary error');
   }
   throw new Error('ingress boundary returned no result');
 }
 
-export async function startupBoundary(request: StartupRequest | Uint8Array): Promise<Uint8Array> {
-  return callBoundaryMethod('nativeBoundaryStartup', encodeStartupRequest(request));
-}
-
 export async function ingressBoundary(request: IngressRequest | Uint8Array): Promise<Uint8Array> {
   return callBoundaryMethod('nativeBoundaryIngress', encodeIngressRequest(request));
-}
-
-export async function startupBoundaryOk(request: StartupRequest | Uint8Array): Promise<Uint8Array> {
-  return unwrapStartupResponse(await startupBoundary(request));
 }
 
 export async function ingressBoundaryOk(request: IngressRequest | Uint8Array): Promise<Uint8Array> {
@@ -158,15 +94,6 @@ export function buildRouterInvokeIngressRequest(method: string, args?: Uint8Arra
         method,
         args: args instanceof Uint8Array ? new Uint8Array(args) : new Uint8Array(0),
       }),
-    },
-  });
-}
-
-export function buildEnvelopeIngressRequest(envelopeBytes: Uint8Array): IngressRequest {
-  return new IngressRequest({
-    operation: {
-      case: 'envelope',
-      value: new EnvelopeOp({ envelopeBytes: new Uint8Array(envelopeBytes) }),
     },
   });
 }

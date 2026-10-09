@@ -2,180 +2,44 @@
 
 // Lightweight shared types for DSM UI flows and events
 import * as pb from '../proto/dsm_app_pb';
-
-export type DsmRawEvent = {
-  type?: string;
-  payload?: unknown;
-  [k: string]: unknown;
-};
-
-export type ContactAddProgress = {
-  kind: "contact:add:progress";
-  step:
-    | "qr:parsed"
-    | "qr:validated"
-    | "bridge:request_sent"
-    | "storage:verifying"
-    | "storage:verified_quorum"
-    | "done";
-  info?: Record<string, unknown>;
-};
-
-export type ContactAddSuccess = {
-  kind: "contact:add:success";
-  deviceId?: string; // base32 (Crockford)
-  verifyingNodes?: string[];
-  genesisHashBase32?: string;
-};
-
-export type ContactAddFailure = {
-  kind: "contact:add:failure";
-  error: string;
-  info?: Record<string, unknown>;
-};
-
-export type ContactAddEvent = ContactAddProgress | ContactAddSuccess | ContactAddFailure;
-
-export type DsmEventListener = (e: ContactAddEvent | DsmRawEvent) => void;
-
-// Minimal structural type for the Android/iOS WebView bridge (or web stub)
-export type DsmBridgeLike = object;
-
-// Access the bridge defensively (SSR-safe) to avoid ReferenceErrors in non-DOM contexts
-import { getBridgeInstance } from '../bridge/BridgeRegistry';
-export const getDsmBridge = (): DsmBridgeLike | undefined => {
-  try {
-    return getBridgeInstance() as DsmBridgeLike | undefined;
-  } catch {
-    return undefined;
-  }
-};
-// path: dsm_client/frontend/src/lib/types.ts
-
-// Strict discriminated result types for DSM API (protobuf-only boundary)
-export type Ok<T>  = { success: true; data: T };
-export type Err    = { success: false; error: { code: number; message: string; isRecoverable: boolean } };
-export type Result<T> = Ok<T> | Err;
+import type { ContactPairing } from '../domain/types';
 
 /**
- * Backend-verified ChainTip (pb-aligned).
- * Canonical fields only; any time-like info is audit-only and optional.
- */
-export interface ChainTipDTO {
-  tipHash: Uint8Array;            // Hash32 (32 bytes)
-  stateNumber?: bigint;           // u64 - may not be available initially
-  deviceId?: Uint8Array;          // 32 bytes - may not be available initially
-  counterpartyId?: Uint8Array;    // 32 bytes - may not be available initially
-  bilateralChainId?: string;      // string id (proto) - may not be available initially
-  anchored?: boolean;             // storage-node confirmation - defaults to false
-  anchorReceiptId?: string;       // optional external anchor ref
-  lastAnchorAttempt?: bigint;     // u64 audit-only counter/index (NOT wall-clock)
-  failedAnchorAttempts?: number;  // u32 - defaults to 0
-  auditTickMs?: bigint;           // OPTIONAL, UI-only; never hashed
-}
-
-/**
- * Bilateral relationship view (pb-aligned).
- * No hex/base64 at the boundary; binary everywhere.
+ * A contact as `contacts.list` states it (pb-aligned, binary). Rust writes the
+ * device id, genesis, signing key and alias on every contact.
  */
 export interface BilateralRelationshipDTO {
-  deviceId: Uint8Array;             // 32 bytes device id
-  publicKey: Uint8Array;          // raw PQ key bytes
-  alias: string;            // user label
-  genesisHash?: Uint8Array;       // 32 bytes genesis hash (if known)
-  lastSeenTick?: bigint;          // canonical progress indicator (no clocks)
-  chainTip?: ChainTipDTO;         // current bilateral tip
-  bleAddress?: string;           // BLE MAC address for offline bilateral transfers
-  genesisVerifiedOnline?: boolean; // genesis hash verified via storage node
-  addedCounter?: bigint;           // commit height when contact was added
+  deviceId: Uint8Array;             // 32 bytes
+  publicKey: Uint8Array;            // SPHINCS+ signing key, 64 bytes
+  alias: string;
+  genesisHash: Uint8Array;          // 32 bytes
+  /** The relationship's tip, once it has one. */
+  chainTip?: Uint8Array;            // 32 bytes
+  bleAddress?: string;              // BLE MAC address for offline bilateral transfers
+  pairing: ContactPairing;          // where BLE pairing stands, as Rust's pairing loop has it
+  genesisVerifiedOnline: boolean;   // genesis hash verified via storage node
   sendStatus?: pb.RelationshipSendStatus;
 }
 
-export interface BilateralRelationshipsListDTO {
-  relationships: BilateralRelationshipDTO[];
-  totalCount?: number;
-}
-
-/**
- * Token balance in base units (no FP).
- */
-export interface BalanceDTO {
-  tokenId: string;                // canonical token id (proto string)
-  baseUnits: bigint;              // u128 as bigint (amount)
-  decimals: number;               // display hint (e.g., ERA=8)
-  symbol?: string;                // optional UI hint
-}
-
-/**
- * Deterministic transaction shape (pb-aligned).
- * No time fields in canon; optional audit tick is UI-only.
- */
-export interface TransactionDTO {
-  hash: Uint8Array;               // 32 bytes
-  amount: bigint;                 // s128/u128 normalized to bigint
-  from: Uint8Array;               // 32 bytes device id
-  to: Uint8Array;                 // 32 bytes device id
-  tokenId: string;                // token id
-  fee?: bigint;                   // optional fee in base units
-  logicalIndex?: bigint;          // device-local deterministic counter
-  type: 'transfer' | 'mint' | 'burn';
-  auditTickMs?: bigint;           // OPTIONAL UI-only
-}
-
-export interface TransactionHistoryDTO {
-  transactions: TransactionDTO[];
-  totalCount?: number;
-  hasMore?: boolean;
-}
-
-/**
- * Platform status (transport/UI only).
- */
-export interface BluetoothStatusDTO {
-  enabled: boolean;
-  scanning: boolean;
-  advertising: boolean;
-  available: boolean;
-}
-
-/**
- * Genesis/identity summary (pb-aligned).
- * Avoid clocks; include optional UI audit tick separately.
- */
-export interface GenesisDTO {
-  genesis_hash: Uint8Array;       // 32 bytes
-  identity_created: boolean;
-  chainIndex?: bigint;            // optional deterministic index
-  auditTickMs?: bigint;           // OPTIONAL UI-only
-}
-
-// Testnet faucet for token distribution.
-
-/**
- * Unilateral inbox check (UI helper).
- */
-export interface B0xCheckDTO {
-  pending_transactions: TransactionDTO[];
-  inbox_available: boolean;
-}
-
-export interface NetworkStatusDTO {
-  connected: boolean;
-  latency?: number;               // UI-only hint
-}
-
-/** UI-level transaction shape used by sendOnlineTransfer/offlineSend. */
+/** UI-level transaction shape used by offlineSend. */
 export type GenericTransaction = {
   tokenId: string;
-  to: string; // Base32 Crockford device id
+  /** Base32 Crockford device id, or the raw 32 bytes. Both paths are
+   *  implemented in offlineSend; the type said string only. */
+  to: Uint8Array | string;
   amount: string | number | bigint;
   memo?: string;
-  bleAddress?: string;
 };
 
-/** UI-level response shape returned by sendOnlineTransfer/offlineSend. */
+/** UI-level response shape returned by offlineSend. */
 export type GenericTxResponse = {
   accepted: boolean;
+  /**
+   * The screen stopped waiting while the step is still open: it completes when
+   * the devices meet again, and until its confirm its proposer may cancel it.
+   * Not a failure.
+   */
+  open?: boolean;
   result?: string;
   txHash?: string;
   newBalance?: bigint;
@@ -183,87 +47,53 @@ export type GenericTxResponse = {
 };
 
 /**
- * Storage Node Status View
+ * What a member of the pinned storage set answered when the SDK asked for its
+ * latest ByteCommit. An observation, never a verdict: a member that did not
+ * answer has not failed, and a ByteCommit is as the member stated it.
  */
+export type StorageMemberAnswer =
+  | {
+      kind: 'latest';
+      cycle: bigint;
+      bytesUsed: bigint;
+      rootB32: string;
+      parentB32: string;
+      /** d_t, computed by Core from the commit's fields. */
+      digestB32: string;
+    }
+  | { kind: 'noCycle' }
+  | { kind: 'unanswered'; why: string };
+
+/** One member of the pinned storage set, as `storage.status` reports it. */
+export interface StorageMember {
+  /** The member id exactly as the set commits it. */
+  memberId: string;
+  registerIncarnationB32: string;
+  /** Transport only; resolved outside committed state. */
+  endpoint: string;
+  answer: StorageMemberAnswer;
+  /** The member id the answering node echoed, when it echoed one. */
+  answeredAs?: string;
+}
+
+/** `storage.status`: the storage set this device's traffic uses. */
 export interface StorageStatus {
-  nodeId: string;
-  isReachable: boolean;
-  latencyMs: number;
-  lastSyncTick?: bigint; // logical tick
-  storageUsedBytes: number;
-  quotaBytes: number;
-  isPaid: boolean;
-  subscriptions: Array<{
-    topic: string;
-    expiresAtTick: bigint;
-  }>;
-  // Proto StorageStatusResponse fields (used by StorageScreen overview)
-  totalNodes?: number;
-  connectedNodes?: number;
-  dataSize?: string;
-  backupStatus?: string;
+  networkId: string;
+  storageSetIdB32: string;
+  /** In the set's member order. */
+  members: StorageMember[];
+  /** `storage.sync` runs that ran to their end on this device. */
+  completedSyncs: bigint;
+  /** The size of this device's database file. */
+  databaseBytes: bigint;
 }
 
 /**
- * Deterministic Limbo Vault (DLV) index entry
- */
-export interface DlvIndexEntry {
-  vaultId: string;
-  createdAtTick: bigint;
-  status: 'locked' | 'unlocked' | 'expired' | 'LOCKED' | 'UNLOCKABLE' | 'LIVE' | 'SPENT' | 'EXPIRED';
-  balance: BalanceDTO;
-  conditions: Array<{
-    type: string;
-    description: string;
-    isMet: boolean;
-  }>;
-  cptaAnchorHex: string;
-  expectedReplication: number;
-  localLabel: string;
-  kind: string;
-}
-
-/**
- * Wallet History Item
- */
-export interface WalletHistoryItem {
-  id: string;
-  type: 'send' | 'receive' | 'mint' | 'burn';
-  amount: BalanceDTO;
-  counterparty: string;
-  status: 'pending' | 'completed' | 'failed';
-  date: Date;
-  txHash: string;
-}
-
-/**
- * Wallet Inbox Item (Pending Actions)
- */
-export interface WalletInboxItem {
-  id: string;
-  type: 'ble_request' | 'payment_request' | 'contact_request';
-  from: string;
-  summary: string;
-  receivedAt: Date;
-  expiresAt?: Date;
-  actions: Array<{
-    label: string;
-    actionId: string;
-    isPrimary: boolean;
-  }>;
-}
-
-// -- Missing Types from Refactor --
-
-/**
- * Identity information
+ * The device's identity as its transport headers carry it.
  */
 export interface IdentityInfo {
   deviceId: string; // Base32
-  deviceEntropy: string; // Hex or B32
-  isRegistered: boolean;
   genesisHash: string; // Base32
-  networkId: string;
 }
 
 /**
@@ -278,40 +108,111 @@ export interface ContactsList {
  * Add Contact Arguments
  */
 export interface AddContactArgs {
+  /** Empty: Rust names the contact by its device. */
   alias: string;
-  deviceId: Uint8Array | string;
-  genesisHash: Uint8Array | string;
-  signingPublicKey: Uint8Array | string;
+  deviceId: Uint8Array;
+  genesisHash: Uint8Array;
+  signingPublicKey: Uint8Array;
+}
+
+/**
+ * The card a contact code carries, as Rust read it (`contacts.readContactCode`).
+ * Rust refuses a code that is not whole or names another network than this
+ * device's.
+ */
+export interface ContactCard {
+  deviceId: Uint8Array;
+  genesisHash: Uint8Array;
+  signingPublicKey: Uint8Array;
+  network: string;
+  /** The alias the card's owner suggests, when it names one. */
+  preferredAlias?: string;
+}
+
+/**
+ * One item `inbox.pull` found queued for this device, as Rust described it.
+ * Rust writes the id and the preview on every item; `isStaleRoute` marks an
+ * item found at the address derived from the contact's previous tip.
+ */
+export interface InboxItemView {
+  id: string;
+  preview: string;
+  senderId?: string;
+  isStaleRoute: boolean;
 }
 
 /**
  * Add Contact Result
  */
-export interface AddContactResult {
-  accepted: boolean;
-  contactId?: string; // Base32 DeviceID
-  error?: string;
-}
+export type AddContactResult =
+  /** The contact Rust added: its device (Base32) and the alias Rust stored. */
+  | { accepted: true; contactId: string; alias: string }
+  /** Rust's refusal, as Rust worded it. */
+  | { accepted: false; error: string };
 
 /**
- * Token Balance View (UI Friendly)
+ * One row of `balance.list`, as Rust reported it. Rust enriches every row at
+ * its encoding boundary, so a row without its token, symbol, name or display
+ * amount is refused, never filled in.
  */
+/** The two kinds of holding the wallet lists apart. */
+export type BalanceHoldingView = 'currency' | 'object';
+
 export interface TokenBalanceView {
-  tokenId: string; // string id
-  ticker: string;
-  balance: string; // formatted decimal string
+  /** The ticker the balance is projected under. Not an identity: see `canonicalTokenId`. */
+  tokenId: string;
+  symbol: string;
+  tokenName: string;
+  /** The available balance in base units. */
   baseUnits: bigint;
   decimals: number;
-  symbol: string;
-  tokenName?: string;
   /** Display form of `baseUnits`, rendered by Rust. Never computed here. */
-  displayAmount?: string;
-  /** The token's canonical id. `tokenId` on the wire is the TICKER, which is not an identity. */
+  displayAmount: string;
+  /** The token's canonical id, when Rust names one (registered tokens). */
   canonicalTokenId?: string;
   /** CPTA policy anchor, Base32 Crockford, rendered by Rust. Carried, never derived. */
   policyAnchorB32?: string;
   /** Short head of the anchor, for visual comparison before adopting. */
   anchorFingerprint?: string;
+  /** The token policy's icon field, carried from Rust; the wallet draws the token's coin from it. */
+  iconUrl?: string;
+  /**
+   * Whether Rust reports the token as one the protocol defines (ERA, dBTC).
+   * Never decided here: a ticker is text, and a created token may read "ERA".
+   */
+  protocolDefined: boolean;
+  /** The whole supply that will ever exist, rendered by Rust; absent when Rust holds none. */
+  genesisSupplyDisplay?: string;
+  /**
+   * What kind of holding this is, as Rust decided from the committed supply: a
+   * token that exists exactly once (a creature, an item) is a state `object`,
+   * anything else a `currency`. Listed apart; never decided here. Rust always
+   * states it; a row built without Rust (a practice coin) is a currency.
+   */
+  holding?: BalanceHoldingView;
+  /** What the committed policy permits, as Rust read it; absent when Rust holds no policy for the token. */
+  permissions?: TokenPolicyPermissionsView;
+  /**
+   * Cash in hand: what this device has loaded into its offline allocation of
+   * the token, as Rust read it under the attached appliance's bundle. An
+   * offline send spends from it; it is not part of `baseUnits`. Absent until
+   * an anchor appliance has been attached since the app started: unknown,
+   * never zero.
+   */
+  offline?: OfflineAllocationView;
+}
+
+/** A token's offline allocation on this device, as Rust reported it. */
+export interface OfflineAllocationView {
+  baseUnits: bigint;
+  /** Display form of `baseUnits`, rendered by Rust. Never computed here. */
+  displayAmount: string;
+}
+
+/** The permission flags of a committed token policy, as Rust read them. */
+export interface TokenPolicyPermissionsView {
+  burnEnabled: boolean;
+  transferable: boolean;
 }
 
 /**

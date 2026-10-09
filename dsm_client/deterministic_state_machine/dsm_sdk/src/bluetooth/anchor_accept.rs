@@ -144,9 +144,9 @@ impl DsmVerifier for DsmStateVerifier<'_> {
         // hook to re-check from its arguments.
         //
         // What Def. 12 step 12 actually asks for is `σ^DSM` over the transition plus the whole-state
-        // consumption `R_i → R_{i+1}`. That CANNOT be verified here: the relationship proofs
-        // (`rel_proof_parent`, `rel_proof_child`) are not carried in the OfflineRelease. The
-        // bilateral handler verifies them, together with the §C1 `h_{n+1}` recompute, and
+        // consumption `R_i → R_{i+1}`. That CANNOT be verified here: the relationship path is not
+        // carried in the OfflineRelease — it rides in the stitched receipt. The bilateral handler
+        // verifies the receipt's state rules, together with the §C1 `h_{n+1}` recompute, and
         // `accept_offline_release` refuses before running the predicate unless the cert's device
         // roots equal the ones the handler verified (anchor_accept.rs:251-257).
         //
@@ -229,6 +229,45 @@ pub(crate) fn pin_admit_decision(
     PinAdmitDecision::NoChange
 }
 
+/// The anchor-state leaves a sender's offline-bearer step moves, DERIVED — never read — from its
+/// release: the counter's successor is `u_i + 1`, and the frontier's successor is
+/// `anchor_root_advance(h_i, D_{i+1})` with `D_{i+1}` recomputed from the release's transition
+/// under this receiver's own challenge `r_R`. Both leaves are under `bundle`, the one this
+/// receiver pins (or is admitting) for the sender. A release whose carried successor is not the
+/// derived one is refused. The release's signatures are checked by [`accept_offline_release`]
+/// before anything commits; these leaves are what the step's receipt must prove it moved.
+pub fn bearer_leaves_of_release(
+    offline_release: &[u8],
+    bundle: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Result<dsm::verification::receipt_verification::BearerLeaves, OfflineRecover> {
+    use anchor_core::root_advance::{anchor_root_advance, anchor_state_leaf, transition_digest};
+    if offline_release.is_empty() {
+        return Err(OfflineRecover::MissingRelease);
+    }
+    let rel = pb::OfflineRelease::decode(offline_release)
+        .map_err(|_| OfflineRecover::Malformed)?
+        .to_release()
+        .map_err(|_| OfflineRecover::Malformed)?;
+    let t = rel.transition.as_transition();
+    let next_counter = t
+        .anchor_counter
+        .checked_add(1)
+        .ok_or(OfflineRecover::Malformed)?;
+    let next_frontier =
+        anchor_root_advance(t.prev_root, &transition_digest(&t, receiver_challenge));
+    if t.next_anchor_counter != next_counter || *t.next_root != next_frontier {
+        return Err(OfflineRecover::Predicate(
+            AcceptError::TransitionProofInvalid,
+        ));
+    }
+    Ok(dsm::verification::receipt_verification::BearerLeaves {
+        bundle: *bundle,
+        anchor_before: anchor_state_leaf(bundle, t.prev_root, t.anchor_counter),
+        anchor_after: anchor_state_leaf(bundle, &next_frontier, next_counter),
+    })
+}
+
 /// The holder's successor frontier state, returned on acceptance so the receiver can ADOPT it
 /// (persist as the new accepted frontier) once the canonical commit succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,7 +308,7 @@ pub fn accept_offline_release(
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
 
     // Tie the cert's device roots to the roots the handler INDEPENDENTLY verified from the confirm
-    // (rel_proof_parent/child + §C1 recompute). The predicate checks Π against the CERT roots; if
+    // (the stitched receipt's relationship path + §C1 recompute). The predicate checks Π against the CERT roots; if
     // the cert roots were not the actual verified device roots, the sender could sign an arbitrary
     // parallel tree — reject before running the predicate.
     if rel.cert.sender_device_root_before != *expected_sender_device_root_before

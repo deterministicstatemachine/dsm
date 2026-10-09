@@ -21,13 +21,25 @@ use crate::sdk::session_manager::SESSION_MANAGER;
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{err, pack_envelope_ok};
 
+/// A PROTO ArgPack's body, decoded as `M`.
+fn decode_proto<M: Message + Default>(args: &[u8], route: &str) -> Result<M, String> {
+    let arg_pack =
+        generated::ArgPack::decode(args).map_err(|e| format!("{route}: decode ArgPack: {e}"))?;
+    if arg_pack.codec != generated::Codec::Proto as i32 {
+        return Err(format!("{route}: ArgPack.codec must be PROTO"));
+    }
+    M::decode(&*arg_pack.body).map_err(|e| format!("{route}: decode request: {e}"))
+}
+
 impl AppRouterImpl {
     /// Dispatch handler for `session.*` query routes.
     pub(crate) async fn handle_session_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "session.status" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
             }
@@ -40,42 +52,69 @@ impl AppRouterImpl {
         match i.method.as_str() {
             "session.lock" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
-                mgr.lock_now();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
+                if let Err(e) = mgr.lock_now() {
+                    return err(format!("session.lock: {e}"));
+                }
                 log::info!("SessionRoutes: session locked via invoke");
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
             }
 
+            // The PIN or pattern, or the recovery phrase, checked by Rust
+            // (`app_lock`). The answer is the session snapshot: still locked
+            // after a miss, with the tries left or the phrase required.
             "session.unlock" => {
+                let req = match decode_proto::<generated::SessionUnlockRequest>(
+                    &i.args,
+                    "session.unlock",
+                ) {
+                    Ok(r) => r,
+                    Err(e) => return err(e),
+                };
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
-                mgr.unlock_now();
-                log::info!("SessionRoutes: session unlocked via invoke");
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
+                let tried = match req.key {
+                    Some(generated::session_unlock_request::Key::Secret(secret)) => {
+                        mgr.try_unlock(&secret).map(|t| format!("{t:?}"))
+                    }
+                    Some(generated::session_unlock_request::Key::RecoveryPhrase(phrase)) => mgr
+                        .try_unlock_with_phrase(&phrase)
+                        .map(|t| format!("{t:?}")),
+                    None => {
+                        return err(
+                            "session.unlock: a PIN, pattern or recovery phrase is required".into(),
+                        )
+                    }
+                };
+                match tried {
+                    Ok(answer) => log::info!("SessionRoutes: unlock tried: {answer}"),
+                    Err(e) => return err(format!("session.unlock: {e}")),
+                }
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
             }
 
             "session.configure_lock" => {
-                let arg_pack = match generated::ArgPack::decode(&*i.args) {
-                    Ok(p) => p,
-                    Err(e) => return err(format!("decode ArgPack failed: {e}")),
-                };
-                if arg_pack.codec != generated::Codec::Proto as i32 {
-                    return err("session.configure_lock: ArgPack.codec must be PROTO".into());
-                }
-                let req = match generated::SessionConfigureLockRequest::decode(&*arg_pack.body) {
+                let req = match decode_proto::<generated::SessionConfigureLockRequest>(
+                    &i.args,
+                    "session.configure_lock",
+                ) {
                     Ok(r) => r,
-                    Err(e) => {
-                        return err(format!(
-                            "session.configure_lock: decode SessionConfigureLockRequest failed: {e}"
-                        ))
-                    }
+                    Err(e) => return err(e),
                 };
 
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.configure_lock(req.enabled, &req.method, req.lock_on_pause);
-                mgr.persist_lock_config_to_app_state();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
+                if let Err(e) = mgr.configure_lock(&req.method, req.lock_on_pause, &req.secret) {
+                    return err(format!("session.configure_lock: {e}"));
+                }
                 log::info!(
                     "SessionRoutes: lock configured enabled={} method={} lock_on_pause={}",
                     mgr.lock_enabled,
@@ -96,8 +135,12 @@ impl AppRouterImpl {
                     }
                 };
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
-                mgr.apply_hardware_facts(&facts);
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
+                if let Err(e) = mgr.apply_hardware_facts(&facts) {
+                    return err(format!("session.hardware_update: {e}"));
+                }
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
             }
@@ -106,13 +149,16 @@ impl AppRouterImpl {
                 // args = ArgPack with body = error message string (UTF-8 bytes)
                 let error_msg = match generated::ArgPack::decode(&*i.args) {
                     Ok(pack) => String::from_utf8_lossy(&pack.body).to_string(),
-                    Err(_) => {
-                        // Fallback: treat raw args as UTF-8 error message
-                        String::from_utf8_lossy(&i.args).to_string()
+                    Err(e) => {
+                        return err(format!(
+                            "session.set_fatal_error: decode ArgPack failed: {e}"
+                        ))
                     }
                 };
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
                 mgr.fatal_error = if error_msg.is_empty() {
                     None
                 } else {
@@ -125,7 +171,9 @@ impl AppRouterImpl {
 
             "session.clear_fatal_error" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-                mgr.sync_lock_config_from_app_state();
+                if let Err(e) = mgr.sync_lock_config_from_app_state() {
+                    return err(format!("session lock settings: {e}"));
+                }
                 mgr.fatal_error = None;
                 log::info!("SessionRoutes: fatal error cleared");
                 let snapshot = mgr.compute_snapshot();

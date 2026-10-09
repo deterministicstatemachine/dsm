@@ -75,12 +75,7 @@ pub fn difficulty_floor(network: BitcoinNetwork) -> Option<u32> {
 /// In Bitcoin's compact target format, a *lower* nBits exponent byte means
 /// *higher* difficulty. We compare the full 256-bit targets: the block's
 /// target must be <= the floor target.
-pub fn meets_difficulty_floor(header: &[u8; 80], network: BitcoinNetwork) -> bool {
-    let floor_nbits = match difficulty_floor(network) {
-        Some(f) => f,
-        None => return true, // no floor for this network
-    };
-
+pub fn meets_difficulty_floor(header: &[u8; 80], floor_nbits: u32) -> bool {
     let block_nbits = extract_nbits(header);
     let block_target = nbits_to_target(block_nbits);
     let floor_target = nbits_to_target(floor_nbits);
@@ -197,15 +192,19 @@ pub fn verify_header_chain(
         if !verify_block_header_work(h) {
             return Ok(false);
         }
-        if !meets_difficulty_floor(h, network) {
-            return Ok(false);
+        if let Some(floor) = difficulty_floor(network) {
+            if !meets_difficulty_floor(h, floor) {
+                return Ok(false);
+            }
         }
     }
 
     // Validate block_header itself (PoW already checked by verify_tx_in_block,
     // but check difficulty floor here)
-    if !meets_difficulty_floor(block_header, network) {
-        return Ok(false);
+    if let Some(floor) = difficulty_floor(network) {
+        if !meets_difficulty_floor(block_header, floor) {
+            return Ok(false);
+        }
     }
 
     Ok(true)
@@ -283,8 +282,10 @@ pub fn verify_entry_anchor(
         if !verify_block_header_work(h) {
             return Ok(false);
         }
-        if !meets_difficulty_floor(h, network) {
-            return Ok(false);
+        if let Some(floor) = difficulty_floor(network) {
+            if !meets_difficulty_floor(h, floor) {
+                return Ok(false);
+            }
         }
     }
 
@@ -557,7 +558,10 @@ mod tests {
         // 0x20ffffff is very easy — should fail mainnet floor
         let mut header = [0u8; 80];
         header[72..76].copy_from_slice(&0x20ffffffu32.to_le_bytes());
-        assert!(!meets_difficulty_floor(&header, BitcoinNetwork::Mainnet));
+        assert!(!meets_difficulty_floor(
+            &header,
+            difficulty_floor(BitcoinNetwork::Mainnet).unwrap()
+        ));
     }
 
     #[test]
@@ -565,13 +569,9 @@ mod tests {
         // 0x1800ffff is harder than 0x1900ffff — should pass
         let mut header = [0u8; 80];
         header[72..76].copy_from_slice(&0x1800ffffu32.to_le_bytes());
-        assert!(meets_difficulty_floor(&header, BitcoinNetwork::Mainnet));
-    }
-
-    #[test]
-    fn meets_difficulty_floor_testnet_always() {
-        let mut header = [0u8; 80];
-        header[72..76].copy_from_slice(&0x20ffffffu32.to_le_bytes());
-        assert!(meets_difficulty_floor(&header, BitcoinNetwork::Testnet));
+        assert!(meets_difficulty_floor(
+            &header,
+            difficulty_floor(BitcoinNetwork::Mainnet).unwrap()
+        ));
     }
 }

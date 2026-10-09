@@ -1,53 +1,45 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Library crate for dsm_storage_node: shared types and routers for tests
+//! The storage node: its state, the storage contract's routes (storage spec
+//! Part II §12), the b0x spool, and the one assembly the binary serves.
 #![deny(warnings)]
 
 use axum::Extension;
-use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 pub mod api;
-pub mod auth;
 pub mod db;
-#[cfg(feature = "dev-replication")]
-pub mod dev_replication;
-pub mod replication;
-pub mod timing;
-
-use replication::StorageNodeId;
+pub mod set_client;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub node_id: StorageNodeId,
-    /// The protocol identity EXACTLY as configured (`[node] id`) — the string
-    /// a client's catalog names, the value the identity echo layer emits, and
-    /// therefore the `member_id` every generic-binding answer carries. Kept
-    /// beside the canonical 32-byte `node_id` because the two are different
-    /// facts: one is how peers address this node, the other is who a quorum
-    /// counts.
+    /// The protocol identity EXACTLY as configured (`[node] id`): the string
+    /// the storage set names, the value the identity echo layer emits, and
+    /// the `member_id` of every ByteCommit and arrival record this node
+    /// signs for.
     pub configured_member_id: String,
-    pub hsts_max_age: Option<u64>,
+    /// `configured_member_id` as the header value the echo layer sends.
+    member_id_header: axum::http::HeaderValue,
     pub db_pool: Arc<db::DBPool>,
-    pub replication_manager: Arc<replication::ReplicationManager>,
-    pub current_tick: Arc<AtomicI64>,
+    /// The client pinned to the storage set's CA (see [`set_client`]).
+    pub set_client: reqwest::Client,
     /// The canonical storage set this node is a member of (`[storage_set]
     /// members = [...]` in config, canonical id derived exactly as clients derive
-    /// it). `None` = not configured: the settlement-slot register refuses every
-    /// claim (fail closed) rather than accepting claims for an unknown set.
+    /// it). `None` = not configured: the node serves the storage contract but
+    /// has no set-mates to mirror.
     pub storage_set: Option<Arc<NodeStorageSet>>,
-    /// The register incarnation THIS node is serving — minted once into its
-    /// own database at first boot, established before anything is served.
-    /// Stamped on every generic-binding answer so a caller can tell this
-    /// register history from a rebuilt one wearing the same node id.
-    pub own_register_incarnation: Option<[u8; 32]>,
-    /// The DSM network this node serves (`node.network_id` in config). Gates
-    /// the ERA faucet-ticket register: the canonical faucet identity is
-    /// NETWORK-SCOPED (`era_faucet_id(network_id)`), so a node that does not
-    /// know its network cannot tell the canonical faucet from an invented
-    /// one and refuses every ticket claim (fail closed) rather than
-    /// defaulting. `None` = faucet register inactive.
-    pub network_id: Option<Arc<Vec<u8>>>,
+    /// ByteCommit mirror syncs, one at a time per set-mate: a caller asking
+    /// while one runs waits for it and shares the next, instead of queuing a
+    /// sync of its own.
+    pub mirror_syncs: Arc<api::objects::bytecommit::MirrorSyncs>,
+    /// The closer lock, held while a cycle closes (a closer waits there,
+    /// before it takes a database connection, so closers queued behind one
+    /// another hold no connection and cannot starve every other request of
+    /// the pool), and what this process keeps of its closed cycles: the leaf
+    /// set of the last one and the trees proofs are read from.
+    pub committed: Arc<db::CommittedCells>,
+    /// Devices' waits on their spools (long-poll), woken by each submit.
+    pub spool_waits: api::transport::b0x::SpoolWaits,
 }
 
 /// This node's view of the canonical storage set it belongs to.
@@ -60,10 +52,14 @@ pub struct NodeStorageSet {
     /// them, and its configured incarnation must be the one this node's
     /// database actually holds.
     pub members: Vec<(String, [u8; 32])>,
-    /// This node's own register incarnation — the value it echoes on every
-    /// register read so a reader can tell it apart from a rebuilt member
-    /// wearing the same node id.
+    /// This node's own register incarnation, as its database holds it and
+    /// the set commits it.
     pub own_incarnation: [u8; 32],
+    /// Where each set-mate is reached, from this node's own configuration
+    /// (`endpoint` on `[[storage_set.members]]`). A node mirrors every
+    /// set-mate's ByteCommits by fetching them at this endpoint and nowhere
+    /// else (storage spec §14, mirror provenance and mirror sync).
+    pub endpoints: Vec<(String, String)>,
 }
 
 impl NodeStorageSet {
@@ -94,196 +90,118 @@ impl NodeStorageSet {
                 "storage_set.members lists a register incarnation for this node ({}) that is \
                  not the one this node's database holds ({}) — this node's register was \
                  rebuilt or restored, so it is no longer the member the configured set names",
-                dsm_sdk::util::text_id::encode_base32_crockford(configured_own),
-                dsm_sdk::util::text_id::encode_base32_crockford(&own_incarnation)
+                dsm::utils::text_id::encode_base32_crockford(configured_own),
+                dsm::utils::text_id::encode_base32_crockford(&own_incarnation)
             );
         }
-        let entries: Vec<(&str, [u8; 32])> =
-            members.iter().map(|(m, i)| (m.as_str(), *i)).collect();
-        let id = dsm_sdk::sdk::storage_set::compute_storage_set_id(&entries)
+        let pairs: Vec<(&[u8], [u8; 32])> =
+            members.iter().map(|(m, i)| (m.as_bytes(), *i)).collect();
+        let committed = dsm::ccb::StorageSetMembers::new(&pairs)
+            .map_err(|e| anyhow::anyhow!("storage_set.members: {e}"))?;
+        let id = dsm::ccb::storage_set_id(&committed)
             .map_err(|e| anyhow::anyhow!("storage_set.members: {e}"))?;
         Ok(Self {
             id,
             members,
             own_incarnation,
+            endpoints: Vec::new(),
         })
     }
 
-    /// The configured member ids, for logging and endpoint resolution.
-    pub fn member_ids(&self) -> impl Iterator<Item = &str> {
-        self.members.iter().map(|(m, _)| m.as_str())
+    /// Attach each set-mate's configured endpoint. A node mirrors every node
+    /// it shares the set with (storage spec §14), so every member other than
+    /// `own_node_id` needs one. Refuses a missing endpoint, an endpoint for an
+    /// id that is not a member, and a member named twice.
+    pub fn with_endpoints(
+        mut self,
+        own_node_id: &str,
+        endpoints: Vec<(String, String)>,
+    ) -> anyhow::Result<Self> {
+        for (i, (member, _)) in endpoints.iter().enumerate() {
+            if !self.members.iter().any(|(m, _)| m == member) {
+                anyhow::bail!("storage_set endpoint names {member:?}, which is not a member");
+            }
+            if endpoints[..i].iter().any(|(m, _)| m == member) {
+                anyhow::bail!("storage_set names an endpoint for {member:?} twice");
+            }
+        }
+        for (member, _) in &self.members {
+            if member != own_node_id && !endpoints.iter().any(|(m, _)| m == member) {
+                anyhow::bail!(
+                    "storage_set member {member:?} has no endpoint: this node mirrors every \
+                     set-mate's ByteCommits and can reach one only at its configured endpoint"
+                );
+            }
+        }
+        self.endpoints = endpoints;
+        Ok(self)
+    }
+
+    /// `(member id, endpoint)` for every member with a configured endpoint.
+    pub fn member_endpoints(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.endpoints.iter().map(|(m, e)| (m.as_str(), e.as_str()))
     }
 }
 
 impl AppState {
-    /// Build an AppState. The supplied `node_id_input` is canonicalised exactly
-    /// like `canonical_node_info` does for gossip: if it is a valid 32-byte
-    /// base32-crockford string, it is decoded as-is; otherwise a 32-byte node
-    /// id is derived from `address_or_seed`. The result is the single
-    /// canonical operator identity used across replication, ByteCommit
-    /// emission, HTTP headers, and DB chain anchoring.
+    /// The state of the node configured as `member_id`. Refuses a member id
+    /// that cannot be sent as the identity echo: a set-mate mirroring this
+    /// node keeps a ByteCommit only when the echo names the member the
+    /// ByteCommit names (storage spec §14, mirror sync).
     pub fn new(
-        node_id_input: String,
-        address_or_seed: &str,
-        hsts_max_age: Option<u64>,
+        member_id: String,
         db_pool: Arc<db::DBPool>,
-        replication_manager: Arc<replication::ReplicationManager>,
-    ) -> Self {
-        let configured_member_id = node_id_input.clone();
-        let node_id =
-            StorageNodeId::from_base32_or_derive(&node_id_input, address_or_seed.as_bytes());
-        Self {
-            node_id,
-            configured_member_id,
-            hsts_max_age,
+        set_client: reqwest::Client,
+    ) -> anyhow::Result<Self> {
+        let member_id_header = axum::http::HeaderValue::from_str(&member_id).map_err(|e| {
+            anyhow::anyhow!("node id {member_id:?} cannot be sent as the identity echo: {e}")
+        })?;
+        Ok(Self {
+            configured_member_id: member_id,
+            member_id_header,
             db_pool,
-            replication_manager,
-            current_tick: Arc::new(AtomicI64::new(0)),
+            set_client,
             storage_set: None,
-            own_register_incarnation: None,
-            network_id: None,
-        }
+            mirror_syncs: Arc::new(api::objects::bytecommit::MirrorSyncs::default()),
+            committed: Arc::new(db::CommittedCells::default()),
+            spool_waits: api::transport::b0x::SpoolWaits::default(),
+        })
     }
 
     /// Attach this node's canonical storage set (see [`NodeStorageSet`]).
-    pub fn with_network_id(mut self, network_id: Vec<u8>) -> Self {
-        self.network_id = Some(Arc::new(network_id));
-        self
-    }
-
-    /// Record the register incarnation this node established at startup.
-    pub fn with_register_incarnation(mut self, incarnation: [u8; 32]) -> Self {
-        self.own_register_incarnation = Some(incarnation);
-        self
-    }
-
     pub fn with_storage_set(mut self, set: NodeStorageSet) -> Self {
         self.storage_set = Some(Arc::new(set));
         self
     }
 }
 
-/// The device-authenticated WRITE half of the two economic write-once
-/// registers (faucet tickets, economic roots), behind `auth::device_auth` so
-/// attribution runs against the authenticated key AND device.
+/// The four operations of the storage contract (Part II §12) — put object,
+/// put at a key, append to an index, get — as ONE assembly, used by the
+/// binary and by the contract suites, so what the suites drive is what the
+/// binary serves.
 ///
-/// ONE assembly, used by the binary's router and by the register conformance
-/// suite, so what the suite drives is what the binary serves.
-pub fn economic_register_write_router(state: Arc<AppState>) -> axum::Router<()> {
-    let auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    api::economic::faucet_ticket::create_write_router()
-        .merge(api::economic::root_register::create_write_router())
-        .layer(axum::middleware::from_fn_with_state(
-            auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state))
+/// No write authorization on any of them: a member never checks who carries
+/// the bytes, because every object carries its own authority and derived
+/// objects need none.
+pub fn storage_contract_router(state: Arc<AppState>) -> axum::Router<()> {
+    api::cells::create_router(state.clone())
+        .merge(api::objects::bytecommit::create_router(state.clone()))
+        .merge(api::objects::immutable::create_read_router(state.clone()))
+        .merge(api::objects::immutable::create_write_router().layer(Extension(state)))
 }
 
-/// The write half of the generic conditional-binding interface (Rev 15
-/// §15.5): `CompareExchangeMany` behind device auth. The node relates the
-/// caller to nothing — there is no claimant in a generic record — device
-/// auth only says a registered device is writing.
-pub fn generic_binding_write_router(state: Arc<AppState>) -> axum::Router<()> {
-    let auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    api::storage::binding::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state))
-}
-
-/// The public read half of the same interface: `ReadBinding`.
-pub fn generic_binding_read_router(state: Arc<AppState>) -> axum::Router<()> {
-    api::storage::binding::create_read_router(state)
-}
-
-/// The public READ half of the same two registers. The binary rate-limits it;
-/// the conformance suite mounts it bare.
-pub fn economic_register_read_router(state: Arc<AppState>) -> axum::Router<()> {
-    api::economic::faucet_ticket::create_read_router(state.clone())
-        .merge(api::economic::root_register::create_read_router(state))
-}
-
-/// Echo this node's configured protocol identity on EVERY response.
-///
-/// A client fanning a keyed write out over a canonical storage set counts an
-/// acceptance only when the answering node IS the member its catalog says
-/// lives at that endpoint — "distinct members" is executable, not
-/// administrative. This is identity, not authentication (crash-fault node
-/// model): it prevents two catalog entries on one physical node from yielding
-/// two acceptances; it does not prove the node is honest. The value is the
-/// RAW configured id, byte-for-byte what the client's catalog names.
+/// Echo this node's configured protocol identity on every response, byte
+/// for byte what the storage set names. A set-mate mirroring this node's
+/// ByteCommits keeps one only when the echo names the member the ByteCommit
+/// names (storage spec §14, mirror sync). This is identity, not
+/// authentication: it does not prove the node is honest.
 pub fn node_identity_echo_layer(
-    node_id: &str,
+    member_id: axum::http::HeaderValue,
 ) -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
     tower_http::set_header::SetResponseHeaderLayer::overriding(
         axum::http::header::HeaderName::from_static("x-dsm-node-id"),
-        axum::http::HeaderValue::from_str(node_id)
-            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid-node-id")),
+        member_id,
     )
-}
-
-/// Minimal app builder for tests that don't require DB access.
-/// It wires only the routes needed by tests (registry gate), with a lazy pool.
-///
-/// When compiled with the `local-dev` feature (SQLite), defaults to an
-/// in-memory database so no PostgreSQL installation is required.
-/// When compiled with the `postgres` feature, honours the `DSM_DATABASE_URL`
-/// environment variable (no default database URL is provided — tests that need
-/// a real PG instance must set that variable).
-pub async fn build_app_for_tests() -> anyhow::Result<axum::Router> {
-    let database_url = std::env::var("DSM_DATABASE_URL").unwrap_or_else(|_| {
-        // `local-dev` (SQLite) build: open an in-memory database.
-        // `postgres` build: callers must supply DSM_DATABASE_URL.
-        #[cfg(feature = "local-dev")]
-        {
-            ":memory:".to_string()
-        }
-        #[cfg(not(feature = "local-dev"))]
-        {
-            "postgresql://localhost:5432/dsm_storage".to_string()
-        }
-    });
-    let pool = db::create_pool(&database_url, true)?;
-
-    // Initialize DB schema for tests
-    db::init_db(&pool).await?;
-
-    let replication_config = replication::ReplicationConfig {
-        replication_factor: 3,
-        gossip_interval_ticks: 100,
-        failure_timeout_ticks: 500,
-        gossip_fanout: 3,
-        max_concurrent_jobs: 10,
-    };
-    let replication_manager = Arc::new(
-        replication::ReplicationManager::new_for_tests(
-            replication_config,
-            "test-node".to_string(),
-            "http://localhost:8080".to_string(),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create replication manager: {}", e))?,
-    );
-
-    let state = AppState::new(
-        "test-node".to_string(),
-        "http://localhost:8080",
-        None,
-        Arc::new(pool),
-        replication_manager,
-    );
-    let state_arc = Arc::new(state);
-
-    // Only mount registry routes for the current tests
-    Ok(axum::Router::new()
-        .merge(api::registry::core::create_router(state_arc.clone()))
-        .layer(Extension(state_arc)))
 }
 
 #[cfg(test)]
@@ -358,4 +276,110 @@ mod storage_set_tests {
         let b = NodeStorageSet::new(reversed, "n1", [0xC1; 32]).unwrap();
         assert_eq!(a.id, b.id);
     }
+}
+
+/// Limits the node's app applies to every request.
+#[derive(Debug, Clone, Copy)]
+pub struct AppLimits {
+    pub body_limit_bytes: usize,
+    /// Requests in flight at once, across every route together.
+    pub concurrency_limit: usize,
+    /// How long one request may take, from the moment it waits for a slot
+    /// under `concurrency_limit` until it is answered, its body included.
+    /// A transport bound, as an unreachable node is: a request cut off here
+    /// is answered `408` and changes nothing, so no protocol fact depends on
+    /// it (storage spec §1 rule 4).
+    pub request_timeout: std::time::Duration,
+    /// How long a device's wait on its spools (long-poll) is held before the
+    /// node answers that nothing landed. A transport bound like
+    /// `request_timeout`, outside it: no protocol fact depends on it (storage
+    /// spec §1 rule 4). The deployed node holds
+    /// [`api::transport::b0x::MAX_WAIT`].
+    pub wait_bound: std::time::Duration,
+}
+
+/// The node's whole app: every route it serves, with its limits and layers.
+/// `/api/v2/health`: ok only over a live Postgres. A node whose store is
+/// down is not healthy, whatever its process is doing.
+/// What went wrong stays in the node's log: the answer names no host,
+/// user, database or driver message.
+async fn health(state: std::sync::Arc<AppState>) -> (axum::http::StatusCode, &'static str) {
+    use axum::http::StatusCode;
+    let client = match state.db_pool.get().await {
+        Ok(client) => client,
+        Err(e) => {
+            log::error!("health: no database connection: {e}");
+            return (StatusCode::SERVICE_UNAVAILABLE, "postgres unavailable");
+        }
+    };
+    match client.simple_query("SELECT 1").await {
+        Ok(_) => (StatusCode::OK, "ok"),
+        Err(e) => {
+            log::error!("health: the database did not answer: {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, "postgres unavailable")
+        }
+    }
+}
+
+/// Bound every connection the node accepts before a request on it reaches
+/// the app: a client that opens a connection and never finishes sending a
+/// request's headers is cut off after `header_read`, instead of holding the
+/// connection open for as long as it likes. The server is given a timer for
+/// this, as the HTTP library needs one to keep any bound; without it the
+/// bound is never kept. A transport bound only (storage spec §1 rule 4).
+pub fn bound_connections(
+    builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
+    header_read: std::time::Duration,
+) {
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(header_read);
+}
+
+/// The binary serves exactly this, and so do tests that stand up real nodes,
+/// so no test ever runs against an assembly the binary does not serve.
+pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Router<()> {
+    use axum::routing::get;
+    use axum::Router;
+    use tower::limit::GlobalConcurrencyLimitLayer;
+    use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
+
+    Router::new()
+        .route(
+            "/api/v2/health",
+            get({
+                let state = state.clone();
+                move || health(state)
+            }),
+        )
+        // The storage contract's four operations (Part II §12): no write
+        // authorization, content-blind.
+        .merge(crate::storage_contract_router(state.clone()))
+        // The b0x spool (storage spec §8): no writer or reader authorization,
+        // envelopes never opened.
+        .merge(crate::api::transport::b0x::router(state.clone()))
+        .layer(RequestBodyLimitLayer::new(limits.body_limit_bytes))
+        // One limit for the whole node. A router applies a layer to each
+        // route on its own, so a per-service limit would be one limit per
+        // route; this one shares a single count across all of them.
+        .layer(GlobalConcurrencyLimitLayer::new(limits.concurrency_limit))
+        // Outside the limit, so waiting for a slot is bounded too.
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            limits.request_timeout,
+        ))
+        // A device's wait on its spools is held open on purpose, so it sits
+        // outside the timeout and the concurrency limit above: the wait
+        // bounds its own length and the number held (b0x::MAX_WAIT,
+        // b0x::MAX_WAITERS), and holds no database connection while it waits.
+        .merge(crate::api::transport::b0x::wait_router(
+            state.clone(),
+            limits.wait_bound,
+        ))
+        .layer(TraceLayer::new_for_http())
+        .layer(crate::node_identity_echo_layer(
+            state.member_id_header.clone(),
+        ))
+        .layer(Extension(state))
 }

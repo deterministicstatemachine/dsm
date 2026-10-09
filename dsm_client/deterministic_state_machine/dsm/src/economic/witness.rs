@@ -38,7 +38,7 @@
 
 use crate::ccb::{class, push_digest32, push_envelope, push_u32, CcbError, CcbObject};
 use crate::economic::credit::CreditSource;
-use crate::types::identifiers::encode_crockford;
+use crate::utils::text_id::encode_base32_crockford;
 use crate::economic::mutation::EconomicLeafMutation;
 
 /// `0x001D` schema 1 — a complete pre-root → post-root economic transition.
@@ -61,7 +61,7 @@ pub struct EconomicTransitionWitness {
     pub operation_digest: [u8; 32],
     pub mutations: Vec<EconomicLeafMutation>,
     /// Strictly ascending by `credit_mutation_index`. Inline, heterogeneous
-    /// CCB objects of classes `0x0023`–`0x0028`; each carries its own envelope,
+    /// CCB objects of classes `0x0025`, `0x005D` and `0x005F`; each carries its own envelope,
     /// which is what keeps the sequence parseable without a side-channel
     /// discriminant.
     pub credit_sources: Vec<CreditSource>,
@@ -136,23 +136,6 @@ impl EconomicTransitionWitness {
                     mutation_index: index,
                 });
             }
-            if let CreditSource::SameTransitionMove(m) = source {
-                let debit = usize::try_from(m.debit_mutation_index).map_err(|_| {
-                    CcbError::CreditIndexOutOfRange {
-                        index: m.debit_mutation_index,
-                        mutations: self.mutations.len(),
-                    }
-                })?;
-                if debit >= self.mutations.len() {
-                    return Err(CcbError::CreditIndexOutOfRange {
-                        index: m.debit_mutation_index,
-                        mutations: self.mutations.len(),
-                    });
-                }
-                if debit == position {
-                    return Err(CcbError::SameTransitionMoveIsSelfFunding { index });
-                }
-            }
         }
 
         // The other half of the bijection: every credit is funded. Checked
@@ -177,7 +160,7 @@ impl EconomicTransitionWitness {
         let mut addrs: Vec<[u8; 32]> = self
             .credit_sources
             .iter()
-            .filter_map(CreditSource::external_evidence_addr)
+            .flat_map(CreditSource::external_evidence_addrs)
             .collect();
         addrs.sort_unstable();
         addrs.dedup();
@@ -281,14 +264,14 @@ impl core::fmt::Display for EconomicWitnessError {
                 f,
                 "economic witness: mutation {index} pre-state is not in the standing root \
                  (expected {}, path derives {})",
-                encode_crockford(expected_root),
-                encode_crockford(derived_root)
+                encode_base32_crockford(expected_root),
+                encode_base32_crockford(derived_root)
             ),
             Self::PostRootMismatch { claimed, derived } => write!(
                 f,
                 "economic witness: mutations derive root {} but the witness claims {}",
-                encode_crockford(derived),
-                encode_crockford(claimed)
+                encode_base32_crockford(derived),
+                encode_base32_crockford(claimed)
             ),
             Self::Malformed { index, cause } => {
                 write!(

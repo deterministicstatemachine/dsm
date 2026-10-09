@@ -35,7 +35,7 @@ const GlobalToast: React.FC = () => {
       role="status"
       style={{
         position: 'absolute',
-        bottom: 'calc(var(--nav-bar-height, 60px) + env(safe-area-inset-bottom, 0px) + 12px)',
+        bottom: 12,
         left: 12,
         right: 12,
         maxWidth: 'calc(100vw - 24px)',

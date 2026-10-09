@@ -17,7 +17,7 @@ fn empty_leaf_is_zero_leaf() {
 #[test]
 fn sparse_tree_root_uses_canonical_empty_root() {
     // SparseMerkleTree uses 256-bit height by default
-    let tree = SparseMerkleTree::new(1024);
+    let tree = SparseMerkleTree::new();
     assert_eq!(
         *tree.root(),
         empty_root(256),

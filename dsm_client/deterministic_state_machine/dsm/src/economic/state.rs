@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The four `R_econ` leaf states — CCB classes `0x001F`–`0x0022` — and the
-//! derivation of the position each one occupies.
+//! The `R_econ` leaf states and the derivation of the position each one
+//! occupies.
 //!
 //! ## The key is derived from the state, never supplied
 //!
@@ -31,7 +31,6 @@
 use crate::ccb::{class, push_digest32, push_envelope, push_u64, CcbError, CcbObject};
 use crate::common::domain_tags::TAG_DSM_ECONOMIC_LEAF_STATE;
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::dlv::settlement_receipt_leaf::derive_receipt_id;
 use crate::economic::keys;
 
 /// `0x001F` schema 1 — one asset's online spendable balance.
@@ -74,136 +73,6 @@ impl EconomicBalanceState {
     }
 }
 
-/// `0x0020` schema 1 — one leg of one DLV's reserves, at a stated generation.
-///
-/// `vault_sequence` is a member of the state and not merely context: it is
-/// what makes a zero reserve a distinguishable state rather than an absence,
-/// and what stops a settlement being replayed against a generation it has
-/// already consumed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EconomicVaultReserveState {
-    pub vault_id: [u8; 32],
-    pub policy_commit: [u8; 32],
-    pub amount: u64,
-    pub vault_sequence: u64,
-}
-
-impl CcbObject for EconomicVaultReserveState {
-    const CLASS: u16 = class::ECONOMIC_VAULT_RESERVE_STATE;
-    const SCHEMA: u16 = 1;
-}
-
-impl EconomicVaultReserveState {
-    fn encode(&self) -> Result<Vec<u8>, CcbError> {
-        let mut out = Vec::new();
-        push_envelope::<Self>(&mut out);
-        push_digest32(&mut out, &self.vault_id); // 1
-        push_digest32(&mut out, &self.policy_commit); // 2
-        push_u64(&mut out, self.amount); // 3
-        push_u64(&mut out, self.vault_sequence); // 4
-        Ok(out)
-    }
-}
-
-/// `0x0021` schema 1 — the record that one settlement happened against one
-/// vault generation.
-///
-/// Its presence is what makes a `DlvReserveConsumption` credit non-reusable:
-/// the settlement writes this leaf from ZERO, so a second settlement claiming
-/// the same `(vault_id, receipt_id)` fails its own Merkle precondition. No
-/// separate consumed-source leaf is needed for the DLV path because this leaf
-/// already is one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EconomicSettlementReceiptState {
-    pub vault_id: [u8; 32],
-    pub receipt_id: [u8; 32],
-    pub x: [u8; 32],
-    pub parent_sequence: u64,
-    pub new_sequence: u64,
-    pub input_policy_commit: [u8; 32],
-    pub input_amount: u64,
-    pub output_policy_commit: [u8; 32],
-    pub output_amount: u64,
-}
-
-impl CcbObject for EconomicSettlementReceiptState {
-    const CLASS: u16 = class::ECONOMIC_SETTLEMENT_RECEIPT_STATE;
-    const SCHEMA: u16 = 1;
-}
-
-impl EconomicSettlementReceiptState {
-    /// The receipt's own consistency conditions, checked at construction so
-    /// that an inconsistent receipt has no canonical bytes at all.
-    ///
-    /// `receipt_id` is **recomputed** from `(vault_id, x)` rather than trusted:
-    /// it is a derived name, and a state carrying a name that does not derive
-    /// from its own contents is exactly the self-rooting shape this tree is
-    /// meant to remove.
-    // The arity is the registry's field table, not a factoring choice.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        vault_id: [u8; 32],
-        x: [u8; 32],
-        parent_sequence: u64,
-        new_sequence: u64,
-        input_policy_commit: [u8; 32],
-        input_amount: u64,
-        output_policy_commit: [u8; 32],
-        output_amount: u64,
-    ) -> Result<Self, CcbError> {
-        if new_sequence != parent_sequence.saturating_add(1) {
-            return Err(CcbError::ReceiptSequenceNotSuccessor {
-                parent: parent_sequence,
-                new: new_sequence,
-            });
-        }
-        if input_amount == 0 || output_amount == 0 {
-            return Err(CcbError::ReceiptZeroAmount);
-        }
-        if input_policy_commit == output_policy_commit {
-            return Err(CcbError::ReceiptAssetsNotDistinct);
-        }
-        Ok(Self {
-            vault_id,
-            receipt_id: derive_receipt_id(&vault_id, &x),
-            x,
-            parent_sequence,
-            new_sequence,
-            input_policy_commit,
-            input_amount,
-            output_policy_commit,
-            output_amount,
-        })
-    }
-
-    fn encode(&self) -> Result<Vec<u8>, CcbError> {
-        if self.new_sequence != self.parent_sequence.saturating_add(1) {
-            return Err(CcbError::ReceiptSequenceNotSuccessor {
-                parent: self.parent_sequence,
-                new: self.new_sequence,
-            });
-        }
-        if self.input_amount == 0 || self.output_amount == 0 {
-            return Err(CcbError::ReceiptZeroAmount);
-        }
-        if self.input_policy_commit == self.output_policy_commit {
-            return Err(CcbError::ReceiptAssetsNotDistinct);
-        }
-        let mut out = Vec::new();
-        push_envelope::<Self>(&mut out);
-        push_digest32(&mut out, &self.vault_id); // 1
-        push_digest32(&mut out, &self.receipt_id); // 2
-        push_digest32(&mut out, &self.x); // 3
-        push_u64(&mut out, self.parent_sequence); // 4
-        push_u64(&mut out, self.new_sequence); // 5
-        push_digest32(&mut out, &self.input_policy_commit); // 6
-        push_u64(&mut out, self.input_amount); // 7
-        push_digest32(&mut out, &self.output_policy_commit); // 8
-        push_u64(&mut out, self.output_amount); // 9
-        Ok(out)
-    }
-}
-
 /// `0x0022` schema 1 — the write-once record that one credit source has been
 /// spent, and by which operation.
 ///
@@ -232,6 +101,31 @@ impl EconomicConsumedSourceState {
     }
 }
 
+/// `0x0060` schema 1 — the creator's record that the native token under
+/// `policy_commit` was created on this lineage (SoFi Amendment S8).
+///
+/// Insert-only: presence is the whole meaning. The creating transition proves
+/// the leaf was ZERO before it wrote, so a second creation of the same commit
+/// on this lineage cannot produce a valid pre-state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EconomicTokenCreationState {
+    pub policy_commit: [u8; 32],
+}
+
+impl CcbObject for EconomicTokenCreationState {
+    const CLASS: u16 = class::ECONOMIC_TOKEN_CREATION_STATE;
+    const SCHEMA: u16 = 1;
+}
+
+impl EconomicTokenCreationState {
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_envelope::<Self>(&mut out);
+        push_digest32(&mut out, &self.policy_commit); // 1
+        out
+    }
+}
+
 /// Any leaf of `R_econ`.
 ///
 /// The offline device-bound allocation is deliberately **not** a variant. It
@@ -241,9 +135,24 @@ impl EconomicConsumedSourceState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EconomicLeafState {
     Balance(EconomicBalanceState),
-    VaultReserve(EconomicVaultReserveState),
-    SettlementReceipt(EconomicSettlementReceiptState),
     ConsumedSource(EconomicConsumedSourceState),
+    /// A SoFi relationship leaf `hʲ` for one vault (P15-6).
+    ///
+    /// It holds no amount: it is the trader's side of a relationship, and its
+    /// only movement is the chain `hʲ⁺¹ = H(rel-leaf ‖ hʲ ‖ E)` that BindExt
+    /// writes. The bytes are `sofi::wire`'s, so there is ONE encoding of this
+    /// object and a second one cannot drift from it.
+    Relationship(crate::sofi::wire::TraderRelationshipLeaf),
+    /// The owner's vault-CREATION record (P15-12), insert-only.
+    ///
+    /// It IS the wire object — one encoding, as with the relationship leaf —
+    /// so the record committed in `R_econ` and the record the operation
+    /// carries cannot drift. Insert-only: a vault is created once, and the
+    /// leaf is never rewritten, which is what makes its presence under a
+    /// validated root a proof that the creation happened on that lineage.
+    VaultCreation(crate::sofi::wire::VaultCreation),
+    /// The creator's token-creation record, insert-only (SoFi Amendment S8).
+    TokenCreation(EconomicTokenCreationState),
 }
 
 impl EconomicLeafState {
@@ -252,9 +161,10 @@ impl EconomicLeafState {
     pub fn class(&self) -> u16 {
         match self {
             Self::Balance(_) => EconomicBalanceState::CLASS,
-            Self::VaultReserve(_) => EconomicVaultReserveState::CLASS,
-            Self::SettlementReceipt(_) => EconomicSettlementReceiptState::CLASS,
             Self::ConsumedSource(_) => EconomicConsumedSourceState::CLASS,
+            Self::Relationship(_) => crate::ccb::class::SOFI_TRADER_RELATIONSHIP_LEAF,
+            Self::VaultCreation(_) => crate::ccb::class::SOFI_VAULT_CREATION,
+            Self::TokenCreation(_) => EconomicTokenCreationState::CLASS,
         }
     }
 
@@ -262,9 +172,10 @@ impl EconomicLeafState {
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         match self {
             Self::Balance(s) => s.encode(),
-            Self::VaultReserve(s) => s.encode(),
-            Self::SettlementReceipt(s) => s.encode(),
             Self::ConsumedSource(s) => s.encode(),
+            Self::Relationship(s) => Ok(s.encode()),
+            Self::VaultCreation(s) => Ok(s.encode()),
+            Self::TokenCreation(s) => Ok(s.encode()),
         }
     }
 
@@ -280,15 +191,22 @@ impl EconomicLeafState {
     /// means a credit. `None` for classes where presence is the meaning and
     /// there is no quantity to increase.
     ///
-    /// A settlement receipt and a consumed-source marker are INSERTIONS, not
-    /// credits: they record that something happened, they do not add spendable
-    /// units. Treating them as credits would demand a funding source for a
-    /// bookkeeping entry.
+    /// A consumed-source marker is an INSERTION, not a credit: it records that
+    /// something happened, it does not add spendable units. Treating it as a
+    /// credit would demand a funding source for a bookkeeping entry.
     pub fn credit_amount(&self) -> Option<u64> {
         match self {
             Self::Balance(s) => Some(s.amount),
-            Self::VaultReserve(s) => Some(s.amount),
-            Self::SettlementReceipt(_) | Self::ConsumedSource(_) => None,
+            Self::ConsumedSource(_)
+            // A relationship leaf is a CHAIN, not a quantity: advancing it
+            // adds nothing spendable, so it needs no funding source.
+            | Self::Relationship(_)
+            // A creation record is a RECORD: the funding it names was debited
+            // by the same write set, so the record itself credits nothing.
+            | Self::VaultCreation(_)
+            // A token-creation record credits nothing either: the supply is
+            // the release credit beside it.
+            | Self::TokenCreation(_) => None,
         }
     }
 
@@ -301,9 +219,10 @@ impl EconomicLeafState {
     pub fn position_material(&self) -> (u16, Vec<[u8; 32]>) {
         match self {
             Self::Balance(s) => (self.class(), vec![s.policy_commit]),
-            Self::VaultReserve(s) => (self.class(), vec![s.vault_id, s.policy_commit]),
-            Self::SettlementReceipt(s) => (self.class(), vec![s.vault_id, s.receipt_id]),
             Self::ConsumedSource(s) => (self.class(), vec![s.source_id]),
+            Self::Relationship(s) => (self.class(), vec![s.vault_id]),
+            Self::VaultCreation(s) => (self.class(), vec![s.vault_id]),
+            Self::TokenCreation(s) => (self.class(), vec![s.policy_commit]),
         }
     }
 
@@ -312,13 +231,22 @@ impl EconomicLeafState {
     pub fn leaf_key(&self, genesis: &[u8; 32], device_id: &[u8; 32]) -> [u8; 32] {
         match self {
             Self::Balance(s) => keys::balance_key(genesis, device_id, &s.policy_commit),
-            Self::VaultReserve(s) => {
-                keys::vault_reserve_key(genesis, device_id, &s.vault_id, &s.policy_commit)
-            }
-            Self::SettlementReceipt(s) => {
-                keys::settlement_receipt_key(genesis, device_id, &s.vault_id, &s.receipt_id)
-            }
             Self::ConsumedSource(s) => keys::consumed_source_key(genesis, device_id, &s.source_id),
+            // `k_{T,v}` — the SoFi relationship key, which is the ONE
+            // derivation for this leaf in both trees (F1). It is not restated
+            // here in another form.
+            Self::Relationship(s) => {
+                crate::sofi::derive::relationship_key(genesis, device_id, &s.vault_id)
+            }
+            // The owner's own tree, scoped to the owner — `vault_id` already
+            // derives from `(G_o, DevID_o, p_create)`, and the key says so
+            // anyway because every economic key names the tree it lives in.
+            Self::VaultCreation(s) => {
+                crate::sofi::derive::vault_creation_key(genesis, device_id, &s.vault_id)
+            }
+            Self::TokenCreation(s) => {
+                keys::token_creation_key(genesis, device_id, &s.policy_commit)
+            }
         }
     }
 }

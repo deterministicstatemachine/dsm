@@ -1,0 +1,2943 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The verifier-local resolution core: facts in, one permanent answer out.
+//!
+//! Every function here is pure and total over the facts it is handed. It
+//! fetches nothing, trusts no caller's opinion, and evaluates no policy: a
+//! fact is either an objective storage observation ([`CellFact`]), a
+//! static validity verdict ([`Validation`]), or a monotone register fact
+//! (registration, canonicality, orphaning). Where those facts come
+//! from is E2's and E3's business.
+//!
+//! ## What it decides
+//!
+//! - one trader position's result — [`resolve_position`], the F2 ladder;
+//! - whether the route was actually consumed — [`consumed_route`];
+//! - whether it can never be — [`fulfillment_impossible`]: conformance, then
+//!   [`route_impossible`], the four arms;
+//! - which DLV successor keys may be skipped — [`classify_attempt`] and
+//!   [`walk`].
+//!
+//! ## Two things that are not the same
+//!
+//! `Invalid` means the operation never satisfied the DLV or protocol rules.
+//! `Void` means a valid operation that could not execute — it lost contention
+//! or became impossible. So validity is established BEFORE Void is declared,
+//! and a position never moves `Void → Invalid` (R14-1). Core resolves only
+//! over complete facts (Amendment S7); until they are complete the position
+//! is not resolved at all.
+//!
+//! One `FinalE(E)` cell is not one executed swap. A route realizes only when
+//! every required leg consumes its exact parent under one registered
+//! fulfillment, which is why [`consumed_route`] quantifies over all legs.
+//!
+//! Registration supplies no truth value: `FulfillmentConformance(F)` is a
+//! conjunct of [`consumed_route`] and rung 2 of the ladder (rebuild step
+//! R12), so a registered `F` that never conformed is Invalid — never Void,
+//! never Realized.
+
+use std::collections::BTreeMap;
+use crate::route_chain::{CellFact, ChainState};
+use super::conformance::Validation;
+use super::registration::PairStanding;
+use super::wire::{next_attempt, ParentClaimRef};
+
+/// What a verifier has established about the predecessor position `p` that `P`
+/// names as its trader parent `T0`.
+///
+/// A trader may build `P` on a conditional parent before that parent resolves,
+/// because the storage fence only requires `p` to be storage-resolved; the
+/// branch it guessed is decided here, not at ingress. Resolving `q` needs `p`
+/// resolved: the SDK resolves the parent first as part of acquiring `q`'s
+/// facts, and when its retries are exhausted the attempt fails on the network
+/// (Amendment S7). An unresolved parent is never a fact Core is handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentPosition {
+    /// `T0` is an ordinary single-root claim. `named` is the claim `P` names;
+    /// `held` is the claim final at the trader's `K_root(p)` and `held_root`
+    /// the root it installed, as this verifier itself established them: its
+    /// own admitted position, or the frontier-relative walk of the trader's
+    /// lineage (DSM Amendment A8; SoFi Amendment S15). A claim `P` carries is
+    /// never its own authority: `P` was built on a position the trader held
+    /// only when the trader holds exactly what `P` names, at the root `P` was
+    /// built on (§6.62).
+    SingleRoot {
+        named: ParentClaimRef,
+        held: ParentClaimRef,
+        held_root: [u8; 32],
+    },
+    /// `C_p` resolved and selected this root: `R_realize` when `p` realized,
+    /// `R_void` when it voided.
+    ConditionalSelected { selected_root: [u8; 32] },
+    /// The `C_p` that `P` names selects no root, ever: another claim holds
+    /// `p`, so it never registered there, or it resolved Invalid. Terminal.
+    ConditionalNoRoot,
+    /// Lineage validation established the trader's lineage Invalid at or
+    /// before `p` (an Invalid step, or a divergent write-once register cell
+    /// it quarantines): that lineage holds no claim at `p`, ever, whatever
+    /// `P` names. Terminal (SoFi §23.3; Amendment S13: "No trade whose
+    /// trader's lineage is known invalid can occupy a vault key
+    /// indefinitely").
+    LineageInvalid,
+}
+
+/// A trader-position result. Every one is permanent (Amendment S7). Core
+/// resolves only over complete storage facts: until they are complete the
+/// SDK keeps reading and relaying, and when its retries are exhausted the
+/// attempt fails on the network. That is never a resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    /// The route consumed every required parent under this fulfillment.
+    Realized,
+    /// A valid operation that could not execute. Terminal.
+    Void,
+    /// The operation never satisfied the rules. Terminal.
+    Invalid,
+}
+
+/// What the position does to the trader's economic lineage once it resolves.
+/// `Void` installs the previous validated root and mutates nothing of its own
+/// — that is all "SofiVoid has zero mutations" means. `advance_resolved`
+/// (E1b-5) is the only constructor that acts on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionEffect {
+    /// Install `P.realize_root`.
+    InstallRealizeRoot,
+    /// Install the previous validated root: no mutation of its own.
+    InstallPreviousRoot,
+    /// Nothing is installed, now or ever.
+    None,
+}
+
+/// The effect of a resolved position. Invalid never has one, because the
+/// lineage is terminal there.
+pub fn effect_of(resolution: Resolution) -> PositionEffect {
+    match resolution {
+        Resolution::Realized => PositionEffect::InstallRealizeRoot,
+        Resolution::Void => PositionEffect::InstallPreviousRoot,
+        Resolution::Invalid => PositionEffect::None,
+    }
+}
+
+/// What a verifier has established about the parent `(v, g, R)` a leg names,
+/// against `R*_g` — the validated canonical root of that vault at that
+/// generation (owner ruling, Section 44.4).
+///
+/// Three valued, and "not established" is not `false`: a parent the verifier
+/// has not walked to leaves the position unresolved, and a parent it has
+/// walked past defeats it. No value is both canonical and orphaned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentStatus {
+    /// `R = R*_g`. The leg names the root that vault's lineage took.
+    Canonical,
+    /// `R ≠ R*_g`. That generation went to another root, so this parent is
+    /// permanently refuted and no later evidence restores it.
+    Orphaned,
+    /// `R*_g` has not been established. A parent the verifier has not reached
+    /// is not thereby refuted, and nothing here is a reason to decide.
+    Unavailable,
+}
+
+/// The status of the parent `(v, g, R)` a leg names, decided against the one
+/// fact that can decide it: `R*_g`, the canonical root this verifier itself
+/// established for that vault at that generation.
+///
+/// `established` is `Some(R*_g)` when the verifier's chain for `v` reaches
+/// generation `g`, and `None` when it does not. Nothing else is consulted,
+/// because nothing else can settle it.
+///
+/// **ABSENCE NEVER REFUTES.** The tempting rule — a root the chain does not
+/// name is orphaned — is wrong, and wrong in the direction that costs the
+/// most. A vault's head is open precisely so that the NEXT root can still
+/// arrive, so a root missing from a chain may be one an in-flight operation
+/// is about to realize. Refuting it answers `Orphaned`, which is a
+/// `RouteImpossible` arm and therefore a permanent `Void`, against a route
+/// whose only defect is that this verifier looked early. That is the
+/// unknown-as-verdict failure `ParentStatus` exists to remove, one layer up.
+///
+/// Only a DIFFERENT root at the SAME generation refutes, and that refutation
+/// is permanent: `R*_g` is unique and never changes once established, because
+/// a successor cell admits at most one realized consumption per attempt key
+/// (`OneConsumerPerParent`, model-checked across crash and recover in
+/// `tla/DSM_SofiSuccessorCells.tla`). So this decision inherits its
+/// uniqueness from the storage layer and needs no argument of its own.
+pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> ParentStatus {
+    match established {
+        Some(root) if root == *claimed => ParentStatus::Canonical,
+        Some(..) => ParentStatus::Orphaned,
+        None => ParentStatus::Unavailable,
+    }
+}
+
+/// The canonical roots a verifier established for one vault, in generation
+/// order: `roots[g]` is `R*_g`.
+///
+/// Contiguous from generation zero, because the generation of a root is its
+/// POSITION here. A gap would shift every generation after it and turn a
+/// correct parent into a refuted one, so the builder stops at the first gap
+/// rather than recording past it.
+///
+/// A chain is established, never assembled: it starts at an accepted genesis
+/// ([`VaultChain::from_genesis`]) or at an owner baseline Core authenticated
+/// ([`VaultChain::from_baseline`], SoFi Amendment S24), and grows by one
+/// Core-recomputed consumption at a time ([`VaultChain::extend`]). The one other way in is
+/// this verifier's own memo of generations it established before, anchored
+/// at the genesis it accepts now and linked row to row before it is stood on
+/// ([`VaultChain::from_recorded`]), which the CI gate
+/// `ci/sofi_validated_root_constructors.sh` pins to its one caller. Nothing
+/// read off the network becomes a root here.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VaultChain {
+    /// The generation `roots[0]` is at: zero for a chain from the genesis,
+    /// the baseline's for a chain from an owner baseline (SoFi Amendment
+    /// S24). Below it, only what `proven` holds is established.
+    base: u64,
+    roots: Vec<[u8; 32]>,
+    /// Roots below `base`, each proven under the baseline's authenticated
+    /// history root (SoFi Amendment S26), by generation.
+    proven: BTreeMap<u64, [u8; 32]>,
+}
+
+/// One generation as this device recorded it (`VaultChain::from_recorded`):
+/// the root, and — past genesis — the root it was built on and the operation
+/// that consumed that root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedGeneration {
+    pub generation: u64,
+    pub root: [u8; 32],
+    pub pre_root: Option<[u8; 32]>,
+    pub consumed_by: Option<[u8; 32]>,
+}
+
+/// This device's own record of a chain contradicts itself, or the genesis it
+/// is anchored at. Not a network status: the local store is incoherent, and
+/// nothing is stood on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoBroken {
+    pub generation: u64,
+    pub why: &'static str,
+}
+
+impl core::fmt::Display for MemoBroken {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "recorded generation {}: {}", self.generation, self.why)
+    }
+}
+
+/// Why a post state does not extend a chain: it was not built on the chain's
+/// head. A chain grows one realized consumption at a time, from its head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotTheHead {
+    pub head: Option<(u64, [u8; 32])>,
+    pub pre_generation: u64,
+    pub pre_root: [u8; 32],
+}
+
+impl core::fmt::Display for NotTheHead {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "the post state was built on generation {} of the vault, which is not the \
+             chain's head {:?}",
+            self.pre_generation,
+            self.head.map(|(g, ..)| g)
+        )
+    }
+}
+
+impl VaultChain {
+    /// The chain at its start: `R*_0`, the root of the genesis this verifier
+    /// accepted (SoFi §19.8; §30 step 1).
+    pub fn from_genesis(genesis: &super::lineage::AcceptedVaultGenesis) -> Self {
+        Self {
+            base: 0,
+            roots: vec![*genesis.genesis_root()],
+            proven: BTreeMap::new(),
+        }
+    }
+
+    /// The chain at an owner baseline (SoFi Amendment S24): `R*_b` is the
+    /// root of the frontier the vault's owner signed, as Core authenticated
+    /// it, and nothing below `b` is established. The generations this
+    /// verifier recorded from `b` are its own memo, linked one to the next
+    /// exactly as [`Self::from_recorded`] links them; the first must be the
+    /// baseline's own. The CI gate pins this constructor to its one caller.
+    pub fn from_baseline(
+        baseline: &super::frontier::VerifiedFrontier,
+        rows: &[RecordedGeneration],
+    ) -> Result<Self, MemoBroken> {
+        let frontier = baseline.frontier();
+        let mut chain = Self {
+            base: frontier.generation,
+            roots: vec![frontier.root],
+            proven: BTreeMap::new(),
+        };
+        let Some((first, later)) = rows.split_first() else {
+            return Ok(chain);
+        };
+        if first.generation != frontier.generation || first.root != frontier.root {
+            return Err(MemoBroken {
+                generation: first.generation,
+                why: "the recorded baseline is not the authenticated one",
+            });
+        }
+        chain.link(later)?;
+        Ok(chain)
+    }
+
+    /// Append recorded rows, each built on the head before it and naming
+    /// the operation that consumed it.
+    fn link(&mut self, rows: &[RecordedGeneration]) -> Result<(), MemoBroken> {
+        for row in rows {
+            let Some((generation, head)) = self.head() else {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "no head to link to",
+                });
+            };
+            if row.generation != generation + 1 {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "the rows are not contiguous",
+                });
+            }
+            if row.pre_root != Some(head) {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "the generation was not built on the one before it",
+                });
+            }
+            if row.consumed_by.is_none() {
+                return Err(MemoBroken {
+                    generation: row.generation,
+                    why: "no operation is recorded as consuming the generation before it",
+                });
+            }
+            self.roots.push(row.root);
+        }
+        Ok(())
+    }
+
+    /// Extend the chain by the consumption `post` recomputes: `R*_{g+1}` is
+    /// the post root of the exercise that consumed `R*_g`, and only a post
+    /// state built on the chain's head extends it.
+    pub fn extend(&mut self, post: &super::validation::VaultPostState) -> Result<(), NotTheHead> {
+        let head = self.head();
+        let at_head = head.is_some_and(|(generation, root)| {
+            generation == post.pre_generation() && root == *post.pre_root()
+        });
+        if !at_head || post.generation() != post.pre_generation() + 1 {
+            return Err(NotTheHead {
+                head,
+                pre_generation: post.pre_generation(),
+                pre_root: *post.pre_root(),
+            });
+        }
+        self.roots.push(*post.root());
+        Ok(())
+    }
+
+    /// THE MEMO: the generations this verifier itself established earlier,
+    /// as it recorded them, anchored at the genesis it accepts NOW and
+    /// linked one to the next before any of it is stood on. Row zero is the
+    /// accepted genesis root; every later row was built on the root before
+    /// it and names the operation that consumed it. A memo proves nothing by
+    /// existing — what it holds is this device's own earlier conclusion, read
+    /// back — so what can be checked is checked here, and a record that does
+    /// not anchor or does not link is a contradiction, never a chain. The CI
+    /// gate pins this constructor to its one caller, the chain walk's start.
+    pub fn from_recorded(
+        genesis: &super::lineage::AcceptedVaultGenesis,
+        rows: &[RecordedGeneration],
+    ) -> Result<Self, MemoBroken> {
+        let mut chain = Self::from_genesis(genesis);
+        let Some((first, later)) = rows.split_first() else {
+            return Ok(chain);
+        };
+        if first.generation != 0 {
+            return Err(MemoBroken {
+                generation: first.generation,
+                why: "the rows are not contiguous from generation zero",
+            });
+        }
+        if first.root != *genesis.genesis_root() {
+            return Err(MemoBroken {
+                generation: 0,
+                why: "the recorded genesis is not the accepted genesis",
+            });
+        }
+        if first.pre_root.is_some() || first.consumed_by.is_some() {
+            return Err(MemoBroken {
+                generation: 0,
+                why: "the genesis generation records a consumption",
+            });
+        }
+        chain.link(later)?;
+        Ok(chain)
+    }
+
+    /// `R*_g` for every generation established, in generation order, from
+    /// [`Self::base`].
+    pub fn roots(&self) -> &[[u8; 32]] {
+        &self.roots
+    }
+
+    /// The generation the chain starts at.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// A chain stated for a test of what reads it; in-crate only.
+    #[cfg(test)]
+    pub(crate) fn of_roots_for_test(roots: Vec<[u8; 32]>) -> Self {
+        Self {
+            base: 0,
+            roots,
+            proven: BTreeMap::new(),
+        }
+    }
+
+    /// Admit `R_g` below this chain's baseline, as a path under the
+    /// baseline's history root proved it (SoFi Amendment S26). A root at or
+    /// above the baseline is the chain's own to establish, and is left to it.
+    pub(crate) fn admit_proven(&mut self, proven: &super::history::ProvenRoot) {
+        if proven.generation() < self.base {
+            self.proven.insert(proven.generation(), *proven.root());
+        }
+    }
+
+    /// `R*_g`, when this chain established generation `g`.
+    fn root_at(&self, generation: u64) -> Option<[u8; 32]> {
+        if generation < self.base {
+            return self.proven.get(&generation).copied();
+        }
+        let offset = generation.checked_sub(self.base)?;
+        usize::try_from(offset)
+            .ok()
+            .and_then(|g| self.roots.get(g))
+            .copied()
+    }
+
+    /// The status of a parent asked about at `generation` — [`parent_status`]
+    /// over what this chain established there. Below a baseline nothing is
+    /// established, so nothing there is refuted.
+    pub fn status_of(&self, generation: u64, claimed: &[u8; 32]) -> ParentStatus {
+        parent_status(self.root_at(generation), claimed)
+    }
+
+    /// Whether this chain names `root` at any generation.
+    ///
+    /// POSITIVE EVIDENCE ONLY. Naming it establishes `Canonical`; not naming
+    /// it establishes NOTHING, because the chain may simply be short. Callers
+    /// use this where a root has to be established before something else can
+    /// proceed, never to refute one.
+    pub fn names(&self, root: &[u8; 32]) -> bool {
+        self.generation_of(root).is_some()
+    }
+
+    /// The generation `root` sits at, when this chain names it.
+    pub fn generation_of(&self, root: &[u8; 32]) -> Option<u64> {
+        self.roots
+            .iter()
+            .position(|r| r == root)
+            .map(|g| self.base + g as u64)
+            .or_else(|| {
+                self.proven
+                    .iter()
+                    .find(|(.., r)| *r == root)
+                    .map(|(g, ..)| *g)
+            })
+    }
+
+    /// The highest generation this chain established.
+    pub fn head(&self) -> Option<(u64, [u8; 32])> {
+        self.roots
+            .last()
+            .map(|r| (self.base + (self.roots.len() - 1) as u64, *r))
+    }
+}
+
+/// The facts about one DLV leg of a registered fulfillment, at the attempt key
+/// that fulfillment fixed for it.
+///
+/// Built by [`super::facts::establish`] from the reads Core evaluated, and
+/// by nothing outside this crate: a leg fact stated by a caller would be a
+/// verdict nobody established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegFacts {
+    /// The storage resolution of `K^(a_j)`.
+    pub(crate) cell: CellFact,
+    /// The named parent `R_j` against this vault's validated canonical root
+    /// at that generation.
+    pub(crate) parent: ParentStatus,
+    /// `∀ b < a_j. Skipped(K^(b))`.
+    pub(crate) attempt_live: bool,
+    /// The named parent was consumed by some `X ≠ E`. A parent that really
+    /// was canonical and was then taken is THIS, never orphaning.
+    pub(crate) parent_consumed_elsewhere: bool,
+}
+
+impl LegFacts {
+    /// The leg's cell holds exactly `e`, finally.
+    ///
+    /// The commitment is the ROUTE's, never the leg's: one operation is bound
+    /// to one `E`, and every required leg must be final on that same one. A
+    /// per-leg commitment would let a "route" be assembled out of legs that
+    /// each finalized a different operation.
+    pub fn final_on(&self, e: &[u8; 32]) -> bool {
+        self.cell
+            == CellFact::Held {
+                id: *e,
+                state: ChainState::Final,
+            }
+    }
+
+    /// Some OTHER operation's commitment holds this key's leader link, final or
+    /// not. Either way this operation can never be final at the key: at most
+    /// one value has a valid leader link at a cell (storage spec §9).
+    pub fn final_on_other(&self, e: &[u8; 32]) -> bool {
+        matches!(self.cell, CellFact::Held { id, .. } if id != *e)
+    }
+}
+
+/// What a Release reads at its verdict cell (SoFi Amendment S21); every other
+/// operation reads none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictFact {
+    /// Not a Release: no verdict bears on the operation.
+    NotARelease,
+    /// A Release, and where it stands at its verdict cell.
+    Release(super::escrow::VerdictStanding),
+}
+
+impl VerdictFact {
+    /// Whether the verdict lets a consumption count: an operation that is no
+    /// release reads none, and a release counts only once the cell's verdict
+    /// is final on its outcome (`ConsumedRoute`, SoFi §19.9).
+    fn permits_consumption(self) -> bool {
+        matches!(
+            self,
+            Self::NotARelease | Self::Release(super::escrow::VerdictStanding::Final)
+        )
+    }
+
+    /// `VerdictHeld(K, o′)` for another outcome: the release can never
+    /// realize (`RouteImpossible` arm (v)).
+    fn lost(self) -> bool {
+        self == Self::Release(super::escrow::VerdictStanding::Lost)
+    }
+}
+
+/// Everything a verifier needs about one trader position `q` and the
+/// fulfillment `F` that claims it.
+///
+/// `parent_pre_root` is `P.void_root`, which P15-2 pins to `T°.pre_root`: the
+/// root this operation was built on, and the root the parent must have
+/// selected for the guessed branch to be the taken one.
+///
+/// Built by [`super::facts::establish`] over reads Core evaluated, and by
+/// nothing outside this crate. Every field is a conclusion; a caller that
+/// could state one would be stating the verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteFacts<'legs> {
+    /// `E` — the ONE external commitment this operation is bound to. Every
+    /// required leg must be final on exactly this value.
+    pub(crate) external_commitment: [u8; 32],
+    /// Where `F` stands at its position pair (R10, SoFi Amendments S14 and
+    /// S20): `Registered` is `FulfillmentRegistered(q, F)`, the exercise
+    /// boundary. `Lost` is the fact behind the skip
+    /// `RejectedFinalInadmissible`: position `q` already holds a different
+    /// claim, so this `F` can never register (Section 21.1), a fact about `F`
+    /// and never an arm of `RouteImpossible(P, E)`. `Misbodied` is the pair
+    /// final on `F` under a claim that is not `derive(P, F)`: lost the same
+    /// way, and the position Invalid for the trader's lineage.
+    pub(crate) pair: PairStanding,
+    /// `FulfillmentConformance(F)` (Section 20.2), as the ladder reads it.
+    /// Registration supplies no truth value for it: a registered `F` may be
+    /// `Invalid`, and a producer's pre-sign check is not this verifier's.
+    pub(crate) conformance: Validation,
+    /// What is known about the claim at `p`.
+    pub(crate) parent: ParentPosition,
+    /// `P.void_root == T°.pre_root`.
+    pub(crate) parent_pre_root: [u8; 32],
+    /// `RouteValidation(P, G, E)`, static.
+    pub(crate) validation: Validation,
+    /// `StorageResolved(q)`: registration and every successor key.
+    pub(crate) storage_resolved: bool,
+    /// A Release's standing at its verdict cell (SoFi Amendment S21).
+    pub(crate) verdict: VerdictFact,
+    /// One entry per leg of `P`, in P's leg order. A single-vault trade is the
+    /// one-leg case.
+    pub(crate) legs: &'legs [LegFacts],
+}
+
+/// What the skips that need no validation evidence read (SoFi §23.5 and
+/// MR-SOFI-0241; Amendment S14): the facts of [`RouteFacts`] that stand
+/// without `FulfillmentConformance` or `RouteValidation`, and nothing that
+/// needs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroundRouteFacts<'legs> {
+    pub(crate) external_commitment: [u8; 32],
+    pub(crate) pair: PairStanding,
+    pub(crate) parent: ParentPosition,
+    pub(crate) parent_pre_root: [u8; 32],
+    /// A Release's standing at its verdict cell: the cell's raw read and the
+    /// verdict's own bytes, no validation evidence (SoFi §19.9, arm (v)).
+    pub(crate) verdict: VerdictFact,
+    pub(crate) legs: &'legs [LegFacts],
+}
+
+impl RouteFacts<'_> {
+    fn multi_leg(&self) -> bool {
+        self.legs.len() > 1
+    }
+
+    /// A reserved key of this fulfillment was reached first, or is final, on another
+    /// commitment.
+    fn a_reserved_key_is_lost(&self) -> bool {
+        self.legs
+            .iter()
+            .any(|l| l.final_on_other(&self.external_commitment))
+    }
+
+    fn a_parent_is_lost(&self) -> bool {
+        self.legs
+            .iter()
+            .any(|l| l.parent == ParentStatus::Orphaned || l.parent_consumed_elsewhere)
+    }
+}
+
+/// The root a terminal parent leaves `P` standing on: the root the ordinary
+/// claim `P` names installed, when the trader's lineage holds that very claim
+/// at `p`; the root a conditional `C_p` selected. `None` when the parent
+/// leaves `P` on no root, ever: an ordinary claim the lineage does not hold
+/// at `p`, a `C_p` that selects no root, or a lineage known Invalid at or
+/// before `p`.
+fn root_left_by(parent: &ParentPosition) -> Option<&[u8; 32]> {
+    match parent {
+        ParentPosition::SingleRoot {
+            named,
+            held,
+            held_root,
+        } => (named == held).then_some(held_root),
+        ParentPosition::ConditionalSelected { selected_root } => Some(selected_root),
+        ParentPosition::ConditionalNoRoot | ParentPosition::LineageInvalid => None,
+    }
+}
+
+/// `TraderParentCompatible(P)`: the parent is an ordinary claim the trader
+/// holds at `p`, at exactly the root this operation was built on, or a
+/// conditional claim that selected exactly that root. The parent is always
+/// resolved here: Core resolves only over complete facts, the predecessor's
+/// resolution among them (Amendment S7).
+pub fn trader_parent_compatible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
+    root_left_by(parent) == Some(parent_pre_root)
+}
+
+/// `TraderParentImpossible(P)`: the parent is terminal and did not select the
+/// root this operation was built on — either it selected nothing (Invalid), or
+/// it selected the other branch — or it is an ordinary claim the trader does
+/// not hold at `p`, or holds at another root, or the trader's lineage is
+/// known Invalid at or before `p`, so it holds nothing there.
+///
+/// A [`ParentPosition`] is always terminal: a parent not established yet is
+/// no fact at all (`NotEstablished::ParentUnresolved`). So the parent is
+/// impossible exactly when it is not compatible. Objective and monotone.
+pub fn trader_parent_impossible(parent: &ParentPosition, parent_pre_root: &[u8; 32]) -> bool {
+    !trader_parent_compatible(parent, parent_pre_root)
+}
+
+/// `ConsumedRoute(F, E)` (Section 23.2): registered, conforming, statically
+/// valid, built on the branch the parent actually took, and every required
+/// leg finally consumed its exact canonical parent on this `E` at a live
+/// attempt. A single-vault trade is the one-leg case. A Release also needs
+/// its verdict cell final on its outcome (SoFi Amendment S21).
+///
+/// This is where parent canonicality lives. `RouteValidation` never looks at
+/// it, so a static verdict cannot depend on who won a race. And
+/// `FulfillmentConformance` is a conjunct of its own: registration is a race
+/// at a leader, not a verdict on the bytes that won it.
+pub fn consumed_route(facts: &RouteFacts<'_>) -> bool {
+    facts.pair == PairStanding::Registered
+        && facts.conformance == Validation::Valid
+        && facts.validation == Validation::Valid
+        && facts.verdict.permits_consumption()
+        && trader_parent_compatible(&facts.parent, &facts.parent_pre_root)
+        && !facts.legs.is_empty()
+        && facts.legs.iter().all(|l| {
+            l.parent == ParentStatus::Canonical
+                && l.attempt_live
+                && l.final_on(&facts.external_commitment)
+        })
+}
+
+/// Which arm of `RouteImpossible(P, E)` holds, if any. The arms are stated
+/// separately because a DLV key skip must be attributable to one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImpossibleArm {
+    /// (i) `RouteValidation = Invalid`. Static and monotone, and a function of
+    /// P alone: the canonical `G` set is derived from P, so no search over
+    /// candidate fulfillments is needed.
+    ValidationInvalid,
+    /// (ii) a named parent is permanently orphaned.
+    ParentOrphaned,
+    /// (iii′) a named parent was consumed by some `X ≠ E`, and the walk
+    /// consumes a parent once.
+    ParentConsumedElsewhere,
+    /// (iv) `TraderParentImpossible(P)`: the trader parent is terminal on the
+    /// other branch, or on none.
+    TraderParentImpossible,
+    /// (v) a Release whose verdict cell holds a verdict on another outcome
+    /// (SoFi Amendment S21). Permanent: the cell's leader keeps one value.
+    VerdictOnAnotherOutcome,
+}
+
+/// The arm of `RouteImpossible(P, E)` that holds, in arm order.
+///
+/// Arms (ii) to (iv) hold whatever `RouteValidation` says. Arm (iv) creates
+/// no `Void`: the trader position is Invalid through the ladder, and the arm
+/// exists only to stop an impossible operation stranding a DLV successor key.
+/// Every arm is a fact about `P` and `E`; which fulfillment lost its position
+/// is a fact about `F`, and it is the skip `RejectedFinalInadmissible`
+/// (SoFi Amendment S14), never an arm here.
+pub fn route_impossible(facts: &RouteFacts<'_>) -> Option<ImpossibleArm> {
+    if facts.validation == Validation::Invalid {
+        return Some(ImpossibleArm::ValidationInvalid);
+    }
+    if facts
+        .legs
+        .iter()
+        .any(|l| l.parent == ParentStatus::Orphaned)
+    {
+        return Some(ImpossibleArm::ParentOrphaned);
+    }
+    if facts.legs.iter().any(|l| l.parent_consumed_elsewhere) {
+        return Some(ImpossibleArm::ParentConsumedElsewhere);
+    }
+    if trader_parent_impossible(&facts.parent, &facts.parent_pre_root) {
+        return Some(ImpossibleArm::TraderParentImpossible);
+    }
+    if facts.verdict.lost() {
+        return Some(ImpossibleArm::VerdictOnAnotherOutcome);
+    }
+    None
+}
+
+/// Why Core does not resolve a position yet: its facts are not complete
+/// (Amendment S7). Never a result and never recorded: the SDK keeps reading,
+/// relaying and retrying within its budget, and when the retries are
+/// exhausted the attempt fails on the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Incomplete {
+    /// F is not registered at q.
+    NotRegistered,
+    /// Some required storage fact is not final, and nothing is lost yet.
+    StorageNotFinal,
+}
+
+/// The resolution ladder (Section 24; Amendment S7). Verifier-local,
+/// deterministic, permanent, and only over complete facts. The first matching
+/// rung decides.
+///
+/// | Rung | Result | Condition |
+/// |---|---|---|
+/// | 0 | not yet (`Incomplete`) | F is not registered |
+/// | 1 | Invalid | the parent resolved and did not select this operation's root |
+/// | 2 | Invalid | `FulfillmentConformance(F) = Invalid` |
+/// | 3 | Realized | `ConsumedRoute(F, E)` |
+/// | 4 | Invalid | `RouteValidation = Invalid` |
+/// | 5 | Void | storage-resolved, and a reserved key, a parent, or a release's verdict is lost |
+/// | 6 | not yet (`Incomplete`) | otherwise: a required storage fact is not final |
+///
+/// The predecessor's resolution is part of the complete facts: the caller
+/// resolves it first. Rung 1 comes before any route result: a position built
+/// on a branch the parent never took is Invalid whatever its own legs did.
+/// Both predicates are binary, so Void never waits on a third value: rung 4
+/// has already turned an invalid route Invalid before rung 5 can Void it.
+///
+/// Crate-private: the one production caller is `advance_resolved`, which
+/// installs a root on this answer and on nothing a caller says.
+pub(crate) fn resolve_position(facts: &RouteFacts<'_>) -> Result<Resolution, Incomplete> {
+    // 0 — nothing is exercised before registration; a pair final on `F`
+    // under another body than `derive(P, F)` is Invalid for the lineage
+    // (SoFi Amendment S20), the same verdict a peer reads.
+    match facts.pair {
+        PairStanding::Registered => {}
+        PairStanding::Misbodied => return Ok(Resolution::Invalid),
+        PairStanding::Pending | PairStanding::Lost => return Err(Incomplete::NotRegistered),
+    }
+    // 1 — the parent took another branch, or none.
+    if trader_parent_impossible(&facts.parent, &facts.parent_pre_root) {
+        return Ok(Resolution::Invalid);
+    }
+    // 2 — the fulfillment never satisfied its own rules. Terminal, whatever
+    // the cells say: registration supplied no truth value.
+    if facts.conformance == Validation::Invalid {
+        return Ok(Resolution::Invalid);
+    }
+    // 3 — the route consumed every required parent.
+    if consumed_route(facts) {
+        return Ok(Resolution::Realized);
+    }
+    // 4 — statically invalid, permanently.
+    if facts.validation == Validation::Invalid {
+        return Ok(Resolution::Invalid);
+    }
+    // 5 — valid, storage-resolved, and lost: a key, a parent, or, for a
+    // release, the verdict (SoFi Amendment S21).
+    if facts.storage_resolved
+        && (facts.a_reserved_key_is_lost() || facts.a_parent_is_lost() || facts.verdict.lost())
+    {
+        return Ok(Resolution::Void);
+    }
+    // 6 — the facts are not complete yet.
+    Err(Incomplete::StorageNotFinal)
+}
+
+/// How one attempt key of one DLV leg classifies during the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptClass {
+    /// The parent was consumed at this key by this operation. The walk stops.
+    Consumed,
+    /// This key can never consume the parent, so the walk moves on.
+    Skipped,
+    /// Neither is established. The walk stops without an answer.
+    Unresolved,
+}
+
+/// Why a key is skippable, kept separate so a skip is always attributable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// A final cell of a single-leg operation whose validation is Invalid.
+    RejectedFinalSingleLeg,
+    /// A final cell of an operation that can never realize.
+    RejectedFinalRoute(ImpossibleArm),
+    /// A final cell of a fulfillment that is not the exercise of its P:
+    /// `FulfillmentConformance(F) = Invalid` (SoFi §23.5, MR-SOFI-0238).
+    RejectedFinalConformance,
+    /// A final cell whose exercise carries a fulfillment that can never
+    /// register: position `q` is final on another claim (SoFi Amendment
+    /// S14, Section 21.1). It reads no validation evidence and creates no
+    /// Void and no Invalid: `q` resolves through the claim that holds it.
+    RejectedFinalInadmissible,
+}
+
+/// Why a fulfillment can never realize (SoFi §23.5):
+///
+/// ```text
+/// FulfillmentImpossible(F, E) ⇔ FulfillmentConformance(F) = Invalid ∨ RouteImpossible(P(F), E)
+/// ```
+///
+/// `RouteImpossible` stays scoped to P and E and takes no F, because several
+/// candidate fulfillments can reference one P; conformance is the F-level arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FulfillmentImpossibility {
+    ConformanceInvalid,
+    Route(ImpossibleArm),
+}
+
+/// `FulfillmentImpossible(F, E)`: the conformance arm first, then the route
+/// arms. Both inputs are binary and in hand (Amendment S3).
+pub fn fulfillment_impossible(facts: &RouteFacts<'_>) -> Option<FulfillmentImpossibility> {
+    if facts.conformance == Validation::Invalid {
+        return Some(FulfillmentImpossibility::ConformanceInvalid);
+    }
+    route_impossible(facts).map(FulfillmentImpossibility::Route)
+}
+
+/// Classify the attempt key of `leg` under the facts of the registered
+/// fulfillment that reserved it.
+///
+/// A key is skippable only on a final cell of an operation that can never
+/// realize. No key is ever taken: a key is open until an exercise naming it
+/// reaches its leader, and nothing else can close it.
+pub fn classify_attempt(
+    facts: &RouteFacts<'_>,
+    leg: &LegFacts,
+) -> (AttemptClass, Option<SkipReason>) {
+    if leg.final_on(&facts.external_commitment) {
+        // A final cell of an operation that cannot realize is stranded, never
+        // a partial execution: nothing rolls back, because the cell was never
+        // consumed as an economic execution on its own.
+        if let Some(why) = fulfillment_impossible(facts) {
+            let reason = match why {
+                FulfillmentImpossibility::ConformanceInvalid => {
+                    SkipReason::RejectedFinalConformance
+                }
+                FulfillmentImpossibility::Route(ImpossibleArm::ValidationInvalid)
+                    if !facts.multi_leg() =>
+                {
+                    SkipReason::RejectedFinalSingleLeg
+                }
+                FulfillmentImpossibility::Route(arm) => SkipReason::RejectedFinalRoute(arm),
+            };
+            return (AttemptClass::Skipped, Some(reason));
+        }
+        // SoFi Amendment S14: the exercise's F can never register, because
+        // another claim holds its position, so no registered fulfillment will
+        // ever name this cell. Without the skip the parent's attempt chain
+        // stops here forever (TLA `DSM_SofiFulfillment`, `LostPosition`).
+        if facts.pair.is_lost() {
+            return (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalInadmissible),
+            );
+        }
+        // A final cell is a consumption only when the whole operation
+        // consumed: the same E across every required leg, validation Valid,
+        // the trader parent compatible. One final cell is not one executed
+        // swap (F4), so a leg's own facts are not enough.
+        if consumed_route(facts) {
+            return (AttemptClass::Consumed, None);
+        }
+    }
+    // Neither skipped nor consumed on these facts: the cell is open or not
+    // final, or another operation's commitment holds it, which is that
+    // operation's question and not this one's.
+    (AttemptClass::Unresolved, None)
+}
+
+/// Where the walk over one DLV parent's attempt keys ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkOutcome {
+    /// The attempt counter has no successor. Refused, never wrapped and never
+    /// saturated onto a key that is already decided.
+    CounterExhausted { attempt: u64 },
+    /// The parent was consumed at this attempt index.
+    Consumed { attempt: u64 },
+    /// Every key up to `attempt` was skipped, and that one is not resolved.
+    Unresolved { attempt: u64 },
+    /// The budget ran out. Resume at `cursor`; the answer is unchanged by
+    /// where the chunking fell.
+    Continue { cursor: u64 },
+}
+
+/// What an exercise's own bytes refute, before anything is read about it
+/// (MR-DSM-0041, MR-DSM-0042).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefutedInHand {
+    /// `FulfillmentConformance(F) = Invalid` from the exercise alone.
+    Conformance,
+    /// `RouteValidation(P, G, E) = Invalid` from `P` and `P(E)` alone, over
+    /// a route of `legs` legs.
+    Route { legs: usize },
+}
+
+/// How an attempt key classifies when the exercise holding it is refuted in
+/// hand: the answer [`classify_attempt`] gives whatever the other facts are.
+/// `FulfillmentImpossible` decides by its conformance arm, then by
+/// `RouteImpossible`'s first arm, before any other fact is read, and nothing
+/// consumes without both predicates Valid. So a cell final on `E` skips for
+/// that reason, and any other cell is unresolved.
+pub fn skip_in_hand(
+    refuted: RefutedInHand,
+    cell: &CellFact,
+    external_commitment: &[u8; 32],
+) -> (AttemptClass, Option<SkipReason>) {
+    let final_on_e = *cell
+        == CellFact::Held {
+            id: *external_commitment,
+            state: ChainState::Final,
+        };
+    if !final_on_e {
+        return (AttemptClass::Unresolved, None);
+    }
+    let reason = match refuted {
+        RefutedInHand::Conformance => SkipReason::RejectedFinalConformance,
+        RefutedInHand::Route { legs } if legs > 1 => {
+            SkipReason::RejectedFinalRoute(ImpossibleArm::ValidationInvalid)
+        }
+        RefutedInHand::Route { .. } => SkipReason::RejectedFinalSingleLeg,
+    };
+    (AttemptClass::Skipped, Some(reason))
+}
+
+/// The key of a final cell classified on facts that need no validation
+/// evidence (SoFi §23.5 and MR-SOFI-0241; Amendments S14, S21): a named parent
+/// consumed by another operation (arm (iii)), a trader parent that can never
+/// be compatible (arm (iv)), a release whose verdict cell holds another
+/// outcome (arm (v)), or a fulfillment whose position went to another
+/// claim. The verifier asks this BEFORE it acquires any validation evidence,
+/// so a cell that is dead on these facts is never held live by evidence that
+/// is not in hand. `Unresolved` here decides nothing: the complete facts may
+/// still skip or consume the key.
+pub fn skip_without_evidence(
+    ground: &GroundRouteFacts<'_>,
+    leg: &LegFacts,
+) -> (AttemptClass, Option<SkipReason>) {
+    if !leg.final_on(&ground.external_commitment) {
+        return (AttemptClass::Unresolved, None);
+    }
+    let reason = if ground.legs.iter().any(|l| l.parent_consumed_elsewhere) {
+        SkipReason::RejectedFinalRoute(ImpossibleArm::ParentConsumedElsewhere)
+    } else if trader_parent_impossible(&ground.parent, &ground.parent_pre_root) {
+        SkipReason::RejectedFinalRoute(ImpossibleArm::TraderParentImpossible)
+    } else if ground.verdict.lost() {
+        SkipReason::RejectedFinalRoute(ImpossibleArm::VerdictOnAnotherOutcome)
+    } else if ground.pair.is_lost() {
+        SkipReason::RejectedFinalInadmissible
+    } else {
+        return (AttemptClass::Unresolved, None);
+    };
+    (AttemptClass::Skipped, Some(reason))
+}
+
+/// The ladder over a position whose exercise is refuted in hand: the pair is
+/// the one fact it reads. Unregistered, rung 0 holds. Registered, the
+/// position is Invalid whatever the other facts are — rung 1 when the parent
+/// took another branch, else rung 2 for a non-conforming `F`, else rung 4
+/// for an invalid route, which nothing before it can consume. Misbodied, it
+/// is Invalid at rung 0.
+pub(crate) fn resolve_refuted_in_hand(pair: PairStanding) -> Result<Resolution, Incomplete> {
+    match pair {
+        PairStanding::Registered | PairStanding::Misbodied => Ok(Resolution::Invalid),
+        PairStanding::Pending | PairStanding::Lost => Err(Incomplete::NotRegistered),
+    }
+}
+
+/// What the walk has for one attempt key, bound to the key it is about: the
+/// vault, the parent root and the attempt the facts were established at.
+/// [`walk`] classifies a key only over facts bound to that very key.
+///
+/// Built from a cell read Core evaluated and facts Core established
+/// ([`KeyFacts::of`], [`KeyFacts::refuted`]); a caller cannot say what a key
+/// holds.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyFacts<'f> {
+    vault_id: [u8; 32],
+    parent_root: [u8; 32],
+    attempt: u64,
+    known: KeyKnown<'f>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KeyKnown<'f> {
+    /// The complete facts of the exercise holding the key, and of the leg
+    /// being walked.
+    Complete(RouteFacts<'f>, LegFacts),
+    /// The exercise holding the key is dead on facts that need no validation
+    /// evidence ([`skip_without_evidence`]), and of the leg being walked.
+    Ground(GroundRouteFacts<'f>, LegFacts),
+    /// The exercise holding the key is refuted by its own bytes; `cell` is
+    /// the key's storage fact, read to find it.
+    RefutedInHand {
+        refuted: RefutedInHand,
+        cell: CellFact,
+        external_commitment: [u8; 32],
+    },
+}
+
+impl<'f> KeyFacts<'f> {
+    /// The key `read` was evaluated at, held by the exercise `facts` were
+    /// established for: the facts of that exercise's leg at this key. `None`
+    /// when the read holds no exercise, holds another exercise, or the
+    /// facts have no leg at this key — no fact about this key, never a skip.
+    pub fn of(
+        read: &super::exercise::AttemptCellRead,
+        facts: &'f super::facts::EstablishedFacts,
+    ) -> Option<Self> {
+        let exercise = read.exercise()?;
+        if *exercise.external_commitment() != *facts.external_commitment() {
+            return None;
+        }
+        let leg = facts.leg_at(read.vault_id(), read.parent_root(), read.attempt())?;
+        Some(Self {
+            vault_id: *read.vault_id(),
+            parent_root: *read.parent_root(),
+            attempt: read.attempt(),
+            known: KeyKnown::Complete(facts.route_facts(), leg),
+        })
+    }
+
+    /// The key `read` was evaluated at, held by the exercise `ground` was
+    /// established for: the facts that need no validation evidence of that
+    /// exercise's leg at this key. `None` when the read holds no exercise,
+    /// holds another exercise, or the facts have no leg at this key.
+    pub fn ground(
+        read: &super::exercise::AttemptCellRead,
+        ground: &'f super::facts::GroundFacts,
+    ) -> Option<Self> {
+        let exercise = read.exercise()?;
+        if *exercise.external_commitment() != *ground.external_commitment() {
+            return None;
+        }
+        let leg = ground.leg_at(read.vault_id(), read.parent_root(), read.attempt())?;
+        Some(Self {
+            vault_id: *read.vault_id(),
+            parent_root: *read.parent_root(),
+            attempt: read.attempt(),
+            known: KeyKnown::Ground(ground.route_ground(), leg),
+        })
+    }
+
+    /// The key `read` was evaluated at, held by an exercise its own bytes
+    /// refute (`refutation`, established by [`super::facts::refuted_in_hand`]
+    /// over those bytes). `None` when the read holds no exercise or another
+    /// one.
+    pub fn refuted(
+        read: &super::exercise::AttemptCellRead,
+        refutation: &super::facts::InHandRefutation,
+    ) -> Option<Self> {
+        let exercise = read.exercise()?;
+        if *exercise.external_commitment() != *refutation.external_commitment() {
+            return None;
+        }
+        Some(Self {
+            vault_id: *read.vault_id(),
+            parent_root: *read.parent_root(),
+            attempt: read.attempt(),
+            known: KeyKnown::RefutedInHand {
+                refuted: refutation.refuted(),
+                cell: read.fact(),
+                external_commitment: *exercise.external_commitment(),
+            },
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_at(
+        vault_id: [u8; 32],
+        parent_root: [u8; 32],
+        attempt: u64,
+        facts: RouteFacts<'f>,
+        leg: LegFacts,
+    ) -> Self {
+        Self {
+            vault_id,
+            parent_root,
+            attempt,
+            known: KeyKnown::Complete(facts, leg),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ground_at(
+        vault_id: [u8; 32],
+        parent_root: [u8; 32],
+        attempt: u64,
+        ground: GroundRouteFacts<'f>,
+        leg: LegFacts,
+    ) -> Self {
+        Self {
+            vault_id,
+            parent_root,
+            attempt,
+            known: KeyKnown::Ground(ground, leg),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refuted_at(
+        vault_id: [u8; 32],
+        parent_root: [u8; 32],
+        attempt: u64,
+        refuted: RefutedInHand,
+        cell: CellFact,
+        external_commitment: [u8; 32],
+    ) -> Self {
+        Self {
+            vault_id,
+            parent_root,
+            attempt,
+            known: KeyKnown::RefutedInHand {
+                refuted,
+                cell,
+                external_commitment,
+            },
+        }
+    }
+}
+
+/// One walk over one DLV parent's attempt keys, as [`walk`] made it: which
+/// keys it was over, where it started, where it ended, and which operation
+/// consumed the parent when one did. What a leg's liveness is read from
+/// ([`AttemptWalk::liveness_of`]); built by `walk` and by nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptWalk {
+    vault_id: [u8; 32],
+    parent_root: [u8; 32],
+    base: u64,
+    outcome: WalkOutcome,
+    consumed_by: Option<[u8; 32]>,
+}
+
+impl AttemptWalk {
+    pub fn vault_id(&self) -> &[u8; 32] {
+        &self.vault_id
+    }
+
+    pub fn parent_root(&self) -> &[u8; 32] {
+        &self.parent_root
+    }
+
+    /// The attempt the walk started at.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    pub fn outcome(&self) -> WalkOutcome {
+        self.outcome
+    }
+
+    /// `E` of the exercise that consumed the parent, when the walk found one.
+    pub fn consumed_by(&self) -> Option<&[u8; 32]> {
+        self.consumed_by.as_ref()
+    }
+
+    /// `AttemptLive(K^(attempt))` — every key before `attempt` skipped — and
+    /// whether the parent was consumed by an operation other than the one
+    /// bound to `e`, as this walk establishes them. `None` when the walk did
+    /// not start at the first key or did not reach `attempt`: not
+    /// established, never assumed.
+    pub(crate) fn liveness_of(&self, attempt: u64, e: &[u8; 32]) -> Option<(bool, bool)> {
+        if self.base != 0 {
+            return None;
+        }
+        match self.outcome {
+            // The parent went at an earlier key: this one was never live, and
+            // whether another operation took it is a different fact.
+            WalkOutcome::Consumed { attempt: at } if at < attempt => {
+                Some((false, self.consumed_by.is_some_and(|by| by != *e)))
+            }
+            // Consumed at this key or a later one: every key before this one
+            // was skipped.
+            WalkOutcome::Consumed { .. } => Some((true, false)),
+            WalkOutcome::Continue { cursor: reached }
+            | WalkOutcome::Unresolved { attempt: reached }
+            | WalkOutcome::CounterExhausted { attempt: reached } => {
+                (reached >= attempt).then_some((true, false))
+            }
+        }
+    }
+}
+
+/// Walk the attempt keys of `vault_id` at `parent_root` in ascending order
+/// from `base_attempt`: a skipped key moves to the next, a consumed key
+/// stops, anything else stops as unresolved.
+///
+/// `keys` supplies what is known about attempt `a`, or `None` past what the
+/// caller has established — which is `Unresolved`, never a skip. Facts bound
+/// to another key are no fact about this one. `budget` bounds the examined
+/// keys only; it never changes the verdict, it only defers it.
+pub fn walk<'f, F>(
+    vault_id: &[u8; 32],
+    parent_root: &[u8; 32],
+    base_attempt: u64,
+    budget: usize,
+    mut keys: F,
+) -> AttemptWalk
+where
+    F: FnMut(u64) -> Option<KeyFacts<'f>>,
+{
+    let mut attempt = base_attempt;
+    let mut examined = 0;
+    let mut consumed_by = None;
+    let outcome = loop {
+        if examined >= budget {
+            break WalkOutcome::Continue { cursor: attempt };
+        }
+        examined += 1;
+        let (class, e) = match keys(attempt) {
+            Some(key)
+                if key.vault_id == *vault_id
+                    && key.parent_root == *parent_root
+                    && key.attempt == attempt =>
+            {
+                match key.known {
+                    KeyKnown::Complete(facts, leg) => {
+                        (classify_attempt(&facts, &leg).0, facts.external_commitment)
+                    }
+                    KeyKnown::Ground(ground, leg) => (
+                        skip_without_evidence(&ground, &leg).0,
+                        ground.external_commitment,
+                    ),
+                    KeyKnown::RefutedInHand {
+                        refuted,
+                        cell,
+                        external_commitment,
+                    } => (
+                        skip_in_hand(refuted, &cell, &external_commitment).0,
+                        external_commitment,
+                    ),
+                }
+            }
+            Some(..) | None => break WalkOutcome::Unresolved { attempt },
+        };
+        match class {
+            AttemptClass::Consumed => {
+                consumed_by = Some(e);
+                break WalkOutcome::Consumed { attempt };
+            }
+            AttemptClass::Unresolved => break WalkOutcome::Unresolved { attempt },
+            AttemptClass::Skipped => match next_attempt(attempt) {
+                Ok(next) => attempt = next,
+                Err(..) => break WalkOutcome::CounterExhausted { attempt },
+            },
+        }
+    };
+    AttemptWalk {
+        vault_id: *vault_id,
+        parent_root: *parent_root,
+        base: base_attempt,
+        outcome,
+        consumed_by,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod tests {
+    use super::*;
+    use crate::sofi::conformance::Validation::{Invalid, Valid};
+
+    const E: [u8; 32] = [0xE5; 32];
+    const OTHER_E: [u8; 32] = [0x11; 32];
+    const PRE: [u8; 32] = [0x99; 32];
+    const OTHER_ROOT: [u8; 32] = [0x77; 32];
+    /// The ordinary parent claim a `P` names.
+    const NAMED: ParentClaimRef = ParentClaimRef::SingleRoot {
+        claim_ref: [0x66; 32],
+    };
+    /// An ordinary parent the trader holds at `p`, at `PRE`.
+    const HELD: ParentPosition = ParentPosition::SingleRoot {
+        named: NAMED,
+        held: NAMED,
+        held_root: PRE,
+    };
+    /// An ordinary parent `P` names while another claim holds `p`.
+    const NOT_HELD: ParentPosition = ParentPosition::SingleRoot {
+        named: NAMED,
+        held: ParentClaimRef::SingleRoot {
+            claim_ref: [0x67; 32],
+        },
+        held_root: PRE,
+    };
+    /// The claim `P` names, held at another root than `P` was built on.
+    const HELD_ELSEWHERE: ParentPosition = ParentPosition::SingleRoot {
+        named: NAMED,
+        held: NAMED,
+        held_root: OTHER_ROOT,
+    };
+    /// The vault whose attempt keys the walk tests walk, at parent `PRE`.
+    const V: [u8; 32] = [0x5A; 32];
+
+    #[test]
+    fn the_established_root_of_that_generation_is_canonical() {
+        assert_eq!(parent_status(Some(PRE), &PRE), ParentStatus::Canonical);
+    }
+
+    #[test]
+    fn a_different_root_at_the_same_generation_orphans_permanently() {
+        // R*_g is established and it is not what the leg names. Nothing later
+        // restores this parent: a generation has one realized consumer.
+        assert_eq!(
+            parent_status(Some(OTHER_ROOT), &PRE),
+            ParentStatus::Orphaned
+        );
+    }
+
+    #[test]
+    fn a_generation_the_chain_has_not_reached_waits_and_is_never_orphaned() {
+        // THE CASE THAT MUST NOT BECOME A VERDICT. A head is open so that the
+        // next root can still arrive, so a root this verifier cannot place is
+        // not thereby refuted -- it may be the one an in-flight operation is
+        // about to realize. Answering Orphaned here would Void it permanently.
+        assert_eq!(parent_status(None, &PRE), ParentStatus::Unavailable);
+        assert_ne!(parent_status(None, &PRE), ParentStatus::Orphaned);
+    }
+
+    #[test]
+    fn an_unreached_generation_neither_consumes_nor_defeats_a_route() {
+        // The status is not read in isolation: an unestablished parent leaves
+        // the position unresolved, where an Orphaned one would Void it.
+        let waiting = [LegFacts {
+            parent: parent_status(None, &PRE),
+            ..good_leg()
+        }];
+        assert_eq!(
+            resolve_position(&realized(&waiting)),
+            Err(Incomplete::StorageNotFinal)
+        );
+        let refuted = [LegFacts {
+            parent: parent_status(Some(OTHER_ROOT), &PRE),
+            ..good_leg()
+        }];
+        assert_eq!(resolve_position(&realized(&refuted)), Ok(Resolution::Void));
+    }
+
+    /// The genesis the memo tests anchor at, accepted as the fixture owner's
+    /// creation.
+    fn accepted_genesis() -> crate::sofi::lineage::AcceptedVaultGenesis {
+        use crate::sofi::lineage::genesis_acceptance::{accept, valid};
+        accept(&valid()).expect("the fixture's genesis is accepted")
+    }
+
+    /// Rows as this device records them: the genesis at zero, then each
+    /// root built on the one before it and consumed by a distinct operation.
+    fn recorded(genesis: &[u8; 32], roots: &[[u8; 32]]) -> Vec<RecordedGeneration> {
+        let mut rows = vec![RecordedGeneration {
+            generation: 0,
+            root: *genesis,
+            pre_root: None,
+            consumed_by: None,
+        }];
+        let mut previous = *genesis;
+        for (i, root) in roots.iter().enumerate() {
+            rows.push(RecordedGeneration {
+                generation: i as u64 + 1,
+                root: *root,
+                pre_root: Some(previous),
+                consumed_by: Some([0xC0 | i as u8; 32]),
+            });
+            previous = *root;
+        }
+        rows
+    }
+
+    /// THE MEMO IS ANCHORED AND LINKED, OR IT IS NOTHING. The rows this
+    /// device recorded become a chain only from the genesis it accepts now,
+    /// each generation built on the one before it and consumed by a named
+    /// operation; a record that does not anchor, does not link, names no
+    /// consumption or skips a generation is a contradiction and no chain.
+    /// MUTATION CONTROL: a constructor that takes the rows as they are turns
+    /// this red.
+    #[test]
+    fn the_memo_becomes_a_chain_only_anchored_at_the_genesis_and_linked_row_to_row() {
+        let genesis = accepted_genesis();
+        let g = *genesis.genesis_root();
+        let (r1, r2) = ([0xA1; 32], [0xA2; 32]);
+
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &[]).unwrap().roots(),
+            &[g][..],
+            "no rows: the chain is the genesis alone"
+        );
+        let rows = recorded(&g, &[r1, r2]);
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &rows).unwrap().roots(),
+            &[g, r1, r2][..]
+        );
+
+        // Not anchored: row zero is not the genesis accepted now.
+        let mut unanchored = rows.clone();
+        unanchored[0].root = OTHER_ROOT;
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &unanchored)
+                .unwrap_err()
+                .generation,
+            0
+        );
+        // The genesis row records a consumption.
+        let mut consumed_genesis = rows.clone();
+        consumed_genesis[0].pre_root = Some(OTHER_ROOT);
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &consumed_genesis)
+                .unwrap_err()
+                .generation,
+            0
+        );
+        // Not linked: generation 2 was not built on generation 1.
+        let mut unlinked = rows.clone();
+        unlinked[2].pre_root = Some(OTHER_ROOT);
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &unlinked)
+                .unwrap_err()
+                .generation,
+            2
+        );
+        // No consumption named.
+        let mut unnamed = rows.clone();
+        unnamed[1].consumed_by = None;
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &unnamed)
+                .unwrap_err()
+                .generation,
+            1
+        );
+        // A generation skipped.
+        let mut gapped = rows.clone();
+        gapped.remove(1);
+        assert_eq!(
+            VaultChain::from_recorded(&genesis, &gapped)
+                .unwrap_err()
+                .generation,
+            2
+        );
+    }
+
+    /// A leg that consumed its canonical parent on this operation's E.
+    fn good_leg() -> LegFacts {
+        LegFacts {
+            cell: CellFact::Held {
+                id: E,
+                state: ChainState::Final,
+            },
+            parent: ParentStatus::Canonical,
+            attempt_live: true,
+            parent_consumed_elsewhere: false,
+        }
+    }
+
+    fn open_leg() -> LegFacts {
+        LegFacts {
+            cell: CellFact::Open,
+            ..good_leg()
+        }
+    }
+
+    /// A registered, valid, single-leg operation on an ordinary parent whose
+    /// leg has consumed: the Realized baseline every case below perturbs.
+    fn realized<'l>(legs: &'l [LegFacts]) -> RouteFacts<'l> {
+        RouteFacts {
+            external_commitment: E,
+            pair: PairStanding::Registered,
+            conformance: Valid,
+            parent: HELD,
+            parent_pre_root: PRE,
+            validation: Valid,
+            storage_resolved: true,
+            verdict: VerdictFact::NotARelease,
+            legs,
+        }
+    }
+
+    // ── step 0: registration is the exercise boundary ──────────────────────
+
+    /// Lean `fulfillment_registration_is_exercise_boundary`, TLA
+    /// `CellsOnlyAfterFulfillmentRegistered`: before registration nothing is
+    /// exercised, whatever the cells say.
+    #[test]
+    fn an_unregistered_fulfillment_is_not_resolved_even_with_every_leg_final() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            pair: PairStanding::Pending,
+            ..realized(&legs)
+        };
+        assert_eq!(resolve_position(&facts), Err(Incomplete::NotRegistered));
+        assert!(!consumed_route(&facts));
+    }
+
+    // ── steps 1–2: the trader parent (P15-3, R17-3) ────────────────────────
+
+    /// A lost leg under a conditional parent resolves by the branch the parent
+    /// took: Void on the root this operation was built on, Invalid on the
+    /// other. The parent is resolved before Core is called (Amendment S7), so
+    /// a terminal Void is never retracted by a later parent answer.
+    #[test]
+    fn a_lost_leg_under_a_conditional_parent_resolves_by_the_branch_it_took() {
+        let legs = [LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
+            ..good_leg()
+        }];
+        let lost = realized(&legs);
+        assert_eq!(lost.validation, Valid);
+        assert!(lost.storage_resolved);
+        assert_eq!(
+            resolve_position(&RouteFacts {
+                parent: ParentPosition::ConditionalSelected {
+                    selected_root: OTHER_ROOT,
+                },
+                ..lost
+            }),
+            Ok(Resolution::Invalid)
+        );
+        assert_eq!(
+            resolve_position(&RouteFacts {
+                parent: ParentPosition::ConditionalSelected { selected_root: PRE },
+                ..lost
+            }),
+            Ok(Resolution::Void)
+        );
+    }
+
+    /// Lean `conditional_parent_on_the_taken_branch_processes_normally`.
+    #[test]
+    fn a_conditional_parent_that_selected_this_root_processes_normally() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            parent: ParentPosition::ConditionalSelected { selected_root: PRE },
+            ..realized(&legs)
+        };
+        assert!(trader_parent_compatible(&facts.parent, &PRE));
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Realized));
+    }
+
+    /// Lean `conditional_parent_on_another_branch_is_invalid`: the trader
+    /// guessed the branch and lost. Not Void — the operation was never the one
+    /// the lineage took.
+    #[test]
+    fn a_conditional_parent_that_selected_another_root_is_invalid() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            parent: ParentPosition::ConditionalSelected {
+                selected_root: OTHER_ROOT,
+            },
+            ..realized(&legs)
+        };
+        assert!(trader_parent_impossible(&facts.parent, &PRE));
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
+        assert!(!consumed_route(&facts));
+        assert_eq!(
+            route_impossible(&facts),
+            Some(ImpossibleArm::TraderParentImpossible)
+        );
+    }
+
+    /// Lean `terminal_parent_with_no_root_is_invalid_without_evidence`: a
+    /// parent that selected no root makes the position Invalid, and its DLV
+    /// key skips on arm (iv) over a statically valid route.
+    #[test]
+    fn a_terminal_parent_that_selected_no_root_is_invalid_and_its_key_skips() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            parent: ParentPosition::ConditionalNoRoot,
+            ..realized(&legs)
+        };
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
+        assert_eq!(
+            route_impossible(&facts),
+            Some(ImpossibleArm::TraderParentImpossible)
+        );
+        let (class, reason) = classify_attempt(&facts, &legs[0]);
+        assert_eq!(class, AttemptClass::Skipped);
+        assert_eq!(
+            reason,
+            Some(SkipReason::RejectedFinalRoute(
+                ImpossibleArm::TraderParentImpossible
+            ))
+        );
+    }
+
+    /// SoFi §23.5, MR-SOFI-0238: a final cell of a conformance-Invalid
+    /// fulfillment is skipped, so the walk moves past it instead of stalling
+    /// on it forever. `RouteImpossible` stays silent: it takes no F.
+    #[test]
+    fn a_final_cell_of_a_conformance_invalid_fulfillment_is_skipped() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            conformance: Validation::Invalid,
+            ..realized(&legs)
+        };
+        assert_eq!(route_impossible(&facts), None, "RouteImpossible takes no F");
+        assert_eq!(
+            fulfillment_impossible(&facts),
+            Some(FulfillmentImpossibility::ConformanceInvalid)
+        );
+        let (class, reason) = classify_attempt(&facts, &legs[0]);
+        assert_eq!(class, AttemptClass::Skipped);
+        assert_eq!(reason, Some(SkipReason::RejectedFinalConformance));
+    }
+
+    /// Lean `trader_parent_arm_is_monotone`: a resolved parent fixes exactly
+    /// one of compatible and impossible, for every root, so the arm never
+    /// retracts and a compatible parent never becomes impossible.
+    #[test]
+    fn the_trader_parent_arm_is_monotone() {
+        for root in [PRE, OTHER_ROOT] {
+            for parent in [
+                HELD,
+                NOT_HELD,
+                HELD_ELSEWHERE,
+                ParentPosition::ConditionalNoRoot,
+                ParentPosition::ConditionalSelected { selected_root: PRE },
+                ParentPosition::ConditionalSelected {
+                    selected_root: OTHER_ROOT,
+                },
+            ] {
+                let compatible = trader_parent_compatible(&parent, &root);
+                let impossible = trader_parent_impossible(&parent, &root);
+                assert!(
+                    compatible != impossible,
+                    "a resolved parent is exactly one of the two: {parent:?} against {root:?}"
+                );
+            }
+        }
+    }
+
+    // ── step 3: consumption ────────────────────────────────────────────────
+
+    /// Lean `fulfillment_atomic_all_or_none`, TLA `NoPartialRealization`: one
+    /// final leg is not one executed swap.
+    #[test]
+    fn a_route_with_one_leg_still_open_is_not_consumed() {
+        let legs = [good_leg(), open_leg()];
+        let facts = RouteFacts { ..realized(&legs) };
+        assert!(!consumed_route(&facts));
+        assert_eq!(resolve_position(&facts), Err(Incomplete::StorageNotFinal));
+    }
+
+    /// Lean `route_validation_excludes_parent_canonicality`: canonicality is a
+    /// consumption question, so a non-canonical parent cannot realize even
+    /// though validation says Valid.
+    #[test]
+    fn a_parent_the_verifier_has_not_established_never_consumes() {
+        let legs = [LegFacts {
+            parent: ParentStatus::Unavailable,
+            ..good_leg()
+        }];
+        let facts = realized(&legs);
+        assert!(!consumed_route(&facts));
+        assert_eq!(resolve_position(&facts), Err(Incomplete::StorageNotFinal));
+    }
+
+    /// An earlier attempt key another operation reached first means the fulfillment's own key was
+    /// never live, so nothing it holds is a consumption.
+    #[test]
+    fn an_earlier_attempt_another_operation_reached_first_makes_this_key_not_live() {
+        let legs = [LegFacts {
+            attempt_live: false,
+            ..good_leg()
+        }];
+        let facts = realized(&legs);
+        assert!(!consumed_route(&facts));
+    }
+
+    /// An unestablished parent is not a refuted one. A parent the verifier
+    /// has not established leaves the position unresolved; one it has
+    /// established as another root defeats it. Under the pair of booleans
+    /// `ParentStatus` replaced, both were `false` on both fields and the
+    /// ladder could not tell them apart.
+    #[test]
+    fn an_unestablished_parent_waits_and_an_orphaned_one_defeats() {
+        for (status, expected, arm) in [
+            (
+                ParentStatus::Unavailable,
+                Err(Incomplete::StorageNotFinal),
+                None,
+            ),
+            (
+                ParentStatus::Orphaned,
+                Ok(Resolution::Void),
+                Some(ImpossibleArm::ParentOrphaned),
+            ),
+            (ParentStatus::Canonical, Ok(Resolution::Realized), None),
+        ] {
+            let legs = [LegFacts {
+                parent: status,
+                ..good_leg()
+            }];
+            let facts = realized(&legs);
+            assert_eq!(facts.validation, Valid, "the route itself is sound");
+            assert_eq!(
+                resolve_position(&facts),
+                expected,
+                "{status:?} must resolve {expected:?}"
+            );
+            assert_eq!(route_impossible(&facts), arm, "{status:?}");
+        }
+    }
+
+    /// Orphaning is a `RouteImpossible` condition, so a valid and conforming
+    /// route that it defeats goes to Void — never Invalid, which would say
+    /// the operation never satisfied the rules (owner ruling §44.4).
+    #[test]
+    fn an_orphaned_parent_voids_a_valid_route_and_never_invalidates_it() {
+        let legs = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        }];
+        let facts = realized(&legs);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Void));
+        assert_eq!(
+            effect_of(Resolution::Void),
+            PositionEffect::InstallPreviousRoot,
+            "a Void moves nothing; the lineage continues where it was"
+        );
+        // Only a static refusal makes it Invalid, and that is a different fact.
+        assert_eq!(
+            resolve_position(&RouteFacts {
+                validation: Invalid,
+                ..facts
+            }),
+            Ok(Resolution::Invalid)
+        );
+    }
+
+    /// A parent that really was canonical and was then taken by another
+    /// route is `parent_consumed_elsewhere`, not orphaned. The two are
+    /// different facts with the same terminal answer, and keeping them apart
+    /// is what lets a skip be attributed (owner ruling §44.4).
+    ///
+    /// The leg's own key is open: a cell final on THIS operation's `E` would
+    /// say we consumed the parent ourselves, which is not a route another
+    /// operation took.
+    #[test]
+    fn a_canonical_parent_taken_by_another_route_is_consumed_not_orphaned() {
+        let legs = [LegFacts {
+            cell: CellFact::Open,
+            parent: ParentStatus::Canonical,
+            parent_consumed_elsewhere: true,
+            ..good_leg()
+        }];
+        let facts = realized(&legs);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Void));
+        assert_eq!(
+            route_impossible(&facts),
+            Some(ImpossibleArm::ParentConsumedElsewhere),
+            "the arm names which fact defeated it"
+        );
+    }
+
+    // ── step 4: static invalidity ──────────────────────────────────────────
+
+    /// TLA `ResolutionPermanent`, arm (i): Invalid is terminal and needs no
+    /// storage resolution.
+    #[test]
+    fn a_statically_invalid_route_is_invalid_before_storage_resolves() {
+        let legs = [open_leg()];
+        let facts = RouteFacts {
+            validation: Invalid,
+            storage_resolved: false,
+            ..realized(&legs)
+        };
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
+        assert_eq!(
+            route_impossible(&facts),
+            Some(ImpossibleArm::ValidationInvalid)
+        );
+    }
+
+    // ── step 5: Void, and only after Valid (R14-1) ─────────────────────────
+
+    /// Lean `fulfillment_registrable_after_parent_loss_resolves_void`: a
+    /// registered fulfillment whose parent a rival consumed is valid but
+    /// defeated.
+    #[test]
+    fn a_valid_route_whose_parent_was_consumed_elsewhere_voids() {
+        let legs = [LegFacts {
+            cell: CellFact::Open,
+            parent_consumed_elsewhere: true,
+            ..good_leg()
+        }];
+        let facts = realized(&legs);
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Void));
+        assert_eq!(
+            effect_of(Resolution::Void),
+            PositionEffect::InstallPreviousRoot
+        );
+    }
+
+    /// A reserved key that died, and an objective abort, are both Void.
+    #[test]
+    fn a_reserved_key_another_operation_reached_first_voids() {
+        let taken = [LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
+            ..good_leg()
+        }];
+        assert_eq!(resolve_position(&realized(&taken)), Ok(Resolution::Void));
+    }
+
+    /// Lean `resolution_is_permanent` and its counterexample
+    /// `literal_ladder_is_not_permanent`, TLA falsification
+    /// `VoidBeforeValidation`: a lost route is Void only when it was valid,
+    /// and Invalid when it never was. Rung 4 precedes rung 5, so a lost route
+    /// is never voided ahead of its validation.
+    #[test]
+    fn a_lost_route_is_void_when_valid_and_invalid_when_not() {
+        let legs = [LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
+            ..good_leg()
+        }];
+        let lost = realized(&legs);
+        assert_eq!(
+            resolve_position(&RouteFacts {
+                validation: Valid,
+                ..lost
+            }),
+            Ok(Resolution::Void)
+        );
+        assert_eq!(
+            resolve_position(&RouteFacts {
+                validation: Invalid,
+                ..lost
+            }),
+            Ok(Resolution::Invalid)
+        );
+    }
+
+    /// Void needs storage resolution: a route that merely looks lost while its
+    /// keys are open is not resolved.
+    #[test]
+    fn void_requires_storage_resolution() {
+        let legs = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            cell: CellFact::Open,
+            ..good_leg()
+        }];
+        let facts = RouteFacts {
+            storage_resolved: false,
+            ..realized(&legs)
+        };
+        assert_eq!(resolve_position(&facts), Err(Incomplete::StorageNotFinal));
+    }
+
+    // ── rungs 3–4: FulfillmentConformance (R12) ───────────────────────────
+
+    /// Lean `realized_requires_conformance`, TLA `RealizedRequiresConformance`
+    /// (fault `_ConformanceDropped`): FulfillmentConformance is a conjunct of
+    /// ConsumedRoute. A registered, statically valid route with every leg
+    /// final on its E never realizes once its conformance is Invalid.
+    #[test]
+    fn realized_requires_conformance() {
+        let legs = [good_leg(), good_leg()];
+        let never = RouteFacts {
+            conformance: Invalid,
+            ..realized(&legs)
+        };
+        assert!(!consumed_route(&never));
+        assert_eq!(resolve_position(&never), Ok(Resolution::Invalid));
+        assert_eq!(
+            resolve_position(&never).map(effect_of),
+            Ok(PositionEffect::None)
+        );
+        // Only Valid realizes, and the effect is the realize root.
+        assert!(consumed_route(&realized(&legs)));
+        assert_eq!(resolve_position(&realized(&legs)), Ok(Resolution::Realized));
+        assert_eq!(
+            resolve_position(&realized(&legs)).map(effect_of),
+            Ok(PositionEffect::InstallRealizeRoot)
+        );
+    }
+
+    /// Lean `registration_is_not_conformance`, TLA `RegistrationIsNotConformance`:
+    /// registration supplies no truth value. The same registered facts with
+    /// conformance Invalid never realize.
+    #[test]
+    fn registration_is_not_conformance() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            conformance: Invalid,
+            ..realized(&legs)
+        };
+        assert_eq!(facts.pair, PairStanding::Registered);
+        assert_ne!(resolve_position(&facts), Ok(Resolution::Realized));
+    }
+
+    /// Section 21.1: a registered, valid route already lost at a reserved key
+    /// is Void only if it conformed, and Invalid if it never did. Rung 2
+    /// precedes rung 5, so no route is voided ahead of its conformance.
+    #[test]
+    fn a_lost_route_is_void_only_if_it_conformed() {
+        let legs = [LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
+            ..good_leg()
+        }];
+        let lost = realized(&legs);
+        assert!(lost.storage_resolved && lost.validation == Valid);
+        assert_eq!(
+            resolve_position(&RouteFacts {
+                conformance: Valid,
+                ..lost
+            }),
+            Ok(Resolution::Void)
+        );
+        assert_eq!(
+            resolve_position(&RouteFacts {
+                conformance: Invalid,
+                ..lost
+            }),
+            Ok(Resolution::Invalid)
+        );
+    }
+
+    // ── Amendment S14: a fulfillment that can never register (R12) ──────
+
+    /// TLA `LostPosition` (fault `_LostPositionDropped` →
+    /// `ObjectiveRejectionImpliesSkipped`), Lean
+    /// `a_lost_position_makes_a_final_cell_skippable`: an exercise final at a
+    /// key whose F can never register — the position holds another claim —
+    /// is skipped, so the parent's attempt chain is not stranded. It is no
+    /// Void: the position resolves through the claim that took it, never
+    /// through this F.
+    #[test]
+    fn a_final_cell_whose_fulfillment_lost_its_position_is_skipped() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            pair: PairStanding::Lost,
+            ..realized(&legs)
+        };
+        assert_eq!(route_impossible(&facts), None);
+        assert_eq!(fulfillment_impossible(&facts), None);
+        assert_eq!(
+            classify_attempt(&facts, &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalInadmissible)
+            )
+        );
+        assert_eq!(resolve_position(&facts), Err(Incomplete::NotRegistered));
+        assert!(!consumed_route(&facts));
+        // Without the skip the same cell is that F's open question forever.
+        let held = RouteFacts {
+            pair: PairStanding::Pending,
+            ..facts
+        };
+        assert_eq!(route_impossible(&held), None);
+        assert_eq!(
+            classify_attempt(&held, &legs[0]).0,
+            AttemptClass::Unresolved
+        );
+    }
+
+    /// MR-SOFI-0239, SoFi §23.5: `RouteImpossible(P, E)` takes no F. Two
+    /// facts differ only in what is known about one particular fulfillment —
+    /// whether it registered, whether its position went to another claim —
+    /// and `route_impossible` answers both alike, for every arm.
+    #[test]
+    fn route_impossibility_reads_nothing_about_a_particular_fulfillment() {
+        let legs = [good_leg()];
+        let orphaned = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        }];
+        for legs in [&legs[..], &orphaned[..]] {
+            for validation in [Valid, Invalid] {
+                for conformance in [Valid, Invalid] {
+                    for about_f in around(legs, conformance, validation) {
+                        let without_f = RouteFacts {
+                            parent: about_f.parent,
+                            validation,
+                            ..realized(legs)
+                        };
+                        assert_eq!(route_impossible(&about_f), route_impossible(&without_f));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── MR-SOFI-0241: skips that need no validation evidence ──────────────
+
+    /// The facts of `facts` that stand without validation evidence.
+    fn ground_of<'l>(facts: &RouteFacts<'l>) -> GroundRouteFacts<'l> {
+        GroundRouteFacts {
+            external_commitment: facts.external_commitment,
+            pair: facts.pair,
+            parent: facts.parent,
+            parent_pre_root: facts.parent_pre_root,
+            verdict: facts.verdict,
+            legs: facts.legs,
+        }
+    }
+
+    /// A leg at attempt 1 of `PRE` with `cell`, whose parent another
+    /// operation consumed at attempt 0: its liveness as a walk over the
+    /// parent's keys establishes it, never stated.
+    fn leg_whose_parent_went_elsewhere(cell: CellFact) -> LegFacts {
+        let other = [LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        }];
+        let consumed = walk(&V, &PRE, 0, 16, |attempt| {
+            (attempt == 0).then(|| {
+                KeyFacts::complete_at(
+                    V,
+                    PRE,
+                    0,
+                    RouteFacts {
+                        external_commitment: OTHER_E,
+                        ..realized(&other)
+                    },
+                    other[0],
+                )
+            })
+        });
+        assert_eq!(consumed.outcome(), WalkOutcome::Consumed { attempt: 0 });
+        let (attempt_live, parent_consumed_elsewhere) =
+            consumed.liveness_of(1, &E).expect("the walk reached key 1");
+        LegFacts {
+            cell,
+            attempt_live,
+            parent_consumed_elsewhere,
+            ..good_leg()
+        }
+    }
+
+    /// SoFi §23.5 and MR-SOFI-0241, Amendment S14: a final cell dead on a
+    /// fact that needs no validation evidence skips on that fact alone — a
+    /// named parent consumed elsewhere (iii), a trader parent that can never
+    /// be compatible (iv), a position that went to another claim. The ground
+    /// facts hold no conformance and no validation, so none is read.
+    #[test]
+    fn a_dead_cell_skips_on_facts_that_need_no_evidence() {
+        let taken = [leg_whose_parent_went_elsewhere(good_leg().cell)];
+        let facts = realized(&taken);
+        assert_eq!(
+            skip_without_evidence(&ground_of(&facts), &taken[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalRoute(
+                    ImpossibleArm::ParentConsumedElsewhere
+                ))
+            )
+        );
+
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            parent: ParentPosition::ConditionalNoRoot,
+            ..realized(&legs)
+        };
+        assert_eq!(
+            skip_without_evidence(&ground_of(&facts), &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalRoute(
+                    ImpossibleArm::TraderParentImpossible
+                ))
+            )
+        );
+
+        let lost = around(&legs, Valid, Valid)
+            .into_iter()
+            .find(|f| f.pair == PairStanding::Lost && f.parent == HELD)
+            .expect("a lost position among the facts");
+        assert_eq!(
+            skip_without_evidence(&ground_of(&lost), &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalInadmissible)
+            )
+        );
+
+        // A cell that is not final on E is no one's skip, dead or not.
+        let open = [leg_whose_parent_went_elsewhere(CellFact::Open)];
+        let facts = realized(&open);
+        assert_eq!(
+            skip_without_evidence(&ground_of(&facts), &open[0]),
+            (AttemptClass::Unresolved, None)
+        );
+    }
+
+    /// What needs validation evidence never skips without it: an Invalid
+    /// conformance, an Invalid route, and an orphaned parent (whose
+    /// generation only the evidence places) are the complete facts' to
+    /// decide.
+    #[test]
+    fn nothing_that_needs_evidence_skips_without_it() {
+        let legs = [good_leg()];
+        for facts in [
+            RouteFacts {
+                conformance: Invalid,
+                ..realized(&legs)
+            },
+            RouteFacts {
+                validation: Invalid,
+                ..realized(&legs)
+            },
+        ] {
+            assert_eq!(classify_attempt(&facts, &legs[0]).0, AttemptClass::Skipped);
+            assert_eq!(
+                skip_without_evidence(&ground_of(&facts), &legs[0]),
+                (AttemptClass::Unresolved, None)
+            );
+        }
+        let orphaned = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        }];
+        let facts = realized(&orphaned);
+        assert_eq!(
+            classify_attempt(&facts, &orphaned[0]).0,
+            AttemptClass::Skipped
+        );
+        assert_eq!(
+            skip_without_evidence(&ground_of(&facts), &orphaned[0]),
+            (AttemptClass::Unresolved, None)
+        );
+    }
+
+    /// An evidence-free skip is the complete facts' own answer: over every
+    /// combination of the facts, one and two legs, and each walked leg,
+    /// wherever `skip_without_evidence` skips a key, `classify_attempt`
+    /// skips it too — whatever the evidence would have said.
+    #[test]
+    fn an_evidence_free_skip_answers_as_the_complete_facts_do() {
+        let final_e = good_leg().cell;
+        let leg_sets = [
+            vec![good_leg()],
+            vec![open_leg()],
+            vec![leg_whose_parent_went_elsewhere(final_e)],
+            vec![leg_whose_parent_went_elsewhere(CellFact::Open)],
+            vec![good_leg(), leg_whose_parent_went_elsewhere(CellFact::Open)],
+            vec![leg_whose_parent_went_elsewhere(final_e), open_leg()],
+        ];
+        let mut skipped = 0usize;
+        for legs in &leg_sets {
+            for conformance in [Valid, Invalid] {
+                for validation in [Valid, Invalid] {
+                    for facts in around(legs, conformance, validation) {
+                        for leg in legs.iter() {
+                            if skip_without_evidence(&ground_of(&facts), leg).0
+                                == AttemptClass::Skipped
+                            {
+                                skipped += 1;
+                                assert_eq!(
+                                    classify_attempt(&facts, leg).0,
+                                    AttemptClass::Skipped,
+                                    "{facts:?} at {leg:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(skipped > 0, "the sweep exercised the evidence-free skips");
+    }
+
+    /// MR-SOFI-0241: a walk passes a key whose exercise is dead on facts that
+    /// need no validation evidence, with none of that evidence in hand, and
+    /// the next attempt is live.
+    #[test]
+    fn a_walk_passes_a_dead_key_whose_evidence_is_not_in_hand() {
+        let legs = [good_leg()];
+        let dead = RouteFacts {
+            parent: ParentPosition::ConditionalNoRoot,
+            ..realized(&legs)
+        };
+        let walked = walk(&V, &PRE, 0, 16, |attempt| {
+            (attempt == 0).then(|| KeyFacts::ground_at(V, PRE, 0, ground_of(&dead), legs[0]))
+        });
+        assert_eq!(walked.outcome(), WalkOutcome::Unresolved { attempt: 1 });
+        // The next key is live exactly as it is when the complete facts skip
+        // the same key.
+        let complete = walk(&V, &PRE, 0, 16, |attempt| {
+            (attempt == 0).then(|| KeyFacts::complete_at(V, PRE, 0, dead, legs[0]))
+        });
+        assert_eq!(walked.outcome(), complete.outcome());
+        assert_eq!(walked.liveness_of(1, &E), complete.liveness_of(1, &E));
+        assert!(walked.liveness_of(1, &E).is_some_and(|(live, _)| live));
+    }
+
+    // ── rung 8, and the ladder as a whole ──────────────────────────────────
+
+    /// Lean `resolution_is_permanent`: no terminal answer is reachable from
+    /// another terminal answer as facts accumulate monotonically — storage
+    /// resolving, or a cell's chain growing. Checked by enumeration over every
+    /// fact combination the ladder reads.
+    #[test]
+    fn a_terminal_resolution_is_never_reached_from_another_terminal_one() {
+        let held = |id: [u8; 32], state: ChainState| CellFact::Held { id, state };
+        let cells = [
+            held(E, ChainState::Final),
+            held(E, ChainState::LeaderHeld),
+            held(OTHER_E, ChainState::Final),
+            held(OTHER_E, ChainState::LeaderHeld),
+            CellFact::Open,
+        ];
+        let parents = [
+            HELD,
+            NOT_HELD,
+            HELD_ELSEWHERE,
+            ParentPosition::ConditionalSelected { selected_root: PRE },
+            ParentPosition::ConditionalSelected {
+                selected_root: OTHER_ROOT,
+            },
+            ParentPosition::ConditionalNoRoot,
+        ];
+        for cell in cells {
+            for parent in parents {
+                for validation in [Valid, Invalid] {
+                    for conformance in [Valid, Invalid] {
+                        for storage_resolved in [false, true] {
+                            let legs = [LegFacts { cell, ..good_leg() }];
+                            let facts = RouteFacts {
+                                external_commitment: E,
+                                pair: PairStanding::Registered,
+                                conformance,
+                                parent,
+                                parent_pre_root: PRE,
+                                validation,
+                                storage_resolved,
+                                verdict: VerdictFact::NotARelease,
+                                legs: &legs,
+                            };
+                            let before = resolve_position(&facts);
+                            if !storage_resolved {
+                                let after = resolve_position(&RouteFacts {
+                                    storage_resolved: true,
+                                    ..facts
+                                });
+                                assert!(
+                                    before.is_err() || before == after,
+                                    "{before:?} changed to {after:?} on storage resolution"
+                                );
+                            }
+                            if let CellFact::Held {
+                                id,
+                                state: ChainState::LeaderHeld,
+                            } = cell
+                            {
+                                let grown = [LegFacts {
+                                    cell: held(id, ChainState::Final),
+                                    ..good_leg()
+                                }];
+                                let after = resolve_position(&RouteFacts {
+                                    legs: &grown,
+                                    ..facts
+                                });
+                                assert!(
+                                    before.is_err() || before == after,
+                                    "{before:?} changed to {after:?} as the chain grew"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Realized and Void are the only results that continue the lineage, and
+    /// Void contributes no mutation of its own.
+    #[test]
+    fn only_realized_installs_the_realize_root_and_void_installs_the_previous_one() {
+        assert_eq!(
+            effect_of(Resolution::Realized),
+            PositionEffect::InstallRealizeRoot
+        );
+        assert_eq!(
+            effect_of(Resolution::Void),
+            PositionEffect::InstallPreviousRoot
+        );
+        assert_eq!(effect_of(Resolution::Invalid), PositionEffect::None);
+    }
+
+    // ── impossibility arms and the walk ────────────────────────────────────
+
+    /// Lean `route_impossible_orphan_and_consumed_elsewhere_arms`: arms (ii)
+    /// and (iii′) hold on a statically valid route.
+    #[test]
+    fn the_orphan_and_consumed_elsewhere_arms_hold_on_a_valid_route() {
+        let orphaned = [LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        }];
+        assert_eq!(
+            route_impossible(&realized(&orphaned)),
+            Some(ImpossibleArm::ParentOrphaned)
+        );
+        let taken = [LegFacts {
+            parent_consumed_elsewhere: true,
+            ..good_leg()
+        }];
+        assert_eq!(
+            route_impossible(&realized(&taken)),
+            Some(ImpossibleArm::ParentConsumedElsewhere)
+        );
+    }
+
+    /// Lean `stranded_e_cell_is_not_partial_execution`: a final cell of an
+    /// impossible route is skipped, and skipping it is not a rollback.
+    #[test]
+    fn a_stranded_final_cell_of_an_impossible_route_is_skipped() {
+        let lost = [
+            LegFacts {
+                parent: ParentStatus::Orphaned,
+                ..open_leg()
+            },
+            good_leg(),
+        ];
+        let facts = realized(&lost);
+        let (class, reason) = classify_attempt(&facts, &lost[1]);
+        assert_eq!(class, AttemptClass::Skipped);
+        assert_eq!(
+            reason,
+            Some(SkipReason::RejectedFinalRoute(
+                ImpossibleArm::ParentOrphaned
+            ))
+        );
+    }
+
+    /// A single-leg operation whose validation is Invalid gives the
+    /// single-leg rejection, which is the arm the cell ingress path reports.
+    #[test]
+    fn a_single_leg_invalid_route_reports_the_single_leg_rejection() {
+        let legs = [good_leg()];
+        let facts = RouteFacts {
+            validation: Invalid,
+            ..realized(&legs)
+        };
+        let (class, reason) = classify_attempt(&facts, &legs[0]);
+        assert_eq!(class, AttemptClass::Skipped);
+        assert_eq!(reason, Some(SkipReason::RejectedFinalSingleLeg));
+    }
+
+    /// A cell another operation reached first is that operation's question, not
+    /// this one's: it is never skipped or consumed from these facts alone.
+    #[test]
+    fn a_cell_another_operation_reached_first_is_that_operations_question() {
+        let legs = [LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::LeaderHeld,
+            },
+            ..good_leg()
+        }];
+        assert_eq!(
+            classify_attempt(&realized(&legs), &legs[0]),
+            (AttemptClass::Unresolved, None)
+        );
+    }
+
+    /// The walk passes skipped keys, stops on a consumption, and the answer is
+    /// the same however the budget chunks it.
+    #[test]
+    fn the_walk_is_chunking_equivalent() {
+        // Attempts 0..3 were exercised by another operation whose route is
+        // impossible: final on its E, rejected, so each is skipped. The facts
+        // describe the ROUTE the key belongs to, because a key is consumed
+        // only when its whole operation is.
+        let rejected = LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        };
+        let rejected_legs = [rejected];
+        let live_legs = [good_leg()];
+        let facts_for = |attempt: u64| {
+            let (legs, leg, e, validation) = if attempt < 3 {
+                (&rejected_legs, rejected, OTHER_E, Invalid)
+            } else {
+                (&live_legs, good_leg(), E, Valid)
+            };
+            Some(KeyFacts::complete_at(
+                V,
+                PRE,
+                attempt,
+                RouteFacts {
+                    external_commitment: e,
+                    pair: PairStanding::Registered,
+                    conformance: Valid,
+                    parent: HELD,
+                    parent_pre_root: PRE,
+                    validation,
+                    storage_resolved: true,
+                    verdict: VerdictFact::NotARelease,
+                    legs,
+                },
+                leg,
+            ))
+        };
+        let consumed = walk(&V, &PRE, 0, 16, facts_for);
+        assert_eq!(consumed.outcome(), WalkOutcome::Consumed { attempt: 3 });
+        assert_eq!(
+            consumed.consumed_by(),
+            Some(&E),
+            "the walk names who consumed"
+        );
+        // A budget of two defers without deciding, and resuming lands the same.
+        let WalkOutcome::Continue { cursor } = walk(&V, &PRE, 0, 2, facts_for).outcome() else {
+            panic!("a two-key budget cannot reach attempt 3")
+        };
+        assert_eq!(cursor, 2);
+        assert_eq!(
+            walk(&V, &PRE, cursor, 16, facts_for).outcome(),
+            WalkOutcome::Consumed { attempt: 3 }
+        );
+    }
+
+    /// Facts bound to another key are no fact about this one: a walk handed
+    /// the facts of a skipped key under a different vault, parent root or
+    /// attempt does not skip on them. The binding is what keeps a walk from
+    /// being fed one skipped key's facts for every key of a chain.
+    /// MUTATION CONTROL: a walk that classifies whatever facts it is handed
+    /// turns this red.
+    #[test]
+    fn a_walk_takes_only_facts_bound_to_the_key_it_asks_about() {
+        let rejected = LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        };
+        let legs = [rejected];
+        let skipped = |vault: [u8; 32], root: [u8; 32], attempt: u64| {
+            KeyFacts::complete_at(
+                vault,
+                root,
+                attempt,
+                RouteFacts {
+                    external_commitment: OTHER_E,
+                    pair: PairStanding::Registered,
+                    conformance: Valid,
+                    parent: HELD,
+                    parent_pre_root: PRE,
+                    validation: Invalid,
+                    storage_resolved: true,
+                    verdict: VerdictFact::NotARelease,
+                    legs: &legs,
+                },
+                rejected,
+            )
+        };
+        // Bound to this key: skipped.
+        assert_eq!(
+            walk(&V, &PRE, 0, 1, |a| Some(skipped(V, PRE, a))).outcome(),
+            WalkOutcome::Continue { cursor: 1 }
+        );
+        // Bound to another vault, another parent root, another attempt:
+        // unresolved, never a skip.
+        for other in [
+            skipped(OTHER_ROOT, PRE, 0),
+            skipped(V, OTHER_ROOT, 0),
+            skipped(V, PRE, 7),
+        ] {
+            assert_eq!(
+                walk(&V, &PRE, 0, 1, |_| Some(other)).outcome(),
+                WalkOutcome::Unresolved { attempt: 0 }
+            );
+        }
+    }
+
+    /// What a walk establishes about a leg's liveness: every key before the
+    /// leg's attempt skipped, and whether the parent went to another
+    /// operation. A walk that did not start at the first key, or did not
+    /// reach the attempt, establishes nothing.
+    #[test]
+    fn a_walk_establishes_liveness_only_as_far_as_it_reached() {
+        let rejected = LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        };
+        let rejected_legs = [rejected];
+        let consuming_legs = [good_leg()];
+        // Keys 0 and 1 are held by a rejected operation, skipped; key 2 is
+        // consumed by the operation bound to E.
+        let facts_for = |attempt: u64| match attempt {
+            0 | 1 => Some(KeyFacts::complete_at(
+                V,
+                PRE,
+                attempt,
+                RouteFacts {
+                    external_commitment: OTHER_E,
+                    pair: PairStanding::Registered,
+                    conformance: Valid,
+                    parent: HELD,
+                    parent_pre_root: PRE,
+                    validation: Invalid,
+                    storage_resolved: true,
+                    verdict: VerdictFact::NotARelease,
+                    legs: &rejected_legs,
+                },
+                rejected,
+            )),
+            2 => Some(KeyFacts::complete_at(
+                V,
+                PRE,
+                2,
+                realized(&consuming_legs),
+                good_leg(),
+            )),
+            _ => None,
+        };
+        let reached_two = walk(&V, &PRE, 0, 2, facts_for);
+        assert_eq!(reached_two.outcome(), WalkOutcome::Continue { cursor: 2 });
+        // Keys before 1 and before 2 are skipped: live. Key 3 is past what
+        // the walk reached: not established.
+        assert_eq!(reached_two.liveness_of(1, &OTHER_ROOT), Some((true, false)));
+        assert_eq!(reached_two.liveness_of(2, &OTHER_ROOT), Some((true, false)));
+        assert_eq!(reached_two.liveness_of(3, &OTHER_ROOT), None);
+
+        let consumed = walk(&V, &PRE, 0, 16, facts_for);
+        assert_eq!(consumed.outcome(), WalkOutcome::Consumed { attempt: 2 });
+        // A leg at attempt 3 of this parent was never live: the parent went
+        // at key 2, to E — another operation for a leg bound to OTHER_ROOT,
+        // and this very one for a leg bound to E.
+        assert_eq!(consumed.liveness_of(3, &OTHER_ROOT), Some((false, true)));
+        assert_eq!(consumed.liveness_of(3, &E), Some((false, false)));
+        // A leg at key 2 itself: every earlier key skipped.
+        assert_eq!(consumed.liveness_of(2, &E), Some((true, false)));
+
+        // A walk that did not start at the first key establishes no liveness.
+        let resumed = walk(&V, &PRE, 1, 16, facts_for);
+        assert_eq!(resumed.outcome(), WalkOutcome::Consumed { attempt: 2 });
+        assert_eq!(resumed.liveness_of(2, &E), None);
+    }
+
+    /// Every combination of the facts an in-hand refutation does not read,
+    /// over one and two legs, with the walked leg's cell as given.
+    fn around<'l>(
+        legs: &'l [LegFacts],
+        conformance: Validation,
+        validation: Validation,
+    ) -> Vec<RouteFacts<'l>> {
+        let mut out = Vec::new();
+        for pair in [
+            PairStanding::Registered,
+            PairStanding::Pending,
+            PairStanding::Lost,
+            PairStanding::Misbodied,
+        ] {
+            {
+                for storage_resolved in [true, false] {
+                    for parent in [
+                        HELD,
+                        NOT_HELD,
+                        HELD_ELSEWHERE,
+                        ParentPosition::ConditionalSelected { selected_root: PRE },
+                        ParentPosition::ConditionalSelected {
+                            selected_root: OTHER_ROOT,
+                        },
+                        ParentPosition::ConditionalNoRoot,
+                    ] {
+                        out.push(RouteFacts {
+                            external_commitment: E,
+                            pair,
+                            conformance,
+                            parent,
+                            parent_pre_root: PRE,
+                            validation,
+                            storage_resolved,
+                            verdict: VerdictFact::NotARelease,
+                            legs,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `skip_in_hand` and `resolve_refuted_in_hand` are the ladder's own
+    /// answers: for every value of the facts they do not read, a key and a
+    /// position whose exercise is refuted in hand classify and resolve exactly
+    /// as `classify_attempt` and `resolve_position` do over the complete facts.
+    #[test]
+    fn an_in_hand_refutation_answers_as_the_complete_facts_do() {
+        let other = LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        };
+        let held = LegFacts {
+            cell: CellFact::Held {
+                id: E,
+                state: ChainState::LeaderHeld,
+            },
+            ..good_leg()
+        };
+        let orphaned = LegFacts {
+            parent: ParentStatus::Orphaned,
+            ..good_leg()
+        };
+        for walked in [good_leg(), open_leg(), other, held, orphaned] {
+            for legs in [
+                vec![walked],
+                vec![walked, good_leg()],
+                vec![walked, open_leg()],
+            ] {
+                let n = legs.len();
+                for (refuted, conformance, validation) in [
+                    (RefutedInHand::Conformance, Invalid, Valid),
+                    (RefutedInHand::Conformance, Invalid, Invalid),
+                    (RefutedInHand::Route { legs: n }, Valid, Invalid),
+                ] {
+                    for facts in around(&legs, conformance, validation) {
+                        assert_eq!(
+                            classify_attempt(&facts, &walked),
+                            skip_in_hand(refuted, &walked.cell, &E),
+                            "{refuted:?} over {facts:?}"
+                        );
+                        assert_eq!(
+                            resolve_position(&facts),
+                            resolve_refuted_in_hand(facts.pair),
+                            "{refuted:?} over {facts:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A key whose exercise is refuted in hand skips in the walk with nothing
+    /// else supplied about it.
+    #[test]
+    fn the_walk_skips_a_key_refuted_in_hand() {
+        let final_e = CellFact::Held {
+            id: E,
+            state: ChainState::Final,
+        };
+        let live_legs = [good_leg()];
+        let facts_for = |attempt: u64| match attempt {
+            0 => Some(KeyFacts::refuted_at(
+                V,
+                PRE,
+                0,
+                RefutedInHand::Conformance,
+                final_e,
+                E,
+            )),
+            1 => Some(KeyFacts::complete_at(
+                V,
+                PRE,
+                1,
+                realized(&live_legs),
+                good_leg(),
+            )),
+            _ => None,
+        };
+        assert_eq!(
+            walk(&V, &PRE, 0, 16, facts_for).outcome(),
+            WalkOutcome::Consumed { attempt: 1 }
+        );
+        // Refuted, but not final on its E: nothing skips.
+        let open_for = |attempt: u64| {
+            (attempt == 0).then_some(KeyFacts::refuted_at(
+                V,
+                PRE,
+                0,
+                RefutedInHand::Route { legs: 1 },
+                CellFact::Open,
+                E,
+            ))
+        };
+        assert_eq!(
+            walk(&V, &PRE, 0, 16, open_for).outcome(),
+            WalkOutcome::Unresolved { attempt: 0 }
+        );
+    }
+
+    /// A key the caller has not fetched is unresolved, never a skip: the walk
+    /// may not invent a skip from absence.
+    #[test]
+    fn an_unfetched_key_is_unresolved_not_skipped() {
+        assert_eq!(
+            walk(&V, &PRE, 5, 16, |_| None).outcome(),
+            WalkOutcome::Unresolved { attempt: 5 }
+        );
+    }
+
+    /// A final cell of a MULTI-LEG route is not a consumption on its own: the
+    /// route consumes only when every required leg did. One FinalE(E) cell is
+    /// not one executed swap.
+    #[test]
+    fn a_final_leg_of_an_incomplete_route_is_not_consumed() {
+        let legs = [good_leg(), open_leg()];
+        let facts = RouteFacts { ..realized(&legs) };
+        assert_eq!(
+            classify_attempt(&facts, &legs[0]),
+            (AttemptClass::Unresolved, None)
+        );
+        // With every leg final, it consumes.
+        let done = [good_leg(), good_leg()];
+        let complete = RouteFacts { ..realized(&done) };
+        assert_eq!(
+            classify_attempt(&complete, &done[0]),
+            (AttemptClass::Consumed, None)
+        );
+    }
+
+    /// A final cell whose route is statically Invalid is not a consumption
+    /// either: consumption carries the validation premise (F4).
+    #[test]
+    fn a_final_leg_of_an_invalid_route_is_not_consumed() {
+        let legs = [good_leg()];
+        let invalid = RouteFacts {
+            validation: Invalid,
+            ..realized(&legs)
+        };
+        assert!(!consumed_route(&invalid));
+        assert_eq!(
+            classify_attempt(&invalid, &legs[0]).0,
+            AttemptClass::Skipped
+        );
+    }
+
+    /// The attempt counter is checked, never saturated: a walk that reaches
+    /// `u64::MAX` refuses rather than re-examining a key it already decided.
+    #[test]
+    fn the_attempt_counter_is_checked_not_saturated() {
+        // Every key is skipped (final on a rejected exercise), so the walk
+        // would advance forever; at `u64::MAX` it refuses instead.
+        let rejected = LegFacts {
+            cell: CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+            ..good_leg()
+        };
+        let legs = [rejected];
+        // Facts for the top of the counter only: a walk that went anywhere else
+        // would find none and stop Unresolved.
+        let facts_for = |attempt: u64| {
+            (attempt == u64::MAX).then_some(KeyFacts::complete_at(
+                V,
+                PRE,
+                attempt,
+                RouteFacts {
+                    external_commitment: OTHER_E,
+                    pair: PairStanding::Registered,
+                    conformance: Valid,
+                    parent: HELD,
+                    parent_pre_root: PRE,
+                    validation: Invalid,
+                    storage_resolved: true,
+                    verdict: VerdictFact::NotARelease,
+                    legs: &legs,
+                },
+                rejected,
+            ))
+        };
+        assert_eq!(
+            walk(&V, &PRE, u64::MAX, 4, facts_for).outcome(),
+            WalkOutcome::CounterExhausted { attempt: u64::MAX }
+        );
+    }
+
+    /// ONE route, ONE E. Two legs that each finalized a DIFFERENT operation do
+    /// not add up to a consumed route, however registered, valid and Complete
+    /// the fulfillment is. With a per-leg commitment this was representable —
+    /// and it would have let a "route" be assembled out of other operations'
+    /// cells.
+    #[test]
+    fn legs_final_on_different_commitments_are_not_one_route() {
+        let legs = [
+            good_leg(),
+            LegFacts {
+                cell: CellFact::Held {
+                    id: OTHER_E,
+                    state: ChainState::Final,
+                },
+                ..good_leg()
+            },
+        ];
+        let facts = RouteFacts { ..realized(&legs) };
+        assert_eq!(facts.external_commitment, E);
+        assert!(
+            !consumed_route(&facts),
+            "a leg final on another operation's E is not this route's consumption"
+        );
+        assert_ne!(resolve_position(&facts), Ok(Resolution::Realized));
+        // It is the loss of the route, not a consumption: the second leg's key
+        // is final on someone else's commitment.
+        assert_eq!(resolve_position(&facts), Ok(Resolution::Void));
+        // And the stray leg is never classified as consuming this route.
+        assert_eq!(
+            classify_attempt(&facts, &legs[1]).0,
+            AttemptClass::Unresolved
+        );
+    }
+
+    // ── a release reads its verdict cell (SoFi Amendment S21) ─────────────
+
+    fn release_facts<'l>(legs: &'l [LegFacts], standing: VerdictStanding) -> RouteFacts<'l> {
+        RouteFacts {
+            verdict: VerdictFact::Release(standing),
+            ..realized(legs)
+        }
+    }
+
+    use crate::sofi::escrow::VerdictStanding;
+
+    /// A release whose leg consumed its parent realizes only once its verdict
+    /// cell is final on its outcome; unsettled, it is no result yet; lost to
+    /// another outcome, it is Void and nothing moves.
+    #[test]
+    fn a_release_realizes_only_on_the_verdict_final_on_its_outcome() {
+        let legs = [good_leg()];
+        assert_eq!(
+            resolve_position(&release_facts(&legs, VerdictStanding::Final)),
+            Ok(Resolution::Realized)
+        );
+        assert_eq!(
+            resolve_position(&release_facts(&legs, VerdictStanding::Unsettled)),
+            Err(Incomplete::StorageNotFinal)
+        );
+        assert_eq!(
+            resolve_position(&release_facts(&legs, VerdictStanding::Lost)),
+            Ok(Resolution::Void)
+        );
+        // Another operation reads no verdict, so the arm never touches it.
+        assert_eq!(resolve_position(&realized(&legs)), Ok(Resolution::Realized));
+    }
+
+    /// Arm (v): the release can never realize once another outcome holds the
+    /// cell, and that is attributable; the key it holds is skipped, so the
+    /// vault's next attempt goes live for the branch that won.
+    #[test]
+    fn a_release_that_lost_the_verdict_frees_its_key() {
+        let legs = [good_leg()];
+        let lost = release_facts(&legs, VerdictStanding::Lost);
+        assert_eq!(
+            route_impossible(&lost),
+            Some(ImpossibleArm::VerdictOnAnotherOutcome)
+        );
+        assert_eq!(
+            classify_attempt(&lost, &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalRoute(
+                    ImpossibleArm::VerdictOnAnotherOutcome
+                ))
+            )
+        );
+        // Decided without validation evidence: the walk skips the key on the
+        // cell's read and the verdict's own bytes.
+        assert_eq!(
+            skip_without_evidence(&ground_of(&lost), &legs[0]),
+            (
+                AttemptClass::Skipped,
+                Some(SkipReason::RejectedFinalRoute(
+                    ImpossibleArm::VerdictOnAnotherOutcome
+                ))
+            )
+        );
+        // Unsettled holds the key; final on its outcome consumes the parent.
+        let unsettled = release_facts(&legs, VerdictStanding::Unsettled);
+        assert_eq!(route_impossible(&unsettled), None);
+        assert_eq!(
+            classify_attempt(&unsettled, &legs[0]),
+            (AttemptClass::Unresolved, None)
+        );
+        assert_eq!(
+            skip_without_evidence(&ground_of(&unsettled), &legs[0]),
+            (AttemptClass::Unresolved, None)
+        );
+        assert_eq!(
+            classify_attempt(&release_facts(&legs, VerdictStanding::Final), &legs[0]),
+            (AttemptClass::Consumed, None)
+        );
+    }
+
+    /// An invalid release is Invalid whatever its verdict: the verdict decides
+    /// between Realized and Void for a valid release only.
+    #[test]
+    fn an_invalid_release_is_invalid_whatever_the_verdict() {
+        let legs = [good_leg()];
+        for standing in [
+            VerdictStanding::Final,
+            VerdictStanding::Unsettled,
+            VerdictStanding::Lost,
+        ] {
+            let facts = RouteFacts {
+                validation: Invalid,
+                ..release_facts(&legs, standing)
+            };
+            assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
+        }
+    }
+}

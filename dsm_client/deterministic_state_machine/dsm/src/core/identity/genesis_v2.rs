@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Genesis v2 — the canonical mnemonic-rooted, deterministic key tree.
-//!
-//! Replaces the n-of-n commit-reveal / storage-node multipart-entropy genesis as the
-//! DEFAULT path (that profile is retained as [`GenesisEntropyProfile::CommitRevealMpcV1`]
-//! for optional high-assurance/legacy use). Genesis v2 needs no storage nodes and roots
+//! Genesis v2 — the canonical mnemonic-rooted, deterministic key tree. It roots
 //! the entire deterministic key tree in the device's BIP39 wallet seed:
 //!
 //! ```text
@@ -40,18 +36,34 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::signatures::SignatureKeyPair;
 use crate::types::error::DsmError;
 
-/// Which entropy profile produced a genesis. `MnemonicV2` is canonical (Layer A);
-/// `CommitRevealMpcV1` is the optional n-of-n storage-node ceremony retained for
-/// high-assurance/legacy use. Ordinary wallet creation MUST NOT require storage nodes.
+/// Which derivation produced a genesis. Both are mnemonic-rooted and
+/// deterministic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum GenesisEntropyProfile {
-    /// Canonical: mnemonic-rooted, deterministic, no storage-node entropy.
+    /// Genesis v2: `G` commits the public nonce, network and version.
     #[default]
     MnemonicV2,
-    /// Canonical (Genesis v3): mnemonic-rooted with `G` committing the GRK.
+    /// Genesis v3: `G` commits the Genesis Root Key.
     MnemonicV3,
-    /// Optional: n-of-n commit-reveal multipart entropy (legacy / high-assurance).
-    CommitRevealMpcV1,
+}
+
+/// Canonical hash of the genesis-time authority policy, bound into `Smaster`
+/// as public context. The genesis policy is the default self-sovereign,
+/// online-checked policy (no offline anchor pinned; enrollment happens later
+/// through a transition, without re-deriving `Smaster`).
+pub fn genesis_authority_policy_hash() -> [u8; 32] {
+    use crate::types::operations::{AuthorityMode, AuthorityPolicy};
+    let default = AuthorityPolicy {
+        mode: AuthorityMode::OnlineChecked,
+        policy_id: [0u8; 32],
+        anchor_set_id: [0u8; 32],
+    };
+    let mut bytes = Vec::new();
+    default.append_canonical(&mut bytes);
+    let mut h =
+        crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(b"DSM/authority-policy/v1"));
+    h.update(&bytes);
+    *h.finalize().as_bytes()
 }
 
 /// HKDF-BLAKE3 KDF: `KDF(secret, "<domain>\0" , parts...) -> 32 bytes`. The domain tag

@@ -27,9 +27,8 @@
 //! relationship id; the relationship is identified by `compute_smt_key(devid_a,
 //! devid_b)` and matched to the pending gate by counterparty device id.
 
-use crate::sdk::receipts::{
-    compute_receipt_b_canonical_target, verify_per_step_ek_signing_target, BilateralSide,
-};
+use dsm::types::receipt_types::compute_receipt_b_canonical_target;
+use dsm::verification::receipt_verification::{verify_per_step_ek_signing_target, BilateralSide};
 use crate::storage::client_db::sender_proposal::SenderOnlineProposal;
 use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 use anyhow::{anyhow, Result};
@@ -58,10 +57,8 @@ pub enum ReceiptVerifyOutcome {
 ///     proposal.canonical_child`, and the recomputed receipt commitment equals
 ///     `proposal.commitment` — all in the ASYMMETRIC canonical space. The gate's
 ///     SYMMETRIC projection pair is deliberately NOT used: cross-space comparison
-///     rejects valid countersignatures;
-///  3. `expected_parent_root` / `expected_child_root`, when known from the
-///     sender's stored proposal, equal the receipt's roots (pass `None` to skip
-///     until proposal storage lands — a `Some` mismatch is a hard reject);
+///     rejects valid countersignatures. The commitment covers the receipt's
+///     parent and child roots, so a receipt naming other roots fails here;
 ///  4. B-side per-step EK: `ek_cert_b` chains `ek_pk_b` back to the sender's
 ///     stored Counterparty (recipient) cert head over `h_n` (or `recipient_ak_pk`
 ///     at relationship genesis), then `sig_b` verifies under `ek_pk_b` over the
@@ -88,8 +85,6 @@ pub fn verify_acceptance_receipt(
     receipt: &StitchedReceiptV2,
     proposal: &SenderOnlineProposal,
     recipient_ak_pk: &[u8],
-    expected_parent_root: Option<&[u8; 32]>,
-    expected_child_root: Option<&[u8; 32]>,
     b_pair: ([u8; 32], [u8; 32]),
 ) -> Result<ReceiptVerifyOutcome> {
     // ---- 1-2. Structural binding: the receipt must name THIS exact transition ----
@@ -125,18 +120,6 @@ pub fn verify_acceptance_receipt(
         return Ok(reject("receipt commitment != proposal commitment"));
     }
 
-    // ---- 3. Root binding against the sender's stored proposal (when known) ----
-    if let Some(expected) = expected_parent_root {
-        if &receipt.parent_root != expected {
-            return Ok(reject("receipt parent_root != stored proposal parent_root"));
-        }
-    }
-    if let Some(expected) = expected_child_root {
-        if &receipt.child_root != expected {
-            return Ok(reject("receipt child_root != stored proposal child_root"));
-        }
-    }
-
     // ---- 5. Kyber consistency (structural) ----
     if !receipt.ek_pk_b.is_empty() && receipt.kyber_ct_b.is_empty() {
         return Ok(reject(
@@ -148,13 +131,23 @@ pub fn verify_acceptance_receipt(
     // ---- 4. B-side per-step EK countersignature ----
     // From the SENDER's viewpoint the recipient (B) is the Counterparty. At
     // relationship genesis (no Counterparty head yet) ek_cert_b chains back to
-    // the recipient's AK — its legitimate predecessor.
-    let rel_key =
-        dsm::verification::smt_replace_witness::compute_smt_key(&receipt.devid_a, &receipt.devid_b);
-    let expected_prev_pk_b = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| recipient_ak_pk.to_vec());
+    // the recipient's AK — its legitimate predecessor. A head that could not
+    // be READ is not "no head": the check cannot be made, and the delta is
+    // retried rather than judged against the root AK.
+    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+        &receipt.devid_a,
+        &receipt.devid_b,
+    );
+    let expected_prev_pk_b =
+        match load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty) {
+            Ok(Some(head)) => head,
+            Ok(None) => recipient_ak_pk.to_vec(),
+            Err(e) => {
+                return Err(anyhow!(
+                    "the counterparty's cert-chain head could not be read: {e}"
+                ))
+            }
+        };
 
     let commitment = receipt
         .compute_commitment()
@@ -333,24 +326,28 @@ pub fn bind_countersign_delta(
 mod tests {
     use super::*;
 
+    /// A real step's receipt — the first transfer between two wallets —
+    /// naming the parties and tips under test. These tests judge a receipt's
+    /// binding to its proposal, never its state rules, so the step's roots,
+    /// writes and entropy are carried as the real step made them.
     fn base_receipt(
         a: [u8; 32],
         b: [u8; 32],
         parent: [u8; 32],
         child: [u8; 32],
     ) -> StitchedReceiptV2 {
-        StitchedReceiptV2::new(
-            [0u8; 32], // genesis
-            a,
-            b,
-            parent,
-            child,
-            [0u8; 32], // parent_root
-            [0u8; 32], // child_root
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+        use crate::test_support::receipts::{transfer_step, Party};
+        static RECEIPT: std::sync::OnceLock<StitchedReceiptV2> = std::sync::OnceLock::new();
+        let mut receipt = RECEIPT
+            .get_or_init(|| {
+                transfer_step(&Party::from_seed(0x31), &Party::from_seed(0x32), 7).receipt
+            })
+            .clone();
+        receipt.devid_a = a;
+        receipt.devid_b = b;
+        receipt.parent_tip = parent;
+        receipt.child_tip = child;
+        receipt
     }
 
     /// A proposal whose CANONICAL pair is the transition under test, and whose
@@ -368,7 +365,7 @@ mod tests {
         commitment: [u8; 32],
     ) -> SenderOnlineProposal {
         SenderOnlineProposal {
-            relationship_key: dsm::verification::smt_replace_witness::compute_smt_key(
+            relationship_key: dsm::core::bilateral_transaction_manager::compute_smt_key(
                 &[0x11u8; 32],
                 &cp,
             ),
@@ -386,7 +383,6 @@ mod tests {
             amount: 0,
             token_id: "ERA".to_string(),
             status: "submitted".to_string(),
-            created_at: 0,
         }
     }
 
@@ -395,17 +391,9 @@ mod tests {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let receipt = base_receipt([0x99u8; 32], b, parent, child);
         let g = proposal(b, parent, child);
-        let out = verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &g,
-            &[0u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap();
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], ([0u8; 32], [0u8; 32]))
+                .unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
     }
 
@@ -415,56 +403,41 @@ mod tests {
         let g = proposal(b, parent, child);
         let r1 = base_receipt(a, b, [0xEEu8; 32], child);
         assert!(matches!(
-            verify_acceptance_receipt(
-                &a,
-                &b,
-                &r1,
-                &g,
-                &[0u8; 32],
-                None,
-                None,
-                ([0u8; 32], [0u8; 32])
-            )
-            .unwrap(),
+            verify_acceptance_receipt(&a, &b, &r1, &g, &[0u8; 32], ([0u8; 32], [0u8; 32])).unwrap(),
             ReceiptVerifyOutcome::Rejected { .. }
         ));
         let r2 = base_receipt(a, b, parent, [0xEEu8; 32]);
         assert!(matches!(
-            verify_acceptance_receipt(
-                &a,
-                &b,
-                &r2,
-                &g,
-                &[0u8; 32],
-                None,
-                None,
-                ([0u8; 32], [0u8; 32])
-            )
-            .unwrap(),
+            verify_acceptance_receipt(&a, &b, &r2, &g, &[0u8; 32], ([0u8; 32], [0u8; 32])).unwrap(),
             ReceiptVerifyOutcome::Rejected { .. }
         ));
     }
 
     #[test]
-    fn rejects_receipt_with_mismatched_stored_root() {
+    fn a_receipt_naming_other_roots_than_the_committed_ones_is_rejected() {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let receipt = base_receipt(a, b, parent, child); // roots are [0u8;32]
-        let g = proposal(b, parent, child);
-        let expected_parent_root = [0x77u8; 32];
-        assert!(matches!(
-            verify_acceptance_receipt(
-                &a,
-                &b,
-                &receipt,
-                &g,
-                &[0u8; 32],
-                Some(&expected_parent_root),
-                None,
-                ([0u8; 32], [0u8; 32]),
-            )
-            .unwrap(),
-            ReceiptVerifyOutcome::Rejected { .. }
-        ));
+        let committed = base_receipt(a, b, parent, child);
+        let g = proposal_with_commitment(
+            b,
+            parent,
+            child,
+            committed.compute_commitment().expect("commitment"),
+        );
+        let mutations: [fn(&mut StitchedReceiptV2); 2] = [
+            |r| r.parent_root = [0x77u8; 32],
+            |r| r.child_root = [0x77u8; 32],
+        ];
+        for mutate in mutations {
+            let mut receipt = committed.clone();
+            mutate(&mut receipt);
+            let out =
+                verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], ([0u8; 32], [0u8; 32]))
+                    .unwrap();
+            assert!(
+                matches!(&out, ReceiptVerifyOutcome::Rejected { reason } if reason.contains("commitment")),
+                "{out:?}"
+            );
+        }
     }
 
     /// REPRODUCER (half 2 of 2) for the stranded-proposal defect: the live gate
@@ -488,17 +461,8 @@ mod tests {
         // Kyber gate is reachable with a stripped receipt.
         let commitment = receipt.compute_commitment().unwrap();
         let g = proposal_with_commitment(b, parent, child, commitment);
-        match verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &g,
-            &[0x55u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap()
+        match verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+            .unwrap()
         {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(
@@ -519,17 +483,9 @@ mod tests {
         let mut receipt = base_receipt(a, b, parent, child);
         receipt.sig_b = vec![0xADu8; 64]; // present but no ek_pk_b/ek_cert_b
         let g = proposal(b, parent, child);
-        let out = verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &g,
-            &[0x55u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap();
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+                .unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
     }
 
@@ -545,7 +501,11 @@ mod tests {
     /// the assertion is specifically that the rejection is NOT about parent,
     /// child, or commitment — i.e. it survived the structural binding stage.
     #[test]
+    #[serial_test::serial]
     fn divergent_projection_does_not_reject_a_valid_canonical_pair() {
+        // A readable, empty store: the relationship has no counterparty head
+        // yet, so the predecessor is the recipient's AK.
+        with_a_store();
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let receipt = base_receipt(a, b, parent, child);
         let commitment = receipt.compute_commitment().expect("commitment");
@@ -556,17 +516,9 @@ mod tests {
         assert_ne!(p.projection_parent, p.canonical_parent);
         assert_ne!(p.projection_target, p.canonical_child);
 
-        let out = verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &p,
-            &[0x55u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap();
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+                .unwrap();
         match out {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(
@@ -581,6 +533,84 @@ mod tests {
         }
     }
 
+    /// A readable, empty client store.
+    fn with_a_store() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+    }
+
+    /// The counterparty head table, out of reach until dropped: every read of
+    /// a head fails while it is held.
+    struct HeadsUnreadable;
+    impl HeadsUnreadable {
+        fn hide() -> Self {
+            crate::storage::client_db::get_connection()
+                .expect("the store")
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .execute_batch("ALTER TABLE cert_chain_heads RENAME TO cert_chain_heads_unreadable")
+                .expect("hide the head table");
+            Self
+        }
+    }
+    impl Drop for HeadsUnreadable {
+        fn drop(&mut self) {
+            let restored = crate::storage::client_db::get_connection().and_then(|conn| {
+                conn.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .execute_batch(
+                        "ALTER TABLE cert_chain_heads_unreadable RENAME TO cert_chain_heads",
+                    )
+                    .map_err(anyhow::Error::from)
+            });
+            if let Err(e) = restored {
+                eprintln!("the head table was not restored; later tests will fail on it: {e}");
+            }
+        }
+    }
+
+    /// Storage spec §4: a counterparty cert-chain head that could not be READ
+    /// is not "no head yet". Both verifiers refuse to judge the chain rather
+    /// than take the root AK as the predecessor: the sender's check of the
+    /// recipient's countersignature returns an error (the delta is retried),
+    /// never a rejection; the recipient's check of the sender's signature
+    /// names the unreadable head. With the store readable again, the same
+    /// inputs reach the chain check itself.
+    #[test]
+    #[serial_test::serial]
+    fn an_unreadable_counterparty_head_is_never_read_as_genesis() {
+        with_a_store();
+        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
+        let receipt = base_receipt(a, b, parent, child);
+        let commitment = receipt.compute_commitment().expect("commitment");
+        let p = proposal_with_commitment(b, parent, child, commitment);
+        let verify = || {
+            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+        };
+        let sig_a = || {
+            crate::handlers::storage_routes::verify_inbound_receipt_sig_a(
+                &receipt,
+                &commitment,
+                &[0x55u8; 32],
+            )
+        };
+        {
+            let _hidden = HeadsUnreadable::hide();
+            let err = verify().expect_err("an unreadable head is not a verdict");
+            assert!(err.to_string().contains("could not be read"), "{err}");
+            let err = sig_a().expect_err("an unreadable head is not a verdict");
+            assert!(err.contains("could not be read"), "{err}");
+        }
+        assert!(
+            verify().is_ok(),
+            "readable again: the chain check itself answers"
+        );
+        let err = sig_a()
+            .expect("readable again: the check can be made")
+            .expect_err("no per-step EK material in this receipt");
+        assert!(!err.contains("could not be read"), "{err}");
+    }
+
     /// A forged canonical child must still fail closed — retargeting the check
     /// onto the proposal tightened the comparison, it did not relax it.
     #[test]
@@ -589,17 +619,9 @@ mod tests {
         let receipt = base_receipt(a, b, parent, [0xEEu8; 32]);
         let commitment = receipt.compute_commitment().expect("commitment");
         let p = proposal_with_commitment(b, parent, child, commitment);
-        let out = verify_acceptance_receipt(
-            &a,
-            &b,
-            &receipt,
-            &p,
-            &[0x55u8; 32],
-            None,
-            None,
-            ([0u8; 32], [0u8; 32]),
-        )
-        .unwrap();
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
+                .unwrap();
         match out {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(reason.contains("child_tip"), "unexpected reason: {reason}");

@@ -2,27 +2,20 @@
 
 //! STRICT multi-node network registry for DSM SDK.
 //! - No auto-discovery, no LAN scans, no silent defaults.
-//! - Requires DSM_ENV_CONFIG_PATH (TOML) OR DSM_SDK_TEST_MODE=1 for hermetic tests.
-//! - Deterministic round-robin across ALL configured nodes.
-//! - On failure, callers may quarantine a node (time-based skip) without background tasks.
+//! - Requires the env config TOML: the path set at init, else DSM_ENV_CONFIG_PATH.
 //!
 //! This implementation uses serde for type-safe TOML parsing.
 
 use std::{
-    collections::HashMap,
     fs,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
-    },
+    sync::{Arc, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
 use toml;
 
 use crate::types::error::DsmError;
-use crate::util::deterministic_time::tick;
 
 /// Global config path set by JNI at initialization
 /// This is the authoritative source for DSM_ENV_CONFIG_PATH
@@ -30,7 +23,9 @@ static ENV_CONFIG_PATH: OnceLock<String> = OnceLock::new();
 
 /// Set the global config path (called once from JNI initDsmSdk)
 pub fn set_env_config_path(path: String) {
-    let _ = ENV_CONFIG_PATH.set(path);
+    if let Err(refused) = ENV_CONFIG_PATH.set(path) {
+        log::warn!("env config path is already set; {refused} was not installed");
+    }
 }
 
 /// Get the global config path if initialized (diagnostics only).
@@ -38,19 +33,23 @@ pub fn get_env_config_path() -> Option<&'static str> {
     ENV_CONFIG_PATH.get().map(|s| s.as_str())
 }
 
+/// The env config every reader loads: the path set at init, else
+/// `DSM_ENV_CONFIG_PATH`. One resolution, so the node list and the CA
+/// certificates always come from the same file.
+pub(crate) fn resolved_env_config_path() -> Option<String> {
+    ENV_CONFIG_PATH
+        .get()
+        .cloned()
+        .or_else(|| std::env::var("DSM_ENV_CONFIG_PATH").ok())
+}
+
 /// Environment config with serde support.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EnvConfig {
-    pub protocol: String, // e.g., "http"
-    pub lan_ip: String,   // e.g., "127.0.0.1" (informational)
-    #[serde(default)]
-    pub ports: Vec<u16>, // optional, informational
     pub nodes: Vec<NodeConfig>, // REQUIRED
-    // Optional MPC-only genesis endpoint (strictly for genesis flow)
-    pub mpc_genesis_url: Option<String>,
-    pub mpc_api_key: Option<String>,
     /// Set `allow_localhost = true` in the TOML to permit 127.0.0.1 endpoints
-    /// on Android release builds when using `adb reverse` for local dev.
+    /// on Android when using `adb reverse` for local dev. The TOML is the only
+    /// switch: no environment variable and no build profile changes it.
     #[serde(default)]
     pub allow_localhost: bool,
     /// Bitcoin network for dBTC key derivation and address format.
@@ -94,7 +93,7 @@ pub struct EnvConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodeConfig {
     pub name: String,
-    pub endpoint: String, // e.g., "http://10.0.0.5:8080"
+    pub endpoint: String, // e.g., "https://10.0.0.5:8080"; only https:// is accepted
     /// The member's durable register incarnation, Base32-Crockford over 32
     /// bytes, as that node reports it.
     ///
@@ -110,45 +109,14 @@ pub struct NodeConfig {
 pub struct NetworkConfigLoader;
 
 impl NetworkConfigLoader {
-    /// Load environment config strictly from TOML or TEST_MODE.
+    /// Load the environment config from its TOML: the path set at init
+    /// (`set_env_config_path`), else `DSM_ENV_CONFIG_PATH`. Nothing else: with
+    /// neither there is no network config.
     pub fn load_env_config() -> Result<EnvConfig, DsmError> {
-        let test_mode = std::env::var("DSM_SDK_TEST_MODE").is_ok();
-        let env_var_path = std::env::var("DSM_ENV_CONFIG_PATH").ok();
-
-        // PRODUCTION: the global static (set once by JNI at init) is the
-        // authority, with the env var as a fallback.
-        //
-        // TEST MODE: the env var alone decides, because `set_env_config_path`
-        // writes a OnceLock that NOTHING can subsequently clear. One test
-        // pointing the loader at its own fleet would otherwise hand that fleet
-        // to every test that ran after it, for the life of the process — which
-        // is how quorum tests came to reason about whichever fleet happened to
-        // be installed first. A test that wants a specific fleet sets the env
-        // var (`point_env_config_at` sets both), so the env var's presence is
-        // exactly the signal "this test chose a fleet"; its absence means "give
-        // me the hermetic default", and that must stay reachable.
-        let explicit_path = if test_mode {
-            if let Some(p) = &env_var_path {
-                log::info!("NetworkConfigLoader: using DSM_ENV_CONFIG_PATH={p} (test mode)");
-            }
-            env_var_path
-        } else if let Some(p) = ENV_CONFIG_PATH.get() {
-            log::info!("NetworkConfigLoader: using global ENV_CONFIG_PATH={}", p);
-            Some(p.clone())
-        } else {
-            if let Some(p) = &env_var_path {
-                log::info!("NetworkConfigLoader: using DSM_ENV_CONFIG_PATH={p}");
-            }
-            env_var_path
-        };
-
-        if explicit_path.is_none() && test_mode {
-            return Ok(Self::test_env_config());
-        }
-
-        let path = explicit_path.ok_or_else(|| {
+        let path = resolved_env_config_path().ok_or_else(|| {
             DsmError::storage(
-                "STRICT: DSM_ENV_CONFIG_PATH not set and global config path not initialized; no network config available.",
+                "STRICT: DSM_ENV_CONFIG_PATH not set and global config path not initialized; \
+                 no network config available.",
                 Option::<std::io::Error>::None,
             )
         })?;
@@ -177,52 +145,10 @@ impl NetworkConfigLoader {
 
         parse_env_config_toml(&toml_str)
     }
-
-    fn test_env_config() -> EnvConfig {
-        EnvConfig {
-            protocol: "http".into(),
-            lan_ip: "127.0.0.1".into(),
-            ports: vec![8080, 8081, 8082],
-            nodes: vec![
-                NodeConfig {
-                    name: "test-1".into(),
-                    register_incarnation: crate::util::text_id::encode_base32_crockford(
-                        &[0xC1u8; 32],
-                    ),
-                    endpoint: "http://127.0.0.1:8080".into(),
-                },
-                NodeConfig {
-                    name: "test-2".into(),
-                    register_incarnation: crate::util::text_id::encode_base32_crockford(
-                        &[0xC2u8; 32],
-                    ),
-                    endpoint: "http://127.0.0.1:8081".into(),
-                },
-                NodeConfig {
-                    name: "test-3".into(),
-                    register_incarnation: crate::util::text_id::encode_base32_crockford(
-                        &[0xC3u8; 32],
-                    ),
-                    endpoint: "http://127.0.0.1:8082".into(),
-                },
-            ],
-            mpc_genesis_url: None,
-            mpc_api_key: None,
-            allow_localhost: true,
-            bitcoin_network: None,
-            dbtc_dust_floor_sats: None,
-            dbtc_estimated_sweep_fee_sats: None,
-            dbtc_min_confirmations: None,
-            dbtc_max_successor_depth: None,
-            dbtc_min_vault_balance_sats: None,
-            dbtc_fee_rate_sat_vb: None,
-            mempool_api_url: None,
-        }
-    }
 }
 
 /// Parse TOML using serde for type safety and automatic deserialization.
-fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmError> {
+pub(crate) fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmError> {
     let mut config: EnvConfig = toml::from_str(toml_str).map_err(|e| {
         DsmError::serialization_error(
             "STRICT: failed to parse TOML env config",
@@ -240,14 +166,6 @@ fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmError> {
         ));
     }
 
-    // Set defaults for optional fields
-    if config.protocol.is_empty() {
-        config.protocol = "http".to_string();
-    }
-    if config.lan_ip.is_empty() {
-        config.lan_ip = "127.0.0.1".to_string();
-    }
-
     // Validate and normalize nodes
     config.nodes = validate_and_normalize_nodes(config.nodes, config.allow_localhost)?;
 
@@ -260,7 +178,9 @@ fn parse_env_config_toml(toml_str: &str) -> Result<EnvConfig, DsmError> {
 }
 
 /// Validate node endpoints and apply platform-specific hardening.
-/// - On Android, disallow localhost/127.0.0.1 unless explicitly allowed via DSM_ALLOW_LOCALHOST=1
+/// - Every endpoint is `https://`, on every platform: a member is known by the
+///   certificate it presents, and plain HTTP presents none.
+/// - On Android, disallow localhost/127.0.0.1 unless the TOML sets `allow_localhost = true`,
 ///   because each device would talk to its own loopback and never see each other's messages.
 fn validate_and_normalize_nodes(
     nodes: Vec<NodeConfig>,
@@ -273,6 +193,10 @@ fn validate_and_normalize_nodes(
         ));
     }
 
+    for node in &nodes {
+        crate::sdk::storage_node_sdk::require_https(&node.endpoint)?;
+    }
+
     // Fast path: if not android, accept as-is.
     #[cfg(not(target_os = "android"))]
     {
@@ -280,22 +204,10 @@ fn validate_and_normalize_nodes(
         Ok(nodes)
     }
 
-    // Android hardening: ban localhost unless an explicit opt-in is set.
+    // Android hardening: ban localhost unless the TOML opts in.
     #[cfg(target_os = "android")]
     {
-        let allow_localhost_env = std::env::var("DSM_ALLOW_LOCALHOST").ok();
-        // Allow localhost endpoints in debug/dev builds as a convenience for adb reverse / local testing.
-        // Production builds still require explicit opt-in via DSM_ALLOW_LOCALHOST=1.
-        let allow_localhost = allow_localhost_env.as_deref() == Some("1")
-            || cfg!(debug_assertions)
-            || toml_allow_localhost;
-        log::info!(
-            "NetworkConfigLoader: Android localhost policy — DSM_ALLOW_LOCALHOST={:?} => allow_localhost={} (debug_override={})",
-            allow_localhost_env,
-            allow_localhost,
-            cfg!(debug_assertions)
-        );
-        if allow_localhost {
+        if toml_allow_localhost {
             log::info!(
                 "NetworkConfigLoader: localhost endpoints permitted; accepting {} node(s)",
                 nodes.len()
@@ -338,7 +250,7 @@ fn validate_and_normalize_nodes(
                     "STRICT: Localhost endpoints are not allowed on Android device builds. \
 Update dsm_env_config.toml to use LAN/IP or domain reachable by all devices. \
 Offending endpoints: {}. \
-To override for dev with adb reverse, set DSM_ALLOW_LOCALHOST=1 before init.",
+For dev with adb reverse, set allow_localhost = true in the config TOML.",
                     bad.join(", ")
                 ),
                 Option::<std::io::Error>::None,
@@ -353,167 +265,35 @@ To override for dev with adb reverse, set DSM_ALLOW_LOCALHOST=1 before init.",
     }
 }
 
-/// Global, multi-node registry (deterministic selection; no background threads).
+/// Global registry of the configured storage endpoints: what the env config
+/// names, never edited at runtime. Protocol paths use the network's pinned set
+/// (`sdk::storage_set`), never this list (storage spec §10: the set is
+/// committed).
 struct NodeRegistry {
-    nodes: std::sync::RwLock<Vec<NodeConfig>>,
-    idx: AtomicUsize,
-    quarantine_for: u64,                           // ticks
-    quarantine_until: Mutex<HashMap<String, u64>>, // endpoint -> until_ticks
+    nodes: Vec<NodeConfig>,
 }
 
 static REGISTRY: OnceLock<Arc<NodeRegistry>> = OnceLock::new();
 
 impl NodeRegistry {
-    fn new(nodes: Vec<NodeConfig>, seed: Option<String>) -> Self {
-        let n_len = nodes.len();
-        let start_idx = match (seed, n_len) {
-            (Some(s), n) if n > 0 => {
-                let hash = dsm::crypto::blake3::domain_hash(
-                    dsm::common::domain_tags::TAG_DSM_NETWORK_HASH,
-                    s.as_bytes(),
-                );
-                let mut le8 = [0u8; 8];
-                le8.copy_from_slice(&hash.as_bytes()[0..8]);
-                (u64::from_le_bytes(le8) as usize) % n
-            }
-            _ => 0,
-        };
-
-        // Optional quarantine override via env (ticks)
-        let quarantine_ticks = std::env::var("DSM_NODE_QUARANTINE_TICKS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(30); // default: 30 logical ticks
-
-        Self {
-            nodes: std::sync::RwLock::new(nodes),
-            idx: AtomicUsize::new(start_idx),
-            quarantine_for: quarantine_ticks,
-            quarantine_until: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn next_endpoint(&self) -> Result<String, DsmError> {
-        let nodes = self.nodes.read().unwrap_or_else(|p| p.into_inner());
-        let n = nodes.len();
-        if n == 0 {
-            return Err(DsmError::storage(
-                "STRICT: no nodes in registry.",
-                None::<std::io::Error>,
-            ));
-        }
-
-        let start = self.idx.fetch_add(1, Ordering::Relaxed) % n;
-        let now_ticks = tick();
-
-        for step in 0..n {
-            let i = (start + step) % n;
-            let endpoint = &nodes[i].endpoint;
-
-            let mut q = self
-                .quarantine_until
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(&until_ticks) = q.get(endpoint) {
-                if until_ticks > now_ticks {
-                    continue;
-                } else {
-                    // Penalty expired; clear it.
-                    q.remove(endpoint);
-                }
-            }
-
-            return Ok(endpoint.clone());
-        }
-
-        Err(DsmError::storage(
-            "STRICT: all configured nodes are temporarily quarantined; backoff and retry.",
-            None::<std::io::Error>,
-        ))
+    fn new(nodes: Vec<NodeConfig>) -> Self {
+        Self { nodes }
     }
 
     fn list_endpoints(&self) -> Vec<String> {
-        let nodes = self.nodes.read().unwrap_or_else(|p| p.into_inner());
-        nodes.iter().map(|n| n.endpoint.clone()).collect()
-    }
-
-    fn add_endpoint(&self, endpoint: &str) -> Result<(), DsmError> {
-        let mut nodes = self.nodes.write().unwrap_or_else(|p| p.into_inner());
-        if nodes.iter().any(|n| n.endpoint == endpoint) {
-            return Ok(()); // already present, idempotent
-        }
-        let name = format!("node-{}", nodes.len() + 1);
-        nodes.push(NodeConfig {
-            name,
-            endpoint: endpoint.to_string(),
-            // DISCOVERY IS NOT AUTHORITY. A node found at runtime has no
-            // known register incarnation, and inventing one would let
-            // discovery mint storage-set membership. The empty string fails
-            // `from_env_config` closed, so such a node can carry transport
-            // and never contribute to a set id.
-            register_incarnation: String::new(),
-        });
-        log::info!(
-            "NodeRegistry: added endpoint {}, total={}",
-            endpoint,
-            nodes.len()
-        );
-        Ok(())
-    }
-
-    fn remove_endpoint(&self, endpoint: &str) -> Result<(), DsmError> {
-        let mut nodes = self.nodes.write().unwrap_or_else(|p| p.into_inner());
-        let before = nodes.len();
-        nodes.retain(|n| n.endpoint != endpoint);
-        if nodes.len() == before {
-            return Err(DsmError::storage(
-                format!("Endpoint not found in registry: {endpoint}"),
-                None::<std::io::Error>,
-            ));
-        }
-        // Clear any quarantine for the removed endpoint
-        let mut q = self
-            .quarantine_until
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        q.remove(endpoint);
-        log::info!(
-            "NodeRegistry: removed endpoint {}, total={}",
-            endpoint,
-            nodes.len()
-        );
-        Ok(())
-    }
-
-    fn quarantine_endpoint(&self, endpoint: &str) {
-        let now_ticks = tick();
-        let until_ticks = now_ticks.saturating_add(self.quarantine_for);
-        let mut q = self
-            .quarantine_until
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        q.insert(endpoint.to_string(), until_ticks);
-    }
-
-    fn clear_quarantine(&self, endpoint: &str) {
-        let mut q = self
-            .quarantine_until
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        q.remove(endpoint);
+        self.nodes.iter().map(|n| n.endpoint.clone()).collect()
     }
 }
 
 /// Install global registry from EnvConfig. Must be called exactly once at SDK init.
 pub fn install_registry(cfg: EnvConfig) -> Result<(), DsmError> {
-    let seed = std::env::var("DSM_NODE_SEED").ok();
     if cfg.nodes.is_empty() {
         return Err(DsmError::storage(
             "STRICT: cannot install registry with zero nodes.",
             None::<std::io::Error>,
         ));
     }
-    let reg = Arc::new(NodeRegistry::new(cfg.nodes.clone(), seed));
+    let reg = Arc::new(NodeRegistry::new(cfg.nodes.clone()));
     match REGISTRY.set(reg) {
         Ok(()) => Ok(()),
         Err(_) => {
@@ -522,19 +302,6 @@ pub fn install_registry(cfg: EnvConfig) -> Result<(), DsmError> {
             Ok(())
         }
     }
-}
-
-/// Get the next endpoint using deterministic round-robin across all nodes.
-pub fn next_storage_endpoint() -> Result<String, DsmError> {
-    REGISTRY
-        .get()
-        .ok_or_else(|| {
-            DsmError::storage(
-                "STRICT: node registry not installed.",
-                None::<std::io::Error>,
-            )
-        })?
-        .next_endpoint()
 }
 
 /// List all configured endpoints (for diagnostics/telemetry).
@@ -550,169 +317,20 @@ pub fn list_storage_endpoints() -> Result<Vec<String>, DsmError> {
         .map(|r| r.list_endpoints())
 }
 
-/// Report a failed attempt; endpoint will be quarantined temporarily.
-pub fn report_storage_failure(endpoint: &str) -> Result<(), DsmError> {
-    REGISTRY
-        .get()
-        .ok_or_else(|| {
-            DsmError::storage(
-                "STRICT: node registry not installed.",
-                None::<std::io::Error>,
-            )
-        })
-        .map(|r| r.quarantine_endpoint(endpoint))
-}
-
-/// Report a successful attempt; clears quarantine if any.
-pub fn report_storage_success(endpoint: &str) -> Result<(), DsmError> {
-    REGISTRY
-        .get()
-        .ok_or_else(|| {
-            DsmError::storage(
-                "STRICT: node registry not installed.",
-                None::<std::io::Error>,
-            )
-        })
-        .map(|r| r.clear_quarantine(endpoint))
-}
-
-/// Add a storage endpoint to the live registry.
-pub fn add_storage_endpoint(endpoint: &str) -> Result<(), DsmError> {
-    REGISTRY
-        .get()
-        .ok_or_else(|| {
-            DsmError::storage(
-                "STRICT: node registry not installed.",
-                None::<std::io::Error>,
-            )
-        })?
-        .add_endpoint(endpoint)
-}
-
-/// Remove a storage endpoint from the live registry (Fisher-Yates placement recalculates automatically).
-pub fn remove_storage_endpoint(endpoint: &str) -> Result<(), DsmError> {
-    REGISTRY
-        .get()
-        .ok_or_else(|| {
-            DsmError::storage(
-                "STRICT: node registry not installed.",
-                None::<std::io::Error>,
-            )
-        })?
-        .remove_endpoint(endpoint)
-}
-
-/// Auto-assign the next storage node via keyed Fisher-Yates.
-///
-/// Protocol rule: the device does not choose which storage node to add.
-/// The SDK selects deterministically from the known pool (all nodes in
-/// dsm_env_config.toml) minus the currently active set, using a
-/// BLAKE3-keyed unbiased sampling seeded by the device's own ID bytes.
-///
-/// Domain: `BLAKE3("DSM/place\0" || device_id_bytes)` → 32-byte seed.
-/// PRF per draw: `BLAKE3("DSM/perm\0" || seed || ctr_le64)`.
-/// Rejection-sampled to be unbiased for any pool size.
-///
-/// Returns the URL of the newly added node.
-pub fn auto_assign_storage_node(device_id_bytes: &[u8]) -> Result<String, DsmError> {
-    // Full pool from TOML (all known nodes).
-    let all_nodes = NetworkConfigLoader::load_env_config()?.nodes;
-
-    // Currently active endpoints in the live registry.
-    let active = list_storage_endpoints()?;
-    let active_set: std::collections::HashSet<&str> = active.iter().map(|s| s.as_str()).collect();
-
-    // Candidates: pool nodes not already active.
-    let candidates: Vec<String> = all_nodes
-        .into_iter()
-        .filter(|n| !active_set.contains(n.endpoint.as_str()))
-        .map(|n| n.endpoint)
-        .collect();
-
-    if candidates.is_empty() {
-        return Err(DsmError::storage(
-            "auto-assign: no new storage nodes available (all configured nodes already active)",
-            None::<std::io::Error>,
-        ));
-    }
-
-    // Seed: BLAKE3("DSM/place\0" || device_id_bytes).
-    let seed = {
-        let mut input = Vec::with_capacity(10 + device_id_bytes.len());
-        input.extend_from_slice(b"DSM/place\0");
-        input.extend_from_slice(device_id_bytes);
-        *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_NETWORK_HASH, &input)
-            .as_bytes()
-    };
-
-    // Unbiased sample one index from [0, candidates.len()).
-    let selected_idx = fisher_yates_sample_one(seed, candidates.len() as u64) as usize;
-    let selected = candidates[selected_idx].clone();
-
-    // Add to live registry.
-    add_storage_endpoint(&selected)?;
-
-    log::info!(
-        "auto_assign_storage_node: selected {} (pool={}, active={})",
-        selected,
-        candidates.len(),
-        active.len()
-    );
-
-    Ok(selected)
-}
-
-/// Return one unbiased index in [0, range) using BLAKE3 PRF rejection sampling.
-///
-/// PRF block: `BLAKE3("DSM/perm\0" || seed || ctr_le64)` → first 8 bytes as u64.
-/// Rejection threshold eliminates modular bias.
-fn fisher_yates_sample_one(seed: [u8; 32], range: u64) -> u64 {
-    // Threshold = lowest multiple of `range` that fits in u64.
-    // Reject values below `threshold` to get an unbiased sample.
-    // threshold = (2^64 % range) — we compute it as (u64::MAX - range + 1) % range.
-    let threshold = u64::MAX.wrapping_sub(range).wrapping_add(1) % range;
-    let mut ctr: u64 = 0;
-    loop {
-        let v = fisher_yates_prf_u64(seed, ctr);
-        ctr += 1;
-        if v >= threshold {
-            return v % range;
-        }
-    }
-}
-
-/// Single PRF draw: `BLAKE3("DSM/perm\0" || seed || ctr_le64)` → u64.
-fn fisher_yates_prf_u64(seed: [u8; 32], ctr: u64) -> u64 {
-    let domain: &[u8] = b"DSM/perm\0";
-    let mut buf = Vec::with_capacity(domain.len() + 32 + 8);
-    buf.extend_from_slice(domain);
-    buf.extend_from_slice(&seed);
-    buf.extend_from_slice(&ctr.to_le_bytes());
-    let h = dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_NETWORK_HASH, &buf);
-    let bytes = h.as_bytes();
-    let mut le8 = [0u8; 8];
-    le8.copy_from_slice(&bytes[..8]);
-    u64::from_le_bytes(le8)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sample_toml() -> String {
         r#"
-protocol = "http"
-lan_ip = "10.0.0.1"
-ports = [8080, 8081]
-
 [[nodes]]
 name = "node-a"
-endpoint = "http://10.0.0.1:8080"
+endpoint = "https://10.0.0.1:8080"
 register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 
 [[nodes]]
 name = "node-b"
-endpoint = "http://10.0.0.2:8081"
+endpoint = "https://10.0.0.2:8081"
 register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#
         .to_string()
@@ -721,34 +339,14 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     fn parse_env_config_toml_valid() {
         let cfg = parse_env_config_toml(&sample_toml()).unwrap();
-        assert_eq!(cfg.protocol, "http");
-        assert_eq!(cfg.lan_ip, "10.0.0.1");
         assert_eq!(cfg.nodes.len(), 2);
         assert_eq!(cfg.nodes[0].name, "node-a");
-        assert_eq!(cfg.nodes[1].endpoint, "http://10.0.0.2:8081");
-    }
-
-    #[test]
-    fn parse_env_config_toml_defaults_protocol_and_ip() {
-        let toml = r#"
-protocol = ""
-lan_ip = ""
-
-[[nodes]]
-name = "n1"
-endpoint = "http://1.2.3.4:80"
-register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
-"#;
-        let cfg = parse_env_config_toml(toml).unwrap();
-        assert_eq!(cfg.protocol, "http");
-        assert_eq!(cfg.lan_ip, "127.0.0.1");
+        assert_eq!(cfg.nodes[1].endpoint, "https://10.0.0.2:8081");
     }
 
     #[test]
     fn parse_env_config_toml_rejects_empty_nodes() {
         let toml = r#"
-protocol = "http"
-lan_ip = "127.0.0.1"
 nodes = []
 "#;
         assert!(parse_env_config_toml(toml).is_err());
@@ -762,178 +360,75 @@ nodes = []
     #[test]
     fn parse_env_config_toml_optional_fields() {
         let toml = r#"
-protocol = "https"
-lan_ip = "10.0.0.5"
-mpc_genesis_url = "https://mpc.example.com"
-mpc_api_key = "secret"
 allow_localhost = true
 bitcoin_network = "signet"
 dbtc_dust_floor_sats = 1000
 
 [[nodes]]
 name = "n1"
-endpoint = "http://10.0.0.5:9090"
+endpoint = "https://10.0.0.5:9090"
 register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#;
         let cfg = parse_env_config_toml(toml).unwrap();
-        assert_eq!(
-            cfg.mpc_genesis_url.as_deref(),
-            Some("https://mpc.example.com")
-        );
-        assert_eq!(cfg.mpc_api_key.as_deref(), Some("secret"));
         assert!(cfg.allow_localhost);
         assert_eq!(cfg.bitcoin_network.as_deref(), Some("signet"));
         assert_eq!(cfg.dbtc_dust_floor_sats, Some(1000));
     }
 
     #[test]
-    fn node_registry_round_robin() {
-        let nodes = vec![
-            NodeConfig {
-                name: "a".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://a".into(),
-            },
-            NodeConfig {
-                name: "b".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://b".into(),
-            },
-            NodeConfig {
-                name: "c".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://c".into(),
-            },
-        ];
-        let reg = NodeRegistry::new(nodes, None);
-        let mut seen = Vec::new();
-        for _ in 0..6 {
-            seen.push(reg.next_endpoint().unwrap());
-        }
-        // Should cycle through all 3 endpoints twice
-        assert_eq!(seen[0], seen[3]);
-        assert_eq!(seen[1], seen[4]);
-        assert_eq!(seen[2], seen[5]);
-    }
-
-    #[test]
-    fn node_registry_add_and_remove() {
-        let nodes = vec![NodeConfig {
-            name: "a".into(),
+    fn node_registry_lists_the_configured_endpoints_in_order() {
+        let node = |name: &str, endpoint: &str| NodeConfig {
+            name: name.into(),
             register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-            endpoint: "http://a".into(),
-        }];
-        let reg = NodeRegistry::new(nodes, None);
-
-        assert_eq!(reg.list_endpoints(), vec!["http://a"]);
-
-        reg.add_endpoint("http://b").unwrap();
-        assert_eq!(reg.list_endpoints().len(), 2);
-
-        // Adding duplicate is idempotent
-        reg.add_endpoint("http://b").unwrap();
-        assert_eq!(reg.list_endpoints().len(), 2);
-
-        reg.remove_endpoint("http://a").unwrap();
-        assert_eq!(reg.list_endpoints(), vec!["http://b"]);
-
-        // Removing non-existent returns error
-        assert!(reg.remove_endpoint("http://z").is_err());
+            endpoint: endpoint.into(),
+        };
+        let reg = NodeRegistry::new(vec![node("a", "https://a"), node("b", "https://b")]);
+        assert_eq!(reg.list_endpoints(), vec!["https://a", "https://b"]);
     }
 
-    #[test]
-    fn node_registry_quarantine_skips_node() {
-        let nodes = vec![
-            NodeConfig {
-                name: "a".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://a".into(),
-            },
-            NodeConfig {
-                name: "b".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://b".into(),
-            },
-        ];
-        let reg = NodeRegistry::new(nodes, None);
-
-        // Quarantine the first node picked by round-robin
-        let first = reg.next_endpoint().unwrap();
-        reg.quarantine_endpoint(&first);
-
-        // Subsequent calls should skip the quarantined node
-        let next = reg.next_endpoint().unwrap();
-        assert_ne!(next, first);
-    }
-
-    #[test]
-    fn node_registry_clear_quarantine() {
-        let nodes = vec![NodeConfig {
-            name: "a".into(),
+    fn node_at(name: &str, endpoint: &str) -> NodeConfig {
+        NodeConfig {
+            name: name.into(),
             register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-            endpoint: "http://a".into(),
-        }];
-        let reg = NodeRegistry::new(nodes, None);
-
-        reg.quarantine_endpoint("http://a");
-        assert!(reg.next_endpoint().is_err()); // all quarantined
-
-        reg.clear_quarantine("http://a");
-        assert_eq!(reg.next_endpoint().unwrap(), "http://a");
-    }
-
-    #[test]
-    fn node_registry_empty_returns_error() {
-        let reg = NodeRegistry::new(vec![], None);
-        assert!(reg.next_endpoint().is_err());
-    }
-
-    #[test]
-    fn fisher_yates_prf_deterministic() {
-        let seed = [42u8; 32];
-        let a = fisher_yates_prf_u64(seed, 0);
-        let b = fisher_yates_prf_u64(seed, 0);
-        assert_eq!(a, b);
-
-        // Different counter yields different value (overwhelmingly likely)
-        let c = fisher_yates_prf_u64(seed, 1);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn fisher_yates_sample_one_in_range() {
-        let seed = [7u8; 32];
-        for range in [1u64, 2, 3, 5, 10, 100, 1000] {
-            let idx = fisher_yates_sample_one(seed, range);
-            assert!(idx < range, "sample {idx} out of range {range}");
+            endpoint: endpoint.into(),
         }
     }
 
     #[test]
-    fn fisher_yates_sample_one_deterministic() {
-        let seed = [99u8; 32];
-        let a = fisher_yates_sample_one(seed, 50);
-        let b = fisher_yates_sample_one(seed, 50);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn validate_and_normalize_nodes_non_android_accepts_all() {
+    fn validate_and_normalize_nodes_non_android_accepts_every_https_endpoint() {
         let nodes = vec![
-            NodeConfig {
-                name: "local".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://127.0.0.1:8080".into(),
-            },
-            NodeConfig {
-                name: "remote".into(),
-                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://10.0.0.5:9090".into(),
-            },
+            node_at("local", "https://127.0.0.1:8080"),
+            node_at("remote", "HTTPS://10.0.0.5:9090"),
         ];
         let result = validate_and_normalize_nodes(nodes.clone(), false);
-        assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 2);
+    }
+
+    /// A member is known by its certificate, so an env config naming an
+    /// endpoint that is not `https://` is refused, and the refusal names the
+    /// endpoint. One plain endpoint among https ones refuses the whole config.
+    #[test]
+    fn an_endpoint_that_is_not_https_is_refused() {
+        let incarnation = crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]);
+        let node = |name: &str, endpoint: &str| {
+            format!(
+                "[[nodes]]\nname = \"{name}\"\nendpoint = \"{endpoint}\"\n\
+                 register_incarnation = \"{incarnation}\"\n"
+            )
+        };
+        for endpoint in ["http://10.0.0.5:9090", "10.0.0.5:9090", "ftp://10.0.0.5"] {
+            let refused = parse_env_config_toml(&node("remote", endpoint)).unwrap_err();
+            assert!(
+                refused.to_string().contains(endpoint),
+                "the refusal names {endpoint}: {refused}"
+            );
+        }
+        let mixed = node("a", "https://10.0.0.1:8080") + &node("b", "http://10.0.0.2:8080");
+        let refused = parse_env_config_toml(&mixed).unwrap_err();
+        assert!(
+            refused.to_string().contains("http://10.0.0.2:8080"),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -944,16 +439,11 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     fn env_config_serialization_roundtrip() {
         let cfg = EnvConfig {
-            protocol: "http".into(),
-            lan_ip: "10.0.0.1".into(),
-            ports: vec![8080],
             nodes: vec![NodeConfig {
                 name: "n1".into(),
                 register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
-                endpoint: "http://10.0.0.1:8080".into(),
+                endpoint: "https://10.0.0.1:8080".into(),
             }],
-            mpc_genesis_url: None,
-            mpc_api_key: None,
             allow_localhost: false,
             bitcoin_network: Some("signet".into()),
             dbtc_dust_floor_sats: None,
@@ -966,7 +456,6 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         };
         let toml_str = toml::to_string(&cfg).unwrap();
         let reparsed = parse_env_config_toml(&toml_str).unwrap();
-        assert_eq!(reparsed.protocol, "http");
         assert_eq!(reparsed.nodes.len(), 1);
         assert_eq!(reparsed.bitcoin_network.as_deref(), Some("signet"));
     }

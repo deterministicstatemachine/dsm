@@ -29,17 +29,13 @@ jest.mock('../contexts/ContactsContext', () => ({
   ContactsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-jest.mock('../contexts/BleContext', () => ({
-  BleProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
-
 jest.mock('../inputs/providers/StateBoyInputProvider', () => ({
   StateBoyInputProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
 
 jest.mock('../hooks/useIntroGate', () => ({
-  useIntroGate: () => false,
+  useIntroGate: () => ({ showIntro: false, dismissIntro: () => {} }),
 }));
 
 jest.mock('../hooks/useThemeAssets', () => ({
@@ -67,10 +63,6 @@ jest.mock('../hooks/useLockState', () => ({
 
 jest.mock('../hooks/useGenesisFlow', () => ({
   useGenesisFlow: () => ({ handleGenerateGenesis: jest.fn() }),
-}));
-
-jest.mock('../services/pendingBilateralSync', () => ({
-  installPendingBilateralSync: () => () => undefined,
 }));
 
 jest.mock('../services/lock/lockService', () => ({
@@ -130,11 +122,6 @@ jest.mock('../components/lock/LockScreen', () => ({
 }));
 
 jest.mock('../components/lock/LockPromptModal', () => ({
-  __esModule: true,
-  default: () => null,
-}));
-
-jest.mock('../components/screens/DevDlvScreen', () => ({
   __esModule: true,
   default: () => null,
 }));

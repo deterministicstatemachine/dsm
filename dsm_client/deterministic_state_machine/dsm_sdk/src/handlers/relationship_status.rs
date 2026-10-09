@@ -117,13 +117,6 @@ pub(crate) fn derive_local_send_status_for_device_id(
 pub(crate) fn derive_local_send_status_for_contact(
     contact: &ContactRecord,
 ) -> generated::RelationshipSendStatus {
-    if contact.status == "Bricked" {
-        return blocked_status(
-            generated::RelationshipSendBlockReason::StateDivergence,
-            "Relationship is bricked after a Tripwire fork detection",
-        );
-    }
-
     if contact.public_key.is_empty() {
         return blocked_status(
             generated::RelationshipSendBlockReason::InternalError,
@@ -139,8 +132,47 @@ pub(crate) fn derive_local_send_status_for_contact(
         }
     }
 
-    let canonical_tip = client_db::get_contact_chain_tip_raw(&contact.device_id);
-    let local_tip = client_db::get_local_bilateral_chain_tip(&contact.device_id);
+    // One step at a time on the relationship, whichever process: an offline
+    // step in flight with the contact — this device's proposal, or the
+    // contact's that it holds — holds every other origination until it
+    // commits or ends.
+    match client_db::bilateral_step_in_flight_with(&contact.device_id, None) {
+        Ok(Some(_)) => {
+            return blocked_status(
+                generated::RelationshipSendBlockReason::PendingCatchup,
+                "An offline step with this contact is in flight",
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return blocked_status(
+                generated::RelationshipSendBlockReason::InternalError,
+                format!("The relationship's offline step is unreadable: {e}"),
+            );
+        }
+    }
+
+    let tips = client_db::get_contact_chain_tip(&contact.device_id).and_then(|canonical| {
+        Ok((
+            canonical,
+            client_db::get_local_bilateral_chain_tip(&contact.device_id)?,
+        ))
+    });
+    let (canonical_tip, local_tip) = match tips {
+        Ok((Some(canonical), Some(local))) => (canonical, local),
+        Ok(_) => {
+            return blocked_status(
+                generated::RelationshipSendBlockReason::InternalError,
+                "The contact disappeared while its tips were read",
+            );
+        }
+        Err(e) => {
+            return blocked_status(
+                generated::RelationshipSendBlockReason::InternalError,
+                format!("The relationship tips are unreadable: {e}"),
+            );
+        }
+    };
 
     if contact.needs_online_reconcile {
         return blocked_status(
@@ -149,44 +181,33 @@ pub(crate) fn derive_local_send_status_for_contact(
         );
     }
 
-    match (canonical_tip, local_tip) {
-        (Some(canonical), Some(local)) if canonical != local => blocked_status(
+    if canonical_tip != local_tip {
+        return blocked_status(
             generated::RelationshipSendBlockReason::StateDivergence,
             "Relationship tips diverged locally",
-        ),
-        (Some(_), None) | (None, Some(_)) => blocked_status(
-            generated::RelationshipSendBlockReason::StateDivergence,
-            "Relationship tip columns are inconsistent",
-        ),
-        _ => {
-            let observed_remote_tip = client_db::get_observed_remote_tip_record(&contact.device_id);
-            match observed_remote_tip {
-                Ok(Some(observed_tip))
-                    if observed_tip
-                        .source
-                        .blocks_send_without_local_corroboration() =>
-                {
-                    let reference_tip = canonical_tip.or(local_tip).unwrap_or([0u8; 32]);
-                    if observed_tip.tip != reference_tip {
-                        blocked_status(
-                            generated::RelationshipSendBlockReason::StateDivergence,
-                            format!(
-                                "Live peer reported a different relationship tip ({})",
-                                crate::util::text_id::encode_base32_crockford(&observed_tip.tip)
-                                    .get(..8)
-                                    .unwrap_or("?")
-                            ),
-                        )
-                    } else {
-                        ready_status()
-                    }
-                }
-                Ok(Some(_)) | Ok(None) => ready_status(),
-                Err(e) => blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    format!("Failed to load observed peer relationship tip: {e}"),
+        );
+    }
+    match client_db::get_observed_remote_tip_record(&contact.device_id) {
+        Ok(Some(observed_tip))
+            if observed_tip
+                .source
+                .blocks_send_without_local_corroboration()
+                && observed_tip.tip != canonical_tip =>
+        {
+            blocked_status(
+                generated::RelationshipSendBlockReason::StateDivergence,
+                format!(
+                    "Live peer reported a different relationship tip ({})",
+                    crate::util::text_id::encode_base32_crockford(&observed_tip.tip)
+                        .get(..8)
+                        .unwrap_or("?")
                 ),
-            }
+            )
         }
+        Ok(Some(_)) | Ok(None) => ready_status(),
+        Err(e) => blocked_status(
+            generated::RelationshipSendBlockReason::InternalError,
+            format!("Failed to load observed peer relationship tip: {e}"),
+        ),
     }
 }

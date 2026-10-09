@@ -20,12 +20,10 @@
 //! | `0x0009` | `ReleasePolicy` |
 //! | `0x000A` | `FeePolicy` |
 //!
-//! and, since amendment 2c-A.1, the transitive encoding closure of `b`
-//! (`settlement`): `0x000E`, `0x000F`, `0x0010`, `0x0033`, `0x0031`,
-//! `0x000B`, `0x000D`, `0x0015`, `0x0016`. Every one of them ships against a
-//! field table the registry defines; a class the registry has not defined
-//! has no encoder here, and [`declared_unencoded`] keeps it that way
-//! structurally rather than by convention.
+//! Every one of them ships against a field table the registry defines; a
+//! class the registry has not defined has no encoder here, and
+//! [`declared_unencoded`] keeps it that way structurally rather than by
+//! convention.
 //!
 //! ## Decoders are strict, and the conformance parser stays independent
 //!
@@ -48,7 +46,6 @@ use crate::crypto::blake3::dsm_domain_hasher;
 pub mod decode;
 pub mod devtree;
 pub mod genesis;
-pub mod settlement;
 pub mod state;
 
 pub use decode::{
@@ -59,11 +56,6 @@ pub use devtree::{
     RootProgressionDelegation,
 };
 pub use genesis::{genesis_v3_commitment, sigalg, GenesisParamsV3};
-pub use settlement::{
-    Allocation, AllocationBundle, BundleShape, ConsumedDlvTransition, DlvProofMaterial,
-    DsmSuccessorEvidence, MarketTerms, Route, RouteLeg, SettlementBundle, TradeIntent,
-    BETA_TRANSITIONS, ENTROPY_LEN, SPX256F_SIGNATURE_LEN,
-};
 pub use state::{
     EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetEntry,
     StorageSetMembers, VaultStateV2,
@@ -82,27 +74,6 @@ pub mod class {
     pub const MARKET_POLICY: u16 = 0x0007;
     pub const RELEASE_POLICY: u16 = 0x0009;
     pub const FEE_POLICY: u16 = 0x000A;
-    // ── The settlement bundle and what it nests (amendments 2c-A, 2c-B,
-    // 2c-A.1). Encoders live in `settlement`.
-    /// `TradeIntent` (§5.5).
-    pub const TRADE_INTENT: u16 = 0x000B;
-    /// `Route` schema 2 (§5.13); schema 1 burned.
-    pub const ROUTE: u16 = 0x000D;
-    /// `SettlementBundle` `B` (§5.19).
-    pub const SETTLEMENT_BUNDLE: u16 = 0x000E;
-    /// `ConsumedDlvTransition` `T_v` (§5.21).
-    pub const CONSUMED_DLV_TRANSITION: u16 = 0x000F;
-    /// `DlvProofMaterial` `P_v` (§5.22) — zero fields in schema 1.
-    pub const DLV_PROOF_MATERIAL: u16 = 0x0010;
-    /// `Allocation` schema 2 (§5.10); schema 1 burned.
-    pub const ALLOCATION: u16 = 0x0015;
-    /// `AllocationBundle` schema 2 (§5.11); schema 1 burned.
-    pub const ALLOCATION_BUNDLE: u16 = 0x0016;
-    /// Substrate class — `DsmSuccessorEvidence` (§5.23), nested in `0x0033`.
-    pub const DSM_SUCCESSOR_EVIDENCE: u16 = 0x0031;
-    /// `MarketTerms` (§5.20), nested in `0x000E` field 1.
-    pub const MARKET_TERMS: u16 = 0x0033;
-
     /// Substrate class — the Genesis v3 parameter set (registry §5.15).
     pub const GENESIS_PARAMS_V3: u16 = 0x0018;
     /// Substrate class — GRK-signed root-progression delegation (§5.16).
@@ -129,45 +100,212 @@ pub mod class {
     // Leaf-state classes. The class is what says which key derivation
     // applies, so a mutation cannot claim a balance state at a reserve key.
     pub const ECONOMIC_BALANCE_STATE: u16 = 0x001F;
-    pub const ECONOMIC_VAULT_RESERVE_STATE: u16 = 0x0020;
-    pub const ECONOMIC_SETTLEMENT_RECEIPT_STATE: u16 = 0x0021;
     pub const ECONOMIC_CONSUMED_SOURCE_STATE: u16 = 0x0022;
 
     /// A complete pre-root → post-root economic transition, carrying its
     /// mutations and its inline credit sources.
     pub const ECONOMIC_TRANSITION_WITNESS: u16 = 0x001D;
 
-    // Credit-provenance classes. Seven arms, closed: a credit that names none
+    // Credit-provenance classes. Eight arms, closed: a credit that names none
     // of them is unfunded, and there is deliberately no `Custom`. All are
     // schema 1 EXCEPT `0x0026`/`0x0027`, whose schema 1 is BURNED (3.6, owner
     // ruling 2026-08-28) — schema 2 adds the peer economic-position locator
     // (`owner_economic_position` / `trader_economic_position`), untrusted,
     // never authority.
-    pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
-    pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
     pub const CREDIT_SOURCE_VALIDATED_PEER_DEBIT: u16 = 0x0025;
-    pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
-    pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
-    pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
 
-    /// `0x0029` — the authenticated issuance authorization an `0x0023`
-    /// `AuthorizedIssuance` credit resolves against.
-    ///
-    /// Allocated with the field table that earns it: it answers WHO HAD THE
-    /// RIGHT TO CREATE THESE UNITS, and it answers it from the committed token
-    /// policy rather than from the issuer's assertion. V1 is deliberately
-    /// narrow — it admits issuance only under a `TokenAuthority` threshold met
-    /// by distinct policy-named signers over the exact issuance, and refuses
-    /// every policy condition whose inputs are not foreign-verifiable.
-    ///
-    /// It proves POLICY AUTHORIZATION, never backing: nothing here establishes
-    /// that the issued units are redeemable for or collateralized by any other
-    /// asset.
-    pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
+    /// The recipient credit of a native reserve release (Part IX §51): one
+    /// generation of the network's ONE ERA reserve lineage, released leader
+    /// first to the recipient the release names. Scoped to one network
+    /// through its `reserve_id`. Replaces the burned `0x0030` ticket credit.
+    pub const CREDIT_SOURCE_NATIVE_RESERVE_RELEASE: u16 = 0x005D;
+    /// `0x005F` — the creator's credit of a native token's whole genesis
+    /// supply, released in the transition that creates the token
+    /// (`ReleaseRule::AllAtCreation`, SoFi §51).
+    pub const CREDIT_SOURCE_GENESIS_RELEASE: u16 = 0x005F;
 
-    /// The recipient credit of a consumed ERA faucet ticket — the seventh
-    /// provenance arm. Scoped to one network through its `faucet_id`.
-    pub const CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION: u16 = 0x0030;
+    // ── SoFi v8: the unilateral trader operation ────────────────────────
+    //
+    // `TraderPrecommit P → DLVPolicyFulfillment G_1 … G_n → TraderFulfillment
+    // F`. Encoders and the normative field tables live in `crate::sofi::wire`;
+    // the discriminants live here because §3 is a single namespace. Unions
+    // follow the house rule: the nested object's envelope IS the
+    // discriminant, so every variant is its own class.
+
+    /// `SofiSetupBody` — the relationship setup claim (F1).
+    pub const SOFI_SETUP_BODY: u16 = 0x0036;
+    /// `TraderPrecommitBody` `P` — signed, non-economic (F2 stage 1).
+    pub const SOFI_TRADER_PRECOMMIT_BODY: u16 = 0x0037;
+    /// `DlvPolicyFulfillmentBody` `G_j` — deterministic policy-fulfillment
+    /// witness identity, no issuer (F2 stage 2).
+    pub const SOFI_DLV_POLICY_FULFILLMENT_BODY: u16 = 0x0038;
+    /// `TraderFulfillmentBody` `F` — the exercise when registered (F2 stage 3).
+    pub const SOFI_TRADER_FULFILLMENT_BODY: u16 = 0x0039;
+    /// `SofiResolutionClaim` `C_q` — the outcome-independent conditional
+    /// position installed with F.
+    pub const SOFI_RESOLUTION_CLAIM: u16 = 0x003A;
+    /// `ParentClaimRef` variant: an exact single-root economic claim.
+    pub const SOFI_PARENT_SINGLE_ROOT_CLAIM: u16 = 0x003B;
+    /// `ParentClaimRef` variant: a conditional SoFi position by `FulfillmentId`.
+    pub const SOFI_PARENT_CONDITIONAL_CLAIM: u16 = 0x003C;
+    /// `ValidationRef` variant: a content-addressed immutable object.
+    pub const SOFI_REF_CONTENT_ADDR: u16 = 0x003D;
+    /// `ValidationRef` variant: an exact single-root economic claim.
+    pub const SOFI_REF_SINGLE_ROOT_CLAIM: u16 = 0x003E;
+    /// `ValidationRef` variant: a conditional position at `(G, DevID, p)`.
+    pub const SOFI_REF_CONDITIONAL_CLAIM: u16 = 0x003F;
+    /// `ValidationRef` variant: a relationship setup by `ρ`.
+    pub const SOFI_REF_SETUP: u16 = 0x0040;
+    /// `𝒞_E^pre` — the canonical pre-E validation closure index (lives in `B°`).
+    pub const SOFI_PRE_E_CLOSURE_INDEX: u16 = 0x0041;
+    /// `PolicyFulfillmentAuxRef` — a content-addressed auxiliary evidence
+    /// candidate. Never an identity field, never a singleton slot.
+    pub const SOFI_POLICY_FULFILLMENT_AUX_REF: u16 = 0x0042;
+    /// `Γ` — the canonical route-leg set folded into a route E.
+    pub const SOFI_ROUTE_LEG_SET: u16 = 0x004A;
+
+    // ── The DLV tree, the cores, B° and vault genesis (E1b-2) ───────────
+    //
+    // P15-4, P15-6, P15-7, P15-8, P15-11 and P15-12. Unions follow the house
+    // rule: the nested envelope IS the discriminant, so B°'s two branches,
+    // `X_route`'s two branches, the owner authority's two branches and the
+    // three core-entry kinds are each their own class.
+
+    /// A vault's own state leaf in its DLV tree (`V_n`).
+    pub const SOFI_VAULT_STATE_LEAF: u16 = 0x004B;
+    /// A trader's relationship leaf in a vault's DLV tree.
+    pub const SOFI_VAULT_RELATIONSHIP_LEAF: u16 = 0x004C;
+    /// A trader's relationship leaf in its OWN economic tree (`R_econ`).
+    pub const SOFI_TRADER_RELATIONSHIP_LEAF: u16 = 0x004D;
+    /// Core entry: a leaf mutated from `pre` to `post`.
+    pub const SOFI_CORE_ENTRY_MUTATION: u16 = 0x004E;
+    /// Core entry: a leaf read, not written.
+    pub const SOFI_CORE_ENTRY_READ: u16 = 0x004F;
+    /// Core entry: a relationship leaf whose post is filled by BindExt.
+    pub const SOFI_CORE_ENTRY_RELATIONSHIP: u16 = 0x0050;
+    /// `T°` — the trader core, scoped to `(G, DevID, q)`.
+    pub const SOFI_TRADER_CORE: u16 = 0x0051;
+    /// `V°_j` — one vault's core, carrying the trader marker.
+    pub const SOFI_DLV_CORE: u16 = 0x0052;
+    /// `B°` branch: a swap over one or more hops.
+    pub const SOFI_SETTLEMENT_SWAP: u16 = 0x0053;
+    /// `B°` branch: a full close of one vault.
+    pub const SOFI_SETTLEMENT_CLOSE: u16 = 0x0054;
+    /// Owner authority: the vault's origin device. The only live branch.
+    pub const SOFI_OWNER_AUTHORITY_ORIGIN: u16 = 0x0055;
+    /// Owner authority: a DSM succession successor. Encodable, and ALWAYS
+    /// refused by semantic validation until DSM succession is activated.
+    pub const SOFI_OWNER_AUTHORITY_DSM_SUCCESSOR: u16 = 0x0056;
+    /// `X_route` preimage branch: swap hops.
+    pub const SOFI_ROUTE_DIGEST_SWAP: u16 = 0x0057;
+    /// `X_route` preimage branch: a close.
+    pub const SOFI_ROUTE_DIGEST_CLOSE: u16 = 0x0058;
+    /// `P(E)` — the canonical settlement preimage.
+    pub const SOFI_SETTLEMENT_PREIMAGE: u16 = 0x0059;
+    /// `VaultGenesisPreimage` — what `GenesisAccepted` validates against.
+    pub const SOFI_VAULT_GENESIS_PREIMAGE: u16 = 0x005A;
+    /// `VaultCreation` — the owner's insert-only creation record at `p_create`.
+    pub const SOFI_VAULT_CREATION: u16 = 0x005B;
+    /// `SignedSofiObject` — the transport envelope that carries a canonical
+    /// SoFi body together with the trader's signature over it.
+    ///
+    /// The frozen body classes (`SOFI_TRADER_PRECOMMIT_BODY`,
+    /// `SOFI_TRADER_FULFILLMENT_BODY`) encode a body and nothing else, so a
+    /// signed `P` or `F` had no carrier: a member checks "signature + key
+    /// binding" at ingress and any relayer may publish, which means the
+    /// signature has to travel and be stored WITH the body.
+    ///
+    /// **The envelope authenticates a body; it never redefines one.** The
+    /// protocol identity of `P` and `F` stays `H(… ‖ CCB(body))` over the
+    /// canonical body, so a different valid signature encoding over the same
+    /// body is the same object, not a second one.
+    pub const SOFI_SIGNED_OBJECT: u16 = 0x005C;
+    /// The exercise (Section 17.5, rebuild step R11): the value written to
+    /// every successor key of a route — the signed envelope of `F`, the
+    /// signed envelope of `P`, `P(E)`, every `G_j` in leg order, and every
+    /// object `𝒞_E^pre` references. It proves itself from its own bytes and
+    /// state the reader already holds, and names its own attempt, so it
+    /// cannot count at another key. `0x005D` is the native-reserve credit
+    /// source (R4), which is why this is `0x005E`.
+    pub const SOFI_EXERCISE: u16 = 0x005E;
+    /// `0x0060` — the creator's insert-only record that a native token was
+    /// created on its lineage (SoFi Amendment S8). Presence under a validated
+    /// root proves the creation, and a second creation of the same policy
+    /// commit on that lineage cannot insert it again.
+    pub const ECONOMIC_TOKEN_CREATION_STATE: u16 = 0x0060;
+    /// `0x0061` — a trader's balance of one token before a trade (SoFi
+    /// Amendment S12). `T°` states that balance only by the hash of its leaf,
+    /// so the exercise carries the value as this object, named in
+    /// `𝒞_E^pre` and accepted only because it hashes to the leaf the core
+    /// states.
+    pub const SOFI_TRADER_PRE_BALANCE: u16 = 0x0061;
+    /// `0x0062` — `C_q` as it occupies `K_root(q)`: the derived claim and the
+    /// trader's signature over it, under a key the claim's own `AttA` binds
+    /// to its `DevID` (DSM Amendment A10, SoFi Amendment S20).
+    pub const SOFI_SIGNED_RESOLUTION_CLAIM: u16 = 0x0062;
+    /// `0x0063` — an escrow vault's terms (SoFi Amendment S21): the held
+    /// token, the external commitment `Y`, and the branches, each an outcome,
+    /// the exact signer set that decides it, and the identity it pays. The
+    /// three policy slots of an escrow vault's state name this object.
+    pub const ESCROW_TERMS: u16 = 0x0063;
+    /// `0x0064` — a verdict on an external commitment (SoFi Amendment S21):
+    /// `Y`, the outcome table, the outcome, and its signers' signatures over
+    /// the statement for the verdict cell. It occupies the cell only when it
+    /// proves its own authority from these bytes.
+    pub const ESCROW_VERDICT: u16 = 0x0064;
+    /// `B°`, the Release branch (SoFi Amendment S21): an escrow vault's whole
+    /// amount to the recipient of the branch whose outcome the canonical
+    /// verdict names.
+    pub const SOFI_SETTLEMENT_RELEASE: u16 = 0x0065;
+    /// `X_route` preimage branch: a release.
+    pub const SOFI_ROUTE_DIGEST_RELEASE: u16 = 0x0066;
+    /// `0x0067` — a computed escrow vault's terms (SoFi Amendment S22): the
+    /// held token, `Y`, the computed table (the program hash, the setup
+    /// digest and one session key per side) and the three branches
+    /// `a-wins`, `b-wins`, `void` with their recipients. The class of the
+    /// object an escrow vault's slots name decides its kind.
+    pub const ESCROW_COMPUTED_TERMS: u16 = 0x0067;
+    /// `0x0068` — one entry of a match transcript (SoFi Amendment S22): its
+    /// index, its side, and a Commit, a Reveal or a Resign. Its canonical
+    /// bytes are what the head chain hashes; it carries no signature.
+    pub const ESCROW_TRANSCRIPT_ENTRY: u16 = 0x0068;
+    /// `0x0069` — a transcript occupying a match cell (SoFi Amendment S22):
+    /// `Y`, the table, the setup, the entries and each side's signature over
+    /// the head of its last entry. It occupies the cell only when it proves
+    /// the outcome from these bytes.
+    pub const ESCROW_TRANSCRIPT_OUTCOME: u16 = 0x0069;
+    /// `0x006A` — two different heads one session key signed at one index
+    /// (SoFi Amendment S22): an occupant of the match cell for the other
+    /// side.
+    pub const ESCROW_EQUIVOCATION_PROOF: u16 = 0x006A;
+    /// `0x006B` — a Start (side B) or a Withdraw (side A) at a match's start
+    /// cell (SoFi Amendment S22).
+    pub const ESCROW_MATCH_START: u16 = 0x006B;
+    /// `0x006C` — a shared lineage's genesis (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENESIS: u16 = 0x006C;
+    /// `0x006D` — a shared lineage's generation (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENERATION: u16 = 0x006D;
+    /// `0x006E` — a generation hint, discovery only (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENERATION_HINT: u16 = 0x006E;
+    /// `0x006F` — a 32-generation checkpoint, discovery only (SoFi
+    /// Amendment S23).
+    pub const SHARED_LINEAGE_CHECKPOINT: u16 = 0x006F;
+    /// `0x0070` — a segment's read plan, discovery only (SoFi Amendment
+    /// S23).
+    pub const SHARED_LINEAGE_TRANSITION_BUNDLE: u16 = 0x0070;
+    /// `0x0071` — a vault's frontier `(vault, generation, root)`, which an
+    /// owner baseline binds (SoFi Amendment S24).
+    pub const SOFI_VAULT_FRONTIER: u16 = 0x0071;
+    /// `0x0072` — a vault's state leaf and one trader's relationship proof
+    /// under a frontier's root (SoFi Amendment S24).
+    pub const SOFI_VAULT_FRONTIER_WITNESS: u16 = 0x0072;
+    /// `0x0073` — a frontier commitment and the owner-authority position the
+    /// baseline's signer is proven at (SoFi Amendment S24).
+    pub const SOFI_OWNER_BASELINE_AUTH: u16 = 0x0073;
+    /// `0x0074` — the head of a vault's history: its generation and the
+    /// peaks of the append-only tree whose leaf `g` is `R_g` (SoFi
+    /// Amendment S26).
+    pub const SOFI_VAULT_HISTORY_HEAD: u16 = 0x0074;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones
@@ -220,37 +358,23 @@ pub mod reserved {
 ///
 /// Same discipline as [`reserved`]: a `CcbObject` impl cannot name one of
 /// these without moving the constant into [`class`], which is a reviewable
-/// diff arriving with the encoder that earns it. `0x0032` is claimed by
-/// amendment 2c for 2c-D with no field table yet, so it belongs here too.
+/// diff arriving with the encoder that earns it. `0x0032` was here while it
+/// was claimed prose; amendment 2c-D gave it a field table and this change is
+/// the encoder that earns it, so it has moved to [`class`].
 pub mod declared_unencoded {
     /// §6 partial table; only `0x0008` blocks it.
     pub const FULFILLMENT_MECHANISM: u16 = 0x0006;
     /// §5.6.
     pub const MARKET_BOUNDS: u16 = 0x0008;
-    /// §5.14 `RouteSet` `R`, schema 2; schema 1 burned.
-    pub const ROUTE_SET: u16 = 0x000C;
-    /// Blocked — 2c-B/2c-C/2c-D.
-    pub const TRADER_ACCEPTANCE: u16 = 0x0011;
     /// Blocked — §6.
     pub const TRADE_DIGEST: u16 = 0x0012;
     /// §5.8.
     pub const REFERENCE_WINDOW: u16 = 0x0013;
-    /// §5.12 `RouteCommitmentBody` `Q`, schema 2; schema 1 burned. `X` is
-    /// carried as a digest in `MarketTerms`; `Q` lives in the receipt
-    /// publication set (2c-A ruling 2).
-    pub const ROUTE_COMMITMENT_BODY: u16 = 0x0017;
-    /// Claimed by amendment 2c for 2c-D.
-    pub const CLAIMED_FOR_2C_D: u16 = 0x0032;
-
     pub const ALL: &[u16] = &[
         FULFILLMENT_MECHANISM,
         MARKET_BOUNDS,
-        ROUTE_SET,
-        TRADER_ACCEPTANCE,
         TRADE_DIGEST,
         REFERENCE_WINDOW,
-        ROUTE_COMMITMENT_BODY,
-        CLAIMED_FOR_2C_D,
     ];
 
     pub fn is_declared_unencoded(object_class: u16) -> bool {
@@ -266,8 +390,109 @@ pub mod burned_class {
     pub const STORAGE_MEMBER_ID: u16 = 0x0003;
     /// `ExternalCommitmentBody` — §6a finding 3.
     pub const EXTERNAL_COMMITMENT_BODY: u16 = 0x0014;
+    /// `RouteSet` `R` — burned by amendment 2c-F R1. The shipped `X` commits
+    /// one signed route, never a set of alternatives, so nothing encodes `R`
+    /// at any schema; schema 2 never shipped an encoder.
+    pub const ROUTE_SET: u16 = 0x000C;
+    /// `RouteCommitmentBody` `Q` — burned by amendment 2c-F R1. `X` is
+    /// `H_dom(DSM/ext, RC*)` over the signed RouteCommit carried inside `B`
+    /// (registry §2.10), so no separate `Q` object exists; schema 2 never
+    /// shipped an encoder.
+    pub const ROUTE_COMMITMENT_BODY: u16 = 0x0017;
+    /// The SoFi resolution-record family and the route-outcome cell values,
+    /// `0x0043` to `0x0049` — burned by the demolition. Every fact they
+    /// carried is derived by Core from raw member reads, so no stored record
+    /// can be an authority for it.
+    pub const SOFI_RECORD_FULFILLMENT_REGISTERED: u16 = 0x0043;
+    pub const SOFI_RECORD_SUCCESSOR_DEAD: u16 = 0x0044;
+    pub const SOFI_RECORD_SUCCESSOR_FINAL: u16 = 0x0045;
+    pub const SOFI_RECORD_OUTCOME_COMPLETE: u16 = 0x0046;
+    pub const SOFI_RECORD_OUTCOME_ABORT: u16 = 0x0047;
+    pub const SOFI_OUTCOME_CELL_COMPLETE: u16 = 0x0048;
+    pub const SOFI_OUTCOME_CELL_ABORT: u16 = 0x0049;
+    /// The old market's credit sources — a vault reserve consumed by a settle,
+    /// a route-wide reserve consumption, and the settlement payment a vault
+    /// owner received — burned with the QuorumBind settlement they funded.
+    pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
+    pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
+    pub const CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION: u16 = 0x0035;
+    /// The recipient credit of a consumed ERA faucet ticket — burned by
+    /// rebuild step R4 with the ticket universe it named. ERA leaves the
+    /// network's one native reserve by release (`0x005D`), never by ticket.
+    pub const CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION: u16 = 0x0030;
+    /// A credit funded by a debit in the same transition — produced only by
+    /// the old settle write set, burned with it.
+    pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
+    /// The verified offline re-entry credit — never produced by any path.
+    /// Offline value is the device's designated offline accounting; moving it
+    /// back to the online balance is a state change in the device's own
+    /// transition, with no credit source and no cost (owner, 2026-09-23).
+    pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
+    /// The authorized-issuance credit and the issuance authorization it
+    /// resolved against: a policy's signer set authorizing new units. There
+    /// is no minting after genesis and the signer set never authorizes
+    /// issuance (SoFi §48, §54; owner, 2026-09-23). A token's supply is
+    /// released at creation (`0x005F`) or from a reserve (`0x005D`).
+    pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
+    pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
+    /// The old market's leaf states — a vault reserve leg, a settlement
+    /// receipt and the bundle acceptance — and the trader acceptance and
+    /// receipt objects that certified them. Burned with the QuorumBind
+    /// settlement they recorded.
+    pub const ECONOMIC_VAULT_RESERVE_STATE: u16 = 0x0020;
+    pub const ECONOMIC_SETTLEMENT_RECEIPT_STATE: u16 = 0x0021;
+    pub const ECONOMIC_BUNDLE_ACCEPTANCE_STATE: u16 = 0x0032;
+    pub const TRADER_ACCEPTANCE: u16 = 0x0011;
+    pub const SOFI_RECEIPT: u16 = 0x0034;
+    /// The old market's settlement bundle and everything it nested — the
+    /// trade intent, route, allocations, successor evidence, market terms,
+    /// consumed transition and proof material. Burned with the QuorumBind
+    /// settlement they described.
+    pub const TRADE_INTENT: u16 = 0x000B;
+    pub const ROUTE: u16 = 0x000D;
+    pub const SETTLEMENT_BUNDLE: u16 = 0x000E;
+    pub const CONSUMED_DLV_TRANSITION: u16 = 0x000F;
+    pub const DLV_PROOF_MATERIAL: u16 = 0x0010;
+    pub const ALLOCATION: u16 = 0x0015;
+    pub const ALLOCATION_BUNDLE: u16 = 0x0016;
+    pub const DSM_SUCCESSOR_EVIDENCE: u16 = 0x0031;
+    pub const MARKET_TERMS: u16 = 0x0033;
 
-    pub const ALL: &[u16] = &[STORAGE_MEMBER_ID, EXTERNAL_COMMITMENT_BODY];
+    pub const ALL: &[u16] = &[
+        STORAGE_MEMBER_ID,
+        EXTERNAL_COMMITMENT_BODY,
+        ROUTE_SET,
+        ROUTE_COMMITMENT_BODY,
+        SOFI_RECORD_FULFILLMENT_REGISTERED,
+        SOFI_RECORD_SUCCESSOR_DEAD,
+        SOFI_RECORD_SUCCESSOR_FINAL,
+        SOFI_RECORD_OUTCOME_COMPLETE,
+        SOFI_RECORD_OUTCOME_ABORT,
+        SOFI_OUTCOME_CELL_COMPLETE,
+        SOFI_OUTCOME_CELL_ABORT,
+        CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION,
+        CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT,
+        CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION,
+        CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION,
+        CREDIT_SOURCE_SAME_TRANSITION_MOVE,
+        ECONOMIC_VAULT_RESERVE_STATE,
+        ECONOMIC_SETTLEMENT_RECEIPT_STATE,
+        ECONOMIC_BUNDLE_ACCEPTANCE_STATE,
+        TRADER_ACCEPTANCE,
+        SOFI_RECEIPT,
+        TRADE_INTENT,
+        ROUTE,
+        SETTLEMENT_BUNDLE,
+        CONSUMED_DLV_TRANSITION,
+        DLV_PROOF_MATERIAL,
+        ALLOCATION,
+        ALLOCATION_BUNDLE,
+        DSM_SUCCESSOR_EVIDENCE,
+        MARKET_TERMS,
+        CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY,
+        CREDIT_SOURCE_AUTHORIZED_ISSUANCE,
+        ISSUANCE_AUTHORIZATION_BODY,
+    ];
 
     pub fn is_burned_class(object_class: u16) -> bool {
         ALL.contains(&object_class)
@@ -305,15 +530,17 @@ pub mod schema {
         (super::class::STORAGE_SET, 2),
         (super::class::ENCUMBRANCE_CLAIM, 1),
         (super::class::ENCUMBRANCE_SET, 1),
-        // The route family moved to schema 2 when `p_v` became `c_n` and legs
-        // began nesting by complete CCB (registry §5.10–§5.14). Recorded for
-        // the two classes this crate does not encode as well, so a schema-1
-        // envelope classifies as burned rather than unknown (2c-A.1 ruling 10).
-        (super::declared_unencoded::ROUTE_SET, 1),
-        (super::class::ROUTE, 1),
-        (super::class::ALLOCATION, 1),
-        (super::class::ALLOCATION_BUNDLE, 1),
-        (super::declared_unencoded::ROUTE_COMMITMENT_BODY, 1),
+        // `RouteSet` and `RouteCommitmentBody` schema 1 stay recorded (2c-A.1
+        // ruling 10); 2c-F R1 burned both classes outright, and the node cut
+        // burned the rest of the settlement family with them.
+        (super::burned_class::ROUTE_SET, 1),
+        (super::burned_class::ROUTE_COMMITMENT_BODY, 1),
+        // The ticket credit: its coordinate space (800M write-once tickets)
+        // went with the faucet register. A credit naming it is unfunded.
+        (
+            super::burned_class::CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION,
+            1,
+        ),
     ];
 
     /// Whether a `(class, schema)` pair is retired. Never true for a live
@@ -392,23 +619,6 @@ pub enum CcbError {
     EmptyBytes { field: &'static str },
     /// A sequence or set that must have at least one element has none.
     EmptySequence { class: u16 },
-    /// The §5.19 shape rule: which side of it was violated.
-    BundleShape(&'static str),
-    /// Beta's transition cardinality is exactly one.
-    TransitionCount { got: usize },
-    /// `V_{n+1}.parent_state_commitment != T_v.parent_binding`.
-    ParentLinkage,
-    /// `MarketTerms.recovery_material.embedded_parent != MarketTerms.trader_parent`
-    /// — the second of 2c-B's two chain-tip equalities, and the half whose
-    /// operands both live inside `B` (2c-A.1 ruling 9: in-bundle structural
-    /// checks are the decoder's). The first half — decoding
-    /// `operation_bytes` as `DlvSettleOperationPreimageV1` and recomputing
-    /// `relationship_chain_tip_v2` — is successor-evidence validity rather
-    /// than byte decoding and lands with 5c-2 Step 2/3, when a real prepared
-    /// preimage exists to carry.
-    EvidenceParentMismatch,
-    /// An owner close whose successor still holds reserves.
-    CloseSuccessorNotRetired { reserve_a: u64, reserve_b: u64 },
     /// A `signature_alg` value the registry does not declare.
     UnknownSignatureAlg { alg: u16 },
     /// A public key whose length is not the declared width for its algorithm.
@@ -419,16 +629,7 @@ pub enum CcbError {
     },
     /// A balance leaf state carried `amount = 0`. Zero balance is the ABSENCE
     /// of the leaf, so a zero-valued balance object has no canonical bytes.
-    /// Reserves are the opposite and deliberately so — see
-    /// `EconomicVaultReserveState`.
     ZeroBalanceLeafMustBeAbsent,
-    /// A settlement-receipt leaf whose `new_sequence` is not
-    /// `parent_sequence + 1`.
-    ReceiptSequenceNotSuccessor { parent: u64, new: u64 },
-    /// A settlement-receipt leaf with a zero amount on either leg.
-    ReceiptZeroAmount,
-    /// A settlement-receipt leaf whose input and output name the same asset.
-    ReceiptAssetsNotDistinct,
     /// A leaf mutation with neither a pre-state nor a post-state. "Absent to
     /// absent" is not a mutation; it is a mutation that should not have been
     /// emitted, and admitting it would let a witness pad its list.
@@ -444,11 +645,6 @@ pub enum CcbError {
     /// An admission manifest naming both substrates, or neither. The object
     /// shape is what states the substrate; exactly one is present.
     ManifestSubstrateNotExactlyOne,
-    /// A `SameTransitionMove` whose credit and debit are the same mutation.
-    /// A mutation cannot fund itself.
-    SameTransitionMoveIsSelfFunding { index: u32 },
-    /// An offline reentry naming one boundary as its own predecessor.
-    OfflineReentryBoundaryIsItsOwnParent,
     /// Credit sources out of order, or two sources for one credit.
     CreditSourcesNotStrictlyAscending { index: usize },
     /// A source naming a mutation index the witness does not have.
@@ -466,6 +662,9 @@ pub enum CcbError {
         manifest_count: usize,
         derived_count: usize,
     },
+    /// One transition introduces more direct external provenance references
+    /// than `MAX_PROVENANCE_FANOUT` (SoFi §18.4). A known bound violation.
+    ProvenanceFanoutExceeded { count: usize, max: usize },
 }
 
 impl core::fmt::Display for CcbError {
@@ -513,20 +712,6 @@ impl core::fmt::Display for CcbError {
                 "economic balance leaf: amount 0 is the ABSENCE of the leaf, not a leaf \
                  holding zero — a zero-valued balance state has no canonical bytes"
             ),
-            CcbError::ReceiptSequenceNotSuccessor { parent, new } => write!(
-                f,
-                "economic settlement receipt: new_sequence {new} must be parent_sequence \
-                 {parent} + 1"
-            ),
-            CcbError::ReceiptZeroAmount => write!(
-                f,
-                "economic settlement receipt: neither leg may be zero — a zero leg is a \
-                 settlement that moved nothing and cannot fund a credit"
-            ),
-            CcbError::ReceiptAssetsNotDistinct => write!(
-                f,
-                "economic settlement receipt: input and output must name distinct assets"
-            ),
             CcbError::MutationBothStatesAbsent => write!(
                 f,
                 "economic leaf mutation: absent-to-absent is not a mutation; emitting one \
@@ -548,16 +733,6 @@ impl core::fmt::Display for CcbError {
                 "economic admission manifest: exactly one of dsm_successor_evidence_addr \
                  and offline_boundary_evidence_addr must be present — the object shape is \
                  what states the substrate"
-            ),
-            CcbError::SameTransitionMoveIsSelfFunding { index } => write!(
-                f,
-                "credit source: mutation {index} is named as both the credit and the debit — \
-                 a mutation cannot fund itself"
-            ),
-            CcbError::OfflineReentryBoundaryIsItsOwnParent => write!(
-                f,
-                "credit source: prior_boundary_id equals unload_boundary_id — the consumed \
-                 checkpoint must be the PREDECESSOR of the reentry, not the reentry itself"
             ),
             CcbError::CreditSourcesNotStrictlyAscending { index } => write!(
                 f,
@@ -593,26 +768,6 @@ impl core::fmt::Display for CcbError {
             CcbError::EmptySequence { class } => {
                 write!(f, "class {class:#06x}: a sequence with no elements is not defined")
             }
-            CcbError::BundleShape(why) => write!(f, "settlement bundle shape: {why}"),
-            CcbError::TransitionCount { got } => write!(
-                f,
-                "a beta settlement bundle carries exactly one transition, not {got}"
-            ),
-            CcbError::ParentLinkage => write!(
-                f,
-                "the successor's parent_state_commitment is not the transition's parent_binding"
-            ),
-            CcbError::EvidenceParentMismatch => write!(
-                f,
-                "the successor evidence's embedded_parent is not the market terms' trader_parent"
-            ),
-            CcbError::CloseSuccessorNotRetired {
-                reserve_a,
-                reserve_b,
-            } => write!(
-                f,
-                "an owner close drains both legs; the successor holds ({reserve_a}, {reserve_b})"
-            ),
             CcbError::WitnessHasNoMutations => write!(
                 f,
                 "economic transition witness: no mutations — a transition that changes no \
@@ -624,6 +779,11 @@ impl core::fmt::Display for CcbError {
                  addresses but the witness's credit sources reference {derived_count} distinct \
                  external addresses — the field is a DERIVED publication index, not a second \
                  description of provenance"
+            ),
+            CcbError::ProvenanceFanoutExceeded { count, max } => write!(
+                f,
+                "economic admission: the transition introduces {count} direct external \
+                 provenance references, more than the bound of {max}"
             ),
         }
     }

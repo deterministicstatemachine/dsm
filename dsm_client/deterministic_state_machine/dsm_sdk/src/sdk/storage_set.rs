@@ -180,7 +180,13 @@ impl StorageSetCatalog {
     /// where `name` is the node's configured protocol identity (`node.id`) and
     /// `endpoint` its transport address.
     pub fn from_env_config() -> Result<Self, DsmError> {
-        let env = crate::network::NetworkConfigLoader::load_env_config()?;
+        Self::from_env(crate::network::NetworkConfigLoader::load_env_config()?)
+    }
+
+    /// The catalog a parsed env config states — the one [`Self::from_env_config`]
+    /// reads from the configured file, and the one the env config bundled into
+    /// the app states.
+    pub(crate) fn from_env(env: crate::network::EnvConfig) -> Result<Self, DsmError> {
         let members: Vec<StorageMember> = env
             .nodes
             .into_iter()
@@ -242,6 +248,66 @@ impl StorageSetCatalog {
     }
 }
 
+/// Resolve the canonical register set for `network_id`, fail-closed, through
+/// the catalog (never `sole_set` — consumers RESOLVE).
+pub fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
+    let profile = root_register_profile(network_id)?;
+    canonical_set_in(&profile, &StorageSetCatalog::from_env_config()?)
+}
+
+/// The network's pinned root-register profile, fail-closed.
+fn root_register_profile(
+    network_id: &[u8],
+) -> Result<dsm::economic::register::RootRegisterProfile, DsmError> {
+    dsm::economic::register::resolve_root_register_profile(network_id).map_err(|e| {
+        DsmError::storage(
+            format!("root register profile: {e}"),
+            None::<std::io::Error>,
+        )
+    })
+}
+
+/// The set of `catalog` that re-derives `profile`'s pinned id, or the
+/// fail-closed refusal.
+fn canonical_set_in(
+    profile: &dsm::economic::register::RootRegisterProfile,
+    catalog: &StorageSetCatalog,
+) -> Result<StorageSet, DsmError> {
+    // The set id is a function of `(member_id, register_incarnation_id)`
+    // pairs, so it cannot be asked for by name: the catalog offers candidates
+    // and `verify_candidate` refuses any that does not re-derive the pinned id.
+    // A member that rebuilt its register therefore stops resolving here
+    // rather than silently serving the register it used to.
+    catalog
+        .sets()
+        .iter()
+        .find(|s| {
+            as_ccb_members(s)
+                .ok()
+                .and_then(|m| profile.verify_candidate(&m).ok())
+                .is_some()
+        })
+        .cloned()
+        .ok_or_else(|| {
+            DsmError::storage(
+                "the canonical register set is not resolvable from the local catalog — fail closed"
+                    .to_string(),
+                None::<std::io::Error>,
+            )
+        })
+}
+
+/// The endpoints of this device's committed network's pinned set, in member
+/// order: where its spool traffic goes.
+pub fn pinned_endpoints() -> Result<Vec<String>, DsmError> {
+    let network = crate::sdk::economic_admission_flow::committed_network_id()?;
+    Ok(canonical_set(&network)?
+        .members()
+        .iter()
+        .map(|member| member.endpoint.clone())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,7 +319,7 @@ mod tests {
     /// so the pin cannot silently drift from what the fleet actually holds.
     /// THE FLEET'S OWN DERIVATION, PINNED. Every provisioned member computed
     /// this set id from its configured `[[storage_set.members]]` at restart and
-    /// logged `storage set configured: 3 members, id=<this>`. Core must
+    /// logged `storage set configured: 5 members, id=<this>`. Core must
     /// re-derive the same digest from the same pairs, or the pin and the fleet
     /// name different registers.
     #[test]
@@ -262,8 +328,32 @@ mod tests {
             .expect("the beta network is provisioned");
         assert_eq!(
             crate::util::text_id::encode_base32_crockford(&profile.storage_set_id),
-            "E05YS8101EJH33KY2CG625JJE8A0Z4GJNSEM335TX1XVTWM9RR8G",
-            "core's derivation must equal what dsm-node-1, -2 and -3 each logged"
+            "7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0",
+            "core's derivation must equal what all five provisioned members logged"
+        );
+    }
+
+    /// The env config the app bundles is what a default install reaches the
+    /// network with, so its `(member, incarnation)` pairs must be the pinned
+    /// beta set: a stale pair (a retired fleet, an incarnation from before a
+    /// reprovision) makes every read of the canonical set fail closed on a
+    /// fresh device, with nothing on screen but the intro.
+    #[test]
+    fn the_bundled_env_config_resolves_the_pinned_beta_set() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../frontend/public/dsm_env_config.toml"
+        );
+        let text = std::fs::read_to_string(path).expect("the bundled env config");
+        let env = crate::network::parse_env_config_toml(&text)
+            .expect("the bundled env config parses under the loader");
+        let catalog = StorageSetCatalog::from_env(env).expect("its members form one set");
+        let profile = root_register_profile(b"dsm-testnet").expect("the beta profile");
+        let set = canonical_set_in(&profile, &catalog)
+            .expect("the bundled env config resolves the pinned beta set");
+        assert_eq!(
+            crate::util::text_id::encode_base32_crockford(&set.id()),
+            "7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0"
         );
     }
 
@@ -272,15 +362,23 @@ mod tests {
         let logged = [
             (
                 "dsm-node-1",
-                "DXWR7W9J2E5ASQ5BJBYF13ZZEK1VFTZFYNWAYPF1KNT8C33YPVM0",
+                "B6DZ4TFJ2Y1GSJ8X57CE8BWX0QM5JRVAJP08JRQTV65DEQ53DYKG",
             ),
             (
                 "dsm-node-2",
-                "H4ZSDG34M1BSQQH8T9WWWZ65Y90YW9QY2CYRR2EG3H621VDGJ3W0",
+                "QYR6K65CD8SZ40G4PZV4PMS2R0VK02N14TECZ0GP00ZR9VCSYC20",
             ),
             (
                 "dsm-node-3",
-                "VW3REAWA7PR608Y4AY3VX18M8BE4828PFPNVTG380XV18HKF8SSG",
+                "2AJ8GZ4QM7YH7D5G552EAHSPTSTWG9KXE04RTBKYN8ES17Y9BTWG",
+            ),
+            (
+                "dsm-node-4",
+                "S95VHW0YZ413DA4YX972ZA9XDA69FXF4KBCG2AHG89DA8PTY200G",
+            ),
+            (
+                "dsm-node-5",
+                "56VB5TY2G8QKVJNVFKJQX9N0GHJN6VEQ1KV9E88GX272V8G43RWG",
             ),
         ];
         let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")

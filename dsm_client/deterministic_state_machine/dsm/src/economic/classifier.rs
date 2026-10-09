@@ -25,6 +25,7 @@
 //! one can never become a `ValidatedEconomicRoot` — which is the honest
 //! outcome, and categorically different from claiming the operation was inert.
 
+use crate::economic::state::EconomicLeafState;
 use crate::types::operations::Operation;
 
 /// What an operation does to `R_econ`.
@@ -61,6 +62,8 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         Create { .. } | Update { .. } | Delete { .. } => None,
         AddRelationship { .. } | CreateRelationship { .. } | RemoveRelationship { .. } => None,
         Link { .. } | Unlink { .. } | Invalidate { .. } | Generic { .. } => None,
+        // Adoption commits a policy leaf; it moves no value and has no write set.
+        AdoptToken { .. } => None,
         // Recovery re-roots identity material; it does not move value.
         Recovery { .. } => None,
         // Value-egress by the recovery gate's measure, but it executes with
@@ -69,18 +72,13 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         DlvUnlock { .. } => None,
 
         // ── Closed write sets ───────────────────────────────────────────
-        Mint { .. } | Burn { .. } | CreateToken { .. } => ClosedWriteSet,
-        // One balance credit of exactly the derived payout, funded by the
-        // consumed ticket (CreditSourceValidatedFaucetDistribution, 0x0030).
-        // NOT a mint: the units come from the network's finite bootstrap
-        // allocation, and the accepting transition refuses the operation
-        // without a matching pending admission.
+        Burn { .. } | CreateToken { .. } => ClosedWriteSet,
+        // One balance credit of exactly the beta payout, funded by one
+        // release of the network's native reserve
+        // (CreditSourceNativeReserveRelease, 0x005D): the units leave the
+        // fixed genesis supply, and the provenance verifier establishes the
+        // release.
         FaucetClaim { .. } => ClosedWriteSet,
-        DlvSettle { .. } | DlvClose { .. } => ClosedWriteSet,
-        // The 3.6 v2 vault operations state their complete economic effect
-        // in the signed operation: both funding legs (create), or the exact
-        // reserve movement with the parent vault-state binding (owner apply).
-        DlvCreateFundedV2 { .. } | DlvOwnerApplyV2 { .. } => ClosedWriteSet,
         // One role-dependent economic event, not a Transfer fact and a
         // separate Receive fact: the role follows from whether
         // `to_device_id` is the local device.
@@ -107,13 +105,20 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
             UnsupportedValueTransition
         }
         // DlvCreate is STRUCTURALLY state-only (owner directive 2026-08-28:
-        // the legacy value-bearing fields are deleted from the wire, and the
-        // legacy DlvOwnerApply tag is burned) — it moves nothing, and the
-        // `Fund` arm refuses to ride it. The structural tripwire remains
-        // load-bearing: if balance/reserve/receipt/consumed-source state
-        // changed, `None` is impossible.
+        // the legacy value-bearing fields are deleted from the wire) — it
+        // moves nothing. The structural tripwire remains load-bearing: if
+        // balance/consumed-source state changed, `None` is impossible.
         DlvCreate { .. } => None,
         DlvClaim { .. } | DlvInvalidate { .. } => UnsupportedValueTransition,
+
+        // SoFi v8. A setup writes ONE relationship leaf and no value — but it
+        // is still a closed write set, because "writes nothing" is what the
+        // tripwire would then enforce and a relationship leaf is a write.
+        SofiSetup { .. } => ClosedWriteSet,
+        // Creation debits the funding into a vault's reserves, and a
+        // fulfillment commits the trader's position: both move value under a
+        // write set fixed by the operation's own preimage.
+        SofiVaultCreate { .. } | SofiFulfill { .. } | EscrowVaultCreate { .. } => ClosedWriteSet,
     }
 }
 
@@ -125,17 +130,24 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObservedEconomicChange {
     pub balances_changed: bool,
-    pub vault_reserves_changed: bool,
-    pub settlement_receipts_changed: bool,
     pub consumed_sources_changed: bool,
+    /// A SoFi relationship leaf moved (P15-6). It carries no amount, but it is
+    /// still an `R_econ` write — an operation that claims to touch nothing and
+    /// advances a relationship has reached a leaf it has no write set for.
+    pub relationships_changed: bool,
+    /// A vault-creation record was inserted (P15-12).
+    pub vault_creations_changed: bool,
+    /// A token-creation record was inserted (SoFi Amendment S8).
+    pub token_creations_changed: bool,
 }
 
 impl ObservedEconomicChange {
     pub fn any(&self) -> bool {
         self.balances_changed
-            || self.vault_reserves_changed
-            || self.settlement_receipts_changed
             || self.consumed_sources_changed
+            || self.relationships_changed
+            || self.vault_creations_changed
+            || self.token_creations_changed
     }
 }
 
@@ -151,18 +163,49 @@ impl core::fmt::Display for EconomicTripwire {
         write!(
             f,
             "economic tripwire: operation classified {:?} but economic state changed \
-             (balances={}, reserves={}, receipts={}, consumed_sources={}) — the classification \
-             is wrong, or the operation reached a leaf it has no write set for",
+             (balances={}, consumed_sources={}, relationships={}, vault_creations={}) — the \
+             classification is wrong, or the operation reached a leaf it has no write set for",
             self.claimed,
             self.observed.balances_changed,
-            self.observed.vault_reserves_changed,
-            self.observed.settlement_receipts_changed,
-            self.observed.consumed_sources_changed
+            self.observed.consumed_sources_changed,
+            self.observed.relationships_changed,
+            self.observed.vault_creations_changed
         )
     }
 }
 
 impl std::error::Error for EconomicTripwire {}
+
+/// What a transition's witness actually writes, by leaf family.
+///
+/// Derived from the mutation list a verifier already holds, which is what
+/// makes the tripwire an independent check rather than a restatement of the
+/// classification: the witness is the operation's own account of the leaves it
+/// touches, and this reads it without consulting `classify` at all.
+///
+/// The match is exhaustive on purpose. A new `EconomicLeafState` variant
+/// cannot be added without the compiler demanding an arm here, so no leaf
+/// family can become observable without the tripwire learning to see it.
+pub fn observed_from_witness(
+    witness: &crate::economic::witness::EconomicTransitionWitness,
+) -> ObservedEconomicChange {
+    let mut observed = ObservedEconomicChange::default();
+    for mutation in &witness.mutations {
+        for state in [&mutation.pre_state, &mutation.post_state]
+            .into_iter()
+            .flatten()
+        {
+            match state {
+                EconomicLeafState::Balance(_) => observed.balances_changed = true,
+                EconomicLeafState::ConsumedSource(_) => observed.consumed_sources_changed = true,
+                EconomicLeafState::Relationship(_) => observed.relationships_changed = true,
+                EconomicLeafState::VaultCreation(_) => observed.vault_creations_changed = true,
+                EconomicLeafState::TokenCreation(_) => observed.token_creations_changed = true,
+            }
+        }
+    }
+    observed
+}
 
 /// The structural tripwire: a classification claiming no economic write must
 /// be contradicted by any economic write.

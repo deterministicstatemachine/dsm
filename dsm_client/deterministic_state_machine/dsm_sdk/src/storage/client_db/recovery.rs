@@ -10,7 +10,6 @@ use log::debug;
 use rusqlite::params;
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 use dsm::recovery::BearerAssetLockState;
 use dsm::types::operations::{EgressAsset, Operation};
 
@@ -28,8 +27,7 @@ pub fn ensure_recovery_tables() -> Result<()> {
         CREATE TABLE IF NOT EXISTS recovery_capsules(
             capsule_index     INTEGER PRIMARY KEY,
             encrypted_bytes   BLOB NOT NULL,
-            smt_root          BLOB NOT NULL,
-            created_tick      INTEGER NOT NULL
+            smt_root          BLOB NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS recovery_prefs(
@@ -39,8 +37,7 @@ pub fn ensure_recovery_tables() -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS recovery_sync_status(
             device_id   BLOB NOT NULL PRIMARY KEY,
-            synced      INTEGER NOT NULL DEFAULT 0,
-            sync_tick   INTEGER
+            synced      INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS recovered_chain_tips(
@@ -82,12 +79,11 @@ pub fn store_recovery_capsule(
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned"))?;
-    let now = tick();
 
     conn.execute(
-        "INSERT OR REPLACE INTO recovery_capsules(capsule_index, encrypted_bytes, smt_root, created_tick)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![capsule_index as i64, encrypted_bytes, smt_root, now as i64],
+        "INSERT OR REPLACE INTO recovery_capsules(capsule_index, encrypted_bytes, smt_root)
+         VALUES (?1, ?2, ?3)",
+        params![capsule_index as i64, encrypted_bytes, smt_root],
     )?;
 
     debug!(
@@ -196,7 +192,6 @@ pub fn get_pending_recovery_capsule() -> Result<Option<(u64, Vec<u8>)>> {
 pub struct CapsuleMetadata {
     pub capsule_index: u64,
     pub smt_root: Vec<u8>,
-    pub created_tick: u64,
     pub counterparty_count: u64,
 }
 
@@ -209,17 +204,15 @@ pub fn get_latest_capsule_metadata() -> Result<Option<CapsuleMetadata>> {
 
     let result = conn
         .query_row(
-            "SELECT capsule_index, smt_root, created_tick FROM recovery_capsules
+            "SELECT capsule_index, smt_root FROM recovery_capsules
              ORDER BY capsule_index DESC LIMIT 1",
             [],
             |row| {
                 let idx: i64 = row.get(0)?;
                 let smt_root: Vec<u8> = row.get(1)?;
-                let tick: i64 = row.get(2)?;
                 Ok(CapsuleMetadata {
                     capsule_index: idx as u64,
                     smt_root,
-                    created_tick: tick as u64,
                     // Counterparty count is inside the encrypted capsule; we store it
                     // as a separate column or derive from the recovery_sync_status table.
                     // For now, use sync status table count as a proxy.
@@ -808,8 +801,7 @@ pub fn ensure_recovery_sync_table() -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS recovery_sync_status(
             device_id   BLOB NOT NULL PRIMARY KEY,
-            synced      INTEGER NOT NULL DEFAULT 0,
-            sync_tick   INTEGER
+            synced      INTEGER NOT NULL DEFAULT 0
         );
         "#,
     )?;
@@ -828,9 +820,8 @@ pub fn init_recovery_sync_status(counterparty_device_ids: &[[u8; 32]]) -> Result
     // Clear any existing sync status
     conn.execute("DELETE FROM recovery_sync_status", [])?;
 
-    let mut stmt = conn.prepare(
-        "INSERT INTO recovery_sync_status(device_id, synced, sync_tick) VALUES (?1, 0, NULL)",
-    )?;
+    let mut stmt =
+        conn.prepare("INSERT INTO recovery_sync_status(device_id, synced) VALUES (?1, 0)")?;
 
     for device_id in counterparty_device_ids {
         stmt.execute(params![device_id.as_slice()])?;
@@ -844,21 +835,18 @@ pub fn init_recovery_sync_status(counterparty_device_ids: &[[u8; 32]]) -> Result
 }
 
 /// Mark a counterparty as having synced the tombstone.
-pub fn mark_counterparty_synced(device_id: &[u8; 32], sync_tick_val: u64) -> Result<()> {
+pub fn mark_counterparty_synced(device_id: &[u8; 32]) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned"))?;
 
     conn.execute(
-        "UPDATE recovery_sync_status SET synced = 1, sync_tick = ?1 WHERE device_id = ?2",
-        params![sync_tick_val as i64, device_id.as_slice()],
+        "UPDATE recovery_sync_status SET synced = 1 WHERE device_id = ?1",
+        params![device_id.as_slice()],
     )?;
 
-    debug!(
-        "[CLIENT_DB] Marked counterparty as tombstone-synced at tick {}",
-        sync_tick_val
-    );
+    debug!("[CLIENT_DB] Marked counterparty as tombstone-synced");
     Ok(())
 }
 
@@ -1050,8 +1038,7 @@ pub fn ensure_tombstone_tables() -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS tombstoned_devices(
             device_id       BLOB NOT NULL PRIMARY KEY,
-            tombstone_hash  BLOB NOT NULL,
-            discovered_tick INTEGER NOT NULL
+            tombstone_hash  BLOB NOT NULL
         );
         "#,
     )?;
@@ -1114,11 +1101,7 @@ pub fn get_succession_receipt() -> Result<Option<Vec<u8>>> {
 }
 
 /// Record a device ID as tombstoned (rejected for future bilateral interactions).
-pub fn store_tombstoned_device(
-    device_id: &[u8; 32],
-    tombstone_hash: &[u8],
-    tick: u64,
-) -> Result<()> {
+pub fn store_tombstoned_device(device_id: &[u8; 32], tombstone_hash: &[u8]) -> Result<()> {
     ensure_tombstone_tables()?;
     let binding = get_connection()?;
     let conn = binding
@@ -1126,32 +1109,28 @@ pub fn store_tombstoned_device(
         .map_err(|_| anyhow!("Database lock poisoned"))?;
 
     conn.execute(
-        "INSERT OR REPLACE INTO tombstoned_devices(device_id, tombstone_hash, discovered_tick)
-         VALUES (?1, ?2, ?3)",
-        params![device_id.as_slice(), tombstone_hash, tick as i64],
+        "INSERT OR REPLACE INTO tombstoned_devices(device_id, tombstone_hash)
+         VALUES (?1, ?2)",
+        params![device_id.as_slice(), tombstone_hash],
     )?;
 
-    debug!("[CLIENT_DB] Stored tombstoned device at tick {}", tick);
+    debug!("[CLIENT_DB] Stored tombstoned device");
     Ok(())
 }
 
-/// Check if a device ID has been tombstoned.
-pub fn is_device_tombstoned(device_id: &[u8; 32]) -> bool {
-    let result = (|| -> Result<bool> {
-        ensure_tombstone_tables()?;
-        let binding = get_connection()?;
-        let conn = binding
-            .lock()
-            .map_err(|_| anyhow!("Database lock poisoned"))?;
+pub fn is_device_tombstoned(device_id: &[u8; 32]) -> Result<bool> {
+    ensure_tombstone_tables()?;
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tombstoned_devices WHERE device_id = ?1",
-            params![device_id.as_slice()],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    })();
-    result.unwrap_or(false)
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tombstoned_devices WHERE device_id = ?1",
+        params![device_id.as_slice()],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1304,38 +1283,77 @@ pub fn any_recovery_locked_assets() -> Result<bool> {
 /// ADDITION to the identity-level [`value_egress_block_reason`] and persists per-asset after
 /// recovery activation.
 pub fn asset_egress_block_reason(op: &Operation) -> Option<String> {
-    const UNREADABLE: &str = "bearer-asset lock state unreadable: egress blocked (fail-closed)";
     match op.egress_asset() {
         EgressAsset::NotEgress => None,
-        EgressAsset::Unidentified => match any_recovery_locked_assets() {
-            Ok(true) => Some(
-                "egress operation's bearer asset cannot be identified while recovery locks are \
-                 active: blocked (fail-closed)"
-                    .to_string(),
-            ),
-            Ok(false) => None,
-            Err(_) => Some(UNREADABLE.to_string()),
-        },
-        EgressAsset::Asset { token_id, amount } => match get_asset_lock(&token_id) {
-            Ok(None) => None,
-            Ok(Some(lock)) => {
-                if !lock.state.permits_egress() {
-                    return Some(format!(
-                        "bearer asset is {} (recovery): egress refused until reconciled",
-                        lock.state.label()
-                    ));
-                }
-                if lock.state.is_frontier_capped() && amount > lock.frontier_cap {
-                    return Some(format!(
-                        "bearer-asset egress {amount} exceeds reconciled frontier {} (Reduced): \
-                         refused",
-                        lock.frontier_cap
-                    ));
-                }
-                None
+        EgressAsset::Unidentified => unidentified_egress_block_reason(),
+        EgressAsset::Asset { token_id, amount } => asset_lock_block_reason(&token_id, amount),
+        // A transfer names its asset by policy commit (pre-audit item 4): the
+        // names it locks under are the builtin's, or the registry's id and
+        // ticker for it. An asset this device cannot name is blocked while
+        // any lock is held.
+        EgressAsset::Committed {
+            policy_commit,
+            amount,
+        } => {
+            let names: Vec<Vec<u8>> =
+                match dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(
+                    &policy_commit,
+                ) {
+                    Some(builtin) => vec![builtin.as_bytes().to_vec()],
+                    None => match super::token_registry::get_token_by_policy_commit(&policy_commit)
+                    {
+                        Ok(Some(row)) => vec![row.token_id.into_bytes(), row.ticker.into_bytes()],
+                        Ok(None) => return unidentified_egress_block_reason(),
+                        Err(e) => {
+                            return Some(format!(
+                                "token registry unreadable: egress blocked (fail-closed): {e}"
+                            ))
+                        }
+                    },
+                };
+            names
+                .iter()
+                .find_map(|name| asset_lock_block_reason(name, amount))
+        }
+    }
+}
+
+const UNREADABLE: &str = "bearer-asset lock state unreadable: egress blocked (fail-closed)";
+
+/// The block on an egress whose asset cannot be named: any lock held.
+fn unidentified_egress_block_reason() -> Option<String> {
+    match any_recovery_locked_assets() {
+        Ok(true) => Some(
+            "egress operation's bearer asset cannot be identified while recovery locks are \
+             active: blocked (fail-closed)"
+                .to_string(),
+        ),
+        Ok(false) => None,
+        Err(e) => Some(format!("{UNREADABLE}: {e}")),
+    }
+}
+
+/// The block the lock held under `token_id` puts on an egress of `amount`.
+fn asset_lock_block_reason(token_id: &[u8], amount: u64) -> Option<String> {
+    match get_asset_lock(token_id) {
+        Ok(None) => None,
+        Ok(Some(lock)) => {
+            if !lock.state.permits_egress() {
+                return Some(format!(
+                    "bearer asset is {} (recovery): egress refused until reconciled",
+                    lock.state.label()
+                ));
             }
-            Err(_) => Some(UNREADABLE.to_string()),
-        },
+            if lock.state.is_frontier_capped() && amount > lock.frontier_cap {
+                return Some(format!(
+                    "bearer-asset egress {amount} exceeds reconciled frontier {} (Reduced): \
+                     refused",
+                    lock.frontier_cap
+                ));
+            }
+            None
+        }
+        Err(e) => Some(format!("{UNREADABLE}: {e}")),
     }
 }
 
@@ -1388,15 +1406,9 @@ mod tests {
     use serial_test::serial;
 
     fn setup_test_db() {
-        // Use in-memory DB for tests
-        std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
-        if let Err(e) = crate::storage::client_db::init_database() {
-            let msg = e.to_string();
-            if !msg.contains("duplicate column name: device_tree_root") {
-                panic!("init db: {e}");
-            }
-        }
+        crate::storage::client_db::init_database().expect("init db");
         ensure_recovery_tables().expect("ensure recovery tables");
     }
 
@@ -1717,19 +1729,26 @@ mod tests {
     use dsm::types::operations::{Operation, TransactionMode};
     use dsm::types::token_types::Balance;
 
+    /// A transfer of `amount` of the builtin `token_id`. A transfer names its
+    /// asset by policy commit (pre-audit item 4); the gate names the lock it
+    /// falls under from that commit.
     fn transfer_of(token_id: &[u8], amount: u64) -> Operation {
+        let ticker = std::str::from_utf8(token_id).expect("a builtin ticker");
         Operation::Transfer {
             to_device_id: vec![0xCC; 32],
-            amount: Balance::from_state(amount, [0u8; 32]),
-            token_id: token_id.to_vec(),
-            policy_commit: [0u8; 32],
-            mode: TransactionMode::Unilateral,
-            nonce: vec![],
-            verification: dsm::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: vec![],
-            to: vec![],
-            message: String::new(),
+            amount: Balance::amount(amount),
+            policy_commit: dsm::core::token::token_state_manager::builtin_policy_commit_for_token(
+                ticker,
+            )
+            .expect("a builtin token"),
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: token_id.to_vec(),
+                nonce: vec![],
+                mode: TransactionMode::Unilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             signature: vec![],
             authority_policy: None,
         }
@@ -1746,7 +1765,29 @@ mod tests {
         // Egress of a LockedRecovery asset is refused.
         assert!(asset_egress_block_reason(&transfer_of(tok, 5)).is_some());
         // An UNTOUCHED asset (no lock entry) is not gated.
-        assert!(asset_egress_block_reason(&transfer_of(b"OTHER", 5)).is_none());
+        assert!(asset_egress_block_reason(&transfer_of(b"dBTC", 5)).is_none());
+        // An asset this device cannot name from its commit is blocked while
+        // any lock is held: the gate cannot prove it is not the locked one.
+        let unnamed = match transfer_of(b"dBTC", 5) {
+            Operation::Transfer {
+                to_device_id,
+                amount,
+                terms_commitment,
+                signature,
+                authority_policy,
+                ..
+            } => Operation::Transfer {
+                to_device_id,
+                amount,
+                policy_commit: [0x77; 32],
+                terms_commitment,
+                signature,
+                authority_policy,
+            },
+            other => other,
+        };
+        let blocked = asset_egress_block_reason(&unnamed).expect("an unnamed asset is blocked");
+        assert!(blocked.contains("cannot be identified"), "{blocked}");
     }
 
     #[test]

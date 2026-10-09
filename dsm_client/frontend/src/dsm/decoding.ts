@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import * as pb from '../proto/dsm_app_pb';
-import { bytesToBase32CrockfordPrefix, encodeBase32Crockford, decodeBase32Crockford } from '../utils/textId';
+import { encodeBase32Crockford } from '../utils/textId';
+import { emitDeterministicSafetyForError } from '../utils/deterministicSafety';
 
 
 /**
@@ -42,6 +43,11 @@ export function decodeFramedEnvelopeV3(bytes: Uint8Array): pb.Envelope {
       throw new Error(`Expected Envelope v3, got v${env.version}`);
     }
 
+    // A refusal Rust tagged as deterministic safety is announced from the one
+    // place every transport envelope is decoded; the tag, never the text, says so.
+    if (env.payload.case === 'error') {
+      emitDeterministicSafetyForError(env.payload.value);
+    }
     return env;
   }
 
@@ -61,71 +67,5 @@ export function toBase32Crockford(bytes: Uint8Array): string {
   return encodeBase32Crockford(bytes);
 }
 
-/** Canonical base32 Crockford decoder. */
-export function fromBase32Crockford(value: string): Uint8Array {
-  return decodeBase32Crockford(value);
-}
-
-/** Encode a canonical Envelope into deterministic bytes. */
-export function encodeEnvelope(env: pb.Envelope): Uint8Array {
-  return env.toBinary();
-}
-
 // decodeEnvelope deleted: all transport ingress MUST go through decodeFramedEnvelopeV3.
 // Direct pb.Envelope.fromBinary is not allowed outside the canonical decoder.
-
-// ---------------- Balances decoding (consolidated) ----------------
-
-export type DecodeBalancesOpts = {
-  /** Label used in error messages/logs for easier tracing. */
-  label?: string;
-};
-
-export type DecodeBalancesResult = {
-  response: pb.BalancesListResponse;
-  headB32: string;
-  /** Where we found the response bytes. Useful for debugging bridge mismatches. */
-  decodedVia: 'direct' | 'result-pack' | 'arg-pack' | 'arg-pack-result-pack' | 'envelope' | 'unwrapped';
-};
-
-
-
-/**
- * Strictly decode a BalancesListResponse from arbitrary bridge bytes.
- *
- * Rules:
- * - Skip 1-byte framing prefix (0x03 transport marker)
- * - Decode as Envelope
- * - If error payload, throw
- * - Extract balancesListResponse from envelope payload
- */
-export function decodeBalancesListResponseStrict(bytes: Uint8Array, opts?: DecodeBalancesOpts): DecodeBalancesResult {
-  const label = opts?.label ?? 'balances';
-  if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
-    throw new Error(`DSM:${label}: empty response bytes`);
-  }
-
-  const headB32 = bytesToBase32CrockfordPrefix(bytes, 24);
-  // ALL bridge responses go through the single canonical decoder — no manual byte slicing.
-  const env = decodeFramedEnvelopeV3(bytes);
-
-  // Check for error response first
-  if (env.payload.case === 'error') {
-    const err = env.payload.value;
-    throw new Error(`Native error: ${err.message || 'Unknown error'} (code ${err.code || 0})`);
-  }
-
-  // Extract balances from envelope
-  if (env.payload.case !== 'balancesListResponse') {
-    throw new Error(`Unexpected payload case for balances: ${env.payload.case}`);
-  }
-
-  const balancesResponse = env.payload.value;
-  if (!balancesResponse) {
-    throw new Error('balancesListResponse payload is null');
-  }
-
-  return { response: balancesResponse, headB32, decodedVia: 'envelope' };
-}
-
-// Helper removed: bytesEqual was unused

@@ -1,9 +1,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// The token-creation wizard, as a StateBoy popover: identity, supply and
+// rules, access and review; then the policy is published and the token
+// created bound to its anchor. Rust reports the fee and the outcome.
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import './TokenCreationDialog.css';
-import { dsmClient } from '@/services/dsmClient';
-import { getTokenCreationFeeEra } from '@/dsm/policies';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { TokenCoin } from './TokenCoin';
+import { encodeCoinSource, silhouetteFromRgba } from '../utils/coinArtwork';
+import { readImageRgba } from '../utils/imageRgba';
+import { checkToken, createToken, getTokenCreationFee, type TokenCreateDetails, type TokenCreationFee } from '@/dsm/policies';
+import { useBackButton } from '../hooks/useBackButton';
+
+/** The creation fee and this device's standing as Rust reported them, the failure of asking, or not asked yet. */
+type CreationFee = TokenCreationFee | { error: string } | undefined;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 // Fungible is the only token kind the protocol enforces. NFT/SBT would need
@@ -18,12 +26,13 @@ interface WizardState {
   alias: string;
   description: string;
   iconUrl: string;
+  /** Cut out the image's background instead of its logo. */
+  artworkInvert: boolean;
   decimals: number;
-  unlimitedSupply: boolean;
-  maxSupply: string;
-  initialAlloc: string;
-  mintBurnEnabled: boolean;
-  mintBurnThreshold: number;
+  /** The whole supply, in base units; fixed at creation and released to the creator. */
+  genesisSupply: string;
+  /** Whether holders may burn their own units. */
+  burnEnabled: boolean;
   allowlistKind: AllowlistKind;
   allowlistData: string;
 }
@@ -34,76 +43,74 @@ const DEFAULT: WizardState = {
   alias: '',
   description: '',
   iconUrl: '',
+  artworkInvert: false,
   decimals: 2,
-  unlimitedSupply: false,
-  maxSupply: '1000000',
-  initialAlloc: '0',
-  mintBurnEnabled: false,
-  mintBurnThreshold: 1,
+  genesisSupply: '1000000',
+  burnEnabled: false,
   allowlistKind: 'NONE',
   allowlistData: '',
 };
 
-// ── Validation ───────────────────────────────────────────────────────────────
-function validateStep1(s: WizardState): string | null {
-  const t = s.ticker.trim().toUpperCase();
-  if (!t || t.length < 2 || t.length > 8) return 'Ticker must be 2–8 letters';
-  if (!/^[A-Z0-9]+$/.test(t)) return 'Ticker: letters and digits only';
-  if (!s.alias.trim()) return 'Display name is required';
-  return null;
+// ── Checking ─────────────────────────────────────────────────────────────────
+// Rust checks every field (token.check, as token.create checks them). A step
+// moves on once Rust refuses none of the fields it asks for, named as the
+// request names them.
+const STEP_FIELDS: Record<number, readonly string[]> = {
+  1: ['ticker', 'alias'],
+  2: ['decimals', 'genesis_supply_entered'],
+};
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
-function validateStep2(s: WizardState): string | null {
-  if (!s.unlimitedSupply) {
-    const raw = s.maxSupply.trim();
-    if (!/^[0-9]+$/.test(raw) || raw === '0') return 'Max supply must be a positive integer';
-    try {
-      const supply = BigInt(raw);
-      const allocRaw = s.initialAlloc.trim() || '0';
-      if (!/^[0-9]*$/.test(allocRaw)) return 'Initial allocation must be a non-negative integer';
-      const alloc = BigInt(allocRaw || '0');
-      if (alloc > supply) return 'Initial allocation cannot exceed max supply';
-    } catch {
-      return 'Max supply must be a valid integer';
-    }
-  }
-  if (s.mintBurnEnabled && (s.mintBurnThreshold < 1 || s.mintBurnThreshold > 255))
-    return 'Threshold must be 1–255';
-  return null;
-}
+// ── Sub-component: the step strip ────────────────────────────────────────────
+const STEP_LABELS = ['Identity', 'Supply', 'Review'];
 
-// ── Sub-component: ProgressBar ───────────────────────────────────────────────
-const STEP_LABELS = ['Identity', 'Supply & Rules', 'Access & Review'];
-
-function ProgressBar({ step }: { step: number }) {
+function StepStrip({ step }: { step: number }) {
   return (
-    <>
-      <div className="tcd-progress">
-        {STEP_LABELS.map((_, i) => (
+    <div className="sb-steps" aria-label={`Step ${step} of ${STEP_LABELS.length}`}>
+      {STEP_LABELS.map((label, i) => {
+        const done = i + 1 < step;
+        const active = i + 1 === step;
+        return (
           <div
-            key={i}
-            className={`tcd-progress-seg${i + 1 < step ? ' tcd-progress-seg--done' : i + 1 === step ? ' tcd-progress-seg--active' : ''}`}
-          />
-        ))}
-      </div>
-      <div className="tcd-progress-label">{STEP_LABELS[step - 1]} — Step {step} of 3</div>
-    </>
+            key={label}
+            className={`sb-steps__step${done ? ' is-done' : ''}${active ? ' is-active' : ''}`}
+            aria-current={active ? 'step' : undefined}
+          >
+            <span className="sb-steps__mark" aria-hidden="true">{done ? '✓' : i + 1}</span>
+            {label}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-// ── Sub-component: Toggle ────────────────────────────────────────────────────
-function Toggle({ checked, onChange, id }: { checked: boolean; onChange: (v: boolean) => void; id: string }) {
+// ── Sub-component: a two-way choice ─────────────────────────────────────────
+function Seg<T extends string>({
+  label, value, options, onChange,
+}: {
+  label: string;
+  value: T;
+  options: ReadonlyArray<{ id: T; label: string }>;
+  onChange: (v: T) => void;
+}) {
   return (
-    <label className="tcd-toggle-switch" htmlFor={id}>
-      <input
-        id={id}
-        type="checkbox"
-        checked={checked}
-        onChange={e => onChange(e.target.checked)}
-      />
-      <span className="tcd-toggle-track" />
-      <span className="tcd-toggle-thumb" />
-    </label>
+    <div className="sb-seg sb-seg--block" role="group" aria-label={label}>
+      {options.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          className={`sb-seg__opt${o.id === value ? ' active' : ''}`}
+          aria-pressed={o.id === value}
+          onClick={() => onChange(o.id)}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -112,21 +119,126 @@ const KIND_META: { kind: TokenKind; icon: string; name: string; desc: string }[]
   { kind: 'FUNGIBLE', icon: 'F', name: 'FUNGIBLE', desc: 'Interchangeable units' },
 ];
 
+// ── Sub-component: coin artwork ─────────────────────────────────────────────
+const PREVIEW_COIN_SIZE = 160;
+
+function useSettled<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const handle = setTimeout(() => setSettled(value), delayMs);
+    return () => clearTimeout(handle);
+  }, [value, delayMs]);
+  return settled;
+}
+
+function CoinArtworkField({ state, set }: { state: WizardState; set: (p: Partial<WizardState>) => void }) {
+  const [image, setImage] = useState<{ rgba: Uint8ClampedArray; width: number; height: number } | null>(null);
+  const [reading, setReading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const reads = useRef(0);
+  const ticker = useSettled(state.ticker || 'TOKEN', 400);
+
+  const cutOut = (source: { rgba: Uint8ClampedArray; width: number; height: number }, invert: boolean) => {
+    try {
+      set({ iconUrl: encodeCoinSource(silhouetteFromRgba(source.rgba, source.width, source.height, { invert })), artworkInvert: invert });
+      setError(null);
+    } catch (e) {
+      set({ iconUrl: '', artworkInvert: invert });
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const upload = async (file: File) => {
+    const read = ++reads.current;
+    setReading(true);
+    setError(null);
+    try {
+      const source = await readImageRgba(file);
+      if (read !== reads.current) return;
+      setImage(source);
+      cutOut(source, state.artworkInvert);
+    } catch (e) {
+      if (read !== reads.current) return;
+      setImage(null);
+      set({ iconUrl: '' });
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (read === reads.current) setReading(false);
+    }
+  };
+
+  return (
+    <div className="sb-field">
+      <label htmlFor="tcd-coin-art">Coin artwork (optional)</label>
+      <div style={{ display: 'flex', justifyContent: 'center', margin: '4px 0 8px' }}>
+        <span className="sb-coin-tile">
+          <TokenCoin iconUrl={state.iconUrl} ticker={ticker} size={PREVIEW_COIN_SIZE} className="sb-coin sb-coin--xl" alt="Your token's coin" />
+        </span>
+      </div>
+      {/* The native file control cannot be drawn in the frame's look, so it is
+          kept off screen and the brick beside it is its label: tapping the
+          brick opens the same picker. */}
+      <input
+        id="tcd-coin-art"
+        type="file"
+        className="sb-file"
+        accept="image/png,image/jpeg,image/webp"
+        disabled={reading}
+        onChange={e => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          if (file) void upload(file);
+        }}
+      />
+      <label htmlFor="tcd-coin-art" className={`sb-btn sb-btn--block${reading ? ' is-disabled' : ''}`} aria-hidden="true">
+        {reading ? 'Reading image…' : state.iconUrl ? 'Choose another image' : 'Choose an image'}
+      </label>
+      {state.iconUrl && (
+        <div style={{ display: 'grid', gap: 6, marginTop: 6 }}>
+          {image && (
+            <label className="sb-hint sb-hint--tight" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="checkbox" checked={state.artworkInvert} onChange={e => cutOut(image, e.target.checked)} />
+              Cut out the background instead
+            </label>
+          )}
+          <button
+            type="button"
+            className="sb-btn sb-btn--small sb-btn--block"
+            onClick={() => {
+              reads.current++;
+              setImage(null);
+              setReading(false);
+              setError(null);
+              set({ iconUrl: '', artworkInvert: false });
+            }}
+          >
+            Use the ticker instead
+          </button>
+        </div>
+      )}
+      <p className="sb-hint sb-hint--tight">
+        Your logo is cut through the coin the way ERA&apos;s lettering is, in every screen colour. Without an image the
+        ticker is used. The artwork is part of the policy and cannot be changed after creation.
+      </p>
+      {reading && <p className="sb-hint sb-hint--tight" role="status">Reading image…</p>}
+      {error && <p className="sb-hint sb-hint--tight" role="alert">{error}</p>}
+    </div>
+  );
+}
+
 function Step1({ state, set }: { state: WizardState; set: (p: Partial<WizardState>) => void }) {
   return (
     <div>
-      <div className="tcd-hint" style={{ marginBottom: 12, padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'rgba(var(--text-dark-rgb),0.08)', lineHeight: 1.5 }}>
-        Tokens require a <strong>CPTA policy</strong>. This wizard defines the policy parameters,
-        publishes it on-chain, then creates a token bound to that policy anchor.
-        Policy settings are immutable after creation.
-      </div>
-      <div className="tcd-section-title">Token Type</div>
-      <div className="tcd-kind-grid">
+      <p className="sb-hint">
+        Tokens require a <b>CPTA policy</b>. This wizard defines the policy, publishes it, then creates a token bound to that policy anchor. Policy settings are immutable after creation.
+      </p>
+      <h3 className="sb-section-title">Token type</h3>
+      <div className="sb-menu" style={{ marginBottom: 10 }}>
         {KIND_META.map(m => (
           <button
             key={m.kind}
             type="button"
-            className={`tcd-kind-btn${state.kind === m.kind ? ' tcd-kind-btn--active' : ''}`}
+            className={`sb-menu__item${state.kind === m.kind ? ' focused' : ''}`}
             aria-pressed={state.kind === m.kind}
             onClick={() => {
               const patch: Partial<WizardState> = { kind: m.kind };
@@ -134,69 +246,56 @@ function Step1({ state, set }: { state: WizardState; set: (p: Partial<WizardStat
               set(patch);
             }}
           >
-            <span className="tcd-kind-icon">{m.icon}</span>
-            <span className="tcd-kind-name">{m.name}</span>
-            <span className="tcd-kind-desc">{m.desc}</span>
+            <span className="sb-menu__glyph">{m.icon}</span>
+            <span className="sb-menu__text">
+              <span className="sb-menu__label">{m.name}</span>
+              <span className="sb-menu__desc">{m.desc}</span>
+            </span>
           </button>
         ))}
       </div>
 
-      <div className="tcd-section-title">Identity</div>
+      <h3 className="sb-section-title">Identity</h3>
 
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-ticker">Ticker</label>
+      <div className="sb-field">
+        <label htmlFor="tcd-ticker">Ticker</label>
         <input
           id="tcd-ticker"
-          className="tcd-input"
+          className="sb-input sb-input--mono"
           placeholder="e.g. GOLD"
           maxLength={8}
           value={state.ticker}
           onChange={e => set({ ticker: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') })}
         />
-        <span className="tcd-hint">2–8 uppercase letters / digits. Cannot be changed after creation.</span>
+        <p className="sb-hint sb-hint--tight">2–8 uppercase letters or digits. Cannot be changed after creation.</p>
       </div>
 
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-alias">Display Name</label>
+      <div className="sb-field">
+        <label htmlFor="tcd-alias">Display Name</label>
         <input
           id="tcd-alias"
-          className="tcd-input"
+          className="sb-input"
           placeholder="e.g. Gold Coin"
           value={state.alias}
           onChange={e => set({ alias: e.target.value })}
         />
       </div>
 
-      <div className="tcd-section-title">Optional Details</div>
-
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-desc">
-          Description <span className="tcd-optional">(optional)</span>
-        </label>
+      <div className="sb-field">
+        <label htmlFor="tcd-desc">Description (optional)</label>
         <textarea
           id="tcd-desc"
-          className="tcd-textarea"
+          className="sb-input"
           placeholder="What is this token for?"
           maxLength={200}
           rows={3}
           value={state.description}
           onChange={e => set({ description: e.target.value })}
         />
-        <span className="tcd-char-count">{state.description.length} / 200</span>
+        <p className="sb-hint sb-hint--tight" style={{ textAlign: 'right' }}>{state.description.length} / 200</p>
       </div>
 
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-icon">
-          Icon URL <span className="tcd-optional">(optional)</span>
-        </label>
-        <input
-          id="tcd-icon"
-          className="tcd-input"
-          placeholder="https://…/icon.png"
-          value={state.iconUrl}
-          onChange={e => set({ iconUrl: e.target.value })}
-        />
-      </div>
+      <CoinArtworkField state={state} set={set} />
     </div>
   );
 }
@@ -211,224 +310,174 @@ function Step2({
 }) {
   return (
     <div>
-      <div className="tcd-section-title">Precision</div>
+      <h3 className="sb-section-title">Precision</h3>
 
-      <div className="tcd-field">
-        <label className="tcd-label">Decimals</label>
-        <div className="tcd-slider-row">
-          <input
-            type="range"
-            className="tcd-slider"
-            min={0}
-            max={18}
-            value={effectiveDecimals}
-            onChange={e => set({ decimals: Number(e.target.value) })}
-          />
-          <span className="tcd-slider-val">{effectiveDecimals}</span>
-        </div>
+      <div className="sb-field">
+        <label htmlFor="tcd-decimals">Decimals: {effectiveDecimals}</label>
+        <input
+          id="tcd-decimals"
+          type="range"
+          className="sb-range"
+          min={0}
+          max={18}
+          value={effectiveDecimals}
+          onChange={e => set({ decimals: Number(e.target.value) })}
+        />
       </div>
 
-      <div className="tcd-section-title">Supply</div>
+      <h3 className="sb-section-title">Supply</h3>
 
-      <div className="tcd-toggle-row">
-        <div className="tcd-toggle-info">
-          <span className="tcd-toggle-name">Unlimited Supply</span>
-          <span className="tcd-toggle-sub">No hard cap — tokens can always be issued if mint is enabled</span>
-        </div>
-        <Toggle id="tcd-unlimited" checked={state.unlimitedSupply} onChange={v => set({ unlimitedSupply: v })} />
+      <div className="sb-field">
+        <label htmlFor="tcd-supply">Total Supply</label>
+        <input
+          id="tcd-supply"
+          className="sb-input sb-input--mono"
+          inputMode="numeric"
+          placeholder="1000000"
+          value={state.genesisSupply}
+          onChange={e => set({ genesisSupply: e.target.value.replace(/[^0-9]/g, '') })}
+        />
+        <p className="sb-hint sb-hint--tight">The whole supply, fixed at creation. All of it is released to your wallet; no more can ever be issued.</p>
       </div>
 
-      {!state.unlimitedSupply && (
-        <>
-          <div className="tcd-field">
-            <label className="tcd-label" htmlFor="tcd-supply">Max Supply</label>
-            <input
-              id="tcd-supply"
-              className="tcd-input"
-              placeholder="1000000"
-              value={state.maxSupply}
-              onChange={e => set({ maxSupply: e.target.value.replace(/[^0-9]/g, '') })}
-            />
-          </div>
+      <h3 className="sb-section-title">Permissions</h3>
 
-          <div className="tcd-field">
-            <label className="tcd-label" htmlFor="tcd-alloc">
-              Initial Allocation <span className="tcd-optional">(optional)</span>
-            </label>
-            <input
-              id="tcd-alloc"
-              className="tcd-input"
-              placeholder="0"
-              value={state.initialAlloc}
-              onChange={e => set({ initialAlloc: e.target.value.replace(/[^0-9]/g, '') })}
-            />
-            <span className="tcd-hint">Tokens minted immediately to your wallet. Must be ≤ max supply.</span>
-          </div>
-        </>
-      )}
-
-      <div className="tcd-section-title">Permissions</div>
-
-      <div className="tcd-toggle-row">
-        <div className="tcd-toggle-info">
-          <span className="tcd-toggle-name">Mint / Burn Authority</span>
-          <span className="tcd-toggle-sub">Allow authorised signers to issue or destroy tokens post-launch</span>
-        </div>
-        <Toggle id="tcd-mintburn" checked={state.mintBurnEnabled} onChange={v => set({ mintBurnEnabled: v })} />
+      <div className="sb-field">
+        <span className="sb-label">Burn</span>
+        <Seg
+          label="Burn"
+          value={state.burnEnabled ? 'on' : 'off'}
+          options={[{ id: 'off', label: 'Off' }, { id: 'on', label: 'On' }] as const}
+          onChange={(v) => set({ burnEnabled: v === 'on' })}
+        />
+        <p className="sb-hint sb-hint--tight">Allow holders to destroy their own units.</p>
       </div>
-
-      {state.mintBurnEnabled && (
-        <div className="tcd-subpanel">
-          <div className="tcd-field" style={{ marginBottom: 0 }}>
-            <label className="tcd-label" htmlFor="tcd-threshold">Signatures Required</label>
-            <div className="tcd-slider-row">
-              <input
-                id="tcd-threshold"
-                type="range"
-                className="tcd-slider"
-                min={1}
-                max={10}
-                value={state.mintBurnThreshold}
-                onChange={e => set({ mintBurnThreshold: Number(e.target.value) })}
-              />
-              <span className="tcd-slider-val">{state.mintBurnThreshold}</span>
-            </div>
-            <span className="tcd-hint">{state.mintBurnThreshold}-of-N authority must co-sign any mint or burn.</span>
-          </div>
-        </div>
-      )}
-
     </div>
   );
 }
 
 // ── Sub-component: Step 3 — Access + Review ──────────────────────────────────
 function Step3({
-  state, set, effectiveDecimals, effectiveTransferable, creationFeeEra,
+  state, set, effectiveDecimals, effectiveTransferable, creationFee,
 }: {
   state: WizardState;
   set: (p: Partial<WizardState>) => void;
   effectiveDecimals: number;
   effectiveTransferable: boolean;
-  /** Authoritative fee from Rust; `undefined` until the query returns. */
-  creationFeeEra?: bigint;
+  /** The fee and this device's standing from Rust; `undefined` until the query returns. */
+  creationFee: CreationFee;
 }) {
-  const supplyLine = state.unlimitedSupply ? 'Unlimited' : Number(state.maxSupply || '0').toLocaleString();
-  const allocLine  = state.unlimitedSupply ? '—' : Number(state.initialAlloc || '0').toLocaleString();
+  const supplyLine = state.genesisSupply ? BigInt(state.genesisSupply).toLocaleString() : '—';
 
   return (
     <div>
-      <div className="tcd-section-title">Allowlist</div>
-      <div className="tcd-radio-group">
-        <label className="tcd-radio-label">
-          <input
-            type="radio"
-            name="tcd-al"
-            value="NONE"
-            checked={state.allowlistKind === 'NONE'}
-            onChange={() => set({ allowlistKind: 'NONE', allowlistData: '' })}
-          />
-          Open — anyone can hold this token
-        </label>
-        <label className="tcd-radio-label">
-          <input
-            type="radio"
-            name="tcd-al"
-            value="INLINE"
-            checked={state.allowlistKind === 'INLINE'}
-            onChange={() => set({ allowlistKind: 'INLINE' })}
-          />
-          Restricted — only allowlisted genesis IDs
-        </label>
-        <span className="tcd-radio-sub">Allowlisted wallets are committed into the policy at creation time.</span>
+      <h3 className="sb-section-title">Allowlist</h3>
+      <div className="sb-field">
+        <Seg
+          label="Allowlist"
+          value={state.allowlistKind}
+          options={[{ id: 'NONE', label: 'Open' }, { id: 'INLINE', label: 'Restricted' }] as const}
+          onChange={(v) => set(v === 'NONE' ? { allowlistKind: 'NONE', allowlistData: '' } : { allowlistKind: 'INLINE' })}
+        />
+        <p className="sb-hint sb-hint--tight">
+          {state.allowlistKind === 'NONE'
+            ? 'Anyone can hold this token.'
+            : 'Only allowlisted genesis IDs can hold it. They are committed into the policy at creation.'}
+        </p>
       </div>
 
-      <div className={`tcd-al-expand${state.allowlistKind === 'INLINE' ? ' tcd-al-expand--open' : ''}`}>
-        <div className="tcd-field">
-          <label className="tcd-label" htmlFor="tcd-al-data">
-            Genesis IDs <span className="tcd-optional">(one per line)</span>
-          </label>
+      {state.allowlistKind === 'INLINE' && (
+        <div className="sb-field">
+          <label htmlFor="tcd-al-data">Genesis IDs (one per line)</label>
           <textarea
             id="tcd-al-data"
-            className="tcd-textarea"
+            className="sb-input sb-input--mono"
             placeholder={'GENESIS1ABC...\nGENESIS2DEF...'}
             rows={4}
             value={state.allowlistData}
             onChange={e => set({ allowlistData: e.target.value })}
+            spellCheck={false}
           />
         </div>
-      </div>
+      )}
 
-      <div className="tcd-section-title">Review</div>
-      <div className="tcd-review-card">
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Kind</span>
-          <span className="tcd-review-val">
-            <span className={`tcd-badge tcd-badge--${state.kind}`}>{state.kind}</span>
-          </span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Ticker</span>
-          <span className="tcd-review-val">{state.ticker.toUpperCase()}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Name</span>
-          <span className="tcd-review-val">{state.alias}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Decimals</span>
-          <span className="tcd-review-val">{effectiveDecimals}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Max Supply</span>
-          <span className="tcd-review-val">{supplyLine}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Initial Alloc</span>
-          <span className="tcd-review-val">{allocLine}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Mint / Burn</span>
-          <span className="tcd-review-val">
-            {state.mintBurnEnabled ? `Enabled (threshold ${state.mintBurnThreshold})` : 'Disabled'}
-          </span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Transferable</span>
-          <span className="tcd-review-val">{effectiveTransferable ? 'Yes' : 'No'}</span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Allowlist</span>
-          <span className="tcd-review-val">
-            {state.allowlistKind === 'NONE'
-              ? 'Open'
-              : `Restricted (${state.allowlistData.trim().split('\n').filter(Boolean).length} entries)`}
-          </span>
-        </div>
-        <div className="tcd-review-row">
-          <span className="tcd-review-key">Creation fee</span>
-          <span className="tcd-review-val">
-            {creationFeeEra === undefined ? '…' : `${creationFeeEra} ERA (burned)`}
-          </span>
-        </div>
-        {state.description.trim() && (
-          <div className="tcd-review-row">
-            <span className="tcd-review-key">Desc</span>
-            <span className="tcd-review-val" style={{ fontSize: 10 }}>{state.description.trim()}</span>
-          </div>
-        )}
-        {state.iconUrl.trim() && (
-          <div className="tcd-review-row">
-            <span className="tcd-review-key">Icon</span>
-            <span className="tcd-review-val" style={{ fontSize: 9 }}>{state.iconUrl.trim()}</span>
-          </div>
-        )}
+      <h3 className="sb-section-title">Review</h3>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Kind</span>
+        <span className="sb-kv__v"><span className="sb-tag">{state.kind}</span></span>
       </div>
-      <div className="tcd-hint" style={{ marginTop: 8, padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 6, background: 'rgba(var(--text-dark-rgb),0.06)', lineHeight: 1.5 }}>
-        A CPTA policy will be published first (content-addressed, immutable).
-        The token is then created bound to that policy anchor.
-        These settings cannot be changed afterwards.
+      <div className="sb-kv">
+        <span className="sb-kv__k">Ticker</span>
+        <span className="sb-kv__v">{state.ticker.toUpperCase()}</span>
       </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Name</span>
+        <span className="sb-kv__v">{state.alias}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Decimals</span>
+        <span className="sb-kv__v">{effectiveDecimals}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Total Supply</span>
+        <span className="sb-kv__v">{supplyLine}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Burn</span>
+        <span className="sb-kv__v">{state.burnEnabled ? 'Enabled' : 'Disabled'}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Transferable</span>
+        <span className="sb-kv__v">{effectiveTransferable ? 'Yes' : 'No'}</span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Allowlist</span>
+        <span className="sb-kv__v">
+          {state.allowlistKind === 'NONE'
+            ? 'Open'
+            : `Restricted (${state.allowlistData.trim().split('\n').filter(Boolean).length} entries)`}
+        </span>
+      </div>
+      <div className="sb-kv">
+        <span className="sb-kv__k">Creation fee</span>
+        <span className="sb-kv__v">
+          {creationFee === undefined
+            ? '…'
+            : 'feeEra' in creationFee
+              ? `${creationFee.feeDisplay} ERA (burned)`
+              : `not available: ${creationFee.error}`}
+        </span>
+      </div>
+      {creationFee !== undefined && 'feeEra' in creationFee && (
+        <div className="sb-kv">
+          <span className="sb-kv__k">Your ERA</span>
+          <span className="sb-kv__v">{`${creationFee.heldDisplay} ERA`}</span>
+        </div>
+      )}
+      {creationFee !== undefined && 'feeEra' in creationFee && !creationFee.feeCovered && (
+        <div className="sb-notice" role="status" style={{ marginTop: 8 }}>
+          <span>
+            {`This burns ${creationFee.feeDisplay} ERA and you hold ${creationFee.heldDisplay}. Get ERA from the Faucet tab first.`}
+          </span>
+        </div>
+      )}
+      {state.description.trim() && (
+        <div className="sb-kv">
+          <span className="sb-kv__k">Desc</span>
+          <span className="sb-kv__v">{state.description.trim()}</span>
+        </div>
+      )}
+      <div className="sb-kv" style={{ alignItems: 'center' }}>
+        <span className="sb-kv__k">Coin</span>
+        <span className="sb-kv__v">
+          <span className="sb-coin-tile sb-coin-tile--sm">
+            <TokenCoin iconUrl={state.iconUrl} ticker={state.ticker} size={PREVIEW_COIN_SIZE} className="sb-coin sb-coin--lg" />
+          </span>
+        </span>
+      </div>
+      <p className="sb-hint" style={{ marginTop: 8 }}>
+        A CPTA policy is published first, content-addressed and immutable. The token is then created bound to that policy anchor. These settings cannot be changed afterwards.
+      </p>
     </div>
   );
 }
@@ -442,34 +491,46 @@ function SuccessScreen({
   onClose: () => void;
 }) {
   return (
-    <div className="tcd-card">
-      <div className="tcd-success">
-        <div className="tcd-success-icon">OK</div>
-        <div className="tcd-success-title">Policy Published &amp; Token Created</div>
-        <div className="tcd-success-detail">
-          <strong>Kind</strong>
-          <span className={`tcd-badge tcd-badge--${state.kind}`}>{state.kind}</span>
-          <strong>Ticker</strong>
-          {state.ticker.toUpperCase()}
-          <strong>Name</strong>
-          {state.alias}
-          {created.tokenId && (
-            <>
-              <strong>Token ID</strong>
-              {created.tokenId}
-            </>
-          )}
-          {created.anchorBase32 && (
-            <>
-              <strong>Policy Anchor (CPTA)</strong>
-              {created.anchorBase32}
-            </>
-          )}
-        </div>
-        <button className="tcd-btn tcd-btn--pri" style={{ width: '100%' }} onClick={onClose}>
-          Done
-        </button>
+    <div className="sb-popover sb-card--dark" role="dialog" aria-modal="true" aria-label="Token created">
+      <div className="sb-popover__head">
+        <h3 className="sb-popover__title">Token created</h3>
+        <button type="button" className="sb-popover__close" onClick={onClose} aria-label="Close">{'×'}</button>
       </div>
+      <div className="sb-popover__body">
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 8 }}>
+          <span className="sb-coin-tile">
+            <TokenCoin iconUrl={state.iconUrl} ticker={state.ticker} size={PREVIEW_COIN_SIZE} className="sb-coin sb-coin--xl" />
+          </span>
+        </div>
+        <p className="sb-hint" style={{ textAlign: 'center' }}>Policy published and token created.</p>
+        <div className="sb-kv">
+          <span className="sb-kv__k">Kind</span>
+          <span className="sb-kv__v"><span className="sb-tag">{state.kind}</span></span>
+        </div>
+        <div className="sb-kv">
+          <span className="sb-kv__k">Ticker</span>
+          <span className="sb-kv__v">{state.ticker.toUpperCase()}</span>
+        </div>
+        <div className="sb-kv">
+          <span className="sb-kv__k">Name</span>
+          <span className="sb-kv__v">{state.alias}</span>
+        </div>
+        {created.tokenId && (
+          <div className="sb-kv">
+            <span className="sb-kv__k">Token ID</span>
+            <span className="sb-kv__v sb-kv__v--mono">{created.tokenId}</span>
+          </div>
+        )}
+        {created.anchorBase32 && (
+          <div className="sb-kv">
+            <span className="sb-kv__k">Policy Anchor (CPTA)</span>
+            <span className="sb-kv__v sb-kv__v--mono">{created.anchorBase32}</span>
+          </div>
+        )}
+      </div>
+      <button type="button" className="sb-btn sb-btn--primary sb-btn--block sb-popover__ok" onClick={onClose}>
+        Done
+      </button>
     </div>
   );
 }
@@ -480,8 +541,6 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   onClose, onSuccess,
 }) => {
   const [step, setStep]       = useState(1);
-  const [dir,  setDir]        = useState<'fwd' | 'bck'>('fwd');
-  const [animKey, setAnimKey] = useState(0);
   const [state, _setState]    = useState<WizardState>(DEFAULT);
   const [creating, setCreating] = useState(false);
   /// Set while an ambiguous outcome is being settled against canonical state,
@@ -492,17 +551,31 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   // Authoritative creation fee, fetched from Rust. Never hardcoded here — the
   // conservation guard validates the charged fee against a core constant, and a
   // number invented in the UI could silently disagree with what is burned.
-  const [creationFeeEra, setCreationFeeEra] = useState<bigint | undefined>(undefined);
+  const [creationFee, setCreationFee] = useState<CreationFee>(undefined);
   const stateRef = useRef(state);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const fee = await getTokenCreationFeeEra();
-      if (!cancelled) setCreationFeeEra(fee);
-    })();
-    return () => { cancelled = true; };
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
   }, []);
+
+  const loadFee = useCallback(async () => {
+    try {
+      const fee = await getTokenCreationFee();
+      if (mountedRef.current) setCreationFee(fee);
+    } catch (e) {
+      if (mountedRef.current) setCreationFee({ error: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
+
+  // The device's standing against the fee is read where it is shown, each
+  // time the review is reached: ERA may have arrived or left since.
+  useEffect(() => {
+    if (step === 3) void loadFee();
+  }, [step, loadFee]);
+
 
   const set = useCallback((patch: Partial<WizardState>) => {
     _setState(prev => {
@@ -518,65 +591,73 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   const effectiveTransferable = true;
 
   const navigate = useCallback((to: number) => {
-    setDir(to > step ? 'fwd' : 'bck');
-    setAnimKey(k => k + 1);
     setStep(to);
     setError(null);
-  }, [step]);
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, []);
 
-  const handleNext = useCallback(() => {
-    if (step === 1) {
-      const e = validateStep1(stateRef.current);
-      if (e) { setError(e); return; }
-    }
-    if (step === 2) {
-      const e = validateStep2(stateRef.current);
-      if (e) { setError(e); return; }
+  // B steps back through the wizard, and closes it from the first step. While
+  // Rust is working the press is ignored: the outcome is on its way.
+  useBackButton(!created, () => {
+    if (creating || resolving) return;
+    if (step > 1) navigate(step - 1);
+    else onClose();
+  });
+
+  /** What the user entered, as entered: Rust trims, capitalises and checks it. */
+  const details = useCallback((): TokenCreateDetails => {
+    const s = stateRef.current;
+    return {
+      ticker:             s.ticker,
+      alias:              s.alias,
+      decimals:           effectiveDecimals,
+      genesisSupply:      s.genesisSupply,
+      burnEnabled:        s.burnEnabled,
+      // The policy's signer set is this device alone (Rust fills it in),
+      // so 1-of-1 is the only threshold it can satisfy.
+      threshold:          1,
+      description:        s.description,
+      iconUrl:            s.iconUrl,
+      transferable:       effectiveTransferable,
+      allowlistKind:      s.allowlistKind,
+      allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,
+    };
+  }, [effectiveDecimals, effectiveTransferable]);
+
+  const [checking, setChecking] = useState<number | null>(null);
+
+  const handleNext = useCallback(async () => {
+    const fields = STEP_FIELDS[step];
+    if (fields !== undefined) {
+      setChecking(step);
+      setError(null);
+      try {
+        const refused = (await checkToken(details())).filter((r) => fields.includes(r.field));
+        if (refused.length > 0) {
+          setError(refused.map((r) => r.reason).join('; '));
+          return;
+        }
+      } catch (e) {
+        setError(messageOf(e));
+        return;
+      } finally {
+        setChecking(null);
+      }
     }
     navigate(step + 1);
-  }, [step, navigate]);
+  }, [step, navigate, details]);
 
   const handleCreate = useCallback(async () => {
     setError(null);
     setCreating(true);
     try {
-      const s = stateRef.current;
-      const res = await dsmClient.createToken({
-        ticker:             s.ticker.trim().toUpperCase(),
-        alias:              s.alias.trim(),
-        decimals:           effectiveDecimals,
-        maxSupply:          s.unlimitedSupply ? '0' : s.maxSupply,
-        kind:               s.kind,
-        description:        s.description.trim() || undefined,
-        iconUrl:            s.iconUrl.trim()      || undefined,
-        unlimitedSupply:    s.unlimitedSupply,
-        initialAlloc:       s.initialAlloc || '0',
-        mintBurnEnabled:    s.mintBurnEnabled,
-        mintBurnThreshold:  s.mintBurnThreshold,
-        transferable:       effectiveTransferable,
-        allowlistKind:      s.allowlistKind,
-        allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,
-      });
-      const ok = typeof res === 'boolean'
-        ? res
-        : (typeof res === 'object' && res !== null && 'success' in res)
-          ? Boolean((res as { success?: boolean }).success)
-          : false;
-      if (ok) {
-        // `createToken` returns a FLAT result. The old code reached for a
-        // `.result` wrapper that only the (now deleted, unreachable) DsmClient
-        // method produced, so `created` was always {} and the success screen
-        // rendered neither the token id nor the anchor.
-        const r = (typeof res === 'object' && res !== null)
-          ? (res as { tokenId?: string; anchorBase32?: string })
-          : {};
-        setCreated({ tokenId: r.tokenId, anchorBase32: r.anchorBase32 });
+      const res = await createToken(details());
+      if (res.success) {
+        setCreated({ tokenId: res.tokenId, anchorBase32: res.anchorBase32 });
         if (onSuccess) onSuccess();
       } else {
-        const msg = (typeof res === 'object' && res !== null && 'error' in res)
-          ? String((res as { error?: unknown }).error)
-          : 'Token creation failed';
-        setError(msg);
+        // Rust's reason, as it gave it.
+        setError(res.message ?? 'token.create gave no reason');
         setCreating(false);
       }
     } catch (e) {
@@ -595,31 +676,12 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
       // verdict is Rust's; this only renders it.
       setResolving(true);
       try {
-        const s = stateRef.current;
-        const again = await dsmClient.createToken({
-          ticker:             s.ticker.trim().toUpperCase(),
-          alias:              s.alias.trim(),
-          decimals:           effectiveDecimals,
-          maxSupply:          s.unlimitedSupply ? '0' : s.maxSupply,
-          kind:               s.kind,
-          description:        s.description.trim() || undefined,
-          iconUrl:            s.iconUrl.trim()      || undefined,
-          unlimitedSupply:    s.unlimitedSupply,
-          initialAlloc:       s.initialAlloc || '0',
-          mintBurnEnabled:    s.mintBurnEnabled,
-          mintBurnThreshold:  s.mintBurnThreshold,
-          transferable:       effectiveTransferable,
-          allowlistKind:      s.allowlistKind,
-          allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,
-        });
-        const r = (typeof again === 'object' && again !== null)
-          ? (again as { success?: boolean; tokenId?: string; anchorBase32?: string; error?: unknown })
-          : {};
-        if (r.success) {
-          setCreated({ tokenId: r.tokenId, anchorBase32: r.anchorBase32 });
+        const again = await createToken(details());
+        if (again.success) {
+          setCreated({ tokenId: again.tokenId, anchorBase32: again.anchorBase32 });
           if (onSuccess) onSuccess();
         } else {
-          setError(r.error ? String(r.error) : String(e));
+          setError(again.message ?? String(e));
           setCreating(false);
         }
       } catch (e2) {
@@ -634,12 +696,12 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
         setResolving(false);
       }
     }
-  }, [effectiveDecimals, effectiveTransferable, onSuccess]);
+  }, [details, onSuccess]);
 
   // ── Success screen ───────────────────────────────────────────────────────
   if (created) {
     return (
-      <div className="tcd-overlay">
+      <div className="sb-popover-backdrop" onClick={(e) => e.stopPropagation()}>
         <SuccessScreen created={created} state={state} onClose={onClose} />
       </div>
     );
@@ -647,21 +709,16 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
 
   // ── Wizard shell ─────────────────────────────────────────────────────────
   return (
-    <div className="tcd-overlay">
-      <div className="tcd-card">
-        {/* Header */}
-        <div className="tcd-header">
-          <span className="tcd-header-title">Create Token Policy (CPTA)</span>
-          <button className="tcd-close" onClick={onClose} aria-label="Close">X</button>
+    <div className="sb-popover-backdrop" onClick={(e) => e.stopPropagation()}>
+      <div className="sb-popover sb-card--dark token-wizard" role="dialog" aria-modal="true" aria-labelledby="tcd-title">
+        <div className="sb-popover__head">
+          <h3 id="tcd-title" className="sb-popover__title">Create Token</h3>
+          <button type="button" className="sb-popover__close" onClick={onClose} aria-label="Close">{'×'}</button>
         </div>
 
-        <ProgressBar step={step} />
+        <StepStrip step={step} />
 
-        {/* Step body */}
-        <div
-          key={animKey}
-          className={`tcd-step-body tcd-step-body--${dir}`}
-        >
+        <div className="sb-popover__body" ref={bodyRef}>
           {step === 1 && <Step1 state={state} set={set} />}
           {step === 2 && (
             <Step2
@@ -676,36 +733,39 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
               set={set}
               effectiveDecimals={effectiveDecimals}
               effectiveTransferable={effectiveTransferable}
-              creationFeeEra={creationFeeEra}
+              creationFee={creationFee}
             />
           )}
         </div>
 
-        {/* Error bar */}
-        {error && <div className="tcd-error-bar">{error}</div>}
+        {error && (
+          <div className="sb-notice sb-notice--error" role="alert" style={{ margin: 0 }}>
+            <span>{error}</span>
+          </div>
+        )}
 
-        {/* Nav */}
-        <div className="tcd-nav">
+        <div className="sb-actions" style={{ margin: 0 }}>
           {step > 1 ? (
-            <button className="tcd-btn tcd-btn--sec" onClick={() => navigate(step - 1)}>
-              ← Back
+            <button type="button" className="sb-btn" onClick={() => navigate(step - 1)} disabled={creating}>
+              Back
             </button>
           ) : (
-            <button className="tcd-btn tcd-btn--sec" onClick={onClose}>
+            <button type="button" className="sb-btn" onClick={onClose}>
               Cancel
             </button>
           )}
           {step < 3 ? (
-            <button className="tcd-btn tcd-btn--pri" onClick={handleNext}>
-              Continue →
+            <button type="button" className="sb-btn sb-btn--primary" onClick={handleNext} disabled={checking !== null}>
+              {checking !== null ? 'Checking' : 'Continue'}
             </button>
           ) : (
             <button
-              className="tcd-btn tcd-btn--create"
+              type="button"
+              className="sb-btn sb-btn--primary"
               onClick={handleCreate}
               disabled={creating}
             >
-              {resolving ? 'Confirming outcome\u2026' : creating ? 'Publishing policy\u2026' : 'Publish'}
+              {resolving ? 'Confirming token' : creating ? 'Publishing token' : 'Burn ERA'}
             </button>
           )}
         </div>

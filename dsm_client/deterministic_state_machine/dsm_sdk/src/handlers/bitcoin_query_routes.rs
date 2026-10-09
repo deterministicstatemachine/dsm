@@ -425,7 +425,7 @@ impl AppRouterImpl {
                 let token_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
 
                 // Prefer canonical projection/state-backed wallet balance.
-                let (available, raw_locked) = match self.wallet.get_balance(Some(token_id)) {
+                let (available, raw_locked) = match self.wallet.get_balance(token_id) {
                     Ok(bal) => (bal.available(), bal.locked()),
                     Err(_) => (0, 0),
                 };
@@ -449,7 +449,13 @@ impl AppRouterImpl {
                     locked,
                     ..Default::default()
                 };
-                crate::handlers::wallet_routes::enrich_balance_metadata(&mut reply);
+                if let Err(e) =
+                    crate::handlers::wallet_routes::enrich_balance_metadata(&mut reply, &|asset| {
+                        self.core_sdk.offline_allocation_of(asset)
+                    })
+                {
+                    return err(format!("bitcoin balance: {e}"));
+                }
                 pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(reply))
             }
 
@@ -623,9 +629,22 @@ impl AppRouterImpl {
                         // which would look for a registry row that cannot exist
                         // and reset its decimals to zero.
                         policy_anchor_b32: String::new(),
+                        icon_url: String::new(),
                         anchor_fingerprint: String::new(),
                         // Native BTC has no CPTA identity either.
                         canonical_token_id: String::new(),
+                        // Nor a committed DSM policy: this row is neither a
+                        // protocol asset nor a created token, and states no
+                        // supply and no permissions.
+                        protocol_defined: false,
+                        genesis_supply_display: String::new(),
+                        permissions: None,
+                        // An offline allocation leaf is keyed by the asset's
+                        // policy commit, which native BTC does not have: no
+                        // such leaf can exist, so there is nothing to state.
+                        offline_allocation: None,
+                        // Bitcoin on its own chain: a currency.
+                        holding: generated::BalanceHolding::Currency as i32,
                     },
                 ))
             }
@@ -1032,7 +1051,6 @@ impl AppRouterImpl {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use prost::Message;
     use serial_test::serial;
@@ -1043,38 +1061,19 @@ mod tests {
     use crate::init::SdkConfig;
     use crate::storage::client_db;
 
-    fn install_test_identity(device_id: Vec<u8>, genesis_hash: Vec<u8>, binding_key: Vec<u8>) {
-        crate::reset_sdk_context_for_testing();
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let (public_key, _secret_key) =
-            crate::sdk::signing_authority::derive_signing_keys_for_testing(
-                &device_id,
-                &genesis_hash,
-                &binding_key,
-            )
-            .expect("derive canonical signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+    /// A device created as wallet creation creates it, in a fresh database.
+    fn install_test_identity(seed: u8) {
+        crate::economic_fixtures::local_device(seed);
     }
 
     fn init_withdrawal_query_test_router(test_name: &str) -> AppRouterImpl {
+        crate::economic_fixtures::use_test_storage_dir();
         unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
             std::env::remove_var("DSM_ENV_CONFIG_PATH");
         }
         client_db::reset_database_for_tests();
-        let _ = crate::storage_utils::set_storage_base_dir(PathBuf::from(format!(
-            "./.dsm_testdata_{test_name}"
-        )));
-        install_test_identity(vec![0xAA; 32], vec![0xCC; 32], vec![0xDD; 32]);
+        crate::economic_fixtures::use_test_storage_dir();
+        install_test_identity(0xAA);
         client_db::init_database().expect("init db");
         set_withdrawal_bridge_sync_test_results(Vec::new());
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
@@ -1097,9 +1096,7 @@ mod tests {
     }
 
     fn decode_framed_envelope(bytes: &[u8], route: &str) -> generated::Envelope {
-        assert!(!bytes.is_empty(), "{route}: empty response bytes");
-        assert_eq!(bytes[0], 0x03, "{route}: expected FramedEnvelopeV3 prefix");
-        dsm::envelope::from_canonical_bytes(&bytes[1..])
+        crate::handlers::response_helpers::decode_local_envelope(bytes)
             .unwrap_or_else(|e| panic!("{route}: failed to decode envelope: {e}"))
     }
 
@@ -1213,6 +1210,7 @@ mod tests {
             processed: 0,
             pushed: 0,
             errors: Vec::new(),
+            more_pending: Vec::new(),
         })]);
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::set_dbtc_storage_list_results(vec![Err(
             "catalog unavailable".to_string(),
@@ -1255,6 +1253,7 @@ mod tests {
             processed: 0,
             pushed: 0,
             errors: Vec::new(),
+            more_pending: Vec::new(),
         })]);
 
         let res = router

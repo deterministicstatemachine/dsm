@@ -11,11 +11,10 @@
        one (tag, message) split when T is NUL-free — for ARBITRARY m.
     2. Each economic key's INPUT ENCODING is injective at the byte layer, from
        fixed-width fields alone.
-    3. The eight economic domains are pairwise non-aliasing.
+    3. The six economic domains are pairwise non-aliasing.
     4. ABSENT_LEAF is not a populated leaf commitment.
     5. Independently keyed economic leaves do not interfere, at map, tree and
        root level, with anti-vacuity witnesses.
-    6. Qualifying quorums intersect when 2q > n, and canonical_quorum(3) = 2.
 
   ── ON NAMING: THIS IS NOT "PREFIX-FREEDOM" ─────────────────────────────────
   The delimiter gives INJECTIVITY IN (tag, message) and hence DISJOINT PREIMAGE
@@ -31,7 +30,7 @@
   §1-§2 are theorems about REAL byte lists and REAL tag literals. They assume
   nothing.
 
-  §3-§10 are theorems about a SYMBOLIC model: `Digest` is the free term algebra
+  §3-§9 are theorems about a SYMBOLIC model: `Digest` is the free term algebra
   over the tagged encoder, so distinct preimages give distinct digests BY
   CONSTRUCTION. That is the abstraction ruling G explicitly asks for — "stated
   under the symbolic abstraction, not as theorems about BLAKE3" — and it is the
@@ -90,15 +89,13 @@
   Code correspondence:
     - encoder, the single 0x00           crypto/blake3.rs:167-177
     - NUL-free-by-type tag               crypto/domain.rs:78, 102-118
-    - the eight tag literals             common/domain_tags/dsm/misc/economic.rs
-    - the four leaf keys                 economic/keys.rs:40-91
+    - the six tag literals               common/domain_tags/dsm/misc/economic.rs
+    - the two leaf keys                  economic/keys.rs:37-60
     - ABSENT_LEAF, econ_leaf/econ_node   economic/tree.rs:41-60
     - default_node, empty_economic_root  economic/tree.rs:75-96
     - root_from_path                     economic/tree.rs:104-119
     - economic_leaf_value                economic/state.rs:271-277
     - K_root                             economic/register.rs:76-86
-    - canonical_quorum                   economic/cell_observation.rs:70-75
-    - SOFI_BETA_MEMBERS / _QUORUM        dlv/beta_storage_profile.rs:47-50
 
   A source-tree note. `economic/tree.rs:29` states "Since every present leaf is
   a BLAKE3 output, all-zero is unreachable as a present value." The conclusion
@@ -198,10 +195,8 @@ theorem fixed_width_quad_injective
   obtain ⟨h3, h4⟩ := List.append_inj hrest2 hc
   exact ⟨h1, h2, h3, h4⟩
 
--- The four economic leaf-key input encodings, at the BYTE layer.
+-- The two economic leaf-key input encodings, at the BYTE layer.
 def encodeBalanceKeyInputs (g d pc : List UInt8) : List UInt8 := g ++ d ++ pc
-def encodeVaultReserveKeyInputs (g d v pc : List UInt8) : List UInt8 := g ++ d ++ v ++ pc
-def encodeSettlementReceiptKeyInputs (g d v r : List UInt8) : List UInt8 := g ++ d ++ v ++ r
 def encodeConsumedSourceKeyInputs (g d s : List UInt8) : List UInt8 := g ++ d ++ s
 
 def Is32 (x : List UInt8) : Prop := x.length = 32
@@ -215,27 +210,6 @@ theorem encode_balance_key_inputs_injective
   exact fixed_width_triple_injective g₁ d₁ p₁ g₂ d₂ p₂
     (by rw [_h1, h3]) (by rw [_h2, h4]) heq
 
-theorem encode_vault_reserve_key_inputs_injective
-    (g₁ d₁ v₁ p₁ g₂ d₂ v₂ p₂ : List UInt8)
-    (a1 : Is32 g₁) (a2 : Is32 d₁) (a3 : Is32 v₁)
-    (b1 : Is32 g₂) (b2 : Is32 d₂) (b3 : Is32 v₂)
-    (heq : encodeVaultReserveKeyInputs g₁ d₁ v₁ p₁ = encodeVaultReserveKeyInputs g₂ d₂ v₂ p₂) :
-    g₁ = g₂ ∧ d₁ = d₂ ∧ v₁ = v₂ ∧ p₁ = p₂ := by
-  unfold encodeVaultReserveKeyInputs at heq
-  exact fixed_width_quad_injective g₁ d₁ v₁ p₁ g₂ d₂ v₂ p₂
-    (by rw [a1, b1]) (by rw [a2, b2]) (by rw [a3, b3]) heq
-
-theorem encode_settlement_receipt_key_inputs_injective
-    (g₁ d₁ v₁ r₁ g₂ d₂ v₂ r₂ : List UInt8)
-    (a1 : Is32 g₁) (a2 : Is32 d₁) (a3 : Is32 v₁)
-    (b1 : Is32 g₂) (b2 : Is32 d₂) (b3 : Is32 v₂)
-    (heq : encodeSettlementReceiptKeyInputs g₁ d₁ v₁ r₁
-         = encodeSettlementReceiptKeyInputs g₂ d₂ v₂ r₂) :
-    g₁ = g₂ ∧ d₁ = d₂ ∧ v₁ = v₂ ∧ r₁ = r₂ := by
-  unfold encodeSettlementReceiptKeyInputs at heq
-  exact fixed_width_quad_injective g₁ d₁ v₁ r₁ g₂ d₂ v₂ r₂
-    (by rw [a1, b1]) (by rw [a2, b2]) (by rw [a3, b3]) heq
-
 theorem encode_consumed_source_key_inputs_injective
     (g₁ d₁ s₁ g₂ d₂ s₂ : List UInt8)
     (a1 : Is32 g₁) (a2 : Is32 d₁) (b1 : Is32 g₂) (b2 : Is32 d₂)
@@ -245,16 +219,14 @@ theorem encode_consumed_source_key_inputs_injective
   exact fixed_width_triple_injective g₁ d₁ s₁ g₂ d₂ s₂
     (by rw [a1, b1]) (by rw [a2, b2]) heq
 
--- §3 THE EIGHT FROZEN DOMAINS
+-- §3 THE SIX FROZEN DOMAINS
 inductive EconDomain where
-  | balanceKey | vaultReserveKey | settlementReceiptKey | consumedSourceKey
+  | balanceKey | consumedSourceKey
   | smtLeaf | smtNode | leafState | rootRegisterKey
 deriving DecidableEq, Repr
 
 def EconDomain.tag : EconDomain → List UInt8
   | .balanceKey           => ascii "DSM/economic-balance-key/v1"
-  | .vaultReserveKey      => ascii "DSM/economic-vault-reserve-key/v1"
-  | .settlementReceiptKey => ascii "DSM/economic-settlement-receipt-key/v1"
   | .consumedSourceKey    => ascii "DSM/economic-consumed-source-key/v1"
   | .smtLeaf              => ascii "DSM/economic-smt-leaf/v1"
   | .smtNode              => ascii "DSM/economic-smt-node/v1"
@@ -268,13 +240,13 @@ theorem econ_domain_tag_nul_free (D : EconDomain) : NulFree D.tag := by
   cases D <;> decide
 
 def EconDomain.all : List EconDomain :=
-  [.balanceKey, .vaultReserveKey, .settlementReceiptKey, .consumedSourceKey,
+  [.balanceKey, .consumedSourceKey,
    .smtLeaf, .smtNode, .leafState, .rootRegisterKey]
 
 theorem econ_domain_table_complete (D : EconDomain) : D ∈ EconDomain.all := by
   cases D <;> decide
 
-theorem econ_domain_count : EconDomain.all.length = 8 := rfl
+theorem econ_domain_count : EconDomain.all.length = 6 := rfl
 
 -- §4 THE SYMBOLIC DIGEST ALGEBRA
 inductive Digest where
@@ -288,10 +260,6 @@ def mkHash (D : EconDomain) (ds : List Digest) (p : Option Nat) (s : List UInt8)
 def absentLeaf : Digest := .absent
 
 def econBalanceKey (g d pc : Digest) : Digest := mkHash .balanceKey [g, d, pc] none []
-def econVaultReserveKey (g d v pc : Digest) : Digest :=
-  mkHash .vaultReserveKey [g, d, v, pc] none []
-def econSettlementRcptKey (g d v r : Digest) : Digest :=
-  mkHash .settlementReceiptKey [g, d, v, r] none []
 def econConsumedSourceKey (g d s : Digest) : Digest := mkHash .consumedSourceKey [g, d, s] none []
 def econLeaf (k v : Digest) : Digest := mkHash .smtLeaf [k, v] none []
 def econNode (l r : Digest) : Digest := mkHash .smtNode [l, r] none []
@@ -508,15 +476,15 @@ theorem update_hits_its_own_key {s s' : EconStore} {k : Digest} {v : Cell}
     (hu : IsUpdate s k v s') : s' k = v := hu.hit
 
 /-- A write to a BALANCE leaf cannot change what is observed at ANY
-    vault-reserve leaf, for any identities and any inputs. This is where the
+    consumed-source leaf, for any identities and any inputs. This is where the
     cross-domain disjointness of §6 becomes operational. -/
 theorem class_non_interference
-    {s s' : EconStore} {v : Cell} {g d pc g' d' vid pc' : Digest}
+    {s s' : EconStore} {v : Cell} {g d pc g' d' src : Digest}
     (hu : IsUpdate s (econBalanceKey g d pc) v s') :
-    s' (econVaultReserveKey g' d' vid pc') = s (econVaultReserveKey g' d' vid pc') := by
+    s' (econConsumedSourceKey g' d' src) = s (econConsumedSourceKey g' d' src) := by
   refine update_frame hu _ ?_
-  unfold econVaultReserveKey econBalanceKey
-  exact econ_domains_pairwise_disjoint .vaultReserveKey .balanceKey (by decide) _ _ _ _ _ _
+  unfold econConsumedSourceKey econBalanceKey
+  exact econ_domains_pairwise_disjoint .consumedSourceKey .balanceKey (by decide) _ _ _ _ _ _
 
 /-- The general form: a write in domain D never disturbs an observation in any
     other domain E. One statement, every cross-domain pair. -/
@@ -579,106 +547,6 @@ theorem update_frame_needs_key_distinctness :
     | hashed _ _ _ _ => rfl
   · intro hc
     exact Option.noConfusion hc
-
--- §10 OBLIGATION 7: QUORUM INTERSECTION
-theorem count_inclusion_exclusion {α : Type} (l : List α) (A B : α → Bool) :
-    (l.filter (fun x => A x && B x)).length + (l.filter (fun x => A x || B x)).length
-      = (l.filter A).length + (l.filter B).length := by
-  induction l with
-  | nil => rfl
-  | cons a t ih => cases hA : A a <;> cases hB : B a <;> simp [hA, hB] <;> omega
-
-/-- The positional pigeonhole. `A` and `B` are PREDICATES over the member
-    universe, not independently chosen sublists, so neither can inflate its own
-    cardinality and the proof needs no `Nodup`.
-
-    `_hnodup` is `_`-prefixed by the house convention for a hypothesis that is
-    not load-bearing IN THE PROOF — and it is carried anyway, because it is what
-    licenses reading `S.length` as *the number of distinct storage members*.
-    Without it the lemma stays true and `n` stops denoting membership, which is
-    the quantity obligation 7 is about. -/
-theorem quorum_intersection {α : Type} (members : List α) (A B : α → Bool)
-    (_hnodup : members.Nodup)
-    (h : members.length < (members.filter A).length + (members.filter B).length) :
-    ∃ x, x ∈ members ∧ A x = true ∧ B x = true := by
-  have hie := count_inclusion_exclusion members A B
-  have hub := List.length_filter_le (fun x => A x || B x) members
-  have hpos : 0 < (members.filter (fun x => A x && B x)).length := by omega
-  obtain ⟨x, hx⟩ := List.exists_mem_of_length_pos hpos
-  rw [List.mem_filter] at hx
-  exact ⟨x, hx.1, by simpa using hx.2⟩
-
-/-- THE OBLIGATION, over QUALIFYING quorums: response sets satisfying AT LEAST
-    `q`, which is what the protocol actually deals with. -/
-theorem qualifying_quorums_intersect {α : Type}
-    (members : List α) (n q : Nat) (A B : α → Bool)
-    (hnodup : members.Nodup)
-    (hn : members.length = n)
-    (hA : q ≤ (members.filter A).length)
-    (hB : q ≤ (members.filter B).length)
-    (h2q : n < 2 * q) :
-    ∃ x, x ∈ members ∧ A x = true ∧ B x = true := by
-  refine quorum_intersection members A B hnodup ?_
-  omega
-
-/-- The exact-`q` form, kept as the underlying lemma. -/
-theorem quorum_intersection_of_two_q {α : Type}
-    (members : List α) (n q : Nat) (A B : α → Bool)
-    (hnodup : members.Nodup)
-    (hn : members.length = n)
-    (hA : (members.filter A).length = q)
-    (hB : (members.filter B).length = q)
-    (h2q : n < 2 * q) :
-    ∃ x, x ∈ members ∧ A x = true ∧ B x = true :=
-  qualifying_quorums_intersect members n q A B hnodup hn (by omega) (by omega) h2q
-
-/-- `canonical_quorum(n) = n/2 + 1` — economic/cell_observation.rs:70-75.
-    DERIVED, never chosen. -/
-def canonicalQuorum (n : Nat) : Nat := n / 2 + 1
-
-theorem canonical_quorum_intersects (n : Nat) : n < 2 * canonicalQuorum n := by
-  unfold canonicalQuorum; omega
-
-/-- ...and it is the SMALLEST such threshold, which is why
-    `require_canonical_quorum` demands exact equality in both directions. -/
-theorem canonical_quorum_is_minimal (n q : Nat) (h : n < 2 * q) : canonicalQuorum n ≤ q := by
-  unfold canonicalQuorum; omega
-
-/-- THE BETA COROLLARY. `SOFI_BETA_QUORUM = 2` over `SOFI_BETA_MEMBERS = 3` is
-    exactly `canonical_quorum(3)` — an identity, not an arithmetic coincidence.
-    Mirrors dlv/beta_storage_profile.rs:152-160. -/
-theorem beta_quorum_is_canonical : canonicalQuorum 3 = 2 := rfl
-
-theorem beta_quorums_intersect {α : Type} (members : List α) (A B : α → Bool)
-    (hnodup : members.Nodup)
-    (hn : members.length = 3)
-    (hA : 2 ≤ (members.filter A).length)
-    (hB : 2 ≤ (members.filter B).length) :
-    ∃ x, x ∈ members ∧ A x = true ∧ B x = true :=
-  qualifying_quorums_intersect members 3 2 A B hnodup hn hA hB (by decide)
-
-/-- TEETH: a sub-canonical `q` admits two DISJOINT quorums and therefore two
-    winners. n = 4, q = 2 (canonical is 3). The safety failure
-    `require_canonical_quorum` exists to refuse. -/
-theorem subcanonical_quorum_admits_disjoint_quorums :
-    ∃ (members : List Nat) (A B : Nat → Bool) (n q : Nat),
-      members.Nodup ∧ members.length = n ∧ (members.filter A).length = q ∧
-      (members.filter B).length = q ∧ q < canonicalQuorum n ∧
-      ¬ ∃ x, x ∈ members ∧ A x = true ∧ B x = true := by
-  refine ⟨[0, 1, 2, 3], (fun x => decide (x < 2)), (fun x => decide (2 ≤ x)), 4, 2, ?_⟩
-  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide⟩
-
-/-- TEETH: a zero threshold carries no intersection at all. Reachable, because
-    `canonical_quorum(0) = 0` in the Rust and `quorum_for(0) == 0` — the
-    "emptiness manufactured from no members at all" the amendment requires
-    `observe_cell` to refuse. -/
-theorem zero_threshold_carries_no_intersection :
-    ¬ ∀ (members : List Nat) (A B : Nat → Bool),
-        0 ≤ (members.filter A).length → 0 ≤ (members.filter B).length →
-        ∃ x, x ∈ members ∧ A x = true ∧ B x = true := by
-  intro h
-  obtain ⟨x, hx, _, _⟩ := h [] (fun _ => true) (fun _ => true) (by omega) (by omega)
-  exact absurd hx (by simp)
 
 -- §11 ADEQUACY BRIDGE — the only place cryptography appears
 def encodeDigs (bytesOf : Digest → List UInt8) : List Digest → List UInt8
@@ -784,8 +652,6 @@ theorem adequacy_needs_field_injectivity :
 
    1  each leaf-key derivation injective over its DECLARED input domain
       byte layer  -> encode_balance_key_inputs_injective,
-                     encode_vault_reserve_key_inputs_injective,
-                     encode_settlement_receipt_key_inputs_injective,
                      encode_consumed_source_key_inputs_injective
       symbolic    -> econ_balance_key_injective, econ_leaf_injective,
                      econ_node_injective, econ_leaf_value_injective,
@@ -836,15 +702,6 @@ theorem adequacy_needs_field_injectivity :
       stores on BOTH sides — the failure mode of DSMNonInterference.lean's old
       `operation_locality`, repaired separately, is structurally excluded here.
 
-   7  quorum intersection (owner-added)
-      -> quorum_intersection, qualifying_quorums_intersect,
-         quorum_intersection_of_two_q, canonical_quorum_intersects,
-         canonical_quorum_is_minimal, beta_quorum_is_canonical,
-         beta_quorums_intersect
-      PROVED, zero assumptions, zero Mathlib. Stated over QUALIFYING quorums
-      (at least q), which is what the protocol deals with; the exact-q form is
-      kept as the underlying lemma.
-
   Non-vacuity witnesses:
     econ_domain_count, econ_domain_table_complete, update_inhabited,
     fold_path_inhabited, distinct_leaves_give_distinct_roots
@@ -854,16 +711,13 @@ theorem adequacy_needs_field_injectivity :
     update_frame_needs_key_distinctness
     econ_node_argument_order_matters
     econ_leaf_binds_key_and_value
-    subcanonical_quorum_admits_disjoint_quorums
-    zero_threshold_carries_no_intersection
     global_injectivity_would_smuggle_in_the_zero_claim
     adequacy_needs_field_injectivity
 
   Axioms used: NONE. This module declares no `axiom` and no `opaque`.
   `#print axioms` on every headline theorem reports only Lean's own logical
-  axioms — `propext`, and `Quot.sound` for the quorum results — because the two
-  cryptographic assumptions are carried as HYPOTHESES in §11 signatures rather
-  than as file-global axioms. `beta_quorum_is_canonical` depends on none at all.
+  axioms — `propext` — because the two cryptographic assumptions are carried
+  as HYPOTHESES in §11 signatures rather than as file-global axioms.
 
   DO NOT report this module as "axiom-free" without that qualification: the
   quorum results are, and the economic hash / non-aliasing results rest on the

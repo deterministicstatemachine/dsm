@@ -33,28 +33,52 @@ cargo clippy --workspace --all-features -- \
 
 echo ""
 echo "✓ Clippy production safety checks passed!"
+echo ""
 
-# Run TLA+ model checking for formal verification
-echo "Running TLA+ formal verification..."
-cd tla
-if [[ ! -f "tla2tools.jar" ]]; then
-  echo "INFO: tla2tools.jar not found — skipping TLA+ formal verification."
-  echo "To enable: download https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar into tla/"
-  cd ..
-else
-  # Run the tiny model check (terminating, fast)
-  echo "Checking DSM_tiny.cfg model..."
-  java -cp "tla2tools.jar" tlc2.TLC -config DSM_tiny.cfg DSM.tla -workers 1
+# The persistent DLV tree trusts its builder: nothing outside `tree::apply` may
+# assemble a commit input. Field visibility and a cfg gate have no runtime
+# behaviour, so this is proven against the artifact, not by a test.
+echo ""
 
-  if [[ $? -ne 0 ]]; then
-    echo "ERROR: TLA+ model checking failed!"
-    exit 1
-  fi
+# A validated economic root is verifier-derived; its two deliberate punctures
+# stay where the conjunctions that earn them are written.
+bash ci/sofi_validated_root_constructors.sh
 
-  echo ""
-  echo "✓ TLA+ formal verification passed!"
-  cd ..
-fi
+# Gate G1 (SoFi §37): every pub fn under CORE/sofi has a production caller.
+# The baseline lists what the rebuild (R1..R14) has not wired yet and only
+# ever shrinks; R14 deletes it.
+python3 ci/sofi_reachability.py
+echo ""
+
+# A vault genesis must not be consumable from a PRESENTED creation operation.
+# The funding pair is stated by a signed operation, never asserted, and F10
+# still owes the binding from that operation to the accepted owner transition.
+bash ci/sofi_genesis_acceptance_binding.sh
+bash ci/sofi_relay_is_party_neutral.sh
+bash ci/android_exported_components.sh
+
+# Only an ordinary single-root lineage can become an eligible peer debit
+# (P15-9). The discriminant is worthless if a caller can attach it, and
+# variant-field visibility changes no runtime behaviour.
+bash ci/peer_debit_lineage_authoritative.sh
+
+# The descendant fence cannot fire until E2/E3 writes conditional admitted
+# rows, so a descendant path added without it would be invisible today and a
+# live hole the day that writer lands. Only a static check holds this.
+bash ci/admitted_predecessor_readers_fenced.sh
+
+# The storage node holds bytes and knows nothing about SoFi.
+bash ci/storage_is_dumb.sh
+
+# Requirement status is derived from evidence: pins, counts, and every named
+# code item and test exist (specs/requirements/CONFORMANCE_GAPS.md §2 rule 6).
+python3 ci/conformance_evidence.py
+
+# Gate G2 (spec §37): SoFi evidence is fetched, never defaulted.
+bash ci/sofi_no_default_evidence.sh
+
+# TLA+ model checking is the Formal Validation job's (ci.yml,
+# `dsm_vertical_validation tla-check`), not this script's.
 
 echo ""
 echo "✓ All production safety checks passed!"

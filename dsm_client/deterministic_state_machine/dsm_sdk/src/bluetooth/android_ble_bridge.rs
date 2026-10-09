@@ -70,16 +70,11 @@ pub struct AndroidBleBridge {
     connected_devices: Arc<RwLock<HashMap<String, DeviceConnection>>>,
 }
 
-// Global registry for a single AndroidBleBridge instance so JNI shims can access it.
-use once_cell::sync::OnceCell;
-static GLOBAL_ANDROID_BRIDGE: OnceCell<Arc<AndroidBleBridge>> = OnceCell::new();
-
-pub fn register_global_android_bridge(b: Arc<AndroidBleBridge>) -> bool {
-    GLOBAL_ANDROID_BRIDGE.set(b).is_ok()
-}
-
+/// The live BLE stack's bridge: the one JNI hands BLE events to. It is part
+/// of the stack, never registered beside it, so events reach the handler that
+/// holds the steps.
 pub fn get_global_android_bridge() -> Option<Arc<AndroidBleBridge>> {
-    GLOBAL_ANDROID_BRIDGE.get().cloned()
+    crate::bluetooth::get_global_bluetooth_manager().map(|manager| manager.android_bridge().clone())
 }
 
 #[derive(Debug, Clone)]
@@ -203,13 +198,8 @@ impl AndroidBleBridge {
                 let address = dev.address;
                 info!("BLE device disconnected (proto): {address}");
 
-                // Fail any early-phase bilateral sessions for this address before removing
-                // from the connected set.  Late-phase sessions (Accepted, ConfirmPending)
-                // retain all cryptographic material for automatic recovery on reconnect.
-                self.transport_delegate
-                    .on_peer_disconnected(address.clone())
-                    .await;
-
+                // A lost link fails no bilateral step: each keeps what it owes
+                // and delivers it when the link returns.
                 // Notify the pairing orchestrator so stale pairing sessions for this
                 // address are reset immediately (no need to wait for the 90-second timeout).
                 crate::bluetooth::get_pairing_orchestrator()
@@ -250,10 +240,6 @@ impl AndroidBleBridge {
                 let address = fail_info.address;
                 let error = fail_info.error;
                 warn!("BLE connection failed (proto): {address}, reason: {error}");
-                // Fail any early-phase bilateral sessions associated with this address.
-                self.transport_delegate
-                    .on_peer_disconnected(address.clone())
-                    .await;
                 // Reset stale pairing sessions for this address immediately.
                 crate::bluetooth::get_pairing_orchestrator()
                     .handle_peer_disconnected(&address)
@@ -650,26 +636,6 @@ impl AndroidBleBridge {
         }
         cleaned
     }
-
-    /// Release a stashed prepare response for a given commitment hash (manual accept)
-    pub async fn release_pending_prepare_response(
-        &self,
-        commitment_hash: [u8; 32],
-    ) -> Result<(), DsmError> {
-        let _ = commitment_hash;
-        Err(DsmError::invalid_operation(
-            "manual prepare-response release is unavailable in the current BLE bridge",
-        ))
-    }
-
-    /// Drop any stashed prepare response for a commitment (manual reject)
-    pub async fn drop_pending_prepare_response(
-        &self,
-        commitment_hash: [u8; 32],
-    ) -> Result<(), DsmError> {
-        let _ = commitment_hash;
-        Ok(())
-    }
 }
 
 // JNI extern helpers for BLE (android_ble_*) are implemented in
@@ -705,20 +671,50 @@ mod tests {
         Arc<BleFrameCoordinator>,
         AndroidBleBridge,
     ) {
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            device_id,
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
         let keypair = dsm::crypto::SignatureKeyPair::generate_from_entropy(
             &[device_id.as_slice(), genesis_hash.as_slice()].concat(),
         )
         .expect("keypair generation failed in test helper");
+        bridge_over(device_id, genesis_hash, keypair)
+    }
+
+    /// A bridge on a device made as wallet creation makes one: its own
+    /// identity, AK and Kyber key, in a fresh database. A device prepares
+    /// nothing without its Kyber identity binding.
+    fn make_device_bridge(
+        seed: u8,
+    ) -> (
+        Arc<RwLock<dsm::core::bilateral_transaction_manager::BilateralTransactionManager>>,
+        Arc<BilateralTransportAdapter>,
+        Arc<BleFrameCoordinator>,
+        AndroidBleBridge,
+    ) {
+        let (identity, _core) = crate::economic_fixtures::local_device(seed);
+        bridge_over(
+            identity.device_id,
+            identity.genesis,
+            identity.signing_keypair(),
+        )
+    }
+
+    fn bridge_over(
+        device_id: [u8; 32],
+        genesis_hash: [u8; 32],
+        keypair: dsm::crypto::SignatureKeyPair,
+    ) -> (
+        Arc<RwLock<dsm::core::bilateral_transaction_manager::BilateralTransactionManager>>,
+        Arc<BilateralTransportAdapter>,
+        Arc<BleFrameCoordinator>,
+        AndroidBleBridge,
+    ) {
+        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(device_id);
         let bilateral_tx_manager = Arc::new(RwLock::new(
             dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
                 contact_manager,
                 keypair,
                 device_id,
                 genesis_hash,
+                std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new()),
             ),
         ));
         let handler = Arc::new(BilateralBleHandler::new(
@@ -833,12 +829,7 @@ mod tests {
     #[serial_test::serial]
     async fn pairing_smoke_event_ordering() {
         // Initialize environment for AppState (Global singleton)
-        // We leak the tempdir path so it persists for other tests if they share the singleton.
-        let temp_dir = tempfile::Builder::new()
-            .prefix("dsm_test_bridge")
-            .tempdir()
-            .expect("tempdir");
-        let _ = crate::storage_utils::set_storage_base_dir(temp_dir.keep());
+        crate::economic_fixtures::use_test_storage_dir();
 
         // Ensure device ID is available using idempotent bootstrap
         crate::sdk::app_state::AppState::set_identity_info_if_empty(
@@ -846,7 +837,8 @@ mod tests {
             vec![0xBB; 32],
             vec![0xCC; 32],
             vec![0x00; 32],
-        );
+        )
+        .expect("AppState identity");
 
         // Fresh DB + orchestrator for deterministic behavior
         client_db::reset_database_for_tests();
@@ -864,18 +856,15 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "peer-smoke".to_string(),
             genesis_hash: genesis.to_vec(),
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
-            public_key: Vec::new(),
-            kyber_public_key: Vec::new(),
-            added_at: 1,
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -998,18 +987,15 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "peer-pre".to_string(),
             genesis_hash: genesis.to_vec(),
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
-            public_key: Vec::new(),
-            kyber_public_key: Vec::new(),
-            added_at: 1,
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1090,18 +1076,15 @@ mod tests {
             device_id: device_id.to_vec(),
             alias: "peer-mis".to_string(),
             genesis_hash: genesis_stored.to_vec(),
-            current_chain_tip: None,
+            current_chain_tip: Some(vec![0x70; 32]),
             verified: true,
             verification_proof: None,
             metadata: HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
-            public_key: Vec::new(),
-            kyber_public_key: Vec::new(),
-            added_at: 1,
+            public_key: vec![0x41; 64],
+            kyber_public_key: vec![0x4B; 1184],
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1193,8 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn test_defer_response_until_identity() {
         // Build minimal environment similar to other tests
-        let (bilateral_mgr, transport_adapter, coord, bridge) =
-            make_test_bridge([9u8; 32], [5u8; 32]);
+        let (bilateral_mgr, transport_adapter, coord, bridge) = make_device_bridge(0x21);
 
         // Establish verified contact + relationship for counterparty so prepare succeeds
         let counterparty = [7u8; 32];
@@ -1206,17 +1188,13 @@ mod tests {
                     device_id: counterparty,
                     genesis_hash: mgr.local_genesis_hash(),
                     public_key: vec![7u8; 32],
-                    genesis_material: vec![],
                     chain_tip: Some([1u8; 32]),
-                    chain_tip_smt_proof: None,
                     genesis_verified_online: true,
-                    verified_at_commit_height: 1,
-                    added_at_commit_height: 1,
-                    last_updated_commit_height: 1,
                     verifying_storage_nodes: vec![],
                     ble_address: Some("AA:BB".to_string()),
                 };
-                let _ = mgr.add_verified_contact(contact);
+                crate::storage::client_db::store_contact_for_tests(&contact);
+                mgr.add_verified_contact(contact).expect("add contact");
             }
             if mgr.get_relationship(&counterparty).is_none() {
                 let _ = mgr.establish_relationship(&counterparty).await;
@@ -1226,7 +1204,7 @@ mod tests {
         // Create a prepare message chunks directly via coordinator (simulate receiving from counterparty)
         let op = dsm::types::operations::Operation::Noop;
         let prepare_envelope = transport_adapter
-            .create_prepare_message(counterparty, op, 50)
+            .create_prepare_message(counterparty, op)
             .await
             .expect("prepare envelope");
         let chunks = coord
@@ -1272,8 +1250,7 @@ mod tests {
             Ok(rt) => rt,
             Err(e) => panic!("failed to create tokio runtime: {}", e),
         };
-        let (bilateral_mgr, transport_adapter, coord, _bridge) =
-            make_test_bridge([0u8; 32], [0u8; 32]);
+        let (bilateral_mgr, transport_adapter, coord, _bridge) = make_device_bridge(0x22);
         // Prepare inputs
         let cp = [2u8; 32];
         // Satisfy relationship requirement: add verified contact and establish relationship
@@ -1284,16 +1261,12 @@ mod tests {
                 device_id: cp,
                 genesis_hash: [1u8; 32],
                 public_key: vec![7u8; 32],
-                genesis_material: vec![5u8; 32],
-                chain_tip: Some([0u8; 32]),
-                chain_tip_smt_proof: None,
+                chain_tip: Some([0x0Cu8; 32]),
                 genesis_verified_online: true,
-                verified_at_commit_height: 1,
-                added_at_commit_height: 1,
-                last_updated_commit_height: 1,
                 ble_address: Some(String::new()),
                 verifying_storage_nodes: vec![],
             };
+            crate::storage::client_db::store_contact_for_tests(&contact);
             if let Err(e) = m.add_verified_contact(contact) {
                 panic!("add_verified_contact failed in test: {}", e);
             }
@@ -1312,11 +1285,10 @@ mod tests {
 
         // Test that we can create prepare message chunks directly from coordinator
         let op = dsm::types::operations::Operation::Noop;
-        let prepare_envelope =
-            match rt.block_on(transport_adapter.create_prepare_message(cp, op, 100)) {
-                Ok(payload) => payload,
-                Err(e) => panic!("create_prepare_message failed in test: {}", e),
-            };
+        let prepare_envelope = match rt.block_on(transport_adapter.create_prepare_message(cp, op)) {
+            Ok(payload) => payload,
+            Err(e) => panic!("create_prepare_message failed in test: {}", e),
+        };
         let chunks = match coord.encode_message(BleFrameType::BilateralPrepare, &prepare_envelope) {
             Ok(c) => c,
             Err(e) => panic!("encode_message failed in test: {}", e),

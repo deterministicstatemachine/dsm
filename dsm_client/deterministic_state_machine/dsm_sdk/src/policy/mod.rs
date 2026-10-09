@@ -2,8 +2,7 @@
 
 //! # Token Policy Module
 //!
-//! Built-in CPTA (Content-Addressed Token Policy Anchor) definitions and
-//! integrity assertions verified at library load time via `#[ctor]`.
+//! Built-in CPTA (Content-Addressed Token Policy Anchor) definitions.
 
 pub mod builtins;
 
@@ -11,7 +10,7 @@ use dsm::types::{error::DsmError, policy_types::PolicyAnchor};
 
 pub fn builtin_policy_commit(token_id: &str) -> Option<[u8; 32]> {
     match token_id {
-        "ERA" => Some(*builtins::NATIVE_POLICY_COMMIT),
+        "ERA" => Some(dsm::core::token::token_state_manager::era_policy_commit()),
         "dBTC" => Some(*builtins::DBTC_POLICY_COMMIT),
         _ => None,
     }

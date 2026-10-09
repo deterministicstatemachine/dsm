@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Contact route handlers extracted from AppRouterImpl.
 //!
-//! Handles `contacts.list`, `contacts.handle_contact_qr_v3`, and `contacts.addManual`.
+//! Handles `contacts.list`, `contacts.readContactCode`, and `contacts.addManual`.
 
 use prost::Message;
 
@@ -10,9 +10,8 @@ use dsm::types::proto as generated;
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 
 use super::app_router_impl::{resolve_counterparty_via_transport, AppRouterImpl, ResolvedCounterparty};
-use super::relationship_status::{
-    derive_local_send_status_for_contact, derive_local_send_status_for_device_id,
-};
+use crate::sdk::contact_sdk::contact_add_response;
+use super::relationship_status::derive_local_send_status_for_contact;
 use super::response_helpers::{err, pack_envelope_ok};
 
 impl AppRouterImpl {
@@ -21,258 +20,152 @@ impl AppRouterImpl {
         preferred_alias: &str,
         resolved: ResolvedCounterparty,
     ) -> AppResult {
-        if let Some(existing) = self
-            .contact_manager
-            .get_verified_contact(resolved.device_id)
+        match self
+            .add_contact_from_resolved(preferred_alias, resolved)
             .await
         {
-            let genesis_matches = existing.genesis_hash == resolved.genesis_hash;
-            let signing_key_matches = resolved.signing_public_key.is_empty()
-                || existing.public_key.is_empty()
-                || existing.public_key == resolved.signing_public_key;
-            if genesis_matches && signing_key_matches {
-                let resp = generated::ContactAddResponse {
-                    alias: existing.alias.clone(),
-                    device_id: existing.device_id.to_vec(),
-                    genesis_hash: Some(generated::Hash32 {
-                        v: existing.genesis_hash.to_vec(),
-                    }),
-                    chain_tip: existing
-                        .chain_tip
-                        .as_ref()
-                        .map(|h| generated::Hash32 { v: h.to_vec() }),
-                    chain_tip_smt_proof: None,
-                    alias_binding: None,
-                    genesis_verified_online: existing.genesis_verified_online,
-                    verify_counter: existing.verified_at_commit_height,
-                    added_counter: 0,
-                    verifying_storage_nodes: existing
-                        .verifying_storage_nodes
-                        .iter()
-                        .map(|nid| nid.to_string())
-                        .collect(),
-                    ble_address: existing.ble_address.clone().unwrap_or_default(),
-                    signing_public_key: existing.public_key.clone(),
-                    send_status: Some(derive_local_send_status_for_device_id(&existing.device_id)),
-                };
-                return pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(resp));
-            }
-
-            log::warn!(
-                "[contacts.add] repairing existing contact device={} genesis_match={} signing_key_match={}",
-                crate::util::text_id::encode_base32_crockford(&resolved.device_id)
-                    .get(..8)
-                    .unwrap_or("?"),
-                genesis_matches,
-                signing_key_matches,
-            );
+            Ok(added) => pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(added)),
+            Err(e) => err(e),
         }
+    }
 
-        let mut cm = self.contact_manager.clone();
-        let alias_short: String = {
-            let preferred = preferred_alias.trim().to_string();
-            if !preferred.is_empty() {
-                preferred
-            } else {
-                crate::util::text_id::encode_base32_crockford(&resolved.device_id)
+    /// Add the counterparty a directory read proved, and establish the
+    /// relationship before any step on it (§26). The one path a contact is
+    /// added by: `contacts.addManual`, and a connected application or wallet
+    /// (DSM Amendment A11).
+    pub(crate) async fn add_contact_from_resolved(
+        &self,
+        preferred_alias: &str,
+        resolved: ResolvedCounterparty,
+    ) -> Result<generated::ContactAddResponse, String> {
+        let device_id = resolved.entry.body.device_id;
+        if let Some(existing) = self.contact_manager.get_verified_contact(device_id).await {
+            if existing.genesis_hash == resolved.entry.body.genesis
+                && existing.public_key == resolved.entry.body.ak_public_key
+            {
+                // A contact whose relationship an earlier attempt did not
+                // establish is established now.
+                if let Err(e) = self.core_sdk.establish_relationship(device_id) {
+                    return Err(format!("contacts.add: establishing the relationship: {e}"));
+                }
+                return Ok(contact_add_response(&existing));
+            }
+            log::warn!(
+                "[contacts.add] the scanned identity replaces the contact device={}",
+                crate::util::text_id::encode_base32_crockford(&device_id)
                     .chars()
                     .take(8)
-                    .collect()
-            }
+                    .collect::<String>(),
+            );
+        }
+
+        let alias = match preferred_alias.trim() {
+            "" => crate::util::text_id::encode_base32_crockford(&device_id)
+                .chars()
+                .take(8)
+                .collect(),
+            preferred => preferred.to_string(),
         };
 
-        log::info!(
-            "[DSM_SDK] 🔍 Contact resolution: payload_len={}, device_id_preview={:?}, genesis_hash_preview={:?}",
-            resolved.genesis_payload.len(),
-            &resolved.device_id[..8],
-            &resolved.genesis_hash[..8]
-        );
+        let mut cm = self.contact_manager.clone();
+        let added = match cm
+            .add_contact_from_directory(&alias, &resolved.entry, resolved.verifying_nodes)
+            .await
+        {
+            Ok(added) => added,
+            Err(e) => return Err(format!("Add contact failed: {e}")),
+        };
+        // The relationship exists from here: its leaf enters this device's
+        // tree at h_0, before any step on it (§26).
+        if let Err(e) = self.core_sdk.establish_relationship(device_id) {
+            return Err(format!("contacts.add: establishing the relationship: {e}"));
+        }
 
-        if resolved.genesis_payload.is_empty() {
-            log::info!(
-                "[DSM_SDK] Contact add: using verified-hash path; alias={}, verifying_nodes={}",
-                alias_short,
-                resolved.verifying_nodes.len()
-            );
-            let verifying_nodes = resolved.verifying_nodes.clone();
-
-            match cm
-                .add_contact_with_verified_hash_from_nodes_and_signing_key(
-                    resolved.device_id,
-                    &alias_short,
-                    resolved.genesis_hash,
-                    verifying_nodes,
-                    resolved.signing_public_key.clone(),
-                )
-                .await
-            {
-                Ok(verified) => {
-                    let ble_contact = dsm::types::contact_types::DsmVerifiedContact {
-                        alias: alias_short.clone(),
-                        device_id: resolved.device_id,
-                        genesis_hash: resolved.genesis_hash,
-                        public_key: resolved.signing_public_key.clone(),
-                        genesis_material: Vec::new(),
-                        chain_tip: None,
-                        chain_tip_smt_proof: None,
-                        genesis_verified_online: true,
-                        verified_at_commit_height: crate::util::deterministic_time::tick(),
-                        added_at_commit_height: crate::util::deterministic_time::tick(),
-                        last_updated_commit_height: crate::util::deterministic_time::tick(),
-                        verifying_storage_nodes: Vec::new(),
-                        ble_address: None,
-                    };
-                    match crate::bluetooth::ensure_bluetooth_manager_and_sync_contact(ble_contact)
-                        .await
-                    {
-                        Ok(true) => {
-                            log::warn!("[contacts.add] ✅ Synced contact device_id={} with public_key_len={} to BluetoothManager for BLE bilateral (verified-hash path)",
-                                dsm::core::utility::labeling::hash_to_short_id(&resolved.device_id), resolved.signing_public_key.len());
-                        }
-                        Ok(false) => {
-                            log::warn!(
-                                "[contacts.add] ⚠️ BLE not available on this platform or no identity yet (verified-hash path)"
-                            );
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "[contacts.add] ❌ Failed to sync contact to BluetoothManager (verified-hash path): {e}"
-                            );
-                        }
-                    }
-                    pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(verified))
+        #[cfg(all(target_os = "android", feature = "bluetooth"))]
+        {
+            let Some(stored) = cm.get_verified_contact(device_id).await else {
+                return Err("contact added, but it is not held in memory".into());
+            };
+            match crate::bluetooth::sync_contact_to_bluetooth_manager(stored).await {
+                Ok(true) => log::info!(
+                    "[contacts.add] synced contact device_id={} to the BluetoothManager",
+                    dsm::core::utility::labeling::hash_to_short_id(&device_id)
+                ),
+                Ok(false) => log::info!(
+                    "[contacts.add] no BLE stack yet: init loads the contact when it builds one"
+                ),
+                Err(e) => {
+                    return Err(format!(
+                        "contact added, but syncing it to the BluetoothManager failed: {e}"
+                    ))
                 }
-                Err(e) => err(format!("Add contact (verified-hash) failed: {e}")),
-            }
-        } else {
-            log::info!(
-                "[DSM_SDK] Contact add: using payload+hash path; alias={}",
-                alias_short
-            );
-            match cm
-                .add_contact_with_genesis_and_hash_and_signing_key(
-                    resolved.device_id,
-                    &alias_short,
-                    resolved.genesis_hash,
-                    &resolved.genesis_payload,
-                    resolved.signing_public_key.clone(),
-                    resolved.verifying_nodes.clone(),
-                )
-                .await
-            {
-                Ok(verified) => {
-                    let ble_contact = dsm::types::contact_types::DsmVerifiedContact {
-                        alias: alias_short.clone(),
-                        device_id: resolved.device_id,
-                        genesis_hash: resolved.genesis_hash,
-                        public_key: resolved.signing_public_key.clone(),
-                        genesis_material: Vec::new(),
-                        chain_tip: None,
-                        chain_tip_smt_proof: None,
-                        genesis_verified_online: true,
-                        verified_at_commit_height: crate::util::deterministic_time::tick(),
-                        added_at_commit_height: crate::util::deterministic_time::tick(),
-                        last_updated_commit_height: crate::util::deterministic_time::tick(),
-                        verifying_storage_nodes: Vec::new(),
-                        ble_address: None,
-                    };
-                    match crate::bluetooth::ensure_bluetooth_manager_and_sync_contact(ble_contact)
-                        .await
-                    {
-                        Ok(true) => {
-                            log::warn!("[contacts.add] ✅ Synced contact device_id={} with public_key_len={} to BluetoothManager for BLE bilateral (genesis path)",
-                                dsm::core::utility::labeling::hash_to_short_id(&resolved.device_id), resolved.signing_public_key.len());
-                        }
-                        Ok(false) => {
-                            log::warn!(
-                                "[contacts.add] ⚠️ BLE not available on this platform or no identity yet (genesis path)"
-                            );
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "[contacts.add] ❌ Failed to sync contact to BluetoothManager (genesis path): {e}"
-                            );
-                        }
-                    }
-                    pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(verified))
-                }
-                Err(e) => err(format!("Add contact (genesis+hash) failed: {e}")),
             }
         }
+        // Pairing takes the new contact up now, if the session lets it run.
+        crate::bluetooth::contact_added();
+        Ok(added)
     }
 
     pub(crate) async fn handle_contacts_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "contacts.list" => {
-                let list = self.contact_manager.list_verified_contacts().await;
-                log::info!("[contacts.list] Returning {} contacts", list.len());
-                for c in &list {
-                    log::info!(
-                        "[contacts.list] Contact: alias='{}' (len={}), device_id len={}, genesis_hash len={}",
-                        c.alias,
-                        c.alias.len(),
-                        c.device_id.len(),
-                        c.genesis_hash.len()
-                    );
+                let list = match self.contact_manager.list_verified_contacts().await {
+                    Ok(list) => list,
+                    Err(e) => return err(format!("contacts.list: {e}")),
+                };
+                let mut items = Vec::with_capacity(list.len());
+                for contact in &list {
+                    let record = match crate::storage::client_db::get_contact_by_device_id(
+                        &contact.device_id,
+                    ) {
+                        Ok(Some(record)) => record,
+                        Ok(None) => {
+                            return err(
+                                "contacts.list: a listed contact has no persisted row".into()
+                            )
+                        }
+                        Err(e) => return err(format!("contacts.list: contact lookup: {e}")),
+                    };
+                    let mut item = contact_add_response(contact);
+                    item.send_status = Some(derive_local_send_status_for_contact(&record));
+                    let session = crate::bluetooth::get_pairing_orchestrator()
+                        .get_session_status(&contact.device_id)
+                        .await;
+                    item.pairing = crate::bluetooth::pairing_orchestrator::contact_pairing_phase(
+                        record.ble_address.as_deref().is_some_and(|a| !a.is_empty()),
+                        session.as_ref(),
+                    ) as i32;
+                    items.push(item);
                 }
-                let items: Vec<generated::ContactAddResponse> = list
-                    .into_iter()
-                    .map(|c| generated::ContactAddResponse {
-                        alias: c.alias,
-                        device_id: c.device_id.to_vec(),
-                        genesis_hash: Some(generated::Hash32 {
-                            v: c.genesis_hash.to_vec(),
-                        }),
-                        chain_tip: c
-                            .chain_tip
-                            .as_ref()
-                            .map(|h| generated::Hash32 { v: h.to_vec() }),
-                        chain_tip_smt_proof: None,
-                        alias_binding: None,
-                        genesis_verified_online: c.genesis_verified_online,
-                        verify_counter: c.verified_at_commit_height,
-                        added_counter: c.added_at_commit_height,
-                        verifying_storage_nodes: c
-                            .verifying_storage_nodes
-                            .iter()
-                            .map(|nid| nid.to_string())
-                            .collect(),
-                        ble_address: c.ble_address.clone().unwrap_or_default(),
-                        signing_public_key: c.public_key.clone(),
-                        send_status: crate::storage::client_db::get_contact_by_device_id(
-                            &c.device_id,
-                        )
-                        .ok()
-                        .flatten()
-                        .map(|record| derive_local_send_status_for_contact(&record))
-                        .or_else(|| Some(derive_local_send_status_for_device_id(&c.device_id))),
-                    })
-                    .collect();
-
                 let reply = generated::ContactsListResponse { contacts: items };
                 pack_envelope_ok(generated::envelope::Payload::ContactsListResponse(reply))
             }
 
-            "contacts.handle_contact_qr_v3" => {
+            // The card a scanned or pasted contact code carries, read by Rust:
+            // the screen renders it and adds the contact through
+            // `contacts.addManual`.
+            "contacts.readContactCode" => {
                 let pack = match generated::ArgPack::decode(&*q.params) {
                     Ok(p) => p,
                     Err(e) => return err(format!("decode ArgPack failed: {e}")),
                 };
                 if pack.codec != generated::Codec::Proto as i32 {
-                    return err("contacts.handle_contact_qr_v3: ArgPack.codec must be PROTO".into());
+                    return err("contacts.readContactCode: ArgPack.codec must be PROTO".into());
                 }
-                let qr = match generated::ContactQrV3::decode(&*pack.body) {
-                    Ok(qr) => qr,
-                    Err(e) => return err(format!("decode ContactQrV3 failed: {e}")),
+                let scanned = match generated::QrScanResultPayload::decode(&*pack.body) {
+                    Ok(scanned) => scanned,
+                    Err(e) => {
+                        return err(format!(
+                            "contacts.readContactCode: decode QrScanResultPayload failed: {e}"
+                        ))
+                    }
                 };
-
-                let resolved = match resolve_counterparty_via_transport(&qr).await {
-                    Ok(r) => r,
-                    Err(e) => return err(format!("counterparty resolve failed: {e}")),
-                };
-
-                self.add_resolved_contact(&qr.preferred_alias, resolved)
-                    .await
+                match super::identity_routes::read_contact_code(&scanned.text_utf8) {
+                    Ok(card) => {
+                        pack_envelope_ok(generated::envelope::Payload::ContactQrResponse(card))
+                    }
+                    Err(e) => err(format!("contacts.readContactCode: {e}")),
+                }
             }
 
             other => err(format!("contacts: unknown route '{other}'")),
@@ -334,8 +227,6 @@ mod tests {
         let qr = generated::ContactQrV3 {
             device_id: device_id.clone(),
             network: "test".into(),
-            storage_nodes: vec!["http://node1:8080".into(), "http://node2:8081".into()],
-            sdk_fingerprint: vec![0x11; 32],
             genesis_hash: genesis_hash.clone(),
             signing_public_key: vec![0x22; 64],
             preferred_alias: "Alice".into(),
@@ -348,7 +239,6 @@ mod tests {
         assert_eq!(decoded.genesis_hash, genesis_hash);
         assert_eq!(decoded.preferred_alias, "Alice");
         assert_eq!(decoded.network, "test");
-        assert_eq!(decoded.storage_nodes.len(), 2);
         assert_eq!(decoded.signing_public_key.len(), 64);
     }
 
@@ -378,7 +268,7 @@ mod tests {
             ..Default::default()
         };
         let arg_pack = generated::ArgPack {
-            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            schema_hash: None,
             codec: generated::Codec::Proto as i32,
             body: qr.encode_to_vec(),
         };
@@ -408,15 +298,13 @@ mod tests {
             device_id: vec![0x55; 32],
             genesis_hash: Some(generated::Hash32 { v: vec![0x66; 32] }),
             chain_tip: Some(generated::Hash32 { v: vec![0x77; 32] }),
-            chain_tip_smt_proof: None,
             alias_binding: None,
             genesis_verified_online: true,
-            verify_counter: 42,
-            added_counter: 10,
             verifying_storage_nodes: vec!["node1".into(), "node2".into()],
             ble_address: "AA:BB:CC:DD:EE:FF".into(),
             signing_public_key: vec![0x88; 64],
             send_status: None,
+            pairing: generated::ContactPairingPhase::Paired as i32,
         };
 
         let bytes = resp.encode_to_vec();
@@ -424,9 +312,71 @@ mod tests {
 
         assert_eq!(decoded.alias, "Carol");
         assert!(decoded.genesis_verified_online);
-        assert_eq!(decoded.verify_counter, 42);
-        assert_eq!(decoded.added_counter, 10);
         assert_eq!(decoded.verifying_storage_nodes.len(), 2);
         assert_eq!(decoded.ble_address, "AA:BB:CC:DD:EE:FF");
+    }
+}
+
+#[cfg(test)]
+mod pairing_phase_tests {
+    use crate::bridge::{AppQuery, AppRouter};
+    use dsm::types::proto as generated;
+    use dsm::types::proto::ContactPairingPhase as Phase;
+
+    async fn pairing_with(
+        device: &crate::test_support::two_device::TestDevice,
+        peer: [u8; 32],
+    ) -> Phase {
+        device.enter();
+        let answer = device
+            .router()
+            .query(AppQuery {
+                path: "contacts.list".to_string(),
+                params: Vec::new(),
+            })
+            .await;
+        assert!(answer.success, "contacts.list: {:?}", answer.error_message);
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answer.data)
+            .expect("a local answer");
+        let Some(generated::envelope::Payload::ContactsListResponse(list)) = env.payload else {
+            panic!("contacts.list answered {:?}", env.payload);
+        };
+        let contact = list
+            .contacts
+            .iter()
+            .find(|c| c.device_id == peer.to_vec())
+            .expect("the peer is listed");
+        Phase::try_from(contact.pairing).expect("a named phase")
+    }
+
+    /// The contact list states where BLE pairing with each contact stands, as
+    /// the SDK's pairing loop has it. The contacts screen used to infer it from
+    /// raw radio events, and showed "Paired!" when an appliance's identity was read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn the_contact_list_states_where_pairing_stands() {
+        let pair = crate::test_support::two_device::Pair::boot(0, 0).await;
+        let (a, b) = (&pair.a, &pair.b);
+        let orchestrator = crate::bluetooth::get_pairing_orchestrator();
+
+        assert_eq!(pairing_with(a, b.device_id).await, Phase::Idle);
+
+        a.enter();
+        orchestrator
+            .initiate_pairing(b.device_id)
+            .await
+            .expect("a session for B");
+        assert_eq!(pairing_with(a, b.device_id).await, Phase::Searching);
+
+        a.enter();
+        crate::storage::client_db::update_contact_ble_status(
+            &b.device_id,
+            None,
+            Some("AA:BB:CC:DD:EE:0B"),
+        )
+        .expect("pairing stores the address");
+        assert_eq!(pairing_with(a, b.device_id).await, Phase::Paired);
+
+        orchestrator.cancel_pairing(&b.device_id).await;
     }
 }

@@ -159,7 +159,10 @@ impl DevTreeProof {
             path_bits.push(bit);
         }
 
-        if offset + num_siblings * 32 != data.len() {
+        // In u64: on a 32-bit target `num_siblings * 32` wraps for a hostile
+        // count, and a wrapped length would pass this check while the copies
+        // below index past the input.
+        if offset as u64 + num_siblings as u64 * 32 != data.len() as u64 {
             return None;
         }
 
@@ -311,6 +314,21 @@ impl DeviceTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A proof that names more siblings than it carries is refused. The count
+    /// here is `2^27`, whose byte length `2^32` wraps to 0 on a 32-bit target,
+    /// so a length check in `usize` would accept these nine bytes there.
+    #[test]
+    fn a_proof_naming_more_siblings_than_it_carries_is_refused() {
+        assert!(
+            DevTreeProof::from_bytes(&[0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x00, 0x00])
+                .is_none()
+        );
+        assert!(
+            DevTreeProof::from_bytes(&[0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00])
+                .is_none()
+        );
+    }
 
     #[test]
     fn test_single_device_tree() {

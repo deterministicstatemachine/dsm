@@ -1,0 +1,29 @@
+# Known facts about the shipped builds the map must keep reading (make
+# requirement-map, then `ci/requirement_map.py check --sentinels`). A lost
+# sentinel fails the check: either the code changed on purpose (change the row
+# in the same pull request, saying why) or the map broke.
+artifact	path	state	code	why
+android	dsm_sdk::jni::JNI_OnLoad	reached	REACHED	the JVM calls it when it loads the library
+android	dsm_sdk::jni::unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngress	reached	REACHED	a JNI export the app's Kotlin declares
+android	dsm_sdk::jni::unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_getSessionSnapshot	reached	REACHED	JNI_OnLoad takes its address so the linker keeps it
+android	dsm_sdk::bridge::get_all_balances_strict	reached	REACHED	a direct call from a JNI export
+android	dsm::core::bridge::install_app_router	reached	REACHED	a call from the SDK into the core crate
+android	dsm_sdk::handlers::app_router_impl::AppRouterImpl::AppRouter::query	reached	REACHED_VIA_DISPATCH	app-router dispatch: the router is constructed where the SDK starts
+android	dsm_sdk::handlers::app_router_impl::AppRouterImpl::AppRouter::invoke	reached	REACHED_VIA_DISPATCH	app-router dispatch
+android	dsm::economic::peer_lineage::SourceAncestry::ProvenanceResolver::anchored_policy_bytes	reached	REACHED_VIA_DISPATCH	trait dispatch on a constructed resolver
+android	dsm::sofi::smt::fold::EconomicHashes::SmtHashes::leaf	reached	REACHED_VIA_DISPATCH	an associated trait function dispatched on as a type argument
+android	dsm::economic::write_set::build_write_set	reached	REACHED_VIA_DISPATCH	a cross-module call reached through the router
+android	dsm_sdk::bridge::install_anchor_appliance_factory	indeterminate	IND_UNINDEXED_ARTIFACT	only the anchor crate calls it, which the map cannot index here
+android	dsm_sdk::sdk::core_sdk::CoreSDK::forget_process_startup_admissions_for_testing	not-in-artifact	NOT_IN_ARTIFACT	test-utils code the shipped build does not compile
+android	dsm_sdk::jni::unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenerateAddress	dead	DEAD_NO_ROOT_PATH	an export no Kotlin declares: a dead-root candidate, reached from nothing
+android	dsm::crypto::anchor_enrollment::InMemoryAnchorEnrollmentStore::AnchorEnrollmentStore::admit	indeterminate	IND_DISPATCH_SELF_TYPE	the store trait's methods are reached, and the shipped build never makes the in-memory store
+android	dsm::core::token::policy::policy_enforcement::EnforcementError::Display::fmt	indeterminate	IND_NOT_CONSTRUCTED	reached code names EnforcementError and makes none of its values
+android	dsm::sofi::resolve::VerifierFailure::From::from	indeterminate	IND_NOT_DISPATCHED	a From impl that `?` or `into()` would call, which the index does not show
+android	dsm::crypto::anchor_enrollment::dyn::Debug::fmt	indeterminate	IND_UNLINKED_IMPL	Debug implemented on a trait object, which the index holds no type symbol for
+android	dsm::common::device_tree::DeviceTree::len	indeterminate	IND_UNRESOLVED_CALL	a `.len()` in reached code (crypto/kyber.rs) the index left unresolved: every method of that name is undecided
+android	dsm_sdk::bluetooth::bilateral_transport_adapter::BleTransportDelegate	reached	REACHED	a trait reached from a reached impl of it (impl-of)
+android	dsm::core::bilateral_transaction_manager::BilateralTransactionManager	reached	REACHED	a type reached through a reached method taking its value (member-of)
+android	dsm::bilateral::offline::AcceptedStep	reached	REACHED	a type reached where reached code makes a value of it (construct)
+android	dsm::ccb::decode::DecodeError::Display::fmt	reached	REACHED_VIA_DISPATCH	an outside trait's method on a type reached code makes (self-type)
+android	dsm::ccb::FEE_DENOMINATOR	reached	REACHED_VIA_DISPATCH	a constant named only inside a format string (format-capture)
+node	dsm_storage_node::main	reached	REACHED	the storage node binary's main

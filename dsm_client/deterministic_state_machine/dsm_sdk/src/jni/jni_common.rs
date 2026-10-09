@@ -172,7 +172,7 @@ pub fn jvalue_bytearray_to_vec(env: &JNIEnv<'_>, val: JValueOwned) -> Result<Vec
     // `.l()` CONSUMES `val`; call it exactly once.
     let obj: JObject = match val.l() {
         Ok(o) => o,
-        Err(_) => return Ok(Vec::new()),
+        Err(e) => return Err(format!("expected JObject byte array, got JNI error: {e}")),
     };
     if obj.is_null() {
         return Ok(Vec::new());

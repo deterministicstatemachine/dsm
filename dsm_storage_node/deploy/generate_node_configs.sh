@@ -34,7 +34,7 @@ set -- "${ARGS[@]+"${ARGS[@]}"}"
 if [ "$#" -lt 2 ]; then
     echo "Usage: $0 [--force] IP1 IP2 [IP3 ... IPN]"
     echo "  Generates per-node deploy bundles for DSM storage nodes."
-    echo "  Minimum 2 nodes; recommended 6 for N=6 K=3 replication."
+    echo "  Minimum 2 nodes."
     echo "  --force: overwrite an existing bundle directory (see the warning below)."
     exit 1
 fi
@@ -42,8 +42,12 @@ fi
 # THIS SCRIPT MINTS A NEW CA AND DELETES THE OLD ONE.
 #
 # The CA private key exists in exactly one place — ${OUT_DIR}/ca/ca.key. It is
-# not in git (only the public cert is, as scripts/ca.crt) and it cannot be
-# reconstructed. Deleting it means the deployed fleet's certificates can never
+# not in git, and it cannot be reconstructed. (The public cert lives beside it
+# at ${OUT_DIR}/ca/ca.crt and is bundled into clients as the app asset
+# dsm_client/frontend/public/ca.crt. A second committed copy at scripts/ca.crt
+# was deleted 2026-09-12: it had drifted to a DIFFERENT CA with the same
+# subject, so the two disagreed silently about which fleet a client could
+# trust. Keep exactly one public cert in the tree.) Deleting it means the deployed fleet's certificates can never
 # be reissued or extended: every node must be redeployed with a new CA, and
 # every client CA bundle re-pushed, before anything can talk to anything.
 #
@@ -92,9 +96,8 @@ PG_PASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
 # member list, and inventing one would produce a fleet whose configured
 # incarnations no node actually holds; every node would refuse to start.
 #
-# So these bundles ship with `[storage_set]` commented out (register INACTIVE,
-# every claim refused — the correct state for a fleet that has not agreed on a
-# set yet). Boot them, collect each node's logged
+# So these bundles ship with `[storage_set]` commented out (each node serves the
+# storage contract and mirrors no set-mate until the set is written). Boot them, collect each node's logged
 # `register incarnation for node <id>: <Base32-Crockford>`, write the full member
 # list into every node config AND the client env config, then restart.
 echo "Storage set: NOT configured by this generator (phase 1)."
@@ -131,27 +134,17 @@ EXTEOF
     cp "${CA_DIR}/ca.crt" "${NODE_DIR}/certs/ca.crt"
     chmod 600 "${NODE_DIR}/certs/node.key"
 
-    # --- Build peer list (all nodes except self) ---
-    PEERS=""
-    for j in $(seq 1 "${N}"); do
-        if [ "${j}" -ne "${i}" ]; then
-            PEER_IP="${IPS[$((j - 1))]}"
-            if [ -n "${PEERS}" ]; then
-                PEERS="${PEERS}, "
-            fi
-            PEERS="${PEERS}\"https://${PEER_IP}:8080\""
-        fi
-    done
-
     # --- Node config from template ---
-    DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}"
+    # The database is the node's sibling container on the compose network,
+    # which serves no TLS; the URL says so rather than letting a client fall
+    # back to plaintext behind a TLS setting.
+    DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}&sslmode=disable"
     # Escape '&' in DB_URL so sed doesn't interpret it as backreference
     DB_URL_ESCAPED="${DB_URL//&/\\&}"
     sed -e "s|__NODE_ID__|${NODE_ID}|g" \
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
         -e "s|__DATABASE_URL__|${DB_URL_ESCAPED}|g" \
-        -e "s|peers = .*|peers = [${PEERS}]|g" \
         "${TEMPLATE}" > "${NODE_DIR}/config/node.toml"
 
     # --- .env for docker-compose ---
@@ -160,7 +153,6 @@ POSTGRES_DB=dsm_storage
 POSTGRES_USER=dsm
 POSTGRES_PASSWORD=${PG_PASS}
 DSM_PORT=8080
-DSM_METRICS_PORT=9090
 RUST_LOG=info
 ENVEOF
 

@@ -5,9 +5,11 @@
  * Options: SECURE NOW, LATER (this session), NEVER ASK (persists).
  */
 
-import React, { memo } from 'react';
+import React, { memo, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import type { ScreenType } from '../../types/app';
 import { saveLockPrefs } from '../../services/lock/lockService';
+import { useBackButton } from '../../hooks/useBackButton';
 
 interface Props {
   onNavigate: (s: ScreenType) => void;
@@ -15,6 +17,8 @@ interface Props {
 }
 
 function LockPromptModal({ onNavigate, onDismiss }: Props) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
   const handleNever = async () => {
     await saveLockPrefs({ promptDismissed: true }).catch(() => {});
     onDismiss();
@@ -29,64 +33,55 @@ function LockPromptModal({ onNavigate, onDismiss }: Props) {
     onDismiss();
   };
 
-  return (
+  // B puts the prompt away for this session, as tapping outside does.
+  useBackButton(true, handleLater);
+
+  useEffect(() => {
+    dialogRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  // Its shade covers the whole display: the screen and the nav bar under it,
+  // which both sit in the shell's screen wrapper (the controller stays live,
+  // so B puts the prompt away). Above the screen (z 5), its nav bar (z 20)
+  // and the home screen's chameleon; below the tour, which portals above the
+  // whole shell.
+  const layer = document.querySelector('.screen-wrapper') ?? document.body;
+
+  return createPortal(
     <div
-      style={{
-        position: 'absolute',
-        inset: 0,
-        zIndex: 8000,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'transparent',
-      }}
+      className="sb-popover-backdrop"
+      style={{ zIndex: 8000 }}
       onClick={(e) => { if (e.target === e.currentTarget) handleLater(); }}
     >
       <div
-        style={{
-          background: 'var(--bg, #9bbc0f)',
-          border: '2px solid var(--border, #306230)',
-          borderRadius: '12px',
-          padding: '20px 16px',
-          width: '260px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '10px',
-          fontFamily: "'Martian Mono', monospace",
-          color: 'var(--text-dark, #0f380f)',
-        }}
+        ref={dialogRef}
+        className="sb-popover"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lock-prompt-title"
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
       >
-        <div style={{ fontSize: '11px', fontWeight: 'bold', letterSpacing: '2px', textAlign: 'center' }}>
-          PROTECT YOUR WALLET?
+        <div className="sb-popover__head">
+          <h3 id="lock-prompt-title" className="sb-popover__title">PROTECT YOUR WALLET?</h3>
         </div>
-        <div style={{ fontSize: '8px', letterSpacing: '1px', lineHeight: '1.5', textAlign: 'center', opacity: 0.8 }}>
-          SET UP A PIN, BIOMETRIC, OR<br />
-          BUTTON COMBO TO LOCK YOUR WALLET.<br />
-          LOCKS IMMEDIATELY ON EXIT OR SCREEN OFF.
+        <div className="sb-popover__body">
+          <p>Set up a PIN or a button combo to lock your wallet. It locks when you leave the app or the screen goes off.</p>
         </div>
-        <button
-          className="settings-action-btn"
-          onClick={handleNow}
-          style={{ fontSize: '10px', fontWeight: 'bold' }}
-        >
+        <button type="button" className="sb-btn sb-btn--primary sb-btn--block sb-popover__ok" onClick={handleNow}>
           SECURE NOW
         </button>
-        <button
-          className="settings-action-btn"
-          onClick={handleLater}
-          style={{ fontSize: '9px' }}
-        >
-          LATER
-        </button>
-        <button
-          className="settings-action-btn"
-          onClick={() => void handleNever()}
-          style={{ fontSize: '8px', opacity: 0.7 }}
-        >
-          NEVER ASK
-        </button>
+        <div className="sb-actions" style={{ margin: 0 }}>
+          <button type="button" className="sb-btn" style={{ color: 'var(--bg)', borderColor: 'var(--bg)', background: 'transparent', boxShadow: 'none' }} onClick={handleLater}>
+            LATER
+          </button>
+          <button type="button" className="sb-btn sb-btn--ghost" style={{ color: 'var(--bg)', borderColor: 'rgba(var(--bg-rgb), 0.5)' }} onClick={() => void handleNever()}>
+            NEVER ASK
+          </button>
+        </div>
       </div>
-    </div>
+    </div>,
+    layer,
   );
 }
 

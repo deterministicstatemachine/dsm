@@ -3,6 +3,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { acceptOfflineTransfer } from '../index';
 import { acceptBilateralByCommitmentBridge } from '../WebViewBridge';
+import { bridgeEvents } from '../../bridge/bridgeEvents';
 import * as pb from '../../proto/dsm_app_pb';
 
 // Helper to wrap responses in DSM_BRIDGE format
@@ -25,16 +26,18 @@ describe('bilateral accept event dispatch', () => {
     jest.restoreAllMocks();
   });
 
-  test('acceptOfflineTransfer dispatches dsm-bilateral-committed', async () => {
+  // One accept, one accepted signal. It used to be dispatched as a window
+  // event the adapter re-emitted on the bus, and emitted on the bus again.
+  test('acceptOfflineTransfer emits wallet.bilateralAccepted exactly once', async () => {
     const commitmentHash = new Uint8Array(32).fill(2);
     const counterpartyDeviceId = new Uint8Array(32).fill(3);
     const env = new pb.Envelope({
       version: 3,
-      payload: { case: 'appStateResponse', value: new pb.AppStateResponse({ key: 'ok' }) },
+      payload: { case: 'bilateralPrepareResponse', value: new pb.BilateralPrepareResponse({}) },
     } as any);
     const framed = frameEnvelope(env);
     (window as any).DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
         const payload = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
@@ -43,20 +46,18 @@ describe('bilateral accept event dispatch', () => {
           expect(payload.length).toBe(32);
           return wrapSuccessEnvelope(framed);
         }
-        throw new Error(`unhandled __callBin method: ${method}`);
+        throw new Error(`unhandled bridge method: ${method}`);
       },
     };
 
     const handler = jest.fn();
-    window.addEventListener('dsm-bilateral-committed', handler as EventListener, { once: true });
+    const off = bridgeEvents.on('wallet.bilateralAccepted', handler as any);
 
     await acceptOfflineTransfer({ commitmentHash, counterpartyDeviceId });
+    off();
 
     expect(handler).toHaveBeenCalledTimes(1);
-    const event = handler.mock.calls[0]?.[0] as CustomEvent | undefined;
-    expect(event?.detail).toEqual(expect.objectContaining({
-      accepted: true,
-      committed: true,
+    expect(handler.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
       commitmentHash,
       counterpartyDeviceId,
     }));
@@ -64,7 +65,7 @@ describe('bilateral accept event dispatch', () => {
 
   test('acceptBilateralByCommitmentBridge rejects invalid payload size', async () => {
     (window as any).DsmBridge = {
-      __callBin: async (_reqBytes: Uint8Array) => new Uint8Array([1]),
+      sendMessageBin: async (_reqBytes: Uint8Array) => new Uint8Array([1]),
     };
     await expect(acceptBilateralByCommitmentBridge(new Uint8Array([1, 2, 3]))).rejects.toThrow(/must be 32 bytes/i);
   });

@@ -6,6 +6,13 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "On-device glue for the DSM Software-Authority / Hardware-Identity anchor: installs the sender USB anchor appliance (UsbAnchorAppliance over the opaque Kotlin picoUsbTransceive) into the dsm_sdk bridge seam, plus gated device-setup ops (counter birth, slot-0 birth cage) and read-only chip diagnostics. Depends on dsm_sdk + dsm-anchor-hw-verifier in ONE direction (no dependency cycle); transitively pulls tropic01, so it is EXCLUDED from the workspace and built only in the Android cargo-ndk pipeline — the default CI workspace stays tropic01-free."
 
+# Its own workspace root. The repository workspace excludes this crate, and cargo keeps
+# climbing past an excluding root: from a checkout nested under another checkout (a git
+# worktree under `.claude/worktrees/`) it reaches the outer repository's manifest, which
+# neither lists nor excludes this path, and refuses to build. Declaring the root here stops
+# the climb wherever the checkout sits.
+[workspace]
+
 [lib]
 # rlib for host tests; staticlib/cdylib so the Android build can link the on-device JNI shell (H3).
 crate-type = ["rlib", "staticlib", "cdylib"]
@@ -45,6 +52,8 @@ jni = "0.21"
 # this cdylib ships as the app's libdsm_sdk.so (H3 packaging).
 [profile.release]
 opt-level = 3
+# Integer overflow stays a panic in the shipped profile (the root workspace sets the same).
+overflow-checks = true
 lto = false
 codegen-units = 1
 strip = false

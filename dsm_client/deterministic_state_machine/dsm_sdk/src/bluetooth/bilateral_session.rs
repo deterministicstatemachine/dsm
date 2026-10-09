@@ -3,75 +3,25 @@
 //! Bilateral BLE session types and session store.
 //!
 //! This module owns the core types for the 3-phase bilateral protocol
-//! (`BilateralBleSession`, `BilateralPhase`, `BilateralSettlementContext`,
-//! `BilateralSettlementDelegate`) and the [`SessionStore`] that manages
-//! the in-memory session map plus SQLite persistence.
+//! (`BilateralBleSession`, `BilateralPhase`, `BilateralSettlementDelegate`),
+//! the one mapping between a session and its `bilateral_sessions` row, and the
+//! [`SessionStore`] that holds the in-memory session map.
 //!
 //! The types are transport-layer-agnostic — no coin logic, no balance
 //! checks, no cross-SDK flag reads.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
-use log::{info, warn};
 use tokio::sync::Mutex;
 
-use crate::storage::client_db::{
-    delete_bilateral_session, deserialize_operation, get_all_bilateral_sessions,
-    serialize_operation, store_bilateral_session, BilateralSessionRecord,
-};
-use crate::util::text_id::encode_base32_crockford;
+use crate::storage::client_db::{deserialize_operation, serialize_operation, BilateralSessionRecord};
 
 // ---------------------------------------------------------------------------
 // Transport–application separation boundary
 // ---------------------------------------------------------------------------
-
-/// Context passed to [`BilateralSettlementDelegate::settle`] when the BLE
-/// protocol has cryptographically completed a bilateral transfer.
-///
-/// The transport layer never inspects token-specific fields directly.  All
-/// business decisions (balance debit/credit, token type, transaction history)
-/// are delegated to the application layer via this type.
-#[derive(Debug)]
-pub struct BilateralSettlementContext {
-    /// Local device identifier.
-    pub local_device_id: [u8; 32],
-    /// Remote peer's device identifier.
-    pub counterparty_device_id: [u8; 32],
-    /// Canonical commitment hash that uniquely identifies this session.
-    pub commitment_hash: [u8; 32],
-    /// Transaction hash produced by the state-machine finalization step.
-    pub transaction_hash: [u8; 32],
-    /// Serialised [`dsm::types::operations::Operation`] bytes.
-    /// The delegate MUST parse this to determine token type, amount, and direction.
-    pub operation_bytes: Vec<u8>,
-    /// Optional serialised cryptographic receipt (proof data).
-    pub proof_data: Option<Vec<u8>>,
-    /// `true` when the local device is the sender of the transfer.
-    pub is_sender: bool,
-    /// Transaction type label stored in the history record
-    /// (e.g. `"bilateral_offline"`, `"bilateral_offline_recovered"`).
-    pub tx_type: &'static str,
-    /// New bilateral chain tip required for the receiver-side atomic persistence
-    /// boundary.  Set to `[0u8; 32]` on sender paths where it is not needed.
-    pub new_chain_tip: [u8; 32],
-}
-
-/// Result returned by [`BilateralSettlementDelegate::settle`].
-///
-/// The settlement layer no longer carries a "canonical state" snapshot back to
-/// the transport. The canonical [`DeviceState`](dsm::types::device_state::DeviceState)
-/// head is installed at the [`execute_on_relationship`](crate::sdk::core_sdk::CoreSDK::execute_on_relationship)
-/// chokepoint, so settlement only needs to materialise display projections
-/// (SQLite `balance_projections`) and fire transfer hooks.
-#[derive(Debug, Default)]
-pub struct BilateralSettlementOutcome {
-    /// Transfer metadata used by frontend hooks and notifications.
-    pub transfer_meta: crate::sdk::transfer_hooks::TransferMeta,
-}
 
 /// Application-layer callback installed on [`BilateralBleHandler`](super::BilateralBleHandler).
 ///
@@ -80,21 +30,17 @@ pub struct BilateralSettlementOutcome {
 /// implementation is
 /// [`DefaultBilateralSettlementDelegate`](crate::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate).
 pub trait BilateralSettlementDelegate: Send + Sync {
-    /// Extract display metadata from raw operation bytes.
+    /// Extract display metadata from a step's operation and, for a transfer,
+    /// the terms that open it.
     ///
     /// Returns `(amount, token_id)`.  Both values may be `None` for
     /// non-transfer operations.  Used to populate event notification fields;
     /// must not mutate any state.
-    fn operation_metadata(&self, operation_bytes: &[u8]) -> (Option<u64>, Option<String>);
-
-    /// Apply token-specific settlement after a successful protocol run.
-    ///
-    /// Called once per completed bilateral transfer.  The delegate is
-    /// responsible for updating balances and persisting transaction history.
-    /// Returns [`TransferMeta`](crate::sdk::transfer_hooks::TransferMeta) for
-    /// upstream hooks, or an error string if persistence fails.
-    fn settle(&self, ctx: BilateralSettlementContext)
-        -> Result<BilateralSettlementOutcome, String>;
+    fn operation_metadata(
+        &self,
+        operation: &Operation,
+        terms: Option<&dsm::types::operations::TransferTerms>,
+    ) -> (Option<u64>, Option<String>);
 }
 
 // ---------------------------------------------------------------------------
@@ -114,44 +60,258 @@ pub struct BilateralBleSession {
     pub phase: BilateralPhase,
     pub local_signature: Option<Vec<u8>>,
     pub counterparty_signature: Option<Vec<u8>>,
-    pub created_at_ticks: u64,
-    pub expires_at_ticks: u64,
     /// BLE MAC address of the sender (for response routing)
     pub sender_ble_address: Option<String>,
-    /// Wall-clock creation time for staleness detection (in-memory only, not persisted)
-    pub created_at_wall: Instant,
-    /// Pre-generated entropy for sender finalize (sender-only).
-    /// Stored during commit construction so finalize reuses the same entropy,
-    /// ensuring the actual post-finalize tip matches the pre-computed
-    /// `shared_chain_tip_new` sent in the BilateralConfirmRequest.
-    pub pre_finalize_entropy: Option<[u8; 32]>,
-    /// Stitched receipt bytes built during `send_bilateral_confirm` (sender-only).
-    /// Cached here so `mark_sender_committed_with_post_state_hash` can persist
-    /// the same verifiable receipt instead of building a degraded one after the
-    /// Per-Device SMT has already been mutated.
+    /// SENDER-only: its own signed receipt of the step, built at confirm (its
+    /// A-side per-step EK, cert and signature). Its EK step is recorded from
+    /// it when the step commits.
     pub stitched_receipt_bytes: Option<Vec<u8>>,
+    /// SENDER-only: the receiver's counter-signed receipt from the verified
+    /// ack — the step's proof in the sender's history, and the receiver's EK
+    /// step.
+    pub counter_signed_receipt: Option<Vec<u8>>,
     /// Offline-bearer receiver challenge r_R. RECEIVER: the fresh challenge it issued in
     /// `BilateralPrepareResponse` (checked vs the release on confirm). SENDER: the challenge
     /// received from that response, bound into the appliance PREPARE. `None` for ordinary
     /// transfers.
     pub receiver_challenge: Option<[u8; 32]>,
     /// SENDER-only: the fused-anchor-state leaf update the appliance produced for this bearer
-    /// transfer, stashed at confirm-build time so `mark_sender_committed_with_post_state_hash`
+    /// transfer, stashed at confirm-build time so `finalize_sender_step`
     /// commits the SAME successor state the on-wire proofs were built from (both-or-neither). `None`
     /// for ordinary transfers and on the receiver side.
     pub anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
-    /// SENDER-only: the simulated post-advance Per-Device SMT root (`child_r_a`) that was placed on
-    /// the `BilateralConfirmRequest` and sent to the receiver. Stashed at confirm-build time so the
-    /// canonical commit can enforce both-or-neither: the committed root MUST equal this sent sim
-    /// root, else the sender fails closed to recovery (the receiver verified proofs against this
-    /// value). `None` for ordinary transfers and on the receiver side.
-    pub anchor_sim_root: Option<[u8; 32]>,
+    /// SENDER-only: the simulated post-advance Per-Device SMT root (`child_r_a`) the confirm's
+    /// receipt names, as sent to the receiver. Stashed at confirm-build time so the canonical
+    /// commit can enforce both-or-neither: the committed root MUST equal it, else the sender fails
+    /// closed to recovery (the receiver verified the receipt against this value). `None` on the
+    /// receiver side and before a confirm is built.
+    pub sent_child_root: Option<[u8; 32]>,
     /// SENDER-only: the offline-cash allocation debit for a bearer transfer, created ONCE at confirm-build
     /// and stashed here so the canonical commit draws value from the allocation identically to the sim.
     /// It carries the anchor bundle `B` — which is NOT recoverable from `anchor_leaf` (whose key is
     /// `H(B)`), so it must live as session state, never be reconstructed at commit. `Some` iff this
     /// bearer transfer is allocation-backed; `None` for ordinary transfers and on the receiver side.
     pub offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+    /// SENDER-only: the relationship tip the proposed step extends — its
+    /// precommitment's parent. With the operation it hashes to the
+    /// commitment, which is how a restart holds the precommitment again.
+    pub parent_tip: Option<[u8; 32]>,
+    /// The frame this session owes its counterparty until the counterparty
+    /// answers it: the sender's prepare (Prepared) or confirm
+    /// (ConfirmPending), the receiver's response (Accepted) — written with
+    /// the phase that owes it and delivered again whenever the link returns.
+    /// A rejected step keeps the signed rejection (or cancellation) that
+    /// ended it, the answer to the counterparty's next frame for the step.
+    pub owed_frame: Option<Vec<u8>>,
+    /// A transfer step: the terms its operation commits to — token, nonce,
+    /// mode and memo — which travel beside the operation over BLE and in no
+    /// public object (pre-audit item 4). `None` for any other step.
+    pub terms: Option<dsm::types::operations::TransferTerms>,
+}
+
+/// The kind of an offline protocol frame, whatever carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OfflineFrameKind {
+    Prepare,
+    PrepareResponse,
+    Confirm,
+}
+
+/// A frame a session owes its counterparty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwedFrame {
+    pub commitment_hash: [u8; 32],
+    pub kind: OfflineFrameKind,
+    pub bytes: Vec<u8>,
+}
+
+impl BilateralBleSession {
+    /// The frame this session owes, by the phase it is in: a proposal awaiting
+    /// its answer owes the prepare, an acceptance awaiting its confirm owes the
+    /// response, a confirm awaiting its ack owes the confirm. A session in any
+    /// other phase owes nothing.
+    /// The signed rejection or cancellation that ended this step, the answer
+    /// to any frame the counterparty sends for it again.
+    pub fn rejection(&self) -> Option<Vec<u8>> {
+        (self.phase == BilateralPhase::Rejected)
+            .then(|| self.owed_frame.clone())
+            .flatten()
+    }
+
+    pub fn owed(&self) -> Option<OwedFrame> {
+        let kind = match self.phase {
+            BilateralPhase::Prepared => OfflineFrameKind::Prepare,
+            BilateralPhase::Accepted => OfflineFrameKind::PrepareResponse,
+            BilateralPhase::ConfirmPending => OfflineFrameKind::Confirm,
+            _ => return None,
+        };
+        self.owed_frame.as_ref().map(|bytes| OwedFrame {
+            commitment_hash: self.commitment_hash,
+            kind,
+            bytes: bytes.clone(),
+        })
+    }
+}
+
+fn array32(what: &str, bytes: Option<&Vec<u8>>) -> Result<Option<[u8; 32]>, DsmError> {
+    bytes
+        .map(|b| {
+            <[u8; 32]>::try_from(b.as_slice()).map_err(|_| {
+                DsmError::invalid_operation(format!(
+                    "persisted bilateral session: {what} must be 32 bytes (got {})",
+                    b.len()
+                ))
+            })
+        })
+        .transpose()
+}
+
+impl BilateralBleSession {
+    /// The session's durable row: everything a restart needs to carry the
+    /// session on where it stopped.
+    pub fn to_record(&self) -> Result<BilateralSessionRecord, DsmError> {
+        let (spend_anchor_bundle, spend_asset, spend_amount) = match &self.offline_spend {
+            Some(spend) => (
+                Some(spend.anchor_bundle_b.to_vec()),
+                Some(spend.asset.to_vec()),
+                Some(i64::try_from(spend.amount).map_err(|_| {
+                    DsmError::invalid_operation("an offline spend's amount exceeds i64::MAX")
+                })?),
+            ),
+            None => (None, None, None),
+        };
+        Ok(BilateralSessionRecord {
+            commitment_hash: self.commitment_hash.to_vec(),
+            counterparty_device_id: self.counterparty_device_id.to_vec(),
+            counterparty_genesis_hash: self.counterparty_genesis_hash.map(|h| h.to_vec()),
+            operation_bytes: serialize_operation(&self.operation),
+            phase: phase_to_str(&self.phase).to_string(),
+            local_signature: self.local_signature.clone(),
+            counterparty_signature: self.counterparty_signature.clone(),
+            sender_ble_address: self.sender_ble_address.clone(),
+            stitched_receipt_bytes: self.stitched_receipt_bytes.clone(),
+            counter_signed_receipt: self.counter_signed_receipt.clone(),
+            parent_tip: self.parent_tip.map(|t| t.to_vec()),
+            receiver_challenge: self.receiver_challenge.map(|c| c.to_vec()),
+            sent_child_root: self.sent_child_root.map(|r| r.to_vec()),
+            anchor_leaf_key: self.anchor_leaf.as_ref().map(|l| l.key.to_vec()),
+            anchor_leaf_value: self.anchor_leaf.as_ref().map(|l| l.new_value.to_vec()),
+            spend_anchor_bundle,
+            spend_asset,
+            spend_amount,
+            owed_frame: self.owed_frame.clone(),
+            terms_bytes: self.terms.as_ref().map(|t| t.to_bytes()),
+        })
+    }
+
+    /// The session a durable row holds. A row that does not decode — a field
+    /// of the wrong length, an unknown phase, half an anchor leaf or half an
+    /// offline spend — is an error, never a session with a stand-in.
+    pub fn from_record(record: &BilateralSessionRecord) -> Result<Self, DsmError> {
+        let commitment_hash = array32("commitment_hash", Some(&record.commitment_hash))?
+            .ok_or_else(|| DsmError::invalid_operation("commitment_hash is required"))?;
+        let counterparty_device_id = array32(
+            "counterparty_device_id",
+            Some(&record.counterparty_device_id),
+        )?
+        .ok_or_else(|| DsmError::invalid_operation("counterparty_device_id is required"))?;
+        let operation = deserialize_operation(&record.operation_bytes).map_err(|e| {
+            DsmError::serialization_error(
+                "persisted bilateral session",
+                "operation_bytes",
+                Some(e.to_string()),
+                None::<std::io::Error>,
+            )
+        })?;
+        let anchor_leaf = match (
+            array32("anchor_leaf_key", record.anchor_leaf_key.as_ref())?,
+            array32("anchor_leaf_value", record.anchor_leaf_value.as_ref())?,
+        ) {
+            (Some(key), Some(new_value)) => {
+                Some(dsm::types::device_state::AnchorLeafUpdate { key, new_value })
+            }
+            (None, None) => None,
+            _ => {
+                return Err(DsmError::invalid_operation(
+                    "persisted bilateral session: half an anchor leaf",
+                ))
+            }
+        };
+        let offline_spend = match (
+            array32("spend_anchor_bundle", record.spend_anchor_bundle.as_ref())?,
+            array32("spend_asset", record.spend_asset.as_ref())?,
+            record.spend_amount,
+        ) {
+            (Some(anchor_bundle_b), Some(asset), Some(amount)) => {
+                Some(dsm::types::device_state::OfflineSpend {
+                    anchor_bundle_b,
+                    asset,
+                    amount: u64::try_from(amount).map_err(|_| {
+                        DsmError::invalid_operation(
+                            "persisted bilateral session: a negative offline spend",
+                        )
+                    })?,
+                })
+            }
+            (None, None, None) => None,
+            _ => {
+                return Err(DsmError::invalid_operation(
+                    "persisted bilateral session: half an offline spend",
+                ))
+            }
+        };
+        let terms = step_terms(&operation, record.terms_bytes.as_deref()).map_err(|e| {
+            DsmError::invalid_operation(format!("persisted bilateral session: {e}"))
+        })?;
+        Ok(Self {
+            commitment_hash,
+            local_commitment_hash: None,
+            counterparty_device_id,
+            counterparty_genesis_hash: array32(
+                "counterparty_genesis_hash",
+                record.counterparty_genesis_hash.as_ref(),
+            )?,
+            operation,
+            phase: phase_from_str(&record.phase)?,
+            local_signature: record.local_signature.clone(),
+            counterparty_signature: record.counterparty_signature.clone(),
+            sender_ble_address: record.sender_ble_address.clone(),
+            stitched_receipt_bytes: record.stitched_receipt_bytes.clone(),
+            counter_signed_receipt: record.counter_signed_receipt.clone(),
+            receiver_challenge: array32("receiver_challenge", record.receiver_challenge.as_ref())?,
+            anchor_leaf,
+            sent_child_root: array32("sent_child_root", record.sent_child_root.as_ref())?,
+            offline_spend,
+            parent_tip: array32("parent_tip", record.parent_tip.as_ref())?,
+            owed_frame: record.owed_frame.clone(),
+            terms,
+        })
+    }
+}
+
+/// The terms an offline step carries beside `operation`: a transfer's, which
+/// must open its signed commitment, and none for any other operation. A
+/// transfer without terms, or terms that do not open it, is refused whole
+/// (pre-audit item 4).
+pub fn step_terms(
+    operation: &Operation,
+    terms_bytes: Option<&[u8]>,
+) -> Result<Option<dsm::types::operations::TransferTerms>, DsmError> {
+    match (operation, terms_bytes) {
+        (Operation::Transfer { .. }, Some(bytes)) if !bytes.is_empty() => {
+            let terms = dsm::types::operations::TransferTerms::from_bytes(bytes)?;
+            terms.open(operation)?;
+            Ok(Some(terms))
+        }
+        (Operation::Transfer { .. }, _) => {
+            Err(DsmError::invalid_operation("the transfer carries no terms"))
+        }
+        (_, Some(bytes)) if !bytes.is_empty() => Err(DsmError::invalid_operation(format!(
+            "a {} carries no transfer terms",
+            operation.get_operation_type()
+        ))),
+        (_, _) => Ok(None),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +344,15 @@ pub fn is_inflight_phase(phase: &BilateralPhase) -> bool {
     )
 }
 
+/// Whether the proposer may still cancel a step in `phase`: until its
+/// confirm, nothing can have committed on either side. Past the confirm its
+/// receiver may have committed, so the step completes or is reconciled
+/// online.
+#[inline]
+pub fn is_cancellable_proposal_phase(phase: &BilateralPhase) -> bool {
+    matches!(phase, BilateralPhase::Preparing | BilateralPhase::Prepared)
+}
+
 /// Map phase to a persistence-safe string tag.
 pub fn phase_to_str(phase: &BilateralPhase) -> &'static str {
     match phase {
@@ -198,9 +367,9 @@ pub fn phase_to_str(phase: &BilateralPhase) -> &'static str {
     }
 }
 
-/// Parse a phase string tag back to the enum.
-pub fn phase_from_str(s: &str) -> BilateralPhase {
-    match s {
+/// Parse a phase string tag back to the enum; an unknown tag is an error.
+pub fn phase_from_str(s: &str) -> Result<BilateralPhase, DsmError> {
+    Ok(match s {
         "preparing" => BilateralPhase::Preparing,
         "prepared" => BilateralPhase::Prepared,
         "pending_user_action" => BilateralPhase::PendingUserAction,
@@ -208,23 +377,23 @@ pub fn phase_from_str(s: &str) -> BilateralPhase {
         "rejected" => BilateralPhase::Rejected,
         "confirm_pending" => BilateralPhase::ConfirmPending,
         "committed" => BilateralPhase::Committed,
-        _ => BilateralPhase::Failed,
-    }
+        "failed" => BilateralPhase::Failed,
+        other => {
+            return Err(DsmError::invalid_operation(format!(
+                "unknown bilateral session phase '{other}'"
+            )))
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
 // SessionStore
 // ---------------------------------------------------------------------------
 
-/// Thread-safe in-memory session map with SQLite persistence.
-///
-/// Wraps `Arc<Mutex<HashMap<[u8;32], BilateralBleSession>>>` and provides
-/// CRUD, persistence, cleanup, and recovery identification methods.
-/// The handler delegates all session bookkeeping here; recovery *finalization*
-/// (which needs the `BilateralTransactionManager`) stays in the handler.
+/// The in-memory map of this device's bilateral sessions, keyed by
+/// commitment. Each session's durable state is its `bilateral_sessions` row
+/// ([`BilateralBleSession::to_record`]).
 pub struct SessionStore {
-    /// Direct access during migration from raw `active_sessions` field.
-    /// Prefer higher-level SessionStore methods where possible.
     pub(crate) sessions: Arc<Mutex<HashMap<[u8; 32], BilateralBleSession>>>,
 }
 
@@ -239,296 +408,6 @@ impl SessionStore {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    // -- Basic CRUD ----------------------------------------------------------
-
-    pub async fn insert(&self, session: BilateralBleSession) {
-        let key = session.commitment_hash;
-        self.sessions.lock().await.insert(key, session);
-    }
-
-    pub async fn get(&self, commitment_hash: &[u8; 32]) -> Option<BilateralBleSession> {
-        self.sessions.lock().await.get(commitment_hash).cloned()
-    }
-
-    pub async fn remove(&self, commitment_hash: &[u8; 32]) -> Option<BilateralBleSession> {
-        self.sessions.lock().await.remove(commitment_hash)
-    }
-
-    pub async fn contains(&self, commitment_hash: &[u8; 32]) -> bool {
-        self.sessions.lock().await.contains_key(commitment_hash)
-    }
-
-    pub async fn get_phase(&self, commitment_hash: &[u8; 32]) -> Option<BilateralPhase> {
-        self.sessions
-            .lock()
-            .await
-            .get(commitment_hash)
-            .map(|s| s.phase.clone())
-    }
-
-    pub async fn len(&self) -> usize {
-        self.sessions.lock().await.len()
-    }
-
-    pub async fn is_empty(&self) -> bool {
-        self.sessions.lock().await.is_empty()
-    }
-
-    /// Run a closure with mutable access to the session map.
-    /// Use sparingly — prefer dedicated methods.
-    pub async fn with_lock<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut HashMap<[u8; 32], BilateralBleSession>) -> R,
-    {
-        let mut guard = self.sessions.lock().await;
-        f(&mut guard)
-    }
-
-    // -- Persistence ---------------------------------------------------------
-
-    /// Serialize a session to SQLite.
-    pub async fn persist_session(&self, session: &BilateralBleSession) -> Result<(), DsmError> {
-        let record = BilateralSessionRecord {
-            commitment_hash: session.commitment_hash.to_vec(),
-            counterparty_device_id: session.counterparty_device_id.to_vec(),
-            counterparty_genesis_hash: session.counterparty_genesis_hash.map(|h| h.to_vec()),
-            operation_bytes: serialize_operation(&session.operation),
-            phase: phase_to_str(&session.phase).to_string(),
-            local_signature: session.local_signature.clone(),
-            counterparty_signature: session.counterparty_signature.clone(),
-            created_at_step: session.created_at_ticks,
-            sender_ble_address: session.sender_ble_address.clone(),
-            stitched_receipt_bytes: session.stitched_receipt_bytes.clone(),
-        };
-        store_bilateral_session(&record).map_err(|e| {
-            DsmError::invalid_operation(format!("Failed to persist bilateral session: {e}"))
-        })
-    }
-
-    // -- Collision detection -------------------------------------------------
-
-    /// Find any in-flight session with the given counterparty.
-    /// Returns `(commitment_hash, phase, wall-clock creation time)`.
-    pub async fn detect_inflight_counterparty_session(
-        &self,
-        counterparty_device_id: &[u8; 32],
-    ) -> Option<([u8; 32], BilateralPhase, Instant)> {
-        let sessions = self.sessions.lock().await;
-        for (hash, session) in sessions.iter() {
-            if session.counterparty_device_id == *counterparty_device_id
-                && is_inflight_phase(&session.phase)
-            {
-                return Some((*hash, session.phase.clone(), session.created_at_wall));
-            }
-        }
-        None
-    }
-
-    // -- Cleanup & maintenance -----------------------------------------------
-
-    /// Prune terminal sessions for a counterparty, keeping at most
-    /// `MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY`.
-    /// Also deletes BLE reassembly chunks for the counterparty.
-    /// Returns the number of sessions pruned.
-    pub async fn prune_terminal_sessions_for_counterparty(
-        &self,
-        counterparty_device_id: &[u8; 32],
-    ) -> usize {
-        // Sweep orphaned BLE reassembly chunks for this counterparty
-        if let Err(e) =
-            crate::storage::client_db::delete_chunks_by_counterparty(counterparty_device_id)
-        {
-            warn!(
-                "[SessionStore] Failed to sweep BLE reassembly chunks: {}",
-                e
-            );
-        }
-
-        let terminal_hashes: Vec<[u8; 32]> = {
-            let sessions = self.sessions.lock().await;
-            sessions
-                .iter()
-                .filter(|(_, s)| {
-                    // Only prune committed sessions. Failed/rejected sessions must
-                    // persist for frontend poller visibility (bilateral.pending_list).
-                    s.counterparty_device_id == *counterparty_device_id
-                        && matches!(s.phase, BilateralPhase::Committed)
-                })
-                .map(|(h, _)| *h)
-                .collect()
-        };
-
-        if terminal_hashes.len() <= MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY {
-            return 0;
-        }
-
-        let excess = terminal_hashes.len() - MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY;
-        let to_remove = &terminal_hashes[..excess];
-        let mut pruned = 0;
-        {
-            let mut sessions = self.sessions.lock().await;
-            for hash in to_remove {
-                sessions.remove(hash);
-                let _ = delete_bilateral_session(hash);
-                pruned += 1;
-            }
-        }
-        if pruned > 0 {
-            info!(
-                "[SessionStore] Pruned {} terminal sessions for counterparty {}",
-                pruned,
-                encode_base32_crockford(&counterparty_device_id[..8])
-            );
-        }
-        pruned
-    }
-
-    /// Clockless: expiry-based cleanup is disabled.
-    /// Sessions are pruned by phase (terminal sessions) elsewhere.
-    pub async fn cleanup_expired(&self) -> usize {
-        // No tick-based expiry in clockless protocol.
-        0
-    }
-
-    /// Reconcile in-memory state with SQLite. Returns count of changes applied.
-    pub async fn reconcile_with_storage(&self) -> Result<usize, DsmError> {
-        let db_sessions = get_all_bilateral_sessions().map_err(|e| {
-            DsmError::invalid_operation(format!("Failed to load sessions for reconcile: {e}"))
-        })?;
-        let mut count = 0;
-        let mut sessions = self.sessions.lock().await;
-        for record in db_sessions {
-            if record.commitment_hash.len() != 32 {
-                continue;
-            }
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&record.commitment_hash);
-            if let std::collections::hash_map::Entry::Vacant(e) = sessions.entry(hash) {
-                // Session in DB but not in memory — restore it
-                if let Some(session) = self.record_to_session(&record) {
-                    e.insert(session);
-                    count += 1;
-                }
-            }
-        }
-        Ok(count)
-    }
-
-    /// Combined cleanup + reconcile. Returns (cleaned, reconciled).
-    pub async fn maintain(&self) -> Result<(usize, usize), DsmError> {
-        let cleaned = self.cleanup_expired().await;
-        let reconciled = self.reconcile_with_storage().await?;
-        Ok((cleaned, reconciled))
-    }
-
-    // -- Bootstrap restoration -----------------------------------------------
-
-    /// Load all sessions from SQLite into the in-memory map.
-    /// Returns the count of sessions restored.
-    /// Does NOT run recovery finalization — the handler calls
-    /// `find_recoverable_sessions()` + its own finalization logic for that.
-    pub async fn restore_from_storage(&self) -> Result<usize, DsmError> {
-        let records = get_all_bilateral_sessions().map_err(|e| {
-            DsmError::invalid_operation(format!("Failed to load bilateral sessions: {e}"))
-        })?;
-
-        let mut restored = 0;
-        let mut sessions = self.sessions.lock().await;
-        for record in records {
-            if record.commitment_hash.len() != 32 {
-                continue;
-            }
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&record.commitment_hash);
-
-            if let Some(session) = self.record_to_session(&record) {
-                sessions.insert(hash, session);
-                restored += 1;
-            }
-        }
-        info!("[SessionStore] Restored {} sessions from storage", restored);
-        Ok(restored)
-    }
-
-    // -- Recovery identification ---------------------------------------------
-
-    /// Find sessions stuck in `Accepted` phase with a counterparty signature.
-    /// These are sessions where the sender never received the commit response
-    /// (e.g., BLE link dropped). Returns the list of (commitment_hash, session)
-    /// pairs. The handler is responsible for running the actual finalization.
-    pub async fn find_recoverable_sessions(&self) -> Vec<([u8; 32], BilateralBleSession)> {
-        let sessions = self.sessions.lock().await;
-        sessions
-            .iter()
-            .filter(|(_, s)| {
-                s.phase == BilateralPhase::Accepted && s.counterparty_signature.is_some()
-            })
-            .map(|(h, s)| (*h, s.clone()))
-            .collect()
-    }
-
-    // -- Internal helpers ----------------------------------------------------
-
-    #[cfg(test)]
-    pub(crate) async fn all_sessions(&self) -> HashMap<[u8; 32], BilateralBleSession> {
-        self.sessions.lock().await.clone()
-    }
-
-    fn record_to_session(&self, record: &BilateralSessionRecord) -> Option<BilateralBleSession> {
-        let operation = match deserialize_operation(&record.operation_bytes) {
-            Ok(op) => op,
-            Err(e) => {
-                warn!(
-                    "[SessionStore] Failed to deserialize operation for session {}: {}",
-                    encode_base32_crockford(
-                        &record.commitment_hash[..record.commitment_hash.len().min(8)]
-                    ),
-                    e
-                );
-                return None;
-            }
-        };
-
-        let mut commitment_hash = [0u8; 32];
-        commitment_hash.copy_from_slice(&record.commitment_hash);
-
-        let mut counterparty_device_id = [0u8; 32];
-        if record.counterparty_device_id.len() == 32 {
-            counterparty_device_id.copy_from_slice(&record.counterparty_device_id);
-        }
-
-        let counterparty_genesis_hash = record
-            .counterparty_genesis_hash
-            .as_ref()
-            .filter(|h| h.len() == 32)
-            .map(|h| {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(h);
-                arr
-            });
-
-        Some(BilateralBleSession {
-            commitment_hash,
-            local_commitment_hash: None,
-            counterparty_device_id,
-            counterparty_genesis_hash,
-            operation,
-            phase: phase_from_str(&record.phase),
-            local_signature: record.local_signature.clone(),
-            counterparty_signature: record.counterparty_signature.clone(),
-            created_at_ticks: record.created_at_step,
-            expires_at_ticks: u64::MAX,
-            sender_ble_address: record.sender_ble_address.clone(),
-            created_at_wall: Instant::now(),
-            pre_finalize_entropy: None,
-            stitched_receipt_bytes: None,
-            receiver_challenge: None,
-            anchor_leaf: None,
-            anchor_sim_root: None,
-            offline_spend: None,
-        })
     }
 }
 
@@ -546,16 +425,16 @@ mod tests {
             phase,
             local_signature: None,
             counterparty_signature: None,
-            created_at_ticks: 0,
-            expires_at_ticks: u64::MAX,
             sender_ble_address: None,
-            created_at_wall: Instant::now(),
             stitched_receipt_bytes: None,
-            pre_finalize_entropy: None,
+            counter_signed_receipt: None,
             receiver_challenge: None,
             anchor_leaf: None,
-            anchor_sim_root: None,
+            sent_child_root: None,
             offline_spend: None,
+            parent_tip: None,
+            owed_frame: None,
+            terms: None,
         }
     }
 
@@ -591,15 +470,15 @@ mod tests {
         ];
         for phase in &phases {
             let tag = phase_to_str(phase);
-            let restored = phase_from_str(tag);
+            let restored = phase_from_str(tag).expect("a known phase");
             assert_eq!(&restored, phase);
         }
     }
 
     #[test]
-    fn phase_from_str_unknown_defaults_to_failed() {
-        assert_eq!(phase_from_str("nonexistent"), BilateralPhase::Failed);
-        assert_eq!(phase_from_str(""), BilateralPhase::Failed);
+    fn an_unknown_phase_is_an_error() {
+        assert!(phase_from_str("nonexistent").is_err());
+        assert!(phase_from_str("").is_err());
     }
 
     #[test]
@@ -618,115 +497,91 @@ mod tests {
         assert!(!is_inflight_phase(&BilateralPhase::Failed));
     }
 
-    #[tokio::test]
-    async fn session_store_insert_get_remove() {
-        let store = SessionStore::new();
-        assert!(store.is_empty().await);
-
-        let hash = [0x42; 32];
-        let session = make_session(hash, BilateralPhase::Preparing);
-        store.insert(session).await;
-
-        assert_eq!(store.len().await, 1);
-        assert!(store.contains(&hash).await);
-
-        let fetched = store.get(&hash).await.unwrap();
-        assert_eq!(fetched.commitment_hash, hash);
-        assert_eq!(fetched.phase, BilateralPhase::Preparing);
-
-        let removed = store.remove(&hash).await;
-        assert!(removed.is_some());
-        assert!(store.is_empty().await);
+    /// The durable rows count a step in flight by its phase tag: exactly the
+    /// tags of the phases a session in memory counts.
+    #[test]
+    fn the_durable_in_flight_tags_are_the_in_flight_phases() {
+        for phase in [
+            BilateralPhase::Preparing,
+            BilateralPhase::Prepared,
+            BilateralPhase::PendingUserAction,
+            BilateralPhase::Accepted,
+            BilateralPhase::Rejected,
+            BilateralPhase::ConfirmPending,
+            BilateralPhase::Committed,
+            BilateralPhase::Failed,
+        ] {
+            assert_eq!(
+                crate::storage::client_db::IN_FLIGHT_PHASE_TAGS.contains(&phase_to_str(&phase)),
+                is_inflight_phase(&phase),
+                "{phase:?}"
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn session_store_get_phase() {
-        let store = SessionStore::new();
-        let hash = [0x10; 32];
-        store
-            .insert(make_session(hash, BilateralPhase::Accepted))
-            .await;
-        assert_eq!(store.get_phase(&hash).await, Some(BilateralPhase::Accepted));
-        assert_eq!(store.get_phase(&[0xFF; 32]).await, None);
+    /// A session and its durable row carry the same state, commit inputs
+    /// included: a restart continues the session it wrote.
+    #[test]
+    fn a_session_survives_its_row() {
+        let mut session = make_session([0x42; 32], BilateralPhase::ConfirmPending);
+        session.counterparty_signature = Some(vec![0x51; 64]);
+        session.stitched_receipt_bytes = Some(vec![0x52; 40]);
+        session.counter_signed_receipt = Some(vec![0x53; 40]);
+        session.parent_tip = Some([0x54; 32]);
+        session.receiver_challenge = Some([0x55; 32]);
+        session.sent_child_root = Some([0x56; 32]);
+        session.anchor_leaf = Some(dsm::types::device_state::AnchorLeafUpdate {
+            key: [0x57; 32],
+            new_value: [0x58; 32],
+        });
+        session.offline_spend = Some(dsm::types::device_state::OfflineSpend {
+            anchor_bundle_b: [0x59; 32],
+            asset: [0x5A; 32],
+            amount: 7,
+        });
+        session.owed_frame = Some(vec![0x5B; 48]);
+        let restored =
+            BilateralBleSession::from_record(&session.to_record().expect("row")).expect("session");
+        assert_eq!(restored.phase, session.phase);
+        assert_eq!(
+            restored.counterparty_signature,
+            session.counterparty_signature
+        );
+        assert_eq!(
+            restored.stitched_receipt_bytes,
+            session.stitched_receipt_bytes
+        );
+        assert_eq!(
+            restored.counter_signed_receipt,
+            session.counter_signed_receipt
+        );
+        assert_eq!(restored.parent_tip, session.parent_tip);
+        assert_eq!(restored.receiver_challenge, session.receiver_challenge);
+        assert_eq!(restored.sent_child_root, session.sent_child_root);
+        assert_eq!(restored.anchor_leaf, session.anchor_leaf);
+        assert_eq!(restored.offline_spend, session.offline_spend);
+        assert_eq!(restored.owed_frame, session.owed_frame);
+        assert_eq!(
+            restored.owed().map(|f| f.kind),
+            Some(OfflineFrameKind::Confirm)
+        );
     }
 
-    #[tokio::test]
-    async fn session_store_detect_inflight_counterparty() {
-        let store = SessionStore::new();
-        let counterparty = [0x01; 32];
-        let hash = [0x20; 32];
-        let mut session = make_session(hash, BilateralPhase::Prepared);
-        session.counterparty_device_id = counterparty;
-        store.insert(session).await;
-
-        let found = store
-            .detect_inflight_counterparty_session(&counterparty)
-            .await;
-        assert!(found.is_some());
-        let (h, phase, _) = found.unwrap();
-        assert_eq!(h, hash);
-        assert_eq!(phase, BilateralPhase::Prepared);
-
-        let not_found = store
-            .detect_inflight_counterparty_session(&[0xFF; 32])
-            .await;
-        assert!(not_found.is_none());
-    }
-
-    #[tokio::test]
-    async fn session_store_no_inflight_for_terminal_sessions() {
-        let store = SessionStore::new();
-        let counterparty = [0x01; 32];
-        let mut s = make_session([0x30; 32], BilateralPhase::Committed);
-        s.counterparty_device_id = counterparty;
-        store.insert(s).await;
-
-        assert!(store
-            .detect_inflight_counterparty_session(&counterparty)
-            .await
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn session_store_find_recoverable_sessions() {
-        let store = SessionStore::new();
-
-        let mut recoverable = make_session([0x40; 32], BilateralPhase::Accepted);
-        recoverable.counterparty_signature = Some(vec![0xAB; 16]);
-        store.insert(recoverable).await;
-
-        let mut not_recoverable = make_session([0x41; 32], BilateralPhase::Accepted);
-        not_recoverable.counterparty_signature = None;
-        store.insert(not_recoverable).await;
-
-        store
-            .insert(make_session([0x42; 32], BilateralPhase::Committed))
-            .await;
-
-        let found = store.find_recoverable_sessions().await;
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].0, [0x40; 32]);
-    }
-
-    #[tokio::test]
-    async fn session_store_cleanup_expired_is_noop() {
-        let store = SessionStore::new();
-        store
-            .insert(make_session([0x50; 32], BilateralPhase::Preparing))
-            .await;
-        let cleaned = store.cleanup_expired().await;
-        assert_eq!(cleaned, 0);
-        assert_eq!(store.len().await, 1);
-    }
-
-    #[tokio::test]
-    async fn session_store_with_lock() {
-        let store = SessionStore::new();
-        store
-            .insert(make_session([0x60; 32], BilateralPhase::Failed))
-            .await;
-
-        let count = store.with_lock(|map| map.len()).await;
-        assert_eq!(count, 1);
+    /// A row that does not decode is an error, never a session with a
+    /// stand-in: half an anchor leaf, a short field, an unknown phase.
+    #[test]
+    fn a_row_that_does_not_decode_is_refused() {
+        let row = make_session([0x43; 32], BilateralPhase::ConfirmPending)
+            .to_record()
+            .expect("row");
+        let mut half_leaf = row.clone();
+        half_leaf.anchor_leaf_key = Some(vec![0x61; 32]);
+        assert!(BilateralBleSession::from_record(&half_leaf).is_err());
+        let mut short_root = row.clone();
+        short_root.sent_child_root = Some(vec![0x62; 31]);
+        assert!(BilateralBleSession::from_record(&short_root).is_err());
+        let mut unknown_phase = row;
+        unknown_phase.phase = "commit".to_string();
+        assert!(BilateralBleSession::from_record(&unknown_phase).is_err());
     }
 }

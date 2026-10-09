@@ -46,73 +46,32 @@ pub(crate) fn derive_current_signing_keypair() -> Result<SignatureKeyPair, DsmEr
     crate::init::derive_device_signing_keypair(&wallet_seed, &genesis)
 }
 
+/// This device's birth attestation digest, `AttA = KDF(wallet_seed, G,
+/// device_slot)`: with the AK it derives the device id (`DevID = H(AK ‖
+/// AttA)`), so an object carrying both proves which device signed it.
+pub(crate) fn current_att_a() -> Result<[u8; 32], DsmError> {
+    let genesis = genesis_from_app_state()?;
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
+            DsmError::InvalidState("wallet seed unavailable for AttA (wallet locked)".into())
+        })?;
+    let slot = crate::sdk::identity_presentation::OwnerIdentityInputs::beta(
+        dsm::economic::register::BETA_NETWORK_ID,
+    )
+    .device_slot;
+    Ok(dsm::core::identity::genesis_v2::derive_atta(
+        &wallet_seed,
+        &genesis,
+        slot,
+    ))
+}
+
 pub(crate) fn current_public_key() -> Result<Vec<u8>, DsmError> {
     Ok(derive_current_signing_keypair()?.public_key().to_vec())
 }
 
 pub(crate) fn current_secret_key() -> Result<Vec<u8>, DsmError> {
     Ok(derive_current_signing_keypair()?.secret_key().to_vec())
-}
-
-/// Whether signing is possible right now, WITHOUT handing back a key.
-///
-/// For callers that need to decide "is there any point starting this work?"
-/// but must not hold signing material while doing the part that precedes
-/// signing. Binding a key just to test for its presence puts the capability in
-/// scope for everything that follows, which is exactly what some boundaries
-/// exist to prevent.
-pub(crate) fn can_sign() -> bool {
-    match derive_current_signing_keypair() {
-        Ok(kp) => !kp.public_key().is_empty() && !kp.secret_key().is_empty(),
-        Err(_) => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Test helpers.
-//
-// Legacy fixtures passed a deterministic 32-byte "binding key"; under Genesis v2 that
-// fixture is simply the wallet seed the derivation re-roots on. `device_id` is no longer
-// an input to the derivation and is retained only for call-site compatibility.
-// ---------------------------------------------------------------------------
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn derive_signing_keypair_for_testing(
-    _device_id: &[u8],
-    genesis_hash: &[u8],
-    wallet_seed: &[u8],
-) -> Result<SignatureKeyPair, DsmError> {
-    if genesis_hash.len() != 32 {
-        return Err(DsmError::invalid_parameter(format!(
-            "genesis_hash must be 32 bytes, got {}",
-            genesis_hash.len()
-        )));
-    }
-    let mut genesis = [0u8; 32];
-    genesis.copy_from_slice(genesis_hash);
-    crate::init::derive_device_signing_keypair(wallet_seed, &genesis)
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn derive_signing_keys_for_testing(
-    device_id: &[u8],
-    genesis_hash: &[u8],
-    wallet_seed: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-    let keypair = derive_signing_keypair_for_testing(device_id, genesis_hash, wallet_seed)?;
-    Ok((keypair.public_key().to_vec(), keypair.secret_key().to_vec()))
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-pub(crate) fn set_binding_key_for_testing(wallet_seed: Vec<u8>) {
-    crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(wallet_seed);
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-pub(crate) fn clear_binding_key_for_testing() {
-    crate::sdk::recovery_sdk::RecoverySDK::clear_cached_wallet_seed_for_testing();
 }
 
 /// Both halves of the device signing keypair, for callers that sign and embed

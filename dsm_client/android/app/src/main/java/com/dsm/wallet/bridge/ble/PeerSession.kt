@@ -3,7 +3,6 @@
 package com.dsm.wallet.bridge.ble
 
 import android.bluetooth.BluetoothDevice
-import com.dsm.wallet.bridge.BleOutboxItem
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
@@ -27,9 +26,9 @@ data class PeerIdentity(
 }
 
 /**
- * Unified per-peer state object. Replaces the 10 address-keyed maps that were
+ * Unified per-peer state object. Replaces the address-keyed maps that were
  * previously spread across BleCoordinator (sessionStates, activeSessions,
- * pendingConnectionAddresses, pendingPairingConfirms) and GattServerHost
+ * pendingConnectionAddresses) and GattServerHost
  * (connectedServerClients, cccdEnabledByDevice, notificationCompletions,
  * chunkAckCompletions, notificationSendLocks, writeBudgets).
  *
@@ -48,18 +47,18 @@ data class PeerSession(
     var negotiatedMtu: Int = 23,
     var serviceDiscoveryCompleted: Boolean = false,
     var lastError: BleSessionEvent.ErrorOccurred? = null,
-    var currentTransaction: BleOutboxItem? = null,
     var identityExchangeInProgress: Boolean = false,
     var pairingInProgress: Boolean = false,
-    @Transient var relationshipStatusReadResult: CompletableDeferred<ByteArray?>? = null,
+    /**
+     * True once the identity read on this client link is anchored, after its
+     * CCCD chain completed: the link carries that appliance and is a route to it.
+     */
+    var clientRouteReady: Boolean = false,
 
     // ── Connection lifecycle (was pendingConnectionAddresses + polling loop) ─
     // When non-null, a connect is in flight. Completed by handleSessionEvent
     // on MtuNegotiated (true) or Disconnected/Error (false).
     @Transient var connectResult: CompletableDeferred<Boolean>? = null,
-
-    // ── Pairing retry (was pendingPairingConfirms) ───────────────────────
-    var pendingPairingConfirm: ByteArray? = null,
 
     // ── Server-side state (was GattServerHost's 6 maps) ──────────────────
     var serverDevice: BluetoothDevice? = null,
@@ -105,14 +104,11 @@ data class PeerSession(
         negotiatedMtu = 23
         serviceDiscoveryCompleted = false
         lastError = null
-        currentTransaction = null
         identityExchangeInProgress = false
         pairingInProgress = false
-        relationshipStatusReadResult?.cancel()
-        relationshipStatusReadResult = null
+        clientRouteReady = false
         connectResult?.complete(false)
         connectResult = null
-        pendingPairingConfirm = null
     }
 
     /** Reset all server-side state. Called when peer disconnects from our GATT server. */

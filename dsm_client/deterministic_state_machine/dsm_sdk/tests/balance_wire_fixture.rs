@@ -42,6 +42,27 @@ fn emit_balances_list_fixture() {
             .chars()
             .take(8)
             .collect(),
+        // The policy's icon field, carried as the policy states it; the wallet draws
+        // the token's coin from it.
+        icon_url: "dsm:coin:v1:FIXTURE".to_string(),
+        // What the token is and what its committed policy fixes and permits, as
+        // Rust reports them for a created token: 100_000_000 base units at 2
+        // decimals is 1000000.00.
+        protocol_defined: false,
+        genesis_supply_display: crate_format(100_000_000, 2),
+        permissions: Some(dsm_sdk::generated::TokenPolicyPermissions {
+            burn_enabled: true,
+            transferable: false,
+        }),
+        // Cash in hand under the attached appliance's bundle, rendered by Rust:
+        // 2_500 base units at 2 decimals is 25.00. Present, because absent means
+        // unknown, and the wallet then prints no offline figure at all.
+        // A token of supply 100_000_000 base units is a currency, not a state object.
+        holding: dsm_sdk::generated::BalanceHolding::Currency as i32,
+        offline_allocation: Some(dsm_sdk::generated::OfflineAllocationView {
+            base_units: 2_500,
+            display_amount: crate_format(2_500, 2),
+        }),
     };
     let list = dsm_sdk::generated::BalancesListResponse {
         balances: vec![row],
@@ -68,6 +89,23 @@ fn emit_balances_list_fixture() {
             assert_eq!(b.symbol, "RIGB", "symbol must survive encoding");
             assert_eq!(b.decimals, 2, "decimals must survive encoding");
             assert_eq!(b.token_name, "RigBravo");
+            assert!(!b.protocol_defined);
+            assert_eq!(b.genesis_supply_display, "1000000.00");
+            assert_eq!(
+                b.permissions,
+                Some(dsm_sdk::generated::TokenPolicyPermissions {
+                    burn_enabled: true,
+                    transferable: false,
+                }),
+                "the policy's permissions must survive encoding, present"
+            );
+            assert_eq!(
+                b.offline_allocation
+                    .as_ref()
+                    .map(|o| (o.base_units, o.display_amount.as_str())),
+                Some((2_500, "25.00")),
+                "the offline allocation must survive encoding, present"
+            );
         }
         other => panic!("unexpected payload {other:?}"),
     }

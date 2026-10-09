@@ -1,78 +1,16 @@
-#![allow(unused_variables)]
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Wallet and balance route handlers for AppRouterImpl.
 //!
-//! Handles: `balance.get`, `balance.list`, `wallet.history`, `wallet.send`, `wallet.sendSmart`,
-//! `wallet.sendOffline`
+//! Handles: `balance.get`, `balance.list`, `wallet.history`, `wallet.amount`, `wallet.send`,
+//! `wallet.sendSmart`, `wallet.sendOffline`
 
 use dsm::types::proto as generated;
 use prost::Message;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
-use super::app_router_impl::{relationship_tip_for_contact_restore, AppRouterImpl};
+use super::app_router_impl::AppRouterImpl;
 use super::relationship_status::status_message;
 use super::response_helpers::{pack_envelope_ok, err};
-
-#[derive(Debug, Clone)]
-struct CachedPolicyMetadata {
-    ticker: String,
-    alias: String,
-    decimals: u32,
-}
-
-fn parse_cached_policy_metadata(policy_bytes: &[u8]) -> Option<CachedPolicyMetadata> {
-    let policy = generated::TokenPolicyV3::decode(policy_bytes).ok()?;
-    let bytes = policy.policy_bytes;
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let mut off = 0usize;
-    let version = *bytes.get(off)?;
-    off += 1;
-
-    match version {
-        1 => {
-            let ticker_len = *bytes.get(off)? as usize;
-            off += 1;
-            let ticker = String::from_utf8(bytes.get(off..off + ticker_len)?.to_vec()).ok()?;
-            off += ticker_len;
-
-            let alias_len = ((*bytes.get(off)? as usize) << 8) | (*bytes.get(off + 1)? as usize);
-            off += 2;
-            let alias = String::from_utf8(bytes.get(off..off + alias_len)?.to_vec()).ok()?;
-            off += alias_len;
-
-            let decimals = *bytes.get(off)? as u32;
-            Some(CachedPolicyMetadata {
-                ticker,
-                alias,
-                decimals,
-            })
-        }
-        2 => {
-            off += 3; // kind + flags + threshold
-
-            let ticker_len = *bytes.get(off)? as usize;
-            off += 1;
-            let ticker = String::from_utf8(bytes.get(off..off + ticker_len)?.to_vec()).ok()?;
-            off += ticker_len;
-
-            let alias_len = ((*bytes.get(off)? as usize) << 8) | (*bytes.get(off + 1)? as usize);
-            off += 2;
-            let alias = String::from_utf8(bytes.get(off..off + alias_len)?.to_vec()).ok()?;
-            off += alias_len;
-
-            let decimals = *bytes.get(off)? as u32;
-            Some(CachedPolicyMetadata {
-                ticker,
-                alias,
-                decimals,
-            })
-        }
-        _ => None,
-    }
-}
 
 /// The token's decimal places, from the authority for that token.
 ///
@@ -80,16 +18,157 @@ fn parse_cached_policy_metadata(policy_bytes: &[u8]) -> Option<CachedPolicyMetad
 /// token whose decimals live in the registry. There is no hardcoded table:
 /// one existed in TypeScript, knew only dBTC, and silently rendered every
 /// custom token as whole units.
-pub fn decimals_for_token(token_id: &str) -> u32 {
-    match token_id.trim().to_uppercase().as_str() {
-        "ERA" => 0,
-        "DBTC" | "BTC" => 8,
-        other => crate::storage::client_db::token_registry::get_token_by_ticker(other)
-            .ok()
-            .flatten()
+///
+/// A token the registry cannot be read for, or holds no entry for, has no
+/// known decimals: that is an error, never 0, because a wrong scale moves
+/// value when a display amount is parsed back into base units.
+pub fn token_decimals(token_id: &str) -> Result<u32, String> {
+    let canonical = canonicalize_token_id(token_id);
+    match canonical.to_ascii_uppercase().as_str() {
+        "" => Err("a token's decimals were asked for with no token named".to_string()),
+        "ERA" => dsm::core::token::era_policy::era_policy()
+            .map(|era| era.decimals)
+            .map_err(|e| e.to_string()),
+        "DBTC" | "BTC" => Ok(8),
+        _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
+            .map_err(|e| format!("token registry unreadable for {canonical}: {e}"))?
             .map(|row| row.decimals)
-            .unwrap_or(0),
+            .ok_or_else(|| {
+                format!("no registry entry for token {canonical}; its decimals are unknown")
+            }),
     }
+}
+
+/// The wire type of a token or SoFi event row, by its stored type.
+fn event_type(stored: &str) -> Option<generated::TransactionType> {
+    use crate::sdk::realized_records::Realized;
+    [
+        Realized::TokenCreate,
+        Realized::VaultCreate,
+        Realized::Setup,
+        Realized::Trade,
+        Realized::Close,
+        Realized::EscrowLock,
+        Realized::EscrowRelease,
+    ]
+    .into_iter()
+    .find(|kind| kind.tx_type() == stored)
+    .map(|kind| match kind {
+        Realized::TokenCreate => generated::TransactionType::TxTypeTokenCreate,
+        Realized::VaultCreate => generated::TransactionType::TxTypeVaultCreate,
+        Realized::Setup => generated::TransactionType::TxTypeSofiSetup,
+        Realized::Trade => generated::TransactionType::TxTypeSofiTrade,
+        Realized::Close => generated::TransactionType::TxTypeSofiClose,
+        Realized::EscrowLock => generated::TransactionType::TxTypeEscrowLock,
+        Realized::EscrowRelease => generated::TransactionType::TxTypeEscrowRelease,
+    })
+}
+
+/// The stored type of a token or SoFi event's wire type; `None` for every
+/// other type.
+fn event_type_name(kind: generated::TransactionType) -> Option<&'static str> {
+    use crate::sdk::realized_records::Realized;
+    match kind {
+        generated::TransactionType::TxTypeTokenCreate => Some(Realized::TokenCreate.tx_type()),
+        generated::TransactionType::TxTypeVaultCreate => Some(Realized::VaultCreate.tx_type()),
+        generated::TransactionType::TxTypeSofiSetup => Some(Realized::Setup.tx_type()),
+        generated::TransactionType::TxTypeSofiTrade => Some(Realized::Trade.tx_type()),
+        generated::TransactionType::TxTypeSofiClose => Some(Realized::Close.tx_type()),
+        generated::TransactionType::TxTypeEscrowLock => Some(Realized::EscrowLock.tx_type()),
+        generated::TransactionType::TxTypeEscrowRelease => Some(Realized::EscrowRelease.tx_type()),
+        generated::TransactionType::TxTypeUnspecified
+        | generated::TransactionType::TxTypeFaucet
+        | generated::TransactionType::TxTypeBilateralOffline
+        | generated::TransactionType::TxTypeOnline
+        | generated::TransactionType::TxTypeDbtcMint
+        | generated::TransactionType::TxTypeDbtcBurn => None,
+    }
+}
+
+/// A token or SoFi event's history row (phone-rig rulings, 2026-10-01): every
+/// token it moved, signed, and the vault or token it is about. A row whose
+/// movements, ids or subject do not decode is corrupt, and an error.
+fn event_transaction(
+    t: &crate::storage::client_db::TransactionRecord,
+    kind: generated::TransactionType,
+) -> Result<generated::TransactionInfo, String> {
+    use crate::sdk::realized_records::{decode_moves, MOVES_KEY, SUBJECT_KEY};
+    use dsm::types::device_state::BalanceDirection;
+    let corrupt = |what: String| format!("wallet.history: event {}: {what}", t.tx_id);
+    let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
+        crate::util::text_id::decode_base32_crockford(text)
+            .filter(|b| b.len() == 32)
+            .ok_or_else(|| corrupt(format!("its {what} is not 32 bytes")))
+    };
+    let stored = t
+        .metadata
+        .get(MOVES_KEY)
+        .ok_or_else(|| corrupt("names no token movements".to_string()))?;
+    let mut moves = Vec::new();
+    for m in decode_moves(stored).map_err(corrupt)? {
+        let (token_id, ..) = token_of_commit(&m.policy_commit).map_err(corrupt)?;
+        let magnitude = i64::try_from(m.amount)
+            .map_err(|e| corrupt(format!("a movement exceeds a signed amount: {e}")))?;
+        moves.push(generated::TokenMove {
+            policy_commit: m.policy_commit.to_vec(),
+            token_id,
+            amount_signed: match m.direction {
+                BalanceDirection::Credit => magnitude,
+                BalanceDirection::Debit => -magnitude,
+            },
+            // Filled at the encoding boundary by enrich_transaction_display.
+            display_amount: String::new(),
+        });
+    }
+    let subject = match t.metadata.get(SUBJECT_KEY) {
+        Some(bytes) => String::from_utf8(bytes.clone())
+            .map_err(|e| corrupt(format!("its subject is not text: {e}")))?,
+        None => String::new(),
+    };
+    Ok(generated::TransactionInfo {
+        id: format!("tx_{}", t.tx_hash),
+        from_device_id: bytes32("device id", &t.from_device)?,
+        to_device_id: bytes32("device id", &t.to_device)?,
+        token_id: String::new(),
+        amount: t.amount,
+        tx_hash: bytes32("event id", &t.tx_hash)?,
+        amount_signed: 0,
+        tx_type: kind as i32,
+        status: t.status.clone(),
+        recipient: subject,
+        stitched_receipt: Vec::new(),
+        memo: String::new(),
+        // An event carries no stitched receipt to verify.
+        receipt_verified: t.proof_data.as_ref().is_some_and(|b| {
+            receipt_state_holds(
+                b,
+                t.metadata
+                    .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
+            )
+        }),
+        display_amount: String::new(),
+        moves,
+    })
+}
+
+/// A token named by its policy commit: its ticker and the decimals of its
+/// committed policy. ERA and dBTC are built in; any other token is the one
+/// this device's registry holds under that commit.
+pub(crate) fn token_of_commit(policy_commit: &[u8; 32]) -> Result<(String, u32), String> {
+    if let Some(builtin) =
+        dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(policy_commit)
+    {
+        return Ok((builtin.to_string(), token_decimals(builtin)?));
+    }
+    let row = crate::storage::client_db::token_registry::get_token_by_policy_commit(policy_commit)
+        .map_err(|e| format!("token registry unreadable: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "no registry entry for token {}; its decimals are unknown",
+                crate::util::text_id::encode_base32_crockford(policy_commit)
+            )
+        })?;
+    Ok((row.ticker, row.decimals))
 }
 
 /// A signed amount rendered for display, sign included.
@@ -113,26 +192,72 @@ pub fn format_signed_base_units_for_display(amount: i64, decimals: u32) -> Strin
 /// the string a UI prints. Amounts that predate signed accounting carry
 /// `amount_signed == 0`, so fall back to the unsigned magnitude rather than
 /// rendering every historical row as zero.
-pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) {
-    let decimals = decimals_for_token(&tx.token_id);
+pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) -> Result<(), String> {
+    // An event shows each token it moved, from that token's committed
+    // decimals; it has no single amount of its own.
+    if let Ok(kind) = generated::TransactionType::try_from(tx.tx_type) {
+        if event_type_name(kind).is_some() {
+            for m in tx.moves.iter_mut() {
+                let commit = <[u8; 32]>::try_from(m.policy_commit.as_slice())
+                    .map_err(|e| format!("a token movement's policy commit: {e}"))?;
+                let (.., decimals) = token_of_commit(&commit)?;
+                m.display_amount = format_signed_base_units_for_display(m.amount_signed, decimals);
+            }
+            return Ok(());
+        }
+    }
+    let decimals = token_decimals(&tx.token_id)?;
     tx.display_amount = if tx.amount_signed != 0 {
         format_signed_base_units_for_display(tx.amount_signed, decimals)
     } else {
         format_base_units_for_display(tx.amount, decimals)
     };
+    Ok(())
 }
 
-pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
+/// The whole supply of a token that is a state object: it exists once.
+const STATE_OBJECT_SUPPLY: u128 = 1;
+
+/// What kind of holding a token of `genesis_supply` is: a state object when
+/// its whole supply is one, else a currency.
+fn holding_of(genesis_supply: u128) -> generated::BalanceHolding {
+    if genesis_supply == STATE_OBJECT_SUPPLY {
+        generated::BalanceHolding::StateObject
+    } else {
+        generated::BalanceHolding::Currency
+    }
+}
+
+/// Fill in everything a balance row says beyond its amounts: the token's
+/// name, unit and policy facts, its anchor, and its offline allocation as
+/// `offline_of` reads it for the row's asset.
+pub(crate) fn enrich_balance_metadata(
+    reply: &mut generated::BalanceGetResponse,
+    offline_of: &dyn Fn(&[u8; 32]) -> Option<u64>,
+) -> Result<(), String> {
     let token_id = reply.token_id.trim().to_uppercase();
     match token_id.as_str() {
         "ERA" => {
-            reply.symbol = "ERA".to_string();
-            reply.decimals = 0;
-            reply.token_name = "ERA".to_string();
-            reply.display_amount = format_base_units_for_display(reply.available, 0);
-            if let Some(c) = crate::policy::builtin_policy_commit("ERA") {
-                set_anchor(reply, &c);
-            }
+            // ERA's facts are its committed policy's (SoFi Amendment S11),
+            // which every device holds by construction.
+            let era = dsm::core::token::era_policy::era_policy().map_err(|e| e.to_string())?;
+            reply.symbol = era.ticker.clone();
+            reply.decimals = era.decimals;
+            reply.token_name = era.alias.clone();
+            reply.display_amount = format_base_units_for_display(reply.available, era.decimals);
+            set_anchor_and_offline(
+                reply,
+                &dsm::core::token::token_state_manager::era_policy_commit(),
+                offline_of,
+            );
+            reply.protocol_defined = true;
+            reply.genesis_supply_display =
+                format_supply_for_display(era.genesis_supply, era.decimals);
+            reply.holding = holding_of(era.genesis_supply) as i32;
+            reply.permissions = Some(generated::TokenPolicyPermissions {
+                burn_enabled: era.burn_enabled,
+                transferable: era.transferable,
+            });
         }
         "DBTC" => {
             reply.token_id = "dBTC".to_string();
@@ -141,8 +266,11 @@ pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse)
             reply.token_name = "dBTC".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 8);
             if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
-                set_anchor(reply, &c);
+                set_anchor_and_offline(reply, &c, offline_of);
             }
+            reply.protocol_defined = true;
+            // Bitcoin, one for one: a currency.
+            reply.holding = generated::BalanceHolding::Currency as i32;
         }
         // Created and adopted tokens carry their own decimals, and the wire
         // amount is BASE UNITS. Leaving decimals at the default meant a
@@ -151,22 +279,71 @@ pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse)
         // canonical allocation was correct. The registry is authoritative for
         // this mapping, so read it rather than defaulting.
         _ => {
-            if let Ok(Some(row)) =
+            let row =
                 crate::storage::client_db::token_registry::get_token_by_ticker(&reply.token_id)
-            {
-                reply.symbol = row.ticker.clone();
-                reply.token_name = if row.alias.is_empty() {
-                    row.ticker
-                } else {
-                    row.alias
-                };
-                reply.decimals = row.decimals;
-                reply.canonical_token_id = row.token_id.clone();
-                set_anchor(reply, &row.policy_commit);
-            }
+                    .map_err(|e| format!("token registry unreadable for {}: {e}", reply.token_id))?
+                    .ok_or_else(|| {
+                        format!(
+                            "no registry entry for token {}; its balance cannot be named",
+                            reply.token_id
+                        )
+                    })?;
+            let policy = registered_policy(&row)?;
+            reply.symbol = row.ticker.clone();
+            reply.token_name = if row.alias.is_empty() {
+                row.ticker
+            } else {
+                row.alias
+            };
+            reply.decimals = row.decimals;
+            reply.canonical_token_id = row.token_id.clone();
+            set_anchor_and_offline(reply, &row.policy_commit, offline_of);
+            reply.icon_url = policy.icon_url.unwrap_or_default();
             reply.display_amount = format_base_units_for_display(reply.available, reply.decimals);
+            // A device created this token; its committed policy fixes the
+            // supply and says what holders may do with it.
+            reply.protocol_defined = false;
+            reply.genesis_supply_display =
+                format_supply_for_display(policy.genesis_supply, reply.decimals);
+            reply.holding = holding_of(policy.genesis_supply) as i32;
+            reply.permissions = Some(generated::TokenPolicyPermissions {
+                burn_enabled: policy.burn_enabled,
+                transferable: policy.transferable,
+            });
         }
     }
+    Ok(())
+}
+
+/// A registered token's committed policy: the bytes stored under its anchor,
+/// verified against it, read by Core's one parser, and in agreement with the
+/// row that names them.
+///
+/// A registered token's policy is stored with it, so a policy that is missing
+/// or does not parse is an error. The row's ticker, alias, decimals and genesis
+/// supply were copied from this policy at registration; a row that disagrees
+/// with the bytes its own commit names is corrupt, and the wallet reports
+/// nothing from either side rather than pick one.
+fn registered_policy(
+    row: &crate::storage::client_db::token_registry::TokenRegistryRow,
+) -> Result<super::token_routes::ParsedTokenPolicy, String> {
+    let anchor = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
+    let bytes = crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
+        .map_err(|e| format!("policy {anchor} unreadable: {e}"))?
+        .ok_or_else(|| format!("policy {anchor} of a registered token is not stored"))?;
+    let policy = super::token_routes::parse_token_policy(&bytes)
+        .ok_or_else(|| format!("stored policy {anchor} does not parse"))?;
+    if policy.ticker != row.ticker
+        || policy.alias != row.alias
+        || policy.decimals != row.decimals
+        || policy.genesis_supply != row.genesis_supply
+    {
+        return Err(format!(
+            "registry row for {} disagrees with its policy {anchor}",
+            row.ticker
+        ));
+    }
+    Ok(policy)
 }
 
 /// How much of an anchor is enough to compare by eye.
@@ -176,20 +353,37 @@ pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse)
 /// identifier: nothing resolves a token by fingerprint.
 const ANCHOR_FINGERPRINT_LEN: usize = 8;
 
-/// Render a token's CPTA policy anchor onto the wire record.
+/// Render a token's CPTA policy anchor and its offline allocation onto the wire record.
 ///
 /// A creator could not see the anchor of a token it had created — the adoption
 /// card showed one, the creator's screen showed nothing — so handing it to a
 /// peer meant deriving it by hand, off-device. Base32 Crockford, encoded by the
 /// canonical encoder, because a second encoder gets the trailing-group padding
 /// wrong and produces a plausible string that resolves to nothing.
-fn set_anchor(reply: &mut generated::BalanceGetResponse, policy_commit: &[u8; 32]) {
+///
+/// The offline allocation rides with the anchor because it is the same asset's
+/// cash in hand, keyed by the commit the anchor renders, and rendered here with
+/// the row's decimals. `None` from the reader means no appliance has stated a
+/// bundle yet: the field stays absent, which the wallet reads as unknown. A
+/// zero there would claim a fact nobody holds.
+fn set_anchor_and_offline(
+    reply: &mut generated::BalanceGetResponse,
+    policy_commit: &[u8; 32],
+    offline_of: &dyn Fn(&[u8; 32]) -> Option<u64>,
+) {
     let b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
     reply.anchor_fingerprint = b32.chars().take(ANCHOR_FINGERPRINT_LEN).collect();
     reply.policy_anchor_b32 = b32;
+    reply.offline_allocation =
+        offline_of(policy_commit).map(|base_units| generated::OfflineAllocationView {
+            base_units,
+            display_amount: format_base_units_for_display(base_units, reply.decimals),
+        });
 }
 
-fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {
+fn ensure_default_visible_balances(
+    items: &mut Vec<generated::BalanceGetResponse>,
+) -> Result<(), String> {
     let push_zero = |items: &mut Vec<generated::BalanceGetResponse>, token_id: &str| {
         if items
             .iter()
@@ -197,35 +391,27 @@ fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse
         {
             return;
         }
-        let mut reply = generated::BalanceGetResponse {
+        items.push(generated::BalanceGetResponse {
             token_id: token_id.to_string(),
             available: 0,
             locked: 0,
             ..Default::default()
-        };
-        enrich_balance_metadata(&mut reply);
-        items.push(reply);
+        });
     };
 
     for token_id in ["ERA", "dBTC"] {
         push_zero(items, token_id);
     }
 
-    // Every token in the registry is visible, held or not.
-    //
-    // The list was built purely from balance projections, so a token this
-    // device had ADOPTED but held none of did not appear at all. On D3 the
-    // CPTA add succeeded — registry row written, policy stored — and the
-    // Tokens screen still showed only ERA and dBTC, which is indistinguishable
-    // from the add having failed. Worse, it hides the token you must be able
-    // to see in order to receive any of it.
-    //
-    // Registry membership, not balance, is what makes a token yours to hold.
-    if let Ok(rows) = crate::storage::client_db::token_registry::all_tokens() {
-        for row in rows {
-            push_zero(items, &row.ticker);
-        }
+    // Every token in the registry is visible, held or not: registry
+    // membership, not balance, is what makes a token yours to hold, and a
+    // token you cannot see is one you cannot receive.
+    let rows = crate::storage::client_db::token_registry::all_tokens()
+        .map_err(|e| format!("token registry unreadable: {e}"))?;
+    for row in rows {
+        push_zero(items, &row.ticker);
     }
+    Ok(())
 }
 
 /// Merge canonical projection rows over the head-synthesized `State` seed.
@@ -300,22 +486,6 @@ pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
     }
 }
 
-pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
-    let canonical = canonicalize_token_id(token_id);
-    match canonical.as_str() {
-        "ERA" => 0,
-        "dBTC" => 8,
-        // Created tokens carry their own decimals; read them from the durable
-        // registry rather than defaulting to 0, which silently mis-scaled every
-        // custom-token amount in the display path.
-        _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
-            .ok()
-            .flatten()
-            .map(|row| row.decimals)
-            .unwrap_or(0),
-    }
-}
-
 /// Render canonical base units as a display amount. The inverse of
 /// [`parse_display_amount_to_base_units`], and deliberately its neighbour:
 /// amount conversion has ONE owner, in Rust, in both directions.
@@ -323,10 +493,19 @@ pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
 /// Integer/string arithmetic — the digits are split, never divided — so a large
 /// balance stays exact where floating point would round it.
 pub fn format_base_units_for_display(base_units: u64, decimals: u32) -> String {
+    format_digits_for_display(base_units.to_string(), decimals)
+}
+
+/// The same rule over a policy's genesis supply, which is `u128` in the
+/// policy blob and the registry (SoFi §47).
+pub(crate) fn format_supply_for_display(base_units: u128, decimals: u32) -> String {
+    format_digits_for_display(base_units.to_string(), decimals)
+}
+
+fn format_digits_for_display(digits: String, decimals: u32) -> String {
     if decimals == 0 {
-        return base_units.to_string();
+        return digits;
     }
-    let digits = base_units.to_string();
     let d = decimals as usize;
     if digits.len() <= d {
         format!("0.{}", "0".repeat(d - digits.len()) + &digits)
@@ -395,71 +574,90 @@ pub(crate) fn parse_display_amount_to_base_units(
         .map_err(|e| format!("amount out of range: {e}"))
 }
 
-fn encode_offline_transfer_operation_canonical(
+/// `wallet.amount`: one amount in both its forms, by the two functions above.
+///
+/// The unit is a token Rust knows, at the decimals of its committed policy by
+/// the lookup a send of it uses, or a stated count of decimals no greater than
+/// a policy may commit. The amount is typed text, parsed exactly as a send
+/// parses it, or canonical base units. A client that asks here converts
+/// nothing itself, so an amount it shows and the same amount sent can never
+/// disagree about what a unit is.
+pub(crate) fn wallet_amount(
+    req: generated::WalletAmountRequest,
+) -> Result<generated::WalletAmountResponse, String> {
+    use dsm::economic::token_policy::MAX_DECIMALS;
+    use generated::wallet_amount_request::{Amount, Unit};
+
+    let decimals = match req.unit {
+        Some(Unit::TokenId(token_id)) => token_decimals(&token_id)?,
+        Some(Unit::Decimals(decimals)) if decimals <= MAX_DECIMALS => decimals,
+        Some(Unit::Decimals(decimals)) => {
+            return Err(format!(
+                "{decimals} decimals exceed the {MAX_DECIMALS} a policy may commit"
+            ))
+        }
+        None => return Err("the request names no unit: a token or its decimals".to_string()),
+    };
+    let base_units = match req.amount {
+        Some(Amount::Entered(text)) => parse_display_amount_to_base_units(&text, decimals)?,
+        Some(Amount::BaseUnits(base_units)) => base_units,
+        None => return Err("the request names no amount".to_string()),
+    };
+    Ok(generated::WalletAmountResponse {
+        base_units,
+        display_amount: format_base_units_for_display(base_units, decimals),
+        decimals,
+    })
+}
+
+/// An offline transfer's canonical operation bytes and the terms it commits
+/// to, which ride beside it over BLE and in no public object (pre-audit
+/// item 4).
+pub(crate) fn encode_offline_transfer_operation_canonical(
     to_device_id: &[u8; 32],
     amount: u64,
     token_id: &str,
     memo: &str,
     policy_commit: &[u8; 32],
-) -> Vec<u8> {
-    let mut out = Vec::new();
-
-    let push_u8 = |out: &mut Vec<u8>, v: u8| out.push(v);
-    let push_u32 = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
-    let push_bytes = |out: &mut Vec<u8>, bytes: &[u8]| {
-        push_u32(out, bytes.len() as u32);
-        out.extend_from_slice(bytes);
-    };
-    let push_str = |out: &mut Vec<u8>, value: &str| push_bytes(out, value.as_bytes());
-
-    push_u8(&mut out, 3); // Operation::Transfer tag
-    push_bytes(&mut out, to_device_id);
-
-    // §4.3 canonical Balance encoding: value (u64 le) ‖ locked (u64 le).
-    // No counter, no tick. Optional state_hash (32B) is omitted for offline
-    // transfer authoring — the receiver derives it on settlement.
-    let mut balance_bytes = Vec::with_capacity(16);
-    balance_bytes.extend_from_slice(&amount.to_le_bytes());
-    balance_bytes.extend_from_slice(&0u64.to_le_bytes());
-    push_bytes(&mut out, &balance_bytes);
-
-    let canonical_token_id = canonicalize_token_id(token_id);
-    push_str(&mut out, &canonical_token_id);
-    // §9.5 policy_commit — length-prefixed 32 bytes, matching Operation::to_bytes.
-    push_bytes(&mut out, policy_commit);
-    push_u8(&mut out, 0); // TransactionMode::Bilateral
-    push_bytes(&mut out, &[]);
-    push_u8(&mut out, 2); // VerificationType::Bilateral
-    push_u8(&mut out, 0); // pre_commit: None
-    push_bytes(&mut out, to_device_id);
-    push_str(
-        &mut out,
-        &crate::util::text_id::encode_base32_crockford(to_device_id),
-    );
-    push_str(&mut out, memo);
-    push_bytes(&mut out, &[]);
-
-    // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"): append the canonical
-    // offline-bearer authority-policy tail so `operation_requires_offline_bearer` fires and the send
-    // drives the physical anchor (fail-closed if no chip). Uses the real `append_canonical` codec, so
-    // the bytes are exactly what `Operation::from_bytes` decodes on the receiver.
+) -> (Vec<u8>, dsm::types::operations::TransferTerms) {
+    // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"):
+    // the canonical offline-bearer authority policy rides on the transfer so
+    // `operation_requires_offline_bearer` fires and the send drives the
+    // physical anchor (fail-closed if no chip).
     let policy = dsm::types::operations::canonical_offline_bearer_policy();
-    policy.append_canonical(&mut out);
     log::info!(
         "[wallet.sendOffline] offline-bearer authority policy bound: policy_id={}",
         crate::util::text_id::encode_base32_crockford(&policy.policy_id)
     );
-
-    out
+    let terms = dsm::types::operations::TransferTerms::new(
+        canonicalize_token_id(token_id).into_bytes(),
+        Vec::new(),
+        dsm::types::operations::TransactionMode::Bilateral,
+        memo.to_string(),
+    );
+    let operation = dsm::types::operations::Operation::Transfer {
+        to_device_id: to_device_id.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(amount),
+        policy_commit: *policy_commit,
+        terms_commitment: terms.commitment(),
+        signature: Vec::new(),
+        authority_policy: Some(policy),
+    };
+    (operation.to_bytes(), terms)
 }
 
 impl AppRouterImpl {
     pub(crate) async fn handle_wallet_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "balance.get" => {
+                // A cold start with no state in memory restores it from the
+                // archive; a restore that fails is the answer, not a zero read
+                // over nothing.
                 if self.core_sdk.get_current_state().is_err() {
                     if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
-                        log::warn!("[balance.get] cold-start archive refresh failed: {}", e);
+                        return err(format!(
+                            "balance.get: no current state and the archive could not be restored: {e}"
+                        ));
                     }
                 }
                 let token_id_opt: Option<String> = match generated::ArgPack::decode(&*q.params) {
@@ -487,7 +685,7 @@ impl AppRouterImpl {
 
                 // Use the wallet lane router, which prefers validated canonical projection rows
                 // for non-ERA tokens and falls back to canonical state.
-                match self.wallet.get_balance(Some(token_for_query)) {
+                match self.wallet.get_balance(token_for_query) {
                     Ok(bal) => {
                         let mut reply = generated::BalanceGetResponse {
                             token_id: token_for_query.to_string(),
@@ -495,7 +693,11 @@ impl AppRouterImpl {
                             locked: bal.locked(),
                             ..Default::default()
                         };
-                        enrich_balance_metadata(&mut reply);
+                        if let Err(e) = enrich_balance_metadata(&mut reply, &|asset| {
+                            self.core_sdk.offline_allocation_of(asset)
+                        }) {
+                            return err(format!("balance.get: {e}"));
+                        }
                         pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(reply))
                     }
                     Err(e) => err(format!("balance.get failed: {e}")),
@@ -505,7 +707,7 @@ impl AppRouterImpl {
             // -------- wallet.history --------
             "wallet.history" => {
                 // Require ArgPack(codec=PROTO) with body = [limit_le_u64 | offset_le_u64].
-                let (limit, _offset): (Option<usize>, Option<usize>) =
+                let (limit, offset): (Option<usize>, Option<usize>) =
                     match generated::ArgPack::decode(&*q.params) {
                         Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
                             if pack.body.len() >= 16 {
@@ -528,11 +730,14 @@ impl AppRouterImpl {
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
 
                 // CRITICAL: Read from SQLite client_db - this is where bilateral transfers store transactions
-                let sqlite_txs = crate::storage::client_db::get_transaction_history(
+                let sqlite_txs = match crate::storage::client_db::get_transaction_history(
                     Some(&my_device_id_str),
                     limit,
-                )
-                .unwrap_or_default();
+                    offset,
+                ) {
+                    Ok(txs) => txs,
+                    Err(e) => return err(format!("wallet.history: history unreadable: {e}")),
+                };
 
                 // Debug: log what we got from SQLite
                 log::info!(
@@ -552,20 +757,34 @@ impl AppRouterImpl {
 
                 // Build a lookup map from device_id text to alias for resolving transaction counterparties
                 // Use sync contact lookup from SQLite storage
-                let alias_lookup: std::collections::HashMap<String, String> =
-                    crate::storage::client_db::get_all_contacts()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|c| {
-                            let device_txt =
-                                crate::util::text_id::encode_base32_crockford(&c.device_id);
-                            (device_txt, c.alias)
-                        })
-                        .collect();
+                let contacts = match crate::storage::client_db::get_all_contacts() {
+                    Ok(contacts) => contacts,
+                    Err(e) => return err(format!("wallet.history: contacts unreadable: {e}")),
+                };
+                let alias_lookup: std::collections::HashMap<String, String> = contacts
+                    .into_iter()
+                    .map(|c| {
+                        let device_txt =
+                            crate::util::text_id::encode_base32_crockford(&c.device_id);
+                        (device_txt, c.alias)
+                    })
+                    .collect();
 
-                let txs: Vec<generated::TransactionInfo> = sqlite_txs
+                // A stored row is this device's own record: a device id or hash
+                // that does not decode, or a transfer with no token, is a
+                // corrupt row and an error, never an empty field.
+                let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
+                    crate::util::text_id::decode_base32_crockford(text)
+                        .filter(|b| b.len() == 32)
+                        .ok_or_else(|| format!("wallet.history: a stored {what} is not 32 bytes"))
+                };
+                let txs: Result<Vec<generated::TransactionInfo>, String> = sqlite_txs
                     .into_iter()
                     .map(|t| {
+                        // A token or SoFi event names every token it moved.
+                        if let Some(event) = event_type(&t.tx_type) {
+                            return event_transaction(&t, event);
+                        }
                         // PROTO SAFETY:
                         // TransactionInfo.id is a `string` in dsm_app.proto and must be valid UTF-8.
                         // Some older records may contain non-UTF8 bytes (or otherwise invalid)
@@ -577,27 +796,99 @@ impl AppRouterImpl {
                         // Prefix to avoid ambiguity with other ids and keep stable format.
                         let safe_id: String = format!("tx_{}", t.tx_hash);
 
+                        // A row that keeps its signed operation shows its amount
+                        // from that operation — the same bytes its receipt badge
+                        // is checked against — and its token and memo from the
+                        // terms it keeps, once they open the operation. Only a
+                        // row with no operation (a faucet claim, a Bitcoin event)
+                        // shows its stored figures.
+                        let (amount, token_id, memo) = match t
+                            .metadata
+                            .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
+                        {
+                            Some(operation) => {
+                                let op = dsm::types::operations::Operation::from_bytes(operation)
+                                    .map_err(|e| {
+                                    format!(
+                                        "wallet.history: transaction {}'s operation does \
+                                             not decode: {e}",
+                                        t.tx_id
+                                    )
+                                })?;
+                                let kept = t
+                                    .metadata
+                                    .get(crate::storage::client_db::HISTORY_TERMS_KEY)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "wallet.history: transaction {} keeps no terms for \
+                                             its operation",
+                                            t.tx_id
+                                        )
+                                    })?;
+                                let opened =
+                                    dsm::types::operations::TransferTerms::from_bytes(kept)
+                                        .map_err(|e| {
+                                            format!(
+                                                "wallet.history: transaction {}'s terms do not \
+                                                 decode: {e}",
+                                                t.tx_id
+                                            )
+                                        })?;
+                                let terms = super::recipient_accept::transfer_terms(&op, &opened)
+                                    .map_err(|e| {
+                                    format!("wallet.history: transaction {}: {e}", t.tx_id)
+                                })?;
+                                (terms.amount, terms.token_id, terms.memo)
+                            }
+                            None => {
+                                let token = t.metadata.get("token_id").ok_or_else(|| {
+                                    format!(
+                                        "wallet.history: transaction {} names no token",
+                                        t.tx_id
+                                    )
+                                })?;
+                                let token = String::from_utf8(token.clone()).map_err(|e| {
+                                    format!(
+                                        "wallet.history: transaction {}'s token is not text: {e}",
+                                        t.tx_id
+                                    )
+                                })?;
+                                // A row with no memo has none; one whose memo is
+                                // not text is corrupt.
+                                let memo = match t.metadata.get("memo") {
+                                    Some(bytes) => {
+                                        String::from_utf8(bytes.clone()).map_err(|e| {
+                                            format!(
+                                            "wallet.history: transaction {}'s memo is not text: \
+                                             {e}",
+                                            t.tx_id
+                                        )
+                                        })?
+                                    }
+                                    None => String::new(),
+                                };
+                                (t.amount, token, memo)
+                            }
+                        };
+
                         // Compute signed amount: positive if incoming, negative if outgoing
                         let amount_signed: i64 = if t.to_device == my_device_id_str {
-                            t.amount as i64 // incoming: positive
+                            amount as i64 // incoming: positive
                         } else {
-                            -(t.amount as i64) // outgoing: negative
+                            -(amount as i64) // outgoing: negative
                         };
 
                         // Determine recipient/sender for UI display - resolve aliases
-                        let recipient = if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
+                        let recipient = if t.tx_type == "faucet" {
+                            "ERA reserve (faucet)".to_string()
+                        } else if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
                             "Bitcoin Network".to_string()
                         } else if t.to_device == my_device_id_str {
-                            // Incoming: show who sent it
-                            if t.tx_type == "faucet" {
-                                "FAUCET".to_string()
-                            } else {
-                                // Try to resolve alias from from_device
-                                alias_lookup
-                                    .get(&t.from_device)
-                                    .cloned()
-                                    .unwrap_or_else(|| t.from_device.clone())
-                            }
+                            // Incoming: show who sent it - try to resolve alias
+                            alias_lookup
+                                .get(&t.from_device)
+                                .cloned()
+                                .unwrap_or_else(|| t.from_device.clone())
                         } else {
                             // Outgoing: show who received it - try to resolve alias
                             alias_lookup
@@ -606,82 +897,75 @@ impl AppRouterImpl {
                                 .unwrap_or_else(|| t.to_device.clone())
                         };
 
-                        // Convert string tx_type to enum value
+                        // The types this device writes. A stored type the wire
+                        // does not name is a row this history cannot report,
+                        // never an unspecified one.
                         let tx_type_enum = match t.tx_type.as_str() {
                             "faucet" => generated::TransactionType::TxTypeFaucet,
                             "bilateral_offline" => {
                                 generated::TransactionType::TxTypeBilateralOffline
                             }
-                            "bilateral_offline_recovered" => {
-                                generated::TransactionType::TxTypeBilateralOfflineRecovered
-                            }
                             "online" => generated::TransactionType::TxTypeOnline,
                             "dbtc_mint" => generated::TransactionType::TxTypeDbtcMint,
                             "dbtc_burn" => generated::TransactionType::TxTypeDbtcBurn,
-                            _ => generated::TransactionType::TxTypeUnspecified,
+                            other => {
+                                return Err(format!(
+                                    "wallet.history: transaction {} has type {other:?}, which the \
+                                     wire does not name",
+                                    t.tx_id
+                                ))
+                            }
                         };
 
-                        generated::TransactionInfo {
+                        Ok(generated::TransactionInfo {
                             // Filled at the encoding boundary by enrich_transaction_display.
                             display_amount: String::new(),
                             id: safe_id,
                             // Protocol/UI contract: device ids are binary 32-byte values.
                             // We store canonical base32 in SQLite for indexing, but must return bytes here.
-                            from_device_id: crate::util::text_id::decode_base32_crockford(&t.from_device)
-                                .filter(|b| b.len() == 32)
-                                .unwrap_or_default(),
-                            to_device_id: crate::util::text_id::decode_base32_crockford(&t.to_device)
-                                .filter(|b| b.len() == 32)
-                                .unwrap_or_default(),
-                            token_id: canonicalize_token_id(
-                                &t.metadata
-                                    .get("token_id")
-                                    .and_then(|b| String::from_utf8(b.clone()).ok())
-                                    .unwrap_or_else(|| "ERA".to_string()),
-                            ),
-                            amount: t.amount,
-                            fee: 0,
-                            logical_index: t.chain_height,
+                            // A faucet row names no sender device: its source is the
+                            // reserve, and a stored faucet row that names one is corrupt.
+                            from_device_id: if t.tx_type == "faucet" {
+                                if !t.from_device.is_empty() {
+                                    return Err(format!(
+                                        "wallet.history: faucet claim {} names a sender device",
+                                        t.tx_id
+                                    ));
+                                }
+                                Vec::new()
+                            } else {
+                                bytes32("sender device id", &t.from_device)?
+                            },
+                            to_device_id: bytes32("recipient device id", &t.to_device)?,
+                            token_id: canonicalize_token_id(&token_id),
+                            amount,
                             // tx_hash is stored as canonical base32 text in SQLite.
-                            tx_hash: crate::util::text_id::decode_base32_crockford(&t.tx_hash)
-                                .filter(|b| b.len() == 32)
-                                .unwrap_or_default(),
+                            tx_hash: bytes32("transaction hash", &t.tx_hash)?,
                             amount_signed,
                             tx_type: tx_type_enum as i32,
                             status: t.status.clone(),
                             recipient,
-                            stitched_receipt: if t.tx_type == "unilateral_send" {
-                                Vec::new()
-                            } else {
-                                t.proof_data.clone().unwrap_or_default()
-                            },
-                            created_at: t.created_at,
-                            memo: t
-                                .metadata
-                                .get("memo")
-                                .map(|b| String::from_utf8_lossy(b).to_string())
-                                .unwrap_or_default(),
+                            stitched_receipt: t.proof_data.clone().unwrap_or_default(),
+                            memo,
                             // §4.3#3: Derive R_G from the stored receipt's devid_a for
                             // display-only consistency check. This is historical UI display
                             // only; protocol acceptance already enforced at ingest time.
-                            receipt_verified: if t.tx_type == "unilateral_send" {
-                                false
-                            } else {
-                                t.proof_data
-                                    .as_ref()
-                                    .map(|b| {
-                                        let r_g = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(b)
-                                            .ok()
-                                            .map(|r| crate::sdk::receipts::DeviceTreeAcceptanceCommitment::from_root(
-                                                dsm::common::device_tree::DeviceTree::single(r.devid_a).root(),
-                                            ));
-                                        crate::sdk::receipts::verify_receipt_bytes(b, r_g)
-                                    })
-                                    .unwrap_or(false)
-                            },
-                        }
+                            receipt_verified: t.proof_data.as_ref().is_some_and(|b| {
+                                receipt_state_holds(
+                                    b,
+                                    t.metadata
+                                        .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
+                                )
+                            }),
+                            // A transfer moves the one token above.
+                            moves: Vec::new(),
+                        })
                     })
                     .collect();
+                let txs = match txs {
+                    Ok(txs) => txs,
+                    Err(e) => return err(e),
+                };
 
                 // Rendered at the encoding boundary, for the same reason
                 // balances are: a producer that builds a row without the
@@ -689,7 +973,9 @@ impl AppRouterImpl {
                 // the frontend has nothing to fall back on but a guess.
                 let mut txs = txs;
                 for tx in txs.iter_mut() {
-                    enrich_transaction_display(tx);
+                    if let Err(e) = enrich_transaction_display(tx) {
+                        return err(format!("wallet.history: {e}"));
+                    }
                 }
                 let reply = generated::WalletHistoryResponse { transactions: txs };
                 // NEW: Return as Envelope.walletHistoryResponse (field 38)
@@ -699,115 +985,87 @@ impl AppRouterImpl {
             // -------- balance.list --------
             "balance.list" => {
                 let current_state = match self.ensure_authoritative_wallet_state("balance.list") {
-                    Ok(state) => Some(state),
-                    Err(e) => {
-                        log::warn!("[balance.list] authoritative state refresh failed: {}", e);
-                        self.core_sdk.get_current_state().ok()
-                    }
+                    Ok(state) => state,
+                    Err(e) => return err(format!("balance.list: authoritative state: {e}")),
                 };
-                log::debug!("[balance.list] query handler entered");
 
-                // Log the restored BCR state for debugging
-                if let Some(cs) = current_state.as_ref() {
-                    let era_balance = cs
-                        .token_balances
-                        .values()
-                        .find_map(|b| if b.value() > 0 { Some(b.value()) } else { None })
-                        .unwrap_or(0);
-                    log::info!(
-                        "[balance.list] restored BCR state hash={} state_number={} era_balance={}",
-                        crate::util::text_id::encode_base32_crockford(&cs.hash),
-                        0u64,
-                        era_balance
-                    );
-                } else {
-                    log::warn!("[balance.list] no current state after restore");
-                }
-
-                // Enumerate token balances from the canonical token cache/projection path.
                 let mut items: Vec<generated::BalanceGetResponse> = Vec::new();
-
                 let device_id_txt =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                // Seed from legacy state first; the projection merge below
-                // overrides it wherever the canonical head has spoken.
-                if let Some(cs) = current_state.as_ref() {
-                    for (token_key, balance) in &cs.token_balances {
-                        let token_id = canonicalize_token_id(&if let Some((_, t)) =
-                            token_key.split_once('|')
-                        {
-                            t.to_string()
-                        } else {
-                            token_key.clone()
+                // Seed from the head's compat view; the projection merge below
+                // overrides it wherever the settled view names a token.
+                for (token_key, balance) in &current_state.token_balances {
+                    let Some((_, ticker)) = token_key.split_once('|') else {
+                        return err(format!(
+                            "balance.list: balance key {token_key:?} is not a canonical \
+                             {{prefix}}|{{token}} key"
+                        ));
+                    };
+                    let token_id = canonicalize_token_id(ticker);
+                    if token_id.is_empty()
+                        || token_id.chars().any(|c| c.is_control() || (c as u32) > 126)
+                    {
+                        return err(format!(
+                            "balance.list: balance key {token_key:?} names no printable token"
+                        ));
+                    }
+                    if !items.iter().any(|i| i.token_id == token_id) {
+                        items.push(generated::BalanceGetResponse {
+                            token_id,
+                            available: balance.available(),
+                            locked: balance.locked(),
+                            ..Default::default()
                         });
-                        if token_id.chars().any(|c| c.is_control() || (c as u32) > 126) {
-                            continue;
-                        }
-                        if !items.iter().any(|i| i.token_id == token_id) {
-                            items.push(generated::BalanceGetResponse {
-                                token_id,
-                                available: balance.available(),
-                                locked: balance.locked(),
-                                ..Default::default()
-                            });
-                        }
                     }
                 }
 
-                // Merge canonical projection rows over the legacy seed.
-                if let Ok(projected) =
-                    crate::storage::client_db::list_balance_projections(&device_id_txt)
-                {
-                    merge_balance_projections(&mut items, projected);
+                match crate::storage::client_db::list_balance_projections(&device_id_txt) {
+                    Ok(projected) => merge_balance_projections(&mut items, projected),
+                    Err(e) => return err(format!("balance.list: balance projections: {e}")),
                 }
 
-                // Ensure built-in tokens always appear (even at zero balance).
-                // Uses case-insensitive matching + metadata enrichment.
-                ensure_default_visible_balances(&mut items);
-
-                // Deterministic order by token_id
-                for item in &mut items {
-                    enrich_balance_metadata(item);
+                // Built-in and registered tokens appear even at zero balance.
+                if let Err(e) = ensure_default_visible_balances(&mut items) {
+                    return err(format!("balance.list: {e}"));
                 }
-                // EVERY row carries its metadata, however it got here.
-                //
-                // Projection-backed rows were pushed straight into `items`, so
-                // only the zero-balance rows synthesised by
-                // ensure_default_visible_balances were ever enriched. A token
-                // you actually HELD therefore went out with decimals 0, and the
-                // wallet had nothing to format with: 100_000 base units of a
-                // 2-decimal token rendered as "100000 RIGB" instead of
-                // "1,000.00". Enrichment belongs at the encoding boundary,
-                // where it cannot be skipped by whichever path produced a row.
+
+                // Every row carries its metadata, however it got here:
+                // enrichment belongs at the encoding boundary, where it cannot
+                // be skipped by whichever path produced a row.
                 for item in items.iter_mut() {
-                    enrich_balance_metadata(item);
+                    if let Err(e) = enrich_balance_metadata(item, &|asset| {
+                        self.core_sdk.offline_allocation_of(asset)
+                    }) {
+                        return err(format!("balance.list: {e}"));
+                    }
                 }
                 items.sort_by(|a, b| a.token_id.cmp(&b.token_id));
 
-                // Critical debug: log what we're actually returning
-                log::debug!("[balance.list] returning {} balance items", items.len());
-                for item in &items {
-                    log::debug!(
-                        "[balance.list] item: token_id={} available={} locked={} decimals={} symbol={}",
-                        item.token_id,
-                        item.available,
-                        item.locked,
-                        item.decimals,
-                        item.symbol
-                    );
-                }
-
                 let resp = generated::BalancesListResponse { balances: items };
+                pack_envelope_ok(generated::envelope::Payload::BalancesListResponse(resp))
+            }
 
-                // Return as Envelope.balancesListResponse (field 34)
-                let result =
-                    pack_envelope_ok(generated::envelope::Payload::BalancesListResponse(resp));
-                log::debug!(
-                    "[balance.list] pack_envelope_ok success={} data_len={}",
-                    result.success,
-                    result.data.len()
-                );
-                result
+            // -------- wallet.amount --------
+            "wallet.amount" => {
+                let req = match generated::ArgPack::decode(&*q.params) {
+                    Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
+                        match generated::WalletAmountRequest::decode(&*pack.body) {
+                            Ok(req) => req,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.amount: decode WalletAmountRequest failed: {e}"
+                                ))
+                            }
+                        }
+                    }
+                    _ => return err("wallet.amount: expected ArgPack(codec=PROTO)".into()),
+                };
+                match wallet_amount(req) {
+                    Ok(reply) => {
+                        pack_envelope_ok(generated::envelope::Payload::WalletAmountResponse(reply))
+                    }
+                    Err(e) => err(format!("wallet.amount: {e}")),
+                }
             }
 
             _ => err(format!("unknown wallet query path: {}", q.path)),
@@ -816,25 +1074,6 @@ impl AppRouterImpl {
 
     pub(crate) async fn handle_wallet_invoke(&self, i: AppInvoke) -> AppResult {
         match i.method.as_str() {
-            "wallet.send" => {
-                // Decode ArgPack from args
-                let arg_pack = match generated::ArgPack::decode(&*i.args) {
-                    Ok(p) => p,
-                    Err(e) => return err(format!("decode ArgPack failed: {e}")),
-                };
-                if arg_pack.codec != generated::Codec::Proto as i32 {
-                    return err("wallet.send: ArgPack.codec must be PROTO".into());
-                }
-
-                // Decode OnlineTransferRequest
-                let transfer_req = match generated::OnlineTransferRequest::decode(&*arg_pack.body) {
-                    Ok(r) => r,
-                    Err(e) => return err(format!("decode OnlineTransferRequest failed: {e}")),
-                };
-
-                self.process_online_transfer_logic(transfer_req).await
-            }
-
             "wallet.sendOffline" => {
                 let arg_pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,
@@ -843,20 +1082,14 @@ impl AppRouterImpl {
                 if arg_pack.codec != generated::Codec::Proto as i32 {
                     return err("wallet.sendOffline: ArgPack.codec must be PROTO".into());
                 }
-                let req = match generated::BilateralPrepareRequest::decode(&*arg_pack.body) {
+                let req = match generated::OfflineTransferRequest::decode(&*arg_pack.body) {
                     Ok(r) => r,
                     Err(e) => {
                         return err(format!(
-                            "wallet.sendOffline: decode BilateralPrepareRequest failed: {e}"
+                            "wallet.sendOffline: decode OfflineTransferRequest failed: {e}"
                         ))
                     }
                 };
-                if req.counterparty_device_id.len() != 32 {
-                    return err(
-                        "wallet.sendOffline: counterparty_device_id must be 32 bytes".into(),
-                    );
-                }
-
                 let counterparty_device_id: [u8; 32] = match req.counterparty_device_id[..]
                     .try_into()
                 {
@@ -867,26 +1100,16 @@ impl AppRouterImpl {
                         )
                     }
                 };
-                let ble_address = if !req.ble_address.trim().is_empty() {
-                    req.ble_address.trim().to_string()
-                } else {
-                    match crate::storage::client_db::get_contact_by_device_id(
-                        &req.counterparty_device_id,
-                    ) {
-                        Ok(Some(contact)) => contact.ble_address.unwrap_or_default(),
-                        Ok(None) => String::new(),
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.sendOffline: failed to resolve counterparty contact: {e}"
-                            ))
-                        }
-                    }
+                // The counterparty's device id routes the prepare. Where its
+                // appliance was last seen over BLE — the address its contact
+                // holds, else the one its identity was seen at this session — is
+                // only where the transport looks first.
+                let address_hint = match crate::bluetooth::peer_address::counterparty_address(
+                    &counterparty_device_id,
+                ) {
+                    Ok(hint) => hint,
+                    Err(e) => return err(format!("wallet.sendOffline: {e}")),
                 };
-                if ble_address.is_empty() {
-                    return err(
-                        "wallet.sendOffline: ble_address unavailable for counterparty".into(),
-                    );
-                }
 
                 let send_status = self
                     .calibrate_local_relationship_send_status(&counterparty_device_id)
@@ -903,49 +1126,38 @@ impl AppRouterImpl {
                     return err(format!("wallet.sendOffline: {message}"));
                 }
 
-                let operation_bytes = if req.operation_data.is_empty() {
-                    let token_id = if req.token_id_hint.trim().is_empty() {
-                        "ERA".to_string()
-                    } else {
-                        canonicalize_token_id(&req.token_id_hint)
-                    };
-                    let transfer_amount = if req.transfer_amount_display.trim().is_empty() {
-                        req.transfer_amount
-                    } else {
-                        let decimals = resolve_token_decimals(&token_id);
-                        match parse_display_amount_to_base_units(
-                            &req.transfer_amount_display,
-                            decimals,
-                        ) {
-                            Ok(amount) => amount,
-                            Err(e) => {
-                                return err(format!(
-                                    "wallet.sendOffline: invalid display amount: {e}"
-                                ))
-                            }
-                        }
-                    };
-                    let policy_commit = match self
-                        .core_sdk
-                        .resolve_policy_commit_strict(token_id.as_bytes())
-                    {
-                        Ok(pc) => pc,
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.sendOffline: policy_commit resolve failed: {e}"
-                            ))
-                        }
-                    };
-                    encode_offline_transfer_operation_canonical(
-                        &counterparty_device_id,
-                        transfer_amount,
-                        &token_id,
-                        req.memo_hint.trim(),
-                        &policy_commit,
-                    )
-                } else {
-                    req.operation_data.clone()
+                // The token is named exactly: an omitted token is not ERA.
+                let token_id = canonicalize_token_id(&req.token_id);
+                if token_id.is_empty() {
+                    return err("wallet.sendOffline: the request names no token".into());
+                }
+                let decimals = match token_decimals(&token_id) {
+                    Ok(d) => d,
+                    Err(e) => return err(format!("wallet.sendOffline: {e}")),
                 };
+                let transfer_amount =
+                    match parse_display_amount_to_base_units(&req.amount, decimals) {
+                        Ok(amount) => amount,
+                        Err(e) => return err(format!("wallet.sendOffline: invalid amount: {e}")),
+                    };
+                let policy_commit = match self
+                    .core_sdk
+                    .resolve_policy_commit_strict(token_id.as_bytes())
+                {
+                    Ok(pc) => pc,
+                    Err(e) => {
+                        return err(format!(
+                            "wallet.sendOffline: policy_commit resolve failed: {e}"
+                        ))
+                    }
+                };
+                let (operation_bytes, transfer_terms) = encode_offline_transfer_operation_canonical(
+                    &counterparty_device_id,
+                    transfer_amount,
+                    &token_id,
+                    req.memo.trim(),
+                    &policy_commit,
+                );
                 let operation =
                     match dsm::types::operations::Operation::from_bytes(&operation_bytes) {
                         Ok(op) => op,
@@ -955,141 +1167,68 @@ impl AppRouterImpl {
                             ))
                         }
                     };
+                // The terms that ride beside the operation open it, as the
+                // receiver will check before it takes the step.
+                if let Err(e) = transfer_terms.open(&operation) {
+                    return err(format!("wallet.sendOffline: {e}"));
+                }
 
                 #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
                 {
-                    let validity_iterations = if req.validity_iterations == 0 {
-                        100
-                    } else {
-                        req.validity_iterations
+                    // The live BLE stack carries the step; `init_dsm_sdk` builds it
+                    // once the identity exists, and nothing builds a second one.
+                    let contact = match crate::storage::client_db::get_contact_by_device_id(
+                        &counterparty_device_id,
+                    ) {
+                        Ok(Some(record)) => match record.to_verified_contact() {
+                            Ok(contact) => contact,
+                            Err(e) => return err(format!("wallet.sendOffline: {e}")),
+                        },
+                        Ok(None) => {
+                            return err(
+                                "wallet.sendOffline: the counterparty is not a contact".into()
+                            )
+                        }
+                        Err(e) => return err(format!("wallet.sendOffline: contact lookup: {e}")),
                     };
-                    // Try to get the adapter; if not yet injected, trigger on-demand
-                    // injection via ensure_bluetooth_manager_and_sync_contact. This
-                    // handles the race where the frontend fires sendOffline immediately
-                    // after pairing finalized but before the Kotlin-side 15s pairing
-                    // timeout fires the bilateral preconditions check.
                     let transport_adapter = match crate::bridge::get_ble_transport_adapter().await {
                         Ok(adapter) => adapter,
-                        Err(_) => {
-                            log::warn!(
-                                "[wallet.sendOffline] BLE transport adapter not yet injected; attempting on-demand injection"
-                            );
-                            // Build a minimal contact from SQLite to trigger late-init
-                            match crate::storage::client_db::get_contact_by_device_id(
-                                &counterparty_device_id,
-                            ) {
-                                Ok(Some(contact_record)) => {
-                                    let verified_contact =
-                                        dsm::types::contact_types::DsmVerifiedContact {
-                                            alias: contact_record.alias.clone(),
-                                            device_id: counterparty_device_id,
-                                            genesis_hash: {
-                                                let mut gh = [0u8; 32];
-                                                if contact_record.genesis_hash.len() == 32 {
-                                                    gh.copy_from_slice(
-                                                        &contact_record.genesis_hash,
-                                                    );
-                                                }
-                                                gh
-                                            },
-                                            public_key: contact_record.public_key.clone(),
-                                            genesis_material: Vec::new(),
-                                            chain_tip: None,
-                                            chain_tip_smt_proof: None,
-                                            genesis_verified_online: true,
-                                            verified_at_commit_height: 0,
-                                            added_at_commit_height: 0,
-                                            last_updated_commit_height: 0,
-                                            verifying_storage_nodes: Vec::new(),
-                                            ble_address: contact_record.ble_address.clone(),
-                                        };
-                                    if let Err(e) =
-                                        crate::bluetooth::ensure_bluetooth_manager_and_sync_contact(
-                                            verified_contact,
-                                        )
-                                        .await
-                                    {
-                                        log::warn!(
-                                            "[wallet.sendOffline] On-demand BLE init failed: {e}"
-                                        );
-                                    }
-                                }
-                                _ => {
-                                    log::warn!("[wallet.sendOffline] Cannot trigger on-demand BLE init: contact not found in SQLite");
-                                }
-                            }
-                            // Retry after on-demand injection
-                            match crate::bridge::get_ble_transport_adapter().await {
-                                Ok(adapter) => adapter,
-                                Err(e) => {
-                                    return err(format!(
-                                        "wallet.sendOffline: BLE transport adapter not ready after on-demand injection attempt: {e}"
-                                    ))
-                                }
-                            }
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: the BLE stack is not live yet: {e}"
+                            ))
                         }
                     };
                     let coordinator = match crate::bridge::get_ble_coordinator().await {
                         Ok(c) => c,
-                        Err(_) => {
-                            // Same pattern: coordinator should have been injected alongside adapter
-                            log::warn!("[wallet.sendOffline] BLE coordinator not yet injected; retrying after brief yield");
-                            tokio::task::yield_now().await;
-                            match crate::bridge::get_ble_coordinator().await {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    return err(format!(
-                                        "wallet.sendOffline: BLE coordinator not ready: {e}"
-                                    ))
-                                }
-                            }
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: the BLE stack is not live yet: {e}"
+                            ))
                         }
                     };
-                    // Just-in-time contact sync: if the BTM doesn't have this contact
-                    // but SQLite does, load it now. This covers cases where the init-time
-                    // sync was missed (e.g., race between contacts.add and BLE init).
+                    // Just-in-time contact sync: the BLE handler may have missed
+                    // the init-time sync (a race between contacts.add and BLE init).
                     if !transport_adapter
                         .bilateral_handler()
                         .has_verified_contact(&counterparty_device_id)
                         .await
                     {
-                        log::warn!(
-                            "[wallet.sendOffline] Contact not in BTM — attempting just-in-time sync from SQLite"
-                        );
-                        if let Ok(Some(record)) =
-                            crate::storage::client_db::get_contact_by_device_id(
-                                &counterparty_device_id,
-                            )
+                        if let Err(e) = transport_adapter
+                            .bilateral_handler()
+                            .add_verified_contact(contact)
+                            .await
                         {
-                            if let Some(verified) = record.to_verified_contact() {
-                                match transport_adapter
-                                    .bilateral_handler()
-                                    .add_verified_contact(verified)
-                                    .await
-                                {
-                                    Ok(_) => log::warn!(
-                                        "[wallet.sendOffline] ✅ Just-in-time contact sync succeeded"
-                                    ),
-                                    Err(e) => log::error!(
-                                        "[wallet.sendOffline] ❌ Just-in-time contact sync failed: {e}"
-                                    ),
-                                }
-                            } else {
-                                log::error!(
-                                    "[wallet.sendOffline] Contact in SQLite but to_verified_contact() returned None (bad field lengths)"
-                                );
-                            }
-                        } else {
-                            log::error!(
-                                "[wallet.sendOffline] Contact not found in SQLite either — user must add contact first"
-                            );
+                            return err(format!(
+                                "wallet.sendOffline: just-in-time contact sync failed: {e}"
+                            ));
                         }
                     }
                     let (prepare_envelope, commitment_hash) = match transport_adapter
-                        .create_prepare_message_with_commitment(
+                        .create_transfer_prepare_with_commitment(
                             counterparty_device_id,
                             operation,
-                            validity_iterations,
+                            transfer_terms,
                         )
                         .await
                     {
@@ -1105,31 +1244,42 @@ impl AppRouterImpl {
                         &prepare_envelope,
                     ) {
                         Ok(chunks) => chunks,
+                        // A prepare that cannot be framed can never be sent: the
+                        // proposal, which reached no one, is cancelled — signed and
+                        // kept, as any proposal its proposer ends before its
+                        // confirm.
                         Err(e) => {
-                            let _ = transport_adapter
-                                .fail_session_by_commitment(
+                            let cancelled = transport_adapter
+                                .bilateral_handler()
+                                .cancel_proposal(
                                     commitment_hash,
-                                    "wallet.sendOffline: failed to frame BLE prepare payload",
+                                    "the prepare could not be framed for BLE".to_string(),
                                 )
                                 .await;
-                            return err(format!(
-                                "wallet.sendOffline: failed to frame BLE prepare payload: {e}"
-                            ));
+                            return err(match cancelled {
+                                Ok(_) => format!(
+                                    "wallet.sendOffline: failed to frame BLE prepare payload \
+                                     (the proposal is cancelled): {e}"
+                                ),
+                                Err(cancel) => format!(
+                                    "wallet.sendOffline: failed to frame BLE prepare payload: \
+                                     {e}; the proposal is not cancelled: {cancel}"
+                                ),
+                            });
                         }
                     };
 
                     use crate::jni::jni_common::get_java_vm_borrowed;
+                    // From here the proposal is prepared and its prepare is owed:
+                    // a send that does not complete fails nothing, and the prepare
+                    // is sent again when the link returns.
                     let vm = match get_java_vm_borrowed() {
                         Some(vm) => vm,
                         None => {
-                            let _ = transport_adapter
-                                .fail_session_by_commitment(
-                                    commitment_hash,
-                                    "wallet.sendOffline: Java VM unavailable for BLE dispatch",
-                                )
-                                .await;
                             return err(
-                                "wallet.sendOffline: Java VM unavailable for BLE dispatch".into()
+                                "wallet.sendOffline: Java VM unavailable for BLE dispatch; the \
+                                 prepare is sent when the link returns"
+                                    .into(),
                             );
                         }
                     };
@@ -1143,57 +1293,63 @@ impl AppRouterImpl {
                         })?;
                         crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
                             &mut jni_env,
-                            &ble_address,
+                            &counterparty_device_id,
+                            address_hint.as_deref(),
                             &chunks,
                         )
                         .map_err(|e| format!("wallet.sendOffline: BLE dispatch failed: {e}"))
                     })();
                     // jni_env is dropped here — safe to .await below
+                    if !matches!(ble_send_result, Ok(true)) {
+                        crate::bluetooth::owed_frame_driver::kick();
+                    }
                     match ble_send_result {
-                        Ok(true) => {}
+                        Ok(true) => crate::bluetooth::owed_frame_driver::delivered(
+                            counterparty_device_id,
+                            &[(
+                                commitment_hash,
+                                crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
+                            )],
+                        ),
                         Ok(false) => {
-                            let _ = transport_adapter
-                                .fail_session_by_commitment(
-                                    commitment_hash,
-                                    "wallet.sendOffline: BLE bridge rejected the prepared chunks",
-                                )
-                                .await;
                             return err(
-                                "wallet.sendOffline: BLE bridge rejected the prepared chunks"
+                                "wallet.sendOffline: BLE bridge rejected the prepared chunks; the \
+                                 prepare is sent again when the link returns"
                                     .into(),
                             );
                         }
                         Err(e) => {
-                            let _ = transport_adapter
-                                .fail_session_by_commitment(
-                                    commitment_hash,
-                                    "wallet.sendOffline: BLE dispatch failed after prepare authoring",
-                                )
-                                .await;
-                            return err(e);
+                            return err(format!(
+                                "{e}; the prepare is sent again when the link returns"
+                            ));
                         }
                     }
 
-                    let resp = generated::BilateralPrepareResponse {
-                        commitment_hash: Some(generated::Hash32 {
+                    // This device's own answer: the prepare went out and the proposal
+                    // is identified by its commitment. The peer's prepare response,
+                    // when it arrives over BLE, is a different message.
+                    let resp = generated::BilateralTransferResponse {
+                        success: true,
+                        transaction_hash: Some(generated::Hash32 {
                             v: commitment_hash.to_vec(),
                         }),
-                        expires_iterations: validity_iterations,
-                        ..Default::default()
+                        message: "prepare sent over BLE; the transfer completes when the peer's \
+                                  response arrives"
+                            .to_string(),
                     };
-                    pack_envelope_ok(generated::envelope::Payload::BilateralPrepareResponse(resp))
+                    pack_envelope_ok(generated::envelope::Payload::BilateralTransferResponse(
+                        resp,
+                    ))
                 }
 
                 #[cfg(not(all(target_os = "android", feature = "bluetooth", feature = "jni")))]
                 {
-                    let _ = (counterparty_device_id, ble_address, operation);
+                    let _ = (counterparty_device_id, address_hint, operation);
                     err("wallet.sendOffline is only available on Android BLE builds".into())
                 }
             }
 
             "wallet.sendSmart" => {
-                use crate::storage::client_db::get_contact_by_alias;
-
                 // Decode ArgPack from args
                 let arg_pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,
@@ -1210,149 +1366,46 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("decode OnlineTransferSmartRequest failed: {e}")),
                 };
 
-                // 1. Resolve Recipient (Crockford Base32 device_id OR Alias)
-                // Try base32 decode first — only accept if it produces exactly 32 bytes
-                // (a valid device ID). Otherwise fall through to alias lookup, since
-                // short aliases like "ej8w2khr" are valid base32 but decode to <32 bytes.
-                let to_device_id_vec = {
-                    let as_device_id =
-                        crate::util::text_id::decode_base32_crockford(&smart_req.recipient)
-                            .filter(|b| b.len() == 32);
-
-                    if let Some(bytes) = as_device_id {
-                        bytes
-                    } else {
-                        match get_contact_by_alias(&smart_req.recipient) {
-                            Ok(Some(c)) if c.device_id.len() == 32 => c.device_id.clone(),
-                            Ok(Some(c)) => {
-                                return err(format!(
-                                    "Contact {} has invalid device ID length: {}",
-                                    smart_req.recipient,
-                                    c.device_id.len()
-                                ))
-                            }
-                            _ => {
-                                return err(format!(
-                                "Recipient not found (not a valid device id or known alias): {}",
-                                smart_req.recipient
-                            ))
-                            }
-                        }
-                    }
-                };
-
-                // 2. Resolve Chain Tip from Contact
-                let local_genesis: [u8; 32] = match self
-                    .core_sdk
-                    .local_genesis_hash()
-                    .await
-                    .ok()
-                    .and_then(|v| v.as_slice().try_into().ok())
-                {
-                    Some(genesis) => genesis,
-                    None => {
-                        return err(
-                            "wallet.sendSmart: local genesis unavailable for canonical relationship routing"
-                                .into(),
-                        )
-                    }
-                };
-                let chain_tip_vec =
-                    match crate::storage::client_db::get_contact_by_device_id(&to_device_id_vec) {
-                        Ok(Some(c)) => match relationship_tip_for_contact_restore(
-                            self.device_id_bytes,
-                            local_genesis,
-                            &c,
-                        ) {
-                            Some(tip) => tip.to_vec(),
-                            None => {
-                                return err(
-                                    "wallet.sendSmart: recipient relationship tip is unavailable or invalid"
-                                        .into(),
-                                )
-                            }
-                        },
-                        Ok(None) => {
-                            return err(
-                                "wallet.sendSmart: recipient must be an added contact before online send"
-                                    .into(),
-                            )
-                        }
-                        Err(e) => {
+                // 1. The recipient: the device id of the contact the user chose.
+                // Never an alias — an alias is a label two contacts can share
+                // (pre-audit item 6, §6.63). That it is an added contact is
+                // checked where the relationship is read.
+                let to_device_id: [u8; 32] =
+                    match <[u8; 32]>::try_from(smart_req.recipient_device_id.as_slice()) {
+                        Ok(id) => id,
+                        Err(..) => {
                             return err(format!(
-                                "wallet.sendSmart: failed to load recipient contact: {e}"
+                                "wallet.sendSmart: the recipient device id is {} bytes, not 32",
+                                smart_req.recipient_device_id.len()
                             ))
                         }
                     };
 
-                // 3. Parse display amount into canonical base units in the backend.
-                let canonical_token_id = canonicalize_token_id(&smart_req.token_id);
-                let token_decimals = resolve_token_decimals(&canonical_token_id);
+                // 2. Parse display amount into canonical base units in the backend.
+                // The token is named exactly: an omitted token is not ERA.
+                let token_id = smart_req.token_id.clone();
+                if token_id.is_empty() {
+                    return err("wallet.sendSmart: the request names no token".into());
+                }
+                let token_decimals = match token_decimals(&token_id) {
+                    Ok(d) => d,
+                    Err(e) => return err(format!("wallet.sendSmart: {e}")),
+                };
                 let amount: u64 =
                     match parse_display_amount_to_base_units(&smart_req.amount, token_decimals) {
                         Ok(v) => v,
                         Err(e) => return err(format!("Invalid amount: {}", e)),
                     };
 
-                // 4. Per §4.3 there's no state_number sequence; use deterministic
-                // tick as a per-request monotonic identifier (not in any hash).
-                let seq = match self.core_sdk.get_current_state() {
-                    Ok(_s) => crate::util::deterministic_time::tick(),
-                    _ => 1,
-                };
-
-                // 5. Construct OnlineTransferRequest with deterministic nonce
-                let mut inner_req = generated::OnlineTransferRequest {
-                    token_id: canonical_token_id,
-                    to_device_id: to_device_id_vec.clone(),
+                // 3. What the send asks for. The sender, the relationship tip,
+                // the nonce and the signed operation are derived from here on.
+                self.process_online_transfer_logic(super::app_router_impl::OnlineSendIntent {
+                    to_device_id,
+                    token_id,
                     amount,
                     memo: smart_req.memo,
-                    nonce: vec![], // Deterministic nonce computed below from request content
-                    signature: vec![],
-                    from_device_id: self.device_id_bytes.to_vec(),
-                    chain_tip: chain_tip_vec.clone(),
-                    seq,
-                    canonical_operation_bytes: Vec::new(),
-                    receipt_evidence_digest: Vec::new(),
-                    sender_economic_position: 0,
-                    sender_debit_mutation_index: 0,
-                };
-
-                // Compute deterministic nonce: Hash(domain || sender_id || receiver_id || prev_tip || seq || payload_digest)
-                let mut payload_bytes = Vec::new();
-                if let Err(e) = inner_req.encode(&mut payload_bytes) {
-                    return err(format!(
-                        "Failed to encode OnlineTransferRequest for nonce computation: {e}"
-                    ));
-                }
-                let payload_digest = dsm::crypto::blake3::domain_hash(
-                    dsm::common::domain_tags::TAG_DSM_PAYLOAD_DIGEST,
-                    &payload_bytes,
-                );
-
-                let sender_id = match <[u8; 32]>::try_from(&self.device_id_bytes[..]) {
-                    Ok(v) => v,
-                    Err(_) => return err("Invalid sender device ID length".into()),
-                };
-                let receiver_id = match <[u8; 32]>::try_from(&to_device_id_vec[..]) {
-                    Ok(v) => v,
-                    Err(_) => return err("Invalid receiver device ID length".into()),
-                };
-                let prev_tip = match <[u8; 32]>::try_from(&chain_tip_vec[..]) {
-                    Ok(v) => v,
-                    Err(_) => return err("Invalid chain tip length".into()),
-                };
-
-                let nonce = dsm::crypto::generate_online_transfer_nonce(
-                    &sender_id,
-                    &receiver_id,
-                    &prev_tip,
-                    seq,
-                    payload_digest.as_bytes(),
-                );
-                inner_req.nonce = nonce.to_vec();
-
-                self.process_online_transfer_logic(inner_req).await
+                })
+                .await
             }
 
             _ => err(format!("unknown wallet invoke method: {}", i.method)),
@@ -1360,16 +1413,110 @@ impl AppRouterImpl {
     }
 }
 
+/// Whether a stored receipt's state rules hold against its author's
+/// AUTHENTICATED Device Tree commitment and pinned genesis — this device's
+/// own, or the ones kept for the contact — and the operation the row keeps
+/// beside it. Nothing is derived from the receipt itself: a receipt whose
+/// author has no kept commitment, or a row that keeps no operation, is not
+/// shown as verified. A history row never holds the author's own
+/// offline-bearer spend (the sender keeps the receiver's counter-signed
+/// receipt), so no anchor-state leaves are needed and none are supplied.
+fn receipt_state_holds(receipt_bytes: &[u8], operation_bytes: Option<&Vec<u8>>) -> bool {
+    let Ok(receipt) =
+        dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(receipt_bytes)
+    else {
+        return false;
+    };
+    let Some(Ok(operation)) =
+        operation_bytes.map(|b| dsm::types::operations::Operation::from_bytes(b))
+    else {
+        return false;
+    };
+    let own = crate::sdk::app_state::AppState::get_device_id()
+        .is_some_and(|id| id.as_slice() == receipt.devid_a.as_slice());
+    let pinned = if own {
+        crate::sdk::app_state::AppState::get_device_tree_commitment().zip(
+            crate::sdk::app_state::AppState::get_genesis_hash()
+                .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok()),
+        )
+    } else {
+        let commitment = match crate::storage::client_db::get_contact_device_tree_root(
+            &receipt.devid_a,
+        ) {
+            Ok(root) => {
+                root.map(dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root)
+            }
+            Err(e) => {
+                log::error!("[wallet] receipt verification: the sender's Device Tree root is unreadable: {e}");
+                return false;
+            }
+        };
+        let genesis = match crate::storage::client_db::get_contact_by_device_id(&receipt.devid_a) {
+            Ok(contact) => {
+                contact.and_then(|c| <[u8; 32]>::try_from(c.genesis_hash.as_slice()).ok())
+            }
+            Err(e) => {
+                log::error!(
+                    "[wallet] receipt verification: the sender's contact is unreadable: {e}"
+                );
+                return false;
+            }
+        };
+        commitment.zip(genesis)
+    };
+    pinned.is_some_and(|(commitment, author_genesis)| {
+        dsm::verification::receipt_verification::verify_receipt_state(
+            &receipt,
+            &dsm::verification::receipt_verification::ReceiptStateContext {
+                device_tree_commitment: &commitment,
+                author_genesis,
+                operation: &operation,
+                bearer: None,
+            },
+        )
+        .is_ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         canonicalize_token_id, encode_offline_transfer_operation_canonical,
-        ensure_default_visible_balances, merge_balance_projections,
-        parse_display_amount_to_base_units,
+        ensure_default_visible_balances, format_base_units_for_display,
+        format_signed_base_units_for_display, merge_balance_projections,
+        parse_display_amount_to_base_units, token_decimals, wallet_amount,
     };
     use crate::storage::client_db::BalanceProjectionRecord;
     use dsm::types::proto as generated;
     use dsm::types::operations::Operation;
+
+    /// Rendering is exact at the magnitudes a hand-rolled conversion gets
+    /// wrong, in both directions of sign.
+    #[test]
+    fn rendering_is_exact_at_the_awkward_magnitudes() {
+        // Fewer digits than decimals: the leading zeros are produced.
+        assert_eq!(format_base_units_for_display(5, 8), "0.00000005");
+        assert_eq!(format_base_units_for_display(0, 2), "0.00");
+        assert_eq!(format_base_units_for_display(100, 2), "1.00");
+        // No fractional part is still written out, so the scale is visible.
+        assert_eq!(format_base_units_for_display(100_000, 2), "1000.00");
+        // Whole-unit tokens get no decimal point.
+        assert_eq!(format_base_units_for_display(750, 0), "750");
+        assert_eq!(
+            format_base_units_for_display(u64::MAX, 2),
+            "184467440737095516.15"
+        );
+        assert_eq!(
+            format_signed_base_units_for_display(-100_000, 2),
+            "-1000.00"
+        );
+        assert_eq!(format_signed_base_units_for_display(0, 2), "0.00");
+        // i64::MIN cannot be negated in place.
+        assert_eq!(
+            format_signed_base_units_for_display(i64::MIN, 0),
+            "-9223372036854775808"
+        );
+    }
 
     /// A projection row as `build_balance_projection_from_device_head` writes it:
     /// `source_state_hash` is the device head root `r_A`, NOT a `State::hash()`.
@@ -1384,7 +1531,6 @@ mod tests {
             // A device head root. Nothing in the read path may compare this to a
             // legacy `State::hash()` — they digest different structures.
             source_state_hash: "HEADROOT0000000000000000000000000".to_string(),
-            updated_at: 7,
         }
     }
 
@@ -1517,10 +1663,96 @@ mod tests {
         assert!(parse_display_amount_to_base_units("1.5", 0).is_err());
     }
 
+    /// `wallet.amount` counts ERA at the decimals of ERA's committed policy,
+    /// in both directions, by the functions a send and a balance use.
+    #[test]
+    fn wallet_amount_counts_era_by_its_committed_policy() {
+        use generated::wallet_amount_request::{Amount, Unit};
+        let era = |amount| {
+            wallet_amount(generated::WalletAmountRequest {
+                unit: Some(Unit::TokenId("ERA".to_string())),
+                amount: Some(amount),
+            })
+            .expect("ERA is counted")
+        };
+        let decimals = dsm::core::token::era_policy::era_policy()
+            .expect("ERA's committed policy")
+            .decimals;
+
+        let typed = era(Amount::Entered("25".to_string()));
+        assert_eq!(typed.decimals, decimals);
+        assert_eq!(
+            typed.base_units,
+            parse_display_amount_to_base_units("25", decimals).expect("25 parses")
+        );
+        assert_eq!(
+            typed.display_amount,
+            format_base_units_for_display(typed.base_units, decimals)
+        );
+        // ERA carries two decimals (SoFi Amendment S18).
+        assert_eq!(
+            (typed.base_units, typed.display_amount.as_str()),
+            (2_500, "25.00")
+        );
+
+        let held = era(Amount::BaseUnits(97_500));
+        assert_eq!(
+            (held.base_units, held.display_amount.as_str(), held.decimals),
+            (97_500, "975.00", decimals)
+        );
+    }
+
+    /// A stated count of decimals is counted by the same rule. More decimals
+    /// than a policy may commit are refused, as is an amount the unit cannot
+    /// hold and a request that names no unit or no amount.
+    #[test]
+    fn wallet_amount_at_stated_decimals_and_what_it_refuses() {
+        use generated::wallet_amount_request::{Amount, Unit};
+        let ask = |unit, amount| wallet_amount(generated::WalletAmountRequest { unit, amount });
+
+        let whole = ask(
+            Some(Unit::Decimals(0)),
+            Some(Amount::Entered("5".to_string())),
+        )
+        .expect("whole units");
+        assert_eq!(
+            (
+                whole.base_units,
+                whole.display_amount.as_str(),
+                whole.decimals
+            ),
+            (5, "5", 0)
+        );
+
+        let past_policy = ask(
+            Some(Unit::Decimals(
+                dsm::economic::token_policy::MAX_DECIMALS + 1,
+            )),
+            Some(Amount::BaseUnits(1)),
+        )
+        .expect_err("more decimals than a policy may commit");
+        assert!(past_policy.contains("a policy may commit"), "{past_policy}");
+
+        let three_places = ask(
+            Some(Unit::TokenId("ERA".to_string())),
+            Some(Amount::Entered("1.234".to_string())),
+        )
+        .expect_err("three places of ERA");
+        assert!(
+            three_places.contains("exceeds 2 fractional digits"),
+            "{three_places}"
+        );
+
+        let no_unit = ask(None, Some(Amount::BaseUnits(1))).expect_err("no unit");
+        assert!(no_unit.contains("names no unit"), "{no_unit}");
+        let no_amount = ask(Some(Unit::Decimals(2)), None).expect_err("no amount");
+        assert!(no_amount.contains("names no amount"), "{no_amount}");
+    }
+
     #[test]
     fn offline_transfer_operation_encodes_canonical_dbtc_token_id() {
         let to_device_id = [0xabu8; 32];
-        let bytes = encode_offline_transfer_operation_canonical(
+        let (bytes, terms) = encode_offline_transfer_operation_canonical(
             &to_device_id,
             42,
             "DBTC",
@@ -1529,20 +1761,524 @@ mod tests {
         );
 
         let op = Operation::from_bytes(&bytes).expect("transfer op should decode");
-        match op {
-            Operation::Transfer { token_id, .. } => {
-                assert_eq!(String::from_utf8(token_id).unwrap(), "dBTC");
-            }
-            other => panic!("expected transfer op, got {other:?}"),
-        }
+        terms.open(&op).expect("the terms open the operation");
+        assert_eq!(String::from_utf8(terms.token_id.clone()).unwrap(), "dBTC");
+        assert_eq!(terms.memo, "memo");
+        let encoded = String::from_utf8_lossy(&bytes);
+        assert!(
+            !encoded.contains("dBTC") && !encoded.contains("memo"),
+            "the operation carries neither the token nor the memo"
+        );
+    }
+
+    /// A display amount is parsed back into base units with the token's
+    /// decimals, so an unknown scale is an error: read as 0, "10" of a
+    /// 2-decimal token would move 10 base units, a hundredth of what was meant.
+    #[test]
+    #[serial_test::serial]
+    fn a_token_without_a_registry_entry_has_no_decimals() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        assert_eq!(token_decimals("ERA"), Ok(2));
+        assert_eq!(token_decimals("dbtc"), Ok(8));
+        let unknown = token_decimals("NOPE").expect_err("no registry entry");
+        assert!(unknown.contains("no registry entry"), "{unknown}");
+        assert!(token_decimals("  ").is_err(), "no token named");
     }
 
     #[test]
+    #[serial_test::serial]
     fn ensure_default_visible_balances_adds_era_and_dbtc() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
         let mut items = Vec::<generated::BalanceGetResponse>::new();
-        ensure_default_visible_balances(&mut items);
+        ensure_default_visible_balances(&mut items).expect("the registry reads");
 
         assert!(items.iter().any(|item| item.token_id == "ERA"));
         assert!(items.iter().any(|item| item.token_id == "dBTC"));
+    }
+
+    fn fresh_db() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    /// A created token's committed policy, packed by the one packer and stored
+    /// under its anchor, as creation and adoption store it.
+    fn store_created_policy(
+        ticker: &str,
+        decimals: u32,
+        genesis_supply: u128,
+        burn_enabled: bool,
+        transferable: bool,
+    ) -> (super::super::token_routes::ParsedTokenPolicy, [u8; 32]) {
+        use prost::Message;
+        let (signer_pk, _secret) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("a signer key");
+        let policy = super::super::token_routes::ParsedTokenPolicy {
+            ticker: ticker.to_string(),
+            alias: format!("{ticker} token"),
+            decimals,
+            genesis_supply,
+            release: dsm::economic::token_policy::Release::AllAtCreation {
+                creator_genesis: [0x11; 32],
+                creator_device_id: [0x22; 32],
+                threshold: 1,
+                signers: vec![signer_pk],
+            },
+            description: None,
+            icon_url: Some("dsm:coin:v1:ABC".to_string()),
+            burn_enabled,
+            transferable,
+            allowlist_device_ids: vec![],
+        };
+        let bytes = generated::TokenPolicyV3 {
+            policy_bytes: super::super::token_routes::build_policy_v3_bytes(&policy)
+                .expect("the policy packs"),
+        }
+        .encode_to_vec();
+        let commit = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_POLICY,
+            &bytes,
+        );
+        crate::storage::client_db::token_registry::upsert_policy(&commit, &bytes)
+            .expect("the policy is stored under its anchor");
+        (policy, commit)
+    }
+
+    /// The registry row adoption writes for a stored policy, with the supply
+    /// it records.
+    fn register(
+        policy: &super::super::token_routes::ParsedTokenPolicy,
+        commit: [u8; 32],
+        genesis_supply: u128,
+    ) {
+        crate::storage::client_db::token_registry::insert_token(
+            &crate::storage::client_db::token_registry::TokenRegistryRow {
+                token_id: format!("token-{}", policy.ticker),
+                policy_commit: commit,
+                ticker: policy.ticker.clone(),
+                alias: policy.alias.clone(),
+                decimals: policy.decimals,
+                genesis_supply,
+                creator_device_id: match &policy.release {
+                    dsm::economic::token_policy::Release::AllAtCreation {
+                        creator_device_id,
+                        ..
+                    } => *creator_device_id,
+                    dsm::economic::token_policy::Release::Faucet => {
+                        panic!("a registered token is device-created")
+                    }
+                },
+            },
+        )
+        .expect("the token is registered");
+    }
+
+    /// A protocol asset is one on Rust's word, not its ticker's. ERA's facts
+    /// are its committed policy's (SoFi Amendment S11): the supply, what
+    /// holders may do, and the anchor its bytes commit to.
+    #[test]
+    #[serial_test::serial]
+    fn era_reports_its_committed_policy_supply_permissions_and_anchor() {
+        fresh_db();
+        let mut era = seed("ERA", 264, 0);
+        super::enrich_balance_metadata(&mut era, &|_| None).expect("ERA is named");
+        assert!(era.protocol_defined);
+        assert_eq!((era.symbol.as_str(), era.decimals), ("ERA", 2));
+        assert_eq!(era.genesis_supply_display, "80000000000.00");
+        assert_eq!(
+            era.permissions,
+            Some(generated::TokenPolicyPermissions {
+                burn_enabled: true,
+                transferable: true,
+            })
+        );
+        assert_eq!(
+            era.policy_anchor_b32,
+            "NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0"
+        );
+        assert_eq!(era.holding, generated::BalanceHolding::Currency as i32);
+        let mut dbtc = seed("dBTC", 0, 0);
+        super::enrich_balance_metadata(&mut dbtc, &|_| None).expect("dBTC is named");
+        assert!(dbtc.protocol_defined);
+        assert_eq!(dbtc.holding, generated::BalanceHolding::Currency as i32);
+    }
+
+    /// A created token's facts are its committed policy's, read from bytes
+    /// verified against the anchor: the supply in display units, what holders
+    /// may do, the icon.
+    #[test]
+    #[serial_test::serial]
+    fn a_registered_token_reports_its_policy_supply_and_permissions() {
+        fresh_db();
+        let (policy, commit) = store_created_policy("RIGB", 2, 100_000, true, false);
+        register(&policy, commit, 100_000);
+        let mut row = seed("RIGB", 5, 0);
+        super::enrich_balance_metadata(&mut row, &|_| None).expect("a registered token is named");
+        assert!(!row.protocol_defined);
+        assert_eq!(row.genesis_supply_display, "1000.00");
+        assert_eq!(
+            row.permissions,
+            Some(generated::TokenPolicyPermissions {
+                burn_enabled: true,
+                transferable: false,
+            })
+        );
+        assert_eq!(row.icon_url, "dsm:coin:v1:ABC");
+        assert_eq!(row.symbol, "RIGB");
+        assert_eq!(row.display_amount, "0.05");
+        assert_eq!(row.holding, generated::BalanceHolding::Currency as i32);
+
+        // A token whose whole supply is one (a creature the game issued) is a
+        // state object, whatever its policy permits holders to do.
+        let (creature, creature_commit) =
+            store_created_policy("MOS0001", 0, 1, policy.burn_enabled, policy.transferable);
+        register(&creature, creature_commit, 1);
+        let mut held = seed("MOS0001", 1, 0);
+        super::enrich_balance_metadata(&mut held, &|_| None).expect("a state object is named");
+        assert_eq!(held.holding, generated::BalanceHolding::StateObject as i32);
+    }
+
+    /// A row states its offline allocation only from a reader that knows the
+    /// attached appliance's bundle, for the row's own asset. With none attached
+    /// the field is absent: unknown is not zero, and the wallet must not print
+    /// a pot it cannot see.
+    #[test]
+    #[serial_test::serial]
+    fn a_row_states_its_offline_allocation_only_when_the_bundle_is_known() {
+        fresh_db();
+        let (policy, commit) = store_created_policy("RIGB", 2, 100_000, true, false);
+        register(&policy, commit, 100_000);
+        let mut unknown = seed("RIGB", 5, 0);
+        super::enrich_balance_metadata(&mut unknown, &|_| None).expect("named");
+        assert_eq!(unknown.offline_allocation, None);
+        let mut known = seed("RIGB", 5, 0);
+        super::enrich_balance_metadata(&mut known, &|asset| {
+            assert_eq!(asset, &commit, "read for the row's own asset");
+            Some(2_500)
+        })
+        .expect("named");
+        assert_eq!(
+            known.offline_allocation,
+            Some(generated::OfflineAllocationView {
+                base_units: 2_500,
+                display_amount: "25.00".to_string(),
+            })
+        );
+    }
+
+    /// A row that disagrees with the bytes its own commit names is corrupt:
+    /// refused, with nothing from either side reported.
+    #[test]
+    #[serial_test::serial]
+    fn a_registry_row_that_disagrees_with_its_policy_is_refused() {
+        fresh_db();
+        let (policy, commit) = store_created_policy("DISA", 0, 10, true, true);
+        register(&policy, commit, 11);
+        let mut row = seed("DISA", 0, 0);
+        let refused = super::enrich_balance_metadata(&mut row, &|_| None)
+            .expect_err("a row disagreeing with its policy is refused");
+        assert!(refused.contains("disagrees with its policy"), "{refused}");
+        assert!(
+            row.permissions.is_none(),
+            "nothing reported from the policy"
+        );
+        assert!(
+            row.genesis_supply_display.is_empty(),
+            "nothing reported from the row"
+        );
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use crate::bridge::{AppQuery, AppRouter};
+    use crate::handlers::app_router_impl::AppRouterImpl;
+    use crate::storage::client_db::{store_transaction, TransactionRecord};
+    use dsm::types::proto as generated;
+    use prost::Message;
+
+    /// `wallet.history` as the frontend asks for it: limit 16, offset 0.
+    async fn history_of(
+        router: &AppRouterImpl,
+    ) -> Result<generated::WalletHistoryResponse, String> {
+        let mut body = Vec::with_capacity(16);
+        body.extend_from_slice(&16u64.to_le_bytes());
+        body.extend_from_slice(&0u64.to_le_bytes());
+        let answer = router
+            .query(AppQuery {
+                path: "wallet.history".to_string(),
+                params: generated::ArgPack {
+                    codec: generated::Codec::Proto as i32,
+                    body,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            })
+            .await;
+        if !answer.success {
+            return Err(answer.error_message.unwrap_or_default());
+        }
+        let env = crate::handlers::response_helpers::decode_local_envelope(&answer.data)?;
+        match env.payload {
+            Some(generated::envelope::Payload::WalletHistoryResponse(history)) => Ok(history),
+            other => Err(format!("wallet.history answered {other:?}")),
+        }
+    }
+
+    /// A faucet claim's row names no sender device — its source is the ERA
+    /// reserve — and is reported as such: type FAUCET, an empty sender, the
+    /// reserve as the counterparty label, the payout incoming. A stored
+    /// faucet row that names a sender is corrupt and refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn history_reports_a_faucet_claim_from_the_reserve_with_no_sender_device() {
+        let device = crate::test_support::one_device::Device::start(0x73).await;
+        let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
+        let faucet_row = |id: &str, from: &str| TransactionRecord {
+            tx_id: id.to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[0x64; 32]),
+            from_device: from.to_string(),
+            to_device: me.clone(),
+            amount: 100,
+            tx_type: "faucet".to_string(),
+            status: "confirmed".to_string(),
+            commitment_hash: None,
+            proof_data: None,
+            metadata: [("token_id".to_string(), b"ERA".to_vec())]
+                .into_iter()
+                .collect(),
+        };
+
+        store_transaction(&faucet_row("claim", "")).expect("store the faucet row");
+        let reported = history_of(&device.router).await.expect("the history");
+        assert_eq!(reported.transactions.len(), 1);
+        let claim = &reported.transactions[0];
+        assert_eq!(
+            claim.tx_type,
+            generated::TransactionType::TxTypeFaucet as i32
+        );
+        assert!(
+            claim.from_device_id.is_empty(),
+            "a claim names no sender device"
+        );
+        assert_eq!(claim.to_device_id, device.router.device_id_bytes.to_vec());
+        assert_eq!(claim.recipient, "ERA reserve (faucet)");
+        assert_eq!(claim.amount_signed, 100, "incoming");
+        assert_eq!(claim.display_amount, "1.00");
+        assert_eq!(claim.token_id, "ERA");
+
+        let peer = crate::util::text_id::encode_base32_crockford(&[0x74u8; 32]);
+        store_transaction(&faucet_row("corrupt", &peer)).expect("store the corrupt row");
+        let refused = history_of(&device.router)
+            .await
+            .expect_err("a faucet row naming a sender is refused");
+        assert!(
+            refused.contains("corrupt") && refused.contains("names a sender device"),
+            "{refused}"
+        );
+    }
+
+    /// A history row is reported only as one of the types the wire names. A
+    /// stored row of any other type is refused by name: it is never sent as
+    /// "unspecified" for the frontend to relabel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn history_refuses_a_row_of_a_type_the_wire_does_not_name() {
+        let device = crate::test_support::one_device::Device::start(0x71).await;
+        let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
+        let peer = crate::util::text_id::encode_base32_crockford(&[0x72u8; 32]);
+        let row = |id: &str, tx_type: &str, hash: u8| TransactionRecord {
+            tx_id: id.to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[hash; 32]),
+            from_device: peer.clone(),
+            to_device: me.clone(),
+            amount: 7,
+            tx_type: tx_type.to_string(),
+            status: "confirmed".to_string(),
+            commitment_hash: None,
+            proof_data: None,
+            metadata: [("token_id".to_string(), b"ERA".to_vec())]
+                .into_iter()
+                .collect(),
+        };
+
+        store_transaction(&row("known", "online", 0x61)).expect("store the online row");
+        let reported = history_of(&device.router).await.expect("the history");
+        assert_eq!(reported.transactions.len(), 1);
+        let online = &reported.transactions[0];
+        assert_eq!(
+            online.tx_type,
+            generated::TransactionType::TxTypeOnline as i32
+        );
+        assert_eq!(online.status, "confirmed");
+        assert_eq!(online.amount_signed, 7, "incoming");
+        assert_eq!(online.recipient, peer, "no contact: the sender's device id");
+
+        store_transaction(&row("unnamed", "unilateral_send", 0x62)).expect("store the row");
+        let refused = history_of(&device.router)
+            .await
+            .expect_err("a row of an unnamed type is refused");
+        assert!(
+            refused.contains("unnamed") && refused.contains("unilateral_send"),
+            "{refused}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod send_offline_tests {
+    use crate::bridge::{AppInvoke, AppRouter};
+    use crate::handlers::app_router_impl::AppRouterImpl;
+    use crate::storage::client_db::{store_contact, update_contact_ble_status, ContactRecord};
+    use dsm::types::proto as generated;
+    use prost::Message;
+
+    /// `wallet.sendOffline` as the frontend asks for it: the user's intent.
+    async fn send_offline(router: &AppRouterImpl, counterparty: [u8; 32]) -> Result<(), String> {
+        let answer = router
+            .invoke(AppInvoke {
+                method: "wallet.sendOffline".to_string(),
+                args: generated::ArgPack {
+                    codec: generated::Codec::Proto as i32,
+                    body: generated::OfflineTransferRequest {
+                        counterparty_device_id: counterparty.to_vec(),
+                        token_id: "ERA".to_string(),
+                        amount: "1".to_string(),
+                        memo: String::new(),
+                    }
+                    .encode_to_vec(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            })
+            .await;
+        if answer.success {
+            Ok(())
+        } else {
+            Err(answer.error_message.unwrap_or_default())
+        }
+    }
+
+    /// The counterparty's device id routes an offline send; where its appliance
+    /// was last seen over BLE is only where the transport looks first. A send
+    /// to a contact whose appliance this device has never met is not refused
+    /// for want of an address: it goes on exactly as far as one to a contact
+    /// holding an address, which on a host build is the dispatch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_offline_send_needs_no_address_for_its_counterparty() {
+        let device = crate::test_support::one_device::Device::start(0x75).await;
+        let peer = [0x76u8; 32];
+        store_contact(&ContactRecord {
+            contact_id: crate::util::text_id::encode_base32_crockford(&peer),
+            device_id: peer.to_vec(),
+            alias: "peer".to_string(),
+            genesis_hash: vec![0x77; 32],
+            public_key: vec![0x78; 64],
+            kyber_public_key: vec![0x4B; 1184],
+            current_chain_tip: Some(vec![0x79; 32]),
+            verified: true,
+            verification_proof: None,
+            metadata: std::collections::HashMap::new(),
+            ble_address: None,
+            status: "OnlineCapable".to_string(),
+            needs_online_reconcile: false,
+            previous_chain_tip: None,
+        })
+        .expect("store the contact");
+        assert_eq!(
+            crate::bluetooth::peer_address::counterparty_address(&peer).expect("contacts read"),
+            None,
+            "the appliances have not met"
+        );
+
+        // A host build has no BLE: the send stops only at the dispatch, past
+        // the relationship's send status, the token, the amount and its policy.
+        let host_dispatch =
+            Err("wallet.sendOffline is only available on Android BLE builds".to_string());
+        assert_eq!(send_offline(&device.router, peer).await, host_dispatch);
+
+        update_contact_ble_status(&peer, None, Some("AA:BB:CC:DD:EE:FF"))
+            .expect("pairing persists the address");
+        assert_eq!(send_offline(&device.router, peer).await, host_dispatch);
+    }
+}
+
+#[cfg(test)]
+mod receipt_badge_tests {
+    use super::receipt_state_holds;
+    use crate::test_support::receipts::{transfer_step, Party};
+
+    /// The history badge re-checks a row's receipt against the operation the
+    /// row keeps and its author's pinned genesis and Device Tree: this
+    /// device's own for its own receipts, the kept contact's for a contact's.
+    /// A row that keeps no operation, or another one, is not shown as
+    /// verified, and neither is a contact's receipt before the contact's
+    /// genesis and Device Tree are kept. MUTATION CONTROL (run 2026-09-27):
+    /// checking a contact's receipt against this device's own genesis and
+    /// Device Tree turns the contact assertions red.
+    #[test]
+    #[serial_test::serial]
+    fn the_history_badge_holds_only_for_the_operation_the_receipt_binds() {
+        let (identity, _core) = crate::economic_fixtures::local_device(0x21);
+        let me = Party::from_seed(0x21);
+        assert_eq!(
+            me.device_id(),
+            identity.device_id,
+            "the fixture is the wallet the device installed"
+        );
+        let peer = Party::from_seed(0x22);
+
+        let own = transfer_step(&me, &peer, 7);
+        let own_bytes = own.receipt.to_canonical_protobuf().expect("encode");
+        assert!(receipt_state_holds(
+            &own_bytes,
+            Some(&own.operation.to_bytes())
+        ));
+        assert!(
+            !receipt_state_holds(&own_bytes, None),
+            "a row with no operation"
+        );
+        let other = transfer_step(&me, &peer, 8);
+        assert!(
+            !receipt_state_holds(&own_bytes, Some(&other.operation.to_bytes())),
+            "a row keeping another operation"
+        );
+
+        let theirs = transfer_step(&peer, &me, 5);
+        let their_bytes = theirs.receipt.to_canonical_protobuf().expect("encode");
+        let their_operation = theirs.operation.to_bytes();
+        assert!(
+            !receipt_state_holds(&their_bytes, Some(&their_operation)),
+            "a contact nothing is kept for"
+        );
+        crate::storage::client_db::store_contact_for_tests(
+            &dsm::types::contact_types::DsmVerifiedContact {
+                alias: "peer".to_string(),
+                device_id: peer.device_id(),
+                genesis_hash: peer.genesis(),
+                public_key: peer.signing_public_key().to_vec(),
+                chain_tip: Some(
+                    dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                        &me.device_id(),
+                        &peer.device_id(),
+                    ),
+                ),
+                genesis_verified_online: true,
+                verifying_storage_nodes: vec![],
+                ble_address: None,
+            },
+        );
+        crate::storage::client_db::store_contact_device_tree_root(
+            &peer.device_id(),
+            &peer.device_tree_commitment().root(),
+        )
+        .expect("keep the contact's Device Tree root");
+        assert!(receipt_state_holds(&their_bytes, Some(&their_operation)));
     }
 }

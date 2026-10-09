@@ -2,29 +2,28 @@
 
 jest.mock('../WebViewBridge', () => ({
   routerInvokeBin: jest.fn(),
-  getTokenPolicyBytes: jest.fn(),
-  listCachedTokenPolicies: jest.fn(),
+  routerQueryBin: jest.fn(),
+  addTokenByAnchor: jest.fn(),
   publishTokenPolicyBytes: jest.fn(),
 }));
 
 jest.mock('../events', () => ({
   emitWalletRefresh: jest.fn(),
-  emitBilateralCommitted: jest.fn(),
-  DSM_WALLET_REFRESH_EVENT: 'dsm-wallet-refresh',
+  emitBilateralAccepted: jest.fn(),
 }));
 
 import * as pb from '../../proto/dsm_app_pb';
 import {
+  addTokenByAnchor,
   createToken,
-  listPolicies,
+  getTokenCreationFee,
   publishTokenPolicyBytes,
-  getTokenPolicyBytes,
   publishTokenPolicy,
 } from '../policies';
 import {
+  addTokenByAnchor as addTokenByAnchorBridge,
   routerInvokeBin,
-  getTokenPolicyBytes as getTokenPolicyBytesBridge,
-  listCachedTokenPolicies,
+  routerQueryBin,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
 } from '../WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
@@ -56,7 +55,7 @@ describe('policies.ts', () => {
       framed.set(env.toBinary(), 1);
       (routerInvokeBin as jest.Mock).mockResolvedValue(framed);
 
-      const result = await createToken({ ticker: 'X', alias: 'test', decimals: 0, maxSupply: '1000' });
+      const result = await createToken({ ticker: 'X', alias: 'test', decimals: 0, genesisSupply: '1000', burnEnabled: false, transferable: true, threshold: 1 });
       expect(routerInvokeBin).toHaveBeenCalledWith('token.create', expect.any(Uint8Array));
       expect(result.success).toBe(false);
       expect(result.message).toMatch(/ticker must be 2-8/);
@@ -82,14 +81,14 @@ describe('policies.ts', () => {
       framed.set(env.toBinary(), 1);
       (routerInvokeBin as jest.Mock).mockResolvedValue(framed);
 
-      const result = await createToken({ ticker: 'TOK', alias: 'test', decimals: 0, maxSupply: '1000' });
+      const result = await createToken({ ticker: 'TOK', alias: 'test', decimals: 0, genesisSupply: '1000', burnEnabled: false, transferable: true, threshold: 1 });
       expect(result.success).toBe(true);
       expect(result.tokenId).toBe('TOKEN123');
       expect(publishTokenPolicyBytesBridge).not.toHaveBeenCalled();
       expect(routerInvokeBin).toHaveBeenCalledTimes(1);
     });
 
-    test('handles default kind as FUNGIBLE', async () => {
+    test('creates a fungible token', async () => {
       const anchor = new Uint8Array(32).fill(0xCC);
       (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(anchor);
 
@@ -106,7 +105,7 @@ describe('policies.ts', () => {
         ticker: 'FT',
         alias: 'Fungible Token',
         decimals: 2,
-        maxSupply: '5000',
+        genesisSupply: '5000', burnEnabled: false, transferable: true, threshold: 1,
       });
       expect(result.success).toBe(true);
     });
@@ -133,7 +132,7 @@ describe('policies.ts', () => {
         ticker: 'NEW',
         alias: 'New Token',
         decimals: 6,
-        maxSupply: '10000',
+        genesisSupply: '10000', burnEnabled: false, transferable: true, threshold: 1,
       });
       expect(emitWalletRefresh).toHaveBeenCalledTimes(1);
       expect(emitWalletRefresh).toHaveBeenCalledWith(
@@ -167,82 +166,58 @@ describe('policies.ts', () => {
         ticker: 'BAD',
         alias: 'Bad Token',
         decimals: 0,
-        maxSupply: '1',
+        genesisSupply: '1', burnEnabled: false, transferable: true, threshold: 1,
       });
       expect(emitWalletRefresh).not.toHaveBeenCalled();
     });
   });
 
 
-  describe('listPolicies', () => {
-    test('maps policies from envelope', async () => {
-      const commit = new Uint8Array(32).fill(0x01);
-      const pBytes = new Uint8Array(16).fill(0x02);
-      const env = new pb.Envelope({
+  // ── publishTokenPolicyBytes ────────────────────────────────────────
+
+  describe('addTokenByAnchor', () => {
+    // The ticker and anchor are the answer's fields; the ticker used to be
+    // scraped from the "Added …" prose, and the anchor looked up elsewhere.
+    test('reads the adopted token’s ticker and anchor from the answer’s fields, not its prose', async () => {
+      const anchor = new Uint8Array(32).fill(0xab);
+      (addTokenByAnchorBridge as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
         version: 3,
         payload: {
-          case: 'tokenPolicyListResponse',
-          value: new pb.TokenPolicyListResponse({
-            policies: [
-              new pb.TokenPolicyCacheEntry({
-                policyCommit: commit as any,
-                policyBytes: pBytes as any,
-                ticker: 'ERA',
-                alias: 'Era Coin',
-                decimals: 8,
-                maxSupply: '1000000',
-              }),
-            ],
-          }),
+          case: 'tokenCreateResponse',
+          value: new pb.TokenCreateResponse({ success: true, tokenId: 'T1', ticker: 'ABC', policyAnchor: anchor as any, message: 'Added XYZ' }),
         },
-      });
-      (listCachedTokenPolicies as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      })));
 
-      const result = await listPolicies();
-      expect(result).toHaveLength(1);
-      expect(result[0].policy_commit).toEqual(commit);
-      expect(result[0].policy_bytes).toEqual(pBytes);
-      expect(result[0].metadata).toEqual({
-        ticker: 'ERA',
-        alias: 'Era Coin',
-        decimals: 8,
-        maxSupply: '1000000',
+      await expect(addTokenByAnchor('ANCHORB32')).resolves.toEqual({
+        success: true, tokenId: 'T1', ticker: 'ABC', anchorBase32: encodeBase32Crockford(anchor),
       });
     });
 
-    test('returns empty array on error envelope', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: { case: 'error', value: new pb.Error({ message: 'nope' }) },
-      });
-      (listCachedTokenPolicies as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      expect(await listPolicies()).toEqual([]);
-    });
-
-    test('returns empty array on bridge error', async () => {
-      (listCachedTokenPolicies as jest.Mock).mockRejectedValue(new Error('fail'));
-      expect(await listPolicies()).toEqual([]);
-    });
-
-    test('metadata is undefined when no metadata fields are present', async () => {
-      const env = new pb.Envelope({
+    test('a success answer without the ticker is refused, never shown as a blank name', async () => {
+      (addTokenByAnchorBridge as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
         version: 3,
         payload: {
-          case: 'tokenPolicyListResponse',
-          value: new pb.TokenPolicyListResponse({
-            policies: [new pb.TokenPolicyCacheEntry({ policyCommit: new Uint8Array(32) as any, policyBytes: new Uint8Array(8) as any })],
-          }),
+          case: 'tokenCreateResponse',
+          value: new pb.TokenCreateResponse({ success: true, tokenId: 'T1', policyAnchor: new Uint8Array(32) as any, message: 'Added XYZ' }),
         },
-      });
-      (listCachedTokenPolicies as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      })));
 
-      const result = await listPolicies();
-      expect(result[0].metadata).toBeUndefined();
+      const result = await addTokenByAnchor('ANCHORB32');
+      expect(result.success).toBe(false);
+      expect((result as { error: string }).error).toContain('STRICT');
     });
   });
 
-  // ── publishTokenPolicyBytes ────────────────────────────────────────
+  describe('getTokenCreationFee', () => {
+    // A failed query used to answer undefined, which the dialog showed as "…" for ever.
+    test('a refused fee query is the failure, not an absent fee', async () => {
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
+        version: 3,
+        payload: { case: 'error', value: new pb.ErrorResponse({ message: 'tokens.getFeeSchedule: no device head' }) },
+      })));
+      await expect(getTokenCreationFee()).rejects.toThrow('no device head');
+    });
+  });
 
   describe('publishTokenPolicyBytes', () => {
     test('returns anchor bytes and base32 on success', async () => {
@@ -265,37 +240,17 @@ describe('policies.ts', () => {
 
   // ── getTokenPolicyBytes ────────────────────────────────────────────
 
-  describe('getTokenPolicyBytes', () => {
-    test('returns bytes from bridge', async () => {
-      const policyBytes = new Uint8Array(64);
-      (getTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(policyBytes);
-
-      const result = await getTokenPolicyBytes(new Uint8Array(32));
-      expect(result).toEqual(policyBytes);
-    });
-
-    test('throws when anchor is not 32 bytes', async () => {
-      await expect(getTokenPolicyBytes(new Uint8Array(16))).rejects.toThrow(/anchorBytes must be 32 bytes/);
-    });
-
-    test('throws when anchor is null', async () => {
-      await expect(getTokenPolicyBytes(null as any)).rejects.toThrow(/anchorBytes must be 32 bytes/);
-    });
-  });
-
   // ── publishTokenPolicy ─────────────────────────────────────────────
 
   describe('publishTokenPolicy', () => {
     test('returns error for empty base32', async () => {
       const result = await publishTokenPolicy({ policyBase32: '' });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/policy bytes required/);
+      expect(result).toEqual({ success: false, error: expect.stringMatching(/policy bytes required/) });
     });
 
     test('returns error for null input', async () => {
       const result = await publishTokenPolicy(null as any);
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/policy bytes required/);
+      expect(result).toEqual({ success: false, error: expect.stringMatching(/policy bytes required/) });
     });
 
     test('successful publish returns id', async () => {
@@ -308,8 +263,34 @@ describe('policies.ts', () => {
       (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(anchor);
 
       const result = await publishTokenPolicy({ policyBase32: b32 });
+      expect(result).toEqual({ success: true, id: encodeBase32Crockford(anchor) });
+    });
+
+    test('publishes the pasted bytes exactly as pasted', async () => {
+      // An unknown field before policy_bytes: a decode and re-encode here would
+      // move it after the known field — other bytes, another anchor.
+      const policyBin = new pb.TokenPolicyV3({ policyBytes: new Uint8Array(16).fill(7) as any }).toBinary();
+      const pasted = new Uint8Array([0x78, 0x01, ...policyBin]); // field 15, varint 1
+      const { encodeBase32Crockford: enc } = await import('../../utils/textId');
+      (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(new Uint8Array(32).fill(0x22));
+
+      const result = await publishTokenPolicy({ policyBase32: enc(pasted) });
+
       expect(result.success).toBe(true);
-      expect(result.id).toBe(encodeBase32Crockford(anchor));
+      expect(Array.from((publishTokenPolicyBytesBridge as jest.Mock).mock.calls.at(-1)[0] as Uint8Array)).toEqual(
+        Array.from(pasted),
+      );
+    });
+
+    test("bytes that are not a policy are Rust's to refuse, in its words", async () => {
+      const { encodeBase32Crockford: enc } = await import('../../utils/textId');
+      (publishTokenPolicyBytesBridge as jest.Mock).mockRejectedValue(
+        new Error('tokens.publishPolicy: not a token policy: policy proto does not decode'),
+      );
+
+      const result = await publishTokenPolicy({ policyBase32: enc(new Uint8Array([0xff, 0xff])) });
+
+      expect(result).toEqual({ success: false, error: expect.stringMatching(/not a token policy/) });
     });
 
     test('returns error when bridge publish fails', async () => {
@@ -321,8 +302,7 @@ describe('policies.ts', () => {
       (publishTokenPolicyBytesBridge as jest.Mock).mockRejectedValue(new Error('publish boom'));
 
       const result = await publishTokenPolicy({ policyBase32: b32 });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/publish boom/);
+      expect(result).toEqual({ success: false, error: expect.stringMatching(/publish boom/) });
     });
   });
 });

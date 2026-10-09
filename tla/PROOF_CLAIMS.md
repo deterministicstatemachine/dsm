@@ -148,3 +148,71 @@ preimage hypothesis. Neither is a global claim about BLAKE3: a universal
 "distinct preimages give distinct 256-bit outputs" is false by pigeonhole, and
 "no populated economic preimage produces the all-zero digest" is not implied by
 preimage resistance.
+
+## SoFi v8 settlement (plan revision 10.3)
+
+```text
+lean4/DSMSofiSuccessorCells.lean   the ALGEBRA of the storage layer and the walk
+lean4/DSMSofiAtomicity.lean        identities, hash order, validation, realization,
+                                   the resolution ladder, the fence
+
+tla/DSM_SofiSuccessorCells.tla     the MEMBERS under interleaving and faults
+tla/DSM_SofiFulfillment.tla        the OPERATION under rivals, completers, late
+                                   evidence and parent canonicality settling
+```
+
+The TLC half is bounded: one parent with two attempts at the members, and two
+parents, two traders and one descendant position for the operation. Both models
+are finite, so "a registered F resolves" is checked as quiescence ⇒ resolved over
+every reachable state rather than as a temporal property. The quorum algebra is
+not restated in TLA+; the member-level behaviour is not restated in the operation
+model.
+
+**Boundary.** These are properties of the models of plan revision 10.3. The v8
+Rust is not written yet (Phase E), so no correspondence to shipping code is
+claimed; Phase E owes conformance vectors and mutation-tested gates against
+these invariants.
+
+
+## A step's receipt proves its whole write set
+
+```text
+lean4/DSMStepTransition.lean       the FOLD: a write set folded against one
+                                   pre-root yields the tree after the writes
+                                   (fold_sound), refuses no honest set
+                                   (fold_complete), and carries only the tree's
+                                   own paths (fold_canonical); with the
+                                   consistency checks deleted it stays sound but
+                                   not canonical (lax_fold_sound,
+                                   lax_fold_is_not_canonical)
+
+tla/DSM_ReceiptWriteSet.tla        the VERIFIER against an unconstrained author:
+                                   every accepted receipt proves the three
+                                   leaves a bearer spend writes, value leaves
+                                   the allocation only as receivers credit it,
+                                   the counter moves with every step, and no
+                                   honest spend is refused
+
+tla/DSM_OfflineAnchorSingleAppliance.tla
+                                   the ORDER: no counter step is committed for
+                                   a step whose receipt does not hold
+```
+
+The split is the one the code has. The pre-root check (`verify_batch`) is what
+makes the post-root right; the sibling-consistency checks are what make the
+proof canonical — the Lean anti-vacuity witness is a write set with a sibling
+the fold never uses, accepted without the checks and refused with them. The
+falsifications are the two verifiers the code replaced: one that checks the
+relationship leaf alone (`AllocationConserved` fails) and one that accepts one
+relationship path and nothing else (`HonestSpendAcceptable` fails: the honest
+bearer spend cannot be proven), and the order that released before proving the
+receipt (`NoCommitWithoutDeliverableConfirm` fails).
+
+**Boundary.** The Lean module rests on the symbolic digest abstraction declared
+in its header (equal roots have equal children); breaking it for the real tree
+means supplying a BLAKE3 collision between two leaf or node preimages. The TLC
+models are bounded (two peers, an allocation of three, three steps; three
+contents over an enrolled counter of three). Correspondence to the Rust is
+supported by the tests and mutation controls recorded in
+`specs/requirements/VERIFICATION_MATRIX.md`, not by a machine-checked
+refinement.

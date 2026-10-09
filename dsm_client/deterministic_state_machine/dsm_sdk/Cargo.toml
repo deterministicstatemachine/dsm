@@ -19,39 +19,12 @@ doctest = false
 
 [features]
 default = []
-# `strict` feature was removed — C-DBRW enforcement is now always on. The
-# responder and the bootstrap ingress path both fail-closed on ReadOnly
-# verdicts without any feature gate.
 demos = []
-dev-discovery = ["mdns"]
 jni = ["dep:jni"]
 test-utils = []
 bluetooth = ["tokio-stream"]
-diagnostics = []
-mdns = ["dep:mdns-sd"]
-test-mock = []
-# Wire an in-process MOCK secure-element anchor (no Safe 7 hardware) into the bilateral manager so
-# the full offline-bearer flow runs end-to-end: the sender mock-signs an attestation, the receiver
-# auto-admits the sender's deterministic mock identity and verifies it. For on-device testing of the
-# anti-clone path without the element. Production builds leave this OFF (no transport -> fail-closed).
-mock-anchor = ["dsm/test-mock"]
-# Use mock/local MPC for token creation (dummy participants + dummy entropy).
-# Default OFF: real HTTP calls to storage nodes for beta builds.
-# Enable for dev/test builds without local storage nodes running.
-local-mpc = []
-storage = []
-examples = []
-deny_fallback = []
-# Optional local performance timing (uses std::time::Instant);
-# core logic remains clockless via deterministic ticks when this is disabled.
-perf-metrics = []
-# web3 feature removed as part of protobuf-only purge
-# default is stable KEK derivation for SoftVault
-# opt-in: make KEK depend on STRICT env + HW timing (may vary across restarts)
-softvault-kek-strict = []
 [build-dependencies]
 cbindgen = "0.29.3"
-blake3 = "1.5.0"
 anyhow = "1.0"
 prost = "0.14"
 prost-build = "0.14"
@@ -62,7 +35,6 @@ glob = "0.3"
 
 
 [dependencies]
-ctor = "1.0"
 # Core dependencies
 dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false }
 # Boot Fenced Fused Anchor offline-bearer acceptance predicate (no_std+alloc, std-compatible).
@@ -73,12 +45,13 @@ dsm-anchor-core = { path = "../../../crates/dsm-anchor-core" }
 # tropic01-free so CI builds without the sibling libtropic checkout; the actual libtropic session
 # reader lives in the workspace-excluded dsm-anchor-hw-verifier crate (D2).
 dsm-anchor-verifier = { path = "../../../crates/dsm-anchor-verifier" }
+# The outcome program staked Wildstate matches are decided by (SoFi Amendment
+# S22): registered with every verifier this SDK builds, never part of Core.
+wildstate-duel = { path = "../../../crates/wildstate-duel" }
 
 # JNI for Android integration
 jni = { version = "0.21", optional = true }
 
-# mDNS service discovery
-mdns-sd = { version = "0.20.0", optional = true }
 
 # Protobuf support
 prost = "0.14"
@@ -108,9 +81,6 @@ toml = "1.1.2"
 bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 # Cryptography
 blake3 = "1.5.0"
-# Ed25519 — ONLY for the in-process anchor appliance mock's resident-chip key (σ^chip); the real
-# chip signs on-die. The receiver verifies σ^chip via dsm::crypto::classical_verify::verify_ed25519.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 # AEAD
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
 hmac = "0.13.0"
@@ -127,7 +97,7 @@ ff = "0.14.0"
 
 # Networking
 rustls = { version = "0.23.37", features = ["ring"] }
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json", "http2"] }
 rcgen = "0.14.8"
 tokio-rustls = "0.26.4"
 url = "2.4.0"
@@ -157,7 +127,6 @@ tokio-util = { version = "0.7.10", features = ["codec"] }
 bitvec = "1.0.1"
 lazy_static = "1.4.0"
 parking_lot = "0.12.1"
-dirs = "6.0.0"
 libc = "0.2"
 bitflags = "2.13.0"
 arrayref = "0.3.9"
@@ -166,7 +135,6 @@ argon2 = "0.5.3"
 # Additional utilities
 fastrand = "2.0.1"
 num_cpus = "1.16.0"
-hostname = "0.4.2"
 rustc_version = "0.4.0"
 tempfile = "3.10.0"
 aes-gcm = "0.10.3"
@@ -189,7 +157,12 @@ proptest = "1.11.0"
 quickcheck = "1.0.3"
 rstest = "0.26.1"
 serial_test = "3.5.0"
-dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false, features = ["testing"] }
+# Storage nodes for tests, on Postgres as the fleet runs them (owner,
+# 2026-09-23: no fake nodes; 2026-09-24: no SQLite). The node already depends
+# on this crate; a dev-dependency back to it is a cycle Cargo allows.
+dsm_storage_node = { path = "../../../dsm_storage_node" }
+axum = "0.8" # serves the node's app in tests (the node's own version)
+axum-server = { version = "0.8", features = ["tls-rustls"] } # serves it over TLS, as the node binary does
 # SELF dev-dependency, enabling `test-utils` for THIS crate's own integration
 # tests (`tests/*.rs`) only. Integration tests are external consumers, so a
 # `cfg(test)` gate is invisible to them and the feature would otherwise never be
@@ -200,6 +173,10 @@ dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false, fea
 # through the REAL origins (faucet admission, authorized issuance, admitted
 # transfer), never by writing it onto a head.
 dsm_sdk = { path = ".", features = ["test-utils"] }
+# The software TROPIC01's resident key in the host test appliance
+# (`test_support::appliance`): the chip signs sigma^chip with Ed25519, which the
+# receiver verifies through `dsm::crypto::classical_verify`. Tests only.
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 
 
  

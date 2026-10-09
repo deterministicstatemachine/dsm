@@ -3,8 +3,9 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
-import { parseBinary32, parseBinary64, bytesToDisplay } from '../contexts/contacts/utils';
-import type { Contact, ContactsState } from '../contexts/ContactsContext';
+import type { ContactsState } from '../contexts/ContactsContext';
+import type { AddContactResult, ContactCard } from '../dsm/types';
+import { mapContactList } from '../domain/mappers';
 import logger from '../utils/logger';
 
 
@@ -77,62 +78,6 @@ class ContactsStore {
     this.emit();
   }
 
-  private mapContacts(list: any[]): Contact[] {
-    return list.map((contact: any) => {
-      // Strict proto field names — camelCase from @bufbuild/protobuf codegen.
-      // If snake_case fields appear, log an error: the bridge returned raw data.
-      if ('genesis_hash' in contact || 'device_id' in contact || 'ble_address' in contact) {
-        logger.error('[ContactsStore] snake_case fields detected — bridge returned raw data instead of protobuf');
-      }
-
-      const alias = String(contact.alias ?? 'Unknown');
-      const genesisRaw = contact.genesisHash;
-      const genesisHash = genesisRaw instanceof Uint8Array
-        ? bytesToDisplay(genesisRaw)
-        : String(genesisRaw ?? '');
-      const deviceRaw = contact.deviceId;
-      const deviceId = deviceRaw instanceof Uint8Array && deviceRaw.length > 0
-        ? bytesToDisplay(deviceRaw)
-        : (typeof deviceRaw === 'string' ? deviceRaw : '');
-      const id = alias ? `${genesisHash}:${alias}` : genesisHash;
-
-      const chainTipRaw = contact.chainTip?.v;
-      const chainTip = chainTipRaw instanceof Uint8Array && chainTipRaw.length > 0
-        ? bytesToDisplay(chainTipRaw)
-        : undefined;
-
-      const smtRaw = contact.chainTipSmtProof;
-      const chainTipSmtProof = smtRaw?.siblings?.length
-        ? { siblings: smtRaw.siblings as Uint8Array[] }
-        : undefined;
-
-      return {
-        id,
-        alias,
-        genesisHash,
-        deviceId: deviceId || undefined,
-        publicKey: (() => {
-          const signingKey = contact.signingPublicKey;
-          if (typeof signingKey === 'string' && signingKey.length > 0) return signingKey;
-          const rawKey = contact.publicKey;
-          if (rawKey instanceof Uint8Array && rawKey.length > 0) return bytesToDisplay(rawKey);
-          return undefined;
-        })(),
-        lastSeen: undefined,
-        isVerified: contact.genesisVerifiedOnline === true,
-        isFavorite: false,
-        notes: undefined,
-        bleAddress: contact.bleAddress || undefined,
-        chainTip,
-        addedCounter: contact.addedCounter,
-        verifyCounter: contact.verifyCounter,
-        chainTipSmtProof,
-        createdAt: 0,
-        updatedAt: 0,
-      };
-    });
-  }
-
   refreshContacts = async (): Promise<void> => {
     const seq = ++this.refreshSeq;
     try {
@@ -142,21 +87,11 @@ class ContactsStore {
       this.setState({ error: null });
 
       const data = await awaitWithFrameBudget(dsmClient.getContacts());
-      const list = Array.isArray((data as any)?.contacts) ? (data as any).contacts : [];
-      const mapped = this.mapContacts(list);
+      // Rust's list as it stands, in the one contact shape every screen reads
+      // — each contact with its send-readiness and the BLE address Rust holds.
+      const contacts = mapContactList(data.contacts);
 
       if (seq === this.refreshSeq) {
-        const previous = new Map(this.snapshot.contacts.map((contact) => [contact.id, contact]));
-        const contacts = mapped.map((contact) => {
-          if (!contact.bleAddress) {
-            const existing = previous.get(contact.id);
-            if (existing?.bleAddress) {
-              return { ...contact, bleAddress: existing.bleAddress };
-            }
-          }
-          return contact;
-        });
-
         this.setState({ contacts });
         this.hasLoadedOnce = true;
       }
@@ -193,105 +128,29 @@ class ContactsStore {
     this.scheduleRefreshContacts('bleUpdated');
   };
 
-  addContact = async (
-    alias: string,
-    genesisHash: Uint8Array | string,
-    deviceId: Uint8Array | string | undefined,
-    signingPublicKey: Uint8Array | string | undefined,
-  ): Promise<boolean> => {
+  /**
+   * Adds the contact a card names under `alias` (empty: Rust names it by its
+   * device) and answers what Rust answered.
+   */
+  addContact = async (alias: string, card: ContactCard): Promise<AddContactResult> => {
+    this.setState({ isLoading: true, error: null });
     try {
-      this.setState({ isLoading: true, error: null });
-
-      if (!deviceId || deviceId.length < 1) {
-        throw new Error('device_id required (must come from BLE identity)');
-      }
-
-      if (!signingPublicKey || signingPublicKey.length < 1) {
-        throw new Error('signingPublicKey required (must come from contact QR)');
-      }
-
       const result = await dsmClient.addContact({
         alias,
-        genesisHash: parseBinary32(genesisHash, 'genesis_hash'),
-        deviceId: parseBinary32(deviceId, 'device_id'),
-        signingPublicKey: parseBinary64(signingPublicKey, 'signingPublicKey'),
+        deviceId: card.deviceId,
+        genesisHash: card.genesisHash,
+        signingPublicKey: card.signingPublicKey,
       });
-
-      if (!result?.accepted) {
-        throw new Error(result?.error || 'Failed to add contact');
+      if (result.accepted) {
+        await this.refreshContacts();
+      } else {
+        logger.error('ContactsStore: addContact refused:', result.error);
+        this.setState({ error: result.error });
       }
-
-      await this.refreshContacts();
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to add contact';
-      logger.error('ContactsStore: addContact failed:', message);
-      this.setState({ error: message });
-      return false;
+      return result;
     } finally {
       this.setState({ isLoading: false });
     }
-  };
-
-  updateContact = async (id: string, updates: Partial<Contact>): Promise<boolean> => {
-    try {
-      this.setState({ isLoading: true, error: null });
-
-      const api = dsmClient as any;
-      if (typeof api.updateContactStrict !== 'function') {
-        throw new Error('updateContactStrict is not available on this build');
-      }
-
-      const result = await api.updateContactStrict({ id, ...updates });
-      if (!result?.success) {
-        throw new Error(result?.message || 'Failed to update contact');
-      }
-
-      await this.refreshContacts();
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to update contact';
-      logger.error('ContactsStore: updateContact failed:', message);
-      this.setState({ error: message });
-      return false;
-    } finally {
-      this.setState({ isLoading: false });
-    }
-  };
-
-  deleteContact = async (id: string): Promise<boolean> => {
-    try {
-      this.setState({ isLoading: true, error: null });
-
-      const api = dsmClient as any;
-      if (typeof api.deleteContactStrict !== 'function') {
-        throw new Error('deleteContactStrict is not available on this build');
-      }
-
-      const result = await api.deleteContactStrict({ id });
-      if (!result?.success) {
-        throw new Error(result?.message || 'Failed to delete contact');
-      }
-
-      await this.refreshContacts();
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to delete contact';
-      logger.error('ContactsStore: deleteContact failed:', message);
-      this.setState({ error: message });
-      return false;
-    } finally {
-      this.setState({ isLoading: false });
-    }
-  };
-
-  getContactByGenesisHash = (genesisHash: string): Contact | null => {
-    const target = String(genesisHash || '').trim().toLowerCase();
-    return this.snapshot.contacts.find((contact) => contact.genesisHash.toLowerCase() === target) || null;
-  };
-
-  getContactByAlias = (alias: string): Contact | null => {
-    return this.snapshot.contacts.find((contact) => contact.alias.toLowerCase() === alias.toLowerCase()) || null;
   };
 
   private emit(): void {

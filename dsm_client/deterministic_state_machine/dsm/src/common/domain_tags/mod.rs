@@ -143,7 +143,53 @@ mod tests {
     /// deliberately when adding a tag — the same idiom as the CI Lean gate's
     /// hardcoded module count. It is the weakest of the three checks and is
     /// here only to make an accidental edit to the registry loud.
-    const EXPECTED_TAG_COUNT: usize = 347;
+    // 389 since E1c-2a froze `DSM/sofi/vault-creation-key/v1`, the R_econ key
+    // the owner's creation record occupies (P15-12).
+    // +6 for the keyed-cell and ByteCommit formats (storage spec §14, 2026-09-23).
+    // -3 for the retired signer-issuance tags, +1 for the genesis release
+    // (SoFi §51), +1 for the spool seal (DSM Amendment A7), +2 for the
+    // self-signed device directory, 2026-09-23.
+    // -4 with the clock, 2026-09-24: the online-transfer nonce and payload
+    // digest (their only caller's nonce was discarded), the anchor "tick" (a
+    // tip hash shown as a time), and the v3 transfer signing preimage (no
+    // caller; transfers sign the canonical Operation bytes).
+    // -1 with the seeded RNG, 2026-09-24: the entropy mixer's seed (its only
+    // callers were tests of itself). -5 with the SDK soft vault (no user): its
+    // envelope, commitment, KEK, key-type and nonce domains. -1 with the
+    // SmartPolicy vault condition: the DLV smart-policy hash domain.
+    // -6 with invented response headers, 2026-09-24: a local answer names no
+    // sender and no message, so the error-envelope device/chain/genesis
+    // domains and the two JNI envelope message-id domains have no input.
+    // -1 with the forward-linked commitment (ruling #4): its hash domain.
+    // -2 with the balance anchors (ruling #7): an operation's amount references
+    // no state, and a zero balance no invented one.
+    // -3 with three genesis tags nothing derives from: an identity id, a
+    // token participant and a sub-genesis device entropy.
+    // +1 with the Kyber identity binding moving into Core (the SDK declared
+    // it outside the registry).
+    // -1 with the client-edited storage node list: its placement seed was the
+    // network hash domain's only input.
+    // +1 with the TraderPreBalance object namespace (SoFi Amendment S12).
+    // +1 with the vault token locator (SoFi Amendment S16).
+    // +1 with the signed resolution claim's digest (SoFi Amendment S20), and
+    // +1 with the relationship-scoped transfer nonce (pre-audit item 5).
+    // +6 with a Web2 application connected to a wallet (DSM Amendment A11):
+    // the offer, its digest, the accept, the session id, the request and the
+    // response. The endpoint's certificate pin is the TLS certificate hash.
+    // +9 with escrow vaults (SoFi Amendment S21): `DSM/external/v1` and the
+    // eight `DSM/escrow/*` domains.
+    // +12 with computed escrow vaults (SoFi Amendment S22): the computed
+    // table, the match and start cells and their seeds, the start statement,
+    // the setup, the occupant id, the transcript head chain and statement,
+    // and the move commitment.
+    // +1 for the ready handshake (owner ruling 2026-10-06): `m_ready`.
+    // +6 with shared lineages (SoFi Amendment S23): the genesis and generation
+    // digests, the vault step digest, the checkpoint digest, the epoch locator
+    // and the object namespace.
+    // +1 for the route lane (client routing policy, owner 2026-10-07).
+    // +4 with a vault's history (SoFi Amendment S26): its leaf, node, head
+    // and locator.
+    const EXPECTED_TAG_COUNT: usize = 396;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
@@ -297,10 +343,10 @@ mod tests {
             .collect();
 
         let required: &[&[u8]] = &[
-            // The eight economic-SMT domains frozen by amendment 2c-C2.
+            // The economic-SMT domains frozen by amendment 2c-C2 that survive
+            // the node cut (the vault-reserve and settlement-receipt keys went
+            // with the old market's leaf classes).
             b"DSM/economic-balance-key/v1",
-            b"DSM/economic-vault-reserve-key/v1",
-            b"DSM/economic-settlement-receipt-key/v1",
             b"DSM/economic-consumed-source-key/v1",
             b"DSM/economic-smt-leaf/v1",
             b"DSM/economic-smt-node/v1",

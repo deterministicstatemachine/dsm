@@ -16,7 +16,13 @@ fn git(args: &[&str]) -> Option<String> {
     }
 }
 
+include!("../../scripts/real_code_guard_build.rs");
+
 fn main() {
+    if let Err(refusal) = real_code_guard() {
+        eprintln!("{refusal}");
+        std::process::exit(1);
+    }
     let commit = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let dirty = git(&["status", "--porcelain"])
         .map(|s| !s.is_empty())

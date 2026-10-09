@@ -70,6 +70,7 @@ pub mod kyber;
 pub mod rng;
 pub mod signatures;
 pub mod sphincs;
+pub mod spool_seal;
 
 // Micro-level determinism property tests.
 // Kept under `crypto` so they can access crypto primitives without exposing new APIs.
@@ -79,10 +80,6 @@ mod determinism_pbt_tests;
 // SPHINCS+ property-based tests (round-trip, non-malleability, size, determinism).
 #[cfg(test)]
 mod sphincs_pbt_tests;
-
-// SPHINCS+ Known Answer Tests (deterministic keygen stability, cross-key rejection).
-#[cfg(test)]
-mod sphincs_kat_tests;
 
 // ML-KEM-768 / AES-GCM property-based tests (KEM round-trip, det keygen, AES tamper).
 #[cfg(test)]
@@ -141,19 +138,6 @@ pub fn hash_multiple(parts: &[&[u8]]) -> Vec<u8> {
     hasher.finalize().as_bytes().to_vec()
 }
 
-// ===== Initialization =====
-
-/// Initialize crypto subsystems used by DSM.
-pub fn init_crypto() -> Result<(), DsmError> {
-    // Kyber KEM/AES
-    kyber::init_kyber()?;
-
-    // SPHINCS+ (ensures self-tests run at startup)
-    sphincs::init_sphincs()?;
-
-    Ok(())
-}
-
 // ===== Nonce generation =====
 // Notes:
 // - AES-GCM requires a 96-bit (12-byte) nonce. Use `generate_gcm_nonce`.
@@ -188,30 +172,4 @@ pub fn generate_deterministic_nonce_32(context: &[u8], counter: u64) -> Vec<u8> 
     hasher.update(&counter.to_le_bytes());
     let hash = hasher.finalize();
     hash.as_bytes()[..32].to_vec()
-}
-
-/// Generate a deterministic 32-byte nonce for OnlineTransferRequest.
-/// Formula: Hash(domain || sender_id || receiver_id || prev_tip || seq || payload_digest)
-/// - domain: "DSM:OnlineTransferRequest:nonce:v1"
-/// - sender_id: from_device_id (32 bytes)
-/// - receiver_id: to_device_id (32 bytes)  
-/// - prev_tip: chain_tip (32 bytes)
-/// - seq: sequence counter (u64)
-/// - payload_digest: BLAKE3 hash of canonical request body excluding nonce (32 bytes)
-pub fn generate_online_transfer_nonce(
-    sender_id: &[u8; 32],
-    receiver_id: &[u8; 32],
-    prev_tip: &[u8; 32],
-    seq: u64,
-    payload_digest: &[u8; 32],
-) -> [u8; 32] {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
-        crate::common::domain_tags::TAG_DSM_ONLINETRANSFERREQUEST_NONCE_V1,
-    );
-    hasher.update(sender_id);
-    hasher.update(receiver_id);
-    hasher.update(prev_tip);
-    hasher.update(&seq.to_le_bytes());
-    hasher.update(payload_digest);
-    *hasher.finalize().as_bytes()
 }

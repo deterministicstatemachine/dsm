@@ -11,39 +11,32 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
 use instant::Instant;
-use prost::Message;
 use serde::Serialize;
 
-use dsm::common::device_tree::{DevTreeProof, DeviceTree};
+use dsm::core::bilateral_transaction_manager::compute_smt_key;
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
-use dsm::core::state_machine::transition::verify_token_balance_consistency;
-use dsm::core::state_machine::StateMachine;
-use dsm::core::token::TokenStateManager;
-use dsm::crypto::blake3::{domain_hash, domain_hash_bytes, dsm_domain_hasher};
-use dsm::crypto::ephemeral_key::sign_ek_cert;
+use dsm::core::token::token_state_manager::era_policy_commit;
+use dsm::crypto::blake3::domain_hash_bytes;
 use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
 use dsm::crypto::signatures::SignatureKeyPair;
-use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
+use dsm::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
+use dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
 use dsm::emissions::{
     select_winner_for_event, verify_emission, EmissionReceipt, EmissionSchedule,
     JoinActivationProof, SourceDlvState,
 };
 use dsm::types::contact_types::DsmVerifiedContact;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::proto as pb;
-use dsm::types::receipt_types::{
-    ParentConsumptionTracker, ReceiptVerificationContext, StitchedReceiptV2,
-};
-use dsm::types::state_types::{DeviceInfo, State};
+use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 use dsm::vault::{DLVManager, FulfillmentMechanism, VaultState};
-use dsm::verification::receipt_verification::verify_stitched_receipt;
-use dsm::verification::smt_replace_witness::{compute_smt_key, hash_smt_leaf};
+
+use crate::live_device::{
+    commit, connect, faucet_claim, marked, Decision, LiveDevice, Stage, Step,
+};
 
 const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-const TRACE_TOKEN_ID: &str = "ERA";
-const TRACE_INITIAL_BALANCE: u64 = 100;
 type TraceFn = fn(&[u8; 32], &[u8], &[u8]) -> ImplementationTraceResult;
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,16 +53,6 @@ pub struct ImplementationTraceSuiteResult {
     pub results: Vec<ImplementationTraceResult>,
     pub all_passed: bool,
     pub duration_ms: f64,
-}
-
-struct TokenTraceHarness {
-    // Manager is no longer the canonical transition driver (§4.3 shim path).
-    #[allow(dead_code)]
-    manager: TokenStateManager,
-    state: State,
-    recipient: Vec<u8>,
-    sender_key: String,
-    recipient_key: String,
 }
 
 pub fn collect_implementation_trace_results() -> ImplementationTraceSuiteResult {
@@ -129,7 +112,7 @@ pub fn collect_named_implementation_trace_results(
     }
 }
 
-fn implementation_trace_catalog() -> [(&'static str, TraceFn); 16] {
+fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
     [
         (
             "state_machine_transfer_chain",
@@ -151,11 +134,7 @@ fn implementation_trace_catalog() -> [(&'static str, TraceFn); 16] {
             "bilateral_precomputed_finalize_hash",
             trace_bilateral_precomputed_finalize_hash,
         ),
-        (
-            "tripwire_parent_consumption",
-            trace_tripwire_parent_consumption,
-        ),
-        ("receipt_verifier_tripwire", trace_receipt_verifier_tripwire),
+        ("receiver_tripwire", trace_receiver_tripwire),
         (
             "tripwire_first_contact_binding",
             trace_tripwire_first_contact_binding,
@@ -208,106 +187,140 @@ fn trace_unknown_binding(
     }
 }
 
+/// Alice holding one faucet payout of ERA, and Bob, for the trace `label`.
+fn trace_pair(label: &str) -> (LiveDevice, LiveDevice) {
+    let mut alice = LiveDevice::new(&format!("trace-{label}-alice")).expect("alice");
+    alice.claim_faucet(1).expect("faucet claim");
+    let mut bob = LiveDevice::new(&format!("trace-{label}-bob")).expect("bob");
+    connect(&mut alice, &mut bob).expect("the two are contacts");
+    (alice, bob)
+}
+
 fn trace_state_machine_transfer_chain(
-    seed_bytes: &[u8; 32],
-    pk: &[u8],
-    sk: &[u8],
+    _seed_bytes: &[u8; 32],
+    _pk: &[u8],
+    _sk: &[u8],
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
+    let (mut alice, bob) = trace_pair("chain");
+    let rel_key = alice.rel_key(&bob);
 
-    let mut state = create_test_state(seed_bytes, pk);
-    let sender_key = builtin_balance_key(pk, "ERA");
-    state
-        .token_balances
-        .insert(sender_key, Balance::from_state(100, state.hash));
-    refresh_state_hash(&mut state);
-
-    let mut machine = StateMachine::new();
-    machine.set_state(state.clone());
-
-    let steps = [1u64, 2, 3, 4];
-    for (idx, amount) in steps.iter().enumerate() {
-        let nonce = vec![(idx as u8) + 1; 8];
-        let op = build_signed_transfer(sk, &state, nonce, *amount, b"ERA".to_vec(), vec![0xCC; 32]);
-        let prev_hash = state.hash().expect("current hash");
-        let expected_entropy = compute_next_entropy(&state, &op);
-
-        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
-            Ok(new_state) => {
-                if new_state.prev_state_hash != prev_hash {
-                    failures.push(format!("step {idx}: prev_state_hash mismatch"));
-                }
-                if new_state.hash == prev_hash {
-                    failures.push(format!("step {idx}: state hash did not advance"));
-                }
-                if new_state.entropy != expected_entropy {
-                    failures.push(format!("step {idx}: entropy diverged from formula"));
-                }
-                state = new_state;
+    let amounts = [1u64, 2, 3, 4];
+    for (idx, amount) in amounts.iter().enumerate() {
+        let tip_before = alice.tip_with(&bob).expect("established");
+        let root_before = alice.head.root();
+        let balance_before = alice.era_balance();
+        let op = match alice.transfer(&bob, *amount, &[(idx as u8) + 1; 8]) {
+            Ok(op) => op,
+            Err(e) => {
+                failures.push(format!("step {idx}: signing failed: {e}"));
+                continue;
             }
-            Err(e) => failures.push(format!("step {idx}: execute_transition failed: {e}")),
+        };
+        match alice.send(&bob, &op) {
+            Ok(outcome) => {
+                if outcome.parent_r_a != root_before {
+                    failures.push(format!(
+                        "step {idx}: the step does not start from the head's root"
+                    ));
+                }
+                if outcome.relationship_pair().0 != tip_before {
+                    failures.push(format!(
+                        "step {idx}: the step does not extend the tip before it"
+                    ));
+                }
+                if outcome.new_device_state.chain_tip(&rel_key) == Some(tip_before) {
+                    failures.push(format!("step {idx}: the relationship tip did not advance"));
+                }
+                alice.install(outcome);
+                if alice.era_balance() != balance_before - amount {
+                    failures.push(format!("step {idx}: the debit is not exactly {amount}"));
+                }
+            }
+            Err(e) => failures.push(format!("step {idx}: advance refused: {e}")),
         }
     }
 
-    if machine.current_state().map(|s| s.hash) != Some(state.hash) {
-        failures.push("machine tip did not end at expected chain head".into());
+    if alice.era_balance() != ERA_FAUCET_PAYOUT - amounts.iter().sum::<u64>() {
+        failures.push("the chain did not end at the expected balance".into());
     }
 
     ImplementationTraceResult {
         trace_name: "state_machine_transfer_chain".into(),
-        steps: steps.len() as u64,
+        steps: amounts.len() as u64,
         passed: failures.is_empty(),
         failures,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
     }
 }
 
+/// The recipient's side of a transfer, as production runs it: bind the
+/// operation to the sender's key (`Operation::decode_and_bind_signed`), and
+/// only then advance on the bound operation.
+fn recipient_applies(
+    recipient: &LiveDevice,
+    sender: &LiveDevice,
+    canonical: &[u8],
+    signature: &[u8],
+) -> Result<dsm::types::device_state::AdvanceOutcome, String> {
+    let bound = Operation::decode_and_bind_signed(canonical, signature, &sender.keypair.public_key)
+        .map_err(|e| e.to_string())?;
+    recipient.receive(sender, &bound).map_err(|e| e.to_string())
+}
+
 fn trace_state_machine_signature_rejection(
-    seed_bytes: &[u8; 32],
-    pk: &[u8],
-    sk: &[u8],
+    _seed_bytes: &[u8; 32],
+    _pk: &[u8],
+    _sk: &[u8],
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
+    let (alice, bob) = trace_pair("signature");
 
-    let mut state = create_test_state(seed_bytes, pk);
-    let sender_key = builtin_balance_key(pk, "ERA");
-    state
-        .token_balances
-        .insert(sender_key, Balance::from_state(100, state.hash));
-    refresh_state_hash(&mut state);
+    let op = alice.transfer(&bob, 10, &[9; 8]).expect("transfer");
+    let canonical = op.signing_bytes();
+    let signature = op
+        .get_signature()
+        .expect("a signed transfer carries its signature");
+    let bob_root = bob.head.root();
 
-    let original_hash = state.hash().expect("original hash");
-    let mut machine = StateMachine::new();
-    machine.set_state(state.clone());
-
-    let mut op = build_signed_transfer(sk, &state, vec![9; 8], 10, b"ERA".to_vec(), vec![0xCD; 32]);
-    if let Operation::Transfer { signature, .. } = &mut op {
-        signature[0] ^= 0xFF;
-    }
-
-    if crate::compat_shim::machine_execute_transition(&mut machine, op).is_ok() {
-        failures.push("tampered signature was accepted by execute_transition".into());
-    }
-
-    match machine.current_state() {
-        Some(current) => {
-            if crate::compat_shim::state_number(&current)
-                != crate::compat_shim::state_number(&state)
+    match recipient_applies(&bob, &alice, &canonical, &signature) {
+        Ok(outcome) => {
+            if outcome
+                .new_device_state
+                .balance(&dsm::core::token::token_state_manager::era_policy_commit())
+                != 10
             {
-                failures.push("state machine advanced after rejected signature".into());
-            }
-            if current.hash != original_hash {
-                failures.push("state hash changed after rejected signature".into());
+                failures.push("the honest transfer did not credit exactly its amount".into());
             }
         }
-        None => failures.push("state machine lost current state after rejection".into()),
+        Err(e) => failures.push(format!("the honest transfer was refused: {e}")),
+    }
+
+    let mut tampered = signature.clone();
+    tampered[0] ^= 0xFF;
+    if recipient_applies(&bob, &alice, &canonical, &tampered).is_ok() {
+        failures.push("a tampered signature was applied".into());
+    }
+    let foreign = bob.keypair.sign(&canonical).expect("sign");
+    if recipient_applies(&bob, &alice, &canonical, &foreign).is_ok() {
+        failures.push("another device's signature was applied as the sender's".into());
+    }
+    let altered = alice
+        .transfer(&bob, 11, &[9; 8])
+        .expect("transfer")
+        .signing_bytes();
+    if recipient_applies(&bob, &alice, &altered, &signature).is_ok() {
+        failures.push("the honest signature was applied to a different transfer".into());
+    }
+    if bob.head.root() != bob_root {
+        failures.push("the recipient's head moved".into());
     }
 
     ImplementationTraceResult {
         trace_name: "state_machine_signature_rejection".into(),
-        steps: 1,
+        steps: 4,
         passed: failures.is_empty(),
         failures,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -315,42 +328,55 @@ fn trace_state_machine_signature_rejection(
 }
 
 fn trace_state_machine_fork_divergence(
-    seed_bytes: &[u8; 32],
-    pk: &[u8],
-    sk: &[u8],
+    _seed_bytes: &[u8; 32],
+    _pk: &[u8],
+    _sk: &[u8],
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
+    let (mut alice, mut bob) = trace_pair("fork");
+    let parent_tip = alice.tip_with(&bob).expect("established");
 
-    let mut state = create_test_state(seed_bytes, pk);
-    let sender_key = builtin_balance_key(pk, "ERA");
-    state
-        .token_balances
-        .insert(sender_key, Balance::from_state(100, state.hash));
-    refresh_state_hash(&mut state);
-    let prev_hash = state.hash().expect("fork parent hash");
-
-    let mut machine_a = StateMachine::new();
-    machine_a.set_state(state.clone());
-    let mut machine_b = StateMachine::new();
-    machine_b.set_state(state.clone());
-
-    let op_a = build_signed_transfer(sk, &state, vec![1; 8], 1, b"ERA".to_vec(), vec![0xD1; 32]);
-    let op_b = build_signed_transfer(sk, &state, vec![2; 8], 2, b"ERA".to_vec(), vec![0xD2; 32]);
-
-    match (
-        crate::compat_shim::machine_execute_transition(&mut machine_a, op_a),
-        crate::compat_shim::machine_execute_transition(&mut machine_b, op_b),
-    ) {
-        (Ok(state_a), Ok(state_b)) => {
-            if state_a.prev_state_hash != prev_hash || state_b.prev_state_hash != prev_hash {
-                failures.push("fork children did not point to the shared parent".into());
+    let op_a = alice.transfer(&bob, 1, &[1; 8]).expect("transfer a");
+    let op_b = alice.transfer(&bob, 2, &[2; 8]).expect("transfer b");
+    match (alice.send(&bob, &op_a), alice.send(&bob, &op_b)) {
+        (Ok(child_a), Ok(child_b)) => {
+            let (pair_a, pair_b) = (child_a.relationship_pair(), child_b.relationship_pair());
+            if pair_a.0 != parent_tip || pair_b.0 != parent_tip {
+                failures.push("the fork children do not share the parent tip".into());
             }
-            if state_a.hash == state_b.hash {
-                failures.push("different operations produced the same child hash".into());
+            if pair_a.1 == pair_b.1 {
+                failures.push("different operations produced the same child tip".into());
+            }
+            // The receiver takes one of two children of its tip.
+            let step_a = alice.propose(&bob, op_a.clone());
+            let step_b = alice.propose(&bob, op_b.clone());
+            match (step_a, step_b) {
+                (Ok(step_a), Ok(step_b)) => {
+                    match bob.decide(&alice, &step_a) {
+                        Decision::Accepted(verified) => {
+                            if let Err(e) = commit(&mut alice, &mut bob, step_a, &verified) {
+                                failures.push(format!("the first child did not commit: {e}"));
+                            }
+                        }
+                        other => failures.push(format!("the first child was refused: {other}")),
+                    }
+                    match bob.decide(&alice, &step_b) {
+                        Decision::Accepted(_) => {
+                            failures.push("the second child of one tip was accepted".into())
+                        }
+                        Decision::StaleTip => {}
+                        other => failures.push(format!(
+                            "the second child was refused for another reason: {other}"
+                        )),
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    failures.push(format!("a step could not be proposed: {e}"))
+                }
             }
         }
-        (Err(e), _) | (_, Err(e)) => failures.push(format!("fork replay failed: {e}")),
+        (Err(e), _) | (_, Err(e)) => failures.push(format!("advance refused: {e}")),
     }
 
     ImplementationTraceResult {
@@ -370,190 +396,97 @@ fn trace_bilateral_precommit_tripwire(
     let start = Instant::now();
     let failures = run_async_trace(async move {
         let mut failures = Vec::new();
-        let (mut manager, local_kp, remote_device_id) = match build_bilateral_trace_manager() {
-            Ok(harness) => harness,
+        let mut side = match trace_side(TRACE_PAIR1_LOCAL, TRACE_PAIR1_REMOTE) {
+            Ok(side) => side,
             Err(e) => return vec![e],
         };
-
-        let expected_initial_tip = manager
-            .initial_relationship_tip_for(&remote_device_id)
-            .expect("initial relationship tip");
-
-        match manager.establish_relationship(&remote_device_id).await {
-            Ok(anchor) => {
-                if anchor.chain_tip != expected_initial_tip {
-                    failures
-                        .push("establish_relationship produced an unexpected initial tip".into());
-                }
+        let remote = side.remote_device_id;
+        let expected_initial_tip = match side.manager.initial_relationship_tip_for(&remote) {
+            Ok(tip) => tip,
+            Err(e) => return vec![format!("initial relationship tip: {e}")],
+        };
+        match side.manager.establish_relationship(&remote).await {
+            Ok(anchor) if anchor.chain_tip == expected_initial_tip => {}
+            Ok(_) => {
+                failures.push("establish_relationship produced an unexpected initial tip".into())
             }
-            Err(e) => failures.push(format!("establish_relationship failed: {e}")),
+            Err(e) => return vec![format!("establish_relationship failed: {e}")],
         }
 
-        let first_op =
-            build_signed_bilateral_transfer(&local_kp, remote_device_id, "trace-precommit-1", 0x01);
-        let first_pre = match manager
-            .prepare_offline_transfer(&remote_device_id, first_op.clone(), 500)
-            .await
-        {
-            Ok(pre) => {
-                if !manager.has_pending_commitment(&pre.bilateral_commitment_hash) {
-                    failures.push("prepared bilateral precommitment was not marked pending".into());
-                }
-                match pre.verify() {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        failures.push("prepared bilateral precommitment did not verify".into())
-                    }
-                    Err(e) => failures.push(format!("precommitment verify errored: {e}")),
-                }
-                match pre.verify_local_signature(local_kp.public_key()) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        failures.push("local signature on precommitment did not verify".into())
-                    }
-                    Err(e) => {
-                        failures.push(format!("local precommit signature verify errored: {e}"))
-                    }
-                }
-                if pre.local_chain_tip_at_creation != Some(expected_initial_tip) {
-                    failures
-                        .push("precommitment did not capture the expected parent chain tip".into());
-                }
-                pre
-            }
-            Err(e) => return vec![format!("prepare_offline_transfer failed: {e}")],
+        // Two sibling precommitments capture the same parent h_n.
+        let first_pre = match trace_prepare(&mut side, "trace-precommit-1", 0x01).await {
+            Ok(pre) => pre,
+            Err(e) => return vec![e],
         };
-
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let first_tip = match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &first_pre.bilateral_commitment_hash,
-                b"accept",
-                &mut smt,
-            )
-            .await
+        if !side
+            .manager
+            .has_pending_commitment(&first_pre.bilateral_commitment_hash)
         {
-            Ok(result) => {
-                if !result.completed_offline {
-                    failures.push("offline finalize did not report completed_offline".into());
+            failures.push("prepared bilateral precommitment was not marked pending".into());
+        }
+        if first_pre.parent_tip != expected_initial_tip {
+            failures.push("precommitment did not capture the expected parent chain tip".into());
+        }
+        let second_pre = match trace_prepare(&mut side, "trace-precommit-2", 0x02).await {
+            Ok(pre) => pre,
+            Err(e) => return vec![e],
+        };
+        if second_pre.parent_tip != expected_initial_tip {
+            failures.push("second precommitment captured the wrong parent chain tip".into());
+        }
+
+        // Sibling 1: the receiver accepts, the production prepare passes the
+        // tripwire, Core's advance derives the successor, h_n is consumed.
+        let first_tip = match trace_commit(&mut side, &first_pre.bilateral_commitment_hash).await {
+            Ok(c) => {
+                if c.parent_tip != expected_initial_tip {
+                    failures.push("first commit did not consume the initial tip".into());
                 }
-                if result.relationship_anchor.chain_tip == expected_initial_tip {
-                    failures
-                        .push("offline finalize did not advance the relationship chain tip".into());
+                if c.new_tip == expected_initial_tip {
+                    failures.push("first commit did not advance the relationship chain tip".into());
                 }
-                if manager.has_pending_commitment(&first_pre.bilateral_commitment_hash) {
-                    failures.push("finalized bilateral precommitment remained pending".into());
-                }
-                if manager
-                    .get_relationship(&remote_device_id)
-                    .map(|anchor| anchor.chain_tip)
-                    != Some(result.relationship_anchor.chain_tip)
+                if side
+                    .manager
+                    .has_pending_commitment(&first_pre.bilateral_commitment_hash)
                 {
-                    failures.push("manager relationship tip diverged from finalize result".into());
+                    failures.push("committed bilateral precommitment remained pending".into());
                 }
-                if manager
-                    .get_contact(&remote_device_id)
-                    .map(DsmVerifiedContact::has_verified_chain_tip)
-                    != Some(true)
-                {
-                    failures.push("contact SMT proof was not updated after finalize".into());
+                if side.manager.get_chain_tip_for(&remote) != Some(c.new_tip) {
+                    failures.push("manager relationship tip diverged from the commit".into());
                 }
-                match manager.verify_relationship_integrity(&remote_device_id) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        failures.push("relationship integrity failed after finalize".into())
-                    }
-                    Err(e) => failures.push(format!("relationship integrity check errored: {e}")),
-                }
-                result.relationship_anchor.chain_tip
+                c.new_tip
             }
-            Err(e) => return vec![format!("finalize_offline_transfer failed: {e}")],
+            Err(e) => return vec![format!("first commit failed: {e}")],
         };
 
-        let second_op =
-            build_signed_bilateral_transfer(&local_kp, remote_device_id, "trace-precommit-2", 0x02);
-        let second_pre = match manager
-            .prepare_offline_transfer(&remote_device_id, second_op.clone(), 500)
-            .await
-        {
-            Ok(pre) => {
-                if pre.local_chain_tip_at_creation != Some(first_tip) {
-                    failures
-                        .push("second precommitment captured the wrong parent chain tip".into());
-                }
-                pre
-            }
-            Err(e) => return vec![format!("second prepare_offline_transfer failed: {e}")],
-        };
-
-        let mut consumed_tip = *domain_hash(
-            dsm::crypto::domain::TaggedHashDomain::from_static(
-                b"DSM/trace-bilateral-parent-consumed",
-            ),
-            &second_pre.bilateral_commitment_hash,
-        )
-        .as_bytes();
-        if consumed_tip == first_tip {
-            consumed_tip[0] ^= 0xFF;
-        }
-
-        match manager.get_relationship(&remote_device_id) {
-            Some(mut anchor) => {
-                let mut smt_anchor = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-                match manager.commit_bilateral_smt_update(
-                    &mut smt_anchor,
-                    &remote_device_id,
-                    &consumed_tip,
-                ) {
-                    Ok(replace_result) => {
-                        if let Err(e) = manager.update_anchor_from_replace_public(
-                            &remote_device_id,
-                            &mut anchor,
-                            consumed_tip,
-                            &replace_result,
-                        ) {
-                            failures.push(format!(
-                                "failed to advance relationship tip before stale finalize: {e}"
-                            ));
-                        }
-                    }
-                    Err(e) => failures.push(format!("commit_bilateral_smt_update failed: {e}")),
-                }
-            }
-            None => failures.push("relationship disappeared before stale finalize check".into()),
-        }
-
-        match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &second_pre.bilateral_commitment_hash,
-                b"accept",
-                &mut smt,
-            )
-            .await
-        {
+        // Sibling 2: the receiver accepts it just as legitimately, but its
+        // parent is consumed. Cryptographic legitimacy does not resurrect it.
+        let head_before = side.head.root();
+        match trace_commit(&mut side, &second_pre.bilateral_commitment_hash).await {
             Ok(_) => failures
-                .push("stale bilateral precommitment finalized after parent consumption".into()),
-            Err(e) => {
-                let msg = format!("{e}");
+                .push("stale bilateral precommitment committed after parent consumption".into()),
+            Err(msg) => {
                 if !(msg.contains("Tripwire")
                     && (msg.contains("advanced since precommitment creation")
                         || msg.contains("parent hash already consumed")))
                 {
                     failures.push(format!(
-                        "stale finalize rejection message was unexpected: {msg}"
+                        "stale prepare rejection message was unexpected: {msg}"
                     ));
                 }
             }
         }
-
-        if !manager.has_pending_commitment(&second_pre.bilateral_commitment_hash) {
+        if side.head.root() != head_before {
+            failures.push("the sender's head advanced on a refused stale commit".into());
+        }
+        if !side
+            .manager
+            .has_pending_commitment(&second_pre.bilateral_commitment_hash)
+        {
             failures.push("rejected stale precommitment was removed from pending set".into());
         }
-
-        if manager.get_chain_tip_for(&remote_device_id) != Some(consumed_tip) {
-            failures.push("manager chain tip changed after stale finalize rejection".into());
+        if side.manager.get_chain_tip_for(&remote) != Some(first_tip) {
+            failures.push("manager chain tip changed after stale prepare rejection".into());
         }
 
         failures
@@ -562,110 +495,6 @@ fn trace_bilateral_precommit_tripwire(
     ImplementationTraceResult {
         trace_name: "bilateral_precommit_tripwire".into(),
         steps: 5,
-        passed: failures.is_empty(),
-        failures,
-        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-    }
-}
-
-fn trace_bilateral_precomputed_finalize_hash(
-    _seed_bytes: &[u8; 32],
-    _pk: &[u8],
-    _sk: &[u8],
-) -> ImplementationTraceResult {
-    let start = Instant::now();
-    let failures = run_async_trace(async move {
-        let mut failures = Vec::new();
-        let (mut manager, local_kp, remote_device_id) = match build_bilateral_trace_manager() {
-            Ok(harness) => harness,
-            Err(e) => return vec![e],
-        };
-
-        if let Err(e) = manager.establish_relationship(&remote_device_id).await {
-            return vec![format!("establish_relationship failed: {e}")];
-        }
-
-        let operation = build_signed_bilateral_transfer(
-            &local_kp,
-            remote_device_id,
-            "trace-precomputed-finalize",
-            0x11,
-        );
-        let entropy = match manager.derive_transition_entropy(&remote_device_id, &operation) {
-            Ok(entropy) => entropy,
-            Err(e) => return vec![format!("derive_transition_entropy failed: {e}")],
-        };
-        let predicted_tip =
-            match manager.peek_post_finalize_hash(&remote_device_id, &operation, &entropy) {
-                Ok(tip) => tip,
-                Err(e) => return vec![format!("peek_post_finalize_hash failed: {e}")],
-            };
-
-        let mut alternate_entropy = entropy;
-        alternate_entropy[0] ^= 0xFF;
-        match manager.peek_post_finalize_hash(&remote_device_id, &operation, &alternate_entropy) {
-            Ok(alternate_tip) => {
-                if alternate_tip == predicted_tip {
-                    failures
-                        .push("changing finalize entropy did not change the predicted tip".into());
-                }
-            }
-            Err(e) => failures.push(format!("alternate peek_post_finalize_hash failed: {e}")),
-        }
-
-        let pre = match manager
-            .prepare_offline_transfer(&remote_device_id, operation.clone(), 500)
-            .await
-        {
-            Ok(pre) => pre,
-            Err(e) => return vec![format!("prepare_offline_transfer failed: {e}")],
-        };
-
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let result = match manager
-            .finalize_offline_transfer_with_entropy(
-                &remote_device_id,
-                &pre.bilateral_commitment_hash,
-                b"accept",
-                Some(entropy),
-                &mut smt,
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                return vec![format!(
-                    "finalize_offline_transfer_with_entropy failed: {e}"
-                )]
-            }
-        };
-
-        if !result.completed_offline {
-            failures.push("precomputed finalize did not report completed_offline".into());
-        }
-        if result.relationship_anchor.chain_tip != predicted_tip {
-            failures.push("predicted post-finalize tip did not match actual finalized tip".into());
-        }
-        if manager.get_chain_tip_for(&remote_device_id) != Some(predicted_tip) {
-            failures.push("manager did not persist the predicted finalized tip".into());
-        }
-        if manager.has_pending_commitment(&pre.bilateral_commitment_hash) {
-            failures.push("precomputed finalize left the commitment pending".into());
-        }
-        if manager
-            .get_contact(&remote_device_id)
-            .map(DsmVerifiedContact::has_verified_chain_tip)
-            != Some(true)
-        {
-            failures.push("contact SMT proof was not updated after precomputed finalize".into());
-        }
-
-        failures
-    });
-
-    ImplementationTraceResult {
-        trace_name: "bilateral_precomputed_finalize_hash".into(),
-        steps: 4,
         passed: failures.is_empty(),
         failures,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -874,7 +703,12 @@ fn trace_dlv_manager_inventory_consistency(
         let (encryption_pk, _encryption_sk) =
             generate_kyber_keypair_from_entropy(&[0x71; 32], "implementation-trace-vault")
                 .expect("vault kyber keypair");
-        let reference_state = create_test_state(&[0x51; 32], &creator_kp.public_key);
+        // The creator's head root is the reference the vault's parameters
+        // commit to.
+        let reference_root = match LiveDevice::new("trace-dlv-creator") {
+            Ok(creator) => creator.head.root(),
+            Err(e) => return vec![format!("creator device: {e}")],
+        };
 
         let condition = FulfillmentMechanism::CryptoCondition {
             condition_hash: vec![0xA1; 32],
@@ -888,7 +722,7 @@ fn trace_dlv_manager_inventory_consistency(
             "text/plain",
             None,
             &encryption_pk,
-            &reference_state.hash,
+            &reference_root,
             // Not an AMM vault: no DLV-layer policy object to derive a digest from.
             None,
         ) {
@@ -914,7 +748,7 @@ fn trace_dlv_manager_inventory_consistency(
             "text/plain",
             None,
             &encryption_pk,
-            &reference_state.hash,
+            &reference_root,
             // Not an AMM vault: no DLV-layer policy object to derive a digest from.
             None,
         ) {
@@ -994,68 +828,47 @@ fn trace_dlv_manager_inventory_consistency(
 }
 
 fn trace_token_manager_balance_replay(
-    seed_bytes: &[u8; 32],
-    pk: &[u8],
-    sk: &[u8],
+    _seed_bytes: &[u8; 32],
+    _pk: &[u8],
+    _sk: &[u8],
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
-    let mut harness = build_token_harness(seed_bytes, pk);
+    let (mut alice, mut bob) = trace_pair("balance-replay");
     let transfers = [7u64, 13, 19];
 
     for (idx, amount) in transfers.iter().enumerate() {
-        let sender_before = balance_for_key(&harness.state, &harness.sender_key);
-        let recipient_before = balance_for_key(&harness.state, &harness.recipient_key);
-        let op = build_signed_transfer_to_owner(
-            sk,
-            &harness.state,
-            vec![(idx as u8) + 3; 8],
-            *amount,
-            TRACE_TOKEN_ID.as_bytes().to_vec(),
-            vec![0xEE; 32],
-            harness.recipient.clone(),
-        );
-        let new_entropy = compute_next_entropy(&harness.state, &op);
-
-        match crate::compat_shim::manager_create_token_state_transition(
-            &harness.state,
-            op.clone(),
-            new_entropy,
-            None,
-        ) {
-            Ok(new_state) => {
-                match verify_token_balance_consistency(&harness.state, &new_state, &op) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        failures.push(format!("step {idx}: balance consistency returned false"))
-                    }
-                    Err(e) => {
-                        failures.push(format!("step {idx}: consistency verifier errored: {e}"))
-                    }
-                }
-
-                let sender_after = balance_for_key(&new_state, &harness.sender_key);
-                let recipient_after = balance_for_key(&new_state, &harness.recipient_key);
-                if sender_after != sender_before.saturating_sub(*amount) {
-                    failures.push(format!("step {idx}: sender balance mismatch"));
-                }
-                if recipient_after != recipient_before + amount {
-                    failures.push(format!("step {idx}: recipient balance mismatch"));
-                }
-                if sender_after + recipient_after != TRACE_INITIAL_BALANCE {
-                    failures.push(format!("step {idx}: token conservation violated"));
-                }
-                harness.state = new_state;
+        let (alice_before, bob_before) = (alice.era_balance(), bob.era_balance());
+        let op = alice
+            .transfer(&bob, *amount, &[(idx as u8) + 3; 8])
+            .expect("transfer");
+        match (alice.send(&bob, &op), bob.receive(&alice, &op)) {
+            (Ok(debit), Ok(credit)) => {
+                alice.install(debit);
+                bob.install(credit);
             }
-            Err(e) => failures.push(format!("step {idx}: token transition failed: {e}")),
+            (Err(e), _) | (_, Err(e)) => {
+                failures.push(format!("step {idx}: advance refused: {e}"));
+                continue;
+            }
+        }
+        if alice.era_balance() != alice_before - amount {
+            failures.push(format!("step {idx}: sender balance mismatch"));
+        }
+        if bob.era_balance() != bob_before + amount {
+            failures.push(format!("step {idx}: recipient balance mismatch"));
+        }
+        if alice.era_balance() + bob.era_balance() != ERA_FAUCET_PAYOUT {
+            failures.push(format!("step {idx}: conservation violated"));
         }
     }
 
-    if balance_for_key(&harness.state, &harness.sender_key) != 61 {
-        failures.push("final sender balance did not match expected trace value".into());
+    let moved: u64 = transfers.iter().sum();
+    if alice.era_balance() != ERA_FAUCET_PAYOUT - moved {
+        failures.push("final sender balance did not match the trace".into());
     }
-    if balance_for_key(&harness.state, &harness.recipient_key) != 39 {
-        failures.push("final recipient balance did not match expected trace value".into());
+    if bob.era_balance() != moved {
+        failures.push("final recipient balance did not match the trace".into());
     }
 
     ImplementationTraceResult {
@@ -1067,214 +880,121 @@ fn trace_token_manager_balance_replay(
     }
 }
 
-fn trace_tripwire_parent_consumption(
+fn trace_token_manager_overspend_rejection(
     _seed_bytes: &[u8; 32],
     _pk: &[u8],
     _sk: &[u8],
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
-    let mut tracker = ParentConsumptionTracker::new();
+    let (alice, bob) = trace_pair("overspend");
+    let held = alice.era_balance();
+    let root = alice.head.root();
 
-    let parent = [0x71; 32];
-    let child_a = [0x72; 32];
-    let child_b = [0x73; 32];
-
-    if let Err(e) = tracker.try_consume(parent, child_a) {
-        failures.push(format!("fresh parent rejected unexpectedly: {e}"));
+    let op = alice
+        .transfer(&bob, held + 1, &[0xEE; 8])
+        .expect("transfer");
+    if alice.send(&bob, &op).is_ok() {
+        failures.push("an overspend was accepted by the advance".into());
     }
-
-    match tracker.try_consume(parent, child_a) {
-        Ok(()) => failures.push("replay was accepted by parent-consumption tracker".into()),
-        Err(e) => {
-            let msg = format!("{e}");
-            if !msg.contains("replay detected") {
-                failures.push(format!("replay rejection message was too weak: {msg}"));
-            }
-        }
-    }
-
-    match tracker.try_consume(parent, child_b) {
-        Ok(()) => failures.push("fork child was accepted by parent-consumption tracker".into()),
-        Err(e) => {
-            let msg = format!("{e}");
-            if !msg.contains("Fork detected") {
-                failures.push(format!("fork rejection message was too weak: {msg}"));
-            }
-        }
-    }
-
-    if tracker.get_child(&parent) != Some(&child_a) {
-        failures.push("canonical child mapping was overwritten after fork attempt".into());
+    if alice.head.root() != root || alice.era_balance() != held {
+        failures.push("the head changed after a refused overspend".into());
     }
 
     ImplementationTraceResult {
-        trace_name: "tripwire_parent_consumption".into(),
-        steps: 3,
+        trace_name: "token_manager_overspend_rejection".into(),
+        steps: 1,
         passed: failures.is_empty(),
         failures,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
     }
 }
 
-fn trace_receipt_verifier_tripwire(
+/// The receiver's decision on `step`, reported as a trace failure message
+/// when it does not match `want`: `None` for accepted, `Some(needle)` for a
+/// refusal whose reason holds `needle` ("stale tip" for a stale tip).
+fn expect_decision(
+    failures: &mut Vec<String>,
+    label: &str,
+    receiver: &LiveDevice,
+    sender: &LiveDevice,
+    step: &Step,
+    want: Option<&str>,
+) -> Option<dsm::bilateral::offline::VerifiedConfirm> {
+    match (receiver.decide(sender, step), want) {
+        (Decision::Accepted(verified), None) => return Some(verified),
+        (Decision::Accepted(_), Some(_)) => failures.push(format!("{label}: ACCEPTED")),
+        (Decision::StaleTip, Some("stale tip")) => {}
+        (decided, Some(needle))
+            if decided
+                .refusal_at(Stage::Prepare)
+                .or(decided.refusal_at(Stage::Confirm))
+                .is_some_and(|e| e.to_string().contains(needle)) => {}
+        (other, want) => failures.push(format!("{label}: {other}, wanted {want:?}")),
+    }
+    None
+}
+
+fn trace_receiver_tripwire(
     _seed_bytes: &[u8; 32],
     _pk: &[u8],
     _sk: &[u8],
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
+    let (mut alice, mut bob) = trace_pair("receiver-tripwire");
 
-    let keypair_a =
-        SignatureKeyPair::generate_from_entropy(b"implementation-trace-receipt-a").expect("kp a");
-    let keypair_b =
-        SignatureKeyPair::generate_from_entropy(b"implementation-trace-receipt-b").expect("kp b");
-
-    let genesis =
-        *domain_hash(dsm::common::domain_tags::TAG_DSM_TRACE_GENESIS, b"receipt").as_bytes();
-    let devid_a =
-        *domain_hash(dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE, b"receipt-a").as_bytes();
-    let devid_b =
-        *domain_hash(dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE, b"receipt-b").as_bytes();
-
-    let device_tree = DeviceTree::new(vec![devid_a, devid_b]);
-    let device_tree_root = device_tree.root();
-    let dev_proof = device_tree
-        .proof(&devid_a)
-        .map(encode_device_tree_proof)
-        .expect("device tree proof");
-
-    let parent_tip = [0x41; 32];
-    let child_tip_a = [0x42; 32];
-    let child_tip_b = [0x43; 32];
-
-    let receipt_a = build_signed_receipt(
-        genesis,
-        devid_a,
-        devid_b,
-        parent_tip,
-        child_tip_a,
-        dev_proof.clone(),
-        &keypair_a,
-        Some(&keypair_b),
+    let step_a = alice.propose(&bob, marked(0xA1)).expect("step a");
+    let step_b = alice.propose(&bob, marked(0xB1)).expect("step b");
+    let replayed = step_a.clone();
+    let successor = step_a.successor_tip;
+    if let Some(verified) = expect_decision(&mut failures, "the step", &bob, &alice, &step_a, None)
+    {
+        if let Err(e) = commit(&mut alice, &mut bob, step_a, &verified) {
+            failures.push(format!("the step did not commit: {e}"));
+        }
+    }
+    if alice.shared_tip_with(&bob) != Some(successor)
+        || bob.shared_tip_with(&alice) != Some(successor)
+    {
+        failures.push("the two devices do not hold the committed successor".into());
+    }
+    expect_decision(
+        &mut failures,
+        "its replay",
+        &bob,
+        &alice,
+        &replayed,
+        Some("stale tip"),
     );
-    let receipt_b = build_signed_receipt(
-        genesis,
-        devid_a,
-        devid_b,
-        parent_tip,
-        child_tip_b,
-        dev_proof,
-        &keypair_a,
-        Some(&keypair_b),
+    expect_decision(
+        &mut failures,
+        "a second child of the tip",
+        &bob,
+        &alice,
+        &step_b,
+        Some("stale tip"),
     );
 
-    let ctx = ReceiptVerificationContext::new(
-        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
-        receipt_a.parent_root,
-        keypair_a.public_key.clone(),
-        keypair_b.public_key.clone(),
-    )
-    .with_chain_head_a(keypair_a.public_key.clone())
-    .with_chain_head_b(keypair_b.public_key.clone());
-    let mut tracker = ParentConsumptionTracker::new();
-
-    match verify_stitched_receipt(&receipt_a, &ctx, &mut tracker) {
-        Ok(result) => {
-            if !result.valid {
-                failures.push(format!(
-                    "valid receipt was rejected: {}",
-                    result.reason.unwrap_or_else(|| "unknown reason".into())
-                ));
-            }
-        }
-        Err(e) => failures.push(format!("receipt verifier errored on valid receipt: {e}")),
-    }
-
-    match verify_stitched_receipt(&receipt_a, &ctx, &mut tracker) {
-        Ok(result) => {
-            if result.valid {
-                failures.push("receipt replay was accepted by verifier".into());
-            } else {
-                let reason = result.reason.unwrap_or_default();
-                if !(reason.contains("already consumed") || reason.contains("replay detected")) {
-                    failures.push(format!(
-                        "receipt replay rejection reason was unexpected: {reason}"
-                    ));
-                }
-            }
-        }
-        Err(e) => failures.push(format!("receipt verifier errored on replay: {e}")),
-    }
-
-    match verify_stitched_receipt(&receipt_b, &ctx, &mut tracker) {
-        Ok(result) => {
-            if result.valid {
-                failures.push("forked receipt was accepted by verifier".into());
-            } else {
-                let reason = result.reason.unwrap_or_default();
-                if !(reason.contains("Fork detected") || reason.contains("conflicting children")) {
-                    failures.push(format!("fork rejection reason was unexpected: {reason}"));
-                }
-            }
-        }
-        Err(e) => failures.push(format!("receipt verifier errored on fork attempt: {e}")),
-    }
-
-    let mut malformed_replace = receipt_a.clone();
-    malformed_replace.set_rel_replace_witness(Vec::new());
-    malformed_replace.sig_a.clear();
-    malformed_replace.sig_b.clear();
-    let malformed_commitment = match malformed_replace.compute_commitment() {
-        Ok(commitment) => commitment,
-        Err(e) => {
-            failures.push(format!(
-                "failed to recompute malformed receipt commitment: {e}"
-            ));
-            [0u8; 32]
-        }
-    };
-    if malformed_commitment != [0u8; 32] {
-        match keypair_a.sign(&malformed_commitment) {
-            Ok(sig) => malformed_replace.add_sig_a(sig),
-            Err(e) => failures.push(format!("failed to resign malformed receipt: {e}")),
-        }
-        match keypair_b.sign(&malformed_commitment) {
-            Ok(sig) => malformed_replace.add_sig_b(sig),
-            Err(e) => failures.push(format!(
-                "failed to resign malformed receipt with sig_b: {e}"
-            )),
-        }
-
-        match verify_stitched_receipt(&malformed_replace, &ctx, &mut tracker) {
-            Ok(result) => {
-                if result.valid {
-                    failures.push("receipt with malformed SMT replace witness was accepted".into());
-                } else {
-                    let reason = result.reason.unwrap_or_default();
-                    if !reason.contains("SMT replace recomputation failed") {
-                        failures.push(format!(
-                            "malformed SMT replace rejection reason was unexpected: {reason}"
-                        ));
-                    }
-                }
-            }
-            Err(e) => failures.push(format!(
-                "receipt verifier errored on malformed SMT replace witness: {e}"
-            )),
-        }
-    }
-
-    if tracker.get_child(&parent_tip) != Some(&child_tip_a) {
-        failures.push("receipt verifier tracker overwrote canonical child after fork".into());
-    }
-
-    if !tracker.is_consumed(&parent_tip) {
-        failures.push("receipt verifier did not mark the parent as consumed".into());
+    // The sender signs a receipt whose writes no longer fold to the
+    // pre-state root: one sibling changed.
+    let mut bent = alice.propose(&bob, marked(0xC1)).expect("step c");
+    bent.receipt.step_writes[0].path.siblings[0] ^= 0x01;
+    let bent = bent.resigned().expect("re-signed");
+    expect_decision(
+        &mut failures,
+        "a signed receipt over a bent path",
+        &bob,
+        &alice,
+        &bent,
+        Some("do not fold to the claimed pre-root"),
+    );
+    if bob.shared_tip_with(&alice) != Some(successor) {
+        failures.push("a refused step moved the receiver's tip".into());
     }
 
     ImplementationTraceResult {
-        trace_name: "receipt_verifier_tripwire".into(),
+        trace_name: "receiver_tripwire".into(),
         steps: 4,
         passed: failures.is_empty(),
         failures,
@@ -1289,143 +1009,62 @@ fn trace_tripwire_first_contact_binding(
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
+    let (mut alice, mut bob) = trace_pair("first-contact");
+    let h0 = bob.shared_tip_with(&alice).expect("established");
+    if alice.shared_tip_with(&bob) != Some(h0) {
+        failures.push("the two devices do not hold one h_0".into());
+    }
 
-    let keypair_a =
-        SignatureKeyPair::generate_from_entropy(b"implementation-trace-first-contact-a")
-            .expect("first-contact keypair a");
-    let keypair_b =
-        SignatureKeyPair::generate_from_entropy(b"implementation-trace-first-contact-b")
-            .expect("first-contact keypair b");
-
-    let genesis = *domain_hash(
-        dsm::common::domain_tags::TAG_DSM_TRACE_GENESIS,
-        b"first-contact",
-    )
-    .as_bytes();
-    let devid_a = *domain_hash(
-        dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE,
-        b"first-contact-a",
-    )
-    .as_bytes();
-    let devid_b = *domain_hash(
-        dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE,
-        b"first-contact-b",
-    )
-    .as_bytes();
-
-    let device_tree = DeviceTree::new(vec![devid_a, devid_b]);
-    let device_tree_root = device_tree.root();
-    let dev_proof = device_tree
-        .proof(&devid_a)
-        .map(encode_device_tree_proof)
-        .expect("device tree proof");
-
-    let parent_tip = [0u8; 32];
-    let first_child = [0x51; 32];
-    let alternate_first_child = [0x52; 32];
-    let extension_child = [0x53; 32];
-
-    let first_receipt = build_signed_receipt(
-        genesis,
-        devid_a,
-        devid_b,
-        parent_tip,
-        first_child,
-        dev_proof.clone(),
-        &keypair_a,
-        Some(&keypair_b),
-    );
-    let extension_receipt = build_signed_receipt(
-        genesis,
-        devid_a,
-        devid_b,
-        first_child,
-        extension_child,
-        dev_proof.clone(),
-        &keypair_a,
-        Some(&keypair_b),
-    );
-    let alternate_first_receipt = build_signed_receipt(
-        genesis,
-        devid_a,
-        devid_b,
-        parent_tip,
-        alternate_first_child,
-        dev_proof,
-        &keypair_a,
-        Some(&keypair_b),
-    );
-
-    let first_ctx = ReceiptVerificationContext::new(
-        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
-        first_receipt.parent_root,
-        keypair_a.public_key.clone(),
-        keypair_b.public_key.clone(),
-    )
-    .with_chain_head_a(keypair_a.public_key.clone())
-    .with_chain_head_b(keypair_b.public_key.clone());
-    let extension_ctx = ReceiptVerificationContext::new(
-        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
-        extension_receipt.parent_root,
-        keypair_a.public_key.clone(),
-        keypair_b.public_key.clone(),
-    )
-    .with_chain_head_a(keypair_a.public_key.clone())
-    .with_chain_head_b(keypair_b.public_key.clone());
-    let mut tracker = ParentConsumptionTracker::new();
-
-    match verify_stitched_receipt(&first_receipt, &first_ctx, &mut tracker) {
-        Ok(result) => {
-            if !result.valid {
-                failures.push(format!(
-                    "first-contact receipt was rejected: {}",
-                    result.reason.unwrap_or_else(|| "unknown reason".into())
-                ));
-            }
+    // First contact: the relationship's first step extends h_0; an
+    // alternate first step extends it too.
+    let first = alice.propose(&bob, marked(0x51)).expect("first step");
+    let alternate = alice
+        .propose(&bob, marked(0x52))
+        .expect("alternate first step");
+    if first.expected_tip != h0 || alternate.expected_tip != h0 {
+        failures.push("a first step does not extend the relationship's h_0".into());
+    }
+    let first_successor = first.successor_tip;
+    if let Some(verified) = expect_decision(
+        &mut failures,
+        "the first-contact step",
+        &bob,
+        &alice,
+        &first,
+        None,
+    ) {
+        if let Err(e) = commit(&mut alice, &mut bob, first, &verified) {
+            failures.push(format!("the first-contact step did not commit: {e}"));
         }
-        Err(e) => failures.push(format!("verifier errored on first-contact receipt: {e}")),
     }
 
-    match verify_stitched_receipt(&extension_receipt, &extension_ctx, &mut tracker) {
-        Ok(result) => {
-            if !result.valid {
-                failures.push(format!(
-                    "extension from first-contact branch was rejected: {}",
-                    result.reason.unwrap_or_else(|| "unknown reason".into())
-                ));
-            }
+    let extension = alice.propose(&bob, marked(0x53)).expect("extension step");
+    if extension.expected_tip != first_successor {
+        failures.push("the extension does not extend the first step's successor".into());
+    }
+    let extension_successor = extension.successor_tip;
+    if let Some(verified) = expect_decision(
+        &mut failures,
+        "the extension",
+        &bob,
+        &alice,
+        &extension,
+        None,
+    ) {
+        if let Err(e) = commit(&mut alice, &mut bob, extension, &verified) {
+            failures.push(format!("the extension did not commit: {e}"));
         }
-        Err(e) => failures.push(format!("verifier errored on first-contact extension: {e}")),
     }
-
-    match verify_stitched_receipt(&alternate_first_receipt, &first_ctx, &mut tracker) {
-        Ok(result) => {
-            if result.valid {
-                failures.push("alternate first-contact branch was accepted".into());
-            } else {
-                let reason = result.reason.unwrap_or_default();
-                if !(reason.contains("Fork detected") || reason.contains("conflicting children")) {
-                    failures.push(format!(
-                        "alternate first-contact rejection reason was unexpected: {reason}"
-                    ));
-                }
-            }
-        }
-        Err(e) => failures.push(format!(
-            "verifier errored on alternate first-contact branch: {e}"
-        )),
-    }
-
-    if tracker.get_child(&parent_tip) != Some(&first_child) {
-        failures.push("first-contact binding did not preserve the canonical first child".into());
-    }
-
-    if tracker.get_child(&first_child) != Some(&extension_child) {
-        failures.push("first-contact extension did not anchor on the accepted child".into());
-    }
-
-    if !tracker.is_consumed(&parent_tip) || !tracker.is_consumed(&first_child) {
-        failures.push("tracker did not mark the accepted first-contact branch as consumed".into());
+    expect_decision(
+        &mut failures,
+        "an alternate first-contact branch",
+        &bob,
+        &alice,
+        &alternate,
+        Some("stale tip"),
+    );
+    if bob.shared_tip_with(&alice) != Some(extension_successor) {
+        failures.push("the receiver does not hold the extension's successor".into());
     }
 
     ImplementationTraceResult {
@@ -1437,47 +1076,83 @@ fn trace_tripwire_first_contact_binding(
     }
 }
 
-fn trace_token_manager_overspend_rejection(
-    seed_bytes: &[u8; 32],
-    pk: &[u8],
-    sk: &[u8],
+fn trace_bilateral_precomputed_finalize_hash(
+    _seed_bytes: &[u8; 32],
+    _pk: &[u8],
+    _sk: &[u8],
 ) -> ImplementationTraceResult {
+    use dsm::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
     let start = Instant::now();
-    let mut failures = Vec::new();
-    let harness = build_token_harness(seed_bytes, pk);
-    let sender_before = balance_for_key(&harness.state, &harness.sender_key);
-    let recipient_before = balance_for_key(&harness.state, &harness.recipient_key);
+    let failures = run_async_trace(async move {
+        let mut failures = Vec::new();
+        let mut side = match trace_side(TRACE_PAIR1_LOCAL, TRACE_PAIR1_REMOTE) {
+            Ok(side) => side,
+            Err(e) => return vec![e],
+        };
+        let remote = side.remote_device_id;
+        let h_n = match side.manager.establish_relationship(&remote).await {
+            Ok(anchor) => anchor.chain_tip,
+            Err(e) => return vec![format!("establish_relationship failed: {e}")],
+        };
 
-    let op = build_signed_transfer(
-        sk,
-        &harness.state,
-        vec![0xEE; 8],
-        sender_before + 1,
-        TRACE_TOKEN_ID.as_bytes().to_vec(),
-        harness.recipient.clone(),
-    );
-    let new_entropy = compute_next_entropy(&harness.state, &op);
+        let pre = match trace_prepare(&mut side, "trace-precomputed-finalize", 0x11).await {
+            Ok(pre) => pre,
+            Err(e) => return vec![e],
+        };
+        // §39: the ONE transition entropy is Core's derivation on the sender's
+        // head — the same function the canonical advance runs — so the sender
+        // can predict the committed tip at confirm time.
+        let rel_key = compute_smt_key(&side.local_device_id, &remote);
+        let entropy = side
+            .head
+            .derive_transition_entropy(&rel_key, &pre.operation);
+        if entropy
+            != side
+                .head
+                .derive_transition_entropy(&rel_key, &pre.operation)
+        {
+            failures.push("Core's transition entropy derivation is not deterministic".into());
+        }
+        let op_bytes = pre.operation.to_bytes();
+        let sigma = compute_precommit(&h_n, &op_bytes, &entropy);
+        let predicted_tip = compute_successor_tip(&h_n, &op_bytes, &entropy, &sigma);
 
-    if crate::compat_shim::manager_create_token_state_transition(
-        &harness.state,
-        op,
-        new_entropy,
-        None,
-    )
-    .is_ok()
-    {
-        failures.push("overspend was accepted by token transition code".into());
-    }
+        let mut alternate_entropy = entropy;
+        alternate_entropy[0] ^= 0xFF;
+        let alternate_sigma = compute_precommit(&h_n, &op_bytes, &alternate_entropy);
+        if compute_successor_tip(&h_n, &op_bytes, &alternate_entropy, &alternate_sigma)
+            == predicted_tip
+        {
+            failures
+                .push("changing the transition entropy did not change the predicted tip".into());
+        }
 
-    let sender_after = balance_for_key(&harness.state, &harness.sender_key);
-    let recipient_after = balance_for_key(&harness.state, &harness.recipient_key);
-    if sender_after != sender_before || recipient_after != recipient_before {
-        failures.push("balances changed after rejected overspend".into());
-    }
+        let committed = match trace_commit(&mut side, &pre.bilateral_commitment_hash).await {
+            Ok(c) => c,
+            Err(e) => return vec![format!("commit failed: {e}")],
+        };
+        if committed.entropy != entropy {
+            failures.push("the committed transition entropy differs from the predicted one".into());
+        }
+        if committed.new_tip != predicted_tip {
+            failures.push("predicted post-commit tip did not match the committed tip".into());
+        }
+        if side.manager.get_chain_tip_for(&remote) != Some(predicted_tip) {
+            failures.push("manager did not persist the predicted committed tip".into());
+        }
+        if side
+            .manager
+            .has_pending_commitment(&pre.bilateral_commitment_hash)
+        {
+            failures.push("commit left the precommitment pending".into());
+        }
+
+        failures
+    });
 
     ImplementationTraceResult {
-        trace_name: "token_manager_overspend_rejection".into(),
-        steps: 1,
+        trace_name: "bilateral_precomputed_finalize_hash".into(),
+        steps: 4,
         passed: failures.is_empty(),
         failures,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -1487,12 +1162,14 @@ fn trace_token_manager_overspend_rejection(
 // ========================================================================
 // OFFLINE FINALITY TRACE (Paper Theorems 4.1, 4.2)
 //
-// Replays the full 3-phase bilateral commit through real Rust code:
-//   1. Establish relationship
-//   2. Prepare + finalize (tip advances, BilateralIrreversibility)
-//   3. Second prepare + finalize (sequential commits work)
-//   4. Tripwire test (stale precommitment rejected)
-//   5. Conservation (relationship integrity preserved)
+// Replays the bilateral commit through the production sequence:
+//   1. Establish the relationship
+//   2. Prepare + commit (the tip advances: BilateralIrreversibility)
+//   3. A second prepare + commit (sequential commits, distinct tips)
+//   4. Two siblings of one parent: one commits, the other is refused
+//      (TripwireGuaranteesUniqueness)
+//   5. Every committed debit is the receiver's credit, on the two heads
+//      (TokenConservation)
 //
 // Maps to DSM_OfflineFinality.tla invariants:
 //   BilateralIrreversibility, FullSettlement, TripwireGuaranteesUniqueness,
@@ -1506,178 +1183,100 @@ fn trace_bilateral_full_offline_finality(
     let start = Instant::now();
     let failures = run_async_trace(async move {
         let mut failures = Vec::new();
-        let (mut manager, local_kp, remote_device_id) = match build_bilateral_trace_manager() {
-            Ok(harness) => harness,
+        let mut side = match trace_side(TRACE_PAIR1_LOCAL, TRACE_PAIR1_REMOTE) {
+            Ok(side) => side,
             Err(e) => return vec![e],
         };
+        let remote = side.remote_device_id;
+        let local = side.local_device_id;
+        let mut remote_head = match DeviceState::new(
+            TRACE_PAIR1_REMOTE.1,
+            remote,
+            side.remote_kp.public_key().to_vec(),
+        )
+        .establish_relationship(local)
+        {
+            Ok(head) => head,
+            Err(e) => return vec![format!("establishing the receiver's relationship: {e}")],
+        };
+        let era = era_policy_commit();
+        let total = side.head.balance(&era) + remote_head.balance(&era);
 
         // Step 1: Establish relationship
-        let initial_tip = manager
-            .initial_relationship_tip_for(&remote_device_id)
-            .expect("initial relationship tip");
-
-        match manager.establish_relationship(&remote_device_id).await {
-            Ok(anchor) => {
-                if anchor.chain_tip != initial_tip {
-                    failures.push("establish_relationship produced unexpected initial tip".into());
-                }
-            }
+        let initial_tip = match side.manager.initial_relationship_tip_for(&remote) {
+            Ok(tip) => tip,
+            Err(e) => return vec![format!("initial relationship tip: {e}")],
+        };
+        match side.manager.establish_relationship(&remote).await {
+            Ok(anchor) if anchor.chain_tip == initial_tip => {}
+            Ok(_) => failures.push("establish_relationship produced unexpected initial tip".into()),
             Err(e) => return vec![format!("establish_relationship failed: {e}")],
         }
 
-        // Step 2: First prepare + finalize (BilateralIrreversibility)
-        let op1 =
-            build_signed_bilateral_transfer(&local_kp, remote_device_id, "finality-trace-1", 0x01);
-        let pre1 = match manager
-            .prepare_offline_transfer(&remote_device_id, op1, 500)
-            .await
-        {
-            Ok(pre) => {
-                if !manager.has_pending_commitment(&pre.bilateral_commitment_hash) {
-                    failures.push("first precommitment not marked pending".into());
-                }
-                if pre.local_chain_tip_at_creation != Some(initial_tip) {
-                    failures.push("first precommitment did not capture initial tip".into());
-                }
-                pre
-            }
-            Err(e) => return vec![format!("first prepare failed: {e}")],
-        };
-
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let first_tip = match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &pre1.bilateral_commitment_hash,
-                b"accept-1",
-                &mut smt,
-            )
-            .await
-        {
-            Ok(result) => {
-                // BilateralIrreversibility: tip advanced past precommitment
-                if result.relationship_anchor.chain_tip == initial_tip {
-                    failures.push("finalize did not advance chain tip (irreversibility)".into());
-                }
-                // FullSettlement: completed offline
-                if !result.completed_offline {
-                    failures.push("finalize did not report completed_offline".into());
-                }
-                // Pending cleared
-                if manager.has_pending_commitment(&pre1.bilateral_commitment_hash) {
-                    failures.push("first precommitment remained pending after finalize".into());
-                }
-                // Relationship integrity
-                match manager.verify_relationship_integrity(&remote_device_id) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        failures.push("relationship integrity failed after first finalize".into())
-                    }
-                    Err(e) => failures.push(format!("relationship integrity errored: {e}")),
-                }
-                result.relationship_anchor.chain_tip
-            }
-            Err(e) => return vec![format!("first finalize failed: {e}")],
-        };
-
-        // Step 3: Second prepare + finalize (sequential commits, distinct tips)
-        let op2 =
-            build_signed_bilateral_transfer(&local_kp, remote_device_id, "finality-trace-2", 0x02);
-        let pre2 = match manager
-            .prepare_offline_transfer(&remote_device_id, op2, 500)
-            .await
-        {
-            Ok(pre) => {
-                if pre.local_chain_tip_at_creation != Some(first_tip) {
-                    failures.push("second precommitment captured wrong parent tip".into());
-                }
-                pre
-            }
-            Err(e) => return vec![format!("second prepare failed: {e}")],
-        };
-
-        let second_tip = match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &pre2.bilateral_commitment_hash,
-                b"accept-2",
-                &mut smt,
-            )
-            .await
-        {
-            Ok(result) => {
-                // TripwireGuaranteesUniqueness: second tip differs from first
-                if result.relationship_anchor.chain_tip == first_tip {
-                    failures.push("second finalize produced same tip as first (uniqueness)".into());
-                }
-                if result.relationship_anchor.chain_tip == initial_tip {
-                    failures.push("second finalize reverted to initial tip".into());
-                }
-                result.relationship_anchor.chain_tip
-            }
-            Err(e) => return vec![format!("second finalize failed: {e}")],
-        };
-
-        // Step 4: Tripwire test — prepare third, advance tip, attempt stale finalize
-        let op3 =
-            build_signed_bilateral_transfer(&local_kp, remote_device_id, "finality-trace-3", 0x03);
-        let pre3 = match manager
-            .prepare_offline_transfer(&remote_device_id, op3, 500)
-            .await
-        {
+        // Step 2: First prepare + commit (BilateralIrreversibility)
+        let pre1 = match trace_prepare(&mut side, "finality-trace-1", 0x01).await {
             Ok(pre) => pre,
-            Err(e) => return vec![format!("third prepare failed: {e}")],
+            Err(e) => return vec![e],
         };
-
-        // Manually advance tip to simulate parent consumption
-        let mut consumed_tip = *domain_hash(
-            dsm::crypto::domain::TaggedHashDomain::from_static(
-                b"DSM/trace-finality-parent-consumed",
-            ),
-            &pre3.bilateral_commitment_hash,
-        )
-        .as_bytes();
-        if consumed_tip == second_tip {
-            consumed_tip[0] ^= 0xFF;
+        if pre1.parent_tip != initial_tip {
+            failures.push("first precommitment did not capture initial tip".into());
         }
-
-        match manager.get_relationship(&remote_device_id) {
-            Some(mut anchor) => {
-                let mut smt_anchor = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-                match manager.commit_bilateral_smt_update(
-                    &mut smt_anchor,
-                    &remote_device_id,
-                    &consumed_tip,
-                ) {
-                    Ok(replace_result) => {
-                        if let Err(e) = manager.update_anchor_from_replace_public(
-                            &remote_device_id,
-                            &mut anchor,
-                            consumed_tip,
-                            &replace_result,
-                        ) {
-                            failures.push(format!("failed to advance tip for tripwire test: {e}"));
-                        }
-                    }
-                    Err(e) => failures.push(format!("commit_bilateral_smt_update failed: {e}")),
-                }
-            }
-            None => failures.push("relationship disappeared before tripwire test".into()),
+        let first = match trace_commit(&mut side, &pre1.bilateral_commitment_hash).await {
+            Ok(c) => c,
+            Err(e) => return vec![format!("first commit failed: {e}")],
+        };
+        if first.new_tip == initial_tip {
+            failures.push("commit did not advance chain tip (irreversibility)".into());
         }
-
-        // Stale finalize MUST fail (TripwireGuaranteesUniqueness)
-        match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &pre3.bilateral_commitment_hash,
-                b"accept-3",
-                &mut smt,
-            )
-            .await
+        if side
+            .manager
+            .has_pending_commitment(&pre1.bilateral_commitment_hash)
         {
-            Ok(_) => failures.push("stale precommitment finalized after parent consumption".into()),
-            Err(e) => {
-                let msg = format!("{e}");
+            failures.push("first precommitment remained pending after commit".into());
+        }
+        if let Err(e) = trace_receive(&mut remote_head, &local, &first) {
+            failures.push(e);
+        }
+
+        // Step 3: Second prepare + commit (sequential commits, distinct tips)
+        let pre2 = match trace_prepare(&mut side, "finality-trace-2", 0x02).await {
+            Ok(pre) => pre,
+            Err(e) => return vec![e],
+        };
+        if pre2.parent_tip != first.new_tip {
+            failures.push("second precommitment captured wrong parent tip".into());
+        }
+        let second = match trace_commit(&mut side, &pre2.bilateral_commitment_hash).await {
+            Ok(c) => c,
+            Err(e) => return vec![format!("second commit failed: {e}")],
+        };
+        if second.new_tip == first.new_tip || second.new_tip == initial_tip {
+            failures.push("the second commit did not produce a new tip".into());
+        }
+        if let Err(e) = trace_receive(&mut remote_head, &local, &second) {
+            failures.push(e);
+        }
+
+        // Step 4: two siblings of the second tip — one commits, the other
+        // finds its parent consumed (TripwireGuaranteesUniqueness).
+        let pre3 = match trace_prepare(&mut side, "finality-trace-3", 0x03).await {
+            Ok(pre) => pre,
+            Err(e) => return vec![e],
+        };
+        let pre4 = match trace_prepare(&mut side, "finality-trace-4", 0x04).await {
+            Ok(pre) => pre,
+            Err(e) => return vec![e],
+        };
+        let third = match trace_commit(&mut side, &pre4.bilateral_commitment_hash).await {
+            Ok(c) => c,
+            Err(e) => return vec![format!("third commit failed: {e}")],
+        };
+        if let Err(e) = trace_receive(&mut remote_head, &local, &third) {
+            failures.push(e);
+        }
+        match trace_commit(&mut side, &pre3.bilateral_commitment_hash).await {
+            Ok(_) => failures.push("a sibling committed after its parent was consumed".into()),
+            Err(msg) => {
                 if !(msg.contains("Tripwire")
                     && (msg.contains("advanced since precommitment creation")
                         || msg.contains("parent hash already consumed")))
@@ -1686,10 +1285,21 @@ fn trace_bilateral_full_offline_finality(
                 }
             }
         }
+        if side.manager.get_chain_tip_for(&remote) != Some(third.new_tip) {
+            failures.push("the chain tip moved on a refused sibling".into());
+        }
 
-        // Step 5: Conservation — tip didn't change after rejected stale finalize
-        if manager.get_chain_tip_for(&remote_device_id) != Some(consumed_tip) {
-            failures.push("chain tip changed after stale finalize rejection".into());
+        // Step 5: TokenConservation — three commits, three debits, three
+        // credits, and no unit created or lost between the two heads.
+        let sent = 3 * TRACE_BILATERAL_AMOUNT;
+        if remote_head.balance(&era) != sent {
+            failures.push(format!(
+                "the receiver holds {} after {sent} was committed to it",
+                remote_head.balance(&era)
+            ));
+        }
+        if side.head.balance(&era) + remote_head.balance(&era) != total {
+            failures.push("token conservation violated across the two heads".into());
         }
 
         failures
@@ -1707,8 +1317,8 @@ fn trace_bilateral_full_offline_finality(
 // ========================================================================
 // NON-INTERFERENCE TRACE (Paper Lemma 3.1, Theorem 3.1)
 //
-// Proves two independent bilateral managers on disjoint device pairs
-// cannot affect each other's state.
+// Two bilateral managers on disjoint device pairs cannot affect each
+// other's state, and each pair's commits move only that pair's balances.
 //
 // Maps to DSM_NonInterference.tla invariants:
 //   NonInterference, ZeroRefreshForInactive, PerPairConservation
@@ -1721,145 +1331,85 @@ fn trace_bilateral_pair_non_interference(
     let start = Instant::now();
     let failures = run_async_trace(async move {
         let mut failures = Vec::new();
-
-        // Create two independent bilateral managers on disjoint device pairs
-        let (mut manager1, kp1, remote1) = match build_bilateral_trace_manager() {
-            Ok(h) => h,
-            Err(e) => return vec![format!("manager1 setup: {e}")],
+        let (mut pair1, mut pair2) = match (
+            trace_side(TRACE_PAIR1_LOCAL, TRACE_PAIR1_REMOTE),
+            trace_side(TRACE_PAIR2_LOCAL, TRACE_PAIR2_REMOTE),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => return vec![format!("pair setup: {e}")],
         };
-        let (mut manager2, kp2, remote2) = match build_bilateral_trace_manager_pair2() {
-            Ok(h) => h,
-            Err(e) => return vec![format!("manager2 setup: {e}")],
-        };
+        let (remote1, remote2) = (pair1.remote_device_id, pair2.remote_device_id);
+        let era = era_policy_commit();
 
         // Step 1: Establish both relationships
-        let tip1_init = match manager1.establish_relationship(&remote1).await {
+        let tip1_init = match pair1.manager.establish_relationship(&remote1).await {
             Ok(anchor) => anchor.chain_tip,
-            Err(e) => return vec![format!("manager1 establish failed: {e}")],
+            Err(e) => return vec![format!("pair1 establish failed: {e}")],
         };
-        let tip2_init = match manager2.establish_relationship(&remote2).await {
+        let tip2_init = match pair2.manager.establish_relationship(&remote2).await {
             Ok(anchor) => anchor.chain_tip,
-            Err(e) => return vec![format!("manager2 establish failed: {e}")],
+            Err(e) => return vec![format!("pair2 establish failed: {e}")],
         };
 
-        // Snapshot manager2 state before operating on manager1
-        let m2_tip_before = manager2
-            .get_chain_tip_for(&remote2)
-            .expect("manager2 chain tip before");
-        let m2_rel_before = manager2
-            .get_relationship(&remote2)
-            .expect("manager2 relationship before")
-            .chain_tip;
-
-        // Step 2: Operate on pair 1 only — prepare + finalize
-        let op1 = build_signed_bilateral_transfer(&kp1, remote1, "ni-trace-pair1", 0x10);
-        let pre1 = match manager1.prepare_offline_transfer(&remote1, op1, 500).await {
+        // Step 2: Operate on pair 1 only
+        let pair2_tip = pair2.manager.get_chain_tip_for(&remote2);
+        let pair2_root = pair2.head.root();
+        let pair1_balance = pair1.head.balance(&era);
+        let pre1 = match trace_prepare(&mut pair1, "ni-trace-pair1", 0x10).await {
             Ok(pre) => pre,
-            Err(e) => return vec![format!("manager1 prepare failed: {e}")],
+            Err(e) => return vec![e],
         };
-        let mut smt1 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let _tip1_after = match manager1
-            .finalize_offline_transfer(
-                &remote1,
-                &pre1.bilateral_commitment_hash,
-                b"accept-ni-1",
-                &mut smt1,
-            )
-            .await
-        {
-            Ok(result) => {
-                if result.relationship_anchor.chain_tip == tip1_init {
-                    failures.push("manager1 finalize did not advance tip".into());
-                }
-                result.relationship_anchor.chain_tip
+        match trace_commit(&mut pair1, &pre1.bilateral_commitment_hash).await {
+            Ok(c) if c.new_tip == tip1_init => {
+                failures.push("pair1 commit did not advance its tip".into())
             }
-            Err(e) => return vec![format!("manager1 finalize failed: {e}")],
-        };
-
-        // Step 3: NonInterference — verify manager2 state is UNCHANGED
-        let m2_tip_after_m1_op = manager2
-            .get_chain_tip_for(&remote2)
-            .expect("manager2 chain tip after m1 op");
-        let m2_rel_after_m1_op = manager2
-            .get_relationship(&remote2)
-            .expect("manager2 relationship after m1 op")
-            .chain_tip;
-
-        if m2_tip_after_m1_op != m2_tip_before {
-            failures.push(format!(
-                "NonInterference violated: manager2 chain tip changed from {:?} to {:?} after manager1 operation",
-                &m2_tip_before[..4], &m2_tip_after_m1_op[..4]
-            ));
-        }
-        if m2_rel_after_m1_op != m2_rel_before {
-            failures.push(
-                "NonInterference violated: manager2 relationship tip changed after manager1 operation".into()
-            );
+            Ok(_) => {}
+            Err(e) => return vec![format!("pair1 commit failed: {e}")],
         }
 
-        // Snapshot manager1 state before operating on manager2
-        let m1_tip_snapshot = manager1
-            .get_chain_tip_for(&remote1)
-            .expect("manager1 chain tip snapshot");
-        let m1_rel_snapshot = manager1
-            .get_relationship(&remote1)
-            .expect("manager1 relationship snapshot")
-            .chain_tip;
+        // Step 3: NonInterference — pair 2 is untouched by pair 1's commit
+        if pair2.manager.get_chain_tip_for(&remote2) != pair2_tip {
+            failures.push("NonInterference violated: pair2's tip moved on pair1's commit".into());
+        }
+        if pair2.head.root() != pair2_root {
+            failures.push("NonInterference violated: pair2's head moved on pair1's commit".into());
+        }
 
         // Step 4: Operate on pair 2
-        let op2 = build_signed_bilateral_transfer(&kp2, remote2, "ni-trace-pair2", 0x20);
-        let pre2 = match manager2.prepare_offline_transfer(&remote2, op2, 500).await {
+        let pair1_tip = pair1.manager.get_chain_tip_for(&remote1);
+        let pair1_root = pair1.head.root();
+        let pair2_balance = pair2.head.balance(&era);
+        let pre2 = match trace_prepare(&mut pair2, "ni-trace-pair2", 0x20).await {
             Ok(pre) => pre,
-            Err(e) => return vec![format!("manager2 prepare failed: {e}")],
+            Err(e) => return vec![e],
         };
-        let mut smt2 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        match manager2
-            .finalize_offline_transfer(
-                &remote2,
-                &pre2.bilateral_commitment_hash,
-                b"accept-ni-2",
-                &mut smt2,
-            )
-            .await
-        {
-            Ok(result) => {
-                if result.relationship_anchor.chain_tip == tip2_init {
-                    failures.push("manager2 finalize did not advance tip".into());
-                }
+        match trace_commit(&mut pair2, &pre2.bilateral_commitment_hash).await {
+            Ok(c) if c.new_tip == tip2_init => {
+                failures.push("pair2 commit did not advance its tip".into())
             }
-            Err(e) => return vec![format!("manager2 finalize failed: {e}")],
+            Ok(_) => {}
+            Err(e) => return vec![format!("pair2 commit failed: {e}")],
         }
 
-        // Step 5: ZeroRefreshForInactive — manager1 state unchanged after manager2 op
-        let m1_tip_after_m2_op = manager1
-            .get_chain_tip_for(&remote1)
-            .expect("manager1 chain tip after m2 op");
-        let m1_rel_after_m2_op = manager1
-            .get_relationship(&remote1)
-            .expect("manager1 relationship after m2 op")
-            .chain_tip;
-
-        if m1_tip_after_m2_op != m1_tip_snapshot {
+        // Step 5: ZeroRefreshForInactive — pair 1 is untouched by pair 2's commit
+        if pair1.manager.get_chain_tip_for(&remote1) != pair1_tip {
             failures.push(
-                "ZeroRefreshForInactive violated: manager1 chain tip changed after manager2 operation".into()
+                "ZeroRefreshForInactive violated: pair1's tip moved on pair2's commit".into(),
             );
         }
-        if m1_rel_after_m2_op != m1_rel_snapshot {
+        if pair1.head.root() != pair1_root {
             failures.push(
-                "ZeroRefreshForInactive violated: manager1 relationship tip changed after manager2 operation".into()
+                "ZeroRefreshForInactive violated: pair1's head moved on pair2's commit".into(),
             );
         }
 
-        // Step 6: PerPairConservation — each manager's relationship is internally consistent
-        match manager1.verify_relationship_integrity(&remote1) {
-            Ok(true) => {}
-            Ok(false) => failures.push("manager1 relationship integrity failed".into()),
-            Err(e) => failures.push(format!("manager1 integrity check errored: {e}")),
+        // Step 6: PerPairConservation — each pair's commit debited exactly its
+        // own amount from its own sender.
+        if pair1.head.balance(&era) != pair1_balance - TRACE_BILATERAL_AMOUNT {
+            failures.push("PerPairConservation violated on pair1".into());
         }
-        match manager2.verify_relationship_integrity(&remote2) {
-            Ok(true) => {}
-            Ok(false) => failures.push("manager2 relationship integrity failed".into()),
-            Err(e) => failures.push(format!("manager2 integrity check errored: {e}")),
+        if pair2.head.balance(&era) != pair2_balance - TRACE_BILATERAL_AMOUNT {
+            failures.push("PerPairConservation violated on pair2".into());
         }
 
         failures
@@ -1872,103 +1422,6 @@ fn trace_bilateral_pair_non_interference(
         failures,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
     }
-}
-
-fn build_signed_transfer(
-    sk: &[u8],
-    current_state: &State,
-    nonce: Vec<u8>,
-    amount: u64,
-    token_id: Vec<u8>,
-    recipient: Vec<u8>,
-) -> Operation {
-    let mut op = Operation::Transfer {
-        policy_commit: [0u8; 32],
-        token_id,
-        to_device_id: recipient.clone(),
-        amount: Balance::from_state(amount, current_state.hash),
-        mode: TransactionMode::Unilateral,
-        nonce,
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient,
-        to: b"trace-recipient".to_vec(),
-        message: "implementation trace".into(),
-        signature: Vec::new(),
-        authority_policy: None,
-    };
-
-    let signable = op.with_cleared_signature();
-    let sig = sphincs_sign(sk, &signable.to_bytes()).expect("SPHINCS+ sign");
-    if let Operation::Transfer { signature, .. } = &mut op {
-        *signature = sig;
-    }
-
-    op
-}
-
-fn build_signed_transfer_to_owner(
-    sk: &[u8],
-    current_state: &State,
-    nonce: Vec<u8>,
-    amount: u64,
-    token_id: Vec<u8>,
-    to_device_id: Vec<u8>,
-    recipient: Vec<u8>,
-) -> Operation {
-    let mut op = Operation::Transfer {
-        policy_commit: [0u8; 32],
-        token_id,
-        to_device_id,
-        amount: Balance::from_state(amount, current_state.hash),
-        mode: TransactionMode::Unilateral,
-        nonce,
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient,
-        to: b"trace-recipient".to_vec(),
-        message: "implementation trace".into(),
-        signature: Vec::new(),
-        authority_policy: None,
-    };
-
-    let signable = op.with_cleared_signature();
-    let sig = sphincs_sign(sk, &signable.to_bytes()).expect("SPHINCS+ sign");
-    if let Operation::Transfer { signature, .. } = &mut op {
-        *signature = sig;
-    }
-
-    op
-}
-
-fn build_signed_bilateral_transfer(
-    kp: &SignatureKeyPair,
-    remote_device_id: [u8; 32],
-    message: &str,
-    nonce: u8,
-) -> Operation {
-    let mut op = Operation::Transfer {
-        policy_commit: [0u8; 32],
-        token_id: b"ERA".to_vec(),
-        to_device_id: remote_device_id.to_vec(),
-        amount: Balance::from_state(1, [0u8; 32]),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![nonce; 8],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: remote_device_id.to_vec(),
-        to: b"trace-bilateral-recipient".to_vec(),
-        message: message.into(),
-        signature: Vec::new(),
-        authority_policy: None,
-    };
-
-    let sig = kp.sign(&op.to_bytes()).expect("bilateral trace sign");
-    if let Operation::Transfer { signature, .. } = &mut op {
-        *signature = sig;
-    }
-
-    op
 }
 
 fn run_async_trace<T, Fut>(future: Fut) -> T
@@ -1987,101 +1440,307 @@ where
     .expect("implementation trace thread")
 }
 
-fn build_bilateral_trace_manager(
-) -> Result<(BilateralTransactionManager, SignatureKeyPair, [u8; 32]), String> {
-    dsm::utils::deterministic_time::reset_for_tests();
-
-    let local_device_id = [0x21; 32];
-    let local_genesis_hash = [0x22; 32];
-    let remote_device_id = [0x31; 32];
-    let remote_genesis_hash = [0x32; 32];
-
-    let local_entropy = [local_device_id.as_slice(), local_genesis_hash.as_slice()].concat();
-    let remote_entropy = [remote_device_id.as_slice(), remote_genesis_hash.as_slice()].concat();
-
-    let local_kp = SignatureKeyPair::generate_from_entropy(&local_entropy)
-        .map_err(|e| format!("local bilateral keypair: {e}"))?;
-    let remote_kp = SignatureKeyPair::generate_from_entropy(&remote_entropy)
-        .map_err(|e| format!("remote bilateral keypair: {e}"))?;
-
-    let mut manager = BilateralTransactionManager::new(
-        DsmContactManager::new(local_device_id, vec![]),
-        local_kp.clone(),
-        local_device_id,
-        local_genesis_hash,
-    );
-
-    let contact = DsmVerifiedContact {
-        alias: "trace-remote".into(),
-        device_id: remote_device_id,
-        genesis_hash: remote_genesis_hash,
-        public_key: remote_kp.public_key().to_vec(),
-        genesis_material: vec![0x42; 64],
-        chain_tip: None,
-        chain_tip_smt_proof: None,
-        genesis_verified_online: true,
-        verified_at_commit_height: 1,
-        added_at_commit_height: 1,
-        last_updated_commit_height: 1,
-        verifying_storage_nodes: vec![],
-        ble_address: None,
-    };
-
-    manager
-        .add_verified_contact(contact)
-        .map_err(|e| format!("failed to add bilateral trace contact: {e}"))?;
-
-    Ok((manager, local_kp, remote_device_id))
+/// The two device pairs the bilateral traces run on: `(device_id, genesis)`
+/// for each side. Pair 1 is `[0x21..] <-> [0x31..]`, pair 2 `[0x41..] <-> [0x51..]`.
+/// Relationship chain tips over process memory, with the store trait's
+/// compare-and-set: an update applies only on the expected parent of a
+/// relationship its contact add recorded.
+#[derive(Default)]
+struct TraceTips {
+    tips: std::sync::Mutex<std::collections::HashMap<[u8; 32], [u8; 32]>>,
 }
 
-/// Build a second bilateral manager on a DISJOINT device pair.
-/// Pair 1 uses devices [0x21..] <-> [0x31..], pair 2 uses [0x41..] <-> [0x51..].
-/// The two managers share no state — this is the non-interference property.
-fn build_bilateral_trace_manager_pair2(
-) -> Result<(BilateralTransactionManager, SignatureKeyPair, [u8; 32]), String> {
-    dsm::utils::deterministic_time::reset_for_tests();
+impl TraceTips {
+    /// What adding the contact records: the relationship at its `h_0`.
+    fn record_contact_added(&self, device_id: [u8; 32], h_0: [u8; 32]) {
+        self.tips
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(device_id, h_0);
+    }
+}
 
-    let local_device_id = [0x41; 32];
-    let local_genesis_hash = [0x42; 32];
-    let remote_device_id = [0x51; 32];
-    let remote_genesis_hash = [0x52; 32];
+impl dsm::core::chain_tip_store::ChainTipStore for TraceTips {
+    fn get_contact_chain_tip(
+        &self,
+        device_id: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, dsm::types::error::DsmError> {
+        Ok(self
+            .tips
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(device_id)
+            .copied())
+    }
 
-    let local_entropy = [local_device_id.as_slice(), local_genesis_hash.as_slice()].concat();
-    let remote_entropy = [remote_device_id.as_slice(), remote_genesis_hash.as_slice()].concat();
+    fn set_contact_chain_tip(
+        &self,
+        device_id: &[u8; 32],
+        expected_parent_tip: [u8; 32],
+        new_tip: [u8; 32],
+    ) -> Result<bool, dsm::types::error::DsmError> {
+        let mut tips = self.tips.lock().unwrap_or_else(|p| p.into_inner());
+        let current = tips.get(device_id).copied().ok_or_else(|| {
+            dsm::types::error::DsmError::InvalidState(
+                "no relationship with that device".to_string(),
+            )
+        })?;
+        if current != expected_parent_tip {
+            return Ok(false);
+        }
+        tips.insert(*device_id, new_tip);
+        Ok(true)
+    }
+}
 
-    let local_kp = SignatureKeyPair::generate_from_entropy(&local_entropy)
-        .map_err(|e| format!("pair2 local keypair: {e}"))?;
-    let remote_kp = SignatureKeyPair::generate_from_entropy(&remote_entropy)
-        .map_err(|e| format!("pair2 remote keypair: {e}"))?;
+const TRACE_PAIR1_LOCAL: ([u8; 32], [u8; 32]) = ([0x21; 32], [0x22; 32]);
+const TRACE_PAIR1_REMOTE: ([u8; 32], [u8; 32]) = ([0x31; 32], [0x32; 32]);
+const TRACE_PAIR2_LOCAL: ([u8; 32], [u8; 32]) = ([0x41; 32], [0x42; 32]);
+const TRACE_PAIR2_REMOTE: ([u8; 32], [u8; 32]) = ([0x51; 32], [0x52; 32]);
 
+/// A trace device's signing keypair, derived from its `(device_id, genesis)`.
+fn trace_keypair(side: ([u8; 32], [u8; 32])) -> Result<SignatureKeyPair, String> {
+    let entropy = [side.0.as_slice(), side.1.as_slice()].concat();
+    SignatureKeyPair::generate_from_entropy(&entropy).map_err(|e| format!("trace keypair: {e}"))
+}
+
+/// The receiver's acceptance proof σ_B, exactly what
+/// `BilateralTransactionManager::verify_receiver_acceptance_proof` checks:
+/// a signature over `"DSM/bilateral-sign\0" || commitment_hash`.
+fn receiver_acceptance_sig(kp: &SignatureKeyPair, commitment_hash: &[u8; 32]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(22 + 32);
+    msg.extend_from_slice(b"DSM/bilateral-sign\0");
+    msg.extend_from_slice(commitment_hash);
+    kp.sign(&msg).expect("receiver acceptance signature")
+}
+
+/// One side of a bilateral trace pair: the sender's manager over its tip
+/// store, its funded device head, and both keypairs.
+struct TraceSide {
+    manager: BilateralTransactionManager,
+    tips: std::sync::Arc<TraceTips>,
+    head: DeviceState,
+    local_kp: SignatureKeyPair,
+    remote_kp: SignatureKeyPair,
+    local_device_id: [u8; 32],
+    remote_device_id: [u8; 32],
+}
+
+/// The sender side of the pair `local ↔ remote`. The counterparty is a
+/// verified contact whose genesis was verified online; that verification is
+/// the network's, and the traces exercise what follows it.
+fn trace_side(
+    local: ([u8; 32], [u8; 32]),
+    remote: ([u8; 32], [u8; 32]),
+) -> Result<TraceSide, String> {
+    let local_kp = trace_keypair(local)?;
+    let remote_kp = trace_keypair(remote)?;
+    let tips = std::sync::Arc::new(TraceTips::default());
     let mut manager = BilateralTransactionManager::new(
-        DsmContactManager::new(local_device_id, vec![]),
+        DsmContactManager::new(local.0),
         local_kp.clone(),
-        local_device_id,
-        local_genesis_hash,
+        local.0,
+        local.1,
+        tips.clone(),
     );
-
-    let contact = DsmVerifiedContact {
-        alias: "trace-remote-pair2".into(),
-        device_id: remote_device_id,
-        genesis_hash: remote_genesis_hash,
-        public_key: remote_kp.public_key().to_vec(),
-        genesis_material: vec![0x43; 64],
-        chain_tip: None,
-        chain_tip_smt_proof: None,
-        genesis_verified_online: true,
-        verified_at_commit_height: 1,
-        added_at_commit_height: 1,
-        last_updated_commit_height: 1,
-        verifying_storage_nodes: vec![],
-        ble_address: None,
-    };
-
     manager
-        .add_verified_contact(contact)
-        .map_err(|e| format!("failed to add pair2 contact: {e}"))?;
+        .add_verified_contact(DsmVerifiedContact {
+            alias: "trace-remote".into(),
+            device_id: remote.0,
+            genesis_hash: remote.1,
+            public_key: remote_kp.public_key().to_vec(),
+            chain_tip: None,
+            genesis_verified_online: true,
+            verifying_storage_nodes: vec![],
+            ble_address: None,
+        })
+        .map_err(|e| format!("failed to add the trace contact: {e}"))?;
+    // The contact add records the relationship at its h_0 in the tip store and
+    // establishes it on the device head.
+    tips.record_contact_added(
+        remote.0,
+        dsm::core::bilateral_transaction_manager::initial_relationship_chain_tip(
+            &local.0, &local.1, &remote.0, &remote.1,
+        ),
+    );
+    let head = trace_local_head(local, &local_kp)?
+        .establish_relationship(remote.0)
+        .map_err(|e| format!("establishing the trace relationship: {e}"))?;
+    Ok(TraceSide {
+        manager,
+        tips,
+        head,
+        local_kp,
+        remote_kp,
+        local_device_id: local.0,
+        remote_device_id: remote.0,
+    })
+}
 
-    Ok((manager, local_kp, remote_device_id))
+/// Commit the pending precommitment `hash` on `side`.
+async fn trace_commit(side: &mut TraceSide, hash: &[u8; 32]) -> Result<TraceCommit, String> {
+    trace_commit_prepared(
+        &mut side.manager,
+        &side.tips,
+        &mut side.head,
+        &side.remote_kp,
+        &side.remote_device_id,
+        hash,
+    )
+    .await
+}
+
+/// Prepare a signed transfer to the counterparty on `side`.
+async fn trace_prepare(
+    side: &mut TraceSide,
+    message: &str,
+    nonce: u8,
+) -> Result<dsm::core::bilateral_transaction_manager::BilateralPreCommitment, String> {
+    let op = build_signed_bilateral_transfer(&side.local_kp, side.remote_device_id, message, nonce);
+    side.manager
+        .prepare_offline_transfer(&side.remote_device_id, op)
+        .await
+        .map_err(|e| format!("prepare_offline_transfer failed: {e}"))
+}
+
+/// A trace pair's side: its device head, funded with one faucet payout of ERA.
+fn trace_local_head(
+    side: ([u8; 32], [u8; 32]),
+    kp: &SignatureKeyPair,
+) -> Result<DeviceState, String> {
+    faucet_claim(
+        &DeviceState::new(side.1, side.0, kp.public_key().to_vec()),
+        1,
+    )
+    .map_err(|e| format!("trace head funding: {e}"))
+}
+
+/// What one committed bilateral step produced on the trace harness.
+struct TraceCommit {
+    parent_tip: [u8; 32],
+    entropy: [u8; 32],
+    new_tip: [u8; 32],
+    operation: Operation,
+}
+
+/// The ERA each bilateral trace transfer moves.
+const TRACE_BILATERAL_AMOUNT: u64 = 1;
+
+/// The sender's commit of a bilateral precommitment, in production's order.
+///
+/// `prepare_bilateral_advance` runs the §6.1 tripwire against a real receiver
+/// acceptance σ_B and hands the advance off with the sender's debit. The
+/// device head advances on it — Core derives the transition's one entropy
+/// there (Part VII step 3); nothing here chooses it. The symmetric successor
+/// tip is `compute_successor_tip(h_n, op, e, C_pre)` over that value, exactly
+/// as the BLE finalize computes it. The pair tip is persisted forward-only,
+/// as the atomic commit persists it, the precommitment is consumed and the
+/// manager's view moves to the new tip. A tripwire refusal comes back as the
+/// manager's own error text.
+async fn trace_commit_prepared(
+    manager: &mut BilateralTransactionManager,
+    tips: &TraceTips,
+    local_head: &mut DeviceState,
+    remote_kp: &SignatureKeyPair,
+    remote_device_id: &[u8; 32],
+    pre_commitment_hash: &[u8; 32],
+) -> Result<TraceCommit, String> {
+    use dsm::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
+    use dsm::core::chain_tip_store::ChainTipStore;
+    let prepared = manager
+        .prepare_bilateral_advance(
+            remote_device_id,
+            pre_commitment_hash,
+            &receiver_acceptance_sig(remote_kp, pre_commitment_hash),
+            vec![BalanceDelta {
+                policy_commit: era_policy_commit(),
+                direction: BalanceDirection::Debit,
+                amount: TRACE_BILATERAL_AMOUNT,
+            }],
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let outcome = local_head
+        .advance(
+            prepared.rel_key,
+            prepared.counterparty_devid,
+            prepared.operation.clone(),
+            &prepared.deltas,
+            None,
+            None,
+        )
+        .map_err(|e| format!("the sender's advance was refused: {e}"))?;
+    let entropy = outcome.transition_entropy();
+    let op_bytes = prepared.operation.to_bytes();
+    let sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &entropy);
+    let new_tip = compute_successor_tip(&prepared.parent_tip, &op_bytes, &entropy, &sigma);
+    if !tips
+        .set_contact_chain_tip(remote_device_id, prepared.parent_tip, new_tip)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("the tip store no longer holds the step's parent".into());
+    }
+    *local_head = outcome.new_device_state;
+    manager.consume_pre_commitment(pre_commitment_hash);
+    manager.advance_chain_tip(remote_device_id, new_tip);
+    Ok(TraceCommit {
+        parent_tip: prepared.parent_tip,
+        entropy,
+        new_tip,
+        operation: prepared.operation,
+    })
+}
+
+/// The receiver's credit for a committed step, on its own head.
+fn trace_receive(
+    remote_head: &mut DeviceState,
+    local_device_id: &[u8; 32],
+    commit: &TraceCommit,
+) -> Result<(), String> {
+    let remote = remote_head.devid();
+    let outcome = remote_head
+        .advance(
+            compute_smt_key(&remote, local_device_id),
+            *local_device_id,
+            commit.operation.clone(),
+            &[BalanceDelta {
+                policy_commit: era_policy_commit(),
+                direction: BalanceDirection::Credit,
+                amount: TRACE_BILATERAL_AMOUNT,
+            }],
+            None,
+            None,
+        )
+        .map_err(|e| format!("the receiver's advance was refused: {e}"))?;
+    *remote_head = outcome.new_device_state;
+    Ok(())
+}
+
+fn build_signed_bilateral_transfer(
+    kp: &SignatureKeyPair,
+    remote_device_id: [u8; 32],
+    message: &str,
+    nonce: u8,
+) -> Operation {
+    let op = Operation::Transfer {
+        policy_commit: era_policy_commit(),
+        terms_commitment: dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![nonce; 8],
+            mode: TransactionMode::Bilateral,
+            memo: message.into(),
+            salt: vec![0x5A; 32],
+        }
+        .commitment(),
+        to_device_id: remote_device_id.to_vec(),
+        amount: Balance::amount(TRACE_BILATERAL_AMOUNT),
+        signature: Vec::new(),
+        authority_policy: None,
+    };
+    let signature = kp.sign(&op.signing_bytes()).expect("bilateral trace sign");
+    op.with_signature(signature)
 }
 
 fn build_djte_transition(
@@ -2102,28 +1761,13 @@ fn build_djte_transition(
 }
 
 fn build_test_jap(id_byte: u8, nonce_byte: u8) -> JoinActivationProof {
-    use dsm::emissions::paidk_proof::{PAIDK_FLAT_RATE, PAIDK_K};
-
-    let device_id = [id_byte; 32];
-
-    // issue #186: `gate_proof` is now decoded as a `PaidKGateProofV1` and
-    // structurally verified, so the trace must carry a REAL proof — at least
-    // K receipts bound to the activating device, each at >= FLAT_RATE, across
-    // K distinct operators. A dummy byte string fails decode (buffer underflow).
-    let proof = pb::PaidKGateProofV1 {
-        receipts: (0u8..PAIDK_K as u8)
-            .map(|op| pb::StoragePaymentReceiptV3 {
-                device_id: device_id.to_vec(),
-                operator_node_id: vec![op.wrapping_add(1); 32],
-                amount: PAIDK_FLAT_RATE,
-                receipt_digest: vec![0u8; 32],
-            })
-            .collect(),
-    };
-
+    // `gate_proof` currently has no verifier: the PaidK structural check was
+    // removed because it never evaluated `VerifyPayment(r)` — the receipt
+    // schema carries no operator signature, so any device could synthesize a
+    // passing bundle, exactly as this fixture used to do.
     JoinActivationProof {
-        id: device_id,
-        gate_proof: proof.encode_to_vec(),
+        id: [id_byte; 32],
+        gate_proof: Vec::new(),
         nonce: [nonce_byte; 32],
     }
 }
@@ -2265,146 +1909,6 @@ fn compute_djte_next_tip(
     domain_hash_bytes(dsm::common::domain_tags::TAG_DJTE_DLV_TIP, &buf)
 }
 
-fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
-    let device_id: [u8; 32] =
-        *domain_hash(dsm::common::domain_tags::TAG_DSM_TEST_DEVICE, seed_bytes).as_bytes();
-    let device_info = DeviceInfo::new(device_id, pk.to_vec());
-    let mut state = State::new_genesis(*seed_bytes, device_info);
-    if let Ok(hash) = state.hash() {
-        state.hash = hash;
-    }
-    state
-}
-
-fn refresh_state_hash(state: &mut State) {
-    if let Ok(hash) = state.hash() {
-        state.hash = hash;
-    }
-}
-
-fn builtin_balance_key(owner_pk: &[u8], token_id: &str) -> String {
-    let policy_commit = dsm::core::token::builtin_policy_commit_for_token(token_id)
-        .expect("builtin policy commit missing for implementation trace token");
-    dsm::core::token::derive_canonical_balance_key(&policy_commit, owner_pk, token_id)
-}
-
-fn build_signed_receipt(
-    genesis: [u8; 32],
-    devid_a: [u8; 32],
-    devid_b: [u8; 32],
-    parent_tip: [u8; 32],
-    child_tip: [u8; 32],
-    dev_proof: Vec<u8>,
-    keypair_a: &SignatureKeyPair,
-    keypair_b: Option<&SignatureKeyPair>,
-) -> StitchedReceiptV2 {
-    let smt_key = compute_smt_key(&devid_a, &devid_b);
-    let parent_root = hash_smt_leaf(&parent_tip);
-    let child_root = hash_smt_leaf(&child_tip);
-
-    let mut receipt = StitchedReceiptV2::new(
-        genesis,
-        devid_a,
-        devid_b,
-        parent_tip,
-        child_tip,
-        parent_root,
-        child_root,
-        encode_single_leaf_smt_proof(smt_key, parent_tip),
-        encode_single_leaf_smt_proof(smt_key, child_tip),
-        dev_proof,
-    );
-    receipt.set_rel_replace_witness(0u32.to_le_bytes().to_vec());
-    let cert_a =
-        sign_ek_cert(&keypair_a.secret_key, &keypair_a.public_key, &parent_tip).expect("ek cert a");
-    receipt.set_ek_cert_a(cert_a);
-    if let Some(keypair_b) = keypair_b {
-        let cert_b = sign_ek_cert(&keypair_b.secret_key, &keypair_b.public_key, &parent_tip)
-            .expect("ek cert b");
-        receipt.set_ek_cert_b(cert_b);
-    }
-
-    let commitment = receipt.compute_commitment().expect("receipt commitment");
-    receipt.add_sig_a(keypair_a.sign(&commitment).expect("sig a"));
-    if let Some(keypair_b) = keypair_b {
-        receipt.add_sig_b(keypair_b.sign(&commitment).expect("sig b"));
-    }
-    receipt
-}
-
-fn compute_next_entropy(current_state: &State, operation: &Operation) -> Vec<u8> {
-    let op_bytes = operation.to_bytes();
-    let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_STATE_ENTROPY);
-    hasher.update(&current_state.entropy);
-    hasher.update(&op_bytes);
-    hasher.update(&current_state.hash);
-    hasher.finalize().as_bytes().to_vec()
-}
-
-fn encode_single_leaf_smt_proof(rel_key: [u8; 32], tip: [u8; 32]) -> Vec<u8> {
-    pb::SmtProof {
-        key: rel_key.to_vec(),
-        v_path: Some(pb::smt_proof::VPath::ExistingLeaf(pb::SmtPathLeaf {
-            key: rel_key.to_vec(),
-            value: tip.to_vec(),
-        })),
-        siblings: Vec::new(),
-    }
-    .encode_to_vec()
-}
-
-fn encode_device_tree_proof(proof: DevTreeProof) -> Vec<u8> {
-    let packed_len = proof.path_bits.len().div_ceil(8);
-    let mut packed_bits = vec![0u8; packed_len];
-    for (idx, bit) in proof.path_bits.iter().enumerate() {
-        if *bit {
-            packed_bits[idx / 8] |= 1 << (idx % 8);
-        }
-    }
-
-    pb::DeviceTreeProof {
-        siblings: proof.siblings.iter().map(|s| s.to_vec()).collect(),
-        leaf_to_root: proof.leaf_to_root,
-        path_bits_len: proof.path_bits.len() as u32,
-        path_bits: packed_bits,
-    }
-    .encode_to_vec()
-}
-
-fn build_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenTraceHarness {
-    let manager = TokenStateManager::new();
-
-    let mut state = create_test_state(seed_bytes, pk);
-    let recipient = vec![0xDD; 32];
-    let sender_key = builtin_balance_key(pk, TRACE_TOKEN_ID);
-    let recipient_key = builtin_balance_key(&recipient, TRACE_TOKEN_ID);
-
-    state.token_balances.insert(
-        sender_key.clone(),
-        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash),
-    );
-    state
-        .token_balances
-        .insert(recipient_key.clone(), Balance::from_state(0, state.hash));
-    refresh_state_hash(&mut state);
-
-    TokenTraceHarness {
-        manager,
-        state,
-        recipient,
-        sender_key,
-        recipient_key,
-    }
-}
-
-fn balance_for_key(state: &State, key: &str) -> u64 {
-    state
-        .token_balances
-        .get(key)
-        .map(Balance::value)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2422,8 +1926,12 @@ mod tests {
     }
 
     #[test]
-    fn receipt_verifier_tripwire_trace_passes() {
-        let result = trace_receipt_verifier_tripwire(&[0u8; 32], &[], &[]);
+    fn receiver_tripwire_trace_passes() {
+        let seed = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE,
+            b"receiver-tripwire-trace",
+        );
+        let result = trace_receiver_tripwire(&seed, &[], &[]);
         assert!(result.passed, "{}", result.failures.join("; "));
     }
 

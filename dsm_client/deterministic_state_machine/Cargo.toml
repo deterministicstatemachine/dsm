@@ -14,6 +14,8 @@ license = "MIT OR Apache-2.0"
 
 [profile.release]
 opt-level = 3
+# Integer overflow stays a panic in the shipped profile (the root workspace sets the same).
+overflow-checks = true
 lto = false  # Disable LTO to preserve JNI exports
 codegen-units = 1
 strip = false  # Don't strip symbols for JNI

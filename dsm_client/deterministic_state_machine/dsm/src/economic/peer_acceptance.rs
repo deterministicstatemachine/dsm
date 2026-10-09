@@ -4,19 +4,28 @@
 //! funds a peer-debit credit.
 //!
 //! `CreditSourceValidatedPeerDebit.acceptance_evidence_addr` names the exact
-//! bytes of a [`PeerTransferAcceptanceEvidenceV1`]: the exact signed
-//! `OnlineTransferRequest`, the exact A-side full receipt wire, and the exact
-//! recipient countersignature. The A-side material alone is a PROPOSAL; the
-//! `sig_b` countersignature is the acceptance.
+//! bytes of a [`PeerTransferAcceptanceEvidenceV1`]: the signed transfer (its
+//! canonical operation bytes and SIG A), the exact A-side full receipt wire,
+//! and the exact recipient countersignature. The A-side material alone is a
+//! PROPOSAL; the `sig_b` countersignature is the acceptance.
+//!
+//! The transfer and the receipt are bound to each other by what they sign,
+//! not by a reference one carries to the other: the operation must be the
+//! validated debit's, and the receipt's child tip must be that debit's
+//! successor.
 //!
 //! ## Certificate ancestry follows the signer, not the receipt role
 //!
 //! Per-step EK certificates chain device-locally per relationship (the AK
 //! certifies only at relationship genesis), and role reversal or a BLE step
 //! advances the same device chain — so each side's predecessor is referenced
-//! BY SIGNER through content-addressed [`EkCertStepV1`] objects, walked
-//! iteratively to the signer's P0–P6-proven AK. A non-portable ancestry step
-//! fails closed as `Incomplete`, never silently assumed A→A/B→B.
+//! BY SIGNER through content-addressed [`EkCertStepV1`] objects. A party to
+//! the relationship already holds every step of it, each recorded as its
+//! bilateral step completed: its check is forward from the step it holds,
+//! one certificate, and nothing behind it is read. A verifier outside the
+//! relationship holds none of it and replays the chain to the signer's
+//! P0–P6-proven AK (whitepaper §11.1). A non-portable ancestry step fails
+//! closed as `Incomplete`, never silently assumed A→A/B→B.
 //!
 //! Production preimages, verbatim: `sig_a` over
 //! `H_bind(commitment ‖ commitment)`; `sig_b` over
@@ -35,9 +44,21 @@ use crate::types::receipt_types::{
     decode_receipt_countersign_b_wire, StitchedReceiptV2,
 };
 
-/// The EK-step byte fetcher a caller supplies: exact bytes at one
-/// `EkCertStepV1` address.
-pub type EkStepFetch<'a> = dyn FnMut(&[u8; 32]) -> Result<Vec<u8>, PeerLineageFailure> + 'a;
+/// Where a verifier's EK steps come from.
+pub trait EkSteps {
+    /// The certified key of the step at `addr` in `signer`'s chain, when this
+    /// verifier holds that step: its own relationship's record, written as
+    /// each bilateral step completed. The check runs forward from a held step
+    /// and fetches nothing behind it.
+    fn held(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
+
+    /// The exact bytes at one `EkCertStepV1` address.
+    fn fetch(&self, addr: &[u8; 32]) -> Result<Vec<u8>, PeerLineageFailure>;
+}
 
 /// Iteration budget for one EK ancestry walk. Exhausting it is `Incomplete`
 /// — an adversarially deep (but acyclic) chain must never look like a
@@ -84,23 +105,29 @@ fn invalid(what: &str) -> PeerLineageFailure {
     PeerLineageFailure::Invalid(format!("acceptance evidence: {what}"))
 }
 
-/// Walk one signer's EK ancestry from `prior_step_addr` down to relationship
-/// genesis, ITERATIVELY, then verify upward from the signer's AK. Returns the
-/// expected certifying key for the CURRENT step.
+/// The expected certifying key for the CURRENT step of one signer: the key
+/// of the step `prior_step_addr` names. A held step answers at once. A step
+/// this verifier does not hold is fetched, and so on back to the first step
+/// it holds or to relationship genesis (the signer's AK); the fetched steps
+/// are then verified forward from there.
 ///
-/// `fetch` returns the exact bytes at an `EkCertStepV1` address (re-hash
-/// verified by the fetcher). Budget exhaustion and unfetchable steps are
-/// `Incomplete`; a cycle or a failed certificate is `Invalid`.
+/// Budget exhaustion and unfetchable steps are `Incomplete`; a cycle or a
+/// failed certificate is `Invalid`.
 fn resolve_expected_prev_pk(
     prior_step_addr: Option<[u8; 32]>,
-    signer_ak: &[u8],
-    fetch: &mut EkStepFetch<'_>,
+    signer: &AcceptanceParty<'_>,
+    steps: &dyn EkSteps,
 ) -> Result<Vec<u8>, PeerLineageFailure> {
-    // Phase 1: collect the chain down to genesis (worklist, no recursion).
+    // Phase 1: collect the unheld steps (worklist, no recursion).
     let mut chain: Vec<generated::EkCertStepV1> = Vec::new();
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut base: Vec<u8> = signer.proven_ak.to_vec();
     let mut cursor = prior_step_addr;
     while let Some(addr) = cursor {
+        if let Some(held) = steps.held(&signer.devid, &addr)? {
+            base = held;
+            break;
+        }
         if chain.len() >= EK_CHAIN_BUDGET {
             return Err(PeerLineageFailure::Incomplete(
                 "EK ancestry exceeds the local walk budget".to_string(),
@@ -109,7 +136,7 @@ fn resolve_expected_prev_pk(
         if !seen.insert(addr) {
             return Err(invalid("EK ancestry cycle"));
         }
-        let bytes = fetch(&addr)?;
+        let bytes = steps.fetch(&addr)?;
         if ek_cert_step_addr(&bytes) != addr {
             return Err(invalid("EK step bytes do not hash to their address"));
         }
@@ -128,8 +155,8 @@ fn resolve_expected_prev_pk(
         };
         chain.push(step);
     }
-    // Phase 2: verify upward from the AK root.
-    let mut expected: Vec<u8> = signer_ak.to_vec();
+    // Phase 2: verify forward from the held step, or from the AK.
+    let mut expected = base;
     for step in chain.iter().rev() {
         let h_n: [u8; 32] = step
             .h_n
@@ -170,7 +197,7 @@ pub fn verify_peer_transfer_acceptance(
     expected_transfer_bytes: &[u8],
     expected_sender_child_tip: &[u8; 32],
     expected_recipient_b_pair: &([u8; 32], [u8; 32]),
-    fetch_step: &mut EkStepFetch<'_>,
+    steps: &dyn EkSteps,
 ) -> Result<VerifiedAcceptance, PeerLineageFailure> {
     let bundle = generated::PeerTransferAcceptanceEvidenceV1::decode(bundle_bytes)
         .map_err(|e| malformed("bundle decode", e))?;
@@ -199,16 +226,7 @@ pub fn verify_peer_transfer_acceptance(
         ));
     }
 
-    // ── The A-side receipt evidence, bound to the request by digest ────────
-    let evidence_digest = crate::crypto::blake3::domain_hash_bytes(
-        crate::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-        &bundle.receipt_evidence_a_bytes,
-    );
-    if request.receipt_evidence_digest != evidence_digest {
-        return Err(invalid(
-            "receipt evidence bytes are not the ones the transfer request names",
-        ));
-    }
+    // ── The A-side receipt evidence, bound to the same debit step ──────────
     let receipt = StitchedReceiptV2::from_canonical_protobuf(&bundle.receipt_evidence_a_bytes)
         .map_err(|e| malformed("receipt decode", e))?;
     if receipt.devid_a != sender.devid || receipt.devid_b != recipient.devid {
@@ -232,7 +250,7 @@ pub fn verify_peer_transfer_acceptance(
         ),
         None => None,
     };
-    let expected_prev_a = resolve_expected_prev_pk(a_prior, sender.proven_ak, fetch_step)?;
+    let expected_prev_a = resolve_expected_prev_pk(a_prior, sender, steps)?;
     let cert_a_ok = verify_ek_cert(
         &expected_prev_a,
         &receipt.ek_pk_a,
@@ -284,7 +302,7 @@ pub fn verify_peer_transfer_acceptance(
         ),
         None => None,
     };
-    let expected_prev_b = resolve_expected_prev_pk(b_prior, recipient.proven_ak, fetch_step)?;
+    let expected_prev_b = resolve_expected_prev_pk(b_prior, recipient, steps)?;
     let cert_b_ok = verify_ek_cert(
         &expected_prev_b,
         &countersign.ek_pk_b,

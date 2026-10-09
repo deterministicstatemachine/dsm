@@ -32,7 +32,6 @@
 //! finalization is precisely what stranded the second transfer on the rig.
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -183,12 +182,11 @@ pub struct SenderOutboxRecord {
     pub status: String,
     /// Storage message ids, GC metadata ONLY — never finalization authority.
     pub message_ids: Option<String>,
-    pub created_at: u64,
 }
 
 const COLS: &str = "relationship_key, canonical_parent, canonical_child, commitment, \
      projection_parent, projection_target, routing_address, submission_id, envelope_bytes, \
-     proposal_nonce, local_expected_prev, is_first_ek_step, status, message_ids, created_at";
+     proposal_nonce, local_expected_prev, is_first_ek_step, status, message_ids";
 
 fn to32(v: Vec<u8>, what: &str) -> Result<[u8; 32]> {
     <[u8; 32]>::try_from(v.as_slice()).map_err(|_| anyhow!("{what} is not 32 bytes"))
@@ -196,28 +194,21 @@ fn to32(v: Vec<u8>, what: &str) -> Result<[u8; 32]> {
 
 fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<SenderOutboxRecord> {
     let g = |i: usize| -> rusqlite::Result<Vec<u8>> { row.get::<_, Vec<u8>>(i) };
-    let arr = |v: Vec<u8>| -> [u8; 32] {
-        let mut a = [0u8; 32];
-        let n = v.len().min(32);
-        a[..n].copy_from_slice(&v[..n]);
-        a
-    };
     Ok(SenderOutboxRecord {
-        relationship_key: arr(g(0)?),
-        canonical_parent: arr(g(1)?),
-        canonical_child: arr(g(2)?),
-        commitment: arr(g(3)?),
-        projection_parent: arr(g(4)?),
-        projection_target: arr(g(5)?),
+        relationship_key: super::column_32(row, 0)?,
+        canonical_parent: super::column_32(row, 1)?,
+        canonical_child: super::column_32(row, 2)?,
+        commitment: super::column_32(row, 3)?,
+        projection_parent: super::column_32(row, 4)?,
+        projection_target: super::column_32(row, 5)?,
         routing_address: row.get::<_, String>(6)?,
         submission_id: row.get::<_, String>(7)?,
         envelope_bytes: g(8)?,
-        proposal_nonce: arr(g(9)?),
+        proposal_nonce: super::column_32(row, 9)?,
         local_expected_prev: row.get::<_, Option<Vec<u8>>>(10)?,
         is_first_ek_step: row.get::<_, i64>(11)? != 0,
         status: row.get::<_, String>(12)?,
         message_ids: row.get::<_, Option<String>>(13)?,
-        created_at: row.get::<_, i64>(14)? as u64,
     })
 }
 
@@ -288,7 +279,7 @@ pub fn insert_sender_outbox_with_conn(conn: &Connection, r: &SenderOutboxRecord)
     conn.execute(
         &format!(
             "INSERT INTO sender_outbox ({COLS}) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"
         ),
         params![
             r.relationship_key.as_slice(),
@@ -305,7 +296,6 @@ pub fn insert_sender_outbox_with_conn(conn: &Connection, r: &SenderOutboxRecord)
             if r.is_first_ek_step { 1i64 } else { 0i64 },
             r.status,
             r.message_ids.as_deref(),
-            tick() as i64,
         ],
     )?;
     Ok(())
@@ -381,8 +371,8 @@ pub fn insert_sender_outbox_artifact_with_conn(
     tx.execute(
         "INSERT INTO sender_outbox_artifacts(
             relationship_key, canonical_parent, proposal_nonce, role,
-            submission_id, envelope_bytes, content_digest, routing_address, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            submission_id, envelope_bytes, content_digest, routing_address
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             artifact.relationship_key.as_slice(),
             artifact.canonical_parent.as_slice(),
@@ -392,7 +382,6 @@ pub fn insert_sender_outbox_artifact_with_conn(
             artifact.envelope_bytes,
             artifact.content_digest.as_slice(),
             artifact.routing_address.as_deref(),
-            tick() as i64,
         ],
     )?;
     Ok(())
@@ -780,10 +769,6 @@ pub fn finalize_on_acceptance_atomically(f: &AcceptanceFinalization<'_>) -> Resu
         OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
     )?;
 
-    // Retained for the sweep's exact-match release; the projection pair is
-    // the gate's identity.
-    let _ = (projection_parent, projection_target);
-
     tx.commit()?;
     Ok(())
 }
@@ -844,7 +829,7 @@ pub fn finalization_checkpoint_pending_sender_outbox() -> Result<Vec<SenderOutbo
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM sender_outbox WHERE status = ?1 ORDER BY created_at"
+        "SELECT {COLS} FROM sender_outbox WHERE status = ?1 ORDER BY rowid"
     ))?;
     let rows = stmt
         .query_map(
@@ -1083,7 +1068,7 @@ pub fn unsettled_sender_outbox() -> Result<Vec<SenderOutboxRecord>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM sender_outbox WHERE status IN (?1, ?2, ?3) ORDER BY created_at"
+        "SELECT {COLS} FROM sender_outbox WHERE status IN (?1, ?2, ?3) ORDER BY rowid"
     ))?;
     let rows = stmt
         .query_map(
@@ -1132,7 +1117,7 @@ pub fn gc_pending_sender_outbox() -> Result<Vec<SenderOutboxRecord>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM sender_outbox WHERE status = ?1 ORDER BY created_at"
+        "SELECT {COLS} FROM sender_outbox WHERE status = ?1 ORDER BY rowid"
     ))?;
     let rows = stmt
         .query_map(params![OUTBOX_GC_PENDING], row_to_record)?
@@ -1151,7 +1136,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -1172,7 +1157,6 @@ mod tests {
             is_first_ek_step: true,
             status: OUTBOX_PENDING_SUBMIT.to_string(),
             message_ids: None,
-            created_at: 0,
         }
     }
 
@@ -1240,9 +1224,8 @@ mod tests {
         with_conn(|c| {
             c.execute(
                 "INSERT INTO contacts (contact_id, device_id, alias, genesis_hash, chain_tip,
-                     added_at, verified, status, needs_online_reconcile,
-                     last_seen_online_counter, last_seen_ble_counter, local_bilateral_chain_tip)
-                 VALUES ('c1', ?1, 'peer', X'00', ?2, 0, 1, 'active', 0, 0, 0, ?2)",
+                     verified, status, needs_online_reconcile, local_bilateral_chain_tip)
+                 VALUES ('c1', ?1, 'peer', X'00', ?2, 1, 'active', 0, ?2)",
                 rusqlite::params![&CP[..], &T0[..]],
             )
             .expect("seed contact");
@@ -1268,7 +1251,6 @@ mod tests {
             amount: 15,
             token_id: "ERA".into(),
             status: crate::storage::client_db::PROPOSAL_PROPOSED.into(),
-            created_at: 0,
         };
         crate::storage::client_db::insert_sender_proposal(&proposal).expect("seed proposal");
         crate::storage::client_db::mark_sender_proposal_submitted(
@@ -1778,15 +1760,12 @@ mod tests {
             public_key: vec![0xBBu8; 64],
             kyber_public_key: vec![0xCCu8; 1184],
             current_chain_tip: Some(tip.to_vec()),
-            added_at: 1,
             verified: true,
             verification_proof: None,
             metadata: std::collections::HashMap::new(),
             ble_address: None,
             status: "Created".to_string(),
             needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
             previous_chain_tip: None,
         };
         c.current_chain_tip = Some(tip.to_vec());
@@ -1816,7 +1795,6 @@ mod tests {
             amount: 25,
             token_id: "ERA".to_string(),
             status: super::super::sender_proposal::PROPOSAL_PROPOSED.to_string(),
-            created_at: 0,
         }
     }
 
@@ -1840,7 +1818,6 @@ mod tests {
             is_first_ek_step: is_first,
             status: OUTBOX_PENDING_SUBMIT.to_string(),
             message_ids: None,
-            created_at: 0,
         }
     }
 

@@ -57,6 +57,41 @@
 //! leaf runs normally throughout, because blocking it would make an economic
 //! publication delay look like a device fault.
 
+use crate::common::domain_tags::{
+    TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM, TAG_DSM_ECONOMIC_OPERATION_ID_DSM,
+};
+use crate::crypto::blake3::dsm_domain_hasher;
+
+/// `operation_digest_dsm = H_dom(DSM/economic-operation-digest/dsm/v1,
+/// exact Operation::to_bytes())`.
+pub fn dsm_operation_digest(operation_bytes: &[u8]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM);
+    h.update(operation_bytes);
+    *h.finalize().as_bytes()
+}
+
+/// `EconomicOperationId_dsm = H_dom(DSM/economic-operation-id/dsm/v2,
+/// G ‖ DevID ‖ C_dsm+)`.
+///
+/// `c_dsm_plus` is the accepted DSM successor's chain-state commitment — the
+/// relationship chain tip the acceptance installed. The id names WHICH
+/// authenticated successor performed the operation; the operation digest
+/// names WHAT was performed. Two successors can carry byte-identical
+/// operation bytes, so an id derived from the digest (the burned `/v1`
+/// preimage) could not tell them apart — and
+/// `consumed_source.consumer_economic_operation_id` needs to.
+pub fn dsm_economic_operation_id(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    c_dsm_plus: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_OPERATION_ID_DSM);
+    h.update(genesis);
+    h.update(device_id);
+    h.update(c_dsm_plus);
+    *h.finalize().as_bytes()
+}
+
 use crate::economic::classifier::EconomicEffect;
 use crate::types::operations::Operation;
 
@@ -77,6 +112,20 @@ pub enum PendingAdmissionKind {
     /// credited. The new checkpoint cannot parent further progression until
     /// admitted.
     OfflineUnload { asset_policy_commit: [u8; 32] },
+    /// SoFi v8: an outstanding `TraderFulfillment` (P15-14).
+    ///
+    /// It fences a POSITION, not an asset: the claim at `q` is conditional
+    /// (`C_q`) until the route resolves, so nothing may advance past it. That
+    /// is a fence on the LINEAGE, and while it stands [`fence_allows`] blocks
+    /// every `ClosedWriteSet` — not just the route's own tokens. What still
+    /// runs is what never advances `R_econ`: offline bearer activity, which
+    /// this kind leaves alone by fencing no asset at all.
+    ///
+    /// It is also the one kind the local device may not be able to finish
+    /// alone. Once `F` is registered any relayer may write the cells and the
+    /// outcome, so this admission is completed by facts that arrive rather
+    /// than by an action this device takes (F2 stage 3).
+    SofiFulfillment { fulfillment_id: [u8; 32] },
 }
 
 impl PendingAdmissionKind {
@@ -90,6 +139,29 @@ impl PendingAdmissionKind {
             | Self::OfflineUnload {
                 asset_policy_commit,
             } => Some(*asset_policy_commit),
+            // A fulfillment fences its POSITION. Naming an asset here would
+            // be false twice over: the lineage fence already stops every
+            // economic write regardless of asset, and the callers of this
+            // accessor gate bearer spends — they would gate the wrong ones.
+            Self::SofiFulfillment { .. } => None,
+        }
+    }
+
+    /// The 32 bytes this kind needs to be reconstructed from durable storage.
+    ///
+    /// Deliberately NOT [`Self::fenced_asset`]: that answers "which asset is
+    /// fenced", and every caller of it gates bearer spends. Handing those
+    /// callers a fulfillment id would fence an asset that does not exist.
+    pub fn durable_digest(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::DsmBacked => None,
+            Self::OfflineLoad {
+                asset_policy_commit,
+            }
+            | Self::OfflineUnload {
+                asset_policy_commit,
+            } => Some(*asset_policy_commit),
+            Self::SofiFulfillment { fulfillment_id } => Some(*fulfillment_id),
         }
     }
 }

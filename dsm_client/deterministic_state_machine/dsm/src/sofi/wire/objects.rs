@@ -1,0 +1,4087 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! SoFi v8 wire objects: validating constructors, canonical encoders and
+//! strict decoders for the field tables in [`super`].
+
+use crate::ccb::decode::{Cursor, DecodeError};
+use crate::ccb::{class, push_bytes, push_digest32, push_u16, push_u32, push_u64, sigalg};
+
+use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
+
+use super::{
+    SofiWireError, CANONICAL_MAX_LEGS, MAX_CLOSURE_REFS, MAX_CORE_ENTRIES, MAX_EXERCISE_BYTES,
+    MAX_SETTLEMENT_PREIMAGE_BYTES, ROUTE_MIN_LEGS, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
+};
+
+/// Every v8 object ships at schema 1.
+pub const SCHEMA_V1: u16 = 1;
+
+type D32 = [u8; 32];
+
+// ── shared validation and primitive helpers ────────────────────────────────
+
+fn push_env(out: &mut Vec<u8>, object_class: u16) {
+    push_u16(out, object_class);
+    push_u16(out, SCHEMA_V1);
+}
+
+fn wire_invalid(e: SofiWireError) -> DecodeError {
+    DecodeError::Invalid(e.to_string())
+}
+
+fn check_key(alg: u16, key: &[u8]) -> Result<(), SofiWireError> {
+    let expected = sigalg::public_key_len(alg).ok_or(SofiWireError::UnknownSignatureAlg { alg })?;
+    if key.len() != expected {
+        return Err(SofiWireError::KeyLengthMismatch {
+            expected,
+            got: key.len(),
+        });
+    }
+    Ok(())
+}
+
+fn check_count(
+    field: &'static str,
+    min: usize,
+    max: usize,
+    got: usize,
+) -> Result<(), SofiWireError> {
+    if got < min || got > max {
+        return Err(SofiWireError::Cardinality {
+            field,
+            min,
+            max,
+            got,
+        });
+    }
+    Ok(())
+}
+
+fn check_strictly_ascending<K: Ord>(field: &'static str, keys: &[K]) -> Result<(), SofiWireError> {
+    for (i, w) in keys.windows(2).enumerate() {
+        if w[0] >= w[1] {
+            return Err(SofiWireError::NotStrictlyAscending {
+                field,
+                index: i + 1,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Read a sequence count and refuse it BEFORE allocating, so a hostile count
+/// cannot become an allocation.
+fn read_count(
+    c: &mut Cursor<'_>,
+    field: &'static str,
+    min: usize,
+    max: usize,
+) -> Result<usize, DecodeError> {
+    let n = c.u32()? as usize;
+    check_count(field, min, max, n).map_err(wire_invalid)?;
+    Ok(n)
+}
+
+fn read_key(c: &mut Cursor<'_>) -> Result<(u16, Vec<u8>), DecodeError> {
+    let alg = c.u16()?;
+    let len = c.u32()? as usize;
+    // Bound the take by the declared width before touching the bytes.
+    let expected = sigalg::public_key_len(alg)
+        .ok_or(SofiWireError::UnknownSignatureAlg { alg })
+        .map_err(wire_invalid)?;
+    if len != expected {
+        return Err(wire_invalid(SofiWireError::KeyLengthMismatch {
+            expected,
+            got: len,
+        }));
+    }
+    Ok((alg, c.take(len)?.to_vec()))
+}
+
+fn finish<T>(c: &Cursor<'_>, value: T) -> Result<T, DecodeError> {
+    if c.i != c.b.len() {
+        return Err(DecodeError::TrailingBytes {
+            extra: c.b.len() - c.i,
+        });
+    }
+    Ok(value)
+}
+
+fn push_key(out: &mut Vec<u8>, alg: u16, key: &[u8]) {
+    push_u16(out, alg);
+    // Width is fixed by the validated algorithm, so this cannot overflow.
+    let _ = push_bytes(out, key);
+}
+
+// ── 0x0036 SofiSetupBody ───────────────────────────────────────────────────
+
+/// The relationship setup claim (F1). Identity is `ρ` over these bytes; the
+/// signature envelope is authorization, never identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SofiSetupBody {
+    genesis: D32,
+    device_id: D32,
+    position: u64,
+    vault_id: D32,
+    claim_ref: D32,
+    setup_root: D32,
+    signature_alg: u16,
+    claimant_public_key: Vec<u8>,
+}
+
+impl SofiSetupBody {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        genesis: D32,
+        device_id: D32,
+        position: u64,
+        vault_id: D32,
+        claim_ref: D32,
+        setup_root: D32,
+        signature_alg: u16,
+        claimant_public_key: &[u8],
+    ) -> Result<Self, SofiWireError> {
+        check_key(signature_alg, claimant_public_key)?;
+        Ok(Self {
+            genesis,
+            device_id,
+            position,
+            vault_id,
+            claim_ref,
+            setup_root,
+            signature_alg,
+            claimant_public_key: claimant_public_key.to_vec(),
+        })
+    }
+
+    pub fn genesis(&self) -> &D32 {
+        &self.genesis
+    }
+    pub fn device_id(&self) -> &D32 {
+        &self.device_id
+    }
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+    pub fn vault_id(&self) -> &D32 {
+        &self.vault_id
+    }
+    pub fn claim_ref(&self) -> &D32 {
+        &self.claim_ref
+    }
+    pub fn setup_root(&self) -> &D32 {
+        &self.setup_root
+    }
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+    pub fn claimant_public_key(&self) -> &[u8] {
+        &self.claimant_public_key
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_SETUP_BODY);
+        push_digest32(&mut out, &self.genesis);
+        push_digest32(&mut out, &self.device_id);
+        push_u64(&mut out, self.position);
+        push_digest32(&mut out, &self.vault_id);
+        push_digest32(&mut out, &self.claim_ref);
+        push_digest32(&mut out, &self.setup_root);
+        push_key(&mut out, self.signature_alg, &self.claimant_public_key);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_SETUP_BODY, SCHEMA_V1)?;
+        let genesis = c.digest32()?;
+        let device_id = c.digest32()?;
+        let position = c.u64()?;
+        let vault_id = c.digest32()?;
+        let claim_ref = c.digest32()?;
+        let setup_root = c.digest32()?;
+        let (alg, key) = read_key(&mut c)?;
+        let v = Self::new(
+            genesis, device_id, position, vault_id, claim_ref, setup_root, alg, &key,
+        )
+        .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+// ── ParentClaimRef: 0x003B | 0x003C ────────────────────────────────────────
+
+/// The exact trader parent `T0`. The nested envelope is the discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentClaimRef {
+    /// An exact single-root economic claim, by its exact envelope digest.
+    SingleRoot { claim_ref: D32 },
+    /// A conditional SoFi position, by the fulfillment that installed it.
+    Conditional { fulfillment_id: D32 },
+}
+
+impl ParentClaimRef {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            Self::SingleRoot { claim_ref } => {
+                push_env(&mut out, class::SOFI_PARENT_SINGLE_ROOT_CLAIM);
+                push_digest32(&mut out, claim_ref);
+            }
+            Self::Conditional { fulfillment_id } => {
+                push_env(&mut out, class::SOFI_PARENT_CONDITIONAL_CLAIM);
+                push_digest32(&mut out, fulfillment_id);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        match c.peek_class()? {
+            class::SOFI_PARENT_SINGLE_ROOT_CLAIM => {
+                c.envelope(class::SOFI_PARENT_SINGLE_ROOT_CLAIM, SCHEMA_V1)?;
+                Ok(Self::SingleRoot {
+                    claim_ref: c.digest32()?,
+                })
+            }
+            class::SOFI_PARENT_CONDITIONAL_CLAIM => {
+                c.envelope(class::SOFI_PARENT_CONDITIONAL_CLAIM, SCHEMA_V1)?;
+                Ok(Self::Conditional {
+                    fulfillment_id: c.digest32()?,
+                })
+            }
+            got => Err(DecodeError::WrongClass { got }),
+        }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+
+    /// The typed parent reference `𝒞_E^pre` carries for this parent, named by
+    /// the trader `(genesis, device_id)` at the position `P` extends (P
+    /// conformance rule 2): a single-root claim by its exact envelope digest,
+    /// a conditional position by `(G, DevID, p)` and the fulfillment that
+    /// installed it.
+    pub fn validation_ref(&self, genesis: &D32, device_id: &D32, position: u64) -> ValidationRef {
+        match self {
+            Self::SingleRoot { claim_ref } => ValidationRef::SingleRootClaim {
+                claim_ref: *claim_ref,
+            },
+            Self::Conditional { fulfillment_id } => ValidationRef::ConditionalClaim {
+                genesis: *genesis,
+                device_id: *device_id,
+                position,
+                fulfillment_id: *fulfillment_id,
+            },
+        }
+    }
+}
+
+// ── 0x0037 TraderPrecommitBody ─────────────────────────────────────────────
+
+/// One DLV leg of `P`: the exact parent state named, and the relationship
+/// reference the trader uses for that vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrecommitLeg {
+    pub vault_id: D32,
+    pub parent_root: D32,
+    pub setup_ref: D32,
+}
+
+/// `P` — the trader's unilateral, non-economic pre-commit (F2 stage 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraderPrecommitBody {
+    genesis: D32,
+    device_id: D32,
+    position: u64,
+    parent_claim_ref: ParentClaimRef,
+    external_commitment: D32,
+    legs: Vec<PrecommitLeg>,
+    realize_root: D32,
+    void_root: D32,
+    storage_set_id: D32,
+    signature_alg: u16,
+    claimant_public_key: Vec<u8>,
+}
+
+impl TraderPrecommitBody {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        genesis: D32,
+        device_id: D32,
+        position: u64,
+        parent_claim_ref: ParentClaimRef,
+        external_commitment: D32,
+        legs: Vec<PrecommitLeg>,
+        realize_root: D32,
+        void_root: D32,
+        storage_set_id: D32,
+        signature_alg: u16,
+        claimant_public_key: &[u8],
+    ) -> Result<Self, SofiWireError> {
+        // A pre-commit at the last position names a successor that cannot exist.
+        super::next_position(position)?;
+        check_count("precommit legs", 1, CANONICAL_MAX_LEGS, legs.len())?;
+        let keys: Vec<D32> = legs.iter().map(|l| l.vault_id).collect();
+        check_strictly_ascending("precommit legs", &keys)?;
+        check_key(signature_alg, claimant_public_key)?;
+        Ok(Self {
+            genesis,
+            device_id,
+            position,
+            parent_claim_ref,
+            external_commitment,
+            legs,
+            realize_root,
+            void_root,
+            storage_set_id,
+            signature_alg,
+            claimant_public_key: claimant_public_key.to_vec(),
+        })
+    }
+
+    pub fn genesis(&self) -> &D32 {
+        &self.genesis
+    }
+    pub fn device_id(&self) -> &D32 {
+        &self.device_id
+    }
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+    pub fn parent_claim_ref(&self) -> &ParentClaimRef {
+        &self.parent_claim_ref
+    }
+    /// The typed parent reference this `P` requires `𝒞_E^pre` to carry.
+    pub fn parent_reference(&self) -> ValidationRef {
+        self.parent_claim_ref
+            .validation_ref(&self.genesis, &self.device_id, self.position)
+    }
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+    pub fn legs(&self) -> &[PrecommitLeg] {
+        &self.legs
+    }
+    pub fn realize_root(&self) -> &D32 {
+        &self.realize_root
+    }
+    pub fn void_root(&self) -> &D32 {
+        &self.void_root
+    }
+    pub fn storage_set_id(&self) -> &D32 {
+        &self.storage_set_id
+    }
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+    pub fn claimant_public_key(&self) -> &[u8] {
+        &self.claimant_public_key
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_TRADER_PRECOMMIT_BODY);
+        push_digest32(&mut out, &self.genesis);
+        push_digest32(&mut out, &self.device_id);
+        push_u64(&mut out, self.position);
+        out.extend_from_slice(&self.parent_claim_ref.encode());
+        push_digest32(&mut out, &self.external_commitment);
+        push_u32(&mut out, self.legs.len() as u32);
+        for l in &self.legs {
+            push_digest32(&mut out, &l.vault_id);
+            push_digest32(&mut out, &l.parent_root);
+            push_digest32(&mut out, &l.setup_ref);
+        }
+        push_digest32(&mut out, &self.realize_root);
+        push_digest32(&mut out, &self.void_root);
+        push_digest32(&mut out, &self.storage_set_id);
+        push_key(&mut out, self.signature_alg, &self.claimant_public_key);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_TRADER_PRECOMMIT_BODY, SCHEMA_V1)?;
+        let genesis = c.digest32()?;
+        let device_id = c.digest32()?;
+        let position = c.u64()?;
+        let parent_claim_ref = ParentClaimRef::at(&mut c)?;
+        let external_commitment = c.digest32()?;
+        let n = read_count(&mut c, "precommit legs", 1, CANONICAL_MAX_LEGS)?;
+        let mut legs = Vec::with_capacity(n);
+        for _ in 0..n {
+            legs.push(PrecommitLeg {
+                vault_id: c.digest32()?,
+                parent_root: c.digest32()?,
+                setup_ref: c.digest32()?,
+            });
+        }
+        let realize_root = c.digest32()?;
+        let void_root = c.digest32()?;
+        let storage_set_id = c.digest32()?;
+        let (alg, key) = read_key(&mut c)?;
+        let v = Self::new(
+            genesis,
+            device_id,
+            position,
+            parent_claim_ref,
+            external_commitment,
+            legs,
+            realize_root,
+            void_root,
+            storage_set_id,
+            alg,
+            &key,
+        )
+        .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0038 DlvPolicyFulfillmentBody ────────────────────────────────────────
+
+/// `G_j` — the canonical identity of the deterministic policy-fulfillment
+/// witness for one DLV leg of `P`. No issuer, no signature, no evidence
+/// encoding: exactly one identity per `(P, E, vault, parent state, shadow)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DlvPolicyFulfillmentBody {
+    pub precommit_id: D32,
+    pub external_commitment: D32,
+    pub vault_id: D32,
+    pub parent_root: D32,
+    pub shadow_core: D32,
+}
+
+impl DlvPolicyFulfillmentBody {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_DLV_POLICY_FULFILLMENT_BODY);
+        push_digest32(&mut out, &self.precommit_id);
+        push_digest32(&mut out, &self.external_commitment);
+        push_digest32(&mut out, &self.vault_id);
+        push_digest32(&mut out, &self.parent_root);
+        push_digest32(&mut out, &self.shadow_core);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_DLV_POLICY_FULFILLMENT_BODY, SCHEMA_V1)?;
+        let v = Self {
+            precommit_id: c.digest32()?,
+            external_commitment: c.digest32()?,
+            vault_id: c.digest32()?,
+            parent_root: c.digest32()?,
+            shadow_core: c.digest32()?,
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x0039 TraderFulfillmentBody ───────────────────────────────────────────
+
+/// The successor-attempt index chosen for one DLV leg at exercise time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptEntry {
+    pub vault_id: D32,
+    pub attempt: u64,
+}
+
+/// `F` — the trader's exercise. Never restates a field of `P`.
+///
+/// `claimant_att_a` is the trader device's `AttA`. `F` occupies `K_ful(q)`,
+/// so it proves its own authority for that position (DSM Amendment A10, SoFi
+/// Amendment S20): `derive_devid(claimant_public_key, claimant_att_a)` must
+/// be the device whose cell it is, decided from these bytes before `P` is
+/// fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraderFulfillmentBody {
+    precommit_id: D32,
+    policy_fulfillment_set: Vec<D32>,
+    attempts: Vec<AttemptEntry>,
+    position: u64,
+    signature_alg: u16,
+    claimant_public_key: Vec<u8>,
+    claimant_att_a: D32,
+}
+
+impl TraderFulfillmentBody {
+    pub fn new(
+        precommit_id: D32,
+        policy_fulfillment_set: Vec<D32>,
+        attempts: Vec<AttemptEntry>,
+        position: u64,
+        signature_alg: u16,
+        claimant_public_key: &[u8],
+        claimant_att_a: D32,
+    ) -> Result<Self, SofiWireError> {
+        check_count(
+            "policy fulfillment set",
+            1,
+            CANONICAL_MAX_LEGS,
+            policy_fulfillment_set.len(),
+        )?;
+        check_strictly_ascending("policy fulfillment set", &policy_fulfillment_set)?;
+        check_count("attempts", 1, CANONICAL_MAX_LEGS, attempts.len())?;
+        let keys: Vec<D32> = attempts.iter().map(|a| a.vault_id).collect();
+        check_strictly_ascending("attempts", &keys)?;
+        check_key(signature_alg, claimant_public_key)?;
+        Ok(Self {
+            precommit_id,
+            policy_fulfillment_set,
+            attempts,
+            position,
+            signature_alg,
+            claimant_public_key: claimant_public_key.to_vec(),
+            claimant_att_a,
+        })
+    }
+
+    pub fn precommit_id(&self) -> &D32 {
+        &self.precommit_id
+    }
+    pub fn policy_fulfillment_set(&self) -> &[D32] {
+        &self.policy_fulfillment_set
+    }
+    pub fn attempts(&self) -> &[AttemptEntry] {
+        &self.attempts
+    }
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+    pub fn claimant_public_key(&self) -> &[u8] {
+        &self.claimant_public_key
+    }
+    pub fn claimant_att_a(&self) -> &D32 {
+        &self.claimant_att_a
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_TRADER_FULFILLMENT_BODY);
+        push_digest32(&mut out, &self.precommit_id);
+        push_u32(&mut out, self.policy_fulfillment_set.len() as u32);
+        for id in &self.policy_fulfillment_set {
+            push_digest32(&mut out, id);
+        }
+        push_u32(&mut out, self.attempts.len() as u32);
+        for a in &self.attempts {
+            push_digest32(&mut out, &a.vault_id);
+            push_u64(&mut out, a.attempt);
+        }
+        push_u64(&mut out, self.position);
+        push_key(&mut out, self.signature_alg, &self.claimant_public_key);
+        push_digest32(&mut out, &self.claimant_att_a);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_TRADER_FULFILLMENT_BODY, SCHEMA_V1)?;
+        let precommit_id = c.digest32()?;
+        let n = read_count(&mut c, "policy fulfillment set", 1, CANONICAL_MAX_LEGS)?;
+        let mut set = Vec::with_capacity(n);
+        for _ in 0..n {
+            set.push(c.digest32()?);
+        }
+        let m = read_count(&mut c, "attempts", 1, CANONICAL_MAX_LEGS)?;
+        let mut attempts = Vec::with_capacity(m);
+        for _ in 0..m {
+            attempts.push(AttemptEntry {
+                vault_id: c.digest32()?,
+                attempt: c.u64()?,
+            });
+        }
+        let position = c.u64()?;
+        let (alg, key) = read_key(&mut c)?;
+        let att_a = c.digest32()?;
+        let v = Self::new(precommit_id, set, attempts, position, alg, &key, att_a)
+            .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x003A SofiResolutionClaim ─────────────────────────────────────────────
+
+/// `C_q` — one outcome-independent conditional economic position, installed
+/// in the same local transaction that accepts `F`. The member derives it; a
+/// caller never supplies these bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SofiResolutionClaim {
+    pub genesis: D32,
+    pub device_id: D32,
+    pub position: u64,
+    pub fulfillment_id: D32,
+    pub realize_root: D32,
+    pub void_root: D32,
+}
+
+impl SofiResolutionClaim {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_RESOLUTION_CLAIM);
+        push_digest32(&mut out, &self.genesis);
+        push_digest32(&mut out, &self.device_id);
+        push_u64(&mut out, self.position);
+        push_digest32(&mut out, &self.fulfillment_id);
+        push_digest32(&mut out, &self.realize_root);
+        push_digest32(&mut out, &self.void_root);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_RESOLUTION_CLAIM, SCHEMA_V1)?;
+        let v = Self {
+            genesis: c.digest32()?,
+            device_id: c.digest32()?,
+            position: c.u64()?,
+            fulfillment_id: c.digest32()?,
+            realize_root: c.digest32()?,
+            void_root: c.digest32()?,
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x0062 SignedSofiResolutionClaim ───────────────────────────────────────
+
+/// `C_q` as it occupies `K_root(q)` (DSM Amendment A10, SoFi Amendment S20):
+/// the derived claim, the key and `AttA` it is signed under, and the
+/// signature.
+///
+/// The claim is still derived: `C_q` is `derive::resolution_claim(P, F)`, and
+/// every comparison is of that body. The signature is how the claim proves
+/// its own authority for the cell, because an object that can occupy a root
+/// position must prove authority for that position. Recognition
+/// (`sofi::signature::verify_resolution_claim`) requires the signature to
+/// verify and `derive_devid(key, AttA)` to be the device the claim names. This
+/// type is the wire form only; holding one proves nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedSofiResolutionClaim {
+    claim: SofiResolutionClaim,
+    signature_alg: u16,
+    claimant_public_key: Vec<u8>,
+    claimant_att_a: D32,
+    signature: Vec<u8>,
+}
+
+impl SignedSofiResolutionClaim {
+    /// Refuses an undeclared algorithm, a key of the wrong width and an empty
+    /// or oversized signature. It does not verify anything.
+    pub fn new(
+        claim: SofiResolutionClaim,
+        signature_alg: u16,
+        claimant_public_key: &[u8],
+        claimant_att_a: D32,
+        signature: &[u8],
+    ) -> Result<Self, SofiWireError> {
+        check_key(signature_alg, claimant_public_key)?;
+        if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "signature",
+                bytes: signature.len(),
+                max: MAX_SIGNATURE_BYTES,
+            });
+        }
+        Ok(Self {
+            claim,
+            signature_alg,
+            claimant_public_key: claimant_public_key.to_vec(),
+            claimant_att_a,
+            signature: signature.to_vec(),
+        })
+    }
+
+    /// The derived claim this signs.
+    pub fn claim(&self) -> &SofiResolutionClaim {
+        &self.claim
+    }
+
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+
+    pub fn claimant_public_key(&self) -> &[u8] {
+        &self.claimant_public_key
+    }
+
+    pub fn claimant_att_a(&self) -> &D32 {
+        &self.claimant_att_a
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_SIGNED_RESOLUTION_CLAIM);
+        push_digest32(&mut out, &self.claim.genesis);
+        push_digest32(&mut out, &self.claim.device_id);
+        push_u64(&mut out, self.claim.position);
+        push_digest32(&mut out, &self.claim.fulfillment_id);
+        push_digest32(&mut out, &self.claim.realize_root);
+        push_digest32(&mut out, &self.claim.void_root);
+        push_key(&mut out, self.signature_alg, &self.claimant_public_key);
+        push_digest32(&mut out, &self.claimant_att_a);
+        // `new` and `decode` bound the signature to MAX_SIGNATURE_BYTES, so
+        // its length fits the u32 prefix.
+        push_u32(&mut out, self.signature.len() as u32);
+        out.extend_from_slice(&self.signature);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_SIGNED_RESOLUTION_CLAIM, SCHEMA_V1)?;
+        let claim = SofiResolutionClaim {
+            genesis: c.digest32()?,
+            device_id: c.digest32()?,
+            position: c.u64()?,
+            fulfillment_id: c.digest32()?,
+            realize_root: c.digest32()?,
+            void_root: c.digest32()?,
+        };
+        let (signature_alg, claimant_public_key) = read_key(&mut c)?;
+        let claimant_att_a = c.digest32()?;
+        let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+        let v = Self {
+            claim,
+            signature_alg,
+            claimant_public_key,
+            claimant_att_a,
+            signature,
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x005C SignedSofiObject ────────────────────────────────────────────────
+
+/// The largest signature any supported algorithm produces, with headroom.
+/// SPX256f is 49,856 bytes and dominates anything carrying one.
+const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
+
+/// The transport envelope for a canonical SoFi body plus the trader's
+/// signature over it.
+///
+/// **It authenticates a body; it never redefines one.** `P` is `P` because of
+/// its canonical `TraderPrecommitBody`, and `PrecommitId` is derived from that
+/// body — not from these bytes. Two valid signature encodings over one body
+/// are the same protocol object at the same identity, which is what lets an
+/// honest relayer republish without racing the trader into a conflict.
+///
+/// **`body_class` is not a dispatch hint.** It is checked against the class
+/// the inner canonical bytes actually carry, and the signing preimage is
+/// rederived from the DECODED object — see `signature::verify_signed_object`,
+/// which is where the class-specific rules live. The envelope is generic; the
+/// verification deliberately is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedSofiObject {
+    body_class: u16,
+    body_ccb: Vec<u8>,
+    signature_alg: u16,
+    signature: Vec<u8>,
+}
+
+impl SignedSofiObject {
+    /// The only constructor. It refuses a body class this envelope does not
+    /// carry, so no producer in this codebase can emit one — the matching
+    /// refusal on the consumer side is in `verify_signed_object`, and both
+    /// exist because a producer check and a verifier check answer different
+    /// questions.
+    pub fn new(
+        body_class: u16,
+        body_ccb: &[u8],
+        signature_alg: u16,
+        signature: &[u8],
+    ) -> Result<Self, SofiWireError> {
+        if !matches!(
+            body_class,
+            class::SOFI_SETUP_BODY
+                | class::SOFI_TRADER_PRECOMMIT_BODY
+                | class::SOFI_TRADER_FULFILLMENT_BODY
+        ) {
+            return Err(SofiWireError::UnsupportedSignedBodyClass { body_class });
+        }
+        if body_ccb.is_empty() || body_ccb.len() > MAX_SETTLEMENT_PREIMAGE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "body_ccb",
+                bytes: body_ccb.len(),
+                max: MAX_SETTLEMENT_PREIMAGE_BYTES,
+            });
+        }
+        if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "signature",
+                bytes: signature.len(),
+                max: MAX_SIGNATURE_BYTES,
+            });
+        }
+        // The algorithm must be one the registry declares. It is checked
+        // again against the BODY's own `signature_alg` at verification: the
+        // body is signed and this envelope is not, so a disagreement between
+        // them is resolved in favour of the body rather than left as a fork.
+        sigalg::public_key_len(signature_alg)
+            .ok_or(SofiWireError::UnknownSignatureAlg { alg: signature_alg })?;
+        Ok(Self {
+            body_class,
+            body_ccb: body_ccb.to_vec(),
+            signature_alg,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn body_class(&self) -> u16 {
+        self.body_class
+    }
+
+    pub fn body_ccb(&self) -> &[u8] {
+        &self.body_ccb
+    }
+
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_SIGNED_OBJECT);
+        push_u16(&mut out, self.body_class);
+        // Lengths are validated by `new` and by `decode`, so neither can
+        // overflow the u32 prefix here.
+        let _ = push_bytes(&mut out, &self.body_ccb);
+        push_u16(&mut out, self.signature_alg);
+        let _ = push_bytes(&mut out, &self.signature);
+        out
+    }
+
+    /// Decode WITHOUT restricting the body class.
+    ///
+    /// A hostile envelope naming an unsupported class must decode so that it
+    /// can be refused by name at verification, rather than failing here as an
+    /// indistinguishable parse error. The producer-side restriction lives in
+    /// [`Self::new`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_SIGNED_OBJECT, SCHEMA_V1)?;
+        let body_class = c.u16()?;
+        let body_ccb = read_var_bytes(&mut c, MAX_SETTLEMENT_PREIMAGE_BYTES)?;
+        let signature_alg = c.u16()?;
+        let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+        let v = Self {
+            body_class,
+            body_ccb,
+            signature_alg,
+            signature,
+        };
+        finish(&c, v)
+    }
+}
+
+/// A length-prefixed byte string, bounded before it is taken.
+fn read_var_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError> {
+    let n = c.u32()? as usize;
+    if n == 0 || n > max {
+        return Err(DecodeError::Invalid(format!(
+            "length {n} is outside 1..={max}"
+        )));
+    }
+    Ok(c.take(n)?.to_vec())
+}
+
+/// The encoding twin of [`read_var_bytes`], for a part its type already
+/// bounds: `new` and `decode` both refuse a part over its maximum, which is
+/// far below `u32::MAX`, so the length always fits its prefix.
+fn push_part(out: &mut Vec<u8>, part: &[u8]) {
+    push_u32(out, part.len() as u32);
+    out.extend_from_slice(part);
+}
+
+// ── ValidationRef: 0x003D..=0x0040 ─────────────────────────────────────────
+
+// ── 0x005E SofiExercise ─────────────────────────────────────────────────────
+
+/// The exercise: the value written to every successor key of a route
+/// (Section 17.5). Everything a reader needs to classify it is inside — `F`
+/// and `P` in the envelopes their signatures travel in, `P(E)`, the witnesses
+/// and the closure objects — and everything is bound to `F` by hashed
+/// preimages. It names its own attempt through `F` and its own parents
+/// through `P`, so it cannot count at another key. It also carries the
+/// trader's signed `C_q` (SoFi Amendment S20), so whatever holds a vault key
+/// carries everything needed to register its own `F`: no relayer can sign
+/// `C_q`, and a trader that withholds its pair cannot hold the key forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SofiExercise {
+    fulfillment: Vec<u8>,
+    resolution_claim: Vec<u8>,
+    precommit: Vec<u8>,
+    preimage: Vec<u8>,
+    witnesses: Vec<Vec<u8>>,
+    closure: Vec<Vec<u8>>,
+}
+
+const MAX_EXERCISE_PART_BYTES: usize = MAX_SETTLEMENT_PREIMAGE_BYTES + MAX_SIGNATURE_BYTES;
+
+impl SofiExercise {
+    /// The only constructor. Each part is the canonical bytes of the object
+    /// it carries; the codec bounds the parts and the whole. What the parts
+    /// MEAN — that the envelopes decode, that `F` is `P`'s, that the
+    /// witnesses are the canonical set — is recognition (`sofi::exercise`),
+    /// not construction.
+    pub fn new(
+        fulfillment: Vec<u8>,
+        resolution_claim: Vec<u8>,
+        precommit: Vec<u8>,
+        preimage: Vec<u8>,
+        witnesses: Vec<Vec<u8>>,
+        closure: Vec<Vec<u8>>,
+    ) -> Result<Self, SofiWireError> {
+        for (field, bytes) in [
+            ("fulfillment", &fulfillment),
+            ("resolution claim", &resolution_claim),
+            ("precommit", &precommit),
+            ("preimage", &preimage),
+        ] {
+            if bytes.is_empty() || bytes.len() > MAX_EXERCISE_PART_BYTES {
+                return Err(SofiWireError::ObjectTooLarge {
+                    field,
+                    bytes: bytes.len(),
+                    max: MAX_EXERCISE_PART_BYTES,
+                });
+            }
+        }
+        check_count("witnesses", 1, CANONICAL_MAX_LEGS, witnesses.len())?;
+        check_count("closure objects", 0, MAX_CLOSURE_REFS, closure.len())?;
+        for (field, list) in [("witness", &witnesses), ("closure object", &closure)] {
+            for bytes in list {
+                if bytes.is_empty() || bytes.len() > MAX_EXERCISE_PART_BYTES {
+                    return Err(SofiWireError::ObjectTooLarge {
+                        field,
+                        bytes: bytes.len(),
+                        max: MAX_EXERCISE_PART_BYTES,
+                    });
+                }
+            }
+        }
+        let v = Self {
+            fulfillment,
+            resolution_claim,
+            precommit,
+            preimage,
+            witnesses,
+            closure,
+        };
+        let total = v.encode().len();
+        if total > MAX_EXERCISE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "exercise",
+                bytes: total,
+                max: MAX_EXERCISE_BYTES,
+            });
+        }
+        Ok(v)
+    }
+
+    pub fn fulfillment(&self) -> &[u8] {
+        &self.fulfillment
+    }
+
+    /// The trader's signed `C_q`, as `K_root(q)` takes it (class `0x0062`).
+    pub fn resolution_claim(&self) -> &[u8] {
+        &self.resolution_claim
+    }
+
+    pub fn precommit(&self) -> &[u8] {
+        &self.precommit
+    }
+
+    pub fn preimage(&self) -> &[u8] {
+        &self.preimage
+    }
+
+    pub fn witnesses(&self) -> &[Vec<u8>] {
+        &self.witnesses
+    }
+
+    pub fn closure(&self) -> &[Vec<u8>] {
+        &self.closure
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_EXERCISE);
+        push_part(&mut out, &self.fulfillment);
+        push_part(&mut out, &self.resolution_claim);
+        push_part(&mut out, &self.precommit);
+        push_part(&mut out, &self.preimage);
+        push_u32(&mut out, self.witnesses.len() as u32);
+        for w in &self.witnesses {
+            push_part(&mut out, w);
+        }
+        push_u32(&mut out, self.closure.len() as u32);
+        for o in &self.closure {
+            push_part(&mut out, o);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() > MAX_EXERCISE_BYTES {
+            return Err(DecodeError::Invalid(format!(
+                "exercise of {} bytes exceeds {MAX_EXERCISE_BYTES}",
+                bytes.len()
+            )));
+        }
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_EXERCISE, SCHEMA_V1)?;
+        let fulfillment = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let resolution_claim = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let precommit = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let preimage = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let n = read_count(&mut c, "witnesses", 1, CANONICAL_MAX_LEGS)?;
+        let mut witnesses = Vec::with_capacity(n);
+        for _ in 0..n {
+            witnesses.push(read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?);
+        }
+        let m = read_count(&mut c, "closure objects", 0, MAX_CLOSURE_REFS)?;
+        let mut closure = Vec::with_capacity(m);
+        for _ in 0..m {
+            closure.push(read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?);
+        }
+        let v = Self {
+            fulfillment,
+            resolution_claim,
+            precommit,
+            preimage,
+            witnesses,
+            closure,
+        };
+        finish(&c, v)
+    }
+}
+
+/// One typed validation reference. Each variant has exactly one fetch and
+/// verification rule, and randomized signature envelopes are never
+/// content-bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ValidationRef {
+    /// Immutable bytes re-hashed under the class's own addressing rule.
+    ContentAddr { object_class: u16, addr: D32 },
+    /// An exact single-root economic claim by exact envelope digest.
+    SingleRootClaim { claim_ref: D32 },
+    /// A conditional position at `(G, DevID, p)`, installed by `fulfillment_id`.
+    ConditionalClaim {
+        genesis: D32,
+        device_id: D32,
+        position: u64,
+        fulfillment_id: D32,
+    },
+    /// A relationship setup by body identity `ρ`.
+    Setup { setup_ref: D32 },
+}
+
+impl ValidationRef {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            Self::ContentAddr { object_class, addr } => {
+                push_env(&mut out, class::SOFI_REF_CONTENT_ADDR);
+                push_u16(&mut out, *object_class);
+                push_digest32(&mut out, addr);
+            }
+            Self::SingleRootClaim { claim_ref } => {
+                push_env(&mut out, class::SOFI_REF_SINGLE_ROOT_CLAIM);
+                push_digest32(&mut out, claim_ref);
+            }
+            Self::ConditionalClaim {
+                genesis,
+                device_id,
+                position,
+                fulfillment_id,
+            } => {
+                push_env(&mut out, class::SOFI_REF_CONDITIONAL_CLAIM);
+                push_digest32(&mut out, genesis);
+                push_digest32(&mut out, device_id);
+                push_u64(&mut out, *position);
+                push_digest32(&mut out, fulfillment_id);
+            }
+            Self::Setup { setup_ref } => {
+                push_env(&mut out, class::SOFI_REF_SETUP);
+                push_digest32(&mut out, setup_ref);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        match c.peek_class()? {
+            class::SOFI_REF_CONTENT_ADDR => {
+                c.envelope(class::SOFI_REF_CONTENT_ADDR, SCHEMA_V1)?;
+                Ok(Self::ContentAddr {
+                    object_class: c.u16()?,
+                    addr: c.digest32()?,
+                })
+            }
+            class::SOFI_REF_SINGLE_ROOT_CLAIM => {
+                c.envelope(class::SOFI_REF_SINGLE_ROOT_CLAIM, SCHEMA_V1)?;
+                Ok(Self::SingleRootClaim {
+                    claim_ref: c.digest32()?,
+                })
+            }
+            class::SOFI_REF_CONDITIONAL_CLAIM => {
+                c.envelope(class::SOFI_REF_CONDITIONAL_CLAIM, SCHEMA_V1)?;
+                Ok(Self::ConditionalClaim {
+                    genesis: c.digest32()?,
+                    device_id: c.digest32()?,
+                    position: c.u64()?,
+                    fulfillment_id: c.digest32()?,
+                })
+            }
+            class::SOFI_REF_SETUP => {
+                c.envelope(class::SOFI_REF_SETUP, SCHEMA_V1)?;
+                Ok(Self::Setup {
+                    setup_ref: c.digest32()?,
+                })
+            }
+            got => Err(DecodeError::WrongClass { got }),
+        }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0041 PreEClosureIndex ────────────────────────────────────────────────
+
+/// Classes a `ContentAddr` may never name inside `𝒞_E^pre`.
+///
+/// Two reasons, and every entry has one of them. Either the object contains
+/// or depends on the CURRENT E (P, G, F, `C_q`, auxiliary evidence, records,
+/// outcome cells, the closure index itself), or the object has its own typed
+/// reference whose identity rule a content hash would bypass (setup bodies go
+/// through `ρ`; economic root claims go through the exact envelope digest).
+pub const CLOSURE_FORBIDDEN_CONTENT_CLASSES: &[u16] = &[
+    class::ECONOMIC_ROOT_CLAIM_BODY,
+    class::SOFI_SETUP_BODY,
+    class::SOFI_TRADER_PRECOMMIT_BODY,
+    class::SOFI_DLV_POLICY_FULFILLMENT_BODY,
+    class::SOFI_TRADER_FULFILLMENT_BODY,
+    class::SOFI_RESOLUTION_CLAIM,
+    class::SOFI_PRE_E_CLOSURE_INDEX,
+    class::SOFI_POLICY_FULFILLMENT_AUX_REF,
+    // The signed envelope wraps P and F, both of which commit E. Without this
+    // entry the wrapper would be a back door into `𝒞_E^pre` for the two
+    // objects the acyclicity argument most depends on keeping out — the list
+    // is keyed by CLASS, so a new wrapper class is not covered by the entries
+    // for the bodies it carries.
+    class::SOFI_SIGNED_OBJECT,
+    // The classes of B°, T°, V° and P(E) (SoFi §18.1, MR-SOFI-0176): each
+    // contains or commits the current E's operation, so none may appear in
+    // the closure E itself commits.
+    class::SOFI_SETTLEMENT_SWAP,
+    class::SOFI_SETTLEMENT_CLOSE,
+    class::SOFI_SETTLEMENT_RELEASE,
+    class::SOFI_TRADER_CORE,
+    class::SOFI_DLV_CORE,
+    class::SOFI_SETTLEMENT_PREIMAGE,
+];
+
+/// `𝒞_E^pre` — the exact finite set of E-independent validation references,
+/// encoded once inside `B°`. Its digest is derived when needed and is never a
+/// second normative field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreEClosureIndex {
+    refs: Vec<ValidationRef>,
+}
+
+impl PreEClosureIndex {
+    pub fn new(refs: Vec<ValidationRef>) -> Result<Self, SofiWireError> {
+        check_count("closure refs", 0, MAX_CLOSURE_REFS, refs.len())?;
+        for r in &refs {
+            if let ValidationRef::ContentAddr { object_class, .. } = r {
+                if CLOSURE_FORBIDDEN_CONTENT_CLASSES.contains(object_class) {
+                    return Err(SofiWireError::ForbiddenClosureClass {
+                        object_class: *object_class,
+                    });
+                }
+            }
+        }
+        let encoded: Vec<Vec<u8>> = refs.iter().map(ValidationRef::encode).collect();
+        check_strictly_ascending("closure refs", &encoded)?;
+        Ok(Self { refs })
+    }
+
+    pub fn refs(&self) -> &[ValidationRef] {
+        &self.refs
+    }
+
+    /// This index with `reference` among its refs, in canonical order. An
+    /// index that already references it is returned unchanged.
+    pub fn with(&self, reference: ValidationRef) -> Result<Self, SofiWireError> {
+        let mut refs = self.refs.clone();
+        if !refs.contains(&reference) {
+            refs.push(reference);
+            refs.sort_by_key(ValidationRef::encode);
+        }
+        Self::new(refs)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_PRE_E_CLOSURE_INDEX);
+        push_u32(&mut out, self.refs.len() as u32);
+        for r in &self.refs {
+            out.extend_from_slice(&r.encode());
+        }
+        out
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        c.envelope(class::SOFI_PRE_E_CLOSURE_INDEX, SCHEMA_V1)?;
+        let n = read_count(c, "closure refs", 0, MAX_CLOSURE_REFS)?;
+        let mut refs = Vec::with_capacity(n);
+        for _ in 0..n {
+            refs.push(ValidationRef::at(c)?);
+        }
+        Self::new(refs).map_err(wire_invalid)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0042 PolicyFulfillmentAuxRef ─────────────────────────────────────────
+
+/// One content-addressed auxiliary evidence candidate for a policy-fulfillment
+/// witness. Many may exist per `(policy_fulfillment_id, evidence_class)`; there
+/// is no singleton slot, and a candidate can only ever establish validity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyFulfillmentAuxRef {
+    pub policy_fulfillment_id: D32,
+    pub evidence_class: u16,
+    pub addr: D32,
+}
+
+impl PolicyFulfillmentAuxRef {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_POLICY_FULFILLMENT_AUX_REF);
+        push_digest32(&mut out, &self.policy_fulfillment_id);
+        push_u16(&mut out, self.evidence_class);
+        push_digest32(&mut out, &self.addr);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_POLICY_FULFILLMENT_AUX_REF, SCHEMA_V1)?;
+        let v = Self {
+            policy_fulfillment_id: c.digest32()?,
+            evidence_class: c.u16()?,
+            addr: c.digest32()?,
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x004A RouteLegSet ─────────────────────────────────────────────────────
+
+/// One entry of `Γ`: each setup reference is paired with its own vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteLegEntry {
+    pub vault_id: D32,
+    pub parent_root: D32,
+    pub setup_ref: D32,
+    pub shadow_core: D32,
+}
+
+/// `Γ` — the canonical route-leg set of a multi-vault E.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteLegSet {
+    legs: Vec<RouteLegEntry>,
+}
+
+impl RouteLegSet {
+    pub fn new(legs: Vec<RouteLegEntry>) -> Result<Self, SofiWireError> {
+        check_count("route legs", ROUTE_MIN_LEGS, CANONICAL_MAX_LEGS, legs.len())?;
+        let keys: Vec<D32> = legs.iter().map(|l| l.vault_id).collect();
+        check_strictly_ascending("route legs", &keys)?;
+        Ok(Self { legs })
+    }
+
+    pub fn legs(&self) -> &[RouteLegEntry] {
+        &self.legs
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_ROUTE_LEG_SET);
+        push_u32(&mut out, self.legs.len() as u32);
+        for l in &self.legs {
+            push_digest32(&mut out, &l.vault_id);
+            push_digest32(&mut out, &l.parent_root);
+            push_digest32(&mut out, &l.setup_ref);
+            push_digest32(&mut out, &l.shadow_core);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_ROUTE_LEG_SET, SCHEMA_V1)?;
+        let n = read_count(&mut c, "route legs", ROUTE_MIN_LEGS, CANONICAL_MAX_LEGS)?;
+        let mut legs = Vec::with_capacity(n);
+        for _ in 0..n {
+            legs.push(RouteLegEntry {
+                vault_id: c.digest32()?,
+                parent_root: c.digest32()?,
+                setup_ref: c.digest32()?,
+                shadow_core: c.digest32()?,
+            });
+        }
+        let v = Self::new(legs).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The DLV tree, the cores, B° and vault genesis (P15-4, 6, 7, 8, 11, 12)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `P(E)` has a frozen byte bound (R8-12). An object over it has no canonical
+/// representation at all, so the codec refuses it on both sides rather than
+/// leaving the rule to a later layer.
+fn check_preimage_bytes(bytes: &[u8]) -> Result<(), SofiWireError> {
+    if bytes.len() > MAX_SETTLEMENT_PREIMAGE_BYTES {
+        return Err(SofiWireError::ObjectTooLarge {
+            field: "settlement preimage",
+            bytes: bytes.len(),
+            max: MAX_SETTLEMENT_PREIMAGE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn check_status(status: u16) -> Result<(), SofiWireError> {
+    if status != VAULT_STATUS_ACTIVE && status != VAULT_STATUS_RETIRED {
+        return Err(SofiWireError::UnknownVaultStatus { status });
+    }
+    Ok(())
+}
+
+fn check_path(path: &[D32]) -> Result<(), SofiWireError> {
+    if path.len() != ECONOMIC_SMT_HEIGHT {
+        return Err(SofiWireError::PathDepth {
+            expected: ECONOMIC_SMT_HEIGHT,
+            got: path.len(),
+        });
+    }
+    Ok(())
+}
+
+fn push_path(out: &mut Vec<u8>, path: &[D32]) {
+    push_u32(out, path.len() as u32);
+    for sib in path {
+        push_digest32(out, sib);
+    }
+}
+
+fn read_path(c: &mut Cursor<'_>) -> Result<Vec<D32>, DecodeError> {
+    let n = read_count(c, "path", ECONOMIC_SMT_HEIGHT, ECONOMIC_SMT_HEIGHT)?;
+    (0..n).map(|_| c.digest32()).collect()
+}
+
+// ── 0x004B VaultStateLeaf ──────────────────────────────────────────────────
+
+/// The vault's own state leaf. `owner_device_id` is the ORIGIN device: it fixes
+/// `vault_id` forever and is not a claim about who controls the vault now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultStateLeaf {
+    pub owner_genesis: D32,
+    pub owner_device_id: D32,
+    pub create_position: u64,
+    pub market_policy: D32,
+    pub fee_policy: D32,
+    pub release_policy: D32,
+    pub storage_set_id: D32,
+    pub generation: u64,
+    pub reserve_a: u64,
+    pub reserve_b: u64,
+    pub status: u16,
+}
+
+impl VaultStateLeaf {
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        check_status(self.status)?;
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_STATE_LEAF);
+        push_digest32(&mut out, &self.owner_genesis);
+        push_digest32(&mut out, &self.owner_device_id);
+        push_u64(&mut out, self.create_position);
+        push_digest32(&mut out, &self.market_policy);
+        push_digest32(&mut out, &self.fee_policy);
+        push_digest32(&mut out, &self.release_policy);
+        push_digest32(&mut out, &self.storage_set_id);
+        push_u64(&mut out, self.generation);
+        push_u64(&mut out, self.reserve_a);
+        push_u64(&mut out, self.reserve_b);
+        push_u16(&mut out, self.status);
+        Ok(out)
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        c.envelope(class::SOFI_VAULT_STATE_LEAF, SCHEMA_V1)?;
+        let leaf = Self {
+            owner_genesis: c.digest32()?,
+            owner_device_id: c.digest32()?,
+            create_position: c.u64()?,
+            market_policy: c.digest32()?,
+            fee_policy: c.digest32()?,
+            release_policy: c.digest32()?,
+            storage_set_id: c.digest32()?,
+            generation: c.u64()?,
+            reserve_a: c.u64()?,
+            reserve_b: c.u64()?,
+            status: c.u16()?,
+        };
+        check_status(leaf.status).map_err(wire_invalid)?;
+        Ok(leaf)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x004C VaultRelationshipLeaf ───────────────────────────────────────────
+
+/// A trader's relationship leaf inside a vault's DLV tree. The key material is
+/// explicit so the tree can be rebuilt by replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultRelationshipLeaf {
+    pub trader_genesis: D32,
+    pub trader_device_id: D32,
+    pub leaf: D32,
+}
+
+impl VaultRelationshipLeaf {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_RELATIONSHIP_LEAF);
+        push_digest32(&mut out, &self.trader_genesis);
+        push_digest32(&mut out, &self.trader_device_id);
+        push_digest32(&mut out, &self.leaf);
+        out
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        c.envelope(class::SOFI_VAULT_RELATIONSHIP_LEAF, SCHEMA_V1)?;
+        Ok(Self {
+            trader_genesis: c.digest32()?,
+            trader_device_id: c.digest32()?,
+            leaf: c.digest32()?,
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0071 VaultFrontierV1 ─────────────────────────────────────────────────
+
+/// A vault's frontier: its root at one generation (SoFi Amendment S24), and
+/// the root of its history to that generation (SoFi Amendment S26), the
+/// commitment of a [`VaultHistoryHeadV1`]. Economic state only — nothing
+/// about the owner's authority is in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultFrontierV1 {
+    pub vault_id: D32,
+    pub generation: u64,
+    pub root: D32,
+    pub history_root: D32,
+}
+
+impl VaultFrontierV1 {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_FRONTIER);
+        push_digest32(&mut out, &self.vault_id);
+        push_u64(&mut out, self.generation);
+        push_digest32(&mut out, &self.root);
+        push_digest32(&mut out, &self.history_root);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_FRONTIER, SCHEMA_V1)?;
+        let v = Self {
+            vault_id: c.digest32()?,
+            generation: c.u64()?,
+            root: c.digest32()?,
+            history_root: c.digest32()?,
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x0074 VaultHistoryHeadV1 ──────────────────────────────────────────────
+
+/// The head of a vault's history at `generation` (SoFi Amendment S26): the
+/// peaks of the append-only tree whose leaf at position `g` is `R_g`, for
+/// `g` from zero to `generation`, left to right — one per set bit of
+/// `generation + 1`, highest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultHistoryHeadV1 {
+    pub vault_id: D32,
+    pub generation: u64,
+    pub peaks: Vec<D32>,
+}
+
+impl VaultHistoryHeadV1 {
+    /// How many peaks a history of `generation + 1` leaves has, or `None`
+    /// past the last generation a history can hold.
+    pub fn peak_count(generation: u64) -> Option<usize> {
+        generation
+            .checked_add(1)
+            .map(|leaves| leaves.count_ones() as usize)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let expected = Self::peak_count(self.generation).ok_or(SofiWireError::Cardinality {
+            field: "history peaks",
+            min: 1,
+            max: 64,
+            got: self.peaks.len(),
+        })?;
+        check_count("history peaks", expected, expected, self.peaks.len())?;
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_HISTORY_HEAD);
+        push_digest32(&mut out, &self.vault_id);
+        push_u64(&mut out, self.generation);
+        push_u32(&mut out, self.peaks.len() as u32);
+        for peak in &self.peaks {
+            push_digest32(&mut out, peak);
+        }
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_HISTORY_HEAD, SCHEMA_V1)?;
+        let vault_id = c.digest32()?;
+        let generation = c.u64()?;
+        let expected = Self::peak_count(generation).ok_or_else(|| {
+            wire_invalid(SofiWireError::Cardinality {
+                field: "history peaks",
+                min: 1,
+                max: 64,
+                got: 0,
+            })
+        })?;
+        let n = read_count(&mut c, "history peaks", expected, expected)?;
+        let mut peaks = Vec::with_capacity(n);
+        for _ in 0..n {
+            peaks.push(c.digest32()?);
+        }
+        finish(
+            &c,
+            Self {
+                vault_id,
+                generation,
+                peaks,
+            },
+        )
+    }
+}
+
+// ── 0x0073 OwnerBaselineAuthV1 ─────────────────────────────────────────────
+
+/// What an owner baseline's anchor signs: a frontier's commitment, and the
+/// owner-authority position its signer is proven at (SoFi Amendment S24).
+/// Authentication material, kept out of the frontier so the owner's
+/// authority lineage is never part of a vault's economic identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnerBaselineAuthV1 {
+    pub frontier_commitment: D32,
+    pub owner_authority_transition_digest: D32,
+}
+
+impl OwnerBaselineAuthV1 {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_OWNER_BASELINE_AUTH);
+        push_digest32(&mut out, &self.frontier_commitment);
+        push_digest32(&mut out, &self.owner_authority_transition_digest);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_OWNER_BASELINE_AUTH, SCHEMA_V1)?;
+        let v = Self {
+            frontier_commitment: c.digest32()?,
+            owner_authority_transition_digest: c.digest32()?,
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x0072 VaultFrontierWitnessV1 ──────────────────────────────────────────
+
+/// `relationship` kind: the trader holds no leaf in the vault's tree.
+const FRONTIER_RELATIONSHIP_ABSENT: u16 = 1;
+/// `relationship` kind: the trader's leaf, present.
+const FRONTIER_RELATIONSHIP_PRESENT: u16 = 2;
+
+/// One trader's relationship under a frontier's root: its leaf and path, or
+/// the path that proves it holds none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrontierRelationship {
+    Present {
+        leaf: VaultRelationshipLeaf,
+        path: Vec<D32>,
+    },
+    Absent {
+        path: Vec<D32>,
+    },
+}
+
+impl FrontierRelationship {
+    pub fn path(&self) -> &[D32] {
+        match self {
+            Self::Present { path, .. } | Self::Absent { path } => path,
+        }
+    }
+}
+
+/// The vault's state leaf with its path, and one trader's relationship proof,
+/// under a frontier's root (SoFi Amendment S24). Constant in size; it carries
+/// no authority, since every path is checked against the root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultFrontierWitnessV1 {
+    pub state_leaf: VaultStateLeaf,
+    pub state_path: Vec<D32>,
+    pub relationship: FrontierRelationship,
+}
+
+impl VaultFrontierWitnessV1 {
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        check_path(&self.state_path)?;
+        check_path(self.relationship.path())?;
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_FRONTIER_WITNESS);
+        out.extend_from_slice(&self.state_leaf.encode()?);
+        push_path(&mut out, &self.state_path);
+        match &self.relationship {
+            FrontierRelationship::Absent { path } => {
+                push_u16(&mut out, FRONTIER_RELATIONSHIP_ABSENT);
+                push_path(&mut out, path);
+            }
+            FrontierRelationship::Present { leaf, path } => {
+                push_u16(&mut out, FRONTIER_RELATIONSHIP_PRESENT);
+                out.extend_from_slice(&leaf.encode());
+                push_path(&mut out, path);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_FRONTIER_WITNESS, SCHEMA_V1)?;
+        let state_leaf = VaultStateLeaf::at(&mut c)?;
+        let state_path = read_path(&mut c)?;
+        let relationship = match c.u16()? {
+            FRONTIER_RELATIONSHIP_ABSENT => FrontierRelationship::Absent {
+                path: read_path(&mut c)?,
+            },
+            FRONTIER_RELATIONSHIP_PRESENT => FrontierRelationship::Present {
+                leaf: VaultRelationshipLeaf::at(&mut c)?,
+                path: read_path(&mut c)?,
+            },
+            kind => {
+                return Err(wire_invalid(SofiWireError::UnknownFrontierRelationship {
+                    kind,
+                }))
+            }
+        };
+        finish(
+            &c,
+            Self {
+                state_leaf,
+                state_path,
+                relationship,
+            },
+        )
+    }
+}
+
+// ── 0x004D TraderRelationshipLeaf ──────────────────────────────────────────
+
+/// The trader's own `R_econ` leaf for one vault relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraderRelationshipLeaf {
+    pub vault_id: D32,
+    pub leaf: D32,
+}
+
+impl TraderRelationshipLeaf {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_TRADER_RELATIONSHIP_LEAF);
+        push_digest32(&mut out, &self.vault_id);
+        push_digest32(&mut out, &self.leaf);
+        out
+    }
+
+    /// Nested decode, for `R_econ`'s class-keyed leaf reader. It shares the
+    /// field order with [`Self::decode`] rather than restating it, so the two
+    /// cannot drift.
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        c.envelope(class::SOFI_TRADER_RELATIONSHIP_LEAF, SCHEMA_V1)?;
+        Ok(Self {
+            vault_id: c.digest32()?,
+            leaf: c.digest32()?,
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0061 TraderPreBalance ────────────────────────────────────────────────
+
+/// A trader's balance of one token before a trade (SoFi Amendment S12).
+///
+/// `T°` states each balance leaf it writes only by the hash of its value, and
+/// `TraderSideValid` recomputes the balance after the trade from the balance
+/// before it. The exercise carries that value as this object, named in
+/// `𝒞_E^pre` by its content address, so `E` commits it. It is evidence and
+/// never authority: a verifier accepts it only because it hashes to the leaf
+/// value the core states at `balance_key(trader_genesis, trader_device_id,
+/// policy_commit)`, and the fold proves that leaf against the trader's root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraderPreBalance {
+    trader_genesis: D32,
+    trader_device_id: D32,
+    policy_commit: D32,
+    amount: u64,
+}
+
+impl TraderPreBalance {
+    /// A zero balance is an absent leaf and needs no object, so a zero amount
+    /// is refused rather than encoded.
+    pub fn new(
+        trader_genesis: D32,
+        trader_device_id: D32,
+        policy_commit: D32,
+        amount: u64,
+    ) -> Result<Self, SofiWireError> {
+        if amount == 0 {
+            return Err(SofiWireError::ZeroPreBalance);
+        }
+        Ok(Self {
+            trader_genesis,
+            trader_device_id,
+            policy_commit,
+            amount,
+        })
+    }
+
+    pub fn trader_genesis(&self) -> &D32 {
+        &self.trader_genesis
+    }
+
+    pub fn trader_device_id(&self) -> &D32 {
+        &self.trader_device_id
+    }
+
+    pub fn policy_commit(&self) -> &D32 {
+        &self.policy_commit
+    }
+
+    pub fn amount(&self) -> u64 {
+        self.amount
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_TRADER_PRE_BALANCE);
+        push_digest32(&mut out, &self.trader_genesis);
+        push_digest32(&mut out, &self.trader_device_id);
+        push_digest32(&mut out, &self.policy_commit);
+        push_u64(&mut out, self.amount);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_TRADER_PRE_BALANCE, SCHEMA_V1)?;
+        let v = Self::new(c.digest32()?, c.digest32()?, c.digest32()?, c.u64()?)
+            .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x004E | 0x004F | 0x0050 CoreEntry ─────────────────────────────────────
+
+/// One per-key entry of a core, with its full authentication path against the
+/// core's `pre_root`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreEntry {
+    /// A leaf written from `pre` to `post`.
+    Mutation {
+        key: D32,
+        pre: D32,
+        post: D32,
+        path: Vec<D32>,
+    },
+    /// A leaf read and not written. It still binds, because the fold covers it.
+    Read {
+        key: D32,
+        value: D32,
+        path: Vec<D32>,
+    },
+    /// A relationship leaf. Its post is `H(rel-leaf ‖ base ‖ E)` and cannot be
+    /// carried here: E is not known until the whole preimage is folded.
+    Relationship {
+        genesis: D32,
+        device_id: D32,
+        vault_id: D32,
+        base: D32,
+        path: Vec<D32>,
+    },
+}
+
+impl CoreEntry {
+    /// The `R_econ` key this entry is about. A relationship entry derives it
+    /// from its key material rather than restating it.
+    pub fn key(&self) -> D32 {
+        match self {
+            Self::Mutation { key, .. } | Self::Read { key, .. } => *key,
+            Self::Relationship {
+                genesis,
+                device_id,
+                vault_id,
+                ..
+            } => super::super::derive::relationship_key(genesis, device_id, vault_id),
+        }
+    }
+
+    pub fn path(&self) -> &[D32] {
+        match self {
+            Self::Mutation { path, .. } | Self::Read { path, .. } => path,
+            Self::Relationship { path, .. } => path,
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        check_path(self.path())?;
+        let mut out = Vec::new();
+        match self {
+            Self::Mutation {
+                key,
+                pre,
+                post,
+                path,
+            } => {
+                push_env(&mut out, class::SOFI_CORE_ENTRY_MUTATION);
+                push_digest32(&mut out, key);
+                push_digest32(&mut out, pre);
+                push_digest32(&mut out, post);
+                push_path(&mut out, path);
+            }
+            Self::Read { key, value, path } => {
+                push_env(&mut out, class::SOFI_CORE_ENTRY_READ);
+                push_digest32(&mut out, key);
+                push_digest32(&mut out, value);
+                push_path(&mut out, path);
+            }
+            Self::Relationship {
+                genesis,
+                device_id,
+                vault_id,
+                base,
+                path,
+            } => {
+                push_env(&mut out, class::SOFI_CORE_ENTRY_RELATIONSHIP);
+                push_digest32(&mut out, genesis);
+                push_digest32(&mut out, device_id);
+                push_digest32(&mut out, vault_id);
+                push_digest32(&mut out, base);
+                push_path(&mut out, path);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        match c.peek_class()? {
+            class::SOFI_CORE_ENTRY_MUTATION => {
+                c.envelope(class::SOFI_CORE_ENTRY_MUTATION, SCHEMA_V1)?;
+                Ok(Self::Mutation {
+                    key: c.digest32()?,
+                    pre: c.digest32()?,
+                    post: c.digest32()?,
+                    path: read_path(c)?,
+                })
+            }
+            class::SOFI_CORE_ENTRY_READ => {
+                c.envelope(class::SOFI_CORE_ENTRY_READ, SCHEMA_V1)?;
+                Ok(Self::Read {
+                    key: c.digest32()?,
+                    value: c.digest32()?,
+                    path: read_path(c)?,
+                })
+            }
+            class::SOFI_CORE_ENTRY_RELATIONSHIP => {
+                c.envelope(class::SOFI_CORE_ENTRY_RELATIONSHIP, SCHEMA_V1)?;
+                Ok(Self::Relationship {
+                    genesis: c.digest32()?,
+                    device_id: c.digest32()?,
+                    vault_id: c.digest32()?,
+                    base: c.digest32()?,
+                    path: read_path(c)?,
+                })
+            }
+            got => Err(DecodeError::WrongClass { got }),
+        }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+fn check_entries(entries: &[CoreEntry]) -> Result<(), SofiWireError> {
+    check_count("core entries", 1, MAX_CORE_ENTRIES, entries.len())?;
+    for e in entries {
+        check_path(e.path())?;
+    }
+    let keys: Vec<D32> = entries.iter().map(CoreEntry::key).collect();
+    check_strictly_ascending("core entries", &keys)
+}
+
+fn push_entries(out: &mut Vec<u8>, entries: &[CoreEntry]) -> Result<(), SofiWireError> {
+    push_u32(out, entries.len() as u32);
+    for e in entries {
+        out.extend_from_slice(&e.encode()?);
+    }
+    Ok(())
+}
+
+fn read_entries(c: &mut Cursor<'_>) -> Result<Vec<CoreEntry>, DecodeError> {
+    let n = read_count(c, "core entries", 1, MAX_CORE_ENTRIES)?;
+    (0..n).map(|_| CoreEntry::at(c)).collect()
+}
+
+// ── 0x0051 TraderCore ──────────────────────────────────────────────────────
+
+/// `T°`, scoped to `(G, DevID, q)`: E cannot be rebuilt at a later position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraderCore {
+    genesis: D32,
+    device_id: D32,
+    position: u64,
+    pre_root: D32,
+    entries: Vec<CoreEntry>,
+}
+
+impl TraderCore {
+    pub fn new(
+        genesis: D32,
+        device_id: D32,
+        position: u64,
+        pre_root: D32,
+        entries: Vec<CoreEntry>,
+    ) -> Result<Self, SofiWireError> {
+        check_entries(&entries)?;
+        Ok(Self {
+            genesis,
+            device_id,
+            position,
+            pre_root,
+            entries,
+        })
+    }
+
+    pub fn genesis(&self) -> &D32 {
+        &self.genesis
+    }
+    pub fn device_id(&self) -> &D32 {
+        &self.device_id
+    }
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+    pub fn pre_root(&self) -> &D32 {
+        &self.pre_root
+    }
+    pub fn entries(&self) -> &[CoreEntry] {
+        &self.entries
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_TRADER_CORE);
+        push_digest32(&mut out, &self.genesis);
+        push_digest32(&mut out, &self.device_id);
+        push_u64(&mut out, self.position);
+        push_digest32(&mut out, &self.pre_root);
+        push_entries(&mut out, &self.entries)?;
+        Ok(out)
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        c.envelope(class::SOFI_TRADER_CORE, SCHEMA_V1)?;
+        let genesis = c.digest32()?;
+        let device_id = c.digest32()?;
+        let position = c.u64()?;
+        let pre_root = c.digest32()?;
+        let entries = read_entries(c)?;
+        Self::new(genesis, device_id, position, pre_root, entries).map_err(wire_invalid)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0052 DlvCore ─────────────────────────────────────────────────────────
+
+/// `V°_j`. Its marker carries the trader's identity and the relationship base
+/// `T°` proved, so the two cores cannot be paired with a different trader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DlvCore {
+    vault_id: D32,
+    pre_root: D32,
+    trader_genesis: D32,
+    trader_device_id: D32,
+    relationship_base: D32,
+    entries: Vec<CoreEntry>,
+}
+
+impl DlvCore {
+    pub fn new(
+        vault_id: D32,
+        pre_root: D32,
+        trader_genesis: D32,
+        trader_device_id: D32,
+        relationship_base: D32,
+        entries: Vec<CoreEntry>,
+    ) -> Result<Self, SofiWireError> {
+        check_entries(&entries)?;
+        Ok(Self {
+            vault_id,
+            pre_root,
+            trader_genesis,
+            trader_device_id,
+            relationship_base,
+            entries,
+        })
+    }
+
+    pub fn vault_id(&self) -> &D32 {
+        &self.vault_id
+    }
+    pub fn pre_root(&self) -> &D32 {
+        &self.pre_root
+    }
+    pub fn trader_genesis(&self) -> &D32 {
+        &self.trader_genesis
+    }
+    pub fn trader_device_id(&self) -> &D32 {
+        &self.trader_device_id
+    }
+    pub fn relationship_base(&self) -> &D32 {
+        &self.relationship_base
+    }
+    pub fn entries(&self) -> &[CoreEntry] {
+        &self.entries
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_DLV_CORE);
+        push_digest32(&mut out, &self.vault_id);
+        push_digest32(&mut out, &self.pre_root);
+        push_digest32(&mut out, &self.trader_genesis);
+        push_digest32(&mut out, &self.trader_device_id);
+        push_digest32(&mut out, &self.relationship_base);
+        push_entries(&mut out, &self.entries)?;
+        Ok(out)
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        c.envelope(class::SOFI_DLV_CORE, SCHEMA_V1)?;
+        let vault_id = c.digest32()?;
+        let pre_root = c.digest32()?;
+        let trader_genesis = c.digest32()?;
+        let trader_device_id = c.digest32()?;
+        let relationship_base = c.digest32()?;
+        let entries = read_entries(c)?;
+        Self::new(
+            vault_id,
+            pre_root,
+            trader_genesis,
+            trader_device_id,
+            relationship_base,
+            entries,
+        )
+        .map_err(wire_invalid)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0055 | 0x0056 OwnerAuthority ─────────────────────────────────────────
+
+/// Who may close a vault. Frozen as a union now so activating DSM succession
+/// later needs no byte change [R18-1].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerAuthority {
+    /// The vault's origin device — the only branch semantic validation accepts.
+    /// Today's mnemonic recovery re-derives the same `(G, DevID)` and key, so
+    /// a recovered owner closes through this branch.
+    Origin,
+    /// A DSM succession successor, named opaquely. Encodable and decodable;
+    /// ALWAYS Invalid (never Unavailable) in this protocol, because a verifier
+    /// KNOWS the branch is not activated. No production builder emits it.
+    DsmSuccessor {
+        authority_class: u16,
+        authority_addr: D32,
+    },
+}
+
+impl OwnerAuthority {
+    /// Whether this protocol version can act on the branch at all. Semantic
+    /// validation turns `false` into Invalid, never Unavailable.
+    pub fn is_activated(&self) -> bool {
+        matches!(self, Self::Origin)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            Self::Origin => push_env(&mut out, class::SOFI_OWNER_AUTHORITY_ORIGIN),
+            Self::DsmSuccessor {
+                authority_class,
+                authority_addr,
+            } => {
+                push_env(&mut out, class::SOFI_OWNER_AUTHORITY_DSM_SUCCESSOR);
+                push_u16(&mut out, *authority_class);
+                push_digest32(&mut out, authority_addr);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        match c.peek_class()? {
+            class::SOFI_OWNER_AUTHORITY_ORIGIN => {
+                c.envelope(class::SOFI_OWNER_AUTHORITY_ORIGIN, SCHEMA_V1)?;
+                Ok(Self::Origin)
+            }
+            class::SOFI_OWNER_AUTHORITY_DSM_SUCCESSOR => {
+                c.envelope(class::SOFI_OWNER_AUTHORITY_DSM_SUCCESSOR, SCHEMA_V1)?;
+                Ok(Self::DsmSuccessor {
+                    authority_class: c.u16()?,
+                    authority_addr: c.digest32()?,
+                })
+            }
+            got => Err(DecodeError::WrongClass { got }),
+        }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── hop entries, shared by the Swap branch and its route digest ────────────
+
+/// One hop of a swap, in hop order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwapHop {
+    pub vault_id: D32,
+    pub parent_root: D32,
+    pub setup_ref: D32,
+    pub token_in: D32,
+    pub amount_in: u64,
+    pub token_out: D32,
+    pub amount_out: u64,
+}
+
+impl SwapHop {
+    fn push(&self, out: &mut Vec<u8>) {
+        push_digest32(out, &self.vault_id);
+        push_digest32(out, &self.parent_root);
+        push_digest32(out, &self.setup_ref);
+        push_digest32(out, &self.token_in);
+        push_u64(out, self.amount_in);
+        push_digest32(out, &self.token_out);
+        push_u64(out, self.amount_out);
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            vault_id: c.digest32()?,
+            parent_root: c.digest32()?,
+            setup_ref: c.digest32()?,
+            token_in: c.digest32()?,
+            amount_in: c.u64()?,
+            token_out: c.digest32()?,
+            amount_out: c.u64()?,
+        })
+    }
+}
+
+/// Hops are in HOP order, not sorted — the route's shape is the order. So
+/// distinctness is checked as a set, and a repeated vault is refused [R15-4]:
+/// every DLV parent is referenced at most once per route.
+fn check_hops(hops: &[SwapHop]) -> Result<(), SofiWireError> {
+    check_count("swap hops", 1, CANONICAL_MAX_LEGS, hops.len())?;
+    let mut sorted: Vec<D32> = hops.iter().map(|h| h.vault_id).collect();
+    sorted.sort_unstable();
+    check_strictly_ascending("swap hop vault ids", &sorted)
+}
+
+fn push_hops(out: &mut Vec<u8>, hops: &[SwapHop]) {
+    push_u32(out, hops.len() as u32);
+    for h in hops {
+        h.push(out);
+    }
+}
+
+fn read_hops(c: &mut Cursor<'_>) -> Result<Vec<SwapHop>, DecodeError> {
+    let n = read_count(c, "swap hops", 1, CANONICAL_MAX_LEGS)?;
+    let hops: Vec<SwapHop> = (0..n).map(|_| SwapHop::at(c)).collect::<Result<_, _>>()?;
+    check_hops(&hops).map_err(wire_invalid)?;
+    Ok(hops)
+}
+
+// ── 0x0057 | 0x0058 RouteDigestPreimage ────────────────────────────────────
+
+/// What `X_route` commits. The variant is discriminated, so `RecomputeE`
+/// derives it from `B°`'s own branch and cannot reinterpret one as the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteDigestPreimage {
+    Swap {
+        hops: Vec<SwapHop>,
+    },
+    Close {
+        vault_id: D32,
+        parent_root: D32,
+        setup_ref: D32,
+        reserve_a: u64,
+        reserve_b: u64,
+    },
+    /// An escrow vault's release (SoFi Amendment S21).
+    Release {
+        vault_id: D32,
+        parent_root: D32,
+        setup_ref: D32,
+        verdict_cell: D32,
+        outcome: Vec<u8>,
+        amount: u64,
+    },
+}
+
+impl RouteDigestPreimage {
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let mut out = Vec::new();
+        match self {
+            Self::Swap { hops } => {
+                check_hops(hops)?;
+                push_env(&mut out, class::SOFI_ROUTE_DIGEST_SWAP);
+                push_hops(&mut out, hops);
+            }
+            Self::Close {
+                vault_id,
+                parent_root,
+                setup_ref,
+                reserve_a,
+                reserve_b,
+            } => {
+                push_env(&mut out, class::SOFI_ROUTE_DIGEST_CLOSE);
+                push_digest32(&mut out, vault_id);
+                push_digest32(&mut out, parent_root);
+                push_digest32(&mut out, setup_ref);
+                push_u64(&mut out, *reserve_a);
+                push_u64(&mut out, *reserve_b);
+            }
+            Self::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                verdict_cell,
+                outcome,
+                amount,
+            } => {
+                check_outcome(outcome)?;
+                push_env(&mut out, class::SOFI_ROUTE_DIGEST_RELEASE);
+                push_digest32(&mut out, vault_id);
+                push_digest32(&mut out, parent_root);
+                push_digest32(&mut out, setup_ref);
+                push_digest32(&mut out, verdict_cell);
+                push_part(&mut out, outcome);
+                push_u64(&mut out, *amount);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = match c.peek_class()? {
+            class::SOFI_ROUTE_DIGEST_SWAP => {
+                c.envelope(class::SOFI_ROUTE_DIGEST_SWAP, SCHEMA_V1)?;
+                Self::Swap {
+                    hops: read_hops(&mut c)?,
+                }
+            }
+            class::SOFI_ROUTE_DIGEST_CLOSE => {
+                c.envelope(class::SOFI_ROUTE_DIGEST_CLOSE, SCHEMA_V1)?;
+                Self::Close {
+                    vault_id: c.digest32()?,
+                    parent_root: c.digest32()?,
+                    setup_ref: c.digest32()?,
+                    reserve_a: c.u64()?,
+                    reserve_b: c.u64()?,
+                }
+            }
+            class::SOFI_ROUTE_DIGEST_RELEASE => {
+                c.envelope(class::SOFI_ROUTE_DIGEST_RELEASE, SCHEMA_V1)?;
+                Self::Release {
+                    vault_id: c.digest32()?,
+                    parent_root: c.digest32()?,
+                    setup_ref: c.digest32()?,
+                    verdict_cell: c.digest32()?,
+                    outcome: read_var_bytes(&mut c, ESCROW_MAX_OUTCOME_BYTES)?,
+                    amount: c.u64()?,
+                }
+            }
+            got => return Err(DecodeError::WrongClass { got }),
+        };
+        finish(&c, v)
+    }
+}
+
+// ── 0x0053 | 0x0054 SettlementBody (B°) ────────────────────────────────────
+
+/// `B°` — the settlement body, one branch per operation kind. The branch fixes
+/// the write sets, the static checks and the route digest's variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementBody {
+    Swap {
+        token_in: D32,
+        amount_in: u64,
+        token_out: D32,
+        exact_out: u64,
+        hops: Vec<SwapHop>,
+        trader_core: D32,
+        dlv_cores: Vec<D32>,
+        closure: PreEClosureIndex,
+    },
+    Close {
+        vault_id: D32,
+        parent_root: D32,
+        setup_ref: D32,
+        owner_authority: OwnerAuthority,
+        reserve_a: u64,
+        reserve_b: u64,
+        trader_core: D32,
+        dlv_core: D32,
+        closure: PreEClosureIndex,
+    },
+    /// An escrow vault's whole amount to the recipient of the branch whose
+    /// outcome the verdict at `verdict_cell` names (SoFi Amendment S21). It
+    /// names the outcome and the cell; the verdict is a fact resolution
+    /// reads, never an input of `E`.
+    Release {
+        vault_id: D32,
+        parent_root: D32,
+        setup_ref: D32,
+        verdict_cell: D32,
+        outcome: Vec<u8>,
+        amount: u64,
+        trader_core: D32,
+        dlv_core: D32,
+        closure: PreEClosureIndex,
+    },
+}
+
+impl SettlementBody {
+    /// How many DLV parents the operation references: hop count for a swap,
+    /// one for a close. It selects the form of E, never the beta cap.
+    pub fn leg_count(&self) -> usize {
+        match self {
+            Self::Swap { hops, .. } => hops.len(),
+            Self::Close { .. } | Self::Release { .. } => 1,
+        }
+    }
+
+    /// `𝒞_E^pre` — the E-independent validation references this branch
+    /// commits, whatever the branch.
+    pub fn closure(&self) -> &PreEClosureIndex {
+        match self {
+            Self::Swap { closure, .. }
+            | Self::Close { closure, .. }
+            | Self::Release { closure, .. } => closure,
+        }
+    }
+
+    /// The route-digest preimage this branch commits. Derived from the branch,
+    /// so no caller chooses the reading.
+    pub fn route_digest_preimage(&self) -> RouteDigestPreimage {
+        match self {
+            Self::Swap { hops, .. } => RouteDigestPreimage::Swap { hops: hops.clone() },
+            Self::Close {
+                vault_id,
+                parent_root,
+                setup_ref,
+                reserve_a,
+                reserve_b,
+                ..
+            } => RouteDigestPreimage::Close {
+                vault_id: *vault_id,
+                parent_root: *parent_root,
+                setup_ref: *setup_ref,
+                reserve_a: *reserve_a,
+                reserve_b: *reserve_b,
+            },
+            Self::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                verdict_cell,
+                outcome,
+                amount,
+                ..
+            } => RouteDigestPreimage::Release {
+                vault_id: *vault_id,
+                parent_root: *parent_root,
+                setup_ref: *setup_ref,
+                verdict_cell: *verdict_cell,
+                outcome: outcome.clone(),
+                amount: *amount,
+            },
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let mut out = Vec::new();
+        match self {
+            Self::Swap {
+                token_in,
+                amount_in,
+                token_out,
+                exact_out,
+                hops,
+                trader_core,
+                dlv_cores,
+                closure,
+            } => {
+                check_hops(hops)?;
+                // One core reference per carried core, in P(E)'s own order
+                // (which is sorted by vault id). The references are DIGESTS,
+                // so they carry no order of their own and nothing here can
+                // bind them to the cores — `sofi::validation` does that, and
+                // must, because the cores are not in scope at this layer.
+                check_count("dlv cores", 1, CANONICAL_MAX_LEGS, dlv_cores.len())?;
+                push_env(&mut out, class::SOFI_SETTLEMENT_SWAP);
+                push_digest32(&mut out, token_in);
+                push_u64(&mut out, *amount_in);
+                push_digest32(&mut out, token_out);
+                push_u64(&mut out, *exact_out);
+                push_hops(&mut out, hops);
+                push_digest32(&mut out, trader_core);
+                push_u32(&mut out, dlv_cores.len() as u32);
+                for core in dlv_cores {
+                    push_digest32(&mut out, core);
+                }
+                out.extend_from_slice(&closure.encode());
+            }
+            Self::Close {
+                vault_id,
+                parent_root,
+                setup_ref,
+                owner_authority,
+                reserve_a,
+                reserve_b,
+                trader_core,
+                dlv_core,
+                closure,
+            } => {
+                push_env(&mut out, class::SOFI_SETTLEMENT_CLOSE);
+                push_digest32(&mut out, vault_id);
+                push_digest32(&mut out, parent_root);
+                push_digest32(&mut out, setup_ref);
+                out.extend_from_slice(&owner_authority.encode());
+                push_u64(&mut out, *reserve_a);
+                push_u64(&mut out, *reserve_b);
+                push_digest32(&mut out, trader_core);
+                push_digest32(&mut out, dlv_core);
+                out.extend_from_slice(&closure.encode());
+            }
+            Self::Release {
+                vault_id,
+                parent_root,
+                setup_ref,
+                verdict_cell,
+                outcome,
+                amount,
+                trader_core,
+                dlv_core,
+                closure,
+            } => {
+                check_outcome(outcome)?;
+                push_env(&mut out, class::SOFI_SETTLEMENT_RELEASE);
+                push_digest32(&mut out, vault_id);
+                push_digest32(&mut out, parent_root);
+                push_digest32(&mut out, setup_ref);
+                push_digest32(&mut out, verdict_cell);
+                push_part(&mut out, outcome);
+                push_u64(&mut out, *amount);
+                push_digest32(&mut out, trader_core);
+                push_digest32(&mut out, dlv_core);
+                out.extend_from_slice(&closure.encode());
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        match c.peek_class()? {
+            class::SOFI_SETTLEMENT_SWAP => {
+                c.envelope(class::SOFI_SETTLEMENT_SWAP, SCHEMA_V1)?;
+                let token_in = c.digest32()?;
+                let amount_in = c.u64()?;
+                let token_out = c.digest32()?;
+                let exact_out = c.u64()?;
+                let hops = read_hops(c)?;
+                let trader_core = c.digest32()?;
+                let n = read_count(c, "dlv cores", 1, CANONICAL_MAX_LEGS)?;
+                let dlv_cores: Vec<D32> = (0..n).map(|_| c.digest32()).collect::<Result<_, _>>()?;
+                let closure = PreEClosureIndex::at(c)?;
+                Ok(Self::Swap {
+                    token_in,
+                    amount_in,
+                    token_out,
+                    exact_out,
+                    hops,
+                    trader_core,
+                    dlv_cores,
+                    closure,
+                })
+            }
+            class::SOFI_SETTLEMENT_CLOSE => {
+                c.envelope(class::SOFI_SETTLEMENT_CLOSE, SCHEMA_V1)?;
+                Ok(Self::Close {
+                    vault_id: c.digest32()?,
+                    parent_root: c.digest32()?,
+                    setup_ref: c.digest32()?,
+                    owner_authority: OwnerAuthority::at(c)?,
+                    reserve_a: c.u64()?,
+                    reserve_b: c.u64()?,
+                    trader_core: c.digest32()?,
+                    dlv_core: c.digest32()?,
+                    closure: PreEClosureIndex::at(c)?,
+                })
+            }
+            class::SOFI_SETTLEMENT_RELEASE => {
+                c.envelope(class::SOFI_SETTLEMENT_RELEASE, SCHEMA_V1)?;
+                Ok(Self::Release {
+                    vault_id: c.digest32()?,
+                    parent_root: c.digest32()?,
+                    setup_ref: c.digest32()?,
+                    verdict_cell: c.digest32()?,
+                    outcome: read_var_bytes(c, ESCROW_MAX_OUTCOME_BYTES)?,
+                    amount: c.u64()?,
+                    trader_core: c.digest32()?,
+                    dlv_core: c.digest32()?,
+                    closure: PreEClosureIndex::at(c)?,
+                })
+            }
+            got => Err(DecodeError::WrongClass { got }),
+        }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0059 SettlementPreimage (P(E)) ───────────────────────────────────────
+
+/// `P(E) = {B°, T°, V° sorted by vault_id}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementPreimage {
+    settlement: SettlementBody,
+    trader_core: TraderCore,
+    dlv_cores: Vec<DlvCore>,
+}
+
+impl SettlementPreimage {
+    pub fn new(
+        settlement: SettlementBody,
+        trader_core: TraderCore,
+        dlv_cores: Vec<DlvCore>,
+    ) -> Result<Self, SofiWireError> {
+        // EXACTLY one core per DLV parent the settlement references. Without
+        // this, two different canonical `P(E)` byte strings — one carrying a
+        // spare core — recompute to the same single-vault E, because the
+        // derivation reads only the first. That is a second preimage for one
+        // commitment, with no hash collision anywhere in it.
+        let expected = settlement.leg_count();
+        check_count("dlv cores", expected, expected, dlv_cores.len())?;
+        let keys: Vec<D32> = dlv_cores.iter().map(|c| *c.vault_id()).collect();
+        check_strictly_ascending("dlv cores", &keys)?;
+        let preimage = Self {
+            settlement,
+            trader_core,
+            dlv_cores,
+        };
+        // An oversized P(E) has NO admissible canonical representation, so the
+        // object refuses to exist rather than existing unencodable.
+        check_preimage_bytes(&preimage.encode_unchecked()?)?;
+        Ok(preimage)
+    }
+
+    pub fn settlement(&self) -> &SettlementBody {
+        &self.settlement
+    }
+    pub fn trader_core(&self) -> &TraderCore {
+        &self.trader_core
+    }
+    pub fn dlv_cores(&self) -> &[DlvCore] {
+        &self.dlv_cores
+    }
+
+    fn encode_unchecked(&self) -> Result<Vec<u8>, SofiWireError> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_SETTLEMENT_PREIMAGE);
+        out.extend_from_slice(&self.settlement.encode()?);
+        out.extend_from_slice(&self.trader_core.encode()?);
+        push_u32(&mut out, self.dlv_cores.len() as u32);
+        for core in &self.dlv_cores {
+            out.extend_from_slice(&core.encode()?);
+        }
+        Ok(out)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let out = self.encode_unchecked()?;
+        check_preimage_bytes(&out)?;
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        // Refused BEFORE parsing: an oversized preimage is not a thing to be
+        // examined and then rejected, it is bytes that name no object.
+        check_preimage_bytes(bytes).map_err(wire_invalid)?;
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_SETTLEMENT_PREIMAGE, SCHEMA_V1)?;
+        let settlement = SettlementBody::at(&mut c)?;
+        let trader_core = TraderCore::at(&mut c)?;
+        let n = read_count(&mut c, "dlv cores", 1, CANONICAL_MAX_LEGS)?;
+        let dlv_cores: Vec<DlvCore> = (0..n)
+            .map(|_| DlvCore::at(&mut c))
+            .collect::<Result<_, _>>()?;
+        let v = Self::new(settlement, trader_core, dlv_cores).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x005A VaultGenesisPreimage · 0x005B VaultCreation ─────────────────────
+
+/// What `GenesisAccepted` validates against: the identity that fixes
+/// `vault_id`, and the exact state `V_0` must hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultGenesisPreimage {
+    pub owner_genesis: D32,
+    pub owner_device_id: D32,
+    pub create_position: u64,
+    pub state: VaultStateLeaf,
+}
+
+impl VaultGenesisPreimage {
+    /// `v = H(vault-id/v1 ‖ G_o ‖ DevID_o ‖ u64be(p_create))`, recomputed from
+    /// these bytes rather than carried, so a genesis cannot name another vault.
+    pub fn vault_id(&self) -> D32 {
+        super::super::derive::vault_id(
+            &self.owner_genesis,
+            &self.owner_device_id,
+            self.create_position,
+        )
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_GENESIS_PREIMAGE);
+        push_digest32(&mut out, &self.owner_genesis);
+        push_digest32(&mut out, &self.owner_device_id);
+        push_u64(&mut out, self.create_position);
+        out.extend_from_slice(&self.state.encode()?);
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_GENESIS_PREIMAGE, SCHEMA_V1)?;
+        let v = Self {
+            owner_genesis: c.digest32()?,
+            owner_device_id: c.digest32()?,
+            create_position: c.u64()?,
+            state: VaultStateLeaf::at(&mut c)?,
+        };
+        finish(&c, v)
+    }
+}
+
+/// The owner's insert-only creation record at `p_create`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultCreation {
+    pub vault_id: D32,
+    pub genesis_root: D32,
+    pub amount_a: u64,
+    pub amount_b: u64,
+}
+
+impl VaultCreation {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_CREATION);
+        push_digest32(&mut out, &self.vault_id);
+        push_digest32(&mut out, &self.genesis_root);
+        push_u64(&mut out, self.amount_a);
+        push_u64(&mut out, self.amount_b);
+        out
+    }
+
+    /// Decode at a cursor, for a nested reader. The economic leaf decoder
+    /// needs this: a creation record is also an `R_econ` leaf (P15-12), and
+    /// the leaf carries these exact bytes rather than a second encoding.
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        c.envelope(class::SOFI_VAULT_CREATION, SCHEMA_V1)?;
+        Ok(Self {
+            vault_id: c.digest32()?,
+            genesis_root: c.digest32()?,
+            amount_a: c.u64()?,
+            amount_b: c.u64()?,
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0063 EscrowTerms · 0x0064 EscrowVerdict (SoFi Amendment S21) ─────────
+
+/// The longest outcome label an escrow branch or verdict carries.
+pub const ESCROW_MAX_OUTCOME_BYTES: usize = 64;
+/// The most branches one escrow vault's terms carry.
+pub const ESCROW_MAX_BRANCHES: usize = 16;
+/// The most signers one outcome is decided by, and one verdict carries.
+pub const ESCROW_MAX_SIGNERS: usize = 4;
+
+/// One signer of an escrow outcome: a declared algorithm and a key of its
+/// width. Signers are ordered by [`EscrowSigner::canonical`], the bytes the
+/// outcome table commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowSigner {
+    signature_alg: u16,
+    public_key: Vec<u8>,
+}
+
+impl EscrowSigner {
+    pub fn new(signature_alg: u16, public_key: &[u8]) -> Result<Self, SofiWireError> {
+        check_key(signature_alg, public_key)?;
+        Ok(Self {
+            signature_alg,
+            public_key: public_key.to_vec(),
+        })
+    }
+
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
+    }
+
+    /// `u16be(alg) ‖ u32be(|key|) ‖ key`: what a signer set is ordered by and
+    /// what the outcome table commits for it.
+    pub fn canonical(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(6 + self.public_key.len());
+        push_key(&mut out, self.signature_alg, &self.public_key);
+        out
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let (signature_alg, public_key) = read_key(c)?;
+        Ok(Self {
+            signature_alg,
+            public_key,
+        })
+    }
+}
+
+fn check_outcome(outcome: &[u8]) -> Result<(), SofiWireError> {
+    check_count("outcome bytes", 1, ESCROW_MAX_OUTCOME_BYTES, outcome.len())
+}
+
+fn check_signer_set(field: &'static str, signers: &[EscrowSigner]) -> Result<(), SofiWireError> {
+    check_count(field, 1, ESCROW_MAX_SIGNERS, signers.len())?;
+    let keys: Vec<Vec<u8>> = signers.iter().map(EscrowSigner::canonical).collect();
+    check_strictly_ascending(field, &keys)
+}
+
+fn read_signers(c: &mut Cursor<'_>, field: &'static str) -> Result<Vec<EscrowSigner>, DecodeError> {
+    let n = read_count(c, field, 1, ESCROW_MAX_SIGNERS)?;
+    let signers: Vec<EscrowSigner> = (0..n)
+        .map(|_| EscrowSigner::at(c))
+        .collect::<Result<_, _>>()?;
+    check_signer_set(field, &signers).map_err(wire_invalid)?;
+    Ok(signers)
+}
+
+/// One outcome and the exact signer set that decides it: an entry of the
+/// outcome table (SoFi §19.9). Every signer of the set must sign; there is no
+/// threshold, and a set with a duplicate or no signer has no encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowOutcome {
+    outcome: Vec<u8>,
+    signers: Vec<EscrowSigner>,
+}
+
+impl EscrowOutcome {
+    pub fn new(outcome: &[u8], signers: Vec<EscrowSigner>) -> Result<Self, SofiWireError> {
+        check_outcome(outcome)?;
+        check_signer_set("outcome signers", &signers)?;
+        Ok(Self {
+            outcome: outcome.to_vec(),
+            signers,
+        })
+    }
+
+    pub fn outcome(&self) -> &[u8] {
+        &self.outcome
+    }
+
+    pub fn signers(&self) -> &[EscrowSigner] {
+        &self.signers
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_part(out, &self.outcome);
+        push_u32(out, self.signers.len() as u32);
+        for signer in &self.signers {
+            push_key(out, signer.signature_alg, &signer.public_key);
+        }
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let outcome = read_var_bytes(c, ESCROW_MAX_OUTCOME_BYTES)?;
+        let signers = read_signers(c, "outcome signers")?;
+        Ok(Self { outcome, signers })
+    }
+}
+
+/// The outcome table `O`: an escrow vault's branches with their recipients
+/// removed, strictly ascending by outcome. It is the verdict authority, and it
+/// has exactly one encoding, so parties that agree on the same outcomes and
+/// signers derive the same `τ` (SoFi §19.9, "Linked vaults").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeTable {
+    entries: Vec<EscrowOutcome>,
+}
+
+impl OutcomeTable {
+    pub fn new(entries: Vec<EscrowOutcome>) -> Result<Self, SofiWireError> {
+        check_count("outcome table", 1, ESCROW_MAX_BRANCHES, entries.len())?;
+        let labels: Vec<&[u8]> = entries.iter().map(EscrowOutcome::outcome).collect();
+        check_strictly_ascending("outcome table", &labels)?;
+        Ok(Self { entries })
+    }
+
+    pub fn entries(&self) -> &[EscrowOutcome] {
+        &self.entries
+    }
+
+    /// The exact signer set that decides `outcome`, when the table has it.
+    pub fn signers_of(&self, outcome: &[u8]) -> Option<&[EscrowSigner]> {
+        self.entries
+            .iter()
+            .find(|entry| entry.outcome == outcome)
+            .map(EscrowOutcome::signers)
+    }
+
+    /// `u8(|O|) ‖ ⨁ (u32be(|o|) ‖ o ‖ u8(|signers|) ‖ ⨁ signer)`: what `τ`
+    /// hashes. Its own encoding, not the CCB one: the count bounds fix every
+    /// width, so a table has exactly these bytes.
+    pub fn digest_preimage(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        // At most ESCROW_MAX_BRANCHES entries and ESCROW_MAX_SIGNERS signers,
+        // so both counts fit a byte.
+        out.push(self.entries.len() as u8);
+        for entry in &self.entries {
+            push_part(&mut out, &entry.outcome);
+            out.push(entry.signers.len() as u8);
+            for signer in &entry.signers {
+                push_key(&mut out, signer.signature_alg, &signer.public_key);
+            }
+        }
+        out
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_u32(out, self.entries.len() as u32);
+        for entry in &self.entries {
+            entry.push(out);
+        }
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let n = read_count(c, "outcome table", 1, ESCROW_MAX_BRANCHES)?;
+        let entries: Vec<EscrowOutcome> = (0..n)
+            .map(|_| EscrowOutcome::at(c))
+            .collect::<Result<_, _>>()?;
+        Self::new(entries).map_err(wire_invalid)
+    }
+}
+
+/// One branch of an escrow vault's terms: an outcome, the exact signer set
+/// that decides it, and the identity it pays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowBranch {
+    decided: EscrowOutcome,
+    recipient_genesis: D32,
+    recipient_device_id: D32,
+}
+
+impl EscrowBranch {
+    pub fn new(decided: EscrowOutcome, recipient_genesis: D32, recipient_device_id: D32) -> Self {
+        Self {
+            decided,
+            recipient_genesis,
+            recipient_device_id,
+        }
+    }
+
+    pub fn outcome(&self) -> &[u8] {
+        self.decided.outcome()
+    }
+
+    pub fn signers(&self) -> &[EscrowSigner] {
+        self.decided.signers()
+    }
+
+    pub fn recipient_genesis(&self) -> &D32 {
+        &self.recipient_genesis
+    }
+
+    pub fn recipient_device_id(&self) -> &D32 {
+        &self.recipient_device_id
+    }
+}
+
+/// `0x0063 EscrowTerms` — what an escrow vault's three policy slots name (SoFi
+/// §19.9): the held token, the external commitment `Y`, and the branches,
+/// strictly ascending by outcome. The vault releases its whole amount once,
+/// along the branch whose outcome the canonical verdict names. Nothing is
+/// chosen at release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowTerms {
+    token: D32,
+    external_commitment: D32,
+    branches: Vec<EscrowBranch>,
+}
+
+impl EscrowTerms {
+    pub fn new(
+        token: D32,
+        external_commitment: D32,
+        branches: Vec<EscrowBranch>,
+    ) -> Result<Self, SofiWireError> {
+        check_count("escrow branches", 1, ESCROW_MAX_BRANCHES, branches.len())?;
+        let labels: Vec<&[u8]> = branches.iter().map(EscrowBranch::outcome).collect();
+        check_strictly_ascending("escrow branches", &labels)?;
+        Ok(Self {
+            token,
+            external_commitment,
+            branches,
+        })
+    }
+
+    /// The policy commit of the held token.
+    pub fn token(&self) -> &D32 {
+        &self.token
+    }
+
+    /// `Y = H(DSM/external/v1 ‖ X)`.
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn branches(&self) -> &[EscrowBranch] {
+        &self.branches
+    }
+
+    /// The branch whose outcome is `outcome`, when the terms have one.
+    pub fn branch(&self, outcome: &[u8]) -> Option<&EscrowBranch> {
+        self.branches.iter().find(|b| b.outcome() == outcome)
+    }
+
+    /// The outcome table: the branches with their recipients removed, in
+    /// branch order, so it is canonical whenever the terms are.
+    pub fn outcome_table(&self) -> OutcomeTable {
+        OutcomeTable {
+            entries: self.branches.iter().map(|b| b.decided.clone()).collect(),
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_TERMS);
+        push_digest32(&mut out, &self.token);
+        push_digest32(&mut out, &self.external_commitment);
+        push_u32(&mut out, self.branches.len() as u32);
+        for branch in &self.branches {
+            branch.decided.push(&mut out);
+            push_digest32(&mut out, &branch.recipient_genesis);
+            push_digest32(&mut out, &branch.recipient_device_id);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_TERMS, SCHEMA_V1)?;
+        let token = c.digest32()?;
+        let external_commitment = c.digest32()?;
+        let n = read_count(&mut c, "escrow branches", 1, ESCROW_MAX_BRANCHES)?;
+        let mut branches = Vec::with_capacity(n);
+        for _ in 0..n {
+            let decided = EscrowOutcome::at(&mut c)?;
+            branches.push(EscrowBranch {
+                decided,
+                recipient_genesis: c.digest32()?,
+                recipient_device_id: c.digest32()?,
+            });
+        }
+        let v = Self::new(token, external_commitment, branches).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// One signature of a verdict: its signer and the signature over the
+/// statement `m(o)` for the verdict cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerdictSignature {
+    signer: EscrowSigner,
+    signature: Vec<u8>,
+}
+
+impl VerdictSignature {
+    /// Refuses an empty or oversized signature. It verifies nothing.
+    pub fn new(signer: EscrowSigner, signature: &[u8]) -> Result<Self, SofiWireError> {
+        if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "verdict signature",
+                bytes: signature.len(),
+                max: MAX_SIGNATURE_BYTES,
+            });
+        }
+        Ok(Self {
+            signer,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn signer(&self) -> &EscrowSigner {
+        &self.signer
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+}
+
+/// `0x0064 EscrowVerdict` — a verdict on an external commitment (SoFi §19.9):
+/// `Y`, the outcome table, the outcome, and signatures over `m(outcome)` for
+/// the verdict cell `Y` and the table derive. It carries its table so that it
+/// proves its own authority for the cell from its own bytes; whether it does
+/// is `sofi::escrow::recognize_verdict`'s, not this type's. A verdict holding
+/// only some of an outcome's signatures has an encoding, because signatures
+/// are gathered before one is written to the cell; it occupies nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscrowVerdict {
+    external_commitment: D32,
+    table: OutcomeTable,
+    outcome: Vec<u8>,
+    signatures: Vec<VerdictSignature>,
+}
+
+impl EscrowVerdict {
+    pub fn new(
+        external_commitment: D32,
+        table: OutcomeTable,
+        outcome: &[u8],
+        signatures: Vec<VerdictSignature>,
+    ) -> Result<Self, SofiWireError> {
+        check_outcome(outcome)?;
+        check_count(
+            "verdict signatures",
+            1,
+            ESCROW_MAX_SIGNERS,
+            signatures.len(),
+        )?;
+        let keys: Vec<Vec<u8>> = signatures.iter().map(|s| s.signer.canonical()).collect();
+        check_strictly_ascending("verdict signatures", &keys)?;
+        Ok(Self {
+            external_commitment,
+            table,
+            outcome: outcome.to_vec(),
+            signatures,
+        })
+    }
+
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &OutcomeTable {
+        &self.table
+    }
+
+    pub fn outcome(&self) -> &[u8] {
+        &self.outcome
+    }
+
+    pub fn signatures(&self) -> &[VerdictSignature] {
+        &self.signatures
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_VERDICT);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        push_part(&mut out, &self.outcome);
+        push_u32(&mut out, self.signatures.len() as u32);
+        for s in &self.signatures {
+            push_key(&mut out, s.signer.signature_alg, &s.signer.public_key);
+            push_part(&mut out, &s.signature);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_VERDICT, SCHEMA_V1)?;
+        let external_commitment = c.digest32()?;
+        let table = OutcomeTable::at(&mut c)?;
+        let outcome = read_var_bytes(&mut c, ESCROW_MAX_OUTCOME_BYTES)?;
+        let n = read_count(&mut c, "verdict signatures", 1, ESCROW_MAX_SIGNERS)?;
+        let mut signatures = Vec::with_capacity(n);
+        for _ in 0..n {
+            let signer = EscrowSigner::at(&mut c)?;
+            let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+            signatures.push(VerdictSignature { signer, signature });
+        }
+        let v =
+            Self::new(external_commitment, table, &outcome, signatures).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+// ── 0x0067..=0x006B computed escrow vaults (SoFi Amendment S22) ────────────
+
+/// The label of side A's win.
+pub const COMPUTED_LABEL_A_WINS: &[u8] = b"a-wins";
+/// The label of side B's win.
+pub const COMPUTED_LABEL_B_WINS: &[u8] = b"b-wins";
+/// The label of a voided match: what a Withdraw holding the start cell gives.
+pub const COMPUTED_LABEL_VOID: &[u8] = b"void";
+/// A computed escrow vault's three branch labels, in their canonical order.
+pub const COMPUTED_LABELS: [&[u8]; 3] = [
+    COMPUTED_LABEL_A_WINS,
+    COMPUTED_LABEL_B_WINS,
+    COMPUTED_LABEL_VOID,
+];
+/// The most entries one transcript holds.
+pub const TRANSCRIPT_MAX_ENTRIES: usize = 1024;
+/// The longest move a Reveal opens.
+pub const TRANSCRIPT_MAX_MOVE_BYTES: usize = 64;
+/// The longest setup a computed table's digest commits.
+pub const COMPUTED_MAX_SETUP_BYTES: usize = 16 * 1024;
+/// The longest canonical entry: a Reveal of the longest move.
+pub const TRANSCRIPT_MAX_ENTRY_BYTES: usize = 4 + 4 + 1 + 1 + 32 + 4 + TRANSCRIPT_MAX_MOVE_BYTES;
+
+/// A side of a computed match: A (1) or B (2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MatchSide {
+    A,
+    B,
+}
+
+impl MatchSide {
+    /// Its byte on the wire.
+    pub fn byte(self) -> u8 {
+        match self {
+            Self::A => 1,
+            Self::B => 2,
+        }
+    }
+
+    /// The side `byte` names, or why it names none.
+    pub fn from_byte(byte: u8) -> Result<Self, SofiWireError> {
+        match byte {
+            1 => Ok(Self::A),
+            2 => Ok(Self::B),
+            value => Err(SofiWireError::UndeclaredValue {
+                field: "match side",
+                value: u32::from(value),
+            }),
+        }
+    }
+
+    /// The other side.
+    pub fn other(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
+
+    /// The label of this side's win.
+    pub fn win_label(self) -> &'static [u8] {
+        match self {
+            Self::A => COMPUTED_LABEL_A_WINS,
+            Self::B => COMPUTED_LABEL_B_WINS,
+        }
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Self::from_byte(c.u8()?).map_err(wire_invalid)
+    }
+}
+
+fn check_signature_bytes(field: &'static str, signature: &[u8]) -> Result<(), SofiWireError> {
+    if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+        return Err(SofiWireError::ObjectTooLarge {
+            field,
+            bytes: signature.len(),
+            max: MAX_SIGNATURE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// The computed table `T_c` (SoFi §19.10): the program hash `P`, the digest
+/// of the setup it runs on, and each side's session key. It is the authority
+/// of a computed escrow vault, and it has exactly one encoding, so parties
+/// that agree on it derive the same `τ_c` and the same match cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputedTable {
+    program: D32,
+    setup_digest: D32,
+    session_a: EscrowSigner,
+    session_b: EscrowSigner,
+}
+
+impl ComputedTable {
+    /// Refuses one key for both sides: an equivocation could not say which
+    /// side cheated.
+    pub fn new(
+        program: D32,
+        setup_digest: D32,
+        session_a: EscrowSigner,
+        session_b: EscrowSigner,
+    ) -> Result<Self, SofiWireError> {
+        if session_a == session_b {
+            return Err(SofiWireError::SessionKeysNotDistinct);
+        }
+        Ok(Self {
+            program,
+            setup_digest,
+            session_a,
+            session_b,
+        })
+    }
+
+    /// `P`, the hash that pins the outcome program.
+    pub fn program(&self) -> &D32 {
+        &self.program
+    }
+
+    /// `H(DSM/escrow/computed-setup/v1 ‖ setup)`.
+    pub fn setup_digest(&self) -> &D32 {
+        &self.setup_digest
+    }
+
+    /// The session key `side` committed at lock.
+    pub fn session(&self, side: MatchSide) -> &EscrowSigner {
+        match side {
+            MatchSide::A => &self.session_a,
+            MatchSide::B => &self.session_b,
+        }
+    }
+
+    /// `P ‖ setup_digest ‖ key_a ‖ key_b`, each key `u16be(alg) ‖
+    /// u32be(|key|) ‖ key`: what `τ_c` hashes, and how the table nests.
+    pub fn canonical(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.push(&mut out);
+        out
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_digest32(out, &self.program);
+        push_digest32(out, &self.setup_digest);
+        push_key(
+            out,
+            self.session_a.signature_alg,
+            &self.session_a.public_key,
+        );
+        push_key(
+            out,
+            self.session_b.signature_alg,
+            &self.session_b.public_key,
+        );
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let program = c.digest32()?;
+        let setup_digest = c.digest32()?;
+        let session_a = EscrowSigner::at(c)?;
+        let session_b = EscrowSigner::at(c)?;
+        Self::new(program, setup_digest, session_a, session_b).map_err(wire_invalid)
+    }
+}
+
+/// One branch of a computed escrow vault: its label and the identity it
+/// pays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputedBranch {
+    label: Vec<u8>,
+    recipient_genesis: D32,
+    recipient_device_id: D32,
+}
+
+impl ComputedBranch {
+    pub fn new(label: &[u8], recipient_genesis: D32, recipient_device_id: D32) -> Self {
+        Self {
+            label: label.to_vec(),
+            recipient_genesis,
+            recipient_device_id,
+        }
+    }
+
+    pub fn label(&self) -> &[u8] {
+        &self.label
+    }
+
+    pub fn recipient_genesis(&self) -> &D32 {
+        &self.recipient_genesis
+    }
+
+    pub fn recipient_device_id(&self) -> &D32 {
+        &self.recipient_device_id
+    }
+}
+
+/// `0x0067 ComputedEscrowTerms` — what a computed escrow vault's three policy
+/// slots name (SoFi §19.10): the held token, `Y`, the computed table, and the
+/// branches `a-wins`, `b-wins` and `void`, in that order, with their
+/// recipients. What the registered program computes from the match
+/// transcript decides which branch the vault releases along.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputedEscrowTerms {
+    token: D32,
+    external_commitment: D32,
+    table: ComputedTable,
+    branches: Vec<ComputedBranch>,
+}
+
+impl ComputedEscrowTerms {
+    pub fn new(
+        token: D32,
+        external_commitment: D32,
+        table: ComputedTable,
+        branches: Vec<ComputedBranch>,
+    ) -> Result<Self, SofiWireError> {
+        let labels: Vec<&[u8]> = branches.iter().map(ComputedBranch::label).collect();
+        if labels != COMPUTED_LABELS {
+            return Err(SofiWireError::ComputedBranchesNotTheThreeLabels);
+        }
+        Ok(Self {
+            token,
+            external_commitment,
+            table,
+            branches,
+        })
+    }
+
+    /// The policy commit of the held token.
+    pub fn token(&self) -> &D32 {
+        &self.token
+    }
+
+    /// `Y = H(DSM/external/v1 ‖ X)`.
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &ComputedTable {
+        &self.table
+    }
+
+    pub fn branches(&self) -> &[ComputedBranch] {
+        &self.branches
+    }
+
+    /// The branch labelled `label`, when the terms have one.
+    pub fn branch(&self, label: &[u8]) -> Option<&ComputedBranch> {
+        self.branches.iter().find(|b| b.label == label)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_COMPUTED_TERMS);
+        push_digest32(&mut out, &self.token);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        push_u32(&mut out, self.branches.len() as u32);
+        for branch in &self.branches {
+            push_part(&mut out, &branch.label);
+            push_digest32(&mut out, &branch.recipient_genesis);
+            push_digest32(&mut out, &branch.recipient_device_id);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_COMPUTED_TERMS, SCHEMA_V1)?;
+        let token = c.digest32()?;
+        let external_commitment = c.digest32()?;
+        let table = ComputedTable::at(&mut c)?;
+        let n = read_count(
+            &mut c,
+            "computed branches",
+            COMPUTED_LABELS.len(),
+            COMPUTED_LABELS.len(),
+        )?;
+        let mut branches = Vec::with_capacity(n);
+        for _ in 0..n {
+            let label = read_var_bytes(&mut c, ESCROW_MAX_OUTCOME_BYTES)?;
+            branches.push(ComputedBranch {
+                label,
+                recipient_genesis: c.digest32()?,
+                recipient_device_id: c.digest32()?,
+            });
+        }
+        let v = Self::new(token, external_commitment, table, branches).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// What an entry of a transcript does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A move committed and not yet shown:
+    /// `H(DSM/escrow/move-commit/v1 ‖ salt ‖ u32be(|move|) ‖ move)`.
+    Commit { commitment: D32 },
+    /// The opening of the side's one unopened commitment.
+    Reveal { salt: D32, played: Vec<u8> },
+    /// The side gives the match up. Nothing follows it.
+    Resign,
+}
+
+impl EntryKind {
+    fn byte(&self) -> u8 {
+        match self {
+            Self::Commit { .. } => 1,
+            Self::Reveal { .. } => 2,
+            Self::Resign => 3,
+        }
+    }
+}
+
+/// `0x0068 TranscriptEntry` — one entry of a match transcript (SoFi §19.10):
+/// its index, from 1, its side, and what it does. It carries no signature:
+/// its canonical bytes are what the head chain hashes, and the signature over
+/// the head travels beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptEntry {
+    index: u32,
+    side: MatchSide,
+    kind: EntryKind,
+}
+
+impl TranscriptEntry {
+    /// Refuses index 0 and a move outside 1..=64 bytes.
+    pub fn new(index: u32, side: MatchSide, kind: EntryKind) -> Result<Self, SofiWireError> {
+        if index == 0 {
+            return Err(SofiWireError::UndeclaredValue {
+                field: "entry index",
+                value: index,
+            });
+        }
+        if let EntryKind::Reveal { played, .. } = &kind {
+            check_count("revealed move", 1, TRANSCRIPT_MAX_MOVE_BYTES, played.len())?;
+        }
+        Ok(Self { index, side, kind })
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    pub fn side(&self) -> MatchSide {
+        self.side
+    }
+
+    pub fn kind(&self) -> &EntryKind {
+        &self.kind
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_TRANSCRIPT_ENTRY);
+        push_u32(&mut out, self.index);
+        out.push(self.side.byte());
+        out.push(self.kind.byte());
+        match &self.kind {
+            EntryKind::Commit { commitment } => push_digest32(&mut out, commitment),
+            EntryKind::Reveal { salt, played } => {
+                push_digest32(&mut out, salt);
+                push_part(&mut out, played);
+            }
+            EntryKind::Resign => {}
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_TRANSCRIPT_ENTRY, SCHEMA_V1)?;
+        let index = c.u32()?;
+        let side = MatchSide::at(&mut c)?;
+        let kind = match c.u8()? {
+            1 => EntryKind::Commit {
+                commitment: c.digest32()?,
+            },
+            2 => EntryKind::Reveal {
+                salt: c.digest32()?,
+                played: read_var_bytes(&mut c, TRANSCRIPT_MAX_MOVE_BYTES)?,
+            },
+            3 => EntryKind::Resign,
+            value => {
+                return Err(wire_invalid(SofiWireError::UndeclaredValue {
+                    field: "entry kind",
+                    value: u32::from(value),
+                }))
+            }
+        };
+        let v = Self::new(index, side, kind).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// One side's signature in a transcript outcome: over the head of the last
+/// entry that side made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideSignature {
+    side: MatchSide,
+    signature: Vec<u8>,
+}
+
+impl SideSignature {
+    /// Refuses an empty or oversized signature. It verifies nothing.
+    pub fn new(side: MatchSide, signature: &[u8]) -> Result<Self, SofiWireError> {
+        check_signature_bytes("side signature", signature)?;
+        Ok(Self {
+            side,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn side(&self) -> MatchSide {
+        self.side
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+}
+
+/// `0x0069 TranscriptOutcome` — a match transcript as it occupies the match
+/// cell (SoFi §19.10): `Y`, the table, the setup, the entries exactly as
+/// they were made, and each side's signature over the head of its last
+/// entry. The entries are carried as bytes so that a reader decodes,
+/// re-encodes and compares each one itself; whether the whole proves an
+/// outcome is `sofi::computed::match_occupant`'s, not this type's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptOutcome {
+    external_commitment: D32,
+    table: ComputedTable,
+    setup: Vec<u8>,
+    entries: Vec<Vec<u8>>,
+    signatures: Vec<SideSignature>,
+}
+
+impl TranscriptOutcome {
+    pub fn new(
+        external_commitment: D32,
+        table: ComputedTable,
+        setup: &[u8],
+        entries: Vec<Vec<u8>>,
+        signatures: Vec<SideSignature>,
+    ) -> Result<Self, SofiWireError> {
+        check_count("setup bytes", 1, COMPUTED_MAX_SETUP_BYTES, setup.len())?;
+        check_count(
+            "transcript entries",
+            1,
+            TRANSCRIPT_MAX_ENTRIES,
+            entries.len(),
+        )?;
+        for entry in &entries {
+            check_count("entry bytes", 1, TRANSCRIPT_MAX_ENTRY_BYTES, entry.len())?;
+        }
+        check_count("side signatures", 1, 2, signatures.len())?;
+        let sides: Vec<MatchSide> = signatures.iter().map(SideSignature::side).collect();
+        check_strictly_ascending("side signatures", &sides)?;
+        Ok(Self {
+            external_commitment,
+            table,
+            setup: setup.to_vec(),
+            entries,
+            signatures,
+        })
+    }
+
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &ComputedTable {
+        &self.table
+    }
+
+    pub fn setup(&self) -> &[u8] {
+        &self.setup
+    }
+
+    /// The entries' bytes, in order, exactly as carried.
+    pub fn entries(&self) -> &[Vec<u8>] {
+        &self.entries
+    }
+
+    pub fn signatures(&self) -> &[SideSignature] {
+        &self.signatures
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_TRANSCRIPT_OUTCOME);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        push_part(&mut out, &self.setup);
+        push_u32(&mut out, self.entries.len() as u32);
+        for entry in &self.entries {
+            push_part(&mut out, entry);
+        }
+        push_u32(&mut out, self.signatures.len() as u32);
+        for s in &self.signatures {
+            out.push(s.side.byte());
+            push_part(&mut out, &s.signature);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_TRANSCRIPT_OUTCOME, SCHEMA_V1)?;
+        let external_commitment = c.digest32()?;
+        let table = ComputedTable::at(&mut c)?;
+        let setup = read_var_bytes(&mut c, COMPUTED_MAX_SETUP_BYTES)?;
+        let n = read_count(&mut c, "transcript entries", 1, TRANSCRIPT_MAX_ENTRIES)?;
+        let mut entries = Vec::with_capacity(n);
+        for _ in 0..n {
+            entries.push(read_var_bytes(&mut c, TRANSCRIPT_MAX_ENTRY_BYTES)?);
+        }
+        let m = read_count(&mut c, "side signatures", 1, 2)?;
+        let mut signatures = Vec::with_capacity(m);
+        for _ in 0..m {
+            let side = MatchSide::at(&mut c)?;
+            let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+            signatures.push(SideSignature { side, signature });
+        }
+        let v = Self::new(external_commitment, table, &setup, entries, signatures)
+            .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// A head one side's session key signed: the head and the signature over
+/// its head statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedHead {
+    head: D32,
+    signature: Vec<u8>,
+}
+
+impl SignedHead {
+    /// Refuses an empty or oversized signature. It verifies nothing.
+    pub fn new(head: D32, signature: &[u8]) -> Result<Self, SofiWireError> {
+        check_signature_bytes("head signature", signature)?;
+        Ok(Self {
+            head,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn head(&self) -> &D32 {
+        &self.head
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_digest32(out, &self.head);
+        push_part(out, &self.signature);
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let head = c.digest32()?;
+        let signature = read_var_bytes(c, MAX_SIGNATURE_BYTES)?;
+        Ok(Self { head, signature })
+    }
+}
+
+/// `0x006A EquivocationProof` — two different heads one side's session key
+/// signed at one index (SoFi §19.10): proof that the key's holder cheated,
+/// and an occupant of the match cell for the other side. The heads are
+/// strictly ascending, so two equal heads have no encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquivocationProof {
+    external_commitment: D32,
+    table: ComputedTable,
+    side: MatchSide,
+    index: u32,
+    first: SignedHead,
+    second: SignedHead,
+}
+
+impl EquivocationProof {
+    pub fn new(
+        external_commitment: D32,
+        table: ComputedTable,
+        side: MatchSide,
+        index: u32,
+        first: SignedHead,
+        second: SignedHead,
+    ) -> Result<Self, SofiWireError> {
+        if index == 0 {
+            return Err(SofiWireError::UndeclaredValue {
+                field: "entry index",
+                value: index,
+            });
+        }
+        check_strictly_ascending("equivocated heads", &[first.head, second.head])?;
+        Ok(Self {
+            external_commitment,
+            table,
+            side,
+            index,
+            first,
+            second,
+        })
+    }
+
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &ComputedTable {
+        &self.table
+    }
+
+    /// The side whose key signed both heads.
+    pub fn side(&self) -> MatchSide {
+        self.side
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The two signed heads, in ascending order of head.
+    pub fn heads(&self) -> [&SignedHead; 2] {
+        [&self.first, &self.second]
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_EQUIVOCATION_PROOF);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        out.push(self.side.byte());
+        push_u32(&mut out, self.index);
+        self.first.push(&mut out);
+        self.second.push(&mut out);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_EQUIVOCATION_PROOF, SCHEMA_V1)?;
+        let external_commitment = c.digest32()?;
+        let table = ComputedTable::at(&mut c)?;
+        let side = MatchSide::at(&mut c)?;
+        let index = c.u32()?;
+        let first = SignedHead::at(&mut c)?;
+        let second = SignedHead::at(&mut c)?;
+        let v = Self::new(external_commitment, table, side, index, first, second)
+            .map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// What a `MatchStart` says: the match started, or it is withdrawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartKind {
+    Start,
+    Withdraw,
+}
+
+impl StartKind {
+    pub fn byte(self) -> u8 {
+        match self {
+            Self::Start => 1,
+            Self::Withdraw => 2,
+        }
+    }
+}
+
+/// The body of a `MatchStart` (SoFi §19.10, the ready handshake).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartBody {
+    /// Both sides' signatures over `m_ready`: side A's, then side B's.
+    Start { ready_a: Vec<u8>, ready_b: Vec<u8> },
+    /// One side's signature over `m_withdraw`. Either side may withdraw.
+    Withdraw { side: MatchSide, signature: Vec<u8> },
+}
+
+impl StartBody {
+    pub fn kind(&self) -> StartKind {
+        match self {
+            Self::Start { .. } => StartKind::Start,
+            Self::Withdraw { .. } => StartKind::Withdraw,
+        }
+    }
+}
+
+/// `0x006B MatchStart` — a Start or a Withdraw at a match's start cell (SoFi
+/// §19.10). A Start carries both sides' ready signatures; a Withdraw names
+/// the side that withdraws and carries its signature. Whichever is first at
+/// the cell's leader holds it for good. Whether the signatures verify is
+/// `sofi::computed::start_occupant`'s, not this type's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchStart {
+    external_commitment: D32,
+    table: ComputedTable,
+    body: StartBody,
+}
+
+impl MatchStart {
+    /// Refuses an empty or oversized signature. It verifies nothing.
+    pub fn new(
+        external_commitment: D32,
+        table: ComputedTable,
+        body: StartBody,
+    ) -> Result<Self, SofiWireError> {
+        match &body {
+            StartBody::Start { ready_a, ready_b } => {
+                check_signature_bytes("ready signature", ready_a)?;
+                check_signature_bytes("ready signature", ready_b)?;
+            }
+            StartBody::Withdraw { signature, .. } => {
+                check_signature_bytes("withdraw signature", signature)?;
+            }
+        }
+        Ok(Self {
+            external_commitment,
+            table,
+            body,
+        })
+    }
+
+    pub fn external_commitment(&self) -> &D32 {
+        &self.external_commitment
+    }
+
+    pub fn table(&self) -> &ComputedTable {
+        &self.table
+    }
+
+    pub fn kind(&self) -> StartKind {
+        self.body.kind()
+    }
+
+    pub fn body(&self) -> &StartBody {
+        &self.body
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::ESCROW_MATCH_START);
+        push_digest32(&mut out, &self.external_commitment);
+        self.table.push(&mut out);
+        out.push(self.kind().byte());
+        match &self.body {
+            StartBody::Start { ready_a, ready_b } => {
+                push_part(&mut out, ready_a);
+                push_part(&mut out, ready_b);
+            }
+            StartBody::Withdraw { side, signature } => {
+                out.push(side.byte());
+                push_part(&mut out, signature);
+            }
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::ESCROW_MATCH_START, SCHEMA_V1)?;
+        let external_commitment = c.digest32()?;
+        let table = ComputedTable::at(&mut c)?;
+        let body = match c.u8()? {
+            1 => StartBody::Start {
+                ready_a: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
+                ready_b: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
+            },
+            2 => StartBody::Withdraw {
+                side: MatchSide::at(&mut c)?,
+                signature: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
+            },
+            value => {
+                return Err(wire_invalid(SofiWireError::UndeclaredValue {
+                    field: "start kind",
+                    value: u32::from(value),
+                }))
+            }
+        };
+        let v = Self::new(external_commitment, table, body).map_err(wire_invalid)?;
+        finish(&c, v)
+    }
+}
+
+/// What an escrow vault's slots name, decided by the class of the bytes
+/// (SoFi §19.10, "The kind is the class"): signed terms (`0x0063`), whose
+/// outcome a verdict decides, or computed terms (`0x0067`), whose outcome
+/// the registered program computes. Bytes of any other class are no escrow
+/// terms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EscrowKind {
+    Signed(EscrowTerms),
+    Computed(ComputedEscrowTerms),
+}
+
+impl EscrowKind {
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let c = Cursor { b: bytes, i: 0 };
+        match c.peek_class()? {
+            class::ESCROW_TERMS => Ok(Self::Signed(EscrowTerms::decode(bytes)?)),
+            class::ESCROW_COMPUTED_TERMS => Ok(Self::Computed(ComputedEscrowTerms::decode(bytes)?)),
+            got => Err(DecodeError::WrongClass { got }),
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Signed(terms) => terms.encode(),
+            Self::Computed(terms) => terms.encode(),
+        }
+    }
+
+    /// The policy commit of the held token.
+    pub fn token(&self) -> &D32 {
+        match self {
+            Self::Signed(terms) => terms.token(),
+            Self::Computed(terms) => terms.token(),
+        }
+    }
+
+    /// `Y`.
+    pub fn external_commitment(&self) -> &D32 {
+        match self {
+            Self::Signed(terms) => terms.external_commitment(),
+            Self::Computed(terms) => terms.external_commitment(),
+        }
+    }
+
+    /// The identity the branch labelled `outcome` pays, when the terms have
+    /// that branch.
+    pub fn recipient(&self, outcome: &[u8]) -> Option<(&D32, &D32)> {
+        match self {
+            Self::Signed(terms) => terms
+                .branch(outcome)
+                .map(|b| (b.recipient_genesis(), b.recipient_device_id())),
+            Self::Computed(terms) => terms
+                .branch(outcome)
+                .map(|b| (b.recipient_genesis(), b.recipient_device_id())),
+        }
+    }
+}

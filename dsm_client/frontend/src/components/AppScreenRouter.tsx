@@ -6,12 +6,7 @@ import EnhancedWalletScreen from './screens/EnhancedWalletScreen';
 import ContactsScreen from './screens/ContactsTabScreen';
 import StorageScreen from './screens/StorageScreen';
 import SettingsMainScreen from './screens/SettingsMainScreen';
-import DevDlvScreen from './screens/DevDlvScreen';
 import DevPolicyScreen from './screens/DevPolicyScreen';
-import DevSoFiLaunchScreen from './screens/DevSoFiLaunchScreen';
-import SofiHubScreen from './screens/SofiHubScreen';
-import LiquidityScreen from './screens/LiquidityScreen';
-import MailScreen from './screens/MailScreen';
 import LockSetupScreen from './screens/LockSetupScreen';
 import QRCodeScannerScreen from './screens/QRCodeScannerScreen';
 import MyContactInfoScreen from './screens/MyContactInfoScreen';
@@ -19,18 +14,14 @@ import AccountsScreen from './screens/AccountsScreen';
 import RecoveryScreen from './screens/RecoveryScreen';
 import NfcRecoveryScreen from './screens/NfcRecoveryScreen';
 import RecoveryPipelineScreen from './screens/RecoveryPipelineScreen';
-import AdditionalDeviceScreen from './screens/AdditionalDeviceScreen';
+import SofiScreen from './screens/SofiScreen';
+import AppsScreen from './screens/AppsScreen';
 
 const MemoWallet = React.memo(EnhancedWalletScreen);
 const MemoContacts = React.memo(ContactsScreen);
 const MemoStorage = React.memo(StorageScreen);
 const MemoSettings = React.memo(SettingsMainScreen);
-const MemoDevDlv = React.memo(DevDlvScreen);
 const MemoDevPolicy = React.memo(DevPolicyScreen);
-const MemoDevSoFiLaunch = React.memo(DevSoFiLaunchScreen);
-const MemoSofi = React.memo(SofiHubScreen);
-const MemoLiquidity = React.memo(LiquidityScreen);
-const MemoMail = React.memo(MailScreen);
 const MemoLockSetup = React.memo(LockSetupScreen);
 const MemoQR = React.memo(QRCodeScannerScreen);
 const MemoMyContact = React.memo(MyContactInfoScreen);
@@ -38,7 +29,8 @@ const MemoAccounts = React.memo(AccountsScreen);
 const MemoRecovery = React.memo(RecoveryScreen);
 const MemoNfcRecovery = React.memo(NfcRecoveryScreen);
 const MemoRecoveryPipeline = React.memo(RecoveryPipelineScreen);
-const MemoAdditionalDevice = React.memo(AdditionalDeviceScreen);
+const MemoSofi = React.memo(SofiScreen);
+const MemoApps = React.memo(AppsScreen);
 
 type Props = {
   currentScreen: ScreenType;
@@ -65,27 +57,15 @@ export default function AppScreenRouter({
 
   switch (currentScreen) {
     case 'wallet':
-      return <MemoWallet eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
+      return <MemoWallet btcLogoSrc={btcLogoSrc} />;
     case 'contacts':
       return <MemoContacts onNavigate={onNavigate} eraTokenSrc={eraTokenSrc} />;
     case 'storage':
       return <MemoStorage />;
     case 'settings':
       return <MemoSettings onNavigate={onNavigate} />;
-    case 'dev_dlv':
-      return <MemoDevDlv />;
     case 'dev_policy':
       return <MemoDevPolicy />;
-    case 'dev_sofi_launch':
-      return <MemoDevSoFiLaunch />;
-    case 'sofi':
-      return <MemoSofi onNavigate={onNavigate} />;
-    case 'liquidity':
-      return <MemoLiquidity onNavigate={onNavigate} />;
-    case 'swap':
-      return <MemoWallet initialTab="swap" eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
-    case 'mail':
-      return <MemoMail onNavigate={onNavigate} />;
     case 'lock_setup':
       return <MemoLockSetup onNavigate={onNavigate} />;
     case 'qr':
@@ -93,9 +73,9 @@ export default function AppScreenRouter({
     case 'mycontact':
       return <MemoMyContact />;
     case 'vault':
-      return <MemoWallet eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
+      return <MemoWallet btcLogoSrc={btcLogoSrc} />;
     case 'transactions':
-      return <MemoWallet initialTab="history" eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
+      return <MemoWallet initialTab="history" btcLogoSrc={btcLogoSrc} />;
     case 'accounts':
       return <MemoAccounts eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
     case 'recovery':
@@ -104,8 +84,10 @@ export default function AppScreenRouter({
       return <MemoNfcRecovery onNavigate={onNavigate} />;
     case 'recovery_pipeline':
       return <MemoRecoveryPipeline onNavigate={onNavigate} />;
-    case 'additional_device':
-      return <MemoAdditionalDevice onNavigate={onNavigate} />;
+    case 'sofi':
+      return <MemoSofi />;
+    case 'apps':
+      return <MemoApps />;
     default:
       return null;
   }

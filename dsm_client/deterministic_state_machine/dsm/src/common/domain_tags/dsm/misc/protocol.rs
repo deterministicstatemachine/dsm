@@ -4,12 +4,6 @@
 
 use crate::crypto::domain::TaggedHashDomain;
 
-pub const TAG_DSM_ANCHOR_TICK: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/anchor-tick");
-pub const TAG_DSM_BALANCE_ANCHOR: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/balance-anchor");
-pub const TAG_DSM_CANONICAL_BALANCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/canonical-balance");
 pub const TAG_DSM_CANONICAL_LP: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/canonical-lp");
 pub const TAG_DSM_DETERMINISTIC_ID: TaggedHashDomain<'static> =
@@ -19,10 +13,6 @@ pub const TAG_DSM_DETERMINISTIC_TIME: TaggedHashDomain<'static> =
 pub const TAG_DSM_DEV_ENT_V2: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/DEV_ENT/v2");
 pub const TAG_DSM_DJTE_SHARD_MERKLE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/djte-shard-merkle");
-/// Content digest of a frozen publication artifact (exact bytes replayed to a
-/// storage quorum): `H(tag ‖ 0x00 ‖ object_key ‖ 0x00 ‖ payload)`.
-pub const TAG_DSM_FROZEN_ARTIFACT_V1: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/frozen-artifact/v1");
 pub const TAG_DSM_OP_VERIFY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/op-verify");
 pub const TAG_DSM_PRE_FINALIZATION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/pre-finalization");
@@ -46,17 +36,6 @@ pub const TAG_DSM_DLV_CLOSE_COMMIT: TaggedHashDomain<'static> =
 /// SDK (3.6 PR3) — same bytes, one constant — because the 0x0026 economic
 /// verifier recomputes X in core.
 pub const TAG_DSM_EXT_COMMIT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/ext");
-/// Settlement-slot claim: the signed preimage `H(tag ‖ 0x00 ‖ canonical
-/// SettlementSlotClaimBodyV2 bytes)`, and (with `-envelope`) the digest of the
-/// frozen envelope bytes a register member stores and compares.
-/// The `/v1` pair is **burned** (3.6, owner ruling 2026-08-28): its body
-/// carried no `parent_binding_c_n`, so two contestants holding divergent
-/// alleged vault states could win one slot without the divergence being
-/// expressible. Key by name, bind by state — one domain, one meaning.
-pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/settlement-slot-claim/v2");
-pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/settlement-slot-claim-envelope/v2");
 /// History-bound vault state anchor, Rev 15 Definition 6.4:
 /// `p_v = H(tag ‖ 0x00 ‖ vault_id ‖ generation ‖ parent_state_commitment
 /// ‖ reserves_digest ‖ storage_set_id ‖ q)`. A distinct domain from the legacy
@@ -79,16 +58,39 @@ pub const TAG_DSM_VAULT_STATE_ANCHOR_V3: TaggedHashDomain<'static> =
 /// Req 15.2's idempotence meaningful rather than accidental.
 pub const TAG_DSM_STORAGE_OBJECT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/storage-object");
+/// Keyed-cell entry digest `d_i = H_dom(tag, v_i)` (storage spec §14,
+/// keyed-cell commitment formats).
+pub const TAG_DSM_STORAGE_CELL_ENTRY_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-entry/v1");
+/// Per-key running hash seed `h_0 = H_dom(tag, N ‖ K)` (storage spec §14).
+pub const TAG_DSM_STORAGE_CELL_RUN_INIT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-run-init/v1");
+/// Per-key running hash step `h_i = H_dom(tag, h_(i-1) ‖ d_i)` (storage spec §14).
+pub const TAG_DSM_STORAGE_CELL_RUN_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-run/v1");
+/// SMT key of a keyed cell's committed leaf `H_dom(tag, N ‖ K)` (storage spec §14).
+pub const TAG_DSM_STORAGE_CELL_LEAF_KEY_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-leaf-key/v1");
+/// SMT value of a keyed cell's committed leaf `H_dom(tag, i ‖ h_i)` (storage spec §14).
+pub const TAG_DSM_STORAGE_CELL_LEAF_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/cell-leaf/v1");
+/// ByteCommit digest `d_t = H_dom(tag, canonical fields)` (storage spec §14,
+/// ByteCommit format).
+pub const TAG_DSM_STORAGE_BYTECOMMIT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/bytecommit/v1");
+/// Completion digest of a route chain's completion proof (storage spec §9,
+/// the completion proof): `c = H_dom(tag, len(N) ‖ N ‖ K ‖ d_x ‖ n ‖ s_0 ‖ …)`.
+pub const TAG_DSM_STORAGE_ROUTE_COMPLETION_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/route-completion/v1");
+/// The value a completion proof finalizes, `d_x = H_dom(tag, x)` (storage
+/// spec §9, the completion proof).
+pub const TAG_DSM_STORAGE_ROUTE_VALUE_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage/route-value/v1");
 /// `k_v = H_dom(DSM/binding-keyset, c_n)` — one settlement resource key from a
 /// vault's committed parent state (Def 6.17). The vault id is NOT restated:
 /// c_n commits it, so supplying both would admit a disagreeing pair.
 pub const TAG_DSM_BINDING_KEYSET: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/binding-keyset");
-/// `b = H_dom(DSM/settlement-bundle, Canon(B))` — the immutable settlement
-/// bundle identity (Def 6.14/6.19). Its content address is
-/// `immutable_addr(TAG_DSM_SETTLEMENT_BUNDLE, Canon(B))`.
-pub const TAG_DSM_SETTLEMENT_BUNDLE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/settlement-bundle");
 
 // --- Device Tree root progression (area 8 / registry §5.16–§5.18). Each
 // object has TWO domains over ONE preimage per registry §2.9: an identity
@@ -117,6 +119,18 @@ pub const TAG_DSM_DEVTREE_DELEGATION_GENESIS_SENTINEL_V1: TaggedHashDomain<'stat
 /// can never validate against a transition origin.
 pub const TAG_DSM_DEVTREE_TRANSITION_GENESIS_SENTINEL_V1: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/devtree-transition/genesis-sentinel/v1");
+/// Content-addressing namespaces for the three policy objects a vault names.
+/// A vault state carries them as addresses, so a verifier that fetches one
+/// re-derives `immutable_addr(tag, CCB(policy))` and refuses bytes that do not
+/// authenticate to the address it asked for — the arithmetic first, the class
+/// agreement after decoding.
+pub const TAG_DSM_MARKET_POLICY_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/market-policy-object/v1");
+pub const TAG_DSM_RELEASE_POLICY_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/release-policy-object/v1");
+pub const TAG_DSM_FEE_POLICY_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/fee-policy-object/v1");
+
 /// Canonical DLV state commitment: `c_n = H(tag ‖ 0x00 ‖ CCB(V_n))`, over the
 /// `VaultStateV2` encoding of the CCB object registry (class `0x0001`).
 pub const TAG_DSM_VAULT_STATE: TaggedHashDomain<'static> =
@@ -136,23 +150,6 @@ pub const TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2: TaggedHashDomain<'static> =
 /// both the layout and its tag go.
 pub const TAG_DSM_STORAGE_SET: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/storage-set");
-/// One generic binding record (SoFi Rev 15 Def 6.20): the digest a member
-/// reports and a Class K driver compares. Over the record's canonical
-/// protobuf bytes — the node hashes what it stores, never a decoded view.
-pub const TAG_DSM_BINDING_RECORD: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/binding-record");
-/// The exact prior record SET over a sorted key set — `expected_digest` in
-/// CompareExchangeMany (§15.5). Absent cells are part of the preimage as
-/// absences, so "nothing held" has a defined digest a first writer can
-/// exchange from.
-pub const TAG_DSM_BINDING_RECORD_SET: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/binding-record-set");
-/// The sorted key set itself — `keyset_digest` inside a record, which the
-/// node requires to equal the digest of the request's own keys (Req 15.7).
-/// Distinct from `DSM/binding-keyset`, which derives ONE resource key from a
-/// vault parent (Def 6.17); this digests a set of such keys.
-pub const TAG_DSM_BINDING_RECORD_SET_KEYS: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/binding-record-set-keys");
 /// Immutable namespace for a published `AnchorPresentationV3` — the owner's
 /// complete verification bundle for one vault state (proto bytes as payload).
 /// The object is pure transport: every claim inside is re-derived by the

@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Section 17.5 and stage 8 of §31, rebuild step R11: the exercise, written
+//! to every successor key of a route and read back as the ladder reads it.
+//!
+//! After `F` registers, any party MAY write the exercise (P2): the object
+//! carries `F`, which only the trader could sign, and everything else in it
+//! is bound to `F` by hashed preimages, so a relayer adds nothing and can
+//! forge nothing. Each leg's cell is `K^(a_j)` of vault `v_j` at parent
+//! `R_j` ([`AttemptCell`]), routed by the vault's storage seed over the
+//! network's pinned set and written along that route, leader first (storage
+//! spec §9); the member stores bytes and decides nothing. What counts at a
+//! key is Core's (`sofi::exercise::exercise_names_key`): the first exercise
+//! at the leader whose `F` names `(v, a)` and whose `P` names `(v, R_n)`.
+
+use dsm::sofi::exercise::{AttemptCell, RecognizedExercise};
+use dsm::sofi::wire::SofiExercise;
+use dsm::types::error::DsmError;
+
+use crate::sdk::route_seats::write_recorded;
+use crate::sdk::storage_set::StorageSet;
+
+type D32 = [u8; 32];
+
+fn err(what: &str, e: impl core::fmt::Display) -> DsmError {
+    DsmError::verification(format!("{what}: {e}"))
+}
+
+/// One leg's cell write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegWrite {
+    pub vault_id: D32,
+    pub parent_root: D32,
+    pub attempt: u64,
+    pub key: D32,
+    /// The leader returned its record: the write got past position 0.
+    pub reached_leader: bool,
+}
+
+/// `K^(attempt)` of `vault_id` at `parent_root`, routed over `set`: the
+/// network's pinned set, as `storage_set::canonical_set` resolved and
+/// checked it.
+pub(crate) fn attempt_cell(
+    set: &StorageSet,
+    vault_id: &D32,
+    parent_root: &D32,
+    attempt: u64,
+) -> Result<AttemptCell, DsmError> {
+    let members = crate::sdk::storage_set::as_ccb_members(set)?;
+    AttemptCell::new(vault_id, parent_root, attempt, &members, &set.id())
+        .map_err(|e| err("attempt cell", format!("{e:?}")))
+}
+
+/// Write `exercise` to every successor key its `F` names — `K^(a_j)` of
+/// `v_j` at the parent `R_j` its `P` names — along each cell's route,
+/// continuing an earlier write of the same bytes. The bytes are the same at
+/// every seat. Each leg's key is its own vault's cell on its own route, so
+/// the legs are written at once, and reported in the order `F` names them.
+pub async fn write_exercise(
+    set: &StorageSet,
+    exercise: &SofiExercise,
+    recognized: &RecognizedExercise,
+) -> Result<Vec<LegWrite>, DsmError> {
+    let bytes = exercise.encode();
+    let bytes = &bytes;
+    futures::future::try_join_all(recognized.fulfillment().body.attempts().iter().map(
+        |attempt| async move {
+            let leg = recognized
+                .precommit()
+                .body
+                .legs()
+                .iter()
+                .find(|l| l.vault_id == attempt.vault_id)
+                .ok_or_else(|| err("exercise", "an attempt names a vault P has no leg for"))?;
+            let cell = attempt_cell(set, &leg.vault_id, &leg.parent_root, attempt.attempt)?;
+            let write = write_recorded(set, cell.routed(), bytes).await?;
+            Ok::<_, DsmError>(LegWrite {
+                vault_id: leg.vault_id,
+                parent_root: leg.parent_root,
+                attempt: attempt.attempt,
+                key: *cell.routed().key(),
+                reached_leader: write.reached_leader(),
+            })
+        },
+    ))
+    .await
+}

@@ -26,7 +26,8 @@ import dsm.types.proto.WalletCreateGenesisV2Request
 //   and receives [0x03][Envelope v3 proto] responses.
 //
 // METHOD ROUTING (grouped by boundary):
-//   Shared boundary: "nativeBoundaryStartup", "nativeBoundaryIngress"
+//   Shared boundary: "nativeBoundaryIngress" (the startup boundary is crossed
+//   natively, by BridgeIdentityHandler; the WebView never sends it)
 //   Private host boundary: "nativeHostRequest"
 //   Platform-bound helpers stay behind the same binary MessagePort dispatcher.
 //
@@ -42,7 +43,6 @@ import dsm.types.proto.WalletCreateGenesisV2Request
 //   3. Add the external fun declaration in UnifiedNativeApi.kt.
 //   4. Add the frontend wrapper in WebViewBridge.ts.
 //
-// See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
 // ============================================================================
 
 /**
@@ -67,18 +67,6 @@ class SinglePathWebViewBridge(private val context: Context) {
         private const val KEY_DEVICE_ID = "device_id_bytes"
         private const val KEY_GENESIS_HASH = "genesis_hash_bytes"
         private const val KEY_GENESIS_ENVELOPE = "genesis_envelope_bytes"
-
-
-
-        private fun readPersistedBytesOrEmpty(p: SharedPreferences, key: String): ByteArray {
-            val s = p.getString(key, null)
-            if (s.isNullOrBlank()) return ByteArray(0)
-            return try {
-                BridgeEncoding.base32CrockfordDecode(s)
-            } catch (_: Throwable) {
-                ByteArray(0)
-            }
-        }
 
 
 
@@ -190,62 +178,6 @@ class SinglePathWebViewBridge(private val context: Context) {
             }
         }
 
-        /**
-         * Parse envelope response and extract payload data.
-         * STRICT: Only accepts valid protobuf envelopes.
-         */
-        private fun parseEnvelopeResponse(responseBytes: ByteArray): Pair<Boolean, ByteArray> {
-            return BridgeEnvelopeCodec.parseEnvelopeResponse(responseBytes)
-        }
-
-        /**
-         * Raw bytes RPC dispatcher (for internal use).
-         * Returns the raw response data from protobuf envelope, not envelope-wrapped.
-         */
-        fun handleBinaryRpcRaw(method: String, payload: ByteArray): ByteArray {
-            val envelopeResponse = handleBinaryRpc(method, payload)
-            return try {
-                val (isSuccess, data) = parseEnvelopeResponse(envelopeResponse)
-                if (isSuccess) {
-                    data
-                } else {
-                    ByteArray(0) // Error case
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "handleBinaryRpcRaw: failed to parse envelope", e)
-                ByteArray(0)
-            }
-        }
-
-        /**
-         * Raw bytes RPC dispatcher that preserves native bridge errors.
-         * Returns the raw success payload or throws with the decoded bridge error.
-         */
-        fun handleBinaryRpcRawStrict(method: String, payload: ByteArray): ByteArray {
-            val envelopeResponse = handleBinaryRpc(method, payload)
-            try {
-                val (isSuccess, data) = parseEnvelopeResponse(envelopeResponse)
-                if (isSuccess) {
-                    return data
-                }
-
-                val err = BridgeEnvelopeCodec.decodeBridgeRpcError(data)
-                val baseMessage = err?.message?.takeIf { it.isNotBlank() }
-                    ?: "Bridge call failed for $method"
-                val suffix = if (err != null && err.errorCode != 0) {
-                    " (code ${err.errorCode})"
-                } else {
-                    ""
-                }
-                throw IllegalStateException(baseMessage + suffix)
-            } catch (e: IllegalStateException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "handleBinaryRpcRawStrict: failed to parse envelope", e)
-                throw IllegalStateException("Failed to decode bridge response for $method", e)
-            }
-        }
-
         /** Escape control characters in strings for diagnostic payloads. */
         private fun escapeForString(s: String?): String {
             if (s == null) return ""
@@ -267,73 +199,10 @@ class SinglePathWebViewBridge(private val context: Context) {
                 // --- Native QR scanner (Android ML Kit / camera activity) ---
                 // JS expects a 1-byte boolean response for availability.
                 // Launch result is delivered via CustomEvent("dsm-event") topic "qr_scan_result".
-                "hasNativeQrScanner" -> {
-                    try {
-                        // If the activity exists, we treat native scanning as available.
-                        // (Camera permission flow is handled by the activity itself.)
-                        val pm = inst.context.packageManager
-                        val intent = android.content.Intent(inst.context, com.dsm.wallet.ui.QrScannerActivity::class.java)
-                        val resolved = intent.resolveActivity(pm) != null
-                        byteArrayOf(if (resolved) 1 else 0)
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "hasNativeQrScanner: failed to resolve activity", e)
-                        byteArrayOf(0)
-                    }
-                }
-
-                "startNativeQrScanner" -> {
-                    try {
-                        // Prefer launching through the active MainActivity so the result callback can
-                        // dispatch back into the WebView as a dsm-event.
-                        val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
-                        if (act != null) {
-                            act.runOnUiThread {
-                                try {
-                                    act.launchNativeQrScanner { qrText: String? ->
-                                        // Dispatch via JS evaluation (topic: qr_scan_result)
-                                        act.dispatchQrScanResult(qrText)
-                                    }
-                                } catch (e: Throwable) {
-                                    Log.w(TAG, "startNativeQrScanner: inner exception", e)
-                                    act.dispatchQrScanResult(null)
-                                }
-                            }
-                        }
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "startNativeQrScanner: failed to launch scanner", e)
-                    }
-                    // Empty response is fine; result comes via event.
-                    ByteArray(0)
-                }
-
-                // device_id bytes via JNI → Rust (Invariant #7: spine path, not prefs).
-                "getDeviceIdBin" -> {
-                    try {
-                        Unified.getDeviceIdBin()
-                    } catch (_: Throwable) {
-                        ByteArray(0)
-                    }
-                }
-
-                // genesis_hash bytes via JNI → Rust (Invariant #7: spine path, not prefs).
-                "getGenesisHashBin" -> {
-                    try {
-                        Unified.getGenesisHashBin()
-                    } catch (_: Throwable) {
-                        ByteArray(0)
-                    }
-                }
-
-                // signing public key bytes (JNI). Returns empty if not available.
-                "getSigningPublicKeyBin" -> {
-                    try {
-                        Unified.getSigningPublicKeyBin()
-                    } catch (_: Throwable) {
-                        ByteArray(0)
-                    }
-                }
-
-                // Canonical mnemonic-rooted Genesis v2 (whitepaper §2.5): generate a mnemonic for
+                 // device_id bytes via JNI → Rust (Invariant #7: spine path, not prefs).
+                 // genesis_hash bytes via JNI → Rust (Invariant #7: spine path, not prefs).
+                 // signing public key bytes (JNI). Returns empty if not available.
+                 // Canonical mnemonic-rooted Genesis v2 (whitepaper §2.5): generate a mnemonic for
                 // backup, then create the wallet from it. No silicon enrollment, no random entropy.
                 "generateMnemonic" -> {
                     inst.generateMnemonic()
@@ -341,61 +210,12 @@ class SinglePathWebViewBridge(private val context: Context) {
 
                 "createGenesisV2" -> {
                     val req = WalletCreateGenesisV2Request.parseFrom(payload)
-                    inst.createGenesisV2(
-                        mnemonic = req.mnemonic,
-                        locale = req.locale,
-                        networkId = req.networkId,
-                    )
+                    inst.createGenesisV2(mnemonic = req.mnemonic)
                 }
 
-                // strict balances (JNI). Returns FramedEnvelopeV3 bytes or empty on error.
+                // strict balances (JNI): FramedEnvelopeV3 bytes; a failure is the dispatcher's error response.
                 "getAllBalancesStrict" -> {
-                    try {
-                        Unified.getAllBalancesStrict()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "getAllBalancesStrict failed", t)
-                        ByteArray(0)
-                    }
-                }
-
-                // strict wallet history (JNI). Returns FramedEnvelopeV3 bytes or empty on error.
-                "getWalletHistoryStrict" -> {
-                    try {
-                        Unified.getWalletHistoryStrict()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "getWalletHistoryStrict failed", t)
-                        ByteArray(0)
-                    }
-                }
-
-                // genesis_envelope bytes (prefs-only). Used for cold-start rehydration.
-                // Returns empty if not present.
-                "getPersistedGenesisEnvelope" -> {
-                    val p = inst.prefs()
-                    readPersistedBytesOrEmpty(p, KEY_GENESIS_ENVELOPE)
-                }
-
-                // Resolve BLE address from native mapping (bytes-only).
-                // Payload: 32-byte device_id. Response: UTF-8 address bytes or empty.
-                "resolveBleAddressForDeviceId" -> {
-                    if (payload.size != 32) return ByteArray(0)
-                    UnifiedContactBridge.resolveBleAddressForDeviceIdBin(payload)
-                }
-
-                "readPeerRelationshipStatus" -> {
-                    val bleAddress = payload.toString(Charsets.UTF_8).trim()
-                    if (bleAddress.isEmpty()) {
-                        ByteArray(0)
-                    } else {
-                        try {
-                            BleCoordinator.getInstance(inst.context)
-                                .readPeerRelationshipStatus(bleAddress)
-                                ?: ByteArray(0)
-                        } catch (t: Throwable) {
-                            Log.w(TAG, "readPeerRelationshipStatus failed for $bleAddress", t)
-                            ByteArray(0)
-                        }
-                    }
+                    Unified.getAllBalancesStrict()
                 }
 
                 // Diagnostics: append raw payload to persisted bridge log
@@ -407,6 +227,27 @@ class SinglePathWebViewBridge(private val context: Context) {
                 // Diagnostics: export persisted bridge log (last ~5MB)
                 "getDiagnosticsLog" -> {
                     BridgeLogger.readLogBytes()
+                }
+
+                // Diagnostics: write the debug report (the summary in the payload, the
+                // app log, the bridge log) and open the share sheet with it. Answers the
+                // report's size in bytes, as decimal UTF-8.
+                // After an approved connect that a link brought: back to the app that
+                // sent it. One byte: 1 when the wallet stepped back, 0 when no link
+                // opened it.
+                "returnToConnectCaller" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("returnToConnectCaller: no active activity")
+                    val stepped = act.returnToConnectCaller()
+                    byteArrayOf(if (stepped) 1 else 0)
+                }
+
+                "shareDiagnosticsReport" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("shareDiagnosticsReport: no active activity")
+                    val report = DiagnosticsReport.write(act, String(payload, Charsets.UTF_8))
+                    DiagnosticsReport.share(act, report)
+                    report.length().toString().toByteArray(Charsets.UTF_8)
                 }
 
                 // Diagnostics: Architecture Info
@@ -429,84 +270,26 @@ class SinglePathWebViewBridge(private val context: Context) {
                     BridgePreferencesHandler.setPreference(inst.prefs(), payload)
                 }
 
-                "nativeBoundaryStartup" -> {
-                    NativeBoundaryBridge.startup(payload)
-                }
-
                 "nativeBoundaryIngress" -> {
                     NativeBoundaryBridge.ingress(payload)
                 }
 
                 "nativeHostRequest" -> {
-                    NativeHostBridge.hostRequest(
-                        context = inst.context,
-                        prefs = inst.prefs(),
-                        sdkContextInitialized = sdkContextInitialized,
-                        logTag = TAG,
-                        keyDeviceId = KEY_DEVICE_ID,
-                        keyGenesisHash = KEY_GENESIS_HASH,
-                        keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-                        requestBytes = payload,
-                    )
+                    NativeHostBridge.hostRequest(payload)
                 }
 
                 // Transport headers (bytes-only). Must be available early for identity/QR/faucet.
+                // Empty means Rust reports NO_IDENTITY (status 0); a failure to restore the
+                // identity or to read the status is the dispatcher's error response.
                 "getTransportHeadersV3Bin" -> {
                     if (!sdkContextInitialized.get()) {
-                        try {
-                            inst.bootstrapFromPrefs()
-                        } catch (_: Throwable) {
-                            // fall through
-                        }
+                        inst.bootstrapFromPrefs()
                     }
-                    val st = try { Unified.getTransportHeadersV3Status().toInt() } catch (_: Throwable) { -1 }
-                    if (st >= 1) {
+                    if (Unified.getTransportHeadersV3Status().toInt() >= 1) {
                         Unified.getTransportHeadersV3()
                     } else {
                         ByteArray(0)
                     }
-                }
-
-                // Rust-driven pairing orchestration: scan all unpaired contacts automatically
-                "startPairingAll" -> {
-                    // Invariant #7: identity check via JNI → Rust, not prefs side channel.
-                    // BLE identity publication requires BOTH device_id and genesis_hash.
-                    val hasIdentity = try {
-                        Unified.getDeviceIdBin().size == 32 && Unified.getGenesisHashBin().size == 32
-                    } catch (_: Throwable) { false }
-                    if (!hasIdentity) {
-                        Log.w(TAG, "startPairingAll: identity not ready, aborting")
-                        return ByteArray(0)
-                    }
-                    // Ensure BLE permissions are granted before starting the loop
-                    BridgeBleHandler.requestBlePermissions()
-                    // Ensure BleCoordinator is initialized before Rust calls startBlePairing*
-                    try {
-                        val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()?.applicationContext
-                        if (ctx != null) {
-                            BleCoordinator.getInstance(ctx)
-                            Log.i(TAG, "startPairingAll: BleCoordinator ensured")
-                        } else {
-                            Log.w(TAG, "startPairingAll: no context for BleCoordinator init")
-                        }
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "startPairingAll: BleCoordinator init failed", t)
-                    }
-                    try {
-                        Unified.startPairingAll()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "startPairingAll failed", t)
-                    }
-                    ByteArray(0)
-                }
-
-                "stopPairingAll" -> {
-                    try {
-                        Unified.stopPairingAll()
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "stopPairingAll failed", t)
-                    }
-                    ByteArray(0)
                 }
 
                 "requestBlePermissions" -> {
@@ -515,96 +298,41 @@ class SinglePathWebViewBridge(private val context: Context) {
                 }
 
                 "openBluetoothSettings" -> {
-                    try {
-                        val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
-                        act?.runOnUiThread {
-                            try {
-                                val intent = android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
-                                act.startActivity(intent)
-                            } catch (e: Throwable) {
-                                Log.w(TAG, "openBluetoothSettings: failed to launch intent", e)
-                            }
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("openBluetoothSettings: no active activity")
+                    act.runOnUiThread {
+                        try {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+                            act.startActivity(intent)
+                        } catch (e: Throwable) {
+                            // The launch runs after this answer went out; the UI thread can only log it.
+                            Log.w(TAG, "openBluetoothSettings: failed to launch intent", e)
                         }
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "openBluetoothSettings: failed", e)
                     }
                     ByteArray(0)
                 }
 
                 "acceptBilateralByCommitment" -> {
-                    if (payload.size != 32) {
-                        Log.w(TAG, "acceptBilateralByCommitment: expected 32 bytes, got ${payload.size}")
-                        return ByteArray(0)
+                    require(payload.size == 32) {
+                        "acceptBilateralByCommitment: expected 32 bytes, got ${payload.size}"
                     }
-                    try {
-                        Unified.acceptBilateralByCommitment(payload)
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "acceptBilateralByCommitment failed", t)
-                        ByteArray(0)
-                    }
+                    Unified.acceptBilateralByCommitment(payload)
                 }
 
                 "rejectBilateralByCommitment" -> {
                     val parsed = BridgeEnvelopeCodec.decodeBilateralPayload(payload)
-                        ?: return ByteArray(0)
-                    try {
-                        Unified.rejectBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "rejectBilateralByCommitment failed", t)
-                        ByteArray(0)
-                    }
+                        ?: throw IllegalArgumentException("rejectBilateralByCommitment: payload is not a BilateralPayload")
+                    Unified.rejectBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
                 }
 
-                "setBleIdentityForAdvertising" -> {
-                    val parsed = try {
-                        dsm.types.proto.BleIdentityPayload.parseFrom(payload)
-                    } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: invalid payload: ${e.message}")
-                        return ByteArray(0)
-                    }
-                    val genesisHash = parsed.genesisHash.toByteArray()
-                    val deviceId = parsed.deviceId.toByteArray()
-                    if (genesisHash.size != 32 || deviceId.size != 32) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: invalid field lengths genesis=${genesisHash.size} device=${deviceId.size}")
-                        return ByteArray(0)
-                    }
-                    // Kotlin MUST NOT concatenate raw bytes — encodeIdentityCharValue is the canonical encoder.
-                    val out = Unified.encodeIdentityCharValue(genesisHash, deviceId)
-                    if (out.isEmpty()) {
-                        Log.w(TAG, "setBleIdentityForAdvertising: encodeIdentityCharValue returned empty")
-                        return ByteArray(0)
-                    }
-                    BridgeBleHandler.setBleIdentityForAdvertising(out, TAG)
-                }
-
-                "handleContactQrV3" -> {
-                    try {
-                        Log.d(TAG, "handleBinaryRpc: handleContactQrV3 invoked payloadLen=${payload.size}")
-                        val result = UnifiedContactBridge.handleContactQrV3(payload)
-                        Log.d(TAG, "handleBinaryRpc: handleContactQrV3 resultLen=${result.size}")
-                        result
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "handleContactQrV3 failed", t)
-                        // Return empty bytes on error; frontend will handle via timeout/events
-                        ByteArray(0)
-                    }
+                "cancelBilateralByCommitment" -> {
+                    val parsed = BridgeEnvelopeCodec.decodeBilateralPayload(payload)
+                        ?: throw IllegalArgumentException("cancelBilateralByCommitment: payload is not a BilateralPayload")
+                    Unified.cancelBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
                 }
 
                 // Generic Envelope v3 processing (online transfers, DBRW export, etc.)
-                "processEnvelopeV3" -> {
-                    try {
-                        val result = Unified.processEnvelopeV3(payload)
-                        // State may have mutated — refresh NFC capsule if backup enabled.
-                        // Rust decides whether to actually create one (no-op if disabled).
-                        try { UnifiedNativeApi.maybeRefreshNfcCapsule() } catch (_: Throwable) {}
-                        result
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "processEnvelopeV3 failed", t)
-                        ByteArray(0)
-                    }
-                }
-
-                else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
+                 else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
             }
         }
 
@@ -675,23 +403,14 @@ class SinglePathWebViewBridge(private val context: Context) {
     }
 
     /** Generate a fresh BIP39 mnemonic for display/backup (canonical Genesis v2). */
-    fun generateMnemonic(): ByteArray {
-        if (!ready) {
-            Log.e(TAG, "generateMnemonic: bridge not ready")
-            return ByteArray(0)
-        }
-        return BridgeIdentityHandler.generateMnemonic()
-    }
+    fun generateMnemonic(): ByteArray = BridgeIdentityHandler.generateMnemonic()
 
     /**
      * Canonical mnemonic-rooted Genesis v2 wallet creation. The (backed-up) mnemonic is the sole
-     * root. Returns framed Envelope v3 bytes; failures may be returned as error envelopes.
+     * root. Returns framed Envelope v3 bytes: Rust's own error envelope is forwarded, and any
+     * other failure is the dispatcher's error response.
      */
-    fun createGenesisV2(mnemonic: String, locale: String, networkId: String): ByteArray {
-        if (!ready) {
-            Log.e(TAG, "createGenesisV2: bridge not ready")
-            return ByteArray(0)
-        }
+    fun createGenesisV2(mnemonic: String): ByteArray {
         return BridgeIdentityHandler.createGenesisV2(
             prefs = prefs(),
             sdkContextInitialized = sdkContextInitialized,
@@ -700,8 +419,6 @@ class SinglePathWebViewBridge(private val context: Context) {
             keyGenesisHash = KEY_GENESIS_HASH,
             keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
             mnemonic = mnemonic,
-            locale = locale,
-            networkId = networkId,
         )
     }
 

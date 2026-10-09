@@ -2,17 +2,13 @@
 
 jest.mock('../WebViewBridge', () => ({
   getContactsStrictBridge: jest.fn(),
-  normalizeToBytes: jest.fn((data: unknown) => {
-    if (data instanceof Uint8Array) return data;
-    if (data instanceof ArrayBuffer) return new Uint8Array(data);
-    if (Array.isArray(data)) return new Uint8Array(data);
-    throw new Error('normalizeToBytes: expected Uint8Array or number[]');
-  }),
   routerInvokeBin: jest.fn(),
+  routerQueryBin: jest.fn(),
   requestBlePermissions: jest.fn(),
 }));
 
 import * as pb from '../../proto/dsm_app_pb';
+import { encodeBase32Crockford } from '../../utils/textId';
 import { getContacts, addContact, requestBlePermissions } from '../contacts';
 import {
   getContactsStrictBridge,
@@ -50,10 +46,9 @@ describe('contacts.ts', () => {
                 alias: 'Alice',
                 signingPublicKey: signingPk as any,
                 genesisHash: { v: gh } as any,
-                verifyCounter: 5n,
                 bleAddress: 'AA:BB:CC:DD:EE:FF',
+                pairing: pb.ContactPairingPhase.PAIRED,
                 genesisVerifiedOnline: true,
-                addedCounter: 10n,
               }),
             ],
           }),
@@ -67,10 +62,9 @@ describe('contacts.ts', () => {
       expect(result.contacts[0].alias).toBe('Alice');
       expect(result.contacts[0].deviceId).toEqual(deviceId);
       expect(result.contacts[0].publicKey).toEqual(signingPk);
-      expect(result.contacts[0].lastSeenTick).toBe(5n);
       expect(result.contacts[0].bleAddress).toBe('AA:BB:CC:DD:EE:FF');
+      expect(result.contacts[0].pairing).toBe('paired');
       expect(result.contacts[0].genesisVerifiedOnline).toBe(true);
-      expect(result.contacts[0].addedCounter).toBe(10n);
     });
 
     test('returns empty contacts list', async () => {
@@ -88,22 +82,71 @@ describe('contacts.ts', () => {
       expect(result.contacts).toEqual([]);
     });
 
-    test('handles contact with missing optional fields', async () => {
-      const env = new pb.Envelope({
+    test('a contact without what Rust always writes is refused, never filled in', async () => {
+      const answer = (contact: pb.ContactAddResponse) =>
+        frameEnvelope(new pb.Envelope({
+          version: 3,
+          payload: { case: 'contactsListResponse', value: new pb.ContactsListResponse({ contacts: [contact] }) },
+        }));
+      const complete = {
+        deviceId: new Uint8Array(32).fill(0x01),
+        alias: 'Alice',
+        signingPublicKey: new Uint8Array(64).fill(0x02),
+        genesisHash: { v: new Uint8Array(32).fill(0x03) },
+        pairing: pb.ContactPairingPhase.IDLE,
+      };
+
+      (getContactsStrictBridge as jest.Mock).mockResolvedValue(answer(new pb.ContactAddResponse({})));
+      await expect(getContacts()).rejects.toThrow(/STRICT.*0-byte device id/);
+
+      (getContactsStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.ContactAddResponse({ ...complete, genesisHash: undefined } as any)),
+      );
+      await expect(getContacts()).rejects.toThrow(/STRICT.*without its 32-byte genesis/);
+
+      (getContactsStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.ContactAddResponse({ ...complete, signingPublicKey: new Uint8Array(0) } as any)),
+      );
+      await expect(getContacts()).rejects.toThrow(/STRICT.*0-byte signing key/);
+
+      (getContactsStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.ContactAddResponse({ ...complete, alias: '' } as any)),
+      );
+      await expect(getContacts()).rejects.toThrow(/STRICT.*without its alias/);
+
+      // Where pairing stands is Rust's to state; a phase the wire does not
+      // name is not read as any other.
+      (getContactsStrictBridge as jest.Mock).mockResolvedValue(
+        answer(new pb.ContactAddResponse({ ...complete, pairing: pb.ContactPairingPhase.UNSPECIFIED } as any)),
+      );
+      await expect(getContacts()).rejects.toThrow(/STRICT.*pairing phase the wire does not name/);
+    });
+
+    test('each contact carries the pairing phase Rust states', async () => {
+      const phases: Array<[pb.ContactPairingPhase, string]> = [
+        [pb.ContactPairingPhase.PAIRED, 'paired'],
+        [pb.ContactPairingPhase.IDLE, 'idle'],
+        [pb.ContactPairingPhase.SEARCHING, 'searching'],
+        [pb.ContactPairingPhase.CONNECTED, 'connected'],
+        [pb.ContactPairingPhase.RETRYING, 'retrying'],
+      ];
+      (getContactsStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(new pb.Envelope({
         version: 3,
         payload: {
           case: 'contactsListResponse',
           value: new pb.ContactsListResponse({
-            contacts: [new pb.ContactAddResponse({})],
+            contacts: phases.map(([pairing], i) => new pb.ContactAddResponse({
+              deviceId: new Uint8Array(32).fill(i + 1) as any,
+              alias: `c${i}`,
+              signingPublicKey: new Uint8Array(64).fill(2) as any,
+              genesisHash: { v: new Uint8Array(32).fill(3) } as any,
+              pairing,
+            })),
           }),
         },
-      });
-      (getContactsStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
+      })));
       const result = await getContacts();
-      expect(result.contacts[0].alias).toBe('');
-      expect(result.contacts[0].deviceId).toEqual(new Uint8Array());
-      expect(result.contacts[0].publicKey).toEqual(new Uint8Array());
+      expect(result.contacts.map((c) => c.pairing)).toEqual(phases.map(([, name]) => name));
     });
 
     test('throws on empty response bytes', async () => {
@@ -153,7 +196,11 @@ describe('contacts.ts', () => {
             contacts: [
               new pb.ContactAddResponse({
                 alias: 'Bob',
+                deviceId: new Uint8Array(32).fill(0x04) as any,
+                signingPublicKey: new Uint8Array(64).fill(0x05) as any,
+                genesisHash: { v: new Uint8Array(32).fill(0x06) } as any,
                 chainTip: { v: tipHash } as any,
+                pairing: pb.ContactPairingPhase.IDLE,
               }),
             ],
           }),
@@ -162,41 +209,16 @@ describe('contacts.ts', () => {
       (getContactsStrictBridge as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await getContacts();
-      expect(result.contacts[0].chainTip).toBeDefined();
-      expect(result.contacts[0].chainTip?.tipHash).toEqual(tipHash);
+      expect(result.contacts[0].chainTip).toEqual(tipHash);
     });
   });
 
   // ── addContact ─────────────────────────────────────────────────────
 
   describe('addContact', () => {
-    test('throws when alias is missing', async () => {
-      await expect(addContact({
-        alias: '',
-        deviceId: new Uint8Array(32),
-        genesisHash: new Uint8Array(32),
-        signingPublicKey: new Uint8Array(64),
-      })).rejects.toThrow(/alias required/);
-    });
-
-    test('throws when genesisHash is not 32 bytes', async () => {
-      await expect(addContact({
-        alias: 'Test',
-        deviceId: new Uint8Array(32),
-        genesisHash: new Uint8Array(16),
-        signingPublicKey: new Uint8Array(64),
-      })).rejects.toThrow(/genesisHash must be 32 bytes/);
-    });
-
-    test('throws when signingPublicKey is not 64 bytes', async () => {
-      await expect(addContact({
-        alias: 'Test',
-        deviceId: new Uint8Array(32),
-        genesisHash: new Uint8Array(32),
-        signingPublicKey: new Uint8Array(32),
-      })).rejects.toThrow(/signingPublicKey must be 64 bytes/);
-    });
-
+    // No alias or length rule is checked here: Rust names a contact added
+    // without an alias by its device, and refuses a card that does not
+    // resolve (contacts.manualAdd.test.ts).
     test('returns accepted on success', async () => {
       const deviceId = new Uint8Array(32).fill(1);
       const genesisHash = new Uint8Array(32).fill(2);
@@ -212,26 +234,7 @@ describe('contacts.ts', () => {
       (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await addContact({ alias: 'TestContact', deviceId, genesisHash, signingPublicKey });
-      expect(result.accepted).toBe(true);
-    });
-
-    test('returns not accepted when response has empty alias', async () => {
-      const deviceId = new Uint8Array(32).fill(1);
-      const genesisHash = new Uint8Array(32).fill(2);
-      const signingPublicKey = new Uint8Array(64).fill(3);
-
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'contactAddResponse',
-          value: new pb.ContactAddResponse({ alias: '' }),
-        },
-      });
-      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await addContact({ alias: 'Test', deviceId, genesisHash, signingPublicKey });
-      expect(result.accepted).toBe(false);
-      expect(result.error).toBe('Empty response or failure');
+      expect(result).toEqual({ accepted: true, contactId: encodeBase32Crockford(deviceId), alias: 'TestContact' });
     });
 
     test('returns error on error envelope', async () => {
@@ -246,8 +249,7 @@ describe('contacts.ts', () => {
       (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await addContact({ alias: 'Test', deviceId, genesisHash, signingPublicKey });
-      expect(result.accepted).toBe(false);
-      expect(result.error).toMatch(/duplicate/);
+      expect(result).toEqual({ accepted: false, error: 'duplicate' });
     });
 
     test('returns error when bridge throws', async () => {
@@ -258,8 +260,7 @@ describe('contacts.ts', () => {
       (routerInvokeBin as jest.Mock).mockRejectedValue(new Error('bridge fail'));
 
       const result = await addContact({ alias: 'Test', deviceId, genesisHash, signingPublicKey });
-      expect(result.accepted).toBe(false);
-      expect(result.error).toBe('bridge fail');
+      expect(result).toEqual({ accepted: false, error: 'bridge fail' });
     });
   });
 

@@ -2,19 +2,14 @@
 
 //! # DSM Storage Node Binary
 //!
-//! Index-only, clockless, signature-free storage node for the DSM network.
-//! Serves protobuf-only HTTP/2 endpoints for genesis anchoring, ByteCommit
-//! mirroring, DLV slot management, unilateral b0x transport, and inter-node
-//! replication. (Capacity/scaling parameters are configured at runtime via the
-//! `[replication]` config section and `ReplicationConfig`, not hardcoded here.)
+//! Clockless storage node for the DSM network. Serves protobuf-only
+//! endpoints for the storage contract (keyed cells, indexes, the immutable
+//! object store), ByteCommits and their mirror, and the b0x inbox spool.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::http::StatusCode;
-use axum::routing::get;
-use axum::{middleware, Extension, Router};
 use axum_server::tls_rustls::RustlsConfig;
 
 use clap::Parser;
@@ -22,112 +17,89 @@ use config::{Config, File};
 use log::info;
 use rustls::crypto::{self, CryptoProvider};
 use std::sync::Once;
-use tower::limit::ConcurrencyLimitLayer;
-use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
-use dsm_sdk::util::text_id;
+use dsm::utils::text_id;
 
-use dsm_storage_node::{api, auth, db, replication, AppState};
-
-use api::infra::network_config::NetworkDetector;
+use dsm_storage_node::{db, set_client, AppState};
 
 #[derive(Parser, Debug)]
 #[clap(version = "1.0", author = "DSM Core Team")]
 struct Opts {
-    #[clap(short, long, default_value = "config.toml")]
+    #[clap(short, long)]
     config: String,
     #[clap(short, long)]
     verbose: bool,
-    #[clap(short, long, help = "Node index for automatic configuration (0-4)")]
-    node_index: Option<usize>,
-    #[clap(long, help = "Use automatic network detection instead of config file")]
-    auto_detect: bool,
-    #[clap(long, help = "Disable rate limiting for throughput benchmarking")]
-    benchmark_mode: bool,
 }
 
 struct ServerConfig {
     bind_addr: SocketAddr,
     node_id: String,
     concurrency_limit: usize,
-    tls_enabled: bool,
-    tls_cert_path: Option<String>,
-    tls_key_path: Option<String>,
+    tls_cert_path: String,
+    tls_key_path: String,
+    /// The storage set's CA certificate: the one anchor this node pins its
+    /// peers to.
+    set_ca_path: String,
     body_limit_bytes: usize,
-    hsts_max_age: Option<u64>,
+    /// `[http] request_timeout_secs`: how long one request may take, waiting
+    /// for a slot included.
+    request_timeout_secs: usize,
+    /// `[http] header_read_timeout_secs`: how long a connection has to send
+    /// a request's headers.
+    header_read_timeout_secs: usize,
     database_url: String,
-    seed_peers: Vec<String>,
     /// `[[storage_set.members]]` — each member's id and register incarnation.
     storage_set_members: Vec<(String, [u8; 32])>,
-    /// The DSM network this node serves (`node.network_id`). Gates the ERA
-    /// faucet-ticket register — its canonical identity is network-scoped, so
-    /// no network means the register is inactive (fail closed, like an
-    /// absent [storage_set]).
-    network_id: Option<String>,
+    /// `endpoint` on `[[storage_set.members]]` — where each set-mate is
+    /// reached, for ByteCommit mirroring.
+    storage_set_endpoints: Vec<(String, String)>,
+}
+
+/// A setting the node cannot start without: absent is an error, never a
+/// value made up in its place.
+fn required(settings: &Config, key: &str) -> Result<String> {
+    settings
+        .get_string(key)
+        .with_context(|| format!("the node's config names no `{key}`"))
+}
+
+/// A setting the node has a stated default for: absent is the default, and a
+/// value of the wrong type or out of range is an error, never the default.
+fn optional_positive(settings: &Config, key: &str, default: usize) -> Result<usize> {
+    match settings.get_int(key) {
+        Ok(v) => usize::try_from(v)
+            .ok()
+            .filter(|v| *v > 0)
+            .with_context(|| format!("`{key}` is {v}; it must be a positive integer")),
+        Err(config::ConfigError::NotFound(_)) => Ok(default),
+        Err(e) => Err(e).with_context(|| format!("`{key}` is not an integer")),
+    }
 }
 
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     let settings = Config::builder()
-        .add_source(File::with_name(&opts.config).required(false))
+        .add_source(File::with_name(&opts.config).required(true))
         .build()?;
 
-    let concurrency_limit = settings
-        .get_int("network.max_connections")
-        .or_else(|_| settings.get_int("network.max_concurrency"))
-        .or_else(|_| settings.get_int("api.max_connections"))
-        .unwrap_or(256)
-        .max(1) as usize;
+    let concurrency_limit = optional_positive(&settings, "network.max_connections", 256)?;
+    let body_limit_bytes = optional_positive(&settings, "http.body_limit_bytes", 1_048_576)?;
+    let request_timeout_secs = optional_positive(&settings, "http.request_timeout_secs", 60)?;
+    let header_read_timeout_secs =
+        optional_positive(&settings, "http.header_read_timeout_secs", 10)?;
 
-    let tls_enabled = settings.get_bool("tls.enabled").unwrap_or(false);
-    let tls_cert_path = if tls_enabled {
-        Some(
-            settings
-                .get_string("tls.cert_path")
-                .unwrap_or_else(|_| "certs/node.crt".to_string()),
-        )
-    } else {
-        None
-    };
-    let tls_key_path = if tls_enabled {
-        Some(
-            settings
-                .get_string("tls.key_path")
-                .unwrap_or_else(|_| "certs/node.key".to_string()),
-        )
-    } else {
-        None
-    };
-
-    let body_limit_bytes = settings.get_int("http.body_limit_bytes").unwrap_or(1048576) as usize;
-    let hsts_max_age = if tls_enabled {
-        Some(
-            settings
-                .get_int("security_headers.hsts_max_age")
-                .unwrap_or(31536000) as u64,
-        )
-    } else {
-        None
-    };
-
-    let database_url = settings
-        .get_string("database.url")
-        .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
-
-    // Extract seed peers from [replication] config section.
-    let seed_peers: Vec<String> = settings
-        .get_array("replication.peers")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| v.into_string().ok())
-        .collect();
+    let tls_cert_path = required(&settings, "tls.cert_path")?;
+    let tls_key_path = required(&settings, "tls.key_path")?;
+    let set_ca_path = required(&settings, "tls.ca_path")?;
+    let database_url = required(&settings, "database.url")?;
 
     // The canonical storage set this node is a member of:
     //
     //     [[storage_set.members]]
     //     id = "dsm-node-1"
     //     register_incarnation = "<Base32-Crockford of 32 bytes>"
+    //     endpoint = "https://10.0.0.1:8080"   # required for every other member
     //
-    // Absent = the settlement-slot register is inactive (fail closed);
+    // Absent = this node is in no set yet (it has no set-mates to mirror);
     // present but not containing this node's own id = misconfiguration,
     // refused at startup. The incarnation is REQUIRED per member: a set id is
     // a function of `(member_id, register_incarnation)` pairs, so a member
@@ -135,269 +107,75 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
     // derived over. A malformed entry refuses rather than defaulting, because
     // a defaulted incarnation would resolve every set to whatever the default
     // hashed to.
-    let storage_set_members: Vec<(String, [u8; 32])> = settings
+    let storage_set_entries: Vec<(String, [u8; 32], Option<String>)> = match settings
         .get_array("storage_set.members")
-        .unwrap_or_default()
-        .into_iter()
-        .map(|v| {
-            let t = v
-                .into_table()
-                .map_err(|e| anyhow::anyhow!("[[storage_set.members]] is not a table: {e}"))?;
-            let id = t
-                .get("id")
-                .and_then(|v| v.clone().into_string().ok())
-                .ok_or_else(|| anyhow::anyhow!("[[storage_set.members]] is missing `id`"))?;
-            let inc_text = t
-                .get("register_incarnation")
-                .and_then(|v| v.clone().into_string().ok())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "[[storage_set.members]] {id:?} is missing `register_incarnation`"
-                    )
-                })?;
-            let raw = text_id::decode_base32_crockford(&inc_text).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "[[storage_set.members]] {id:?} register_incarnation is not Base32-Crockford"
-                )
-            })?;
-            let inc: [u8; 32] = raw.try_into().map_err(|_| {
-                anyhow::anyhow!(
-                    "[[storage_set.members]] {id:?} register_incarnation is not 32 bytes"
-                )
-            })?;
-            Ok((id, inc))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    // The DSM network this node serves. NOT defaulted: the ERA faucet
-    // identity is era_faucet_id(network_id), so a defaulted network would let
-    // a misconfigured node acknowledge tickets for a faucet universe nobody
-    // meant it to serve.
-    let network_id: Option<String> = settings.get_string("node.network_id").ok();
-
-    if opts.auto_detect {
-        let node_index = opts.node_index.unwrap_or(0);
-        let detected = NetworkDetector::detect_network_config_with_tls(node_index, tls_enabled)?;
-        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), detected.port);
-
-        return Ok(ServerConfig {
-            bind_addr,
-            node_id: detected.node_id,
-            concurrency_limit,
-            tls_enabled,
-            tls_cert_path,
-            tls_key_path,
-            body_limit_bytes,
-            hsts_max_age,
-            database_url,
-            seed_peers,
-            storage_set_members,
-            network_id: network_id.clone(),
-        });
+    {
+        Ok(members) => members,
+        Err(config::ConfigError::NotFound(_)) => Vec::new(),
+        Err(e) => return Err(e).context("`storage_set.members` is not an array of tables"),
     }
+    .into_iter()
+    .map(|v| {
+        let t = v
+            .into_table()
+            .map_err(|e| anyhow::anyhow!("[[storage_set.members]] is not a table: {e}"))?;
+        let id = t
+            .get("id")
+            .and_then(|v| v.clone().into_string().ok())
+            .ok_or_else(|| anyhow::anyhow!("[[storage_set.members]] is missing `id`"))?;
+        let inc_text = t
+            .get("register_incarnation")
+            .and_then(|v| v.clone().into_string().ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("[[storage_set.members]] {id:?} is missing `register_incarnation`")
+            })?;
+        let raw = text_id::decode_base32_crockford(&inc_text).ok_or_else(|| {
+            anyhow::anyhow!(
+                "[[storage_set.members]] {id:?} register_incarnation is not Base32-Crockford"
+            )
+        })?;
+        let inc: [u8; 32] = raw.try_into().map_err(|_| {
+            anyhow::anyhow!("[[storage_set.members]] {id:?} register_incarnation is not 32 bytes")
+        })?;
+        let endpoint = match t.get("endpoint") {
+            None => None,
+            Some(v) => Some(v.clone().into_string().map_err(|_| {
+                anyhow::anyhow!("[[storage_set.members]] {id:?} endpoint is not a string")
+            })?),
+        };
+        Ok((id, inc, endpoint))
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
+    let storage_set_endpoints: Vec<(String, String)> = storage_set_entries
+        .iter()
+        .filter_map(|(id, _, e)| e.clone().map(|e| (id.clone(), e)))
+        .collect();
+    let storage_set_members: Vec<(String, [u8; 32])> = storage_set_entries
+        .into_iter()
+        .map(|(id, inc, _)| (id, inc))
+        .collect();
 
-    let listen_ip = settings
-        .get_string("network.listen_addr")
-        .or_else(|_| settings.get_string("api.bind_address"))
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
-
+    let listen_ip = required(&settings, "network.listen_addr")?;
     let port = settings
         .get_int("network.port")
-        .or_else(|_| settings.get_int("api.port"))
-        .unwrap_or(8080) as u16;
-
+        .context("the node's config names no `network.port`")?;
     let bind_addr: SocketAddr = format!("{listen_ip}:{port}").parse()?;
-
-    let node_id = settings
-        .get_string("node.id")
-        .or_else(|_| settings.get_string("node.node_id"))
-        .unwrap_or_else(|_| {
-            // Generate deterministic node ID from hostname and port
-            let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
-            let mut material = Vec::new();
-            material.extend_from_slice(hostname.as_bytes());
-            material.extend_from_slice(&port.to_be_bytes());
-            text_id::encode_base32_crockford(&api::infra::hardening::blake3_tagged(
-                api::infra::hardening::DOM_NODE_ID,
-                &material,
-            ))
-        });
+    let node_id = required(&settings, "node.id")?;
 
     Ok(ServerConfig {
         bind_addr,
         node_id,
         concurrency_limit,
-        tls_enabled,
         tls_cert_path,
         tls_key_path,
+        set_ca_path,
         body_limit_bytes,
-        hsts_max_age,
+        request_timeout_secs,
+        header_read_timeout_secs,
         database_url,
-        seed_peers,
         storage_set_members,
-        network_id,
+        storage_set_endpoints,
     })
-}
-
-/// Build the app and return `Router<()>`.
-fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: bool) -> Router<()> {
-    let public_rate_limiter = if benchmark_mode {
-        log::info!("BENCHMARK MODE: rate limiting disabled for all public endpoints");
-        Arc::new(api::infra::rate_limit::RateLimiter::new_bypass())
-    } else {
-        Arc::new(api::infra::rate_limit::RateLimiter::new())
-    };
-    let public_rate_layer = middleware::from_fn_with_state(
-        public_rate_limiter.clone(),
-        api::infra::rate_limit::rate_limit_by_ip,
-    );
-
-    // Start with deterministic storage APIs you already have
-    // (merge only the routers that are public & compile cleanly).
-    // Object store reads (GET) are public; writes (PUT/DELETE) are behind device_auth
-    // to prevent unauthenticated deletion or modification of vault advertisements.
-    let object_read_router =
-        api::objects::store::create_router(state.clone()).layer(public_rate_layer.clone());
-    let object_write_auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    let object_write_router = api::objects::store::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            object_write_auth_state.clone(),
-            auth::device_auth,
-        ))
-        .layer(Extension(state.clone()));
-    // Immutable content-addressed store (Area 4): reads public, writes behind
-    // the same device auth as the mutable object store. The node is
-    // content-blind on this path — no payload decode, ever.
-    let immutable_read_router =
-        api::objects::immutable::create_read_router(state.clone()).layer(public_rate_layer.clone());
-    let immutable_write_router = api::objects::immutable::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            object_write_auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state.clone()));
-    let object_list_router =
-        api::objects::list::create_router(state.clone()).layer(public_rate_layer.clone());
-    let registry_router =
-        api::registry::core::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Policy router is transport-only and signature-free; safe to expose.
-    let policy_router =
-        api::vault::policy::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Identity mirrors
-    let devtree_router =
-        api::identity::devtree::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Recovery-authority anchor — single-assignment per genesis (§0.5 bind-once)
-    let recovery_anchor_router = api::identity::recovery_anchor::create_router(state.clone())
-        .layer(public_rate_layer.clone());
-    // Append-only Per-Device SMT head chain (§0.5 gap 13, R4 layer 1)
-    let pdsmt_head_router =
-        api::identity::pdsmt_head::create_router(state.clone()).layer(public_rate_layer.clone());
-    let tips_router =
-        api::identity::tips::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Genesis mirror
-    let genesis_router =
-        api::identity::genesis::create_router(state.clone()).layer(public_rate_layer.clone());
-    // DLV slot + Recovery Capsule
-    let dlv_slot_router =
-        api::vault::slot::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Settlement-slot claim register: writes behind device auth (attribution is
-    // checked against the authenticated key), reads public.
-    let slot_claim_auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    let slot_claim_write_router = api::vault::settlement_slot::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            slot_claim_auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state.clone()));
-    let slot_claim_read_router = api::vault::settlement_slot::create_read_router(state.clone())
-        .layer(public_rate_layer.clone());
-    // Economic write-once registers (faucet tickets + economic roots): same
-    // split — writes behind device auth (attribution against the
-    // authenticated key AND device), reads public. The x-dsm-node-id echo on
-    // every response is NORMATIVE for these registers: quorum reads count a
-    // response only when the echo equals the member queried. Assembled by
-    // the library so the conformance suite drives exactly what is served.
-    // Generic conditional binding (Rev 15 §15.5): application-blind
-    // CompareExchangeMany behind device auth, ReadBinding public.
-    let generic_binding_write_router =
-        dsm_storage_node::generic_binding_write_router(state.clone());
-    let generic_binding_read_router = dsm_storage_node::generic_binding_read_router(state.clone())
-        .layer(public_rate_layer.clone());
-    let economic_register_write_router =
-        dsm_storage_node::economic_register_write_router(state.clone());
-    let economic_register_read_router =
-        dsm_storage_node::economic_register_read_router(state.clone())
-            .layer(public_rate_layer.clone());
-    let recovery_capsule_router =
-        api::vault::recovery::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Device registration
-    let device_router =
-        api::identity::device_api::create_router(state.clone()).layer(public_rate_layer.clone());
-    // PaidK spend-gate
-    let paidk_router =
-        api::vault::paidk::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Registry scaling (signals, applicants, registry queries)
-    let registry_scaling_router =
-        api::registry::scaling::create_router(state.clone()).layer(public_rate_layer.clone());
-    // DrainProof & stake exit
-    let drain_proof_router =
-        api::registry::drain::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Gossip protocol for replication
-    let gossip_router = api::transport::gossip::gossip_routes(state.clone());
-    // Node discovery for SDK auto-discovery
-    let discovery_router =
-        api::registry::discovery::create_router(state.clone()).layer(public_rate_layer.clone());
-
-    // EVERY `/admin` endpoint, assembled in one place behind one token check.
-    // Two sibling admin routers nested at the same path is how the registry's
-    // update and seed endpoints came to be reachable unauthenticated.
-    let admin_router = api::infra::admin::admin_surface(state.clone());
-
-    // Compose routes and layers, then install `state`.
-    // Returning `Router<()>` here is important (see Axum docs).
-    // Request metrics for Prometheus scraping
-
-    Router::new()
-        // Health check endpoint (lightweight, no DB access)
-        .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
-        .merge(object_read_router)
-        .merge(object_write_router)
-        .merge(immutable_read_router)
-        .merge(immutable_write_router)
-        .merge(object_list_router)
-        .merge(registry_router) // exposes /api/v2/registry/* as in your tests
-        .merge(policy_router)
-        .merge(devtree_router)
-        .merge(recovery_anchor_router)
-        .merge(pdsmt_head_router)
-        .merge(tips_router)
-        .merge(genesis_router)
-        .merge(dlv_slot_router)
-        .merge(slot_claim_write_router)
-        .merge(economic_register_write_router)
-        .merge(generic_binding_write_router)
-        .merge(generic_binding_read_router)
-        .merge(slot_claim_read_router)
-        .merge(economic_register_read_router)
-        .merge(recovery_capsule_router)
-        .merge(device_router) // exposes /api/v2/device/register
-        .merge(paidk_router) // PaidK spend-gate endpoints
-        .merge(registry_scaling_router) // signals, applicants, registry
-        .merge(drain_proof_router) // DrainProof & stake exit
-        .merge(gossip_router) // Gossip protocol endpoints
-        .merge(discovery_router) // Node discovery for SDK auto-discovery
-        .nest("/admin", admin_router) // Every /admin/* endpoint, auth applied once
-        .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
-        .layer(ConcurrencyLimitLayer::new(config.concurrency_limit))
-        .layer(TraceLayer::new_for_http())
-        // The node-identity echo (see `node_identity_echo_layer`): NORMATIVE
-        // for every quorum read and write, so it is the one shared layer.
-        .layer(dsm_storage_node::node_identity_echo_layer(&config.node_id))
-        .layer(Extension(state))
 }
 
 // Ensure a rustls CryptoProvider is installed once per-process (required by rustls >= 0.23)
@@ -425,11 +203,6 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     let opts = Opts::parse();
 
-    // Enforce production safety in release builds.
-    if let Err(msg) = api::infra::hardening::enforce_release_safety(&opts.config) {
-        anyhow::bail!(msg);
-    }
-
     // Bridge `log` records into `tracing` subscriber so `log::{info,warn,...}` work
     let _ = tracing_log::LogTracer::init();
 
@@ -449,7 +222,7 @@ async fn async_main() -> Result<()> {
     // Initialize database
     info!("Initializing database connection pool...");
     let db_pool = Arc::new(
-        db::create_pool(&server_config.database_url, false)
+        db::create_pool(&server_config.database_url, db::POOL_MAX_SIZE)
             .context("failed to create database connection pool")?,
     );
 
@@ -465,69 +238,15 @@ async fn async_main() -> Result<()> {
         .await
         .context("failed to initialize database schema")?;
 
-    let replication_config = if cfg!(debug_assertions) {
-        replication::ReplicationConfig {
-            replication_factor: 1,
-            gossip_interval_ticks: 100,
-            failure_timeout_ticks: 500,
-            gossip_fanout: 1,
-            max_concurrent_jobs: 2,
-        }
-    } else {
-        replication::default_production_config()
-    };
-
-    let replication_manager = if cfg!(debug_assertions) {
-        info!("Initializing replication manager (test-mode for dev)...");
-        Arc::new(
-            replication::ReplicationManager::new_for_tests(
-                replication_config,
-                server_config.node_id.clone(),
-                format!(
-                    "http://{}:{}",
-                    server_config.bind_addr.ip(),
-                    server_config.bind_addr.port()
-                ),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create test replication manager: {}", e))?,
+    let set_ca_pem = std::fs::read(&server_config.set_ca_path).with_context(|| {
+        format!(
+            "failed to read the storage set's CA certificate at {}",
+            server_config.set_ca_path
         )
-    } else {
-        info!(
-            "Initializing replication manager (production TLS pinning, {} seed peers)...",
-            server_config.seed_peers.len()
-        );
-        let cert_path = server_config
-            .tls_cert_path
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("missing TLS cert_path for replication"))?;
-        Arc::new(
-            replication::ReplicationManager::new(
-                replication_config,
-                server_config.node_id.clone(),
-                format!(
-                    "https://{}:{}",
-                    server_config.bind_addr.ip(),
-                    server_config.bind_addr.port()
-                ),
-                std::path::Path::new(cert_path),
-                server_config.seed_peers.clone(),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create replication manager: {}", e))?,
-        )
-    };
-
-    let bind_addr_str = format!(
-        "https://{}:{}",
-        server_config.bind_addr.ip(),
-        server_config.bind_addr.port()
-    );
-    let mut state = AppState::new(
-        server_config.node_id.clone(),
-        &bind_addr_str,
-        server_config.hsts_max_age,
-        db_pool.clone(),
-        replication_manager,
-    );
+    })?;
+    let set_client = set_client::pinned_set_client(&set_ca_pem)
+        .context("failed to build the client pinned to the storage set's CA")?;
+    let mut state = AppState::new(server_config.node_id.clone(), db_pool.clone(), set_client)?;
     // ESTABLISHED AND LOGGED UNCONDITIONALLY, before any set is considered.
     //
     // The incarnation is a property of this node's register, not of its
@@ -538,7 +257,6 @@ async fn async_main() -> Result<()> {
     let own_incarnation = db::register_incarnation(&db_pool)
         .await
         .context("failed to establish this node's register incarnation")?;
-    state = state.with_register_incarnation(own_incarnation);
     log::info!(
         "register incarnation for node {}: {}",
         server_config.node_id,
@@ -551,6 +269,10 @@ async fn async_main() -> Result<()> {
             server_config.storage_set_members.clone(),
             &server_config.node_id,
             own_incarnation,
+        )?
+        .with_endpoints(
+            &server_config.node_id,
+            server_config.storage_set_endpoints.clone(),
         )?;
         log::info!(
             "storage set configured: {} members, id={}",
@@ -560,50 +282,31 @@ async fn async_main() -> Result<()> {
         state = state.with_storage_set(set);
     } else {
         log::warn!(
-            "no [storage_set] configured — the settlement-slot register is INACTIVE on this node \
-             (every claim is refused)"
-        );
-    }
-    if let Some(network) = server_config.network_id.as_ref() {
-        log::info!("network configured: {network} — the faucet-ticket register is active");
-        state = state.with_network_id(network.clone().into_bytes());
-    } else {
-        log::warn!(
-            "no node.network_id configured — the faucet-ticket register is INACTIVE on this \
-             node (every ticket claim is refused); the canonical ERA faucet identity is \
-             network-scoped and cannot be derived without it"
+            "no [storage_set] configured: this node serves the storage contract and mirrors no \
+             set-mate; name its members, with the incarnation above for this node, to join a set"
         );
     }
 
     let app_state = Arc::new(state.clone());
 
-    let mut app = build_router(app_state.clone(), &server_config, opts.benchmark_mode);
-
-    // NOTE: No wall-clock maintenance loop. Maintenance cycles are invoked explicitly
-    // via admin tooling with deterministic tick inputs.
-
-    // Mount b0x v2 (protobuf-only, clockless) with auth middleware
-    // Auth now uses the shared DB pool instead of a separate bare connection
-    let auth_state = Arc::new(auth::AuthState {
-        db_pool: db_pool.clone(),
-    });
-    let b0x_router = api::transport::b0x::router(Arc::new(state.clone()), auth_state);
-    app = app.merge(b0x_router);
-
-    info!(
-        "DSM storage node ready: deterministic storage APIs (ByteCommit/ObjectStore + Registry) (node {} addr {} tls {})",
-        server_config.node_id,
-        server_config.bind_addr,
-        server_config.tls_enabled
+    // The one assembly the node serves (`dsm_storage_node::build_app`), shared
+    // with tests that stand up real nodes.
+    let app = dsm_storage_node::build_app(
+        app_state.clone(),
+        dsm_storage_node::AppLimits {
+            body_limit_bytes: server_config.body_limit_bytes,
+            concurrency_limit: server_config.concurrency_limit,
+            request_timeout: std::time::Duration::from_secs(u64::try_from(
+                server_config.request_timeout_secs,
+            )?),
+            wait_bound: dsm_storage_node::api::transport::b0x::MAX_WAIT,
+        },
     );
 
-    // ---------------------------------------------------------------------
-    // Cleanup policy (clockless)
-    // ---------------------------------------------------------------------
-    // IMPORTANT: This storage node is clockless at the protocol boundary.
-    // We intentionally do NOT run periodic cleanup using wall-clock time.
-    // Expired object pruning is instead invoked explicitly via admin tooling
-    // by supplying a deterministic `before_iter` value.
+    info!(
+        "DSM storage node ready (node {} addr {})",
+        server_config.node_id, server_config.bind_addr
+    );
 
     // Graceful shutdown with handle pattern
     let handle = axum_server::Handle::new();
@@ -633,61 +336,147 @@ async fn async_main() -> Result<()> {
         shutdown_handle.graceful_shutdown(None);
     });
 
-    if server_config.tls_enabled {
-        let cert_path = server_config
-            .tls_cert_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing TLS cert_path"))?;
-        let key_path = server_config
-            .tls_key_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing TLS key_path"))?;
-        let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
+    let tls_config =
+        RustlsConfig::from_pem_file(&server_config.tls_cert_path, &server_config.tls_key_path)
             .await
             .context("failed to load TLS certificates")?;
-
-        axum_server::bind_rustls(server_config.bind_addr, tls_config)
-            .handle(handle)
-            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await
-            .context("storage node TLS server error")?;
-    } else {
-        axum_server::bind(server_config.bind_addr)
-            .handle(handle)
-            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await
-            .context("storage node server error")?;
-    }
+    let mut server = axum_server::bind_rustls(server_config.bind_addr, tls_config).handle(handle);
+    dsm_storage_node::bound_connections(
+        server.http_builder(),
+        std::time::Duration::from_secs(u64::try_from(server_config.header_read_timeout_secs)?),
+    );
+    server
+        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .await
+        .context("storage node TLS server error")?;
 
     Ok(())
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
 mod tests {
-    use dsm::common::domain_tags::{TAG_DSM_BYTECOMMIT, TAG_DSM_NODE_ID};
+    const WHOLE_CONFIG: &str = r#"
+[node]
+id = "node-under-test"
 
-    /// Central storage-related tags remain ASCII `DSM/` domains.
-    ///
-    /// REWRITTEN for the canonical encoder. This used to build `format!("{tag}\0")`
-    /// and assert the result ended with a NUL — i.e. it checked that the TEST
-    /// could append a delimiter, which was true by construction and proved
-    /// nothing about the hasher. The delimiter now belongs to `tagged_hasher`
-    /// alone and a tag carrying its own is unrepresentable, so the meaningful
-    /// statement is about the SOURCE bytes.
+[network]
+listen_addr = "127.0.0.1"
+port = 8443
+
+[tls]
+cert_path = "/certs/node.crt"
+key_path = "/certs/node.key"
+ca_path = "/certs/ca.crt"
+
+[database]
+url = "postgresql://127.0.0.1:5432/node"
+"#;
+
+    fn load(body: &str) -> anyhow::Result<super::ServerConfig> {
+        let path = std::env::temp_dir().join(format!(
+            "dsm-node-config-{}.toml",
+            dsm::utils::text_id::encode_base32_crockford(&rand::random::<[u8; 16]>())
+        ));
+        std::fs::write(&path, body).expect("write the config");
+        let loaded = super::load_server_config(&super::Opts {
+            config: path.to_string_lossy().into_owned(),
+            verbose: false,
+        });
+        std::fs::remove_file(&path).expect("remove the config");
+        loaded
+    }
+
+    /// Ruling #2: a node starts from what its config states. A setting it
+    /// cannot run without is refused by name when absent — no identity, TLS
+    /// material, trust anchor or database is made up in its place.
     #[test]
-    fn node_id_domain_tags_are_ascii_dsm_and_carry_no_delimiter() {
-        for tag in [TAG_DSM_NODE_ID, TAG_DSM_BYTECOMMIT] {
-            let b = tag.source_bytes();
-            let shown = String::from_utf8_lossy(b);
-            assert!(b.is_ascii(), "domain tag must be ASCII: {shown}");
-            assert!(
-                b.starts_with(b"DSM/"),
-                "domain tag must use DSM/ prefix: {shown}"
-            );
-            assert!(
-                !b.contains(&0),
-                "the delimiter belongs to the encoder, never the tag: {shown}"
-            );
+    fn a_config_missing_a_required_setting_is_refused_by_name() {
+        let whole = load(WHOLE_CONFIG).expect("the whole config loads");
+        assert_eq!(whole.node_id, "node-under-test");
+        assert_eq!(whole.set_ca_path, "/certs/ca.crt");
+        for (line, key) in [
+            ("id = \"node-under-test\"", "node.id"),
+            ("listen_addr = \"127.0.0.1\"", "network.listen_addr"),
+            ("port = 8443", "network.port"),
+            ("cert_path = \"/certs/node.crt\"", "tls.cert_path"),
+            ("key_path = \"/certs/node.key\"", "tls.key_path"),
+            ("ca_path = \"/certs/ca.crt\"", "tls.ca_path"),
+            ("url = \"postgresql://127.0.0.1:5432/node\"", "database.url"),
+        ] {
+            assert!(WHOLE_CONFIG.contains(line), "fixture line {line}");
+            let err = match load(&WHOLE_CONFIG.replace(line, "")) {
+                Ok(_) => panic!("a config without `{key}` is refused"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(key), "the refusal names `{key}`: {err}");
         }
+    }
+
+    /// A config file that does not exist is refused as missing, before any
+    /// setting is read — not treated as an empty config.
+    #[test]
+    fn a_missing_config_file_is_refused() {
+        let err = match super::load_server_config(&super::Opts {
+            config: "/nonexistent/dsm-node-config.toml".to_string(),
+            verbose: false,
+        }) {
+            Ok(_) => panic!("a config file that does not exist is refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("/nonexistent/dsm-node-config.toml") && err.contains("not found"),
+            "the refusal names the missing file: {err}"
+        );
+    }
+
+    /// A setting with a stated default takes the default only when it is
+    /// absent. A value of the wrong type, zero or negative is refused by name
+    /// rather than quietly read as the default.
+    #[test]
+    fn a_limit_of_the_wrong_type_or_out_of_range_is_refused_by_name() {
+        let whole = load(WHOLE_CONFIG).expect("the whole config loads");
+        assert_eq!(whole.concurrency_limit, 256);
+        assert_eq!(whole.body_limit_bytes, 1_048_576);
+        assert_eq!(whole.request_timeout_secs, 60);
+        assert_eq!(whole.header_read_timeout_secs, 10);
+
+        let with = |extra: &str| format!("{WHOLE_CONFIG}\n{extra}\n");
+        let set = load(&with("[http]\nbody_limit_bytes = 4096")).expect("a stated limit loads");
+        assert_eq!(set.body_limit_bytes, 4096);
+        for (extra, key) in [
+            (
+                "[http]\nbody_limit_bytes = \"lots\"",
+                "http.body_limit_bytes",
+            ),
+            ("[http]\nbody_limit_bytes = 0", "http.body_limit_bytes"),
+            ("[http]\nbody_limit_bytes = -1", "http.body_limit_bytes"),
+        ] {
+            let err = match load(&with(extra)) {
+                Ok(_) => panic!("`{extra}` is refused"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(key), "the refusal names `{key}`: {err}");
+        }
+        let err = match load(
+            &WHOLE_CONFIG.replace("port = 8443", "port = 8443\nmax_connections = [1]"),
+        ) {
+            Ok(_) => panic!("a non-integer max_connections is refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("network.max_connections"), "{err}");
+    }
+
+    /// `storage_set.members` of the wrong shape is refused, never read as
+    /// "no set".
+    #[test]
+    fn storage_set_members_of_the_wrong_shape_are_refused() {
+        let err = match load(&format!(
+            "{WHOLE_CONFIG}\n[storage_set]\nmembers = \"n1\"\n"
+        )) {
+            Ok(_) => panic!("a string for storage_set.members is refused"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("storage_set.members"), "{err}");
     }
 }

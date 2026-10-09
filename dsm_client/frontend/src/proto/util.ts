@@ -20,30 +20,3 @@ export function extractGenesisCreated(env: pb.Envelope): pb.GenesisCreated {
     : 'none';
   throw new Error(`no genesisCreatedResponse in envelope (payload shape: ${String(shape)})`);
 }
-
-/**
- * Extract SystemGenesisResponse from a UniversalRx envelope.
- * This is the standard response for a `system.genesis` query.
- */
-export function extractSystemGenesisResponse(env: pb.Envelope): pb.SystemGenesisResponse {
-  let innerEnv = env;
-
-  // Check if the payload is a BatchEnvelope and extract the first envelope
-  if (env?.payload?.case === 'batchEnvelope' && env.payload.value.envelopes.length > 0) {
-    innerEnv = env.payload.value.envelopes[0];
-  }
-
-  if (!innerEnv?.payload || (innerEnv.payload as any).case !== 'universalRx') {
-    throw new Error('no universalRx in envelope');
-  }
-  const urx = (innerEnv.payload as any).value as pb.UniversalRx;
-  const firstResult = urx?.results?.[0];
-  if (firstResult?.error) {
-    throw new Error(firstResult.error.message || 'system.genesis failed in UniversalRx');
-  }
-  const pack = firstResult?.result;
-  if (!pack?.body) {
-    throw new Error('system.genesis: missing result body in UniversalRx');
-  }
-  return pb.SystemGenesisResponse.fromBinary(pack.body);
-}

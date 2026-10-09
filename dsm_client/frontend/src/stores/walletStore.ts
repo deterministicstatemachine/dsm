@@ -3,7 +3,7 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
-import { bridgeEvents } from '../bridge/bridgeEvents';
+import { isIdentityUnavailable } from '../dsm/identityUnavailable';
 import type { Transaction } from '@/hooks/useTransactions';
 import type { WalletBalance, WalletState } from '../contexts/WalletContext';
 
@@ -21,8 +21,6 @@ class WalletStore {
   private snapshot: WalletState = initialState;
 
   private listeners = new Set<() => void>();
-
-  private hasObservedBalances = false;
 
   // Track concurrent in-flight refresh calls so isLoading stays true
   // until ALL concurrent operations complete (prevents race where
@@ -53,62 +51,30 @@ class WalletStore {
     this.emit();
   }
 
-  private balanceKey(entry: WalletBalance): string {
-    return String(entry.tokenId || entry.symbol || entry.tokenName || 'UNKNOWN');
-  }
-
-  private coerceBalance(value: unknown): bigint {
-    if (typeof value === 'bigint') return value;
-    if (typeof value === 'number') return BigInt(Number.isFinite(value) ? Math.trunc(value) : 0);
-    if (typeof value === 'string') {
-      try {
-        return BigInt(value);
-      } catch {
-        return 0n;
-      }
-    }
-    return 0n;
-  }
-
-  private detectPositiveCredits(previous: WalletBalance[], next: WalletBalance[]): Array<{
-    tokenId: string;
-    delta: bigint;
-    nextBalance: bigint;
-  }> {
-    const previousByToken = new Map<string, bigint>();
-    previous.forEach((entry) => {
-      previousByToken.set(this.balanceKey(entry), this.coerceBalance(entry.balance));
-    });
-
-    return next.flatMap((entry) => {
-      const tokenId = this.balanceKey(entry);
-      const nextBalance = this.coerceBalance(entry.balance);
-      const previousBalance = previousByToken.get(tokenId) ?? 0n;
-      const delta = nextBalance - previousBalance;
-      return delta > 0n ? [{ tokenId, delta, nextBalance }] : [];
-    });
-  }
-
   initialize = async (): Promise<void> => {
     try {
       this.setState({ isLoading: true, error: null });
 
       const identity = await dsmClient.getIdentity();
-      const genesisHash = identity?.genesisHash ?? null;
-      const deviceId = identity?.deviceId ?? null;
 
       this.setState({
-        genesisHash,
-        deviceId,
-        isInitialized: Boolean(genesisHash && deviceId),
+        genesisHash: identity.genesisHash,
+        deviceId: identity.deviceId,
+        isInitialized: true,
         isLoading: false,
         error: null,
       });
 
-      if (genesisHash && deviceId) {
-        await this.refreshAll();
-      }
+      await this.refreshAll();
     } catch (error) {
+      // No identity on this device is a state, not a failure: the store stays
+      // uninitialized with no error, and the genesis flow is where the app
+      // goes. Anything else — the runtime not ready within the window, a read
+      // that failed — is reported as what it is.
+      if (isIdentityUnavailable(error) && error.state === 'missing') {
+        this.setState({ genesisHash: null, deviceId: null, isInitialized: false, isLoading: false, error: null });
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to initialize wallet';
       this.setState({ isLoading: false, error: message });
     }
@@ -118,7 +84,6 @@ class WalletStore {
     this.loadingCount++;
     this.setState({ isLoading: true });
     try {
-      const previousBalances = this.snapshot.balances.slice();
       const [eraResult] = await Promise.allSettled([
         dsmClient.getAllBalances(),
       ]);
@@ -127,38 +92,22 @@ class WalletStore {
       // Do not overwrite dBTC with the separate Bitcoin chain-wallet endpoint.
       let balances: WalletBalance[];
       if (eraResult.status === 'fulfilled') {
-        balances = (eraResult.value as any[])
-          .filter((entry: any) => String(entry.tokenId || '').toUpperCase() !== 'BTC_CHAIN')
-          .slice();
+        balances = eraResult.value.filter((entry) => entry.tokenId.toUpperCase() !== 'BTC_CHAIN');
       } else {
-        console.error('WalletStore: ERA balance fetch failed:', eraResult.reason);
+        console.error('WalletStore: balance fetch failed:', eraResult.reason);
         balances = this.snapshot.balances.slice();
       }
 
-      // Report partial failures as a non-blocking error
-      const failedParts: string[] = [];
-      if (eraResult.status === 'rejected') failedParts.push('ERA');
-      const error = failedParts.length > 0
-        ? `Failed to refresh ${failedParts.join(' & ')} balances`
-        : null;
+      // A failed refresh keeps the last list and says so.
+      const error = eraResult.status === 'rejected' ? 'Failed to refresh balances' : null;
 
+      // A balance that is higher than the last read is not a credit this
+      // store may announce: the last read may have been empty (the runtime
+      // still warming up at launch) or stale, and a difference between two
+      // reads is not Rust's word that anything arrived. What arrived is
+      // announced by Rust — inbox.updated for items it processed, the
+      // completion events for a deposit or a sealed transfer.
       this.setState({ balances, error });
-
-      const positiveCredits = this.hasObservedBalances
-        ? this.detectPositiveCredits(previousBalances, balances)
-        : [];
-      this.hasObservedBalances = true;
-
-      if (positiveCredits.length > 0) {
-        const firstCredit = positiveCredits[0];
-        bridgeEvents.emit('wallet.creditReceived', {
-          source: 'wallet.refreshBalances',
-          tokenId: firstCredit.tokenId,
-          amount: firstCredit.delta.toString(),
-          nextBalance: firstCredit.nextBalance.toString(),
-          creditCount: positiveCredits.length,
-        });
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to refresh balances';
       console.error('WalletStore: refreshBalances failed:', message);
@@ -204,69 +153,5 @@ export function useWalletStore(): WalletState {
     walletStore.subscribe,
     walletStore.getSnapshot,
     walletStore.getServerSnapshot,
-  );
-}
-
-export function useWalletBalances(): WalletBalance[] {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().balances,
-    () => walletStore.getServerSnapshot().balances,
-  );
-}
-
-export function useWalletTransactions(): Transaction[] {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().transactions,
-    () => walletStore.getServerSnapshot().transactions,
-  );
-}
-
-// Memoized identity selector — avoids creating a new object reference on every
-// unrelated store change (e.g. transaction updates) which would cause needless
-// re-renders in all useWalletIdentity() consumers.
-let _cachedIdentity: { genesisHash: string | null; deviceId: string | null } = {
-  genesisHash: null,
-  deviceId: null,
-};
-
-function getIdentitySnapshot(): { genesisHash: string | null; deviceId: string | null } {
-  const s = walletStore.getSnapshot();
-  if (s.genesisHash !== _cachedIdentity.genesisHash || s.deviceId !== _cachedIdentity.deviceId) {
-    _cachedIdentity = { genesisHash: s.genesisHash, deviceId: s.deviceId };
-  }
-  return _cachedIdentity;
-}
-
-export function useWalletIdentity(): { genesisHash: string | null; deviceId: string | null } {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    getIdentitySnapshot,
-    getIdentitySnapshot,
-  );
-}
-
-export function useWalletInitialized(): boolean {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().isInitialized,
-    () => walletStore.getServerSnapshot().isInitialized,
-  );
-}
-
-export function useWalletLoading(): boolean {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().isLoading,
-    () => walletStore.getServerSnapshot().isLoading,
-  );
-}
-
-export function useWalletError(): string | null {
-  return useSyncExternalStore(
-    walletStore.subscribe,
-    () => walletStore.getSnapshot().error,
-    () => walletStore.getServerSnapshot().error,
   );
 }

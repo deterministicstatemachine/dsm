@@ -11,12 +11,12 @@ type HomeStatusArgs = {
 export function buildHomeMenuItems(appState: AppState, currentScreen: ScreenType): string[] {
   switch (appState) {
     case 'needs_genesis':
-      return ['INITIALIZE', 'ADDITIONAL DEVICE', 'DEVICE RECOVERY'];
+      return ['INITIALIZE', 'DEVICE RECOVERY'];
     case 'error':
       return ['RETRY CONNECTION', 'VIEW ERROR LOG'];
     case 'wallet_ready':
       if (currentScreen !== 'home') return ['BACK TO HOME'];
-      return ['WALLET', 'TOKENS', 'SOFI', 'CONTACTS', 'STORAGE', 'SETTINGS'];
+      return ['WALLET', 'TOKENS', 'TRADE', 'APPS', 'CONTACTS', 'STORAGE', 'SETTINGS'];
     default:
       return [];
   }

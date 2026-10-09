@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! What a device's poll reads from the members for it, before anything is
+//! processed: the transfer entries and the evidence halves exactly as its
+//! dispatcher is handed them. Tests take these as the honest arrivals of a
+//! real send, and derive hostile arrivals from them.
+
+use crate::economic_fixtures::FleetGuard;
+use crate::sdk::b0x_sdk::{
+    B0xEntry, B0xSDK, CountersignDelta, EvidenceArtifact, RelationshipFinalizedMessage,
+};
+use crate::storage::client_db;
+use crate::test_support::two_device::TestDevice;
+
+/// Everything waiting for one device on the members.
+pub struct Arrived {
+    /// Transfer copies, each with the route it was read from (`inbox_key`)
+    /// and the id the spool holds it by (`transaction_id`).
+    pub transfers: Vec<B0xEntry>,
+    /// Evidence copies with the id the spool holds each by, and the route it
+    /// was read from.
+    pub evidence: Vec<(EvidenceArtifact, String)>,
+    /// Recipients' countersign deltas for this device's sends.
+    pub deltas: Vec<CountersignDelta>,
+    /// Senders' finality certificates for transitions this device accepted.
+    pub certificates: Vec<RelationshipFinalizedMessage>,
+}
+
+/// Read `device`'s inbox on `fleet` the way its poll does — every rotated
+/// route it holds for its contacts — and process nothing.
+pub async fn arrivals_for(device: &TestDevice, fleet: &FleetGuard) -> Arrived {
+    device.enter();
+    let mut b0x = B0xSDK::new(
+        crate::util::text_id::encode_base32_crockford(&device.device_id),
+        device.router().core_sdk.clone(),
+        fleet.endpoints(),
+    )
+    .expect("B0xSDK");
+    let contacts = client_db::get_all_contacts().expect("contacts");
+    let mut arrived = Arrived {
+        transfers: Vec::new(),
+        evidence: Vec::new(),
+        deltas: Vec::new(),
+        certificates: Vec::new(),
+    };
+    for tagged in crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
+        device.genesis,
+        device.device_id,
+        &contacts,
+    )
+    .expect("inbox routes")
+    {
+        let outcome = b0x
+            .retrieve_from_b0x_v2(&tagged.address)
+            .await
+            .expect("read the inbox");
+        assert_eq!(
+            outcome.coverage,
+            crate::sdk::b0x_sdk::SpoolCoverage::Complete,
+            "the harness reads every delivery"
+        );
+        arrived.transfers.extend(outcome.entries);
+        for artifact in b0x.take_evidence_artifacts() {
+            arrived.evidence.push((artifact, tagged.address.clone()));
+        }
+        arrived.deltas.extend(b0x.take_countersign_deltas());
+        arrived
+            .certificates
+            .extend(b0x.take_relationship_finalized());
+    }
+    arrived
+}
+
+/// The one transfer and its evidence waiting for `device`, as its poll reads
+/// them. An honest sender spools the transfer under the id derived from the
+/// receipt's commitment; that is asserted here, from the receipt itself.
+pub async fn the_one_transfer(device: &TestDevice, fleet: &FleetGuard) -> OneTransfer {
+    let mut arrived = arrivals_for(device, fleet).await;
+    assert_eq!(arrived.transfers.len(), 1, "one transfer is waiting");
+    assert_eq!(arrived.evidence.len(), 1, "its evidence is waiting");
+    let transfer = arrived.transfers.remove(0);
+    let (artifact, evidence_route) = arrived.evidence.remove(0);
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        &artifact.evidence.full_receipt_bytes,
+    )
+    .expect("the receipt decodes");
+    let commitment = receipt
+        .compute_commitment()
+        .expect("the receipt commitment");
+    assert_eq!(
+        crate::storage::client_db::derive_submission_id(&commitment),
+        transfer.transaction_id,
+        "an honest sender spools the transfer under the id its receipt derives"
+    );
+    OneTransfer {
+        message_id: transfer.transaction_id.clone(),
+        route: transfer.inbox_key.clone(),
+        header_sender: transfer.sender_device_id.clone(),
+        transfer_bytes: transfer.transfer_wire_bytes.clone(),
+        evidence_message_id: artifact.message_id,
+        evidence_bytes: artifact.evidence.full_receipt_bytes,
+        evidence_route,
+    }
+}
+
+/// One transfer's halves as they arrived.
+pub struct OneTransfer {
+    /// The id the spool holds the transfer by.
+    pub message_id: String,
+    /// The route the transfer half was read from.
+    pub route: String,
+    /// The device the transfer's envelope header names (Base32).
+    pub header_sender: String,
+    /// The `OnlineTransferRequest` bytes, exactly as the sender froze them.
+    pub transfer_bytes: Vec<u8>,
+    /// The id the spool holds the evidence by.
+    pub evidence_message_id: String,
+    /// The full A-side receipt wire bytes.
+    pub evidence_bytes: Vec<u8>,
+    /// The route the evidence half was read from.
+    pub evidence_route: String,
+}

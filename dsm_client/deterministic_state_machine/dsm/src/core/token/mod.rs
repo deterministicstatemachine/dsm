@@ -2,11 +2,8 @@
 
 //! src/core/token/mod.rs
 
-pub mod era_token;
-pub mod init;
+pub mod era_policy;
 pub mod policy;
-pub mod token_factory;
-pub mod token_registry;
 pub mod token_state_manager;
 
 // Optional modules (enable via Cargo features)
@@ -14,18 +11,10 @@ pub mod token_state_manager;
 // JNI bridge moved to dsm_sdk - see dsm_sdk/src/jni/unified_protobuf_bridge.rs
 
 // Export main token manager types and helpers (only items that exist)
-pub use era_token::{EraTokenManager, NetworkType};
-pub use init::{initialize_root_token, initialize_root_token_with_balance};
 pub use policy::TokenPolicySystem;
 
-pub use token_factory::{
-    create_token_genesis, derive_sub_token_genesis, ParticipantId, TokenContribution, TokenGenesis,
-};
-
-pub use token_registry::TokenRegistry;
 pub use token_state_manager::{
     builtin_policy_commit_for_token, builtin_token_id_for_policy_commit,
     canonical_balance_key_for_commit, register_policy_commit_ticker, TOKEN_CREATION_FEE_ERA,
     resolve_ticker_for_policy_commit, derive_canonical_balance_key, resolve_policy_commit,
-    PolicyCommitResolver, TokenStateManager, TokenTransfer,
 };

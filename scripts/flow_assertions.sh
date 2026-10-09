@@ -28,6 +28,7 @@ assert_pattern() {
 }
 
 FRONT_TX="dsm_client/frontend/src/dsm/transactions.ts"
+FRONT_CONTACTS="dsm_client/frontend/src/dsm/contacts.ts"
 FRONT_BRIDGE="dsm_client/frontend/src/dsm/WebViewBridge/transportCore.ts"
 FRONT_NBB="dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts"
 FRONT_EVENT="dsm_client/frontend/src/dsm/EventBridge.ts"
@@ -36,6 +37,7 @@ JNI_BRIDGE="dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_proto
 SDK_ROUTER="dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs"
 
 assert_file "$FRONT_TX"
+assert_file "$FRONT_CONTACTS"
 assert_file "$FRONT_BRIDGE"
 assert_file "$FRONT_NBB"
 assert_file "$FRONT_EVENT"
@@ -43,16 +45,15 @@ assert_file "$FRONT_PORT"
 assert_file "$JNI_BRIDGE"
 assert_file "$SDK_ROUTER"
 
-# Online transfer path — routes via unified ingress (routerInvokeBin → IngressRequest)
-assert_pattern "$FRONT_TX" "sendOnlineTransfer(" "frontend online transfer entrypoint missing"
-assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.send'" "frontend online transfer must route via wallet.send"
-assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.sendSmart'" "frontend smart online transfer must route via wallet.sendSmart"
+# Online transfer path — the send screen's, via unified ingress (routerInvokeBin → IngressRequest)
+assert_pattern "$FRONT_TX" "sendOnlineTransferSmart(" "frontend online transfer entrypoint missing"
+assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.sendSmart'" "frontend online transfer must route via wallet.sendSmart"
 assert_pattern "$SDK_ROUTER" "process_online_transfer_logic" "sdk online transfer processing logic missing"
 
 # Offline bilateral prepare path
 assert_pattern "$FRONT_TX" "offlineSend(" "frontend offline send entrypoint missing"
 assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.sendOffline'" "frontend offline send must route via wallet.sendOffline"
-assert_pattern "$JNI_BRIDGE" "Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOfflineSend" "jni bilateral offline entrypoint missing"
+assert_pattern "dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs" "\"wallet.sendOffline\" =>" "sdk offline send handler missing"
 
 # Unified ingress boundary (replaced legacy appRouterInvokeFramed/appRouterQueryFramed post-16f0763)
 assert_pattern "$FRONT_NBB" "case: 'routerInvoke'" "ingress routerInvoke case missing in NativeBoundaryBridge"
@@ -70,8 +71,14 @@ assert_pattern "$FRONT_EVENT" "window.addEventListener('dsm-event-bin'" "event b
 assert_pattern "$FRONT_EVENT" "topic === 'bilateral.event'" "bilateral event fanout missing"
 assert_pattern "$FRONT_EVENT" "topic === 'ble.envelope.bin'" "ble envelope fanout missing"
 
-# QR/contact onboarding and storage/inbox anchors
-assert_pattern "$SDK_ROUTER" "\"contacts.handle_contact_qr_v3\"" "sdk contact qr handler missing"
+# QR/contact onboarding: the contact code is Rust's both ways, and the add goes through Rust
+assert_pattern "$FRONT_CONTACTS" "routerQueryBin('identity.contact_code'" "frontend must take its contact code from Rust"
+assert_pattern "$FRONT_CONTACTS" "routerQueryBin('contacts.readContactCode'" "frontend must have Rust read a scanned contact code"
+assert_pattern "$FRONT_CONTACTS" "routerInvokeBin('contacts.addManual'" "frontend contact add must route via contacts.addManual"
+assert_pattern "$SDK_ROUTER" "\"identity.contact_code\"" "sdk contact code writer missing"
+assert_pattern "$SDK_ROUTER" "\"contacts.readContactCode\"" "sdk contact code reader missing"
+
+# Storage/inbox anchors
 assert_pattern "$SDK_ROUTER" "\"inbox.pull\"" "sdk inbox pull query handler missing"
 assert_pattern "$SDK_ROUTER" "\"bilateral.pending_list\"" "sdk bilateral pending query handler missing"
 

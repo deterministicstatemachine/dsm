@@ -28,7 +28,6 @@ use rand::rngs::OsRng;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 // =================== Encrypted chain-head SK helpers (§11.1) ===================
 //
@@ -138,7 +137,6 @@ pub struct CertChainHead {
     pub side: CertChainSide,
     pub chain_head_pubkey: Vec<u8>,
     pub step_count: u64,
-    pub updated_at: u64,
 }
 
 /// Initialize a chain head for a relationship. Idempotent: if a row already
@@ -155,54 +153,17 @@ pub fn init_cert_chain_head(
 ) -> Result<bool> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO cert_chain_heads
-            (relationship_key, side, chain_head_pubkey, step_count, updated_at)
-         VALUES (?1, ?2, ?3, 0, ?4)",
+            (relationship_key, side, chain_head_pubkey, step_count)
+         VALUES (?1, ?2, ?3, 0)",
         params![
             relationship_key.as_slice(),
             side.as_i64(),
-            chain_head_pubkey,
-            now
+            chain_head_pubkey
         ],
     )?;
     Ok(inserted > 0)
-}
-
-/// Advance the chain head to a new pubkey after a receipt is accepted.
-/// Bumps `step_count` by one and sets `chain_head_pubkey` to `new_pubkey`.
-/// Returns the new step count, or `None` if no row exists for that
-/// (relationship_key, side) pair.
-pub fn advance_cert_chain_head(
-    relationship_key: &[u8; 32],
-    side: CertChainSide,
-    new_pubkey: &[u8],
-) -> Result<Option<u64>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
-    let updated = conn.execute(
-        "UPDATE cert_chain_heads
-         SET chain_head_pubkey = ?1,
-             step_count = step_count + 1,
-             updated_at = ?2
-         WHERE relationship_key = ?3 AND side = ?4",
-        params![new_pubkey, now, relationship_key.as_slice(), side.as_i64()],
-    )?;
-    if updated == 0 {
-        return Ok(None);
-    }
-    let step_count: i64 = conn
-        .query_row(
-            "SELECT step_count FROM cert_chain_heads
-             WHERE relationship_key = ?1 AND side = ?2",
-            params![relationship_key.as_slice(), side.as_i64()],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    Ok(Some(step_count as u64))
 }
 
 /// Load the current chain head pubkey for a relationship + side. Returns
@@ -240,56 +201,13 @@ pub fn init_local_cert_chain_head_with_sk(
     let encrypted_sk = encrypt_chain_sk(chain_head_secret_key, chain_head_wrap_key)?;
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO cert_chain_heads
-            (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count, updated_at)
-         VALUES (?1, 0, ?2, ?3, 0, ?4)",
-        params![
-            relationship_key.as_slice(),
-            chain_head_pubkey,
-            encrypted_sk,
-            now
-        ],
+            (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count)
+         VALUES (?1, 0, ?2, ?3, 0)",
+        params![relationship_key.as_slice(), chain_head_pubkey, encrypted_sk],
     )?;
     Ok(inserted > 0)
-}
-
-/// Advance the local chain head to a new pubkey + secret key after a
-/// receipt is accepted. Encrypts the new SK under `chain-head wrap key`. Returns the
-/// new step count, or `None` if no row exists for that relationship.
-pub fn advance_local_cert_chain_head_with_sk(
-    relationship_key: &[u8; 32],
-    new_pubkey: &[u8],
-    new_secret_key: &[u8],
-    chain_head_wrap_key: &[u8; 32],
-) -> Result<Option<u64>> {
-    let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
-    let updated = conn.execute(
-        "UPDATE cert_chain_heads
-         SET chain_head_pubkey = ?1,
-             chain_head_sk_encrypted = ?2,
-             step_count = step_count + 1,
-             updated_at = ?3
-         WHERE relationship_key = ?4 AND side = 0",
-        params![new_pubkey, encrypted_sk, now, relationship_key.as_slice()],
-    )?;
-    if updated == 0 {
-        return Ok(None);
-    }
-    let step: i64 = conn
-        .query_row(
-            "SELECT step_count FROM cert_chain_heads
-             WHERE relationship_key = ?1 AND side = 0",
-            params![relationship_key.as_slice()],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    Ok(Some(step as u64))
 }
 
 /// Outcome of a compare-and-swap local cert-head advance.
@@ -335,18 +253,15 @@ pub fn cas_advance_local_cert_chain_head_with_sk(
         let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
         let binding = get_connection()?;
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        let now = tick() as i64;
         let updated = conn.execute(
             "UPDATE cert_chain_heads
              SET chain_head_pubkey = ?1,
                  chain_head_sk_encrypted = ?2,
-                 step_count = step_count + 1,
-                 updated_at = ?3
-             WHERE relationship_key = ?4 AND side = 0 AND chain_head_pubkey = ?5",
+                 step_count = step_count + 1
+             WHERE relationship_key = ?3 AND side = 0 AND chain_head_pubkey = ?4",
             params![
                 new_pubkey,
                 encrypted_sk,
-                now,
                 relationship_key.as_slice(),
                 expected
             ],
@@ -404,12 +319,11 @@ pub fn cas_advance_counterparty_cert_chain_head_with_conn(
     new_pubkey: &[u8],
 ) -> Result<CasHeadOutcome> {
     if let Some(expected) = expected_current {
-        let now = tick() as i64;
         let updated = conn.execute(
             "UPDATE cert_chain_heads
-             SET chain_head_pubkey = ?1, step_count = step_count + 1, updated_at = ?2
-             WHERE relationship_key = ?3 AND side = 1 AND chain_head_pubkey = ?4",
-            params![new_pubkey, now, relationship_key.as_slice(), expected],
+             SET chain_head_pubkey = ?1, step_count = step_count + 1
+             WHERE relationship_key = ?2 AND side = 1 AND chain_head_pubkey = ?3",
+            params![new_pubkey, relationship_key.as_slice(), expected],
         )?;
         if updated == 1 {
             let step: i64 = conn
@@ -442,9 +356,9 @@ pub fn cas_advance_counterparty_cert_chain_head_with_conn(
             conn.execute(
                 "INSERT OR IGNORE INTO cert_chain_heads
                     (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted,
-                     step_count, updated_at)
-                 VALUES (?1, 1, ?2, NULL, 0, ?3)",
-                params![relationship_key.as_slice(), new_pubkey, tick() as i64],
+                     step_count)
+                 VALUES (?1, 1, ?2, NULL, 0)",
+                params![relationship_key.as_slice(), new_pubkey],
             )?;
             Ok(CasHeadOutcome::GenesisInit)
         }
@@ -473,16 +387,14 @@ pub fn cas_advance_local_cert_chain_head_with_conn(
 ) -> Result<CasHeadOutcome> {
     let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
     if let Some(expected) = expected_current {
-        let now = tick() as i64;
         let updated = conn.execute(
             "UPDATE cert_chain_heads
              SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
-                 step_count = step_count + 1, updated_at = ?3
-             WHERE relationship_key = ?4 AND side = 0 AND chain_head_pubkey = ?5",
+                 step_count = step_count + 1
+             WHERE relationship_key = ?3 AND side = 0 AND chain_head_pubkey = ?4",
             params![
                 new_pubkey,
                 encrypted_sk,
-                now,
                 relationship_key.as_slice(),
                 expected
             ],
@@ -518,14 +430,9 @@ pub fn cas_advance_local_cert_chain_head_with_conn(
             conn.execute(
                 "INSERT OR IGNORE INTO cert_chain_heads
                     (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted,
-                     step_count, updated_at)
-                 VALUES (?1, 0, ?2, ?3, 0, ?4)",
-                params![
-                    relationship_key.as_slice(),
-                    new_pubkey,
-                    encrypted_sk,
-                    tick() as i64
-                ],
+                     step_count)
+                 VALUES (?1, 0, ?2, ?3, 0)",
+                params![relationship_key.as_slice(), new_pubkey, encrypted_sk],
             )?;
             Ok(CasHeadOutcome::GenesisInit)
         }
@@ -540,12 +447,11 @@ pub fn cas_advance_counterparty_cert_chain_head(
     if let Some(expected) = expected_current {
         let binding = get_connection()?;
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        let now = tick() as i64;
         let updated = conn.execute(
             "UPDATE cert_chain_heads
-             SET chain_head_pubkey = ?1, step_count = step_count + 1, updated_at = ?2
-             WHERE relationship_key = ?3 AND side = 1 AND chain_head_pubkey = ?4",
-            params![new_pubkey, now, relationship_key.as_slice(), expected],
+             SET chain_head_pubkey = ?1, step_count = step_count + 1
+             WHERE relationship_key = ?2 AND side = 1 AND chain_head_pubkey = ?3",
+            params![new_pubkey, relationship_key.as_slice(), expected],
         )?;
         if updated == 1 {
             let step: i64 = conn
@@ -636,12 +542,11 @@ pub fn pending_local_head_signer(
 pub fn wipe_local_chain_head_sk(relationship_key: &[u8; 32]) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick() as i64;
     conn.execute(
         "UPDATE cert_chain_heads
-         SET chain_head_sk_encrypted = NULL, updated_at = ?1
-         WHERE relationship_key = ?2 AND side = 0",
-        params![now, relationship_key.as_slice()],
+         SET chain_head_sk_encrypted = NULL
+         WHERE relationship_key = ?1 AND side = 0",
+        params![relationship_key.as_slice()],
     )?;
     Ok(())
 }
@@ -667,33 +572,6 @@ pub fn init_cert_chain_for_relationship(
         counterparty_ak_pubkey,
     )?;
     Ok((local_inserted, cp_inserted))
-}
-
-/// Advance both sides of a relationship's cert chain after a co-signed
-/// receipt has been accepted. `local_new_pubkey` is the EK_pk that signed
-/// our outbound sig_a (when we were sender) or sig_b (when we were
-/// receiver). `counterparty_new_pubkey` is the corresponding EK_pk from
-/// the other side.
-///
-/// Returns `Some((local_step, cp_step))` with the new step counts if both
-/// sides were advanced, or `None` if either side had no row to advance
-/// (relationship not yet initialized via `init_cert_chain_for_relationship`).
-pub fn advance_cert_chain_for_relationship(
-    relationship_key: &[u8; 32],
-    local_new_pubkey: &[u8],
-    counterparty_new_pubkey: &[u8],
-) -> Result<Option<(u64, u64)>> {
-    let local_step =
-        advance_cert_chain_head(relationship_key, CertChainSide::Local, local_new_pubkey)?;
-    let cp_step = advance_cert_chain_head(
-        relationship_key,
-        CertChainSide::Counterparty,
-        counterparty_new_pubkey,
-    )?;
-    match (local_step, cp_step) {
-        (Some(l), Some(c)) => Ok(Some((l, c))),
-        _ => Ok(None),
-    }
 }
 
 /// Stash a freshly-derived per-step EK as a PENDING Local chain-head
@@ -804,42 +682,27 @@ pub fn stash_pending_local_head_with_conn(
     is_init: bool,
 ) -> Result<()> {
     let encrypted_sk = encrypt_chain_sk(ek_secret_key, chain_head_wrap_key)?;
-    let now = tick() as i64;
     conn.execute(
         "INSERT OR REPLACE INTO pending_local_cert_heads
-            (relationship_key, commitment_hash, ek_pubkey, ek_sk_encrypted, is_init, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (relationship_key, commitment_hash, ek_pubkey, ek_sk_encrypted, is_init)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             relationship_key.as_slice(),
             commitment_hash.as_slice(),
             ek_pubkey,
             encrypted_sk,
-            is_init as i64,
-            now
+            is_init as i64
         ],
     )?;
     Ok(())
 }
 
-/// Promote a pending Local chain-head advance into `cert_chain_heads`
-/// after the receiver's commit-response proves the step was accepted.
-/// The encrypted SK blob moves verbatim (it is never decrypted here).
-/// Returns the resulting step count, or `None` if no pending row exists
-/// for that (relationship, commitment) pair — e.g. already promoted, or
-/// dropped by a failure path.
-pub fn promote_pending_local_head(
-    relationship_key: &[u8; 32],
-    commitment_hash: &[u8; 32],
-) -> Result<Option<u64>> {
-    let binding = get_connection()?;
-    let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let tx = conn.transaction()?;
-    let step = promote_pending_local_head_with_conn(&tx, relationship_key, commitment_hash)?;
-    tx.commit()?;
-    Ok(step)
-}
-
-/// Same promotion, INSIDE a caller-owned transaction (§16.6 defect 1).
+/// Promote a pending Local chain-head advance into `cert_chain_heads`, inside
+/// the transaction the accepted step commits in (§16.6 defect 1). The
+/// encrypted SK blob moves verbatim (it is never decrypted here). Returns the
+/// resulting step count, or `None` if no pending row exists for that
+/// (relationship, commitment) pair — already promoted, or dropped by a
+/// failure path.
 ///
 /// Keyed by COMMITMENT, not "latest for the relationship", so a retried or
 /// concurrent finalization promotes exactly the head the verified acceptance
@@ -860,7 +723,6 @@ pub fn promote_pending_local_head_with_conn(
     let Some((ek_pk, sk_ct, is_init)) = row else {
         return Ok(None);
     };
-    let now = tick() as i64;
     if is_init != 0 {
         // Relationship genesis: the sign fell back to the root AK because
         // no Local row existed. Record EK_1 as the step-0 head. If a row
@@ -869,26 +731,26 @@ pub fn promote_pending_local_head_with_conn(
         // ignored and the UPDATE below advances instead.
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO cert_chain_heads
-                (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count, updated_at)
-             VALUES (?1, 0, ?2, ?3, 0, ?4)",
-            params![relationship_key.as_slice(), ek_pk, sk_ct, now],
+                (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count)
+             VALUES (?1, 0, ?2, ?3, 0)",
+            params![relationship_key.as_slice(), ek_pk, sk_ct],
         )?;
         if inserted == 0 {
             tx.execute(
                 "UPDATE cert_chain_heads
                  SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
-                     step_count = step_count + 1, updated_at = ?3
-                 WHERE relationship_key = ?4 AND side = 0",
-                params![ek_pk, sk_ct, now, relationship_key.as_slice()],
+                     step_count = step_count + 1
+                 WHERE relationship_key = ?3 AND side = 0",
+                params![ek_pk, sk_ct, relationship_key.as_slice()],
             )?;
         }
     } else {
         tx.execute(
             "UPDATE cert_chain_heads
              SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
-                 step_count = step_count + 1, updated_at = ?3
-             WHERE relationship_key = ?4 AND side = 0",
-            params![ek_pk, sk_ct, now, relationship_key.as_slice()],
+                 step_count = step_count + 1
+             WHERE relationship_key = ?3 AND side = 0",
+            params![ek_pk, sk_ct, relationship_key.as_slice()],
         )?;
     }
     tx.execute(
@@ -938,7 +800,7 @@ pub fn drop_pending_local_heads_for_relationship(relationship_key: &[u8; 32]) ->
     Ok(deleted)
 }
 
-/// Load the full chain head record (pubkey + step_count + timestamp).
+/// Load the full chain head record (pubkey + step_count).
 pub fn load_cert_chain_head(
     relationship_key: &[u8; 32],
     side: CertChainSide,
@@ -947,24 +809,22 @@ pub fn load_cert_chain_head(
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let row = conn
         .query_row(
-            "SELECT chain_head_pubkey, step_count, updated_at
+            "SELECT chain_head_pubkey, step_count
              FROM cert_chain_heads
              WHERE relationship_key = ?1 AND side = ?2",
             params![relationship_key.as_slice(), side.as_i64()],
             |row| {
                 let pk: Vec<u8> = row.get(0)?;
                 let step: i64 = row.get(1)?;
-                let ts: i64 = row.get(2)?;
-                Ok((pk, step, ts))
+                Ok((pk, step))
             },
         )
         .optional()?;
-    Ok(row.map(|(pk, step, ts)| CertChainHead {
+    Ok(row.map(|(pk, step)| CertChainHead {
         relationship_key: relationship_key.to_vec(),
         side,
         chain_head_pubkey: pk,
         step_count: step as u64,
-        updated_at: ts as u64,
     }))
 }
 
@@ -989,7 +849,7 @@ mod tests {
         assert!(init_cert_chain_head(&r, CertChainSide::Local, &pk_v1).unwrap());
 
         // Second init for the same (key, side) is idempotent — does NOT
-        // overwrite. Use advance_cert_chain_head to change the pubkey.
+        // overwrite. Only a compare-and-set moves a head.
         assert!(!init_cert_chain_head(&r, CertChainSide::Local, &pk_v2).unwrap());
 
         let head = load_cert_chain_head_pubkey(&r, CertChainSide::Local)
@@ -1032,39 +892,43 @@ mod tests {
         let ek1_pk = vec![0xBB; 64];
         let ek2_pk = vec![0xCC; 64];
 
-        init_cert_chain_head(&r, CertChainSide::Local, &ak_pk).unwrap();
-        let head0 = load_cert_chain_head(&r, CertChainSide::Local)
+        init_cert_chain_head(&r, CertChainSide::Counterparty, &ak_pk).unwrap();
+        let head0 = load_cert_chain_head(&r, CertChainSide::Counterparty)
             .unwrap()
             .unwrap();
         assert_eq!(head0.chain_head_pubkey, ak_pk);
         assert_eq!(head0.step_count, 0);
 
-        let step1 = advance_cert_chain_head(&r, CertChainSide::Local, &ek1_pk)
-            .unwrap()
-            .unwrap();
-        assert_eq!(step1, 1);
+        assert_eq!(
+            cas_advance_counterparty_cert_chain_head(&r, Some(&ak_pk), &ek1_pk).unwrap(),
+            CasHeadOutcome::Advanced { step: 1 }
+        );
+        assert_eq!(
+            cas_advance_counterparty_cert_chain_head(&r, Some(&ek1_pk), &ek2_pk).unwrap(),
+            CasHeadOutcome::Advanced { step: 2 }
+        );
 
-        let step2 = advance_cert_chain_head(&r, CertChainSide::Local, &ek2_pk)
-            .unwrap()
-            .unwrap();
-        assert_eq!(step2, 2);
-
-        let final_head = load_cert_chain_head(&r, CertChainSide::Local)
+        let final_head = load_cert_chain_head(&r, CertChainSide::Counterparty)
             .unwrap()
             .unwrap();
         assert_eq!(final_head.chain_head_pubkey, ek2_pk);
         assert_eq!(final_head.step_count, 2);
     }
 
+    /// A head move names the head it moves from; with no head there, nothing
+    /// is written.
     #[test]
     #[serial_test::serial]
-    fn advance_returns_none_when_no_row_exists() {
+    fn a_head_move_needs_the_head_it_names() {
         reset_database_for_tests();
         let r = rel(0xDD);
-        let pk = vec![0xEE; 64];
-        // No init first — advance should be a no-op and return None.
-        let result = advance_cert_chain_head(&r, CertChainSide::Local, &pk).unwrap();
-        assert!(result.is_none(), "advance without init must return None");
+        assert_eq!(
+            cas_advance_counterparty_cert_chain_head(&r, Some(&[0xAB; 64]), &[0xEE; 64]).unwrap(),
+            CasHeadOutcome::Conflict { current: None }
+        );
+        assert!(load_cert_chain_head(&r, CertChainSide::Counterparty)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1112,56 +976,6 @@ mod tests {
         let (li2, ci2) = init_cert_chain_for_relationship(&r, &local_ak, &cp_ak).unwrap();
         assert!(!li2);
         assert!(!ci2);
-    }
-
-    /// `advance_cert_chain_for_relationship` advances both sides atomically
-    /// after a co-signed receipt is accepted, returning `(local_step, cp_step)`.
-    #[test]
-    #[serial_test::serial]
-    fn advance_for_relationship_bumps_both_sides() {
-        reset_database_for_tests();
-        let r = rel(0xA2);
-        init_cert_chain_for_relationship(&r, &[0xAA; 64], &[0xBB; 64]).unwrap();
-
-        let local_ek1 = vec![0xCC; 64];
-        let cp_ek1 = vec![0xDD; 64];
-
-        let steps = advance_cert_chain_for_relationship(&r, &local_ek1, &cp_ek1)
-            .unwrap()
-            .unwrap();
-        assert_eq!(steps, (1, 1));
-
-        let local_ek2 = vec![0xEE; 64];
-        let cp_ek2 = vec![0xFF; 64];
-        let steps2 = advance_cert_chain_for_relationship(&r, &local_ek2, &cp_ek2)
-            .unwrap()
-            .unwrap();
-        assert_eq!(steps2, (2, 2));
-
-        assert_eq!(
-            load_cert_chain_head_pubkey(&r, CertChainSide::Local)
-                .unwrap()
-                .unwrap(),
-            local_ek2
-        );
-        assert_eq!(
-            load_cert_chain_head_pubkey(&r, CertChainSide::Counterparty)
-                .unwrap()
-                .unwrap(),
-            cp_ek2
-        );
-    }
-
-    /// `advance_cert_chain_for_relationship` returns `None` when the
-    /// relationship has never been initialized — caller is expected to
-    /// init first.
-    #[test]
-    #[serial_test::serial]
-    fn advance_for_relationship_requires_init() {
-        reset_database_for_tests();
-        let r = rel(0xA3);
-        let result = advance_cert_chain_for_relationship(&r, &[0xAA; 64], &[0xBB; 64]).unwrap();
-        assert!(result.is_none());
     }
 
     // ── Encrypted SK helpers (Phase C) ──
@@ -1254,10 +1068,17 @@ mod tests {
         let chain_head_wrap_key = [0x33; 32];
 
         init_local_cert_chain_head_with_sk(&r, &pk0, &sk0, &chain_head_wrap_key).unwrap();
-        let step1 = advance_local_cert_chain_head_with_sk(&r, &pk1, &sk1, &chain_head_wrap_key)
-            .unwrap()
-            .unwrap();
-        assert_eq!(step1, 1);
+        assert_eq!(
+            cas_advance_local_cert_chain_head_with_sk(
+                &r,
+                Some(&pk0),
+                &pk1,
+                &sk1,
+                &chain_head_wrap_key
+            )
+            .unwrap(),
+            CasHeadOutcome::Advanced { step: 1 }
+        );
 
         let loaded_sk = load_local_chain_head_sk(&r, &chain_head_wrap_key)
             .unwrap()
@@ -1301,16 +1122,22 @@ mod tests {
         assert_eq!(pk_after, pk);
     }
 
-    /// Advance fails (returns None) if the relationship has no init'd row.
+    /// A Local head move from a named head fails closed when no head exists.
     #[test]
     #[serial_test::serial]
     fn local_chain_head_sk_advance_requires_init() {
         reset_database_for_tests();
         let r = rel(0xB4);
-        let result =
-            advance_local_cert_chain_head_with_sk(&r, &[0x77; 64], &[0x88; 96], &[0x99; 32])
-                .unwrap();
-        assert!(result.is_none());
+        let result = cas_advance_local_cert_chain_head_with_sk(
+            &r,
+            Some(&[0x66; 64]),
+            &[0x77; 64],
+            &[0x88; 96],
+            &[0x99; 32],
+        )
+        .unwrap();
+        assert_eq!(result, CasHeadOutcome::Conflict { current: None });
+        assert!(load_local_chain_head_sk(&r, &[0x99; 32]).unwrap().is_none());
     }
 
     // ── Pending (deferred) Local chain-head advance (§11.1 sender side) ──
@@ -1334,7 +1161,7 @@ mod tests {
             .unwrap()
             .is_none());
 
-        let step = promote_pending_local_head(&r, &commitment).unwrap();
+        let step = promote_by_commitment(&r, &commitment);
         assert_eq!(step, Some(0), "genesis promote records EK_1 at step 0");
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
@@ -1348,7 +1175,7 @@ mod tests {
             Some(ek_sk.clone())
         );
         // Pending row consumed — second promote is a no-op.
-        assert_eq!(promote_pending_local_head(&r, &commitment).unwrap(), None);
+        assert_eq!(promote_by_commitment(&r, &commitment), None);
     }
 
     /// Steady-state flow: with an existing Local row, promote advances it
@@ -1366,7 +1193,7 @@ mod tests {
         let ek_sk = vec![0xB1; 96];
         stash_pending_local_head(&r, &commitment, &ek_pk, &ek_sk, &wrap, false).unwrap();
 
-        let step = promote_pending_local_head(&r, &commitment).unwrap();
+        let step = promote_by_commitment(&r, &commitment);
         assert_eq!(step, Some(1));
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
@@ -1400,7 +1227,7 @@ mod tests {
                 .unwrap(),
             ak_pk
         );
-        assert_eq!(promote_pending_local_head(&r, &commitment).unwrap(), None);
+        assert_eq!(promote_by_commitment(&r, &commitment), None);
         // Dropping again reports nothing deleted.
         assert!(!drop_pending_local_head(&r, &commitment).unwrap());
     }
@@ -1418,7 +1245,7 @@ mod tests {
         let ek_pk2 = vec![0x60; 64];
         stash_pending_local_head(&r, &commitment, &ek_pk2, &[0x61; 96], &wrap, true).unwrap();
 
-        promote_pending_local_head(&r, &commitment).unwrap();
+        promote_by_commitment(&r, &commitment);
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
                 .unwrap()
@@ -1451,8 +1278,18 @@ mod tests {
                 .unwrap(),
             pk2
         );
-        // Advance r1 doesn't touch r2.
-        advance_cert_chain_head(&r1, CertChainSide::Local, &[0xAB; 64]).unwrap();
+        // Moving r1's head doesn't touch r2.
+        assert_eq!(
+            cas_advance_local_cert_chain_head_with_sk(
+                &r1,
+                Some(&pk1),
+                &[0xAB; 64],
+                &[0xCD; 96],
+                &[0x01; 32]
+            )
+            .unwrap(),
+            CasHeadOutcome::Advanced { step: 1 }
+        );
         assert_eq!(
             load_cert_chain_head_pubkey(&r2, CertChainSide::Local)
                 .unwrap()
@@ -1716,7 +1553,17 @@ mod tests {
 
         // Sender snapshotted 0x11.., signed, and meanwhile the finalizer
         // advanced the head to 0x99...
-        advance_local_cert_chain_head_with_sk(&r, &[0x99u8; 64], &[0x88u8; 64], &WRAP).unwrap();
+        assert_eq!(
+            cas_advance_local_cert_chain_head_with_sk(
+                &r,
+                Some(&[0x11u8; 64]),
+                &[0x99u8; 64],
+                &[0x88u8; 64],
+                &WRAP
+            )
+            .unwrap(),
+            CasHeadOutcome::Advanced { step: 1 }
+        );
 
         let err = with_conn(|c| {
             stash_pending_local_head_cas_with_conn(

@@ -11,13 +11,12 @@
 use dsm::ccb::genesis::sigalg;
 use dsm::economic::claim::EconomicRootClaimBody;
 use dsm::economic::claim_envelope::{
-    decode_and_verify_economic_root_claim, sign_economic_root_claim, verify_claim_attribution,
-    ClaimEnvelopeError,
+    decode_and_verify_economic_root_claim, sign_economic_root_claim, ClaimEnvelopeError,
 };
 use dsm::economic::lineage::{activate, EconomicActivationSnapshot};
 use dsm::economic::register::{
     economic_root_register_key, resolve_for_trader, resolve_root_register_profile,
-    AttributionError, AuthenticatedCaller, RegisteredEconomicRoot, RegisterResolutionError,
+    RegisteredEconomicRoot, RegisterResolutionError,
 };
 use dsm::economic::tree::empty_economic_root;
 
@@ -54,10 +53,9 @@ fn each_position_of_each_identity_is_its_own_cell() {
 // ── Network-scoped resolution, fail closed ─────────────────────────────────
 
 #[test]
-fn the_beta_register_resolves_to_the_three_member_fleet_at_q_two() {
+fn the_beta_register_resolves_to_the_five_member_fleet() {
     let p = resolve_root_register_profile(b"dsm-testnet").expect("known network");
-    assert_eq!(p.members.len(), 3);
-    assert_eq!(p.quorum, 2);
+    assert_eq!(p.members.len(), 5);
     // The set id is a re-derivation over `(member, incarnation)` pairs, not a
     // constant somebody typed — so a member list that drifts, or a member
     // that rebuilt its register, changes the id rather than silently
@@ -90,7 +88,7 @@ fn a_candidate_whose_membership_is_not_the_networks_is_refused() {
         other => panic!("a foreign membership must be refused, got {other:?}"),
     }
 
-    // A SHORT set is refused too: a quorum argument over two of the three
+    // A SHORT set is refused too: a quorum argument over a subset of the pinned
     // members is not this network's register.
     let short = dsm::ccb::StorageSetMembers::new(&[
         (&b"dsm-node-1"[..], [0xC1; 32]),
@@ -166,16 +164,26 @@ fn keypair() -> (Vec<u8>, Vec<u8>) {
     dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair")
 }
 
+/// The claimant device's attestation digest: its device id is
+/// `derive_devid(pk, ATT_A)` (DSM Amendment A10).
+const ATT_A: [u8; 32] = [0xA7; 32];
+
+/// The device a key signs for: the id `pk` and [`ATT_A`] derive.
+fn devid_of(pk: &[u8]) -> [u8; 32] {
+    dsm::core::identity::genesis_v2::derive_devid(pk, &ATT_A)
+}
+
 fn body(pk: &[u8], set_id: [u8; 32]) -> EconomicRootClaimBody {
     EconomicRootClaimBody::new(
         G,
-        DEV,
+        devid_of(pk),
         7,
         [0x33; 32],
         [0x44; 32],
         set_id,
         sigalg::SPHINCS_PLUS_SPX256F,
         pk,
+        ATT_A,
     )
     .expect("valid body")
 }
@@ -190,9 +198,10 @@ fn a_signed_claim_round_trips_and_a_tampered_one_does_not() {
     let envelope = sign_economic_root_claim(&b, &sk).expect("signable");
 
     let verified = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
-    assert_eq!(verified.body, b);
+    assert_eq!(*verified.body(), b);
     assert_eq!(
-        verified.envelope_bytes, envelope,
+        verified.envelope_bytes(),
+        envelope,
         "the member stores the EXACT bytes; a re-encode is a different value at a write-once cell"
     );
 
@@ -226,61 +235,14 @@ fn a_claim_signed_for_one_position_does_not_verify_at_another() {
     let envelope = sign_economic_root_claim(&at7, &sk).expect("signable");
     let verified = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
 
-    assert_eq!(verified.body.economic_position, 7);
+    assert_eq!(verified.body().economic_position, 7);
     assert_ne!(
-        economic_root_register_key(&G, &DEV, verified.body.economic_position),
-        economic_root_register_key(&G, &DEV, 8)
+        economic_root_register_key(&G, &devid_of(&pk), verified.body().economic_position),
+        economic_root_register_key(&G, &devid_of(&pk), 8)
     );
 }
 
 // ── Member-side attribution ────────────────────────────────────────────────
-
-#[test]
-fn a_member_refuses_a_claim_that_is_not_the_callers() {
-    let (pk, sk) = keypair();
-    let set = resolve_root_register_profile(b"dsm-testnet")
-        .unwrap()
-        .storage_set_id;
-    let envelope = sign_economic_root_claim(&body(&pk, set), &sk).expect("signable");
-    let claim = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
-
-    let caller = AuthenticatedCaller {
-        public_key: pk.clone(),
-        device_id: DEV,
-    };
-    assert!(verify_claim_attribution(&claim, &caller, &set).is_ok());
-
-    // Signature-valid, but written by someone else. This — not K_root — is
-    // what prevents third-party preemption: the cell coordinate is derivable
-    // by anyone holding the victim's public (G, DevID, position), so only the
-    // attribution refusal stops a write that would burn the cell forever.
-    let impostor = AuthenticatedCaller {
-        public_key: keypair().0,
-        device_id: DEV,
-    };
-    assert_eq!(
-        verify_claim_attribution(&claim, &impostor, &set).unwrap_err(),
-        AttributionError::ClaimantIsNotCaller
-    );
-
-    let wrong_device = AuthenticatedCaller {
-        public_key: pk,
-        device_id: [0x99; 32],
-    };
-    assert_eq!(
-        verify_claim_attribution(&claim, &wrong_device, &set).unwrap_err(),
-        AttributionError::DeviceIsNotCaller
-    );
-
-    // A member refuses a claim addressed to a register it is not part of.
-    let other_set = [0x77; 32];
-    assert!(matches!(
-        verify_claim_attribution(&claim, &caller, &other_set).unwrap_err(),
-        AttributionError::WrongStorageSet { .. }
-    ));
-}
-
-// ── Activation ─────────────────────────────────────────────────────────────
 
 #[test]
 fn a_fresh_identity_activates_at_the_canonical_empty_root() {
@@ -301,10 +263,8 @@ fn a_device_already_holding_value_cannot_call_its_holdings_position_zero() {
     // Each field independently blocks activation. Snapshotting current
     // holdings as position 0 would let the device assert its own opening
     // balances — self-rooting at the base of the lineage.
-    let cases: [(&str, DirtySnapshot); 4] = [
+    let cases: [(&str, DirtySnapshot); 2] = [
         ("balances", |s| s.online_balances_empty = false),
-        ("reserves", |s| s.vault_reserves_empty = false),
-        ("receipts", |s| s.settlement_receipt_state_empty = false),
         ("allocation", |s| s.outstanding_offline_allocation = true),
     ];
     for (name, dirty) in cases {
@@ -321,21 +281,36 @@ fn a_device_already_holding_value_cannot_call_its_holdings_position_zero() {
 
 #[test]
 fn registering_an_arbitrary_root_yields_nothing_validated() {
-    // A malicious trader registers a root it invented, perfectly consistently.
-    // The register accepts it — non-equivocation is all it establishes.
-    let registered = RegisteredEconomicRoot {
-        trader_genesis: G,
-        trader_devid: DEV,
-        economic_position: 1,
-        post_economic_root: [0xEE; 32], // invented
-        admission_manifest_addr: [0xDD; 32],
-        storage_set_id: resolve_root_register_profile(b"dsm-testnet")
+    // A malicious trader registers a root it invented, perfectly consistently
+    // — and SIGNS it, because that is the only way to get a registered root
+    // now. The register accepts it: non-equivocation is all it establishes,
+    // and a valid signature over an invented root is still an invented root.
+    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a keypair");
+    let body = dsm::economic::claim::EconomicRootClaimBody::new(
+        G,
+        devid_of(&pk),
+        1,
+        [0xEE; 32], // invented
+        [0xDD; 32],
+        resolve_root_register_profile(b"dsm-testnet")
             .unwrap()
             .storage_set_id,
-    };
+        dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+        &pk,
+        ATT_A,
+    )
+    .expect("a claim body");
+    let envelope =
+        dsm::economic::claim_envelope::sign_economic_root_claim(&body, &sk).expect("sign");
+    let registered = RegisteredEconomicRoot::from_verified_single_root(
+        dsm::economic::claim_envelope::decode_registered_economic_claim(&envelope)
+            .expect("decodes")
+            .single_root()
+            .expect("a single-root claim"),
+    );
     assert_eq!(
         registered.register_key(),
-        economic_root_register_key(&G, &DEV, 1)
+        economic_root_register_key(&G, &devid_of(&pk), 1)
     );
 
     // There is deliberately NO API turning that into a ValidatedEconomicRoot:
@@ -346,7 +321,7 @@ fn registering_an_arbitrary_root_yields_nothing_validated() {
     assert_eq!(validated.economic_position(), 0);
     assert_ne!(
         validated.economic_root(),
-        registered.post_economic_root,
+        registered.post_economic_root(),
         "a registered root is not thereby a validated one"
     );
 }

@@ -4,14 +4,17 @@ package com.dsm.wallet
 
 import android.app.Application
 import android.util.Log
-import java.io.File
-import java.io.FileOutputStream
 
-    class App : Application() {
+class App : Application() {
     override fun onCreate() {
         super.onCreate()
         Log.d("DSM-App", "App.onCreate()")
-        // Defer all native work to DsmInitManager.ensure() invoked by UI/Services after first frame.
-        // This avoids class-initializer crashes during cold start and gives us clearer logs.
+        // BLE events arrive with no context of their own; the relay persists through this one.
+        com.dsm.wallet.bridge.BleEventRelay.attach(this)
+        // The debug report's app log is kept on disk from process start: logcat's
+        // own buffer holds only minutes of it.
+        com.dsm.wallet.bridge.DiagnosticsReport.startRollingLog(this)
+        // The library load is DsmInitProvider's and SDK initialisation is
+        // MainActivity.initDsmAndSignalReady's; this class holds no native work.
     }
 }

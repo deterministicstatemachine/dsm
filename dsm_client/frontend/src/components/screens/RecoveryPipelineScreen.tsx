@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// The recovery pipeline on the StateBoy frame: tombstone, succession,
+// propagate, then the wait for counterparties, then resume.
 
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -14,11 +16,12 @@ import {
   type PipelineResult,
   type SyncProgress,
 } from '../../services/recovery/nfcRecoveryService';
-import './NfcRecoveryScreen.css';
+import { Notice, ScreenFrame } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
 
 type Phase = 'staged' | 'polling' | 'complete' | 'error' | 'none';
 
-const PHASE_STEPS = ['TOMBSTONE', 'SUCCESSION', 'PROPAGATE', 'SYNCED'] as const;
+const PHASE_STEPS = ['Tombstone', 'Succession', 'Propagate', 'Synced'] as const;
 
 function phaseIndex(phase: Phase): number {
   switch (phase) {
@@ -188,12 +191,11 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
 
       const pendingGoLive = activation.startsWith('assembled;awaiting-go-live');
       setPhase('complete');
+      const activationNote = pendingGoLive
+        ? 'Identity succession assembled — activation pends go-live.'
+        : `Activation: ${activation}.`;
       setStatusMsg(
-        `Recovery complete. ${result.resumed} relationship(s) restored. ` +
-          (pendingGoLive
-            ? 'Identity succession assembled — activation pends go-live. '
-            : `Activation: ${activation}. `) +
-          `dBTC: ${dbtc}.`,
+        `Recovery complete. ${result.resumed} relationship(s) restored. ${activationNote} dBTC: ${dbtc}.`,
       );
     } catch (error: unknown) {
       if (!mountedRef.current) return;
@@ -225,188 +227,150 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
   const progressIdx = phaseIndex(phase);
 
   return (
-    <div className="nfc-shell" role="main">
-      <div className="nfc-header">
-        <h2>RECOVERY PIPELINE</h2>
-      </div>
-
-      <div className="nfc-stage">
-        {/* Phase progress indicator */}
-        <div className="nfc-card">
-          <div className="nfc-stat-grid">
-            {PHASE_STEPS.map((label, i) => {
-              const done = i < progressIdx;
-              const active = i === progressIdx;
-              return (
-                <div className="nfc-stat-cell" key={label}>
-                  <div
-                    className="nfc-stat-val-sm"
-                    style={{
-                      opacity: done ? 1 : active ? 1 : 0.3,
-                      color: done
-                        ? 'var(--nfc-panel-text)'
-                        : active
-                          ? 'var(--nfc-panel-text)'
-                          : undefined,
-                    }}
-                  >
-                    {done ? 'DONE' : active ? '...' : '--'}
-                  </div>
-                  <div className="nfc-stat-label">{label}</div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Phase: none — no capsule staged */}
-        {phase === 'none' && (
-          <div className="nfc-card">
-            <div className="nfc-note nfc-note--strong">
-              No recovery capsule has been staged on this device. Go back and stage a capsule from
-              the NFC ring first.
-            </div>
-            <div className="nfc-actions">
-              <button className="nfc-btn" onClick={() => onNavigate?.('recovery')}>
-                BACK TO RECOVERY
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Phase: staged — ready to execute */}
-        {phase === 'staged' && (
-          <div className="nfc-card">
-            <div className="nfc-note nfc-note--strong">
-              Recovery capsule is staged. Tap RECOVER to execute the full pipeline: create a
-              tombstone receipt for the old device, bind this device as the successor, and propagate
-              to counterparties.
-            </div>
-            <div className="nfc-actions">
-              <button
-                className="nfc-btn"
-                onClick={onExecutePipeline}
-                disabled={busy}
-                style={{ fontWeight: 900, letterSpacing: '1px' }}
+    <ScreenFrame
+      title="Recovery Pipeline"
+      onBack={() => onNavigate?.('recovery')}
+      className="recovery-pipeline-screen"
+      info={(
+        <InfoTip title="Recovery pipeline">
+          <p>With a capsule staged, RECOVER creates a tombstone receipt for the old device, binds this device as its successor, and propagates that to the storage nodes.</p>
+          <p>Counterparties acknowledge the tombstone in their own time; this screen polls for them every 30 seconds and when it comes back into view.</p>
+          <p>Once all have, RESUME restores the bilateral relationships, assembles the succession and reconciles recovered assets.</p>
+        </InfoTip>
+      )}
+      banner={(
+        <>
+          {errorMsg && <Notice banner kind="error" onClose={() => setErrorMsg('')}>{errorMsg}</Notice>}
+          {statusMsg && !errorMsg && <Notice banner onClose={() => setStatusMsg('')}>{statusMsg}</Notice>}
+        </>
+      )}
+    >
+      {/* Phase progress indicator */}
+      <section className="sb-card sb-card--dark" aria-label="Recovery phase">
+        <div className="sb-steps">
+          {PHASE_STEPS.map((label, i) => {
+            const done = i < progressIdx;
+            const active = i === progressIdx;
+            return (
+              <div
+                key={label}
+                className={`sb-steps__step${done ? ' is-done' : ''}${active ? ' is-active' : ''}`}
+                aria-current={active ? 'step' : undefined}
               >
-                {busy ? 'EXECUTING...' : 'RECOVER'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Phase: polling — waiting for counterparty ACKs */}
-        {phase === 'polling' && (
-          <>
-            <div className="nfc-card">
-              <div className="nfc-note nfc-note--strong">
-                Tombstone propagated. Waiting for counterparty acknowledgements.
+                <span className="sb-steps__mark" aria-hidden="true">{done ? '✓' : active ? '…' : '·'}</span>
+                {label}
               </div>
-              {syncProgress && (
-                <div className="nfc-stat-grid">
-                  <div className="nfc-stat-cell">
-                    <div className="nfc-stat-val">{syncProgress.synced}</div>
-                    <div className="nfc-stat-label">Synced</div>
-                  </div>
-                  <div className="nfc-stat-cell">
-                    <div className="nfc-stat-val">{syncProgress.total}</div>
-                    <div className="nfc-stat-label">Total</div>
-                  </div>
-                </div>
-              )}
-              {lastAckStatus && (
-                <div className="nfc-note">
-                  Last poll: {lastAckStatus.newAcks} new ACK(s). {lastAckStatus.synced}/
-                  {lastAckStatus.total} synced.
-                </div>
-              )}
-              <div className="nfc-note" style={{ opacity: 0.5 }}>
-                Auto-polling every 30s. Also polls on screen visibility change.
-              </div>
-            </div>
-
-            {pipelineResult && pipelineResult.failed > 0 && (
-              <div className="nfc-card">
-                <div className="nfc-note" style={{ color: 'var(--gb-error, #c00)' }}>
-                  {pipelineResult.failed}/{pipelineResult.total} storage node(s) failed propagation.
-                  Those counterparties may need manual re-sync.
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* Phase: complete — all ACKs received, resume relationships */}
-        {phase === 'complete' && (
-          <div className="nfc-card">
-            <div className="nfc-note nfc-note--strong">
-              {resumeCount > 0
-                ? `Recovery complete. ${resumeCount} relationship(s) restored.`
-                : 'All counterparties synced. Tap RESUME to restore bilateral relationships.'}
-            </div>
-            {resumeCount === 0 && (
-              <div className="nfc-actions">
-                <button
-                  className="nfc-btn"
-                  onClick={onResumeAll}
-                  disabled={busy}
-                  style={{ fontWeight: 900, letterSpacing: '1px' }}
-                >
-                  {busy ? 'RESUMING...' : 'RESUME ALL'}
-                </button>
-              </div>
-            )}
-            <div className="nfc-actions">
-              <button className="nfc-btn" onClick={() => void onDone()}>
-                {resumeCount > 0 ? 'DONE' : 'BACK TO WALLET'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Phase: error */}
-        {phase === 'error' && (
-          <div className="nfc-card">
-            <div className="nfc-note nfc-note--strong" style={{ color: 'var(--gb-error, #c00)' }}>
-              {errorMsg}
-            </div>
-            <div className="nfc-actions">
-              <button className="nfc-btn" onClick={onRetry}>
-                RETRY
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Status message */}
-        {statusMsg && phase !== 'error' && (
-          <div className="nfc-card">
-            <div className="nfc-note nfc-note--strong">{statusMsg}</div>
-          </div>
-        )}
-
-        {/* Error overlay for non-error phases */}
-        {errorMsg && phase !== 'error' && (
-          <div className="nfc-card">
-            <div className="nfc-note nfc-note--strong" style={{ color: 'var(--gb-error, #c00)' }}>
-              {errorMsg}
-            </div>
-          </div>
-        )}
-
-        {/* Navigation */}
-        <div className="nfc-card">
-          <div className="nfc-actions">
-            <button className="nfc-btn" onClick={() => onNavigate?.('recovery')}>
-              BACK TO INSPECT
-            </button>
-            <button className="nfc-btn" onClick={() => onNavigate?.('settings')}>
-              SETTINGS
-            </button>
-          </div>
+            );
+          })}
         </div>
+      </section>
+
+      {/* Phase: none — no capsule staged */}
+      {phase === 'none' && (
+        <>
+          <div className="sb-empty">
+            No recovery capsule has been staged on this device. Go back and stage a capsule from the NFC ring first.
+          </div>
+          <div className="sb-actions">
+            <button type="button" className="sb-btn sb-btn--primary sb-btn--block" onClick={() => onNavigate?.('recovery')}>
+              Back to recovery
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Phase: staged — ready to execute */}
+      {phase === 'staged' && (
+        <section className="sb-card">
+          <div className="sb-card__title">Capsule staged</div>
+          <p className="sb-hint">
+            Tap RECOVER to execute the full pipeline: create a tombstone receipt for the old device, bind this device as the successor, and propagate to counterparties.
+          </p>
+          <button
+            type="button"
+            className="sb-btn sb-btn--primary sb-btn--block"
+            onClick={onExecutePipeline}
+            disabled={busy}
+          >
+            {busy ? 'Executing…' : 'Recover'}
+          </button>
+        </section>
+      )}
+
+      {/* Phase: polling — waiting for counterparty ACKs */}
+      {phase === 'polling' && (
+        <>
+          <section className="sb-card">
+            <div className="sb-card__title">Waiting for counterparties</div>
+            {syncProgress && (
+              <div className="sb-stats sb-stats--2" style={{ marginBottom: 8 }}>
+                <div className="sb-stats__cell">
+                  <div className="sb-stats__val">{syncProgress.synced}</div>
+                  <div className="sb-stats__label">Synced</div>
+                </div>
+                <div className="sb-stats__cell">
+                  <div className="sb-stats__val">{syncProgress.total}</div>
+                  <div className="sb-stats__label">Total</div>
+                </div>
+              </div>
+            )}
+            <p className="sb-hint sb-hint--tight">Tombstone propagated. Waiting for counterparty acknowledgements.</p>
+            {lastAckStatus && (
+              <p className="sb-hint sb-hint--tight">
+                Last poll: {lastAckStatus.newAcks} new ACK(s). {lastAckStatus.synced}/{lastAckStatus.total} synced.
+              </p>
+            )}
+            <p className="sb-hint sb-hint--tight">Polling every 30 s, and whenever this screen comes back into view.</p>
+          </section>
+
+          {pipelineResult && pipelineResult.failed > 0 && (
+            <Notice kind="error">
+              {pipelineResult.failed}/{pipelineResult.total} storage node(s) failed propagation. Those counterparties may need manual re-sync.
+            </Notice>
+          )}
+        </>
+      )}
+
+      {/* Phase: complete — all ACKs received, resume relationships */}
+      {phase === 'complete' && (
+        <section className="sb-card sb-card--dark sb-card--hero">
+          <div className="sb-hero__label">{resumeCount > 0 ? 'Recovery complete' : 'All counterparties synced'}</div>
+          <div className="sb-hero__value" style={{ fontSize: 14 }}>
+            {resumeCount > 0
+              ? `${resumeCount} relationship${resumeCount === 1 ? '' : 's'} restored`
+              : 'Ready to resume'}
+          </div>
+          {resumeCount === 0 && (
+            <div className="sb-hero__sub">Resume restores the bilateral relationships, assembles the succession and reconciles recovered assets.</div>
+          )}
+          <div className="sb-actions" style={{ marginBottom: 0 }}>
+            {resumeCount === 0 && (
+              <button type="button" className="sb-btn sb-btn--primary" onClick={onResumeAll} disabled={busy}>
+                {busy ? 'Resuming…' : 'Resume all'}
+              </button>
+            )}
+            <button type="button" className="sb-btn" onClick={() => void onDone()}>
+              {resumeCount > 0 ? 'Done' : 'Back to wallet'}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Phase: error */}
+      {phase === 'error' && (
+        <div className="sb-actions">
+          <button type="button" className="sb-btn sb-btn--primary sb-btn--block" onClick={onRetry}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      <div className="sb-actions">
+        <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('settings')}>
+          Settings
+        </button>
       </div>
-    </div>
+    </ScreenFrame>
   );
 };
 

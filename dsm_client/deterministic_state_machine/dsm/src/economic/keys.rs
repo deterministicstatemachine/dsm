@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The four `R_econ` key derivations.
+//! The five `R_econ` key derivations.
 //!
 //! Each is the **only** place its key class is computed;
 //! [`super::state::EconomicLeafState::leaf_key`] dispatches here rather than
@@ -16,7 +16,7 @@
 
 use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_BALANCE_KEY, TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY,
-    TAG_DSM_ECONOMIC_SETTLEMENT_RECEIPT_KEY, TAG_DSM_ECONOMIC_VAULT_RESERVE_KEY,
+    TAG_DSM_ECONOMIC_TOKEN_CREATION_KEY,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
@@ -46,33 +46,17 @@ pub fn balance_key(genesis: &[u8; 32], device_id: &[u8; 32], policy_commit: &[u8
     )
 }
 
-/// `H_dom(DSM/economic-vault-reserve-key/v1, G ‖ DevID ‖ vault_id ‖ policy_commit)`.
-pub fn vault_reserve_key(
+/// `H_dom(DSM/economic-token-creation-key/v1, G ‖ DevID ‖ policy_commit)`.
+pub fn token_creation_key(
     genesis: &[u8; 32],
     device_id: &[u8; 32],
-    vault_id: &[u8; 32],
     policy_commit: &[u8; 32],
 ) -> [u8; 32] {
     derive(
-        TAG_DSM_ECONOMIC_VAULT_RESERVE_KEY,
+        TAG_DSM_ECONOMIC_TOKEN_CREATION_KEY,
         genesis,
         device_id,
-        &[vault_id, policy_commit],
-    )
-}
-
-/// `H_dom(DSM/economic-settlement-receipt-key/v1, G ‖ DevID ‖ vault_id ‖ receipt_id)`.
-pub fn settlement_receipt_key(
-    genesis: &[u8; 32],
-    device_id: &[u8; 32],
-    vault_id: &[u8; 32],
-    receipt_id: &[u8; 32],
-) -> [u8; 32] {
-    derive(
-        TAG_DSM_ECONOMIC_SETTLEMENT_RECEIPT_KEY,
-        genesis,
-        device_id,
-        &[vault_id, receipt_id],
+        &[policy_commit],
     )
 }
 

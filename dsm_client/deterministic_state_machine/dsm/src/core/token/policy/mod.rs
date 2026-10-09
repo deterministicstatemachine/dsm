@@ -1,30 +1,30 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! src/core/token/policy/mod.rs
-//! Token Policy Module
+//! Token policies as the enforcer sees them.
 //!
-//! Implements the Content-Addressed Token Policy Anchor (CTPA) system for DSM tokens.
-//! - Caching
-//! - Validation
-//! - Enforcement
-//! - Governance
+//! A token's policy is the `TokenPolicyV3` bytes committed at its
+//! `policy_commit = BLAKE3(TAG_DSM_POLICY, bytes)` (SoFi §47), read by Core's
+//! one parser (`crate::economic::token_policy`). Nothing here takes a policy
+//! any other way: registration takes the bytes, recomputes the commitment
+//! from them and derives the enforcer's view from what the blob says
+//! (`policy_enforcement::enforced_policy`), and enforcement is keyed by the
+//! commitment an operation names. ERA's policy is pre-rooted: every device
+//! holds its bytes by construction ([`crate::core::token::era_policy`], SoFi
+//! Amendment S11), so it is answered from them, never from the cache, which
+//! could evict it, nor from the durable store, which never holds it. A
+//! commitment no committed policy is in hand for permits nothing.
 //!
-//! Determinism rules:
-//! - No wall-clock.
-//! - Enforcement prefers explicit tick witness in context_data ("tick" -> u64 LE).
+//! Determinism rules: no wall-clock; enforcement reads only what the
+//! operation carries and what Core derived from canonical state.
 
 pub mod policy_cache;
 pub mod policy_enforcement;
-pub mod policy_manager;
-pub mod policy_validation;
 
-pub use policy_cache::{PolicyCache, PolicyCacheEntry, PolicyCacheConfig};
-pub use policy_enforcement::{EnforcementError, EnforcementResult, PolicyEnforcer};
-pub use policy_manager::{
-    PolicyBuilder, PolicyManager, PolicyManagerConfig, PolicySignature, PolicyTemplate,
-    PolicyUpdateRequest, PolicyUpdateHistory, PolicyVote, Vote, VoteDecision, VoteStatus,
+pub use policy_cache::{PolicyCache, PolicyCacheConfig, PolicyCacheEntry};
+pub use policy_enforcement::{
+    enforced_policy, permitted_operations, EnforcementError, EnforcementResult, PolicyEnforcer,
 };
-pub use policy_validation::{PolicyValidator, ValidationContext, ValidationMode, ValidationResult};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,417 +33,318 @@ use parking_lot::RwLock;
 
 use crate::types::{
     error::DsmError,
-    policy_types::{PolicyAnchor, PolicyFile, TokenPolicy},
-    token_types::TokenMetadata,
+    policy_types::{PolicyAnchor, TokenPolicy},
 };
 
-/// Loads a token's committed policy from durable storage on a cache miss.
+/// Answers the durable `TokenPolicyV3` bytes recorded at a policy commitment,
+/// on a cache miss. Installed by the SDK, which owns the durable
+/// `token_policies` store; Core does not learn to read the client database.
 ///
-/// Installed by the SDK, which owns both the durable `token_policies` store and
-/// the single policy parser. Core keeps enforcement; it does not learn to read
-/// the client database or to parse policy bytes a second way.
-///
-/// The implementation is required to re-derive the CPTA anchor from the loaded
-/// bytes and reject anything that does not match, so a miss can never be
-/// satisfied by bytes the storage layer merely *claims* belong to this token.
-pub type PolicyResolver =
-    Arc<dyn Fn(&str) -> Option<(PolicyFile, PolicyAnchor)> + Send + Sync + 'static>;
+/// The bytes are trusted for nothing: [`TokenPolicySystem::policy_at`]
+/// recomputes the commitment from them and takes them only when it is the
+/// one asked for, so a miss can never be satisfied by bytes the storage
+/// layer merely *claims* belong to this commitment.
+pub type PolicyResolver = Arc<dyn Fn(&[u8; 32]) -> Option<Vec<u8>> + Send + Sync + 'static>;
 
-/// Central token policy system for DSM
+/// The token policies this process has read, keyed by commitment.
 #[derive(Clone)]
 pub struct TokenPolicySystem {
+    /// In-memory ONLY. Authority for a policy is its committed bytes, behind
+    /// `resolver`; this is a cache in front of them.
     policy_cache: Arc<PolicyCache>,
     enforcer: Arc<PolicyEnforcer>,
-    manager: Arc<PolicyManager>,
-    validator: Arc<PolicyValidator>,
-    /// In-memory index ONLY. Authority for persisted policy bytes is the
-    /// durable store behind `resolver`; this is a cache in front of it.
-    token_policies: Arc<RwLock<HashMap<String, PolicyAnchor>>>,
     resolver: Arc<RwLock<Option<PolicyResolver>>>,
 }
 
 impl std::fmt::Debug for TokenPolicySystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TokenPolicySystem")
-            .field("indexed_tokens", &self.token_policies.read().len())
+            .field("cached_policies", &self.policy_cache.len())
             .finish_non_exhaustive()
-    }
-}
-
-impl TokenPolicySystem {
-    pub fn policy_manager(&self) -> Arc<PolicyManager> {
-        self.manager.clone()
-    }
-
-    pub fn new() -> Result<Self, DsmError> {
-        let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
-        let enforcer = Arc::new(PolicyEnforcer::new(cache.clone()));
-        let manager = Arc::new(PolicyManager::new(PolicyManagerConfig::default()));
-        let validator = Arc::new(PolicyValidator::new());
-
-        Ok(Self {
-            policy_cache: cache,
-            enforcer,
-            manager,
-            validator,
-            token_policies: Arc::new(RwLock::new(HashMap::new())),
-            resolver: Arc::new(RwLock::new(None)),
-        })
-    }
-
-    /// Install the durable-storage resolver used on a cache miss.
-    pub fn set_policy_resolver(&self, resolver: PolicyResolver) {
-        *self.resolver.write() = Some(resolver);
-    }
-
-    pub async fn register_token_policy(
-        &self,
-        token_id: &str,
-        policy_file: PolicyFile,
-    ) -> Result<PolicyAnchor, DsmError> {
-        let anchor = PolicyAnchor::from_policy(&policy_file)?;
-        self.register_token_policy_with_anchor(token_id, policy_file, anchor.clone())
-            .await?;
-        Ok(anchor)
-    }
-
-    /// Register a token policy while preserving an already-authoritative
-    /// policy anchor.
-    ///
-    /// Use this when the policy bytes are committed externally (for example,
-    /// via storage-layer `DSM/policy` anchoring) and token operations must
-    /// bind to that exact 32-byte commitment.
-    pub async fn register_token_policy_with_anchor(
-        &self,
-        token_id: &str,
-        policy_file: PolicyFile,
-        anchor: PolicyAnchor,
-    ) -> Result<(), DsmError> {
-        // Validate policy deterministically
-        let validation_context = ValidationContext::new(token_id, &policy_file);
-        let validation_result = self.validator.validate_policy(&validation_context).await?;
-
-        if !validation_result.is_valid {
-            return Err(DsmError::policy_violation(
-                "policy_validation",
-                format!(
-                    "Policy validation failed: {} (errors: {:?})",
-                    validation_result.message, validation_result.errors
-                ),
-                None::<std::convert::Infallible>,
-            ));
-        }
-
-        let token_policy = TokenPolicy::new_with_anchor(policy_file, anchor.clone());
-        self.policy_cache.store_policy(anchor.clone(), token_policy);
-
-        // Register mappings
-        self.policy_cache
-            .index_token_policy(token_id.to_string(), anchor.clone());
-        self.token_policies
-            .write()
-            .insert(token_id.to_string(), anchor.clone());
-
-        log::info!("Registered policy for token {}", token_id);
-        Ok(())
-    }
-
-    pub async fn get_token_policy(&self, token_id: &str) -> Result<Option<TokenPolicy>, DsmError> {
-        let anchor = { self.token_policies.read().get(token_id).cloned() };
-        if let Some(anchor) = anchor {
-            return self.policy_cache.get_policy(&anchor).await;
-        }
-
-        // Cache miss is NOT absence. This map lives only as long as the
-        // process, so after a restart every created and adopted token looked
-        // policy-less and enforcement denied them — on device that surfaced as
-        // "Token policy violation for RIGB: No policy registered for token"
-        // while the committed policy sat in durable storage the whole time.
-        //
-        // So a miss consults the durable store rather than concluding. The
-        // resolver re-derives the CPTA anchor from the loaded bytes and returns
-        // None unless it matches exactly, so this can only ever install the
-        // policy the token actually committed to. Genuinely absent, malformed,
-        // or mismatched bytes still yield None and the caller still denies.
-        let resolver = { self.resolver.read().clone() };
-        if let Some(resolver) = resolver {
-            if let Some((policy_file, anchor)) = resolver(token_id) {
-                let policy = TokenPolicy::new_with_anchor(policy_file, anchor.clone());
-                self.policy_cache.store_policy(anchor.clone(), policy);
-                self.policy_cache
-                    .index_token_policy(token_id.to_string(), anchor.clone());
-                self.token_policies
-                    .write()
-                    .insert(token_id.to_string(), anchor.clone());
-                log::info!("[policy] rehydrated {token_id} from durable storage on cache miss");
-                return self.policy_cache.get_policy(&anchor).await;
-            }
-        }
-        Ok(None)
-    }
-
-    pub async fn enforce_policy(
-        &self,
-        token_id: &str,
-        operation_type: &str,
-        context: &HashMap<String, Vec<u8>>,
-    ) -> Result<EnforcementResult, DsmError> {
-        if let Some(policy) = self.get_token_policy(token_id).await? {
-            self.enforcer
-                .enforce_policy(&policy, operation_type, context)
-                .await
-        } else if crate::core::token::token_state_manager::builtin_policy_commit_for_token(token_id)
-            .is_some()
-        {
-            // Built-in tokens (ERA, dBTC) carry their constraints in dedicated
-            // code paths (e.g. the Bitcoin-tap flow) and were never gated by the
-            // TokenPolicySystem. Default-denying them here is a regression, so
-            // the fail-closed default applies only to genuinely-unknown,
-            // user-created tokens that registered no policy.
-            Ok(EnforcementResult::allowed(
-                "Built-in token; no TokenPolicySystem restrictions",
-                0,
-            ))
-        } else {
-            Ok(EnforcementResult::denied(
-                "No policy registered for token",
-                0,
-            ))
-        }
-    }
-
-    pub async fn validate_token_metadata(
-        &self,
-        metadata: &TokenMetadata,
-    ) -> Result<ValidationResult, DsmError> {
-        let anchor = self.get_policy_anchor(&metadata.token_id).ok_or_else(|| {
-            DsmError::not_found(
-                "Token policy",
-                Some(format!(
-                    "No policy registered for token {}",
-                    metadata.token_id
-                )),
-            )
-        })?;
-
-        let declared_anchor = metadata.policy_anchor.as_deref().ok_or_else(|| {
-            DsmError::invalid_operation(format!(
-                "Token {} metadata is missing a policy anchor",
-                metadata.token_id
-            ))
-        })?;
-        let declared_anchor = declared_anchor
-            .strip_prefix("dsm:policy:")
-            .unwrap_or(declared_anchor);
-        if declared_anchor != anchor.to_base32() {
-            return Err(DsmError::invalid_operation(format!(
-                "Token {} metadata policy anchor does not match registered policy",
-                metadata.token_id
-            )));
-        }
-
-        if let Some(policy) = self.policy_cache.get_policy(&anchor).await? {
-            let context = ValidationContext::new(&metadata.token_id, &policy.file);
-            self.validator
-                .validate_token_metadata(&context, metadata)
-                .await
-        } else {
-            Err(DsmError::not_found(
-                "Token policy",
-                Some("Policy not found for registered anchor".to_string()),
-            ))
-        }
-    }
-
-    pub async fn update_token_policy(
-        &self,
-        token_id: &str,
-        new_policy: PolicyFile,
-        authorization: &[u8],
-    ) -> Result<PolicyAnchor, DsmError> {
-        self.manager
-            .verify_policy_update_authorization(token_id, authorization)
-            .await?;
-        self.register_token_policy(token_id, new_policy).await
-    }
-
-    pub fn has_policy_restrictions(&self, token_id: &str) -> bool {
-        self.token_policies.read().contains_key(token_id)
-    }
-
-    pub fn get_policy_anchor(&self, token_id: &str) -> Option<PolicyAnchor> {
-        self.token_policies.read().get(token_id).cloned()
-    }
-
-    pub async fn preload_standard_policies(&self) -> Result<(), DsmError> {
-        let root_policy = self.create_root_token_policy();
-        self.register_token_policy("ERA", root_policy).await?;
-        Ok(())
-    }
-
-    pub fn preload_standard_policies_blocking(&self) -> Result<(), DsmError> {
-        // Avoid nested runtime panics: if inside a runtime, do the work on a dedicated thread.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            let sys = self.clone();
-            let join_res = std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| {
-                        DsmError::internal(
-                            format!("Failed to build runtime for policy preload: {e}"),
-                            None::<std::convert::Infallible>,
-                        )
-                    })?;
-                rt.block_on(sys.preload_standard_policies())
-            })
-            .join();
-
-            return match join_res {
-                Ok(res) => res,
-                Err(_) => Err(DsmError::internal(
-                    "Failed to join policy preload thread",
-                    None::<std::convert::Infallible>,
-                )),
-            };
-        }
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                DsmError::internal(
-                    format!("Failed to build runtime for policy preload: {e}"),
-                    None::<std::convert::Infallible>,
-                )
-            })?;
-        rt.block_on(self.preload_standard_policies())
-    }
-
-    fn create_root_token_policy(&self) -> PolicyFile {
-        let mut policy = PolicyFile::new("ERA Token Policy", "1.0.0", "system");
-        policy.with_description("Default policy for the ERA token in DSM ecosystem");
-        policy.add_metadata("token_type", "native");
-        policy.add_metadata("governance", "meritocratic");
-        policy.add_metadata("supply_model", "fixed");
-        policy
     }
 }
 
 impl Default for TokenPolicySystem {
     fn default() -> Self {
-        Self::new().unwrap_or_else(|e| {
-            log::error!("TokenPolicySystem default init failed: {e}");
-            let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
-            Self {
-                policy_cache: cache.clone(),
-                enforcer: Arc::new(PolicyEnforcer::new(cache)),
-                manager: Arc::new(PolicyManager::new(PolicyManagerConfig::default())),
-                validator: Arc::new(PolicyValidator::new()),
-                token_policies: Arc::new(RwLock::new(HashMap::new())),
-                resolver: Arc::new(RwLock::new(None)),
-            }
-        })
+        Self::new()
     }
 }
 
-impl crate::core::token::token_state_manager::PolicyCommitResolver for TokenPolicySystem {
-    /// Resolve a token_id to its 32-byte CPTA policy_commit.
-    ///
-    /// Returns the registered `PolicyAnchor` bytes if the token has a policy.
-    /// Missing policy anchors fail closed.
-    fn resolve(&self, token_id: &str) -> Result<[u8; 32], DsmError> {
-        self.get_policy_anchor(token_id)
-            .map(|a| a.0)
-            .ok_or_else(|| {
-                DsmError::invalid_operation(format!("Missing policy anchor for token {token_id}"))
-            })
+impl TokenPolicySystem {
+    pub fn new() -> Self {
+        Self {
+            policy_cache: Arc::new(PolicyCache::new(PolicyCacheConfig::default())),
+            enforcer: Arc::new(PolicyEnforcer::new()),
+            resolver: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Install the durable-storage resolver consulted on a cache miss.
+    pub fn set_policy_resolver(&self, resolver: PolicyResolver) {
+        *self.resolver.write() = Some(resolver);
+    }
+
+    /// The commitment of `bytes`: `BLAKE3(TAG_DSM_POLICY, bytes)` (SoFi §47).
+    pub fn commitment_of(bytes: &[u8]) -> [u8; 32] {
+        crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, bytes)
+    }
+
+    /// Register the policy these exact `TokenPolicyV3` bytes are, and answer
+    /// its commitment. The commitment is recomputed from the bytes, the blob
+    /// is read by Core's one parser, and the enforcer's view is derived from
+    /// what it says: nothing about the policy is taken from the caller.
+    pub fn register_policy(&self, bytes: &[u8]) -> Result<[u8; 32], DsmError> {
+        let commit = Self::commitment_of(bytes);
+        let parsed = crate::economic::token_policy::parse_token_policy(bytes).map_err(|e| {
+            DsmError::invalid_operation(format!(
+                "token policy: the committed bytes do not parse: {e}"
+            ))
+        })?;
+        // Exactly one network-anchored policy exists, ERA's, and it is fixed
+        // in Core; no other is registered (SoFi Amendment S11).
+        if !matches!(
+            parsed.release,
+            crate::economic::token_policy::Release::AllAtCreation { .. }
+        ) {
+            return Err(DsmError::invalid_operation(
+                "token policy: a network-anchored policy is registered by nobody — the one \
+                 that exists, ERA's, is fixed in Core (Amendment S11)",
+            ));
+        }
+        let anchor = PolicyAnchor::from_bytes(commit);
+        self.policy_cache.store_policy(
+            anchor.clone(),
+            TokenPolicy::new_with_anchor(enforced_policy(&parsed), anchor),
+        );
+        Ok(commit)
+    }
+
+    /// The policy committed at `commit`: from the cache, else from the
+    /// durable bytes the resolver answers, taken only when they are the
+    /// policy at exactly this commitment. `None` when no committed policy is
+    /// in hand — a miss is not absence, and neither is bytes at another
+    /// commitment, but there is nothing to evaluate against either way.
+    pub async fn policy_at(&self, commit: &[u8; 32]) -> Result<Option<TokenPolicy>, DsmError> {
+        let anchor = PolicyAnchor::from_bytes(*commit);
+        if *commit == crate::core::token::era_policy::era_policy_commit() {
+            let era = crate::core::token::era_policy::era_policy()?;
+            return Ok(Some(TokenPolicy::new_with_anchor(
+                enforced_policy(era),
+                anchor,
+            )));
+        }
+        if let Some(policy) = self.policy_cache.get_policy(&anchor).await? {
+            return Ok(Some(policy));
+        }
+        let resolver = { self.resolver.read().clone() };
+        let Some(resolver) = resolver else {
+            return Ok(None);
+        };
+        let Some(bytes) = resolver(commit) else {
+            return Ok(None);
+        };
+        if Self::commitment_of(&bytes) != *commit {
+            log::warn!(
+                "[policy] the durable store answered bytes at another commitment for {}; not a policy",
+                crate::utils::text_id::encode_base32_crockford(commit)
+            );
+            return Ok(None);
+        }
+        self.register_policy(&bytes)?;
+        log::info!(
+            "[policy] rehydrated {} from durable storage on cache miss",
+            crate::utils::text_id::encode_base32_crockford(commit)
+        );
+        self.policy_cache.get_policy(&anchor).await
+    }
+
+    /// Whether the policy committed at `commit` permits `operation_type` in
+    /// `context`. Denied when no policy is committed there.
+    pub async fn enforce_policy(
+        &self,
+        commit: &[u8; 32],
+        operation_type: &str,
+        context: &HashMap<String, Vec<u8>>,
+    ) -> Result<EnforcementResult, DsmError> {
+        match self.policy_at(commit).await? {
+            Some(policy) => {
+                self.enforcer
+                    .enforce_policy(&policy, operation_type, context)
+                    .await
+            }
+            None => Ok(EnforcementResult::denied(
+                "no policy is committed at the commitment the operation names",
+            )),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::token_types::{TokenMetadata, TokenType};
+    use crate::economic::token_policy::{POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE};
+    use crate::sofi::validation::fixtures::token_policy_bytes_with;
+    use crate::types::policy_types::PolicyCondition;
 
-    #[tokio::test]
-    async fn test_policy_system_creation() {
-        let system = TokenPolicySystem::new().unwrap();
-        assert!(!system.has_policy_restrictions("test_token"));
+    fn context(amount: u64) -> HashMap<String, Vec<u8>> {
+        let mut context = HashMap::new();
+        context.insert("amount_u64".to_string(), amount.to_le_bytes().to_vec());
+        context
     }
 
+    /// SoFi §47: a policy is registered from its committed bytes alone — the
+    /// commitment recomputed from them, the enforcer's view derived from what
+    /// the blob says (its genesis supply, its flags) and nothing else.
     #[tokio::test]
-    async fn test_register_token_policy() {
-        let system = TokenPolicySystem::new().unwrap();
+    async fn a_policy_is_registered_from_its_committed_bytes_alone() {
+        let system = TokenPolicySystem::new();
+        let bytes = token_policy_bytes_with(1, POLICY_FLAG_TRANSFERABLE | POLICY_FLAG_BURN);
+        let commit = system
+            .register_policy(&bytes)
+            .expect("the fixture blob parses");
+        assert_eq!(commit, TokenPolicySystem::commitment_of(&bytes));
 
-        let mut policy = PolicyFile::new("Test Policy", "1.0.0", "test_creator");
-        policy.add_metadata("test_key", "test_value");
-        let anchor = system
-            .register_token_policy("test_token", policy)
+        let policy = system
+            .policy_at(&commit)
             .await
-            .unwrap();
-
-        assert!(system.has_policy_restrictions("test_token"));
-        assert_eq!(system.get_policy_anchor("test_token"), Some(anchor));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_missing_policy_fails_closed() {
-        let system = TokenPolicySystem::new().unwrap();
-        let resolved = crate::core::token::token_state_manager::PolicyCommitResolver::resolve(
-            &system,
-            "missing_token",
-        );
-        assert!(resolved.is_err());
-    }
-
-    /// Regression: the fail-closed default for an unregistered token must NOT
-    /// catch built-in tokens (ERA, dBTC) — they were never gated by the
-    /// TokenPolicySystem and carry their constraints elsewhere. Only genuinely
-    /// unknown, user-created tokens with no registered policy are denied.
-    #[tokio::test]
-    async fn enforce_policy_allows_unregistered_builtin_but_denies_unknown() {
-        let system = TokenPolicySystem::new().unwrap();
-        let ctx = std::collections::HashMap::new();
-
-        // dBTC: builtin, no TokenPolicySystem policy registered -> allowed.
-        let dbtc = system
-            .enforce_policy("dBTC", "transfer", &ctx)
-            .await
-            .unwrap();
+            .expect("cache read")
+            .expect("registered");
+        assert_eq!(*policy.anchor.as_bytes(), commit);
+        assert!(policy
+            .file
+            .conditions
+            .contains(&PolicyCondition::SupplyCap {
+                max_supply: 1_000_000_000
+            }));
+        assert!(policy
+            .file
+            .conditions
+            .contains(&PolicyCondition::OperationRestriction {
+                allowed_operations: permitted_operations(true, true),
+            }));
+        assert_eq!(policy.file.conditions.len(), 2);
         assert!(
-            dbtc.allowed,
-            "unregistered builtin dBTC must not be default-denied"
-        );
-
-        // Unknown user token, no policy -> denied (fail closed).
-        let unknown = system
-            .enforce_policy("UNKNOWN_USER_TOKEN", "transfer", &ctx)
-            .await
-            .unwrap();
-        assert!(
-            !unknown.allowed,
-            "unknown unregistered token must be denied"
+            system
+                .enforce_policy(&commit, "transfer", &context(5))
+                .await
+                .expect("enforced")
+                .allowed
         );
     }
 
+    /// Storage §4: bytes the durable store answers for a commitment are the
+    /// policy there only if they re-hash to it. Bytes at another commitment
+    /// establish no policy, and an operation naming the commitment is denied.
     #[tokio::test]
-    async fn test_token_metadata_validation_requires_policy_anchor() {
-        let system = TokenPolicySystem::new().unwrap();
+    async fn bytes_at_another_commitment_are_not_the_policy_asked_for() {
+        let system = TokenPolicySystem::new();
+        let other = token_policy_bytes_with(2, POLICY_FLAG_TRANSFERABLE);
+        let other_again = other.clone();
+        let asked =
+            TokenPolicySystem::commitment_of(&token_policy_bytes_with(3, POLICY_FLAG_TRANSFERABLE));
+        system.set_policy_resolver(Arc::new(move |_commit: &[u8; 32]| Some(other.clone())));
 
-        let owner_id = blake3::hash(b"test_owner").into();
-        let metadata = TokenMetadata::new(
-            "test_token",
-            "Test Token",
-            "TEST",
-            18,
-            TokenType::Created,
-            owner_id,
+        assert!(system.policy_at(&asked).await.expect("read").is_none());
+        let result = system
+            .enforce_policy(&asked, "transfer", &context(1))
+            .await
+            .expect("enforced");
+        assert!(!result.allowed, "{}", result.reason);
+        assert!(
+            system
+                .policy_cache
+                .get_policy(&PolicyAnchor::from_bytes(TokenPolicySystem::commitment_of(
+                    &other_again
+                )))
+                .await
+                .expect("cache read")
+                .is_none(),
+            "a refused answer registers nothing, under any commitment"
+        );
+    }
+
+    /// A commitment no committed policy is in hand for permits nothing: the
+    /// operation is denied for the absence, never allowed by a default.
+    #[tokio::test]
+    async fn an_operation_naming_a_commitment_without_a_policy_is_denied() {
+        let system = TokenPolicySystem::new();
+        let unregistered =
+            TokenPolicySystem::commitment_of(&token_policy_bytes_with(9, POLICY_FLAG_TRANSFERABLE));
+        let result = system
+            .enforce_policy(&unregistered, "transfer", &context(1))
+            .await
+            .expect("enforced");
+        assert!(!result.allowed);
+        assert_eq!(
+            result.reason,
+            "no policy is committed at the commitment the operation names"
+        );
+    }
+
+    /// SoFi Amendment S11: ERA's policy is pre-rooted. A transfer and a burn of
+    /// ERA are permitted by ERA's own committed rules with nothing registered,
+    /// nothing cached, and a resolver that is never asked.
+    #[tokio::test]
+    async fn eras_policy_is_answered_from_cores_bytes_never_cached_or_resolved() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let system = TokenPolicySystem::new();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        system.set_policy_resolver(Arc::new(move |_commit: &[u8; 32]| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            None
+        }));
+        let era = crate::core::token::era_policy::era_policy_commit();
+        for operation in ["transfer", "burn"] {
+            let result = system
+                .enforce_policy(&era, operation, &context(1))
+                .await
+                .expect("enforced");
+            assert!(result.allowed, "ERA {operation}: {}", result.reason);
+        }
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
             0,
-            None,
+            "the resolver was asked for ERA"
         );
+        assert!(system.policy_cache.is_empty(), "ERA took a cache slot");
+    }
 
-        let result = system.validate_token_metadata(&metadata).await;
-        assert!(result.is_err());
+    /// ERA's own bytes are network-anchored, so they are registered by nobody:
+    /// its policy is Core's, fixed (Amendment S11).
+    #[tokio::test]
+    async fn eras_own_bytes_are_never_registered() {
+        let system = TokenPolicySystem::new();
+        assert!(system
+            .register_policy(crate::core::token::era_policy::era_policy_bytes())
+            .is_err());
+        assert!(system.policy_cache.is_empty());
+    }
+
+    /// The durable bytes at a commitment are taken on a cache miss when they
+    /// re-hash to it; the policy is then the one those bytes commit.
+    #[tokio::test]
+    async fn a_cache_miss_takes_the_durable_bytes_that_re_hash_to_the_commitment() {
+        let system = TokenPolicySystem::new();
+        let bytes = token_policy_bytes_with(4, 0);
+        let commit = TokenPolicySystem::commitment_of(&bytes);
+        let stored = bytes.clone();
+        system.set_policy_resolver(Arc::new(move |asked: &[u8; 32]| {
+            (*asked == TokenPolicySystem::commitment_of(&stored)).then(|| stored.clone())
+        }));
+        let policy = system
+            .policy_at(&commit)
+            .await
+            .expect("read")
+            .expect("rehydrated from the durable bytes");
+        assert_eq!(*policy.anchor.as_bytes(), commit);
+        let result = system
+            .enforce_policy(&commit, "transfer", &context(1))
+            .await
+            .expect("enforced");
+        assert!(
+            !result.allowed,
+            "the fixture with no flags is not transferable"
+        );
     }
 }

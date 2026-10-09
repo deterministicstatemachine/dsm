@@ -27,8 +27,8 @@
 //!
 //! Sealing key:
 //! - **Android** (`target_os = "android"`): an `AndroidKeyStore` AES/GCM key held by
-//!   `com.dsm.wallet.security.KeystoreVault` (hardware-backed; a no-auth key for a
-//!   no-lock wallet, a biometric/PIN-gated key otherwise). Rust hands plaintext across
+//!   `com.dsm.wallet.security.KeystoreVault` (hardware-backed, with no user-authentication
+//!   requirement: the app lock is Rust's, `sdk::app_lock`). Rust hands plaintext across
 //!   JNI and gets ciphertext back — the sealing key never enters Rust memory.
 //! - **Host / desktop** (non-Android, tests): a software XChaCha20-Poly1305 fallback so
 //!   the persistence logic is exercisable off-device. This path is **not** hardware-backed

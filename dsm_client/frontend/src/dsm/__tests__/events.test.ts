@@ -22,17 +22,11 @@ jest.mock('../../bridge/bridgeEvents', () => {
   };
 });
 
-import { emitWalletRefresh, emitBilateralCommitted, DSM_WALLET_REFRESH_EVENT } from '../events';
+import { emitWalletRefresh, emitBilateralAccepted } from '../events';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 
 describe('events.ts', () => {
   beforeEach(() => jest.clearAllMocks());
-
-  describe('DSM_WALLET_REFRESH_EVENT', () => {
-    test('has the canonical event name', () => {
-      expect(DSM_WALLET_REFRESH_EVENT).toBe('dsm-wallet-refresh');
-    });
-  });
 
   describe('emitWalletRefresh', () => {
     test('emits wallet.refresh event with detail', () => {
@@ -48,27 +42,14 @@ describe('events.ts', () => {
     });
   });
 
-  describe('emitBilateralCommitted', () => {
-    test('emits wallet.bilateralCommitted with detail', () => {
+  describe('emitBilateralAccepted', () => {
+    test('emits wallet.bilateralAccepted with the transfer it names', () => {
       const detail = {
         commitmentHash: new Uint8Array(32).fill(0xAA),
         counterpartyDeviceId: new Uint8Array(32).fill(0xBB),
-        accepted: true,
-        committed: true,
-        rejected: false,
       };
-      emitBilateralCommitted(detail);
-      expect(bridgeEvents.emit).toHaveBeenCalledWith('wallet.bilateralCommitted', detail);
-    });
-
-    test('emits empty object when no detail provided', () => {
-      emitBilateralCommitted();
-      expect(bridgeEvents.emit).toHaveBeenCalledWith('wallet.bilateralCommitted', {});
-    });
-
-    test('emits empty object when undefined is passed', () => {
-      emitBilateralCommitted(undefined);
-      expect(bridgeEvents.emit).toHaveBeenCalledWith('wallet.bilateralCommitted', {});
+      emitBilateralAccepted(detail);
+      expect(bridgeEvents.emit).toHaveBeenCalledWith('wallet.bilateralAccepted', detail);
     });
   });
 
@@ -81,12 +62,15 @@ describe('events.ts', () => {
       expect(listener).toHaveBeenCalledWith({ source: 'test' });
     });
 
-    test('wallet.bilateralCommitted event is received by listeners', () => {
+    test('wallet.bilateralAccepted event is received by listeners', () => {
       const listener = jest.fn();
-      bridgeEvents.on('wallet.bilateralCommitted', listener);
+      bridgeEvents.on('wallet.bilateralAccepted', listener);
 
-      const detail = { accepted: true, committed: true };
-      emitBilateralCommitted(detail);
+      const detail = {
+        commitmentHash: new Uint8Array(32).fill(1),
+        counterpartyDeviceId: new Uint8Array(32).fill(2),
+      };
+      emitBilateralAccepted(detail);
       expect(listener).toHaveBeenCalledWith(detail);
     });
   });

@@ -31,7 +31,6 @@ body:
       description: Which setup path were you following?
       options:
         - label: QUICKSTART.md
-        - label: docs/book/README.md
         - label: Custom setup
         - label: Other
   - type: textarea

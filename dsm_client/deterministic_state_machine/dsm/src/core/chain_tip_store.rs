@@ -8,16 +8,16 @@
 //! The SDK layer provides the concrete implementation backed by
 //! platform-specific storage.
 
-use std::sync::Arc;
-
 use crate::types::error::DsmError;
 
 /// Chain-tip store abstraction (SDKs provide the backing store).
 ///
 /// Core stays storage-agnostic; callers can provide a DB-backed implementation.
 pub trait ChainTipStore: Send + Sync {
-    /// Get the latest chain tip for a contact relationship (if available).
-    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]>;
+    /// The persisted chain tip of the relationship with `device_id`, or
+    /// `None` when the store holds no such relationship. A store that cannot
+    /// read it answers an error, never "no tip".
+    fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Result<Option<[u8; 32]>, DsmError>;
 
     /// Persist the latest chain tip for a contact relationship if the parent still matches.
     ///
@@ -37,85 +37,48 @@ impl std::fmt::Debug for dyn ChainTipStore {
     }
 }
 
-/// No-op chain-tip store used by default in core-only contexts.
-#[derive(Default)]
-pub struct NoopChainTipStore;
-
-impl ChainTipStore for NoopChainTipStore {
-    fn get_contact_chain_tip(&self, _device_id: &[u8; 32]) -> Option<[u8; 32]> {
-        None
-    }
-
-    fn set_contact_chain_tip(
-        &self,
-        _device_id: &[u8; 32],
-        _expected_parent_tip: [u8; 32],
-        _new_tip: [u8; 32],
-    ) -> Result<bool, DsmError> {
-        Ok(true)
-    }
-}
-
-/// Convenience helper for a default no-op store.
-pub fn noop_chain_tip_store() -> Arc<dyn ChainTipStore> {
-    Arc::new(NoopChainTipStore)
-}
-
+/// A chain-tip store over process memory with the trait's compare-and-set
+/// semantics, for Core's own tests: Core has no durable store of its own, and
+/// the SDK's store needs the SDK's database.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod memory {
+    use super::ChainTipStore;
+    use crate::types::error::DsmError;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    #[test]
-    fn noop_get_always_returns_none() {
-        let store = NoopChainTipStore;
-        let id = [0xABu8; 32];
-        assert!(store.get_contact_chain_tip(&id).is_none());
-        assert!(store.get_contact_chain_tip(&[0u8; 32]).is_none());
-    }
-
-    #[test]
-    fn noop_set_always_succeeds() {
-        let store = NoopChainTipStore;
-        let id = [1u8; 32];
-        let parent = [2u8; 32];
-        let tip = [3u8; 32];
-        assert!(store.set_contact_chain_tip(&id, parent, tip).unwrap());
-    }
-
-    #[test]
-    fn noop_helper_returns_arc() {
-        let store = noop_chain_tip_store();
-        assert!(store.get_contact_chain_tip(&[0u8; 32]).is_none());
-        assert!(store
-            .set_contact_chain_tip(&[0u8; 32], [0u8; 32], [1u8; 32])
-            .unwrap());
-    }
-
-    #[test]
-    fn debug_impl_for_dyn_chain_tip_store() {
-        let store: Arc<dyn ChainTipStore> = noop_chain_tip_store();
-        let dbg = format!("{:?}", store);
-        assert!(dbg.contains("ChainTipStore(..)"));
-    }
-
-    /// `(root, state_number)` recorded per device id.
-    struct InMemoryChainTipStore {
+    /// The tip recorded per counterparty device id. A relationship exists once
+    /// its contact is added at h_0; a step on any other relationship is refused.
+    #[derive(Default)]
+    pub(crate) struct InMemoryChainTipStore {
         tips: Mutex<HashMap<[u8; 32], [u8; 32]>>,
     }
 
     impl InMemoryChainTipStore {
-        fn new() -> Self {
-            Self {
-                tips: Mutex::new(HashMap::new()),
-            }
+        pub(crate) fn new() -> Self {
+            Self::default()
+        }
+
+        /// What adding the contact records: the relationship at its `h_0`.
+        pub(crate) fn record_contact_added(&self, device_id: [u8; 32], h_0: [u8; 32]) {
+            self.tips
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(device_id, h_0);
         }
     }
 
     impl ChainTipStore for InMemoryChainTipStore {
-        fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]> {
-            self.tips.lock().unwrap().get(device_id).copied()
+        fn get_contact_chain_tip(
+            &self,
+            device_id: &[u8; 32],
+        ) -> Result<Option<[u8; 32]>, DsmError> {
+            Ok(self
+                .tips
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(device_id)
+                .copied())
         }
 
         fn set_contact_chain_tip(
@@ -124,8 +87,10 @@ mod tests {
             expected_parent_tip: [u8; 32],
             new_tip: [u8; 32],
         ) -> Result<bool, DsmError> {
-            let mut tips = self.tips.lock().unwrap();
-            let current = tips.get(device_id).copied().unwrap_or([0u8; 32]);
+            let mut tips = self.tips.lock().unwrap_or_else(|p| p.into_inner());
+            let current = tips.get(device_id).copied().ok_or_else(|| {
+                DsmError::InvalidState("no relationship with that device".to_string())
+            })?;
             if current != expected_parent_tip {
                 return Ok(false);
             }
@@ -133,15 +98,33 @@ mod tests {
             Ok(true)
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory::InMemoryChainTipStore;
+    use super::*;
+    use std::sync::Arc;
 
     #[test]
-    fn in_memory_store_set_then_get() {
+    fn debug_impl_for_dyn_chain_tip_store() {
+        let store: Arc<dyn ChainTipStore> = Arc::new(InMemoryChainTipStore::new());
+        let dbg = format!("{:?}", store);
+        assert!(dbg.contains("ChainTipStore(..)"));
+    }
+
+    #[test]
+    fn in_memory_store_holds_a_relationship_from_its_contact_add() {
         let store = InMemoryChainTipStore::new();
         let id = [42u8; 32];
-        let tip = [99u8; 32];
-        assert!(store.get_contact_chain_tip(&id).is_none());
-        assert!(store.set_contact_chain_tip(&id, [0u8; 32], tip).unwrap());
-        assert_eq!(store.get_contact_chain_tip(&id), Some(tip));
+        let h_0 = [99u8; 32];
+        assert!(store.get_contact_chain_tip(&id).expect("read").is_none());
+        assert!(
+            store.set_contact_chain_tip(&id, [0u8; 32], h_0).is_err(),
+            "a step on a relationship nobody added is refused"
+        );
+        store.record_contact_added(id, h_0);
+        assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(h_0));
     }
 
     #[test]
@@ -150,14 +133,14 @@ mod tests {
         let id = [1u8; 32];
         let tip1 = [10u8; 32];
         let tip2 = [20u8; 32];
-        store.set_contact_chain_tip(&id, [0u8; 32], tip1).unwrap();
+        store.record_contact_added(id, tip1);
 
         let wrong_parent = [0xFFu8; 32];
         let applied = store
             .set_contact_chain_tip(&id, wrong_parent, tip2)
             .unwrap();
         assert!(!applied, "CAS should reject wrong parent");
-        assert_eq!(store.get_contact_chain_tip(&id), Some(tip1));
+        assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(tip1));
     }
 
     #[test]
@@ -166,9 +149,9 @@ mod tests {
         let id = [5u8; 32];
         let tip1 = [10u8; 32];
         let tip2 = [20u8; 32];
-        store.set_contact_chain_tip(&id, [0u8; 32], tip1).unwrap();
+        store.record_contact_added(id, tip1);
         let applied = store.set_contact_chain_tip(&id, tip1, tip2).unwrap();
         assert!(applied);
-        assert_eq!(store.get_contact_chain_tip(&id), Some(tip2));
+        assert_eq!(store.get_contact_chain_tip(&id).expect("read"), Some(tip2));
     }
 }

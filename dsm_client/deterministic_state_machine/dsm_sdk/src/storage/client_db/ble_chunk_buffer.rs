@@ -13,7 +13,6 @@ use rusqlite::params;
 
 use super::get_connection;
 use super::types::{PersistedChunk, ChunkPersistenceParams};
-use crate::util::deterministic_time::tick;
 
 /// Persist a single BLE chunk to SQLite. Idempotent — duplicates are silently ignored
 /// via `INSERT OR IGNORE` on the (frame_commitment, chunk_index) primary key.
@@ -22,13 +21,12 @@ pub fn persist_ble_chunk(params: ChunkPersistenceParams) -> Result<()> {
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("Database lock poisoned"))?;
-    let now = tick();
 
     conn.execute(
         "INSERT OR IGNORE INTO ble_reassembly_state
          (frame_commitment, chunk_index, frame_type, total_chunks,
-          payload_len, chunk_data, checksum, counterparty_id, created_at_tick)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+          payload_len, chunk_data, checksum, counterparty_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             &params.frame_commitment[..],
             params.chunk_index as i64,
@@ -38,7 +36,6 @@ pub fn persist_ble_chunk(params: ChunkPersistenceParams) -> Result<()> {
             params.chunk_data,
             params.checksum as i64,
             params.counterparty_id.map(|id| &id[..]),
-            now as i64,
         ],
     )?;
 
@@ -153,7 +150,8 @@ pub fn delete_chunks_by_counterparty(counterparty_id: &[u8; 32]) -> Result<()> {
 }
 
 /// Cleanup orphaned chunk buffers. If more than 50 distinct frame_commitments
-/// exist, delete the oldest ones (by created_at_tick) to prevent unbounded growth.
+/// exist, delete the ones whose newest chunk was persisted longest ago (insertion
+/// order, the rowid) to prevent unbounded growth.
 pub fn cleanup_orphan_chunk_buffers() -> Result<()> {
     let binding = get_connection()?;
     let conn = binding
@@ -170,7 +168,7 @@ pub fn cleanup_orphan_chunk_buffers() -> Result<()> {
         return Ok(());
     }
 
-    // Find frame_commitments to keep (50 most recent by max created_at_tick)
+    // Keep the 50 frames with the most recently persisted chunk.
     let to_delete = distinct_count - 50;
     let deleted = conn.execute(
         "DELETE FROM ble_reassembly_state
@@ -178,7 +176,7 @@ pub fn cleanup_orphan_chunk_buffers() -> Result<()> {
              SELECT frame_commitment
              FROM ble_reassembly_state
              GROUP BY frame_commitment
-             ORDER BY MAX(created_at_tick) ASC
+             ORDER BY MAX(rowid) ASC
              LIMIT ?1
          )",
         params![to_delete],
@@ -200,7 +198,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -345,6 +343,29 @@ mod tests {
 
         cleanup_orphan_chunk_buffers().unwrap();
         assert_eq!(count_persisted_chunks(&fc).unwrap(), 1);
+    }
+
+    /// Over the threshold, the frames whose newest chunk is oldest go; a frame
+    /// that receives a chunk late counts as recent however early it started.
+    #[test]
+    #[serial]
+    fn cleanup_orphan_chunk_buffers_evicts_the_least_recently_persisted_frames() {
+        init_test_db();
+        let frame = |i: u8| [i; 32];
+        for i in 0..52u8 {
+            persist_ble_chunk(make_chunk_params(&frame(i), 0, b"data")).unwrap();
+        }
+        // Frame 0 was first, but it is the most recent to receive a chunk.
+        persist_ble_chunk(make_chunk_params(&frame(0), 1, b"late")).unwrap();
+
+        cleanup_orphan_chunk_buffers().unwrap();
+
+        assert_eq!(count_persisted_chunks(&frame(0)).unwrap(), 2);
+        assert_eq!(count_persisted_chunks(&frame(1)).unwrap(), 0);
+        assert_eq!(count_persisted_chunks(&frame(2)).unwrap(), 0);
+        for i in 3..52u8 {
+            assert_eq!(count_persisted_chunks(&frame(i)).unwrap(), 1, "frame {i}");
+        }
     }
 
     #[test]

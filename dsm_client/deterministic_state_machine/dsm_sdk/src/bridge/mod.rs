@@ -10,11 +10,11 @@
 //!
 //! 1. After SDK bootstrap, call [`app_router()`] to get the installed router.
 //! 2. Use [`AppRouter::query()`] for read-only operations:
-//!    - `"balance.list"`, `"wallet.history"`, `"contacts.list"`, `"sys.tick"`,
-//!      `"state.info"`, `"bitcoin.balance"`, `"bilateral.pending_list"`, etc.
+//!    - `"balance.list"`, `"wallet.history"`, `"contacts.list"`,
+//!      `"bitcoin.balance"`, `"bilateral.pending_list"`, etc.
 //! 3. Use [`AppRouter::invoke()`] for state-mutating operations:
-//!    - `"wallet.send"`, `"token.create"`, `"faucet.claim"`, `"prefs.set"`,
-//!      `"message.send"`, `"dbrw.export_report"`, etc.
+//!    - `"wallet.sendSmart"`, `"token.create"`, `"faucet.claim"`, `"prefs.set"`,
+//!      `"dbrw.export_report"`, etc.
 //! 4. All parameters (`AppQuery::params`, `AppInvoke::args`) and return values
 //!    (`AppResult::data`) are prost-encoded protobuf bytes. See `dsm_app.proto`.
 //!
@@ -44,9 +44,8 @@
 //!
 //! ---
 //!
-//! Defines the minimal traits (`AppRouter`, `BilateralHandler`,
-//! `UnilateralHandler`), dispatch types (`AppQuery`, `AppInvoke`,
-//! `BiPrepare`, `UniOp`, etc.), and `OnceLock`-based installer functions
+//! Defines the minimal router trait (`AppRouter`), dispatch types
+//! (`AppQuery`, `AppInvoke`), the BLE runtime slot, and `OnceLock`-based installer functions
 //! used by the SDK handler implementations. This keeps the transport/UI
 //! bridge entirely out of the pure `dsm` core crate.
 
@@ -86,31 +85,25 @@ pub trait AppRouter: Send + Sync {
     /// installed by `execute_on_relationship` at the AdvanceOutcome
     /// chokepoint; settlement-layer state never needs to be pushed back
     /// into CoreSDK.
-    fn sync_balance_cache(&self) {}
+    fn sync_balance_cache(&self);
 
     /// Read-only snapshot of the canonical [`DeviceState`] head (§2.2 `r_A`).
     ///
     /// Used by settlement delegates to materialise display-layer projections
     /// from the device head's authoritative balance scalar — never to mutate
-    /// it. Returns `None` when the router does not yet hold an identity
-    /// (pre-genesis bootstrap router).
-    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
-        None
-    }
+    /// it. `None` when the router does not yet hold an identity (the
+    /// pre-genesis bootstrap router).
+    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState>;
 
     /// §9.5: resolve a token's canonical `policy_commit` from the local
     /// source-of-truth installed policy (builtins -> canonical constants;
     /// custom -> the device's own registration history). Returns `Err` when the
     /// policy is not locally installed — callers MUST fail closed and never
-    /// absorb a peer-supplied commit. Default impl fails closed.
+    /// absorb a peer-supplied commit.
     fn resolve_policy_commit_strict(
         &self,
-        _token_id: &[u8],
-    ) -> Result<[u8; 32], dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "resolve_policy_commit_strict: unsupported by this router",
-        ))
-    }
+        token_id: &[u8],
+    ) -> Result<[u8; 32], dsm::types::error::DsmError>;
 
     /// Pure-prepare view of the canonical AdvanceOutcome — used by the BLE
     /// sender to build a stitched receipt with the real post-advance SMT
@@ -121,18 +114,13 @@ pub trait AppRouter: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn simulate_advance_for_confirm(
         &self,
-        _rel_key: [u8; 32],
-        _counterparty_devid: [u8; 32],
-        _operation: dsm::types::operations::Operation,
-        _deltas: &[dsm::types::device_state::BalanceDelta],
-        _initial_chain_tip: Option<[u8; 32]>,
-        _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
-        _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
-    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "simulate_advance_for_confirm not implemented on this router",
-        ))
-    }
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 
     /// v2 producer phase 1 (Software-Authority / Hardware-Identity): stage the next offline-bearer
     /// transition from the appliance's active state — the transition `Δ`, the successor frontier,
@@ -143,44 +131,33 @@ pub trait AppRouter: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn stage_offline_bearer_transition(
         &self,
-        _relationship_id: [u8; 32],
-        _recipient_device_id: [u8; 32],
-        _object_id: [u8; 32],
-        _payload_hash: [u8; 32],
-        _authority_policy_hash: [u8; 32],
-        _action_type: u32,
-        _action_fields: Vec<u8>,
-        _receiver_challenge: [u8; 32],
-    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "stage_offline_bearer_transition not implemented on this router",
-        ))
-    }
+        relationship_id: [u8; 32],
+        recipient_device_id: [u8; 32],
+        object_id: [u8; 32],
+        payload_hash: [u8; 32],
+        authority_policy_hash: [u8; 32],
+        action_type: u32,
+        action_fields: Vec<u8>,
+        receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError>;
 
     /// v2 producer phase 2: PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT → FINALIZE with the real
     /// device SMT roots from the caller's advance simulation, attaching `Π_i`/`Π_{i+1}` to the
     /// release package. Delegates to [`CoreSDK::release_offline_bearer`].
     fn release_offline_bearer(
         &self,
-        _staged: &crate::sdk::core_sdk::StagedBearerTransition,
-        _receiver_challenge: [u8; 32],
-        _sender_device_root_before: [u8; 32],
-        _sender_device_root_after: [u8; 32],
-        _anchor_smt_proof_before: Vec<u8>,
-        _anchor_smt_proof_after: Vec<u8>,
-    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "release_offline_bearer not implemented on this router",
-        ))
-    }
+        staged: &crate::sdk::core_sdk::StagedBearerTransition,
+        receiver_challenge: [u8; 32],
+        sender_device_root_before: [u8; 32],
+        sender_device_root_after: [u8; 32],
+        anchor_smt_proof_before: Vec<u8>,
+        anchor_smt_proof_after: Vec<u8>,
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError>;
 
     /// Cleanup: release an ABANDONED prepared bearer (e.g. the confirm build failed between
     /// PREPARE and COMMIT) so the appliance returns to `Ready` and future offline-bearer sends do
-    /// not fail closed. Best-effort no-op default; overridden to delegate to
-    /// [`CoreSDK::cancel_offline_bearer_release`].
-    fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
-        Ok(())
-    }
+    /// not fail closed. Delegates to [`CoreSDK::cancel_offline_bearer_release`].
+    fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError>;
 
     /// Execute a prepared bilateral advance through the canonical
     /// [`CoreSDK::execute_on_relationship`] chokepoint.
@@ -190,28 +167,39 @@ pub trait AppRouter: Send + Sync {
     /// only the [`AdvanceOutcome`] — settlement and BLE paths do not need the
     /// compat `State` view. Callers feed in the tripwire-verified operation
     /// and balance deltas produced by
-    /// `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
-    /// (which no longer mutates any SMT itself), along with the parent chain
-    /// tip for CAS-style linkage.
+    /// `BilateralTransactionManager::prepare_bilateral_advance` (which mutates
+    /// no SMT and resolves no entropy — Core derives the transition's one
+    /// entropy inside `advance`), along with the parent chain tip for
+    /// CAS-style linkage.
+    ///
+    /// `before_commit` runs on the prepared advance before its transaction
+    /// opens, with no other advance in between: the receiver signs its
+    /// receipt there, from the advance that commits. `settle` writes the
+    /// step's relationship tip, projection and history in the transaction
+    /// that commits the head.
     ///
     /// Returns `Err` if the router is not yet attached to an identity, or if
     /// the underlying advance fails (§4.3 acceptance, §6.1 tripwire, §8
-    /// balance binding).
+    /// balance binding) or `settle` does — then nothing is written.
     #[allow(clippy::too_many_arguments)]
     fn execute_on_relationship_for_bilateral(
         &self,
-        _rel_key: [u8; 32],
-        _counterparty_devid: [u8; 32],
-        _operation: dsm::types::operations::Operation,
-        _deltas: &[dsm::types::device_state::BalanceDelta],
-        _initial_chain_tip: Option<[u8; 32]>,
-        _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
-        _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
-    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "execute_on_relationship_for_bilateral not implemented on this router",
-        ))
-    }
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        before_commit: Option<
+            &dyn Fn(
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), dsm::types::error::DsmError>,
+        >,
+        settle: &dyn Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+        ) -> Result<(), dsm::types::error::DsmError>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 }
 
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).
@@ -284,13 +272,46 @@ pub fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
-/// The local device's CURRENT ML-KEM-768 (Kyber) encapsulation key. Installed by
-/// `AppRouterImpl::new` right after `WalletSDK` initializes device keys — the keypair is
-/// deliberately RANDOMIZED per wallet init (no persisted device secret), so this snapshot is
-/// valid for the life of the wallet instance and is re-installed on every router (re)build.
-/// The bilateral BLE prepare exchange attaches it so counterparties can refresh their contact
-/// record (per-step EK receipts encapsulate to it). `None` -> prepare messages carry an empty
-/// key and the counterparty's receipt build fail-closes exactly as before.
+/// Test-only: the SDK app router slot held empty — as a process in which no
+/// router has been installed has it — for as long as the hold lives, with the
+/// full-router identity marker cleared to match. What the slot held is put
+/// back when the hold drops, a failing test included, so a test states this
+/// premise instead of inheriting whatever router an earlier test left, and
+/// leaves nothing of its own behind.
+#[cfg(test)]
+#[must_use = "dropping the hold at once puts the previous router back"]
+pub(crate) struct NoAppRouterHold {
+    router: Option<Arc<dyn AppRouter>>,
+    full_router_identity: Option<Vec<u8>>,
+}
+
+#[cfg(test)]
+impl NoAppRouterHold {
+    pub(crate) fn take() -> Self {
+        Self {
+            router: APP_ROUTER.write().unwrap_or_else(|e| e.into_inner()).take(),
+            full_router_identity: FULL_APP_ROUTER_IDENTITY
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoAppRouterHold {
+    fn drop(&mut self) {
+        *APP_ROUTER.write().unwrap_or_else(|e| e.into_inner()) = self.router.take();
+        *FULL_APP_ROUTER_IDENTITY
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = self.full_router_identity.take();
+    }
+}
+
+/// A cache of the local device's ML-KEM-768 (Kyber) encapsulation key, the key derived from
+/// `Smaster` under `DSM/kyber\0`. Installed by `AppRouterImpl::new` once `WalletSDK` has
+/// derived the device keys; `kyber_identity::local_kyber_public_key` re-derives it when the
+/// cache is cold.
 static LOCAL_KYBER_PUBKEY: Lazy<RwLock<Option<Vec<u8>>>> = Lazy::new(|| RwLock::new(None));
 
 /// Install (or replace) the local wallet's Kyber public key snapshot.
@@ -340,14 +361,13 @@ pub fn anchor_enrollment_store(
 }
 
 /// SENDER-side fused-anchor appliance factory. Produces the fresh `AnchorAppliance` the offline-bearer
-/// release is built on. The device layer installs a factory that returns a `UsbAnchorAppliance`
-/// driving the physical RP2350/TROPIC01; `build_offline_bearer_release` calls it ONCE and caches the
-/// result (the appliance is stateful — its counter advances and its witness key erases on COMMIT).
+/// release is built on: a client driving the physical RP2350/TROPIC01, installed by the device layer.
+/// `build_offline_bearer_release` calls it ONCE and caches the result (the appliance is stateful —
+/// its counter advances and its witness key erases on COMMIT).
 ///
-/// `None` until installed. On device, an absent factory means offline-bearer is unavailable and the
-/// send FAILS CLOSED (no mock fallback) — "offline = chips". The in-process mock is used only by the
-/// SDK's own `#[cfg(test)]` release-path tests. The factory returns `Result` so a failed chip connect
-/// (e.g. STATUS unreadable) propagates as a fail-closed error rather than a silent mock.
+/// `None` until installed, and no appliance transport exists yet to install: offline-bearer is
+/// unavailable and the send FAILS CLOSED — "offline = chips". The factory returns `Result` so a
+/// failed chip connect (e.g. STATUS unreadable) propagates as a fail-closed error.
 type AnchorApplianceFactory = Arc<
     dyn Fn() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, dsm::types::error::DsmError>
         + Send
@@ -366,21 +386,17 @@ pub fn install_anchor_appliance_factory(factory: AnchorApplianceFactory) {
     }
 }
 
-#[must_use]
-pub fn anchor_appliance_factory() -> Option<AnchorApplianceFactory> {
-    ANCHOR_APPLIANCE_FACTORY.read().ok()?.clone()
-}
-
-/// Test-only: uninstall the factory so the next test does not inherit it.
-///
-/// The factory is process-global. A test that installs one and does not remove it
-/// changes the anchor-attach outcome for every test that runs after it, which surfaces
-/// as unrelated failures far from the cause.
+/// Remove the installed factory: the process has no appliance again.
 #[cfg(test)]
-pub(crate) fn clear_anchor_appliance_factory_for_tests() {
+pub(crate) fn uninstall_anchor_appliance_factory() {
     if let Ok(mut g) = ANCHOR_APPLIANCE_FACTORY.write() {
         *g = None;
     }
+}
+
+#[must_use]
+pub fn anchor_appliance_factory() -> Option<AnchorApplianceFactory> {
+    ANCHOR_APPLIANCE_FACTORY.read().ok()?.clone()
 }
 
 #[cfg(test)]
@@ -391,231 +407,45 @@ pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = FULL_APP_ROUTER_IDENTITY.write() {
         *guard = None;
     }
-    if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
-        *guard = None;
-    }
     std::ptr::write(
-        std::ptr::addr_of!(BILATERAL_HANDLER) as *mut OnceCell<Arc<dyn BilateralHandler>>,
+        std::ptr::addr_of!(BLE_RUNTIME) as *mut OnceCell<Arc<crate::handlers::BiImpl>>,
         OnceCell::new(),
     );
 }
 
-// ---------- Unilateral Ops ----------
-
-#[derive(Debug, Clone)]
-pub struct UniOp {
-    pub operation_type: String,
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UniResult {
-    pub success: bool,
-    pub result_data: Vec<u8>,
-    pub error_message: Option<String>,
-}
-
-#[async_trait::async_trait]
-pub trait UnilateralHandler: Send + Sync {
-    async fn handle(&self, op: UniOp) -> UniResult;
-}
-
-/// Unilateral handler storage. Uses RwLock to allow replacement (pre-genesis → post-genesis).
-static UNILATERAL_HANDLER: Lazy<RwLock<Option<Arc<dyn UnilateralHandler>>>> =
-    Lazy::new(|| RwLock::new(None));
-
-pub fn install_unilateral_handler(handler: Arc<dyn UnilateralHandler>) {
-    match UNILATERAL_HANDLER.write() {
-        Ok(mut guard) => {
-            *guard = Some(handler);
-        }
-        Err(_) => {
-            log::error!("install_unilateral_handler: unilateral handler lock poisoned");
-        }
-    }
-}
-
-pub fn unilateral_handler() -> Option<Arc<dyn UnilateralHandler>> {
-    UNILATERAL_HANDLER.read().ok()?.clone()
-}
-
-// ---------------- Contact Management Helpers ----------------
-
-pub fn sdk_remove_contact(contact_id: &str) -> bool {
-    match crate::storage::client_db::remove_contact(contact_id) {
-        Ok(r) => r,
-        Err(e) => {
-            log::error!("remove_contact failed: {e}");
-            false
-        }
-    }
-}
-
-/// Helper: convert a u64 balance to the U128 le-bytes format used by TokenBalanceEntry.
-fn u64_to_u128_le(val: u64) -> crate::generated::U128 {
-    let mut le = vec![0u8; 16];
-    le[..8].copy_from_slice(&val.to_le_bytes());
-    crate::generated::U128 { le }
-}
-
-/// Fetch all token balances as a BalancesListResponse (strict, protobuf-encoded).
+/// Every token balance, as the app router's `balance.list` answers it: the
+/// CANONICAL `BalanceGetResponse` rows, never a surrogate.
 ///
-/// Routes through the app router `balance.list` handler which aggregates from authoritative sources:
-/// 1. All DSM tokens from canonical balance projection rows materialized from DSM state
-/// 2. Ensures dBTC always appears (even with 0) so the token picker works
-///
-/// Falls back to direct SQLite reads if the app router is not yet available.
-/// Returns the CANONICAL `BalanceGetResponse` rows, not a surrogate.
-///
-/// This used to narrow each row into `TokenBalanceEntry { token_id, amount }`
-/// and the JNI layer re-inflated it with `..Default::default()`, so `symbol`,
-/// `decimals`, `locked` and `token_name` were silently dropped and came back
-/// empty/zero. On device that meant a 2-decimal token with 100_000 base units
-/// rendered as "100000" — the wallet had no decimals to format with, because a
-/// two-field surrogate had thrown them away mid-flight.
-///
-/// One authoritative message end to end. A second representation only invites
-/// the two to drift again.
+/// There is no second source. Without a router, or when the router's answer
+/// does not decode, this is an error — never rows assembled from projection
+/// caches with zero balances filled in.
 pub fn get_all_balances_strict() -> Result<Vec<crate::generated::BalanceGetResponse>, String> {
-    let device_id = crate::sdk::app_state::AppState::get_device_id()
-        .ok_or_else(|| "No device_id available".to_string())?;
-    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-    log::info!(
-        "[getAllBalancesStrict] device_id_b32={} (first16)",
-        &device_id_b32[..device_id_b32.len().min(16)]
-    );
-
-    // Try the app router first — it aggregates from the live authoritative paths.
-    if let Some(router) = app_router() {
-        let query = AppQuery {
-            path: "balance.list".to_string(),
-            params: vec![],
-        };
-        let result = futures::executor::block_on(router.query(query));
-        if result.success && !result.data.is_empty() {
-            // Response is 0x03-framed Envelope containing BalancesListResponse payload.
-            let data = if result.data.first() == Some(&0x03) {
-                &result.data[1..]
-            } else {
-                &result.data
-            };
-            if let Ok(envelope) = crate::envelope::from_canonical_bytes(data) {
-                if let Some(crate::generated::envelope::Payload::BalancesListResponse(resp)) =
-                    envelope.payload
-                {
-                    log::info!(
-                        "[getAllBalancesStrict] via app_router: {} items",
-                        resp.balances.len()
-                    );
-                    for b in &resp.balances {
-                        log::info!("[getAllBalancesStrict]   {}={}", b.token_id, b.available);
-                    }
-                    // The router already built the canonical rows, metadata
-                    // and all. Pass them straight through.
-                    return Ok(resp.balances);
-                }
-            }
-            log::warn!("[getAllBalancesStrict] app_router returned data but failed to decode");
-        } else {
-            log::warn!(
-                "[getAllBalancesStrict] app_router query failed: {:?}",
-                result.error_message
-            );
+    let router =
+        app_router().ok_or_else(|| "balance.list: app router not installed".to_string())?;
+    let result = futures::executor::block_on(router.query(AppQuery {
+        path: "balance.list".to_string(),
+        params: vec![],
+    }));
+    if !result.success {
+        return Err(format!(
+            "balance.list: {}",
+            result
+                .error_message
+                .unwrap_or_else(|| "the router refused without a reason".to_string())
+        ));
+    }
+    let envelope = crate::handlers::response_helpers::decode_local_envelope(&result.data)
+        .map_err(|e| format!("balance.list answer: {e}"))?;
+    match envelope.payload {
+        Some(dsm::types::proto::envelope::Payload::BalancesListResponse(list)) => {
+            // This crate and `dsm::types::proto` each generate the message from
+            // the one .proto; the bytes are the same message.
+            crate::generated::BalancesListResponse::decode(list.encode_to_vec().as_slice())
+                .map(|list| list.balances)
+                .map_err(|e| format!("balance.list answer: {e}"))
         }
+        other => Err(format!("balance.list answered {other:?}")),
     }
-
-    // Fallback: direct SQLite reads (pre-genesis or if app router unavailable)
-    log::info!("[getAllBalancesStrict] falling back to direct SQLite reads");
-    let mut entries: Vec<(String, u64)> = Vec::new();
-
-    // 1. Tokens from canonical projection rows only.
-    match crate::storage::client_db::list_balance_projections(&device_id_b32) {
-        Ok(projected) => {
-            for record in projected {
-                let tok_id = record.token_id;
-                if let Some(existing) = entries.iter_mut().find(|(t, _)| t == &tok_id) {
-                    if record.available > existing.1 {
-                        existing.1 = record.available;
-                    }
-                } else {
-                    entries.push((tok_id, record.available));
-                }
-            }
-        }
-        Err(e) => {
-            log::warn!(
-                "[getAllBalancesStrict] list_balance_projections failed: {}",
-                e
-            );
-        }
-    }
-
-    if !entries.iter().any(|(token_id, _)| token_id == "ERA") {
-        entries.push(("ERA".to_string(), 0));
-    }
-
-    // 3. Ensure dBTC always appears (even with 0) so token picker works
-    if !entries.iter().any(|(t, _)| t == "dBTC") {
-        entries.push(("dBTC".to_string(), 0));
-    }
-
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    log::info!(
-        "[getAllBalancesStrict] returning {} entries: {:?}",
-        entries.len(),
-        entries
-            .iter()
-            .map(|(t, a)| format!("{}={}", t, a))
-            .collect::<Vec<_>>()
-    );
-
-    // The fallback builds the same canonical rows, enriched from the same
-    // registry the router uses, so a pre-genesis read is not a second shape.
-    Ok(entries
-        .into_iter()
-        .map(|(token_id, available)| {
-            let mut row = crate::generated::BalanceGetResponse {
-                token_id,
-                available,
-                locked: 0,
-                ..Default::default()
-            };
-            // Same registry the router reads. (Note: this crate and
-            // dsm::types::proto each generate their own BalanceGetResponse from
-            // the one .proto, so the router's enrichment helper is not directly
-            // callable here — that duplication is worth collapsing separately.)
-            match row.token_id.trim().to_uppercase().as_str() {
-                "ERA" => {
-                    row.symbol = "ERA".into();
-                    row.token_name = "ERA".into();
-                    row.decimals = 0;
-                }
-                "DBTC" => {
-                    row.token_id = "dBTC".into();
-                    row.symbol = "dBTC".into();
-                    row.token_name = "dBTC".into();
-                    row.decimals = 8;
-                }
-                _ => {
-                    if let Ok(Some(t)) =
-                        crate::storage::client_db::token_registry::get_token_by_ticker(
-                            &row.token_id,
-                        )
-                    {
-                        row.symbol = t.ticker.clone();
-                        row.token_name = if t.alias.is_empty() {
-                            t.ticker
-                        } else {
-                            t.alias
-                        };
-                        row.decimals = t.decimals;
-                    }
-                }
-            }
-            row
-        })
-        .collect())
 }
 
 /// Fetch wallet history as WalletHistoryResponse (strict, protobuf-encoded)
@@ -651,268 +481,123 @@ pub fn get_wallet_history_strict() -> Result<crate::generated::WalletHistoryResp
     crate::generated::WalletHistoryResponse::decode(&*arg.body)
         .map_err(|e| format!("Failed to decode WalletHistoryResponse from ArgPack body: {e}"))
 }
-// ---------- Bilateral Ops (offline) ----------
+// ---------- The BLE runtime (offline) ----------
 
-#[derive(Debug, Clone, Default)]
-pub struct BiPrepare {
-    pub payload: Vec<u8>,
-}
+/// The slots the offline session engine's BLE carrier is injected into. Not
+/// a protocol handler: offline bilateral steps run in `BilateralBleHandler`,
+/// and the envelope bridge routes none of them.
+static BLE_RUNTIME: OnceCell<Arc<crate::handlers::BiImpl>> = OnceCell::new();
 
-#[derive(Debug, Clone, Default)]
-pub struct BiTransfer {
-    pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BiResult {
-    pub success: bool,
-    pub result_data: Vec<u8>,
-    pub error_message: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BiAccept {
-    pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BiCommit {
-    pub payload: Vec<u8>,
-}
-
-#[async_trait::async_trait]
-pub trait BilateralHandler: Send + Sync {
-    async fn prepare(&self, p: BiPrepare) -> BiResult;
-    async fn transfer(&self, t: BiTransfer) -> BiResult;
-    async fn accept(&self, a: BiAccept) -> BiResult;
-    async fn commit(&self, c: BiCommit) -> BiResult;
-
-    /// Retrieve pending transactions (beta requirement: strict sync).
-    /// Returns serialized pb::OfflineBilateralTransaction messages.
-    async fn get_pending_transactions(&self) -> Result<Vec<Vec<u8>>, String>;
-
-    /// Allow downcasting to concrete type for SDK injection.
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-
-static BILATERAL_HANDLER: OnceCell<Arc<dyn BilateralHandler>> = OnceCell::new();
-
-pub fn get_pending_bilateral_proposals_strict() -> Result<Vec<Vec<u8>>, String> {
-    if let Some(h) = BILATERAL_HANDLER.get() {
-        crate::runtime::get_runtime().block_on(h.get_pending_transactions())
-    } else {
-        Err("Bilateral handler not installed".to_string())
+pub fn install_ble_runtime(runtime: Arc<crate::handlers::BiImpl>) {
+    if BLE_RUNTIME.set(runtime).is_err() {
+        log::warn!("[SDK] BLE runtime already installed; the first one stays");
     }
 }
 
-pub fn install_bilateral_handler(handler: Arc<dyn BilateralHandler>) {
-    let _ = BILATERAL_HANDLER.set(handler);
+pub fn ble_runtime() -> Option<Arc<crate::handlers::BiImpl>> {
+    BLE_RUNTIME.get().cloned()
 }
 
-pub fn bilateral_handler() -> Option<Arc<dyn BilateralHandler>> {
-    BILATERAL_HANDLER.get().cloned()
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+fn installed_ble_runtime() -> Result<Arc<crate::handlers::BiImpl>, String> {
+    ble_runtime().ok_or_else(|| "BLE runtime not installed".to_string())
 }
 
-/// Inject the BleFrameCoordinator into the bilateral handler (Android only).
+/// Inject the BleFrameCoordinator into the BLE runtime (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn inject_ble_coordinator(
     coordinator: std::sync::Arc<crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator>,
 ) -> Result<(), String> {
-    use crate::handlers::BiImpl;
-
-    let handler = BILATERAL_HANDLER
-        .get()
-        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
-
-    let bi_impl = handler
-        .as_ref()
-        .as_any()
-        .downcast_ref::<BiImpl>()
-        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
-
-    bi_impl.set_ble_coordinator(coordinator).await;
-    log::info!("BleFrameCoordinator injected into BiImpl via bridge");
+    installed_ble_runtime()?
+        .set_ble_coordinator(coordinator)
+        .await;
+    log::info!("BleFrameCoordinator injected into the BLE runtime");
     Ok(())
 }
 
-/// Inject the bilateral transport adapter into the bilateral handler (Android only).
+/// Inject the bilateral transport adapter into the BLE runtime (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn inject_ble_transport_adapter(
     adapter: std::sync::Arc<
         crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter,
     >,
 ) -> Result<(), String> {
-    use crate::handlers::BiImpl;
-
-    let handler = BILATERAL_HANDLER
-        .get()
-        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
-
-    let bi_impl = handler
-        .as_ref()
-        .as_any()
-        .downcast_ref::<BiImpl>()
-        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
-
-    bi_impl.set_ble_transport_adapter(adapter).await;
-    log::info!("Ble transport adapter injected into BiImpl via bridge");
+    installed_ble_runtime()?
+        .set_ble_transport_adapter(adapter)
+        .await;
+    log::info!("Ble transport adapter injected into the BLE runtime");
     Ok(())
 }
 
-/// Get the BleFrameCoordinator from the bilateral handler (Android only).
+/// Get the BleFrameCoordinator from the BLE runtime (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn get_ble_coordinator(
 ) -> Result<std::sync::Arc<crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator>, String> {
-    use crate::handlers::BiImpl;
-
-    let handler = BILATERAL_HANDLER
-        .get()
-        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
-
-    let bi_impl = handler
-        .as_ref()
-        .as_any()
-        .downcast_ref::<BiImpl>()
-        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
-
-    bi_impl
+    installed_ble_runtime()?
         .get_ble_coordinator()
         .await
         .ok_or_else(|| "BleFrameCoordinator not injected yet".to_string())
 }
 
-/// Get the bilateral transport adapter from the bilateral handler (Android only).
+/// Get the bilateral transport adapter from the BLE runtime (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn get_ble_transport_adapter() -> Result<
     std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
     String,
 > {
-    use crate::handlers::BiImpl;
-
-    let handler = BILATERAL_HANDLER
-        .get()
-        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
-
-    let bi_impl = handler
-        .as_ref()
-        .as_any()
-        .downcast_ref::<BiImpl>()
-        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
-
-    bi_impl
+    installed_ble_runtime()?
         .get_ble_transport_adapter()
         .await
         .ok_or_else(|| "Ble transport adapter not injected yet".to_string())
 }
 
 #[cfg(test)]
-mod tests {
+mod no_app_router_hold_tests {
     use super::*;
+    use serial_test::serial;
 
-    struct Dummy;
-
-    #[async_trait::async_trait]
-    impl AppRouter for Dummy {
-        async fn query(&self, _q: AppQuery) -> AppResult {
-            AppResult {
-                success: true,
-                data: vec![],
-                error_message: None,
-            }
-        }
-        async fn invoke(&self, _i: AppInvoke) -> AppResult {
-            AppResult {
-                success: true,
-                data: vec![],
-                error_message: None,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl UnilateralHandler for Dummy {
-        async fn handle(&self, _op: UniOp) -> UniResult {
-            UniResult {
-                success: true,
-                result_data: vec![],
-                error_message: None,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl BilateralHandler for Dummy {
-        async fn prepare(&self, _p: BiPrepare) -> BiResult {
-            BiResult {
-                success: true,
-                result_data: vec![],
-                error_message: None,
-            }
-        }
-        async fn transfer(&self, _t: BiTransfer) -> BiResult {
-            BiResult {
-                success: true,
-                result_data: vec![],
-                error_message: None,
-            }
-        }
-        async fn accept(&self, _a: BiAccept) -> BiResult {
-            BiResult {
-                success: true,
-                result_data: vec![],
-                error_message: None,
-            }
-        }
-        async fn commit(&self, _c: BiCommit) -> BiResult {
-            BiResult {
-                success: true,
-                result_data: vec![],
-                error_message: None,
-            }
-        }
-
-        async fn get_pending_transactions(&self) -> Result<Vec<Vec<u8>>, String> {
-            Ok(vec![])
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-    }
-
+    /// The hold empties the router slot for its lifetime and puts back
+    /// exactly what it found: a router installed before it — as an earlier
+    /// test leaves one — is out of reach while it lives, and back, with its
+    /// full-router marker, when it drops.
+    /// MUTATION CONTROL: a hold that leaves the slot as it is turns this red.
     #[test]
-    fn installers_set_cells() {
-        match install_app_router(Arc::new(Dummy)) {
-            Ok(_) => {}
-            Err(e) => panic!("Failed to install app router: {:?}", e),
-        }
-        install_unilateral_handler(Arc::new(Dummy));
-        install_bilateral_handler(Arc::new(Dummy));
-        assert!(app_router().is_some());
-        assert!(unilateral_handler().is_some());
-        assert!(bilateral_handler().is_some());
-    }
+    #[serial]
+    fn the_hold_empties_the_router_slot_and_puts_back_what_it_found() {
+        // This test's own premise: it starts from an empty slot, and leaves
+        // the slot as it found it.
+        let _as_found = NoAppRouterHold::take();
+        let identity = crate::economic_fixtures::local_device(0x4D).0;
+        let router: Arc<dyn AppRouter> = Arc::new(
+            crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+                node_id: "no-app-router-hold-test".to_string(),
+                storage_endpoints: Vec::new(),
+                enable_offline: false,
+            })
+            .expect("a router for the fixture device"),
+        );
+        install_app_router(router.clone()).expect("install the router");
+        mark_full_app_router_installed(identity.device_id.to_vec());
 
-    /// Reset all bridge handler singletons for testing.
-    ///
-    /// # Safety
-    /// This function is UNSAFE and should ONLY be called in single-threaded test contexts.
-    /// The bilateral handler uses OnceCell which requires unsafe pointer writes to reset.
-    pub unsafe fn reset_bridge_handlers_for_tests() {
-        // APP_ROUTER and UNILATERAL_HANDLER are RwLock-based — safe to clear.
-        if let Ok(mut guard) = APP_ROUTER.write() {
-            *guard = None;
+        {
+            let _no_router = NoAppRouterHold::take();
+            assert!(app_router().is_none(), "the hold left a router in the slot");
+            assert_eq!(
+                *FULL_APP_ROUTER_IDENTITY.read().expect("the marker"),
+                None,
+                "the hold left the full-router marker set"
+            );
         }
-        if let Ok(mut guard) = FULL_APP_ROUTER_IDENTITY.write() {
-            *guard = None;
-        }
-        if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
-            *guard = None;
-        }
-        // BILATERAL_HANDLER is still OnceCell — requires unsafe reset.
-        std::ptr::write(
-            std::ptr::addr_of!(BILATERAL_HANDLER) as *mut OnceCell<Arc<dyn BilateralHandler>>,
-            OnceCell::new(),
+
+        let back = app_router().expect("the router is back when the hold drops");
+        assert!(
+            Arc::ptr_eq(&back, &router),
+            "the hold put back another router"
+        );
+        assert_eq!(
+            *FULL_APP_ROUTER_IDENTITY.read().expect("the marker"),
+            Some(identity.device_id.to_vec()),
+            "the hold lost the full-router marker"
         );
     }
 }

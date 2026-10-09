@@ -1118,36 +1118,6 @@
   pointer-events: none;
 }
 
-/* ERA token gif */
-.era-gif {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  image-rendering: pixelated;
-}
-
-.era-gif.small {
-  width: 20px;
-  height: 20px;
-  vertical-align: middle;
-  margin-right: 6px;
-}
-
-/* BTC token gif — 10% larger to match ERA visual weight */
-.btc-gif {
-  width: 31px;
-  height: 31px;
-  border-radius: 50%;
-  image-rendering: pixelated;
-}
-
-.btc-gif.small {
-  width: 22px;
-  height: 22px;
-  vertical-align: middle;
-  margin-right: 6px;
-}
-
 /* Mode toggle for Send tab */
 .mode-toggle {
   display: inline-flex;
@@ -1386,10 +1356,6 @@
   .action-button {
     padding: 12px;
     font-size: 11px;
-  }
-  
-  .form-actions {
-    flex-direction: column;
   }
   
   .address-display {

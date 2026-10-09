@@ -19,44 +19,57 @@ fn fixed_device(id_byte: u8) -> [u8; 32] {
 
 #[tokio::test]
 async fn bilateral_reject_session_emits_event_and_updates_phase() {
-    // Building a prepare now signs the local Kyber identity binding, which reads the global
-    // AppState identity. Run in test-isolation mode so AppState uses an in-memory default (empty
-    // binding — fine for a reject-flow test) instead of trying to load persisted state, which in
-    // production is primed at startup via set_storage_base_dir().
-    unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
-
-    // Setup local + counterparty identities
-    let local_device = fixed_device(0x11);
+    // A device made as wallet creation makes one: its own identity, AK and
+    // Kyber key, in a fresh database. Its prepare carries its Kyber identity
+    // binding, so it needs them.
+    let (identity, _core) = dsm_sdk::economic_fixtures::local_device(0x11);
+    let local_device = identity.device_id;
     let remote_device = fixed_device(0x22);
-    let genesis_hash = fixed_device(0x33);
+    let remote_genesis = fixed_device(0x33);
+
+    // The relationship's tips live on the persisted contact, as a contact
+    // added through the wallet is.
+    sdk::storage::client_db::store_contact(&sdk::storage::client_db::ContactRecord {
+        contact_id: "peer".to_string(),
+        device_id: remote_device.to_vec(),
+        alias: "peer".to_string(),
+        genesis_hash: remote_genesis.to_vec(),
+        public_key: vec![0; 32],
+        kyber_public_key: vec![0x4B; 1184],
+        current_chain_tip: Some(vec![0x70; 32]),
+        verified: true,
+        verification_proof: None,
+        metadata: std::collections::HashMap::new(),
+        ble_address: None,
+        status: "Created".to_string(),
+        needs_online_reconcile: false,
+        previous_chain_tip: None,
+    })
+    .unwrap();
 
     // Build bilateral transaction manager with verified contact & relationship
-    let keypair =
-        dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[0xAA; 32]).unwrap();
-    let mut contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-        local_device,
-        vec![dsm::types::identifiers::NodeId::new("local")],
-    );
+    let keypair = identity.signing_keypair();
+    let mut contact_manager = dsm::core::contact_manager::DsmContactManager::new(local_device);
 
     let contact = dsm::types::contact_types::DsmVerifiedContact {
         alias: "peer".to_string(),
         device_id: remote_device,
-        genesis_hash,
+        genesis_hash: remote_genesis,
         public_key: vec![0; 32],
-        genesis_material: vec![0; 32],
-        chain_tip: None,
-        chain_tip_smt_proof: None,
+        chain_tip: Some([0x70; 32]),
         genesis_verified_online: true,
-        verified_at_commit_height: 1,
-        added_at_commit_height: 1,
-        last_updated_commit_height: 1,
         verifying_storage_nodes: vec![],
         ble_address: None,
     };
     contact_manager.add_verified_contact(contact).unwrap();
 
-    let mut manager =
-        BilateralTransactionManager::new(contact_manager, keypair, local_device, genesis_hash);
+    let mut manager = BilateralTransactionManager::new(
+        contact_manager,
+        keypair,
+        local_device,
+        identity.genesis,
+        std::sync::Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new()),
+    );
     manager
         .establish_relationship(&remote_device)
         .await
@@ -76,20 +89,18 @@ async fn bilateral_reject_session_emits_event_and_updates_phase() {
     // Create a prepared session via normal prepare path (acts as sender side)
     let (_envelope_bytes, commitment_hash) = {
         let h = &handler; // borrow
-        h.prepare_bilateral_transaction(remote_device, Operation::Noop, 100)
+        h.prepare_bilateral_transaction(remote_device, Operation::Noop)
             .await
             .unwrap()
     };
 
-    // Reject the session (simulating user cancellation)
-    handler
-        .reject_incoming_prepare(
-            commitment_hash,
-            remote_device,
-            Some("user rejected".to_string()),
-        )
+    // The proposer's user ends its proposal before any confirm: a signed
+    // cancellation, kept as the step's answer.
+    let cancellation = handler
+        .cancel_proposal(commitment_hash, "user rejected".to_string())
         .await
         .unwrap();
+    assert!(!cancellation.is_empty(), "the cancellation is its envelope");
 
     // Assert session phase updated
     {
@@ -116,7 +127,7 @@ async fn bilateral_reject_session_emits_event_and_updates_phase() {
                 note.event_type,
                 sdk::generated::BilateralEventType::BilateralEventRejected as i32
             );
-            assert_eq!(note.status, "rejected");
+            assert_eq!(note.status, "cancelled");
             assert_eq!(note.message, "user rejected");
         } else {
             panic!("Failed to decode BilateralEventNotification");

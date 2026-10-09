@@ -35,22 +35,9 @@ fn ingress_error(code: u32, message: impl Into<String>) -> pb::Error {
     }
 }
 
-fn build_envelope(payload: pb::envelope::Payload) -> Envelope {
-    Envelope {
-        version: 3,
-        headers: Some(pb::Headers {
-            device_id: vec![0u8; 32],
-            chain_tip: vec![0u8; 32],
-            genesis_hash: vec![0u8; 32],
-            seq: 0,
-        }),
-        message_id: vec![0u8; 16],
-        payload: Some(payload),
-    }
-}
-
+#[cfg(all(target_os = "android", feature = "jni"))]
 fn encode_framed_envelope(payload: pb::envelope::Payload) -> Result<Vec<u8>, pb::Error> {
-    let envelope = build_envelope(payload);
+    let envelope = crate::envelope::local_answer(payload);
     let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
     buf.push(0x03);
     envelope.encode(&mut buf).map_err(|e| {
@@ -82,354 +69,13 @@ fn push_canonical_envelope_event(payload: pb::envelope::Payload) -> Result<(), p
 }
 
 /// Push a genesis lifecycle event to the WebView (EventBridge maps kinds to the
-/// `genesis.securing-device*` topics the frontend renders). `pub(crate)` so the canonical
-/// Genesis v2 route (`system.createGenesisV2` in `handlers::system_routes`) drives the SAME
-/// securing-screen rail as this legacy bootstrap path.
+/// `genesis.securing-device*` topics the frontend renders). `pub(crate)` for the
+/// canonical Genesis v2 route (`system.createGenesisV2` in `handlers::system_routes`),
+/// which drives the securing-screen rail.
 pub(crate) fn push_genesis_lifecycle_event(kind: i32, progress: u32) -> Result<(), pb::Error> {
     push_canonical_envelope_event(pb::envelope::Payload::GenesisLifecycle(
         pb::GenesisLifecycleEvent { kind, progress },
     ))
-}
-
-fn bootstrap_finalize_envelope(
-    result: i32,
-    device_id: Vec<u8>,
-    genesis_hash: Vec<u8>,
-    message: impl Into<String>,
-) -> Envelope {
-    build_envelope(pb::envelope::Payload::BootstrapFinalizeResponse(
-        pb::BootstrapFinalizeResponse {
-            result,
-            device_id,
-            genesis_hash,
-            message: message.into(),
-        },
-    ))
-}
-
-fn startup_initialize_identity_context(
-    device_id: Vec<u8>,
-    genesis_hash: Vec<u8>,
-) -> Result<(), pb::Error> {
-    match dispatch_startup(StartupRequest {
-        operation: Some(startup_request::Operation::InitializeIdentityContext(
-            pb::InitializeIdentityContextOp {
-                device_id,
-                genesis_hash,
-            },
-        )),
-    })
-    .result
-    {
-        Some(startup_response::Result::OkBytes(_)) => Ok(()),
-        Some(startup_response::Result::Error(error)) => Err(error),
-        None => Err(ingress_error(
-            ERROR_CODE_PROCESSING_FAILED,
-            "startup: empty initialize identity response",
-        )),
-    }
-}
-
-fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Envelope, pb::Error> {
-    log::info!(
-        "FINALIZE_BOOTSTRAP: ENTRY phase={} trust={}",
-        report.phase,
-        report.trust_level
-    );
-    // Scope guard: keep BOOTSTRAP_SECURING=true until this function exits, then clear it
-    // unconditionally. This preserves phase=securing_device throughout the whole finalize
-    // (including startup_initialize_identity_context which writes the identity), so any
-    // concurrent session state read observes securing_device → wallet_ready atomically
-    // instead of the prior race where the flag was cleared BEFORE has_identity became true,
-    // exposing a transient phase=needs_genesis flash in the UI.
-    struct ClearBootstrapSecuringOnDrop;
-    impl Drop for ClearBootstrapSecuringOnDrop {
-        fn drop(&mut self) {
-            log::info!("FINALIZE_BOOTSTRAP: SCOPE_GUARD_DROP clearing BOOTSTRAP_SECURING=false");
-            crate::sdk::session_manager::BOOTSTRAP_SECURING
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            log::info!(
-                "FINALIZE_BOOTSTRAP: POST_DROP BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
-                crate::sdk::session_manager::BOOTSTRAP_SECURING
-                    .load(std::sync::atomic::Ordering::SeqCst),
-                crate::sdk::session_manager::SDK_READY.load(std::sync::atomic::Ordering::SeqCst),
-                crate::sdk::app_state::AppState::get_has_identity()
-            );
-        }
-    }
-    let _clear_on_exit = ClearBootstrapSecuringOnDrop;
-
-    if report.device_id.len() != 32 {
-        return Err(ingress_error(
-            ERROR_CODE_INVALID_INPUT,
-            format!(
-                "bootstrap_finalize: device_id must be 32 bytes, got {}",
-                report.device_id.len()
-            ),
-        ));
-    }
-    if report.genesis_hash.len() != 32 {
-        return Err(ingress_error(
-            ERROR_CODE_INVALID_INPUT,
-            format!(
-                "bootstrap_finalize: genesis_hash must be 32 bytes, got {}",
-                report.genesis_hash.len()
-            ),
-        ));
-    }
-
-    let device_id = report.device_id.clone();
-    let genesis_hash = report.genesis_hash.clone();
-
-    // Strict enforcement: no feature gate and no default-allow path.
-    // A ReadOnly trust level from the bootstrap measurement means the device
-    // failed the C-DBRW entropy health test and MUST NOT be allowed to proceed
-    // through genesis creation. The caller surface returns a BootstrapResultReadOnly
-    // envelope and the genesis lifecycle emits an error event for telemetry.
-    match report.trust_level {
-        x if x
-            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelReadOnly as i32 =>
-        {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-                0,
-            )?;
-            return Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultReadOnly as i32,
-                device_id,
-                genesis_hash,
-                "bootstrap rejected by Rust: read-only trust state",
-            ));
-        }
-        x if x
-            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelBlocked as i32 =>
-        {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-                0,
-            )?;
-            return Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultBlocked as i32,
-                device_id,
-                genesis_hash,
-                "bootstrap rejected by Rust: blocked trust state",
-            ));
-        }
-        x if x
-            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelUnspecified
-                as i32 =>
-        {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-                0,
-            )?;
-            return Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultRejected as i32,
-                device_id,
-                genesis_hash,
-                "bootstrap rejected by Rust: missing trust level",
-            ));
-        }
-        _ => {}
-    }
-
-    let context = PlatformContext::bootstrap(RawPlatformInputs {
-        device_id_raw: device_id.clone(),
-        genesis_hash_raw: genesis_hash.clone(),
-    })
-    .map_err(|e| {
-        ingress_error(
-            ERROR_CODE_PROCESSING_FAILED,
-            format!("bootstrap_finalize: PlatformContext::bootstrap failed: {e}"),
-        )
-    })?;
-
-    if let Err(error) = startup_initialize_identity_context(
-        context.device_id.to_vec(),
-        context.genesis_hash.to_vec(),
-    ) {
-        log::error!(
-            "FLASH_DEBUG: FINALIZE_BOOTSTRAP: startup_initialize_identity_context FAILED err={} BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
-            error.message,
-            crate::sdk::session_manager::BOOTSTRAP_SECURING.load(std::sync::atomic::Ordering::SeqCst),
-            crate::sdk::session_manager::SDK_READY.load(std::sync::atomic::Ordering::SeqCst),
-            crate::sdk::app_state::AppState::get_has_identity()
-        );
-        let _ = push_genesis_lifecycle_event(
-            pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-            0,
-        );
-        return Ok(bootstrap_finalize_envelope(
-            pb::bootstrap_finalize_response::Result::BootstrapResultError as i32,
-            device_id,
-            genesis_hash,
-            error.message,
-        ));
-    }
-
-    // CRITICAL EVIDENCE POINT: at this moment, startup_initialize_identity_context has
-    // returned successfully, which means prime_identity_app_state has already stored
-    // has_identity=true AND initialize_sdk_core has stored SDK_READY=true. The scope
-    // guard is still holding BOOTSTRAP_SECURING=true. If compute_phase runs at this
-    // exact instant it should return `securing_device` (not `wallet_ready` yet). The
-    // scope guard drops only after we return from finalize_bootstrap_core below.
-    log::info!(
-        "FLASH_DEBUG: FINALIZE_BOOTSTRAP: IDENTITY_INSTALLED BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
-        crate::sdk::session_manager::BOOTSTRAP_SECURING.load(std::sync::atomic::Ordering::SeqCst),
-        crate::sdk::session_manager::SDK_READY.load(std::sync::atomic::Ordering::SeqCst),
-        crate::sdk::app_state::AppState::get_has_identity()
-    );
-
-    push_genesis_lifecycle_event(
-        pb::genesis_lifecycle_event::Kind::GenesisKindSecuringComplete as i32,
-        0,
-    )?;
-    push_genesis_lifecycle_event(pb::genesis_lifecycle_event::Kind::GenesisKindOk as i32, 0)?;
-
-    // Ensure the wallet is registered for authenticated PUTs on every
-    // configured storage node.  Runs on BOTH genesis (BootstrapPhaseFinalize)
-    // and resume (BootstrapPhaseResumeFinalize) so existing wallets that
-    // completed genesis before this code existed get their auth tokens
-    // populated on the next launch.  Idempotent at the storage-node level;
-    // tokens stored via `store_auth_token`, read on every PUT path via
-    // `storage_io::resolve_storage_auth`.  Best-effort: failures are
-    // logged but never block bootstrap completion.
-    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&context.device_id);
-    let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&context.genesis_hash);
-    let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-    let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
-    let rt = tokio::runtime::Handle::try_current();
-    let auth_task = async move {
-        match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-            Ok(cfg) => match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
-                Ok(auth_sdk) => match auth_sdk
-                    .register_device_for_auth(&device_id_b32, &public_key_b32, &genesis_hash_b32)
-                    .await
-                {
-                    Ok(_) => log::info!(
-                        "FINALIZE_BOOTSTRAP: storage-node auth-registration completed"
-                    ),
-                    Err(e) => log::warn!(
-                        "FINALIZE_BOOTSTRAP: auth-registration failed (PUTs may 401 until retry): {e}"
-                    ),
-                },
-                Err(e) => log::warn!(
-                    "FINALIZE_BOOTSTRAP: auth-registration SDK init failed: {e}"
-                ),
-            },
-            Err(e) => log::warn!(
-                "FINALIZE_BOOTSTRAP: auth-registration cfg load failed: {e}"
-            ),
-        }
-    };
-    if let Ok(handle) = rt {
-        // Spawn off the runtime if we're already on one — never block
-        // finalize_bootstrap_core on the network round-trips.
-        handle.spawn(auth_task);
-    } else {
-        // No active runtime (test or unusual init order); fire-and-forget
-        // via a fresh runtime so the storage publishes still happen.
-        std::thread::spawn(|| {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                rt.block_on(auth_task);
-            }
-        });
-    }
-
-    let ready_message = if report.trust_level
-        == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelPinRequired as i32
-    {
-        "bootstrap ready with degraded trust: PIN required"
-    } else {
-        "bootstrap ready"
-    };
-
-    Ok(bootstrap_finalize_envelope(
-        pb::bootstrap_finalize_response::Result::BootstrapResultReady as i32,
-        context.device_id.to_vec(),
-        context.genesis_hash.to_vec(),
-        ready_message,
-    ))
-}
-
-fn handle_bootstrap_measurement_report_core(
-    report: pb::BootstrapMeasurementReport,
-) -> Result<Envelope, pb::Error> {
-    match report.phase {
-        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseStarted as i32 => {
-            // Mark that C-DBRW securing is in progress — session manager returns
-            // "securing_device" phase until finalization completes.
-            crate::sdk::session_manager::BOOTSTRAP_SECURING
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindStarted as i32,
-                0,
-            )?;
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindSecuringDevice as i32,
-                0,
-            )?;
-            Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultUnspecified as i32,
-                report.device_id,
-                report.genesis_hash,
-                "bootstrap measurement started",
-            ))
-        }
-        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseProgress as i32 => {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindSecuringProgress as i32,
-                report.progress_percent,
-            )?;
-            Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultUnspecified as i32,
-                report.device_id,
-                report.genesis_hash,
-                "bootstrap progress",
-            ))
-        }
-        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseFinalize as i32
-            || x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseResumeFinalize
-                as i32 =>
-        {
-            finalize_bootstrap_core(report)
-        }
-        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseAborted as i32 => {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindSecuringAborted as i32,
-                0,
-            )?;
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-                0,
-            )?;
-            Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultAborted as i32,
-                report.device_id,
-                report.genesis_hash,
-                report.error_message,
-            ))
-        }
-        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseError as i32 => {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-                0,
-            )?;
-            Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultError as i32,
-                report.device_id,
-                report.genesis_hash,
-                report.error_message,
-            ))
-        }
-        _ => Err(ingress_error(
-            ERROR_CODE_INVALID_INPUT,
-            format!("bootstrap measurement: unsupported phase {}", report.phase),
-        )),
-    }
 }
 
 fn process_envelope_core(envelope_in: Envelope) -> Result<Envelope, pb::Error> {
@@ -439,12 +85,6 @@ fn process_envelope_core(envelope_in: Envelope) -> Result<Envelope, pb::Error> {
             format!("ingress: envelope validation failed: {e}"),
         )
     })?;
-
-    if let Some(pb::envelope::Payload::BootstrapMeasurementReport(report)) =
-        envelope_in.payload.clone()
-    {
-        return handle_bootstrap_measurement_report_core(report);
-    }
 
     let mut raw = Vec::new();
     match envelope_in.encode(&mut raw) {
@@ -464,7 +104,7 @@ fn process_envelope_core(envelope_in: Envelope) -> Result<Envelope, pb::Error> {
         &out[..]
     };
 
-    crate::envelope::from_canonical_bytes(payload).map_err(|e| {
+    crate::envelope::local_answer_from_canonical_bytes(payload).map_err(|e| {
         ingress_error(
             ERROR_CODE_PROCESSING_FAILED,
             format!("ingress: response envelope decode failed: {e}"),
@@ -478,22 +118,6 @@ fn router_query_core(method: String, args: Vec<u8>) -> Result<Vec<u8>, pb::Error
             ERROR_CODE_INVALID_INPUT,
             "ingress: router query path missing",
         ));
-    }
-
-    if method == "system.genesis" {
-        let res = crate::handlers::handle_system_genesis_query(crate::bridge::AppQuery {
-            path: method,
-            params: args,
-        });
-        return if res.success {
-            Ok(res.data)
-        } else {
-            Err(ingress_error(
-                ERROR_CODE_PROCESSING_FAILED,
-                res.error_message
-                    .unwrap_or_else(|| "router_query_core failed".to_string()),
-            ))
-        };
     }
 
     let router = match crate::bridge::app_router() {
@@ -627,8 +251,6 @@ fn configure_env_core(config_path_utf8: String) -> Result<Vec<u8>, pb::Error> {
     }
 
     crate::network::set_env_config_path(config_path_utf8);
-    #[cfg(debug_assertions)]
-    std::env::set_var("DSM_ALLOW_LOCALHOST", "1");
     Ok(startup_ok())
 }
 
@@ -636,6 +258,7 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
     match crate::runtime::get_runtime().block_on(crate::init_dsm_sdk()) {
         Ok(()) => {
             crate::sdk::session_manager::set_sdk_ready(true);
+            crate::sdk::session_manager::clear_startup_failure();
 
             // Resume any identity whose publication never reached quorum.
             // Publication is a precondition of "identity created", so a device
@@ -651,10 +274,9 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
         }
         Err(e) => {
             crate::sdk::session_manager::set_sdk_ready(false);
-            Err(ingress_error(
-                ERROR_CODE_NOT_READY,
-                format!("startup: init_dsm_sdk failed: {e}"),
-            ))
+            let message = format!("startup: init_dsm_sdk failed: {e}");
+            crate::sdk::session_manager::record_startup_failure(&message);
+            Err(ingress_error(ERROR_CODE_NOT_READY, message))
         }
     }
 }
@@ -701,20 +323,43 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) -> Result<(),
         kp.public_key().len()
     );
 
-    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
-        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-    )
-    .to_vec();
+    // The SMT root genesis recorded for this identity.
+    let genesis_b32 = crate::util::text_id::encode_base32_crockford(&g);
+    let record = crate::storage::client_db::get_genesis_record_by_id(&genesis_b32)
+        .map_err(|e| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                format!("startup: read the genesis record: {e}"),
+            )
+        })?
+        .ok_or_else(|| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                "startup: no genesis record for this identity".to_string(),
+            )
+        })?;
+    let smt_root = crate::util::text_id::decode_base32_crockford(&record.merkle_root)
+        .filter(|root| root.len() == 32)
+        .ok_or_else(|| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                "startup: the genesis record's SMT root is not 32 Base32 bytes".to_string(),
+            )
+        })?;
 
     crate::sdk::app_state::AppState::set_identity_info(
         device_id.to_vec(),
         kp.public_key().to_vec(),
         genesis_hash.to_vec(),
         smt_root,
-    );
-    crate::sdk::app_state::AppState::set_has_identity(true);
-
-    Ok(())
+    )
+    .and_then(|()| crate::sdk::app_state::AppState::set_has_identity(true))
+    .map_err(|e| {
+        ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            format!("startup: persist the identity: {e}"),
+        )
+    })
 }
 
 fn ensure_identity_context_matches(
@@ -781,22 +426,16 @@ fn install_identity_context_core(
         ));
     }
 
-    if ensure_identity_context_matches(&device_id, &genesis_hash)? {
+    // The same identity already installed, with its SDK context up, is done.
+    // An identity on disk with no context in this process — a restart — is
+    // not: its context is brought up below.
+    if ensure_identity_context_matches(&device_id, &genesis_hash)?
+        && crate::is_sdk_context_initialized()
+    {
         return Ok(());
     }
 
     prime_identity_app_state(&device_id, &genesis_hash)?;
-
-    // Self-heal: republish DeviceTreeEntry to the registry if it is below
-    // quorum on the network. Genesis creation used to swallow publish
-    // failures silently, which left some users with locally-valid identities
-    // that were invisible to `contacts.addManual`. Running the idempotent
-    // verify+republish on every bootstrap guarantees eventual consistency
-    // without requiring the user to regenerate their identity.
-    //
-    // Non-fatal: network errors here never block startup. If the device is
-    // offline we'll retry on the next bootstrap.
-    ensure_device_tree_registered(device_id.clone(), genesis_hash.clone());
 
     let wallet_seed = crate::fetch_wallet_seed().map_err(|e| {
         ingress_error(
@@ -811,49 +450,6 @@ fn install_identity_context_core(
             format!("startup: initialize_sdk_context failed: {e}"),
         )
     })
-}
-
-/// Best-effort self-heal for the DeviceTreeEntry registry entry.
-///
-/// Runs the `ensure_device_in_tree` flow on a background task using the
-/// shared tokio runtime so the bootstrap path is never blocked on network
-/// I/O. The task logs its own success/failure; there is no caller-visible
-/// error surface because registry publication is strictly best-effort at
-/// the ingress boundary — any failure here will retry on the next bootstrap.
-fn ensure_device_tree_registered(device_id: Vec<u8>, genesis_hash: Vec<u8>) {
-    let rt = crate::runtime::get_runtime();
-    rt.spawn(async move {
-        let cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                log::warn!("self-heal registry: env config unavailable, skipping republish: {e}");
-                return;
-            }
-        };
-
-        let sdk = match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
-            Ok(sdk) => sdk,
-            Err(e) => {
-                log::warn!("self-heal registry: storage SDK init failed, skipping republish: {e}");
-                return;
-            }
-        };
-
-        match sdk.ensure_device_in_tree(&device_id, &genesis_hash).await {
-            Ok(n) => {
-                log::info!(
-                    "self-heal registry: DeviceTreeEntry healthy on {} storage nodes",
-                    n
-                );
-            }
-            Err(e) => {
-                log::error!(
-                    "self-heal registry: failed to ensure DeviceTreeEntry visibility: {e}. \
-                     Contact discovery will remain broken until network recovers."
-                );
-            }
-        }
-    });
 }
 
 fn initialize_identity_context_core(
@@ -882,7 +478,37 @@ fn restore_identity_context_core(
     initialize_identity_context_core(context.device_id.to_vec(), context.genesis_hash.to_vec())
 }
 
+/// What a locked wallet runs at the ingress besides its session's own routes
+/// (`session.*`: the snapshot, opening and closing the lock): the receiving
+/// loop the host keeps going in the background, so value still arrives while
+/// the wallet is locked.
+const RUNS_WHILE_LOCKED: [&str; 2] = ["inbox.resume", "inbox.startPoller"];
+
+/// Refuse what the app asks while the session is locked (S-LOCK): every
+/// route and envelope but the session's own and the receiving loop. The
+/// host's hardware facts are not a request of the wallet.
+fn refuse_while_locked(request: &IngressRequest) -> Result<(), pb::Error> {
+    let asked = match &request.operation {
+        Some(ingress_request::Operation::RouterQuery(op)) => op.method.as_str(),
+        Some(ingress_request::Operation::RouterInvoke(op)) => op.method.as_str(),
+        Some(ingress_request::Operation::Envelope(..)) => "an envelope",
+        Some(ingress_request::Operation::HardwareFacts(..))
+        | Some(ingress_request::Operation::DrainEvents(..))
+        | None => return Ok(()),
+    };
+    if asked.starts_with("session.") || RUNS_WHILE_LOCKED.contains(&asked) {
+        return Ok(());
+    }
+    crate::sdk::session_manager::refuse_while_locked(asked)
+        .map_err(|e| ingress_error(ERROR_CODE_PROCESSING_FAILED, e))
+}
+
 pub fn dispatch_ingress(request: IngressRequest) -> IngressResponse {
+    if let Err(locked) = refuse_while_locked(&request) {
+        return IngressResponse {
+            result: Some(ingress_response::Result::Error(locked)),
+        };
+    }
     let result: Result<Vec<u8>, pb::Error> = match request.operation {
         Some(ingress_request::Operation::RouterQuery(op)) => router_query_core(op.method, op.args),
         Some(ingress_request::Operation::RouterInvoke(op)) => {
@@ -1021,83 +647,40 @@ pub fn dispatch_startup_bytes(request_bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use once_cell::sync::Lazy;
     use serial_test::serial;
 
-    use crate::bridge::{install_app_router, AppInvoke, AppQuery, AppResult, AppRouter};
+    use crate::bridge::install_app_router;
+    use crate::economic_fixtures::{self, TestIdentity};
 
-    // Local mutex serializes tests within this module. We additionally apply
-    // `#[serial]` to every test so they cooperate with the global
-    // `serial_test` mutex used by other modules (notably
-    // `handlers::bitcoin_invoke_routes::tests`) which mutate the same global
-    // C-DBRW binding-key slot. Without the global serialization, a parallel
-    // bitcoin test calling `install_test_identity(.., vec![0xD1; 32])` could
-    // overwrite the binding key between this module's `setup_test_env()` (which
-    // clears it) and its `install_identity_context_core(...)` reading it back.
-    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-
-    struct TestRouter;
-
-    #[async_trait]
-    impl AppRouter for TestRouter {
-        async fn query(&self, q: AppQuery) -> AppResult {
-            AppResult {
-                success: true,
-                data: format!("query:{}:{}", q.path, q.params.len()).into_bytes(),
-                error_message: None,
-            }
-        }
-
-        async fn invoke(&self, i: AppInvoke) -> AppResult {
-            AppResult {
-                success: true,
-                data: format!("invoke:{}:{}", i.method, i.args.len()).into_bytes(),
-                error_message: None,
-            }
-        }
-    }
-
-    fn ensure_test_env_config() -> String {
-        let path = crate::network::get_env_config_path()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("dsm_ingress_startup_test_env.toml"));
-        let body = r#"
-protocol = "http"
-lan_ip = "127.0.0.1"
-allow_localhost = true
-
-[[nodes]]
-name = "test-1"
-endpoint = "http://127.0.0.1:8080"
-register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
-"#;
-        std::fs::write(&path, body).expect("write env config");
-        path.to_string_lossy().to_string()
-    }
-
-    fn setup_test_env() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        let storage_base = crate::storage_utils::get_storage_base_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("./.dsm_testdata"));
-        let _ = crate::storage_utils::set_storage_base_dir(storage_base);
-        crate::sdk::app_state::AppState::reset_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
+    /// A process with nothing installed yet: no router, no SDK context, no
+    /// identity in memory, the SDK not ready.
+    fn fresh_process() {
+        economic_fixtures::use_test_storage_dir();
         crate::sdk::session_manager::set_sdk_ready(false);
         crate::reset_sdk_context_for_testing();
         unsafe { crate::bridge::reset_bridge_handlers_for_tests() };
-        let config_path = ensure_test_env_config();
-        let _ = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::ConfigureEnv(
-                pb::ConfigureEnvOp {
-                    config_path_utf8: config_path,
-                },
-            )),
-        });
-        guard
+    }
+
+    /// A device created as wallet creation creates it, then the process that
+    /// created it gone: its identity is on disk, the new process holds
+    /// nothing in memory, and the wallet is unlocked from its mnemonic.
+    fn restarted_device(seed: u8) -> TestIdentity {
+        let identity = economic_fixtures::local_device(seed).0;
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        fresh_process();
+        crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(
+            &economic_fixtures::test_mnemonic(seed),
+        )
+        .expect("unlock the wallet");
+        identity
+    }
+
+    /// The network's pinned nodes and the env config naming them — what
+    /// `ConfigureEnv` points a device at.
+    fn fleet() -> crate::test_support::one_device::Fleet {
+        crate::test_support::one_device::Fleet::start()
     }
 
     fn expect_ok_bytes(response: IngressResponse) -> Vec<u8> {
@@ -1105,6 +688,21 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
             Some(ingress_response::Result::OkBytes(bytes)) => bytes,
             other => panic!("expected ok bytes, got {:?}", other),
         }
+    }
+
+    /// A device as wallet creation creates it, with its router installed as
+    /// the app installs it and no storage nodes named: the router answers what
+    /// this device holds.
+    fn device_with_router(seed: u8) {
+        fresh_process();
+        economic_fixtures::local_device(seed);
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "ingress-router-test".to_string(),
+            storage_endpoints: Vec::new(),
+            enable_offline: false,
+        })
+        .expect("router");
+        install_app_router(Arc::new(router)).expect("install router");
     }
 
     fn expect_error(response: IngressResponse) -> pb::Error {
@@ -1131,7 +729,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn dispatch_ingress_empty_request_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_ingress(IngressRequest { operation: None });
         let error = expect_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
@@ -1141,7 +739,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn dispatch_ingress_bytes_invalid_proto_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response_bytes = dispatch_ingress_bytes(&[0xff, 0xfe, 0xfd]);
         let response = IngressResponse::decode(response_bytes.as_slice()).expect("decode response");
         let error = expect_error(response);
@@ -1151,14 +749,12 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn envelope_request_strips_optional_prefix_and_reframes_success_output() {
-        let _guard = setup_test_env();
+        fresh_process();
         let request_env = Envelope {
             version: 3,
             headers: Some(pb::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![7; 16],
             payload: Some(pb::envelope::Payload::Error(pb::Error {
@@ -1180,15 +776,15 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         });
         let ok_bytes = expect_ok_bytes(response);
         assert_eq!(ok_bytes.first(), Some(&0x03));
-        let decoded =
-            crate::envelope::from_canonical_bytes(&ok_bytes[1..]).expect("decode envelope");
+        let decoded = crate::envelope::local_answer_from_canonical_bytes(&ok_bytes[1..])
+            .expect("the answer is a local answer");
         assert_eq!(decoded.version, 3);
     }
 
     #[test]
     #[serial]
     fn malformed_envelope_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::Envelope(pb::EnvelopeOp {
                 envelope_bytes: vec![0x03, 0xaa, 0xbb, 0xcc],
@@ -1202,14 +798,12 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn wrong_version_envelope_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let request_env = Envelope {
             version: 2,
             headers: Some(pb::Headers {
                 device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
                 genesis_hash: vec![3; 32],
-                seq: 0,
             }),
             message_id: vec![4; 16],
             payload: Some(pb::envelope::Payload::Error(pb::Error {
@@ -1238,44 +832,811 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         );
     }
 
+    /// The device's router answers through the ingress byte for byte: a
+    /// preference set and read back through `RouterQuery`.
     #[test]
     #[serial]
-    fn router_query_success_returns_router_payload() {
-        let _guard = setup_test_env();
-        install_app_router(Arc::new(TestRouter)).expect("install router");
-
-        let response = dispatch_ingress(IngressRequest {
-            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                method: "wallet.balance".to_string(),
-                args: vec![1, 2, 3],
-            })),
-        });
-        let ok_bytes = expect_ok_bytes(response);
-        assert_eq!(ok_bytes, b"query:wallet.balance:3".to_vec());
+    fn a_router_query_answer_passes_through_unchanged() {
+        device_with_router(0x44);
+        let pref = |path: &str, value: &str| {
+            dispatch_ingress(IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: path.to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::AppStateRequest {
+                            key: "ingress.test".to_string(),
+                            operation: String::new(),
+                            value: value.to_string(),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                })),
+            })
+        };
+        expect_ok_bytes(pref("prefs.set", "through the ingress"));
+        let answer = expect_ok_bytes(pref("prefs.get", ""));
+        let envelope = crate::handlers::response_helpers::decode_local_envelope(&answer)
+            .expect("the router's local answer");
+        match envelope.payload {
+            Some(dsm::types::proto::envelope::Payload::AppStateResponse(r)) => {
+                assert_eq!(r.value.as_deref(), Some("through the ingress"))
+            }
+            other => panic!("prefs.get answered {other:?}"),
+        }
     }
 
+    /// The record the frontend's tests answer `wallet.amount` from. Jest runs
+    /// no Rust, so the guided tour's practice wallet, which asks Rust for every
+    /// figure it shows, is tested against this process's own answers: each
+    /// request those tests send, framed as the WebView frames it, and the bytes
+    /// this ingress answered, as the JNI hands them back. The committed record
+    /// must equal the live answers; DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const WALLET_AMOUNT_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/tour/__tests__/fixtures/wallet_amount.ingress.bin"
+    );
+
+    /// `wallet.amount` through the ingress: ERA by its committed policy, the
+    /// practice coin at its stated decimals, and a refusal in Rust's words; and
+    /// `balance.list`, whose ERA row is where the practice wallet reads that ERA
+    /// is protocol-defined, as every screen reads it. The frontend's record of
+    /// these answers is this process's own.
     #[test]
     #[serial]
-    fn router_invoke_success_returns_router_payload() {
-        let _guard = setup_test_env();
-        install_app_router(Arc::new(TestRouter)).expect("install router");
+    fn wallet_amount_answers_through_the_ingress_as_the_frontend_records_it() {
+        use pb::wallet_amount_request::{Amount, Unit};
+        device_with_router(0x46);
 
+        // What the practice wallet's tests ask (practiceMode.test.ts).
+        let asked = vec![
+            // Practice ERA, counted by ERA's committed policy.
+            (
+                Unit::TokenId("ERA".to_string()),
+                Amount::Entered("1000".to_string()),
+            ),
+            // 5 of the practice coin sent, and what is left of its 50.
+            (Unit::Decimals(0), Amount::Entered("5".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(45)),
+            // 25 ERA sent, and what is left.
+            (Unit::Decimals(2), Amount::Entered("25".to_string())),
+            (Unit::Decimals(2), Amount::BaseUnits(97_500)),
+            // The faucet's 100 ERA, and the balance after it.
+            (Unit::Decimals(2), Amount::Entered("100".to_string())),
+            (Unit::Decimals(2), Amount::BaseUnits(110_000)),
+            // Finer than ERA counts, and nothing at all.
+            (Unit::Decimals(2), Amount::Entered("1.234".to_string())),
+            (Unit::Decimals(2), Amount::Entered("0".to_string())),
+        ];
+        let mut record = Vec::new();
+        let mut answers = Vec::new();
+        for (unit, amount) in asked {
+            let request = IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: "wallet.amount".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::WalletAmountRequest {
+                            unit: Some(unit),
+                            amount: Some(amount),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                })),
+            }
+            .encode_to_vec();
+            let response = dispatch_ingress_bytes(&request);
+            for part in [&request, &response] {
+                let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+                record.extend_from_slice(&len.to_be_bytes());
+                record.extend_from_slice(part);
+            }
+            answers.push(IngressResponse::decode(response.as_slice()).expect("an IngressResponse"));
+        }
+
+        // The practice wallet's ERA row states ERA as Rust lists it
+        // (practiceMode.ts `seedEra`): the router's `balance.list`, which lists
+        // ERA at any balance, asked as the WebView asks it, with no arguments.
+        let listed_request = IngressRequest {
+            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                method: "balance.list".to_string(),
+                args: Vec::new(),
+            })),
+        }
+        .encode_to_vec();
+        let listed_response = dispatch_ingress_bytes(&listed_request);
+        for part in [&listed_request, &listed_response] {
+            let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+            record.extend_from_slice(&len.to_be_bytes());
+            record.extend_from_slice(part);
+        }
+        let listed = expect_ok_bytes(
+            IngressResponse::decode(listed_response.as_slice()).expect("an IngressResponse"),
+        );
+        match crate::handlers::response_helpers::decode_local_envelope(&listed)
+            .expect("the router's local answer")
+            .payload
+        {
+            Some(dsm::types::proto::envelope::Payload::BalancesListResponse(list)) => {
+                let era = list
+                    .balances
+                    .iter()
+                    .find(|row| row.token_id == "ERA")
+                    .expect("balance.list lists ERA at any balance");
+                assert!(era.protocol_defined, "Rust lists ERA as protocol-defined");
+            }
+            other => panic!("balance.list answered {other:?}"),
+        }
+
+        let forms = |response: IngressResponse| {
+            let answer = expect_ok_bytes(response);
+            match crate::handlers::response_helpers::decode_local_envelope(&answer)
+                .expect("the router's local answer")
+                .payload
+            {
+                Some(dsm::types::proto::envelope::Payload::WalletAmountResponse(r)) => {
+                    (r.base_units, r.display_amount, r.decimals)
+                }
+                other => panic!("wallet.amount answered {other:?}"),
+            }
+        };
+        let mut answers = answers.into_iter();
+        let mut next = || answers.next().expect("an answer to every request");
+        assert_eq!(forms(next()), (100_000, "1000.00".to_string(), 2));
+        assert_eq!(forms(next()), (5, "5".to_string(), 0));
+        assert_eq!(forms(next()), (45, "45".to_string(), 0));
+        assert_eq!(forms(next()), (2_500, "25.00".to_string(), 2));
+        assert_eq!(forms(next()), (97_500, "975.00".to_string(), 2));
+        assert_eq!(forms(next()), (10_000, "100.00".to_string(), 2));
+        assert_eq!(forms(next()), (110_000, "1100.00".to_string(), 2));
+        let refused = expect_error(next());
+        assert!(
+            refused
+                .message
+                .contains("wallet.amount: amount exceeds 2 fractional digits"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(forms(next()), (0, "0.00".to_string(), 2));
+
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => {
+                std::fs::write(WALLET_AMOUNT_RECORD, &record).expect("write the frontend's record")
+            }
+            None => assert_eq!(
+                std::fs::read(WALLET_AMOUNT_RECORD).expect("the frontend's committed record"),
+                record,
+                "the frontend's wallet.amount record differs from this ingress's answers; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+    }
+
+    /// The app lock's settings never pass through the preferences route, as
+    /// the WebView asks it: not the PIN's hash, the miss count, nor the locked
+    /// flag. A caller that could read the hash or write the flag would not
+    /// need the PIN. The frontend's own settings pass.
+    #[test]
+    #[serial]
+    fn the_preferences_route_refuses_the_app_locks_settings() {
+        device_with_router(0x4A);
+        let pref = |path: &str, key: &str, value: &str| {
+            dispatch_ingress(IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: path.to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::AppStateRequest {
+                            key: key.to_string(),
+                            operation: String::new(),
+                            value: value.to_string(),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                })),
+            })
+        };
+        for key in crate::sdk::app_lock::OWNED_KEYS {
+            for (path, value) in [("prefs.get", ""), ("prefs.set", "open")] {
+                let refused = expect_error(pref(path, key, value));
+                assert!(
+                    refused.message.contains("belongs to the app lock"),
+                    "{path} {key}: {}",
+                    refused.message
+                );
+            }
+        }
+        expect_ok_bytes(pref("prefs.set", "lock_prompt_dismissed", "never"));
+        expect_ok_bytes(pref("prefs.get", "lock_prompt_dismissed", ""));
+    }
+
+    /// While the session is locked the ingress runs nothing the app asks but
+    /// the session's own routes: no read, no write, no envelope. Rust opens it
+    /// only for its PIN, and then the same requests run (S-LOCK).
+    #[test]
+    #[serial]
+    fn a_locked_wallet_answers_nothing_but_its_session() {
+        economic_fixtures::use_test_storage_dir();
+        crate::sdk::app_state::AppState::reset_for_testing();
+        device_with_router(0x4B);
+        *crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .expect("the session manager") = crate::sdk::session_manager::SessionManager::default();
+        let op = |method: &str, body: Vec<u8>| pb::RouterInvokeOp {
+            method: method.to_string(),
+            args: pb::ArgPack {
+                codec: pb::Codec::Proto as i32,
+                body,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        };
+        let invoke = |method: &str, body: Vec<u8>| IngressRequest {
+            operation: Some(ingress_request::Operation::RouterInvoke(op(method, body))),
+        };
+        let query = |method: &str| IngressRequest {
+            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                method: method.to_string(),
+                args: Vec::new(),
+            })),
+        };
+        let configure = |method: &str, secret: &str| {
+            invoke(
+                "session.configure_lock",
+                pb::SessionConfigureLockRequest {
+                    method: method.to_string(),
+                    secret: secret.to_string(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+        };
+        let forget = || {
+            invoke(
+                "token.forget",
+                pb::TokenForgetRequest {
+                    token_id: "NONE".to_string(),
+                }
+                .encode_to_vec(),
+            )
+        };
+        let asked = || {
+            [
+                query("balance.list"),
+                forget(),
+                IngressRequest {
+                    operation: Some(ingress_request::Operation::Envelope(pb::EnvelopeOp {
+                        envelope_bytes: vec![0x03, 0x0a, 0x00],
+                    })),
+                },
+            ]
+        };
+
+        expect_ok_bytes(dispatch_ingress(configure("pin", "2468")));
+        expect_ok_bytes(dispatch_ingress(invoke("session.lock", Vec::new())));
+        for request in asked() {
+            let refused = expect_error(dispatch_ingress(request));
+            assert!(
+                refused.message.contains("the wallet is locked"),
+                "{}",
+                refused.message
+            );
+        }
+        // The session's own routes answer: its snapshot, and a wrong PIN,
+        // counted, opens nothing.
+        expect_ok_bytes(dispatch_ingress(query("session.status")));
+        let unlock = |secret: &str| {
+            invoke(
+                "session.unlock",
+                pb::SessionUnlockRequest {
+                    key: Some(pb::session_unlock_request::Key::Secret(secret.to_string())),
+                }
+                .encode_to_vec(),
+            )
+        };
+        expect_ok_bytes(dispatch_ingress(unlock("0000")));
+        let still = expect_error(dispatch_ingress(query("balance.list")));
+        assert!(
+            still.message.contains("the wallet is locked"),
+            "{}",
+            still.message
+        );
+
+        expect_ok_bytes(dispatch_ingress(unlock("2468")));
+        expect_ok_bytes(dispatch_ingress(query("balance.list")));
+        // The write reaches its route, which answers for itself.
+        let reached = expect_error(dispatch_ingress(forget()));
+        assert!(
+            reached.message.contains("no token named NONE"),
+            "{}",
+            reached.message
+        );
+
+        // No lock is left behind for the tests that follow in this process.
+        expect_ok_bytes(dispatch_ingress(configure("none", "")));
+    }
+
+    /// The record the frontend's lock screen tests answer `session.*` from:
+    /// each try the lock screen sends, framed as the WebView frames it, and
+    /// this ingress's answer. The committed record must equal the live
+    /// answers; DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const SESSION_LOCK_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/lock/__tests__/fixtures/session_lock.ingress.bin"
+    );
+
+    /// The BIP39 vectors the lock screen's tests type: this wallet's phrase,
+    /// and another wallet's.
+    const LOCK_RECORD_PHRASE: &str = "abandon abandon abandon abandon abandon abandon \
+                                      abandon abandon abandon abandon abandon about";
+    const LOCK_RECORD_OTHER_PHRASE: &str = "legal winner thank year wave sausage worth useful \
+                                            legal winner thank yellow";
+
+    /// The app lock through the ingress, as the lock screen meets it: a PIN
+    /// lock on, the session locked, three wrong PINs answered with the tries
+    /// left and then the phrase required, the right PIN no longer opening it,
+    /// another wallet's phrase refused, and this wallet's phrase opening it.
+    /// Each answer is Rust's session snapshot; the frontend's record of them
+    /// is this process's own.
+    #[test]
+    #[serial]
+    fn the_lock_answers_through_the_ingress_as_the_frontend_records_it() {
+        // A fresh store: no lock settings left by an earlier test.
+        economic_fixtures::use_test_storage_dir();
+        crate::sdk::app_state::AppState::reset_for_testing();
+        device_with_router(0x47);
+        crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(LOCK_RECORD_PHRASE)
+            .expect("this wallet's seed");
+        *crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .expect("the session manager") = crate::sdk::session_manager::SessionManager::default();
+
+        let invoke = |method: &str, body: Vec<u8>| {
+            IngressRequest {
+                operation: Some(ingress_request::Operation::RouterInvoke(
+                    pb::RouterInvokeOp {
+                        method: method.to_string(),
+                        args: pb::ArgPack {
+                            codec: pb::Codec::Proto as i32,
+                            body,
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    },
+                )),
+            }
+            .encode_to_vec()
+        };
+        let unlock = |key: pb::session_unlock_request::Key| {
+            invoke(
+                "session.unlock",
+                pb::SessionUnlockRequest { key: Some(key) }.encode_to_vec(),
+            )
+        };
+        let lock_of = |response: &[u8]| {
+            let answer =
+                expect_ok_bytes(IngressResponse::decode(response).expect("an IngressResponse"));
+            match crate::handlers::response_helpers::decode_local_envelope(&answer)
+                .expect("the router's local answer")
+                .payload
+            {
+                Some(dsm::types::proto::envelope::Payload::SessionStateResponse(s)) => {
+                    let lock = s.lock_status.expect("a lock status");
+                    (lock.locked, lock.misses_left, lock.phrase_required)
+                }
+                other => panic!("the session route answered {other:?}"),
+            }
+        };
+
+        // The lock the user set up: a PIN. Not part of the record.
+        let on = dispatch_ingress_bytes(&invoke(
+            "session.configure_lock",
+            pb::SessionConfigureLockRequest {
+                method: "pin".to_string(),
+                secret: "2468".to_string(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ));
+        let (locked, left, phrase) = lock_of(&on);
+        assert!(!locked && !phrase, "a new lock leaves the wallet open");
+        assert_eq!(left, crate::sdk::app_lock::MISSES_BEFORE_PHRASE);
+
+        use pb::session_unlock_request::Key;
+        let asked = [
+            IngressRequest {
+                operation: Some(ingress_request::Operation::RouterInvoke(
+                    pb::RouterInvokeOp {
+                        method: "session.lock".to_string(),
+                        args: Vec::new(),
+                    },
+                )),
+            }
+            .encode_to_vec(),
+            unlock(Key::Secret("0000".to_string())),
+            unlock(Key::Secret("0001".to_string())),
+            unlock(Key::Secret("0002".to_string())),
+            unlock(Key::RecoveryPhrase(LOCK_RECORD_OTHER_PHRASE.to_string())),
+            unlock(Key::RecoveryPhrase(LOCK_RECORD_PHRASE.to_string())),
+        ];
+        let mut record = Vec::new();
+        let mut answers = Vec::new();
+        for (at, request) in asked.iter().enumerate() {
+            let response = dispatch_ingress_bytes(request);
+            for part in [request, &response] {
+                let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+                record.extend_from_slice(&len.to_be_bytes());
+                record.extend_from_slice(part);
+            }
+            answers.push(lock_of(&response));
+            // Once the tries are used up, the right PIN opens nothing either.
+            // The lock screen no longer offers the PIN, so this is not recorded.
+            if at == 3 {
+                let right = dispatch_ingress_bytes(&unlock(Key::Secret("2468".to_string())));
+                let (locked, _, phrase) = lock_of(&right);
+                assert!(
+                    locked && phrase,
+                    "the right PIN opened a lock past its tries"
+                );
+            }
+        }
+        // Locked with `left` tries, the phrase required exactly when none are.
+        let locked_with = |(locked, misses_left, phrase): (bool, u32, bool), left: u32| {
+            assert!(locked, "the wallet stays locked");
+            assert_eq!(misses_left, left);
+            assert_eq!(
+                phrase,
+                left == 0,
+                "the phrase is required once no tries are left"
+            );
+        };
+        let max = crate::sdk::app_lock::MISSES_BEFORE_PHRASE;
+        let mut answers = answers.into_iter();
+        let mut next = || answers.next().expect("an answer to every request");
+        locked_with(next(), max);
+        locked_with(next(), max - 1);
+        locked_with(next(), max - 2);
+        locked_with(next(), 0);
+        locked_with(next(), 0);
+        let (locked, misses_left, phrase) = next();
+        assert!(!locked && !phrase, "this wallet's phrase opens it");
+        assert_eq!(misses_left, max, "and starts the tries again");
+
+        // Opened, the wallet answers what the app asks again: the contacts
+        // the lock screen has it read once it opens.
+        let contacts = IngressRequest {
+            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                method: "contacts.list".to_string(),
+                args: Vec::new(),
+            })),
+        }
+        .encode_to_vec();
+        let listed = dispatch_ingress_bytes(&contacts);
+        for part in [&contacts, &listed] {
+            let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+            record.extend_from_slice(&len.to_be_bytes());
+            record.extend_from_slice(part);
+        }
+        expect_ok_bytes(IngressResponse::decode(listed.as_slice()).expect("an IngressResponse"));
+
+        // No lock is left behind for the tests that follow in this process.
+        let off = dispatch_ingress_bytes(&invoke(
+            "session.configure_lock",
+            pb::SessionConfigureLockRequest {
+                method: "none".to_string(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ));
+        assert!(!lock_of(&off).0, "the lock is off");
+
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => {
+                std::fs::write(SESSION_LOCK_RECORD, &record).expect("write the frontend's record")
+            }
+            None => assert_eq!(
+                std::fs::read(SESSION_LOCK_RECORD).expect("the frontend's committed record"),
+                record,
+                "the frontend's session lock record differs from this ingress's answers; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+    }
+
+    /// The record the token wizard's tests answer `token.check` from: the
+    /// requests the wizard sends as it moves through its steps, framed as the
+    /// WebView frames them, and this ingress's answers. The committed record
+    /// must equal the live answers; DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const TOKEN_CHECK_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/__tests__/fixtures/token_check.ingress.bin"
+    );
+
+    /// `token.check` through the ingress, as the wizard asks it: a token the
+    /// wizard's defaults complete (two decimals, a supply of 1,000,000, burn
+    /// off, transferable, this device alone), which Rust refuses nothing of,
+    /// and the same with a one-letter ticker, which Rust refuses naming the
+    /// ticker; and `token.create` of that one, which Rust refuses as an error
+    /// carrying the same reason.
+    #[test]
+    #[serial]
+    fn token_check_answers_through_the_ingress_as_the_wizard_records_it() {
+        device_with_router(0x48);
+        let wizard = |ticker: &str| dsm::types::proto::TokenCreateRequest {
+            alias: "Artwork".to_string(),
+            burn_enabled: dsm::types::proto::TokenCreateRequest::default().burn_enabled,
+            ..crate::handlers::token_create_tests::request(ticker, 2, 1_000_000)
+        };
+        let asked = ["ART", "X"].map(|ticker| {
+            IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: "token.check".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: wizard(ticker).encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                })),
+            }
+            .encode_to_vec()
+        });
+        let mut record = Vec::new();
+        let mut keep = |request: &[u8], response: &[u8]| {
+            for part in [request, response] {
+                let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+                record.extend_from_slice(&len.to_be_bytes());
+                record.extend_from_slice(part);
+            }
+        };
+        let mut answers = Vec::new();
+        for request in &asked {
+            let response = dispatch_ingress_bytes(request);
+            keep(request, &response);
+            let answer = expect_ok_bytes(
+                IngressResponse::decode(response.as_slice()).expect("an IngressResponse"),
+            );
+            match crate::handlers::response_helpers::decode_local_envelope(&answer)
+                .expect("the router's local answer")
+                .payload
+            {
+                Some(dsm::types::proto::envelope::Payload::TokenCheckResponse(r)) => answers.push(
+                    r.refusals
+                        .into_iter()
+                        .map(|r| (r.field, r.reason))
+                        .collect::<Vec<_>>(),
+                ),
+                other => panic!("token.check answered {other:?}"),
+            }
+        }
+        assert_eq!(answers[0], Vec::new(), "the wizard's defaults are a token");
+        assert_eq!(
+            answers[1],
+            vec![(
+                "ticker".to_string(),
+                "a ticker is 2 to 8 characters, not 1".to_string()
+            )]
+        );
+        let create = IngressRequest {
+            operation: Some(ingress_request::Operation::RouterInvoke(
+                pb::RouterInvokeOp {
+                    method: "token.create".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: wizard("X").encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                },
+            )),
+        }
+        .encode_to_vec();
+        let response = dispatch_ingress_bytes(&create);
+        keep(&create, &response);
+        let refused =
+            expect_error(IngressResponse::decode(response.as_slice()).expect("an IngressResponse"));
+        assert!(
+            refused
+                .message
+                .contains("ticker: a ticker is 2 to 8 characters, not 1"),
+            "{}",
+            refused.message
+        );
+
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => {
+                std::fs::write(TOKEN_CHECK_RECORD, &record).expect("write the frontend's record")
+            }
+            None => assert_eq!(
+                std::fs::read(TOKEN_CHECK_RECORD).expect("the frontend's committed record"),
+                record,
+                "the wizard's token.check record differs from this ingress's answers; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+    }
+
+    /// The record the wallet's escrow tab tests answer `escrow.*` from: the
+    /// requests the tab sends, framed as the WebView frames them, in the order
+    /// it sends them, and this device's answers on running nodes. The
+    /// committed record must equal the live answers;
+    /// DSM_WRITE_FRONTEND_FIXTURES=1 rewrites it.
+    const ESCROW_RECORD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/components/screens/__tests__/fixtures/escrow.ingress.bin"
+    );
+
+    /// The agreement and the one outcome the escrow tab's tests enter.
+    const ESCROW_RECORD_AGREEMENT: &str = "terms v1: order 1042";
+    const ESCROW_RECORD_OUTCOME: &str = "delivered";
+
+    /// The escrow tab's routes through the ingress, as a funded device meets
+    /// them on the network's nodes: this device as a party, its escrow vaults
+    /// (none), a stake of 5 ERA locked on one outcome this device decides and
+    /// is paid by, the vaults again, the outcome decided, the vaults again,
+    /// the stake released, and the vaults a last time.
+    #[test]
+    #[serial]
+    fn escrow_answers_through_the_ingress_as_the_wallet_records_it() {
+        fresh_process();
+        let fleet = fleet();
+        let router = crate::runtime::get_runtime()
+            .block_on(economic_fixtures::funded_router(fleet.config(), 0x49));
+        install_app_router(Arc::new(router)).expect("install router");
+
+        let invoke = |method: &str, body: Vec<u8>| {
+            IngressRequest {
+                operation: Some(ingress_request::Operation::RouterInvoke(
+                    pb::RouterInvokeOp {
+                        method: method.to_string(),
+                        args: pb::ArgPack {
+                            codec: pb::Codec::Proto as i32,
+                            body,
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    },
+                )),
+            }
+            .encode_to_vec()
+        };
+        let mut record = Vec::new();
+        let mut ask = |request: Vec<u8>| {
+            let response = dispatch_ingress_bytes(&request);
+            for part in [&request, &response] {
+                let len = u32::try_from(part.len()).expect("a record part fits a u32 length");
+                record.extend_from_slice(&len.to_be_bytes());
+                record.extend_from_slice(part);
+            }
+            let answer = expect_ok_bytes(
+                IngressResponse::decode(response.as_slice()).expect("an IngressResponse"),
+            );
+            crate::handlers::response_helpers::decode_local_envelope(&answer)
+                .expect("the router's local answer")
+                .payload
+                .expect("a payload")
+        };
+        use dsm::types::proto::envelope::Payload;
+        let vaults = |payload: Payload| match payload {
+            Payload::EscrowVaultsResponse(r) => r.vaults,
+            other => panic!("escrow.vaults answered {other:?}"),
+        };
+
+        let me = match ask(invoke(
+            "escrow.party",
+            pb::EscrowPartyRequest {}.encode_to_vec(),
+        )) {
+            Payload::EscrowPartyResponse(r) => r,
+            other => panic!("escrow.party answered {other:?}"),
+        };
+        let listed = || invoke("escrow.vaults", pb::EscrowVaultsRequest {}.encode_to_vec());
+        assert_eq!(vaults(ask(listed())).len(), 0, "no escrow yet");
+
+        let era = dsm::core::token::token_state_manager::era_policy_commit();
+        let created = match ask(invoke(
+            "escrow.lock",
+            pb::EscrowLockRequest {
+                external: ESCROW_RECORD_AGREEMENT.as_bytes().to_vec(),
+                token_policy_commit: era.to_vec(),
+                amount_entered: "5".to_string(),
+                outcomes: vec![pb::EscrowLockOutcomeV1 {
+                    outcome: ESCROW_RECORD_OUTCOME.as_bytes().to_vec(),
+                    decided_by: vec![me.device_id.clone()],
+                    pays: me.device_id.clone(),
+                }],
+                counterpart_vault_id: Vec::new(),
+            }
+            .encode_to_vec(),
+        )) {
+            Payload::EscrowCreatedResponse(r) => r,
+            other => panic!("escrow.lock answered {other:?}"),
+        };
+        let locked = vaults(ask(listed()));
+        assert_eq!(locked.len(), 1);
+        assert_eq!(locked[0].vault_id, created.vault_id);
+        assert_eq!(locked[0].status, pb::SofiVaultStatus::Active as i32);
+        let outcome = &locked[0].outcomes[0];
+        assert!(outcome.decided_by_this_device && outcome.pays_this_device);
+
+        let decided = match ask(invoke(
+            "escrow.adjudicate",
+            pb::EscrowOutcomeRequest {
+                vault_id: created.vault_id.clone(),
+                outcome: ESCROW_RECORD_OUTCOME.as_bytes().to_vec(),
+            }
+            .encode_to_vec(),
+        )) {
+            Payload::EscrowVerdictResponse(r) => r,
+            other => panic!("escrow.adjudicate answered {other:?}"),
+        };
+        assert_eq!(decided.state, pb::EscrowVerdictState::Final as i32);
+        assert_eq!(decided.outcome, ESCROW_RECORD_OUTCOME.as_bytes());
+        assert_eq!(vaults(ask(listed())).len(), 1);
+
+        match ask(invoke(
+            "escrow.release",
+            pb::EscrowReleaseRequest {
+                vault_id: created.vault_id.clone(),
+            }
+            .encode_to_vec(),
+        )) {
+            Payload::SofiPositionResponse(r) => {
+                assert_eq!(r.state, pb::SofiPositionState::Realized as i32, "{r:?}")
+            }
+            other => panic!("escrow.release answered {other:?}"),
+        }
+        let released = vaults(ask(listed()));
+        assert_eq!(released[0].status, pb::SofiVaultStatus::Retired as i32);
+        assert_eq!(released[0].amount, 0);
+
+        match std::env::var_os("DSM_WRITE_FRONTEND_FIXTURES") {
+            Some(_) => std::fs::write(ESCROW_RECORD, &record).expect("write the frontend's record"),
+            None => assert_eq!(
+                std::fs::read(ESCROW_RECORD).expect("the frontend's committed record"),
+                record,
+                "the escrow tab's record differs from this ingress's answers; \
+                 rewrite it with DSM_WRITE_FRONTEND_FIXTURES=1"
+            ),
+        }
+        drop(fleet);
+    }
+
+    /// A router refusal reaches the caller as an error carrying the router's
+    /// own reason: an invoke for a token this device does not hold.
+    #[test]
+    #[serial]
+    fn a_router_invoke_refusal_passes_through_with_its_reason() {
+        device_with_router(0x45);
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterInvoke(
                 pb::RouterInvokeOp {
-                    method: "wallet.send".to_string(),
-                    args: vec![9, 8],
+                    method: "token.forget".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::TokenForgetRequest {
+                            token_id: "NOTHELD".to_string(),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
                 },
             )),
         });
-        let ok_bytes = expect_ok_bytes(response);
-        assert_eq!(ok_bytes, b"invoke:wallet.send:2".to_vec());
+        let error = expect_error(response);
+        assert!(error.message.contains("token.forget"), "{}", error.message);
     }
 
     #[test]
     #[serial]
     fn router_absent_maps_to_not_ready() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
                 method: "wallet.balance".to_string(),
@@ -1290,7 +1651,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn hardware_facts_success_returns_envelope_wrapped_snapshot() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::HardwareFacts(
                 pb::HardwareFactsOp {
@@ -1311,10 +1672,10 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
         });
         let ok_bytes = expect_ok_bytes(response);
         assert_eq!(ok_bytes.first(), Some(&0x03));
-        let envelope =
-            crate::envelope::from_canonical_bytes(&ok_bytes[1..]).expect("decode envelope");
+        let envelope = crate::handlers::response_helpers::decode_local_envelope(&ok_bytes)
+            .expect("the session snapshot is a local answer");
         match envelope.payload {
-            Some(pb::envelope::Payload::SessionStateResponse(snapshot)) => {
+            Some(dsm::types::proto::envelope::Payload::SessionStateResponse(snapshot)) => {
                 let hardware = snapshot.hardware_status.expect("hardware status");
                 assert!(hardware.app_foreground);
             }
@@ -1325,7 +1686,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn startup_empty_request_returns_invalid_input() {
-        let _guard = setup_test_env();
+        fresh_process();
         let response = dispatch_startup(StartupRequest { operation: None });
         let error = expect_startup_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
@@ -1335,7 +1696,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn startup_set_storage_base_dir_is_idempotent() {
-        let _guard = setup_test_env();
+        fresh_process();
         let path_utf8 = crate::storage_utils::get_storage_base_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./.dsm_testdata"))
             .to_string_lossy()
@@ -1358,7 +1719,8 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn startup_initialize_sdk_installs_minimal_router() {
-        let _guard = setup_test_env();
+        fresh_process();
+        let fleet = fleet();
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::InitializeSdk(
                 pb::InitializeSdkOp {},
@@ -1369,61 +1731,79 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                method: "sys.tick".to_string(),
+                method: "system.generateMnemonic".to_string(),
                 args: Vec::new(),
             })),
         });
+        // Before genesis the minimal router answers wallet creation's first
+        // query: a fresh BIP39 mnemonic.
         let ok_bytes = expect_ok_bytes(response);
-        assert!(!ok_bytes.is_empty());
+        let pack = pb::ArgPack::decode(ok_bytes.as_slice()).expect("an ArgPack answer");
+        let phrase = String::from_utf8(pack.body).expect("a UTF-8 phrase");
+        bip39::Mnemonic::parse_in(bip39::Language::English, &phrase)
+            .expect("the minimal router answers a valid mnemonic");
+        drop(fleet);
     }
 
+    /// A phone an older build provisioned keeps its store at that build's
+    /// schema, and this build refuses it: beta does not migrate. Startup fails
+    /// in the store's own words and that is the session's error, so the page
+    /// leaves "starting runtime" and says what to do. The nodes run, the device
+    /// is created as wallet creation creates it, and its store is left as the
+    /// older build left it: stamped 24, without the table 25 added.
     #[test]
     #[serial]
-    fn startup_minimal_router_routes_system_genesis_validation() {
-        let _guard = setup_test_env();
-        let response = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::InitializeSdk(
-                pb::InitializeSdkOp {},
-            )),
-        });
-        assert_eq!(expect_startup_ok(response), STARTUP_OK_BYTES);
-
-        let args = pb::ArgPack {
-            schema_hash: None,
-            codec: pb::Codec::Proto as i32,
-            body: pb::SystemGenesisRequest {
-                locale: "en-US".to_string(),
-                network_id: "testnet".to_string(),
-                device_entropy: vec![0x42; 8],
-            }
-            .encode_to_vec(),
+    fn a_store_at_an_older_schema_fails_startup_as_the_sessions_error() {
+        let fleet = fleet();
+        let _identity = economic_fixtures::local_device(0x12).0;
+        {
+            let store = crate::storage::client_db::get_connection().expect("the store");
+            let conn = store.lock().expect("the store lock");
+            conn.execute_batch("DROP TABLE history_repair_queue; PRAGMA user_version = 24;")
+                .expect("leave the store as schema 24 left it");
         }
-        .encode_to_vec();
+        // The process that provisioned it is gone.
+        crate::storage::client_db::close_database_for_tests();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        fresh_process();
+        crate::sdk::session_manager::clear_fatal_error_and_snapshot().expect("clear");
 
-        let response = dispatch_ingress(IngressRequest {
-            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                method: "system.genesis".to_string(),
-                args,
-            })),
-        });
-        let error = expect_error(response);
-        assert_eq!(error.code, ERROR_CODE_PROCESSING_FAILED);
-        assert!(error.message.contains("device_entropy must be 32 bytes"));
-        assert!(!error.message.contains("requires genesis"));
-    }
+        let start = || {
+            dispatch_startup(StartupRequest {
+                operation: Some(startup_request::Operation::InitializeSdk(
+                    pb::InitializeSdkOp {},
+                )),
+            })
+        };
+        let snapshot = || {
+            crate::sdk::session_manager::SESSION_MANAGER
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .compute_snapshot()
+        };
+        let error = expect_startup_error(start());
+        assert!(
+            error.message.contains("SCHEMA RESET REQUIRED"),
+            "{}",
+            error.message
+        );
+        assert_eq!(snapshot().phase, "error");
+        assert_eq!(snapshot().fatal_error, error.message);
 
-    /// Cache a deterministic wallet seed so the Genesis v2 identity derivation can run
-    /// (replaces the legacy C-DBRW binding-key staging).
-    fn unlock_test_wallet_seed() {
-        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x33; 64]);
+        // The remedy the refusal names, a wiped store: startup then succeeds
+        // and takes its own failure back.
+        crate::storage::client_db::reset_database_for_tests();
+        expect_startup_ok(start());
+        assert_eq!(snapshot().fatal_error, "");
+        assert_ne!(snapshot().phase, "error");
+        drop(fleet);
     }
 
     #[test]
     #[serial]
-    fn startup_initialize_identity_context_sets_identity_and_router() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-        install_identity_context_core(vec![0x11; 32], vec![0x22; 32])
+    fn initialize_identity_context_sets_identity_and_router() {
+        let identity = restarted_device(0x11);
+        install_identity_context_core(identity.device_id.to_vec(), identity.genesis.to_vec())
             .expect("identity context install should succeed");
         assert!(crate::is_sdk_context_initialized());
     }
@@ -1431,11 +1811,11 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
     #[test]
     #[serial]
     fn prime_identity_app_state_returns_error_when_wallet_locked() {
-        let _guard = setup_test_env();
-        // No wallet seed cached → identity priming fails closed.
-        let error = prime_identity_app_state(&[0x11; 32], &[0x22; 32])
-            .expect_err("missing wallet seed should be surfaced as startup error");
-
+        let identity = restarted_device(0x12);
+        // The wallet locks: its seed leaves RAM.
+        crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
+        let error = prime_identity_app_state(&identity.device_id, &identity.genesis)
+            .expect_err("a locked wallet must be surfaced as a startup error");
         assert_eq!(error.code, ERROR_CODE_PROCESSING_FAILED);
         assert!(error
             .message
@@ -1444,109 +1824,79 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 
     #[test]
     #[serial]
-    fn startup_initialize_identity_context_via_dispatch_succeeds() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-        // The legacy C-DBRW binding_key field is gone from the proto; identity install is
-        // wallet-seed-rooted and succeeds via the dispatch path.
+    fn initialize_identity_context_via_dispatch_succeeds() {
+        let identity = restarted_device(0x13);
+        let fleet = fleet();
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::InitializeIdentityContext(
                 pb::InitializeIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
+                    device_id: identity.device_id.to_vec(),
+                    genesis_hash: identity.genesis.to_vec(),
                 },
             )),
         });
-        match response.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
+        assert_eq!(expect_startup_ok(response), STARTUP_OK_BYTES);
         assert!(crate::is_sdk_context_initialized());
+        drop(fleet);
+    }
+
+    fn restore(identity_device: [u8; 32], genesis: [u8; 32]) -> StartupResponse {
+        dispatch_startup(StartupRequest {
+            operation: Some(startup_request::Operation::RestoreIdentityContext(
+                pb::RestoreIdentityContextOp {
+                    device_id: identity_device.to_vec(),
+                    genesis_hash: genesis.to_vec(),
+                },
+            )),
+        })
     }
 
     #[test]
     #[serial]
     fn startup_restore_identity_context_initializes_router() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-        let response = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-
-        match response.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
+        let identity = restarted_device(0x14);
+        let fleet = fleet();
+        assert_eq!(
+            expect_startup_ok(restore(identity.device_id, identity.genesis)),
+            STARTUP_OK_BYTES
+        );
         assert!(crate::is_sdk_context_initialized());
+        drop(fleet);
     }
 
     #[test]
     #[serial]
     fn startup_restore_identity_context_is_idempotent_for_same_identity() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-
-        let first = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-        match first.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
-
-        let second = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-        match second.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
+        let identity = restarted_device(0x15);
+        let fleet = fleet();
+        assert_eq!(
+            expect_startup_ok(restore(identity.device_id, identity.genesis)),
+            STARTUP_OK_BYTES
+        );
+        assert_eq!(
+            expect_startup_ok(restore(identity.device_id, identity.genesis)),
+            STARTUP_OK_BYTES
+        );
+        drop(fleet);
     }
 
     #[test]
     #[serial]
     fn startup_restore_identity_context_rejects_mismatched_identity() {
-        let _guard = setup_test_env();
-        unlock_test_wallet_seed();
-
-        let first = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-        match first.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
-
-        let second = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x99; 32],
-                    genesis_hash: vec![0x22; 32],
-                },
-            )),
-        });
-        let error = expect_startup_error(second);
+        let other = crate::test_support::two_device::TestDevice::create("other", 0x99);
+        let identity = restarted_device(0x16);
+        let fleet = fleet();
+        assert_eq!(
+            expect_startup_ok(restore(identity.device_id, identity.genesis)),
+            STARTUP_OK_BYTES
+        );
+        let error = expect_startup_error(restore(other.device_id, identity.genesis));
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
-        assert!(error.message.contains("different device_id"));
+        assert!(
+            error.message.contains("different device_id"),
+            "{}",
+            error.message
+        );
+        drop(fleet);
     }
 }

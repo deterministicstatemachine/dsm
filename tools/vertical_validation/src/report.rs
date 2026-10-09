@@ -1144,8 +1144,8 @@ fn classify_tla_spec(label: &str) -> (&'static str, &'static str, &'static str) 
     match label {
         "OfflineFinality" => (
             "Protocol Mechanics",
-            "Whitepaper Thm 4.1, 4.2; SR \u{00a7}4",
-            "Settlement irreversibility, partition tolerance",
+            "Spec \u{00a7}53 Tripwire; offline bilateral step",
+            "Both-or-neither across link loss and restart; one step at a time",
         ),
         "NonInterference" => (
             "Protocol Mechanics",

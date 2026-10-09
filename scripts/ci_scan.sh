@@ -22,14 +22,25 @@ CORE_DIR="dsm_client/deterministic_state_machine/dsm/src"
 red()  { printf "\033[31m%s\033[0m\n" "$*"; }
 green(){ printf "\033[32m%s\033[0m\n" "$*"; }
 
+# rg exits 0 on a match, 1 on none, and 2 on an error such as a path that is
+# not there. Only 1 passes: a rule pinned to a file that no longer exists is a
+# failed scan, not a clean one.
 fail_if_found() {
   local desc="$1"; shift
   local cmd=("rg" "-n" "$@")
-  if "${cmd[@]}" > /dev/null; then
-    red "[CI-SCAN] FAIL: ${desc}"
-    "${cmd[@]}" || true
-    exit 1
-  fi
+  local status=0
+  "${cmd[@]}" > /dev/null || status=$?
+  case "$status" in
+    0)
+      red "[CI-SCAN] FAIL: ${desc}"
+      "${cmd[@]}" || true
+      exit 1 ;;
+    1) ;;
+    *)
+      red "[CI-SCAN] ERROR: ${desc}: rg exited $status (a scanned path is missing?)"
+      "${cmd[@]}" || true
+      exit 1 ;;
+  esac
 }
 
 # Common ripgrep excludes
@@ -105,7 +116,7 @@ fail_if_found "Forbidden version=2 markers" "${EXCLUDES[@]}" -e '\bversion\s*=\s
 #     legacy type names
 #   - accept_v2 / accept_legacy / legacy_envelope          → semantic flags
 # Anchored on `envelope` keyword for the numeric inequality so that
-# non-envelope schema bumps (soft_vault, recovery capsule) don't trigger.
+# non-envelope schema bumps (the recovery capsule) don't trigger.
 fail_if_found "envelope-version lenient acceptance (seam a)" "${EXCLUDES[@]}" \
   -e '\bEnvelopeV[12]\b|\benvelope\b.*\bversion\s*[<≤]\s*3\b|\baccept_v2\b|\baccept_legacy\b|\blegacy_envelope\b' \
   "${SCAN_ROOTS[@]}"
@@ -137,7 +148,7 @@ fail_if_found "serde_json reaches into Core/SDK protocol path (seam b)" \
 # or vault-specific execution material. The file currently has zero vault
 # imports; this scan freezes that property.
 fail_if_found "transfer_hooks must stay token-only — no vault/anchor imports (seam c)" \
-  -e '(crate::|dsm::|super::)?vault::|::vault\b|LimboVault|LimboVaultProto|DlvManager|AnchorEnforcement|VaultStateAnchor|dlv_routes::|dlv_sdk::|dsm::dlv::' \
+  -e '(crate::|dsm::|super::)?vault::|::vault\b|LimboVault|LimboVaultProto|DlvManager|AnchorEnforcement|VaultStateAnchor|dlv_sdk::|dsm::dlv::' \
   dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/transfer_hooks.rs
 
 # 3) Ban clocks/time APIs (protocol layer only)
@@ -282,19 +293,6 @@ fail_if_found "static: policy_commit derived from a metadata cache" \
   -e 'policy_commit = metadata\.policy_anchor' \
   -e 'from_policy_anchor\(&metadata\.policy_anchor' \
   "$SDK_SRC/"
-
-# Path search is pure route arithmetic. If it could build RouteCommits or drive
-# the state machine, quote-time code would be able to move value.
-fail_if_found "static: routing_path_sdk reaches into RouteCommit or settlement" \
-  -e 'RouteCommitV1|execute_on_relationship|Operation::Dlv' \
-  "$SDK_SRC/sdk/routing_path_sdk.rs"
-
-# RouteCommit construction is likewise pure: it binds a quote, it does not
-# settle one. Emitting operations here would put value movement outside the
-# handler that gates it.
-fail_if_found "static: route_commit_sdk emits state-machine operations" \
-  -e 'execute_on_relationship|Operation::DlvUnlock|Operation::DlvClaim|Operation::DlvCreate' \
-  "$SDK_SRC/sdk/route_commit_sdk.rs"
 
 # Business logic stays in Rust: a frontend that can hash can derive identity,
 # and then two implementations decide what an asset is.

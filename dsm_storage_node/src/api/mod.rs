@@ -2,24 +2,12 @@
 
 //! # Storage Node API Endpoints
 //!
-//! All HTTP handler modules for the storage node. Each module exposes
-//! protobuf-only endpoints under `/api/v2/`. No JSON, no hex-encoded
-//! paths, no wall-clock-dependent logic.
+//! Every HTTP handler the node serves, protobuf-only, under `/api/v2/`.
 //!
-//! ## Layout
-//!
-//! - [`infra`]      — cross-cutting plumbing (admin, hardening, rate-limit, network-config)
-//! - [`identity`]   — device & genesis identity (authenticate, device_api, genesis, devtree, tips)
-//! - [`objects`]    — raw byte storage (store, list, bytecommit)
-//! - [`vault`]      — DLV / policy / recovery / paidk
-//! - [`registry`]   — node registry, scaling, discovery, drain-proof
-//! - [`transport`]  — message delivery (b0x, gossip)
+//! - [`cells`]      — keyed cells and indexes: bytes in, bytes out
+//! - [`objects`]    — the immutable content-addressed store and ByteCommits
+//! - [`transport`]  — the b0x inbox spool
 
-pub mod economic;
-pub mod identity;
-pub mod infra;
+pub mod cells;
 pub mod objects;
-pub mod registry;
-pub mod storage;
 pub mod transport;
-pub mod vault;

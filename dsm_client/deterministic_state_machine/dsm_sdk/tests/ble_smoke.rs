@@ -23,17 +23,6 @@ async fn ble_smoke_basic_chunk_roundtrip() {
 
     // Minimal BLE handler + coordinator
     let device_id = [0u8; 32];
-    let genesis_hash = [0u8; 32];
-    let keypair = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[0x01; 32])
-        .unwrap_or_else(|e| panic!("generate keypair failed: {e}"));
-    let contact_manager = dsm::core::contact_manager::DsmContactManager::new(device_id, vec![]);
-    let _manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-        contact_manager,
-        keypair,
-        device_id,
-        genesis_hash,
-    )));
-
     let coord = BleFrameCoordinator::new(device_id);
     let chunks = coord
         .chunk_message(BleFrameType::Unspecified, &payload)
@@ -63,10 +52,7 @@ async fn ble_smoke_prepare_roundtrip() {
     let genesis_hash = [0x22; 32];
     let keypair = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[0x02; 32])
         .unwrap_or_else(|e| panic!("generate keypair failed: {e}"));
-    let mut contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-        device_id,
-        vec![dsm::types::identifiers::NodeId::new("local")],
-    );
+    let mut contact_manager = dsm::core::contact_manager::DsmContactManager::new(device_id);
 
     // Add recipient as verified contact first (bilateral requires verified contacts)
     let contact = dsm::types::contact_types::DsmVerifiedContact {
@@ -74,13 +60,8 @@ async fn ble_smoke_prepare_roundtrip() {
         device_id: recipient_id,
         genesis_hash,
         public_key: vec![0; 32],
-        genesis_material: vec![0; 32],
         chain_tip: None,
-        chain_tip_smt_proof: None,
         genesis_verified_online: true,
-        verified_at_commit_height: 1,
-        added_at_commit_height: 1,
-        last_updated_commit_height: 1,
         verifying_storage_nodes: vec![],
         ble_address: None,
     };
@@ -88,8 +69,13 @@ async fn ble_smoke_prepare_roundtrip() {
         .add_verified_contact(contact)
         .unwrap_or_else(|e| panic!("add contact failed: {e}"));
 
-    let mut manager =
-        BilateralTransactionManager::new(contact_manager, keypair, device_id, genesis_hash);
+    let mut manager = BilateralTransactionManager::new(
+        contact_manager,
+        keypair,
+        device_id,
+        genesis_hash,
+        std::sync::Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new()),
+    );
 
     // Establish bilateral relationship before attempting prepare
     manager
@@ -104,7 +90,7 @@ async fn ble_smoke_prepare_roundtrip() {
     let coord = BleFrameCoordinator::new(device_id);
 
     let prepare_payload = adapter
-        .create_prepare_message(recipient_id, dsm::types::operations::Operation::Noop, 1)
+        .create_prepare_message(recipient_id, dsm::types::operations::Operation::Noop)
         .await
         .unwrap_or_else(|e| panic!("prepare payload failed: {e}"));
     let chunks = coord
@@ -151,24 +137,12 @@ async fn ble_smoke_multi_chunk_roundtrip() {
     // Exercise multi-chunk framing (> MAX_BLE_CHUNK_SIZE = 180) and verify
     // reassembly + fallback path returns original payload.
     let device_id = [0x55; 32];
-    let genesis_hash = [0x66; 32];
-    let keypair = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[0x03; 32])
-        .unwrap_or_else(|e| panic!("generate keypair failed: {e}"));
 
     // Large payload (pseudo-random pattern) > 3 chunks (e.g., 560 bytes)
     let mut payload = Vec::with_capacity(560);
     for i in 0..560u32 {
         payload.push((i.wrapping_mul(1315423911) & 0xFF) as u8);
     }
-
-    // Minimal contact manager (no verified contact ensures fallback triggers for BilateralPrepare)
-    let contact_manager = dsm::core::contact_manager::DsmContactManager::new(device_id, vec![]);
-    let _manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-        contact_manager,
-        keypair,
-        device_id,
-        genesis_hash,
-    )));
 
     let coord = BleFrameCoordinator::new(device_id);
 
@@ -210,23 +184,8 @@ async fn ble_smoke_multi_chunk_roundtrip() {
 async fn ble_checksum_mismatch_fails() {
     use sdk::bluetooth::ble_frame_coordinator::BleFrameCoordinator;
     use sdk::generated::{BleChunk, BleFrameType};
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-    use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
-    use dsm::crypto::signatures::SignatureKeyPair;
-    use dsm::core::contact_manager::DsmContactManager;
 
     let device_id = [0xAA; 32];
-    let genesis_hash = [0xBB; 32];
-    let keypair = SignatureKeyPair::generate_from_entropy(&[0x11; 32])
-        .unwrap_or_else(|e| panic!("generate keypair failed: {e}"));
-    let contact_manager = DsmContactManager::new(device_id, vec![]); // no contacts
-    let _manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-        contact_manager,
-        keypair,
-        device_id,
-        genesis_hash,
-    )));
     let coord = BleFrameCoordinator::new(device_id);
 
     // Small payload producing single chunk (easier corruption)

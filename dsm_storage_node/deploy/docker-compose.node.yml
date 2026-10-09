@@ -5,6 +5,9 @@
 #
 # Usage:
 #   docker compose -f docker-compose.node.yml up -d
+#
+# Each service's log is rotated: at most five files of 50 MB, so a client
+# that makes a node log cannot fill its disk.
 
 services:
   postgres:
@@ -23,6 +26,11 @@ services:
       retries: 5
     networks:
       - dsm-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   storage-node:
     image: dsm-storage-node:latest
@@ -32,7 +40,6 @@ services:
         condition: service_healthy
     ports:
       - "${DSM_PORT:-8080}:8080"
-      - "${DSM_METRICS_PORT:-9090}:9090"
     volumes:
       - ./config:/config:ro
       - ./certs:/certs:ro
@@ -47,6 +54,11 @@ services:
       retries: 3
     networks:
       - dsm-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   pgdata:

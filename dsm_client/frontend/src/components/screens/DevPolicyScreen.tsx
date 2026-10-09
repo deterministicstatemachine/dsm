@@ -1,55 +1,60 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, security/detect-object-injection, security/detect-unsafe-regex, no-console, react-hooks/exhaustive-deps */
 // SPDX-License-Identifier: Apache-2.0
-import React, { useState, useMemo } from 'react';
+// Policy tools (developer options): the token-creation wizard, and publishing
+// a TokenPolicyV3 exactly as pasted. Rust refuses bytes Core's policy parser
+// does not accept; the anchor is the BLAKE3 hash of the bytes.
+import React, { useState, useMemo, useCallback } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { TokenCreationDialog } from '../TokenCreationDialog';
 import { useDpadNav } from '../../hooks/useDpadNav';
-import './SettingsScreen.css';
+import { Notice, ScreenFrame } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
 
-export default function DevPolicyScreen(): JSX.Element {
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+export default function DevPolicyScreen(): React.JSX.Element {
   const [policyBase32, setPolicyBase32] = useState('');
-  const [status, setStatus] = useState<string>('');
+  const [status, setStatus] = useState<{ kind: 'info' | 'error' | 'success'; text: string } | null>(null);
   const [isCreationDialogOpen, setIsCreationDialogOpen] = useState(false);
-  const examplePolicyBase32 =
-    '189P8SBP81JQGRBDE1P6ABK9DSV62V39CG91J2GQ189P8SBP81JQGRBDE1P6ABK9DSV62V39CG8024GR38B0M13DD5Q782G4C9TQ4VGA11T74RBEEDK6AWGT3G50CTBKEDTPAWGJ0S4Q6WVNCNS1M13DD5Q786G4C9TQ4VGT3850CT3FDHJ6AWGJ0S46YV34CNS1M23ME9GPWWV6CNS0';
 
-  const pasteFromClipboard = async () => {
+  const pasteFromClipboard = useCallback(async () => {
     try {
       if (!navigator?.clipboard?.readText) {
-        setStatus('Clipboard API unavailable; paste manually.');
+        setStatus({ kind: 'error', text: 'Clipboard API unavailable; paste manually.' });
         return;
       }
       const txt = await navigator.clipboard.readText();
       if (!txt) {
-        setStatus('Clipboard empty');
+        setStatus({ kind: 'info', text: 'Clipboard empty' });
         return;
       }
       setPolicyBase32(txt.trim());
-      setStatus('Pasted from clipboard');
-    } catch (e: any) {
-      setStatus(e?.message || 'Clipboard read failed');
+      setStatus({ kind: 'success', text: 'Pasted from clipboard' });
+    } catch (e) {
+      setStatus({ kind: 'error', text: messageOf(e) || 'Clipboard read failed' });
     }
-  };
+  }, []);
 
-  const handlePublish = async () => {
-    setStatus('');
+  const handlePublish = useCallback(async () => {
+    setStatus(null);
     try {
       const out = await dsmClient.publishTokenPolicy({ policyBase32 });
-      setStatus(out?.success ? `Policy published: ${out?.id ?? 'ok'}` : `Publish failed: ${out?.error ?? 'unknown'}`);
-    } catch (e: any) {
-      setStatus(e?.message || 'Policy publish failed');
+      setStatus(out.success
+        ? { kind: 'success', text: `Policy published: ${out.id}` }
+        : { kind: 'error', text: `Publish failed: ${out.error}` });
+    } catch (e) {
+      setStatus({ kind: 'error', text: messageOf(e) || 'Policy publish failed' });
     }
-  };
+  }, [policyBase32]);
 
   // --- D-pad navigation ---
-  // Items: Create Token Policy (0), Publish Policy (1), Load Example (2), Paste from Clipboard (3)
+  // Items: Create Token (0), Publish Policy (1), Paste from Clipboard (2)
   const navActions = useMemo(() => [
     () => setIsCreationDialogOpen(true),
     () => void handlePublish(),
-    () => setPolicyBase32(examplePolicyBase32),
     () => void pasteFromClipboard(),
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [policyBase32]);
+  ], [handlePublish, pasteFromClipboard]);
 
   const { focusedIndex } = useDpadNav({
     itemCount: navActions.length,
@@ -59,71 +64,72 @@ export default function DevPolicyScreen(): JSX.Element {
   const fc = (idx: number) => (idx === focusedIndex ? ' focused' : '');
 
   return (
-    <div className="settings-shell settings-shell--dev">
-      <div className="settings-shell__title">Policy Tools</div>
+    <ScreenFrame
+      title="Policy Tools"
+      info={(
+        <InfoTip title="Policy tools">
+          <p><b>Create Token</b> is the same wizard as Tokens → Create Token: it defines the token&apos;s CPTA policy (supply, ticker, decimals, burn authority), anchors it, and creates the token bound to that anchor. A token&apos;s whole supply exists at creation; nothing mints more.</p>
+          <p><b>Publish Policy</b> takes the Base32 (Crockford) encoding of serialized TokenPolicyV3 bytes and publishes them exactly as pasted. Rust refuses bytes Core&apos;s policy parser does not accept. The anchor is the BLAKE3 hash of the bytes.</p>
+        </InfoTip>
+      )}
+      banner={status ? (
+        <Notice banner kind={status.kind} onClose={() => setStatus(null)}>{status.text}</Notice>
+      ) : null}
+    >
+      <section className="sb-card">
+        <div className="sb-card__title">Create a token</div>
+        <p className="sb-hint">The same wizard as Tokens → Create Token: your ticker, name, coin and supply.</p>
+        <button
+          type="button"
+          className={`sb-btn sb-btn--primary sb-btn--block${fc(0)}`}
+          onClick={() => setIsCreationDialogOpen(true)}
+        >
+          Create Token
+        </button>
+      </section>
 
-      <div className="settings-shell__panel">
-         <button
-           className={`settings-shell__button${fc(0)}`}
-           onClick={() => setIsCreationDialogOpen(true)}
-           style={{ width: '100%', marginBottom: 4 }}
-         >
-           Create Token (advanced)
-         </button>
-         <div style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
-          Same wizard as Tokens → + CREATE TOKEN. Defines the token&apos;s CPTA policy (supply, ticker, decimals, mint/burn authority), anchors it, and creates the token bound to that anchor.
-         </div>
-      </div>
-
-      <div className="settings-shell__stack">
-        <div style={{ fontSize: 10, lineHeight: 1.4, color: 'var(--text-dark)', display: 'grid', gap: 4 }}>
-          <div>
-            Paste the Base32 (Crockford) encoding of a <strong>CanonicalPolicy</strong> protobuf message. The bytes must already be serialized via the proto definition (no JSON/YAML). If the payload is not a valid CanonicalPolicy, publish will fail with a clear error.
-          </div>
-          <div style={{ display: 'grid', gap: 2, marginLeft: 8 }}>
-            <div><strong>How to build a CanonicalPolicy</strong></div>
-            <div>1) Set <code>author</code> to your canonical identity string.</div>
-            <div>2) Define <code>roles</code> with stable <code>id</code>, human-readable <code>name</code>, and sorted <code>permissions</code> (e.g., mint, burn, transfer).</div>
-            <div>3) Add <code>conditions</code> (choose oneof per entry): identity constraints, vault enforcement, operation restrictions, geographic or logical time constraints, emissions schedule, credit bundle policy, or custom constraints.</div>
-            <div>4) Serialize the message via the protobuf schema (<code>proto/dsm_app.proto</code> &rarr; message <code>CanonicalPolicy</code>) and Base32-Crockford encode the resulting bytes.</div>
-            <div style={{ marginTop: 2 }}>
-              Termux/CLI helper (from <code>dsm_client/frontend</code>):
-              <div style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                <code>{`npx ts-node -O '{"module":"commonjs","esModuleInterop":true}' scripts/examples/gen_canonical_policy.ts`}</code>
-              </div>
-              Create your own script by importing <code>CanonicalPolicy</code> and <code>encodeBase32Crockford</code> from <code>src/utils/textId</code>, then printing <code>encodeBase32Crockford(policy.toBinary())</code>.
-            </div>
-          </div>
+      <section className="sb-card">
+        <div className="sb-card__title">Publish a policy (advanced)</div>
+        <p className="sb-hint">Serialized TokenPolicyV3 bytes, published exactly as pasted.</p>
+        <div className="sb-field">
+          <label htmlFor="policy-base32">TokenPolicyV3 bytes, Base32 Crockford</label>
+          <textarea
+            id="policy-base32"
+            className="sb-input sb-input--mono"
+            value={policyBase32}
+            onChange={(e) => setPolicyBase32(e.target.value)}
+            rows={6}
+            spellCheck={false}
+          />
         </div>
-        <label style={{ fontSize: 10 }}>
-          Token Policy (Base32 Crockford of CanonicalPolicy proto bytes)
-          <textarea className="settings-input" value={policyBase32} onChange={e => setPolicyBase32(e.target.value)} rows={8} style={{ width: '100%', padding: 6, fontFamily: 'monospace', fontSize: 10, background: 'var(--bg)', color: 'var(--text-dark)', border: '2px solid var(--border)', borderRadius: '4px', outline: 'none' }} />
-        </label>
-        <div className="settings-shell__button-row">
-          <button className={`settings-shell__button${fc(1)}`} onClick={() => void handlePublish()} style={{ fontSize: '9px' }}>Publish Policy</button>
-          <button className={`settings-shell__button${fc(2)}`} onClick={() => setPolicyBase32(examplePolicyBase32)} style={{ fontSize: '9px', background: 'var(--bg-secondary)', color: 'var(--text-dark)' }}>Load Example CanonicalPolicy</button>
-          <button className={`settings-shell__button${fc(3)}`} onClick={() => void pasteFromClipboard()} style={{ fontSize: '9px', background: 'var(--bg-secondary)', color: 'var(--text-dark)' }}>Paste from Clipboard</button>
+        <div className="sb-actions" style={{ margin: 0 }}>
+          <button
+            type="button"
+            className={`sb-btn${fc(2)}`}
+            onClick={() => void pasteFromClipboard()}
+          >
+            Paste
+          </button>
+          <button
+            type="button"
+            className={`sb-btn sb-btn--primary${fc(1)}`}
+            onClick={() => void handlePublish()}
+            disabled={!policyBase32.trim()}
+          >
+            Publish Policy
+          </button>
         </div>
-        <div className="settings-shell__info">
-          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>Example CanonicalPolicy (Base32)</div>
-          <div className="settings-shell__mono">{examplePolicyBase32}</div>
-          <div style={{ marginTop: 4 }}>
-            Fields: author=<code>dev@example.invalid</code>, roles [issuer: mint/burn, holder: transfer], conditions [identity constraint allowing dev@example.invalid (and derived), operation restriction allowing mint/burn/transfer].
-          </div>
-        </div>
-        {status && <div className="settings-shell__status">{status}</div>}
-      </div>
-      <div className="settings-shell__hint">Press B to go back</div>
+      </section>
 
       {isCreationDialogOpen && (
         <TokenCreationDialog
           onClose={() => setIsCreationDialogOpen(false)}
           onSuccess={() => {
-            setStatus('Token created successfully via interactive dialog');
+            setStatus({ kind: 'success', text: 'Token created' });
             setIsCreationDialogOpen(false);
           }}
         />
       )}
-    </div>
+    </ScreenFrame>
   );
 }

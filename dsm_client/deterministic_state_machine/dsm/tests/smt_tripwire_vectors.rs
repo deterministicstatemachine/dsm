@@ -9,11 +9,8 @@
 
 use dsm::crypto::blake3::dsm_domain_hasher;
 use dsm::merkle::sparse_merkle_tree::{
-    default_node, empty_root, hash_smt_node, SmtInclusionProof, SparseMerkleTree,
+    default_node, empty_root, hash_smt_leaf, hash_smt_node, SmtInclusionProof, SparseMerkleTree,
     DEFAULT_SMT_HEIGHT, ZERO_LEAF,
-};
-use dsm::verification::smt_replace_witness::{
-    hash_smt_leaf, hash_smt_node as witness_hash_node, SmtReplaceWitness,
 };
 use dsm::core::bilateral_transaction_manager::{
     compute_precommit, compute_smt_key, compute_successor_tip,
@@ -43,10 +40,9 @@ const GOLDEN_DEFAULT_NODE_1: &str = "SVRH8ZTRABJ1G040KNKY042R9E3HC8E5ZNBWWF17Q0E
 const GOLDEN_DEVTREE_SINGLE: &str = "32D73DT2ME8YNVD6DFB2DSKZN1R5YYN87ARBBCGZJATC63D24JV0";
 const GOLDEN_INITIAL_TIP: &str = "KKF8ZAT6H6X292YFK5VBM5SCKYB8AR912HD0RN8VNEQVGBCQECR0";
 
-// Beta release (2026-03-29): inclusion proof + smt_replace golden vectors.
+// Beta release (2026-03-29): inclusion proof + first-write golden vectors.
 // These freeze the ZERO_LEAF non-inclusion proof behavior for absent keys
-// and the full smt_replace proof pipeline for first-ever transactions.
-// Placeholder — will be populated on first run with --nocapture.
+// and the root a relationship's first write folds to.
 const GOLDEN_SINGLE_LEAF_ROOT: &str = "Q6E1YEENJDT4ZQ9CN0Y52H144ZTHEB2EW94YTR8Y7BKCJPKKR7W0";
 const GOLDEN_FIRST_TX_POST_ROOT: &str = "Q6E1YEENJDT4ZQ9CN0Y52H144ZTHEB2EW94YTR8Y7BKCJPKKR7W0";
 
@@ -58,7 +54,7 @@ const GOLDEN_FIRST_TX_POST_ROOT: &str = "Q6E1YEENJDT4ZQ9CN0Y52H144ZTHEB2EW94YTR8
 fn golden_tag_smt_node() {
     let left = [0x01u8; 32];
     let right = [0x02u8; 32];
-    let result = witness_hash_node(&left, &right);
+    let result = hash_smt_node(&left, &right);
     assert_eq!(
         to_b32(&result),
         GOLDEN_SMT_NODE,
@@ -320,72 +316,9 @@ fn cross_impl_leaf_hash_consistent() {
     }
 }
 
-#[test]
-fn cross_impl_node_hash_core_vs_witness() {
-    for i in 0u8..100 {
-        let mut left = [0u8; 32];
-        left[0] = i;
-        left[15] = i.wrapping_mul(3);
-        let mut right = [0u8; 32];
-        right[0] = i.wrapping_add(50);
-        right[15] = i.wrapping_mul(11);
-
-        let core_hash = hash_smt_node(&left, &right);
-        let witness_hash = witness_hash_node(&left, &right);
-
-        assert_eq!(
-            core_hash,
-            witness_hash,
-            "sparse_merkle_tree::hash_smt_node and smt_replace_witness::hash_smt_node diverge for pair {i}"
-        );
-    }
-}
-
 // ===========================================================================
 // Serialization
 // ===========================================================================
-
-#[test]
-fn smt_replace_witness_roundtrip() {
-    // Build a witness with 3 steps manually in wire format
-    let step_count: u32 = 3;
-    let mut wire = Vec::new();
-    wire.extend_from_slice(&step_count.to_le_bytes());
-
-    let siblings: [[u8; 32]; 3] = [[0xAA; 32], [0xBB; 32], [0xCC; 32]];
-    let is_lefts: [u8; 3] = [1, 0, 1];
-
-    for i in 0..3 {
-        wire.push(is_lefts[i]);
-        wire.extend_from_slice(&siblings[i]);
-    }
-
-    let witness = SmtReplaceWitness::from_bytes(&wire).expect("valid witness bytes must parse");
-
-    // Re-encode manually and decode again
-    let witness2 = SmtReplaceWitness::from_bytes(&wire).expect("second parse must succeed");
-
-    // Both must produce the same root from an arbitrary leaf
-    let leaf = hash_smt_leaf(&[0x42; 32]);
-    let root1 = witness.recompute_root(&leaf);
-    let root2 = witness2.recompute_root(&leaf);
-    assert_eq!(root1, root2, "witness roundtrip produced different roots");
-
-    // Root must be non-zero (not degenerate)
-    assert_ne!(root1, [0u8; 32], "witness root should not be all zeros");
-}
-
-#[test]
-fn smt_replace_witness_rejects_bad_is_left() {
-    let step_count: u32 = 1;
-    let mut wire = Vec::new();
-    wire.extend_from_slice(&step_count.to_le_bytes());
-    wire.push(2); // invalid: is_left must be 0 or 1
-    wire.extend_from_slice(&[0xDD; 32]);
-
-    let result = SmtReplaceWitness::from_bytes(&wire);
-    assert!(result.is_none(), "witness with is_left=2 must be rejected");
-}
 
 // ===========================================================================
 // Bit Ordering
@@ -457,7 +390,7 @@ fn smt_key_determinism_reversed_args() {
 
 #[test]
 fn golden_inclusion_proof_absent_key() {
-    let smt = SparseMerkleTree::new(256);
+    let smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
 
     let proof = smt
@@ -487,10 +420,10 @@ fn golden_inclusion_proof_absent_key() {
 
 #[test]
 fn golden_inclusion_proof_present_key() {
-    let mut smt = SparseMerkleTree::new(256);
+    let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let value = [0x42u8; 32];
-    smt.update_leaf(&key, &value).expect("insert leaf");
+    smt.update_leaf(&key, &value);
 
     let proof = smt
         .get_inclusion_proof(&key, 256)
@@ -516,56 +449,64 @@ fn golden_inclusion_proof_present_key() {
     );
 }
 
+/// A relationship's first write, to a key the tree does not hold, folds from
+/// the empty root to the golden root: its entry holds nothing before, its
+/// path is a non-inclusion path under the pre-root, and after the write the
+/// tree proves the new tip under the post-root.
 #[test]
-fn golden_smt_replace_first_tx() {
-    let mut smt = SparseMerkleTree::new(256);
+fn golden_first_write_folds_from_the_empty_root() {
+    let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let new_tip = [0x42u8; 32];
 
-    let result = smt.smt_replace(&key, &new_tip).expect("smt_replace");
-
-    // Pre-root is the empty tree root.
+    let pre_root = *smt.root();
     assert_eq!(
-        to_b32(&result.pre_root),
+        to_b32(&pre_root),
         GOLDEN_EMPTY_ROOT_32,
-        "first-tx pre_root must be the empty tree root"
+        "a first write's pre-root is the empty tree root"
+    );
+    let entries = smt
+        .apply_writes(&[(key, new_tip)])
+        .expect("the first write");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].pre, None,
+        "the key held nothing before its first write"
+    );
+    let post_root = *smt.root();
+    assert_eq!(
+        dsm::merkle::batch_fold::verify_batch::<dsm::merkle::sparse_merkle_tree::DeviceSmtHashes>(
+            &pre_root, &entries
+        )
+        .expect("the write folds from the pre-root"),
+        post_root,
+        "the write folds to the tree's root after it"
     );
 
-    // Parent proof: ZERO_LEAF (key absent before insert).
+    let child_proof = smt.get_inclusion_proof(&key, 256).expect("child proof");
     assert_eq!(
-        result.parent_proof.value,
-        Some(ZERO_LEAF),
-        "first-tx parent proof must be ZERO_LEAF"
-    );
-    assert!(
-        SparseMerkleTree::verify_proof_against_root(&result.parent_proof, &result.pre_root),
-        "first-tx parent proof must verify against pre_root"
-    );
-
-    // Child proof: the inserted value.
-    assert_eq!(
-        result.child_proof.value,
+        child_proof.value,
         Some(new_tip),
-        "first-tx child proof must contain the new tip"
+        "the tree holds the new tip after the write"
     );
     assert!(
-        SparseMerkleTree::verify_proof_against_root(&result.child_proof, &result.post_root),
-        "first-tx child proof must verify against post_root"
+        SparseMerkleTree::verify_proof_against_root(&child_proof, &post_root),
+        "the child proof verifies against the post-root"
     );
 
-    let post_root_b32 = to_b32(&result.post_root);
     assert_eq!(
-        post_root_b32, GOLDEN_FIRST_TX_POST_ROOT,
-        "first-tx post_root drifted — smt_replace proof pipeline changed"
+        to_b32(&post_root),
+        GOLDEN_FIRST_TX_POST_ROOT,
+        "first-write post-root drifted — tree structure or leaf hashing changed"
     );
 }
 
 #[test]
 fn golden_proof_serialization_round_trip() {
-    let mut smt = SparseMerkleTree::new(256);
+    let mut smt = SparseMerkleTree::new();
     let key = [0x07u8; 32];
     let value = [0x42u8; 32];
-    smt.update_leaf(&key, &value).expect("insert leaf");
+    smt.update_leaf(&key, &value);
 
     let proof = smt.get_inclusion_proof(&key, 256).expect("proof");
     let bytes = proof.to_bytes();

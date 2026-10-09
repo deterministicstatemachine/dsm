@@ -2,40 +2,38 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
- * E2E UI Coordination Tests — REAL EVERYTHING, __callBin-only mock
+ * E2E UI Coordination Tests — REAL EVERYTHING, sendMessageBin-only mock
  *
  * WHAT THIS PROVES:
  * The ENTIRE TypeScript stack works end-to-end — from React components down to
- * the JNI bridge boundary. The ONLY mock is window.DsmBridge.__callBin, which
+ * the JNI bridge boundary. The ONLY mock is window.DsmBridge.sendMessageBin, which
  * is the actual Android/Kotlin JNI entry point.
  *
  * WHAT'S REAL (NOT MOCKED):
  * - BilateralTransferDialog (REAL React component)
  * - WalletProvider / useWallet (REAL React context with real refreshAll)
  * - UXProvider (REAL)
- * - dsmClient.getAllBalances() → dsm/wallet.ts::getAllBalances() → WebViewBridge::getAllBalancesStrictBridge() → callBin() → __callBin (mock)
- * - dsmClient.getWalletHistory() → dsm/wallet.ts::getWalletHistory() → WebViewBridge::getWalletHistoryStrictBridge() → routerQueryBin() → __callBin (mock)
- * - dsmClient.getIdentity() → dsm/identity.ts::getIdentity() → getHeaders() → getTransportHeadersV3Bin() → __callBin (mock)
- * - dsmClient.isReady() → hasIdentity() → checkIdentityState() → __callBin (mock)
- * - acceptIncomingTransfer() → acceptOfflineTransfer() → acceptBilateralByCommitmentBridge() → callBin() → __callBin (mock)
- * - rejectIncomingTransfer() → rejectOfflineTransfer() → rejectBilateralByCommitmentBridge() → sendBridgeRequestBytes() → __callBin (mock)
+ * - dsmClient.getAllBalances() → dsm/wallet.ts::getAllBalances() → WebViewBridge::getAllBalancesStrictBridge() → callBin() → sendMessageBin (mock)
+ * - dsmClient.getWalletHistory() → dsm/wallet.ts::getWalletHistory() → WebViewBridge::getWalletHistoryStrictBridge() → routerQueryBin() → sendMessageBin (mock)
+ * - dsmClient.getIdentity() → dsm/identity.ts::getIdentity() → getHeaders() → getTransportHeadersV3Bin() → sendMessageBin (mock)
+ * - useTransactions → checkIdentityState() (the native session store)
+ * - acceptIncomingTransfer() → acceptOfflineTransfer() → acceptBilateralByCommitmentBridge() → callBin() → sendMessageBin (mock)
+ * - rejectIncomingTransfer() → rejectOfflineTransfer() → rejectBilateralByCommitmentBridge() → sendBridgeRequestBytes() → sendMessageBin (mock)
  * - EventBridge (REAL — initializeEventBridge)
  * - nativeBridgeAdapter (REAL — initializeNativeBridgeAdapter)
  * - bridgeEvents (REAL pub/sub)
  * - useEventSignal (REAL useSyncExternalStore)
  * - useWalletSync (REAL event→dispatch routing)
- * - BridgeGate (REAL — auto-opens for __callBin paths)
- * - decodeFramedEnvelopeV3, decodeBalancesListResponseStrict (REAL decoders)
+ * - BridgeGate (REAL — auto-opens for sendMessageBin paths)
+ * - decodeFramedEnvelopeV3 (the REAL decoder)
  *
  * COVERAGE:
  * 1. BridgeEventBus — typed delivery, multi-subscriber, error isolation
  * 2. useEventSignal — useSyncExternalStore, no tearing
  * 3. Bilateral event encode/decode roundtrip (protobuf)
- * 4. DOM event → nativeBridgeAdapter → bridgeEvents (REAL adapter)
- * 5. DOM event → EventBridge → bilateral.event (REAL EventBridge)
- * 6. INTEGRATED: Dialog + WalletContext — PREPARE → Accept → COMPLETE → refreshAll → REAL getAllBalances → __callBin → proto decode → balance in DOM
- * 7. INTEGRATED: wallet.sendCommitted → WalletContext refresh trigger only
- * 8. INTEGRATED: Full bilateral sequence through REAL components — EXACT device sequence
+ * 4. DOM event → EventBridge → bilateral.event, and the native lifecycle topics → the bus (REAL EventBridge)
+ * 5. INTEGRATED: Dialog + WalletContext — PREPARE → Accept → COMPLETE → refreshAll → REAL getAllBalances → sendMessageBin → proto decode → balance in DOM
+ * 6. INTEGRATED: Full bilateral sequence through REAL components — EXACT device sequence
  */
 
 import React from 'react';
@@ -45,11 +43,8 @@ import { useEventSignal } from '../bridge/useEventSignal';
 import * as pb from '../proto/dsm_app_pb';
 import { emit as eventBridgeEmit, on as eventBridgeOn, initializeEventBridge } from '../dsm/EventBridge';
 import { initializeNativeBridgeAdapter } from '../bridge/nativeBridgeAdapter';
-import {
-  BilateralEventType,
-  encodeBilateralEventNotification,
-  decodeBilateralEvent,
-} from '../services/bilateral/bilateralEventService';
+import { BilateralEventType, decodeBilateralEvent } from '../services/bilateral/bilateralEventService';
+import { encodeBilateralEventNotification } from './helpers/bilateralEventFixture';
 import { setBridgeInstance } from '../bridge/BridgeRegistry';
 
 let consoleWarnSpy: jest.SpyInstance;
@@ -122,11 +117,21 @@ function frameEnvelope(env: pb.Envelope): Uint8Array {
 }
 
 /** Build FramedEnvelopeV3 containing a BalancesListResponse */
-function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available: bigint }>): Uint8Array {
+function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available: bigint; displayAmount: string }>): Uint8Array {
+  // Complete rows, as balance.list enriches them: the boundary decoder refuses
+  // a row missing its symbol, name or display amount, and a created token's
+  // row without its policy facts. The fixture's tokens are ERA, a protocol
+  // asset on Rust's word, at ERA's two decimals; each row carries the display
+  // form Rust renders for it.
   const balList = balances.map(b => new pb.BalanceGetResponse({
     tokenId: b.tokenId,
     available: b.available as any,
     locked: 0n as any,
+    symbol: b.tokenId,
+    tokenName: b.tokenId,
+    decimals: 2,
+    displayAmount: b.displayAmount,
+    protocolDefined: true,
   } as any));
   const resp = new pb.BalancesListResponse({ balances: balList } as any);
   const env = new pb.Envelope({
@@ -137,12 +142,22 @@ function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available
 }
 
 /** Build FramedEnvelopeV3 containing a WalletHistoryResponse */
-function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountSigned: bigint }>): Uint8Array {
-  const txList = transactions.map(t => new pb.TransactionInfo({
-    id: `tx-${Math.random().toString(36).slice(2, 8)}`,
-    amount: t.amount as any,
-    amountSigned: t.amountSigned as any,
-  } as any));
+function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountSigned: bigint; displayAmount: string }>): Uint8Array {
+  // Complete rows, as wallet.history writes them: the boundary mapper refuses
+  // a row missing any field Rust always sets.
+  const txList = transactions.map((t, i) => new pb.TransactionInfo({
+    id: `tx-${i}`,
+    fromDeviceId: new Uint8Array(32).fill(0x11),
+    toDeviceId: new Uint8Array(32).fill(0x22),
+    tokenId: 'ERA',
+    amount: t.amount,
+    txHash: new Uint8Array(32).fill(0x30 + i),
+    amountSigned: t.amountSigned,
+    txType: pb.TransactionType.TX_TYPE_BILATERAL_OFFLINE,
+    status: 'completed',
+    recipient: 'peer',
+    displayAmount: t.displayAmount,
+  }));
   const resp = new pb.WalletHistoryResponse({ transactions: txList } as any);
   const env = new pb.Envelope({
     version: 3,
@@ -163,33 +178,47 @@ function makeSuccessFramedEnvelope(): Uint8Array {
   return frameEnvelope(env);
 }
 
-// ─── __callBin Mock State ────────────────────────────────────────────────────
+/** The SDK's answer to an accept: the accept envelope it sends the proposer. */
+function makeAcceptFramedEnvelope(): Uint8Array {
+  const env = new pb.Envelope({
+    version: 3,
+    payload: { case: 'bilateralPrepareResponse', value: new pb.BilateralPrepareResponse({}) },
+  } as any);
+  return frameEnvelope(env);
+}
 
-/** Mutable state that tests can modify to change what __callBin returns */
-let balancesState: Array<{ tokenId: string; available: bigint }> = [
-  { tokenId: 'ERA', available: 10000n },
+/** The SDK's answer to a reject: the rejection it sends the proposer. */
+function makeRejectFramedEnvelope(): Uint8Array {
+  const env = new pb.Envelope({
+    version: 3,
+    payload: { case: 'bilateralPrepareReject', value: new pb.BilateralPrepareReject({ reason: 'User rejected transfer' }) },
+  } as any);
+  return frameEnvelope(env);
+}
+
+// ─── sendMessageBin Mock State ────────────────────────────────────────────────────
+
+/** Mutable state that tests can modify to change what sendMessageBin returns */
+let balancesState: Array<{ tokenId: string; available: bigint; displayAmount: string }> = [
+  { tokenId: 'ERA', available: 1000000n, displayAmount: '10000.00' },
 ];
-let historyState: Array<{ amount: bigint; amountSigned: bigint }> = [
-  { amount: 100n, amountSigned: 100n },
+let historyState: Array<{ amount: bigint; amountSigned: bigint; displayAmount: string }> = [
+  { amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' },
 ];
 let capturedMethods: string[] = [];
 
-/** Install a __callBin mock that handles the full protocol */
+/** Install a sendMessageBin mock that handles the full protocol */
 function installCallBinMock() {
   const g = global as any;
   g.window = g.window || {};
 
   const bridge = {
     __binary: true,
-    __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
+    sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
       const { method, payload } = decodeBridgeReq(reqBytes);
       capturedMethods.push(method);
 
       // --- Direct bridge methods ---
-
-      if (method === 'hasIdentityDirect') {
-        return wrapSuccess(new Uint8Array([0x01])); // identity exists
-      }
 
       if (method === 'getTransportHeadersV3Bin') {
         const headers = new pb.Headers({
@@ -207,13 +236,11 @@ function installCallBinMock() {
       }
 
       if (method === 'acceptBilateralByCommitment') {
-        // Returns FramedEnvelopeV3 with success
-        return wrapSuccess(makeSuccessFramedEnvelope());
+        return wrapSuccess(makeAcceptFramedEnvelope());
       }
 
       if (method === 'rejectBilateralByCommitment') {
-        // Returns FramedEnvelopeV3 with success
-        return wrapSuccess(makeSuccessFramedEnvelope());
+        return wrapSuccess(makeRejectFramedEnvelope());
       }
 
       if (method === 'getPreference' || method === 'setPreference') {
@@ -252,15 +279,10 @@ function installCallBinMock() {
       // Default: error for unknown methods
       return wrapError(`Method '${method}' not handled in UI coordination test mock`);
     },
-    sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
-      return bridge.__callBin(reqBytes);
-    },
-    getAppRouterStatus: () => 1,
-    hasIdentityDirect: () => true,
   };
 
+  // The setter registers the bridge with the DI registry and completes it.
   g.window.DsmBridge = bridge;
-  setBridgeInstance(bridge);
 }
 
 // ─── Initialization ──────────────────────────────────────────────────────────
@@ -334,50 +356,16 @@ describe('BridgeEventBus — core event delivery', () => {
     u1(); u2();
   });
 
-  test('bilateral.event delivers Uint8Array payload', () => {
+  test('wallet.bilateralAccepted carries typed payload', () => {
     const spy = jest.fn();
-    const unsub = bridgeEvents.on('bilateral.event', spy);
-    const payload = new Uint8Array([1, 2, 3, 4]);
-    bridgeEvents.emit('bilateral.event', payload);
-    expect(spy).toHaveBeenCalledWith(payload);
+    const unsub = bridgeEvents.on('wallet.bilateralAccepted', spy);
+    const commitmentHash = makeCommitmentHash();
+    const counterpartyDeviceId = makeDeviceId();
+    bridgeEvents.emit('wallet.bilateralAccepted', { commitmentHash, counterpartyDeviceId });
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ commitmentHash, counterpartyDeviceId }));
     unsub();
   });
 
-  test('wallet.bilateralCommitted carries typed payload', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.bilateralCommitted', spy);
-    bridgeEvents.emit('wallet.bilateralCommitted', {
-      commitmentHash: makeCommitmentHash(),
-      counterpartyDeviceId: makeDeviceId(),
-      accepted: true,
-      committed: true,
-    });
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({
-      accepted: true,
-      committed: true,
-    }));
-    unsub();
-  });
-
-  test('wallet.sendCommitted carries balance and tx info', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.sendCommitted', spy);
-    bridgeEvents.emit('wallet.sendCommitted', {
-      success: true,
-      tokenId: 'ERA',
-      newBalance: 9500n,
-      transactionHash: makeTxHash(),
-      toDeviceId: makeDeviceId(),
-      amount: 500n,
-    });
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({
-      success: true,
-      tokenId: 'ERA',
-      newBalance: 9500n,
-      amount: 500n,
-    }));
-    unsub();
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -396,11 +384,11 @@ describe('useEventSignal — React external store integration', () => {
 
   test('increments on bridge event emission', async () => {
     const C: React.FC = () => {
-      const s = useEventSignal('wallet.bilateralCommitted');
+      const s = useEventSignal('wallet.bilateralAccepted');
       return <div data-testid="sig2">{s}</div>;
     };
     const { unmount } = render(<C />);
-    act(() => { bridgeEvents.emit('wallet.bilateralCommitted', {} as any); });
+    act(() => { bridgeEvents.emit('wallet.bilateralAccepted', {} as any); });
     await waitFor(() => {
       expect(parseInt(screen.getByTestId('sig2').textContent || '0')).toBeGreaterThan(0);
     });
@@ -493,71 +481,40 @@ describe('Bilateral event service — encode/decode roundtrip', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 4. nativeBridgeAdapter — REAL DOM → bridgeEvents Translation
-// ═══════════════════════════════════════════════════════════════════════════════
-
-describe('nativeBridgeAdapter — REAL DOM → bridgeEvents translation', () => {
-  test('REAL: dsm-bilateral-committed DOM event → wallet.bilateralCommitted', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.bilateralCommitted', spy);
-    window.dispatchEvent(new CustomEvent('dsm-bilateral-committed', {
-      detail: { commitmentHash: makeCommitmentHash(0x11), counterpartyDeviceId: makeDeviceId(0x22), accepted: true },
-    }));
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ accepted: true }));
-    unsub();
-  });
-
-  test('REAL: dsm-wallet-refresh DOM event → wallet.refresh', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.refresh', spy);
-    window.dispatchEvent(new CustomEvent('dsm-wallet-refresh', { detail: { source: 'dom-test' } }));
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ source: 'dom-test' }));
-    unsub();
-  });
-
-  test('REAL: dsm-wallet-send-committed DOM event → wallet.sendCommitted', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.sendCommitted', spy);
-    window.dispatchEvent(new CustomEvent('dsm-wallet-send-committed', {
-      detail: { success: true, tokenId: 'ERA', newBalance: 5000n, amount: 1000n },
-    }));
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ success: true, tokenId: 'ERA' }));
-    unsub();
-  });
-
-  test('REAL: dsm-identity-ready DOM event → identity.ready', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('identity.ready', spy);
-    document.dispatchEvent(new CustomEvent('dsm-identity-ready'));
-    expect(spy).toHaveBeenCalledTimes(1);
-    unsub();
-  });
-
-  test('REAL: dsm-history-updated DOM event → wallet.historyUpdated', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.historyUpdated', spy);
-    window.dispatchEvent(new CustomEvent('dsm-history-updated'));
-    expect(spy).toHaveBeenCalledTimes(1);
-    unsub();
-  });
-
-  test('REAL: dsm-balances-updated DOM event → wallet.balancesUpdated', () => {
-    const spy = jest.fn();
-    const unsub = bridgeEvents.on('wallet.balancesUpdated', spy);
-    window.dispatchEvent(new CustomEvent('dsm-balances-updated'));
-    expect(spy).toHaveBeenCalledTimes(1);
-    unsub();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 5. EventBridge — REAL DOM → EventBridge → subscribers
+// 4. EventBridge — REAL DOM → EventBridge → subscribers
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('EventBridge — REAL DOM event-bin propagation', () => {
+  // Native lifecycle topics reach the bus from the event bridge directly. They
+  // used to go through DOM events the adapter re-emitted, beside four DOM
+  // events nothing ever dispatched.
+  test('REAL: the native dsm-identity-ready topic → identity.ready on the bus', () => {
+    const spy = jest.fn();
+    const unsub = bridgeEvents.on('identity.ready', spy);
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic: 'dsm-identity-ready', payload: new Uint8Array(0) } }));
+    expect(spy).toHaveBeenCalledTimes(1);
+    unsub();
+  });
+
+  test('REAL: the native dsm-wallet-refresh topic → wallet.refresh from native on the bus', () => {
+    const spy = jest.fn();
+    const unsub = bridgeEvents.on('wallet.refresh', spy);
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic: 'dsm-wallet-refresh', payload: new Uint8Array(0) } }));
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith({ source: 'native' });
+    unsub();
+  });
+
+  test('REAL: the native dsm-env-config-error topic → env.config.error with its message on the bus', () => {
+    const spy = jest.fn();
+    const unsub = bridgeEvents.on('env.config.error', spy);
+    // Built in the window's realm: the event-bin handler takes a Uint8Array of its own.
+    const payload = new Uint8Array(Array.from(new TextEncoder().encode('MISSING_FILE|no dsm_env_config.toml|put one in files/')));
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic: 'dsm-env-config-error', payload } }));
+    expect(spy).toHaveBeenCalledWith({ message: 'no dsm_env_config.toml' });
+    unsub();
+  });
+
   test('REAL: dsm-event-bin with topic=bilateral.event → EventBridge subscribers', () => {
     const spy = jest.fn();
     const unsub = eventBridgeOn('bilateral.event', spy);
@@ -613,14 +570,14 @@ describe('EventBridge — REAL DOM event-bin propagation', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 6. INTEGRATED: BilateralTransferDialog + WalletProvider — __callBin-only Mock
-//    The ENTIRE TypeScript chain is REAL. Only __callBin is mocked.
+// 5. INTEGRATED: BilateralTransferDialog + WalletProvider — sendMessageBin-only Mock
+//    The ENTIRE TypeScript chain is REAL. Only sendMessageBin is mocked.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('INTEGRATED: Full chain with __callBin-only mock', () => {
+describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
   // NO jest.mock() for bilateralEventService — it's REAL!
-  // acceptIncomingTransfer → acceptOfflineTransfer → acceptBilateralByCommitmentBridge → callBin → __callBin (mocked)
-  // rejectIncomingTransfer → rejectOfflineTransfer → rejectBilateralByCommitmentBridge → sendBridgeRequestBytes → __callBin (mocked)
+  // acceptIncomingTransfer → acceptOfflineTransfer → acceptBilateralByCommitmentBridge → callBin → sendMessageBin (mocked)
+  // rejectIncomingTransfer → rejectOfflineTransfer → rejectBilateralByCommitmentBridge → sendBridgeRequestBytes → sendMessageBin (mocked)
 
   // Dynamic imports to avoid module initialization order issues
   let BilateralTransferDialog: any;
@@ -651,7 +608,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
         <span data-testid="i-tx-count">{wallet.transactions?.length ?? 0}</span>
         <span data-testid="i-initialized">{String(wallet.isInitialized)}</span>
         <span data-testid="i-balance-era">
-          {wallet.balances?.find((b: any) => b.tokenId === 'ERA')?.balance?.toString() ?? 'none'}
+          {wallet.balances?.find((b: any) => b.tokenId === 'ERA')?.displayAmount ?? 'none'}
         </span>
       </div>
     );
@@ -672,11 +629,8 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     capturedMethods = [];
 
     // Reset balance and history state
-    balancesState = [{ tokenId: 'ERA', available: 10000n }];
-    historyState = [{ amount: 100n, amountSigned: 100n }];
-
-    // Clear identity cache
-    (global as any).__dsmLastGoodHeaders = { deviceId: undefined, genesisHash: undefined, chainTip: undefined };
+    balancesState = [{ tokenId: 'ERA', available: 1000000n, displayAmount: '10000.00' }];
+    historyState = [{ amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' }];
 
     // Re-install bridge mock (in case previous test modified it)
     installCallBinMock();
@@ -687,28 +641,28 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     jest.useRealTimers();
   });
 
-  test('WalletProvider initializes by calling REAL getAllBalances → __callBin', async () => {
+  test('WalletProvider initializes by calling REAL getAllBalances → sendMessageBin', async () => {
     render(<ProductionLayout />);
     await settleWalletInit();
 
-    // Wait for the REAL init chain: isReady → getIdentity → getAllBalances → getWalletHistory
+    // Wait for the REAL init chain: getIdentity → getAllBalances → getWalletHistory
     await waitFor(() => {
       expect(screen.getByTestId('i-balance-era').textContent).not.toBe('none');
     });
 
-    // The balance came from __callBin via: dsmClient.getAllBalances() → dsm.getAllBalances()
-    // → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict') → __callBin → FramedEnvelopeV3
-    // → decodeBalancesListResponseStrict() → TokenBalanceView[]
+    // The balance came from sendMessageBin via: dsmClient.getAllBalances() → dsm.getAllBalances()
+    // → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict') → sendMessageBin → FramedEnvelopeV3
+    // → decodeFramedEnvelopeV3() → TokenBalanceView[]
     // PROVES the entire decode chain works.
     const balText = screen.getByTestId('i-balance-era').textContent;
-    expect(balText).toBe('10000');
+    expect(balText).toBe('10000.00');
 
-    // Verify __callBin was actually called with the expected methods
+    // Verify sendMessageBin was actually called with the expected methods
     expect(capturedMethods).toContain('getAllBalancesStrict');
     expect(capturedMethods).toContain('getTransportHeadersV3Bin');
   });
 
-  test('PREPARE_RECEIVED → Dialog shows → Accept → REAL acceptIncomingTransfer → __callBin', async () => {
+  test('PREPARE_RECEIVED → Dialog shows → Accept → REAL acceptIncomingTransfer → sendMessageBin', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).not.toBe('none'));
@@ -743,12 +697,12 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     capturedMethods = [];
 
     // Click Accept — calls REAL handleAccept → REAL acceptIncomingTransfer
-    // → REAL acceptOfflineTransfer → REAL acceptBilateralByCommitmentBridge → callBin → __callBin
+    // → REAL acceptOfflineTransfer → REAL acceptBilateralByCommitmentBridge → callBin → sendMessageBin
     await act(async () => {
       fireEvent.click(screen.getByText('Accept'));
     });
 
-    // Verify __callBin received acceptBilateralByCommitment
+    // Verify sendMessageBin received acceptBilateralByCommitment
     expect(capturedMethods).toContain('acceptBilateralByCommitment');
 
     // Dialog clears after successful accept
@@ -757,7 +711,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     });
   });
 
-  test('PREPARE → Reject → REAL rejectIncomingTransfer → __callBin', async () => {
+  test('PREPARE → Reject → REAL rejectIncomingTransfer → sendMessageBin', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).not.toBe('none'));
@@ -781,7 +735,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
       fireEvent.click(screen.getByText('Reject'));
     });
 
-    // Verify __callBin received rejectBilateralByCommitment
+    // Verify sendMessageBin received rejectBilateralByCommitment
     expect(capturedMethods).toContain('rejectBilateralByCommitment');
 
     await waitFor(() => {
@@ -789,10 +743,10 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     });
   });
 
-  test('TRANSFER_COMPLETE → Dialog clears + REAL refreshAll → __callBin returns new balance → DOM updates', async () => {
+  test('TRANSFER_COMPLETE → Dialog clears + REAL refreshAll → sendMessageBin returns new balance → DOM updates', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
+    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000.00'));
 
     // Show dialog first
     act(() => {
@@ -807,12 +761,12 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     });
     await waitFor(() => expect(container.querySelector('.bilateral-transfer-dialog')).not.toBeNull());
 
-    // CHANGE what __callBin returns for the NEXT getAllBalancesStrict call
+    // CHANGE what sendMessageBin returns for the NEXT getAllBalancesStrict call
     // This simulates the balance updating in the native layer after transfer
-    balancesState = [{ tokenId: 'ERA', available: 10300n }];
+    balancesState = [{ tokenId: 'ERA', available: 1030000n, displayAmount: '10300.00' }];
     historyState = [
-      { amount: 300n, amountSigned: 300n },
-      { amount: 100n, amountSigned: 100n },
+      { amount: 30000n, amountSigned: 30000n, displayAmount: '300.00' },
+      { amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' },
     ];
 
     capturedMethods = [];
@@ -820,8 +774,8 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     // Emit TRANSFER_COMPLETE — this is the critical moment:
     // BilateralTransferDialog.handleComplete → refreshAll() → WalletProvider's REAL refreshAll()
     // → dsmClient.getAllBalances() → dsm.getAllBalances() → getAllBalancesStrictBridge()
-    // → callBin('getAllBalancesStrict') → __callBin → FramedEnvelopeV3(10300)
-    // → decodeBalancesListResponseStrict() → mapBalanceList() → dispatch SET_BALANCES → DOM updates
+    // → callBin('getAllBalancesStrict') → sendMessageBin → FramedEnvelopeV3(10300)
+    // → getAllBalances() → TokenBalanceView[] → walletStore → DOM updates
     act(() => {
       eventBridgeEmit('bilateral.event', encodeBilateralEventNotification({
         eventType: BilateralEventType.TRANSFER_COMPLETE,
@@ -834,19 +788,19 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     // Dialog should be cleared
     await waitFor(() => expect(container.querySelector('.bilateral-transfer-dialog')).toBeNull());
 
-    // KEY ASSERTION: __callBin was called for the refresh
+    // KEY ASSERTION: sendMessageBin was called for the refresh
     await waitFor(() => {
       expect(capturedMethods).toContain('getAllBalancesStrict');
     });
 
-    // KEY ASSERTION: The new balance (10300) from __callBin should appear in the DOM
+    // KEY ASSERTION: The new balance (10300) from sendMessageBin should appear in the DOM
     // This proves the ENTIRE chain works:
     // TRANSFER_COMPLETE event → Dialog.handleComplete → refreshAll() → dsmClient.getAllBalances()
     // → dsm/wallet.ts::getAllBalances() → getAllBalancesStrictBridge() → callBin('getAllBalancesStrict')
-    // → __callBin → BridgeRpcResponse → unwrapProtobufResponse → FramedEnvelopeV3
-    // → decodeBalancesListResponseStrict → TokenBalanceView[] → mapBalanceList → dispatch SET_BALANCES → DOM
+    // → sendMessageBin → BridgeRpcResponse → unwrapProtobufResponse → FramedEnvelopeV3
+    // → getAllBalances → TokenBalanceView[] → walletStore → DOM
     await waitFor(() => {
-      expect(screen.getByTestId('i-balance-era').textContent).toBe('10300');
+      expect(screen.getByTestId('i-balance-era').textContent).toBe('10300.00');
     });
 
     // Transaction count should reflect updated history
@@ -858,7 +812,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
   test('REJECTED clears dialog WITHOUT triggering balance refresh', async () => {
     const { container } = render(<ProductionLayout />);
     await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
+    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000.00'));
 
     act(() => {
       eventBridgeEmit('bilateral.event', encodeBilateralEventNotification({
@@ -963,67 +917,40 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     await waitFor(() => expect(container.querySelector('.bilateral-transfer-overlay')).not.toBeNull());
   });
 
-  test('wallet.bilateralCommitted → WalletProvider refreshes (REAL __callBin round trip)', async () => {
+  test('an accepted transfer → WalletProvider refreshes on the accept path’s wallet.refresh (REAL sendMessageBin round trip)', async () => {
     render(<ProductionLayout />);
     await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
+    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000.00'));
 
-    // Change what __callBin will return on next balance fetch
-    balancesState = [{ tokenId: 'ERA', available: 10500n }];
+    // Change what sendMessageBin will return on next balance fetch
+    balancesState = [{ tokenId: 'ERA', available: 1050000n, displayAmount: '10500.00' }];
     capturedMethods = [];
 
-    // Emit wallet.bilateralCommitted — useEventSignal triggers refreshAll
+    // What the accept path emits: the accepted signal (the toast's trigger)
+    // and its own wallet.refresh (the reload's). The provider reloads on the
+    // second alone.
     act(() => {
-      bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true, committed: true } as any);
+      bridgeEvents.emit('wallet.bilateralAccepted', { commitmentHash: makeCommitmentHash(), counterpartyDeviceId: makeDeviceId() });
+      bridgeEvents.emit('wallet.refresh', { source: 'bilateral.accept_followup' });
     });
 
-    // Wait for REAL getAllBalances → __callBin round trip
+    // Wait for REAL getAllBalances → sendMessageBin round trip
     await waitFor(() => {
       expect(capturedMethods).toContain('getAllBalancesStrict');
     });
 
-    // Balance should update in UI from __callBin's response
+    // Balance should update in UI from sendMessageBin's response
     await waitFor(() => {
-      expect(screen.getByTestId('i-balance-era').textContent).toBe('10500');
+      expect(screen.getByTestId('i-balance-era').textContent).toBe('10500.00');
     });
 
     await settleWalletEffects();
   });
 
-  test('wallet.sendCommitted triggers refresh without frontend-owned balance mutation', async () => {
-    render(<ProductionLayout />);
-    await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
-
-    const initialTxCount = parseInt(screen.getByTestId('i-tx-count').textContent || '0');
-    capturedMethods = [];
-
-    // Emit sendCommitted — simulates what happens after online send completes
-    act(() => {
-      bridgeEvents.emit('wallet.sendCommitted', {
-        success: true,
-        tokenId: 'ERA',
-        newBalance: 9500n,
-        transactionHash: makeTxHash(0x01),
-        toDeviceId: makeDeviceId(0x02),
-        amount: 500n,
-      });
-    });
-
-    await waitFor(() => {
-      expect(capturedMethods).toContain('getAllBalancesStrict');
-      expect(capturedMethods).toContain('nativeBoundaryIngress');
-    });
-
-    expect(screen.getByTestId('i-balance-era').textContent).toBe('10000');
-    expect(parseInt(screen.getByTestId('i-tx-count').textContent || '0')).toBe(initialTxCount);
-
-    await settleWalletEffects();
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 7. INTEGRATED: Full Bilateral Sequence — EXACT Device Event Flow
+// 6. INTEGRATED: Full Bilateral Sequence — EXACT Device Event Flow
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
@@ -1046,7 +973,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
     const w = useWallet();
     return (
       <div>
-        <span data-testid="seq-bal">{w.balances?.find((b: any) => b.tokenId === 'ERA')?.balance?.toString() ?? 'none'}</span>
+        <span data-testid="seq-bal">{w.balances?.find((b: any) => b.tokenId === 'ERA')?.displayAmount ?? 'none'}</span>
         <span data-testid="seq-txs">{w.transactions?.length ?? 0}</span>
       </div>
     );
@@ -1064,9 +991,8 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     capturedMethods = [];
-    balancesState = [{ tokenId: 'ERA', available: 5000n }];
+    balancesState = [{ tokenId: 'ERA', available: 500000n, displayAmount: '5000.00' }];
     historyState = [];
-    (global as any).__dsmLastGoodHeaders = { deviceId: undefined, genesisHash: undefined, chainTip: undefined };
     installCallBinMock();
   });
 
@@ -1075,25 +1001,25 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
     jest.useRealTimers();
   });
 
-  test('EXACT device sequence: PREPARE → show → Accept → __callBin(acceptBilateral) → ACCEPT_SENT → COMMIT → COMPLETE → __callBin(getAllBalancesStrict) → new balance in DOM', async () => {
+  test('EXACT device sequence: PREPARE → show → Accept → sendMessageBin(acceptBilateral) → ACCEPT_SENT → COMMIT → COMPLETE → sendMessageBin(getAllBalancesStrict) → new balance in DOM', async () => {
     /**
      * This test reproduces the EXACT sequence of events from a real BLE transfer.
-     * The ONLY mock is __callBin. Everything else — React components, event bridges,
+     * The ONLY mock is sendMessageBin. Everything else — React components, event bridges,
      * proto encoding/decoding, identity resolution, BridgeGate, WebViewBridge,
      * bilateralEventService, transactions — is ALL REAL.
      */
 
     const { container } = render(<FullApp />);
     await settleWalletInit();
-    await waitFor(() => expect(screen.getByTestId('seq-bal').textContent).toBe('5000'));
+    await waitFor(() => expect(screen.getByTestId('seq-bal').textContent).toBe('5000.00'));
 
     // ──── Step 1: PREPARE_RECEIVED ────
     act(() => {
       eventBridgeEmit('bilateral.event', encodeBilateralEventNotification({
         eventType: BilateralEventType.PREPARE_RECEIVED,
         status: 'pending',
-        message: 'Incoming: 1000 ERA from Device-A',
-        amount: 1000n,
+        message: 'Incoming: 1000.00 ERA from Device-A',
+        amount: 100000n,
         tokenId: 'ERA',
         counterpartyDeviceId: makeDeviceId(0x11),
         commitmentHash: makeCommitmentHash(0x22),
@@ -1107,12 +1033,12 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
       expect(container.textContent).toContain('1000');
     });
 
-    // ──── Step 3: User clicks Accept → REAL acceptIncomingTransfer chain → __callBin ────
+    // ──── Step 3: User clicks Accept → REAL acceptIncomingTransfer chain → sendMessageBin ────
     capturedMethods = [];
     await act(async () => {
       fireEvent.click(screen.getByText('Accept'));
     });
-    // Proves the REAL chain: acceptIncomingTransfer → acceptOfflineTransfer → acceptBilateralByCommitmentBridge → __callBin
+    // Proves the REAL chain: acceptIncomingTransfer → acceptOfflineTransfer → acceptBilateralByCommitmentBridge → sendMessageBin
     expect(capturedMethods).toContain('acceptBilateralByCommitment');
 
     // ──── Step 4: ACCEPT_SENT ────
@@ -1137,9 +1063,9 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
       }));
     });
 
-    // ──── Step 6: TRANSFER_COMPLETE → refreshAll → __callBin(getAllBalancesStrict with new balance) → DOM ────
-    balancesState = [{ tokenId: 'ERA', available: 6000n }];
-    historyState = [{ amount: 1000n, amountSigned: 1000n }];
+    // ──── Step 6: TRANSFER_COMPLETE → refreshAll → sendMessageBin(getAllBalancesStrict with new balance) → DOM ────
+    balancesState = [{ tokenId: 'ERA', available: 600000n, displayAmount: '6000.00' }];
+    historyState = [{ amount: 100000n, amountSigned: 100000n, displayAmount: '1000.00' }];
     capturedMethods = [];
 
     act(() => {
@@ -1147,16 +1073,16 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
         eventType: BilateralEventType.TRANSFER_COMPLETE,
         status: 'completed',
         message: 'Transfer complete!',
-        amount: 1000n,
+        amount: 100000n,
         tokenId: 'ERA',
         commitmentHash: makeCommitmentHash(0x22),
         transactionHash: makeTxHash(0x33),
       }));
     });
 
-    // Balance should reflect the 1000 ERA received (5000 → 6000) via __callBin
+    // Balance should reflect the 1000.00 ERA received (5000.00 → 6000.00) via sendMessageBin
     await waitFor(() => {
-      expect(screen.getByTestId('seq-bal').textContent).toBe('6000');
+      expect(screen.getByTestId('seq-bal').textContent).toBe('6000.00');
     });
 
     // Transaction history should show the transfer
@@ -1164,17 +1090,16 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
       expect(parseInt(screen.getByTestId('seq-txs').textContent || '0')).toBe(1);
     });
 
-    // Verify __callBin was called for the balance refresh
+    // Verify sendMessageBin was called for the balance refresh
     expect(capturedMethods).toContain('getAllBalancesStrict');
 
-    // ──── Step 7: wallet.bilateralCommitted → refresh again via __callBin ────
+    // ──── Step 7: wallet.bilateralAccepted → refresh again via sendMessageBin ────
     capturedMethods = [];
     act(() => {
-      bridgeEvents.emit('wallet.bilateralCommitted', {
+      bridgeEvents.emit('wallet.bilateralAccepted', {
         commitmentHash: makeCommitmentHash(0x22),
-        accepted: true,
-        committed: true,
-      } as any);
+        counterpartyDeviceId: makeDeviceId(),
+      });
     });
 
     await waitFor(() => {
@@ -1186,7 +1111,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 8. Event Ordering & Determinism
+// 7. Event Ordering & Determinism
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Event ordering & determinism', () => {
@@ -1242,7 +1167,7 @@ describe('Event ordering & determinism', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 9. Error Resilience
+// 8. Error Resilience
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Error resilience', () => {
@@ -1263,9 +1188,9 @@ describe('Error resilience', () => {
   test('handler error does not break other handlers', () => {
     const bad = jest.fn(() => { throw new Error('crash'); });
     const good = jest.fn();
-    const u1 = bridgeEvents.on('wallet.bilateralCommitted', bad as any);
-    const u2 = bridgeEvents.on('wallet.bilateralCommitted', good);
-    bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true } as any);
+    const u1 = bridgeEvents.on('wallet.bilateralAccepted', bad as any);
+    const u2 = bridgeEvents.on('wallet.bilateralAccepted', good);
+    bridgeEvents.emit('wallet.bilateralAccepted', { accepted: true } as any);
     expect(bad).toHaveBeenCalled();
     expect(good).toHaveBeenCalled();
     u1(); u2();

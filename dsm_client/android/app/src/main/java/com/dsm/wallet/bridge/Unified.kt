@@ -27,15 +27,13 @@ import androidx.annotation.Keep
 //   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
-//   Identity:  extractGenesisIdentity, recordPeerIdentity
-//   Protocol:  processEnvelopeV3, processEnvelopeV3WithAddress
+//   Protocol:  processEnvelopeV3
 //   Shared boundary: dispatchStartup, dispatchIngress
-//   Bilateral: bilateralOfflineSend, acceptBilateralByCommitment, ...
-//   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
-//   Contacts:  removeContact, handleContactQrV3, hasContactForDeviceId
+//   Bilateral: acceptBilateralByCommitment, ...
+//   BLE:       initBleCoordinator, chunkEnvelopeForBle, ...
+//   Contacts:  hasContactForDeviceId
 //
-// Full method list: See UnifiedNativeApi.kt for all 87+ external declarations.
-// See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
+// Full method list: UnifiedNativeApi.kt holds every external declaration.
 // ============================================================================
 
 /**
@@ -45,23 +43,6 @@ import androidx.annotation.Keep
  * - No reflection-based dispatch; strict surface.
  */
 object Unified {
-
-    /**
-     * Called when a peer's identity (genesis hash + device ID) is read from BLE GATT.
-     * This should be bridged to Rust/JS as needed.
-     */
-    @Keep
-    @JvmStatic
-    fun recordPeerIdentity(address: String, identity: ByteArray) {
-        UnifiedNativeApi.recordPeerIdentity(address, identity)
-    }
-
-    @Keep
-    @JvmStatic
-    fun onPeerIdentityReceived(address: String, identity: ByteArray) {
-        // Forward to native layer to maintain device_id -> BLE address mapping (no hex at app layer)
-        recordPeerIdentity(address, identity)
-    }
 
     init {
         // Load the native library with JNI exports.
@@ -79,8 +60,6 @@ object Unified {
     // ---------- Protobuf-only externals ----------
     @Keep @JvmStatic fun initSdk(baseDir: String): Boolean =
         UnifiedNativeApi.initSdk(baseDir)
-    @Keep @JvmStatic fun initSdkV3(baseDir: String): ByteArray =
-        UnifiedNativeApi.initSdkV3(baseDir)
     @Keep @JvmStatic fun initStorageBaseDir(path: ByteArray) {
         UnifiedNativeApi.initStorageBaseDir(path)
     }
@@ -125,7 +104,7 @@ object Unified {
     // installs the USB anchor appliance factory so offline-bearer sends drive the phone's own
     // physical RP2350/TROPIC01 (v2: the receiver needs NO hardware — this is the entire device
     // install story). Fail-closed: without it every offline-bearer send errors ("offline = chips").
-    // Catch UnsatisfiedLinkError.
+    // `DsmInitProvider` registers it once at app start. Catch UnsatisfiedLinkError.
     @Keep @JvmStatic external fun installAnchorTransport(): Boolean
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
@@ -137,8 +116,6 @@ object Unified {
         UnifiedNativeApi.getTransportHeadersV3()
     @Keep @JvmStatic fun processEnvelopeV3(envelope: ByteArray): ByteArray =
         UnifiedNativeApi.processEnvelopeV3(envelope)
-    @Keep @JvmStatic fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray =
-        UnifiedNativeApi.processEnvelopeV3WithAddress(envelope, deviceAddress)
     /**
      * Fetch all token balances (strict, protobuf-encoded).
      * Returns: ByteArray (protobuf-encoded TokenBalanceView[])
@@ -146,23 +123,8 @@ object Unified {
     @Keep @JvmStatic fun getAllBalancesStrict(): ByteArray =
         UnifiedNativeApi.getAllBalancesStrict()
 
-    /**
-     * Fetch wallet history (strict, protobuf-encoded).
-     * Returns: ByteArray (protobuf-encoded WalletHistoryResponse)
-     */
-    @Keep @JvmStatic fun getWalletHistoryStrict(): ByteArray =
-        UnifiedNativeApi.getWalletHistoryStrict()
 
     // BLE bilateral operations
-    @Keep @JvmStatic fun bilateralOfflineSend(deviceAddress: String, envelope: ByteArray): ByteArray {
-        return UnifiedNativeApi.bilateralOfflineSend(envelope, deviceAddress)
-    }
-
-    /**
-     * Returns the current monotonic tick from the Rust core.
-     * This is the single source of truth for time/ordering in the system.
-     */
-    @Keep @JvmStatic fun nowTick(): Long = UnifiedNativeApi.nowTick()
 
     /**
      * Ensure the AppRouter is installed (safe to call multiple times; idempotent).
@@ -180,26 +142,11 @@ object Unified {
      */
     @Keep @JvmStatic fun getAppRouterStatus(): Int = UnifiedNativeApi.getAppRouterStatus()
 
-    /**
-     * Compute deterministic b0x address for (genesis, deviceId, tip).
-     * All inputs MUST be 32-byte arrays. Returns Base32 Crockford string.
-     */
-    @Keep @JvmStatic fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String =
-        UnifiedNativeApi.computeB0xAddress(genesis, deviceId, tip)
-
     // ---------- BLE unified surface ----------
     @Keep @JvmStatic fun initBleCoordinator(context: android.content.Context) {
         UnifiedBleBridge.initBleCoordinator(context) { eventName, detail ->
             dispatchBlePermissionEvent(eventName, detail)
         }
-    }
-
-    /**
-     * Request a GATT write to the DSM TX characteristic of the given device.
-     * Returns true if the async flow was successfully started.
-     */
-    @Keep @JvmStatic fun requestGattWrite(deviceAddress: String, transactionData: ByteArray): Boolean {
-        return UnifiedBleBridge.requestGattWrite(deviceAddress, transactionData)
     }
 
     /**
@@ -225,16 +172,9 @@ object Unified {
         return UnifiedBleBridge.stopBlePairingScan()
     }
 
-    /**
-     * Stop BLE advertising. Called by Rust pairing loop on exit to prevent lingering advertise.
-     */
-    @Keep @JvmStatic fun stopBlePairingAdvertise(): Boolean {
-        return UnifiedBleBridge.stopBlePairingAdvertise()
-    }
-
     // ---------- Event notifications ----------
-    @Keep @JvmStatic fun bleNotifyConnectionState(address: String, connected: Boolean) {
-        UnifiedNativeApi.bleNotifyConnectionState(address, connected)
+    @Keep @JvmStatic fun bleNotifyLink(deviceId: ByteArray, address: String, up: Boolean) {
+        UnifiedNativeApi.bleNotifyLink(deviceId, address, up)
     }
 
     /**
@@ -268,15 +208,7 @@ object Unified {
     @Keep @JvmStatic fun notifyBleIdentityObserved(address: String, genesisHash: ByteArray, deviceId: ByteArray) {
         UnifiedNativeApi.notifyBleIdentityObserved(address, genesisHash, deviceId)
     }
-    
-    /**
-     * Check if there are any contacts that are not yet BLE-capable (need pairing).
-     * Used to determine if persistent BLE scanning should be active.
-     * Returns true if there are unpaired contacts, false if all contacts are BleCapable.
-     */
-    @Keep @JvmStatic fun hasUnpairedContacts(): Boolean = UnifiedNativeApi.hasUnpairedContacts()
 
-    
     @Keep @JvmStatic fun onDeviceConnected(address: String) {
         UnifiedBleEvents.onDeviceConnected(address)
     }
@@ -338,41 +270,26 @@ object Unified {
         UnifiedNativeApi.encodeIdentityCharValue(genesisHash, deviceId)
 
     /**
-     * Encode the local relationship send-status protobuf for the connected BLE peer.
-     * Rust owns the relationship-readiness logic; Kotlin relays the raw bytes.
-     */
-    @Keep @JvmStatic fun getRelationshipStatusCharValue(bleAddress: String): ByteArray =
-        UnifiedNativeApi.getRelationshipStatusCharValue(bleAddress)
-
-    /**
      * Process raw protobuf bytes read from the GATT identity characteristic.
-     * Rust decodes BleIdentityCharValue, dispatches identity events, and returns
-     * BleGattIdentityReadResult with the write-back envelope.
+     * Rust decodes BleIdentityCharValue, decides by the contact's device id whether
+     * the link re-anchors a paired contact or starts pairing, and returns
+     * BleGattIdentityReadResult (with the write-back envelope when pairing starts).
+     * expectedDeviceId names the appliance a reach is connecting for (empty when the
+     * link is not a reach); any other peer is reported not established and nothing
+     * about it is recorded.
      * Kotlin MUST NOT split or interpret identity bytes.
      */
-    @Keep @JvmStatic fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
-        UnifiedNativeApi.processGattIdentityRead(bleAddress, rawProtoBytes)
-    /**
-     * Observe raw protobuf bytes read from the GATT identity characteristic for an already-paired peer.
-     * Rust re-anchors the peer identity and updates persistence without sending write-back pairing data.
-     */
-    @Keep @JvmStatic fun observeGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
-        UnifiedNativeApi.observeGattIdentityRead(bleAddress, rawProtoBytes)
+    @Keep @JvmStatic fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray, expectedDeviceId: ByteArray): ByteArray =
+        UnifiedNativeApi.processGattIdentityRead(bleAddress, rawProtoBytes, expectedDeviceId)
 
     @Keep @JvmStatic fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray? =
         UnifiedNativeApi.createTransactionErrorEnvelope(address, code, message)
         
-    // ---------- Contact management ----------
-    @Keep @JvmStatic fun removeContact(contactId: String): Byte =
-        UnifiedNativeApi.removeContact(contactId)
-    @Keep @JvmStatic fun handleContactQrV3(contactQrV3Bytes: ByteArray): ByteArray =
-        UnifiedNativeApi.handleContactQrV3(contactQrV3Bytes)
-
     // ---------- Bilateral BLE operations ----------
     
     /**
      * Check if BleFrameCoordinator has been injected and is ready to process BLE chunks.
-     * MUST be called before passing any BLE chunks to processBleChunk to avoid dropping frames.
+     * Rust builds the coordinator during SDK init once an identity exists.
      * Returns true if coordinator is ready, false otherwise.
      */
     @Keep @JvmStatic fun isBleCoordinatorReady(): Boolean = UnifiedNativeApi.isBleCoordinatorReady()
@@ -393,21 +310,6 @@ object Unified {
      */
     @Keep @JvmStatic fun detectEnvelopeFrameType(envelopeBytes: ByteArray): Int =
         UnifiedNativeApi.detectEnvelopeFrameType(envelopeBytes)
-
-    /**
-     * Process incoming BLE chunk (bilateral frame).
-     * Returns empty array if chunk is buffered (multi-chunk reassembly in progress).
-     * Returns response envelope bytes if frame is complete and processed.
-     * 
-     * IMPORTANT: Call isBleCoordinatorReady() before calling this method.
-     * If coordinator is not ready, chunks will be dropped silently.
-     */
-    /**
-     * Process incoming BLE chunk (bilateral frame) for a specific device address.
-     * NOTE: Signature updated to include deviceAddress to match JNI binding in unified_protobuf_bridge.rs
-     */
-    @Keep @JvmStatic fun processBleChunk(deviceAddress: String, chunkBytes: ByteArray): ByteArray =
-        UnifiedNativeApi.processBleChunk(deviceAddress, chunkBytes)
 
     /**
      * Returns true if the payload is a framed Envelope v3 (0x03 prefix) that expects
@@ -438,36 +340,32 @@ object Unified {
         UnifiedNativeApi.identityReadResultGetSuccess(responseProto)
 
     /** Extract write_back_envelope bytes from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic fun identityReadResultExtractWriteBack(responseProto: ByteArray): ByteArray =
+    @Keep @JvmStatic fun identityReadResultExtractWriteBack(responseProto: ByteArray): ByteArray? =
         UnifiedNativeApi.identityReadResultExtractWriteBack(responseProto)
 
     /** Extract peer_device_id (32 bytes) from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray =
+    @Keep @JvmStatic fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray? =
         UnifiedNativeApi.identityReadResultExtractPeerDeviceId(responseProto)
 
     /** Extract peer_genesis_hash (32 bytes) from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray =
+    @Keep @JvmStatic fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray? =
         UnifiedNativeApi.identityReadResultExtractPeerGenesisHash(responseProto)
 
     /**
-     * Called after bilateral prepare succeeds.
-     * deviceAddress: BLE MAC address of recipient
-     * chunks: Array of byte arrays, each containing a protobuf BleChunk
-     * Returns true if async send was successfully initiated.
+     * Send one message's chunks to the appliance deviceId (invoked by Rust). The
+     * device id routes: only a link whose identity is anchored to it carries the
+     * message; with none, the transport reaches for it, trying addressHint (where
+     * it was last seen, possibly empty) first. False is "not delivered now" — the
+     * SDK's frame stays owed.
      */
-    @Keep @JvmStatic fun sendBleChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean =
-        UnifiedNativeApi.sendBleChunks(deviceAddress, chunks)
-
-    /**
-     * Optimized multi-chunk writer invoked by JNI (sendBleChunks) after chunk diagnostics.
-     * Reuses / establishes a SINGLE GATT connection and writes all provided BleChunk protobuf
-     * messages sequentially, advancing only after onCharacteristicWrite callbacks succeed.
-     * Falls back to per-chunk failure envelope on first error.
-     */
-    @Keep @JvmStatic fun requestGattWriteChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean {
-        return UnifiedBleBridge.requestGattWriteChunks(deviceAddress, chunks)
+    @Keep @JvmStatic fun requestGattWriteChunks(deviceId: ByteArray, addressHint: String, chunks: Array<ByteArray>): Boolean {
+        return UnifiedBleBridge.requestGattWriteChunks(deviceId, addressHint, chunks)
     }
 
+    /**
+     * Send a reply on the link, at deviceAddress, that the frame it answers
+     * arrived on. Nothing reconnects for it.
+     */
     @Keep @JvmStatic fun dispatchRustBleFollowUp(deviceAddress: String, chunks: Array<ByteArray>, useReliableWrite: Boolean): Boolean {
         return UnifiedBleBridge.dispatchRustFollowUp(deviceAddress, chunks, useReliableWrite)
     }
@@ -488,24 +386,8 @@ object Unified {
      */
     @Keep @JvmStatic fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray =
         UnifiedNativeApi.rejectBilateralByCommitment(commitmentHashBytes, reason)
-
-    /**
-     * Canonical offline send validation + response generation.
-     * Returns a response Envelope (UniversalRx) with BilateralPrepareResponse results or an error Envelope.
-     * Rust prepends 0x03 framing; both success and error paths return Envelope v3.
-     */
-    @Keep @JvmStatic fun bilateralOfflineSend(envelopeBytes: ByteArray, bleAddress: String): ByteArray =
-        UnifiedNativeApi.bilateralOfflineSend(envelopeBytes, bleAddress)
-
-    /**
-     * Passthrough for bilateralOfflineSend — propagates Rust exceptions to the caller.
-     * Rust returns Envelope v3 (0x03 framed) for both success and error; no status-byte
-     * framing is applied here. Callers should wrap with try/catch.
-     */
-    @Keep @JvmStatic fun bilateralOfflineSendSafe(deviceAddress: String, envelope: ByteArray): ByteArray =
-        bilateralOfflineSend(envelope, deviceAddress)
-
-
+    @Keep @JvmStatic fun cancelBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray =
+        UnifiedNativeApi.cancelBilateralByCommitment(commitmentHashBytes, reason)
 
     // Device + envelope inspection helpers
     @Keep @JvmStatic fun getDeviceIdBin(): ByteArray = UnifiedNativeApi.getDeviceIdBin()
@@ -519,32 +401,9 @@ object Unified {
         try { UnifiedNativeApi.onAppBackgrounded() } catch (_: Throwable) { false }
     @Keep @JvmStatic fun getGenesisHashBin(): ByteArray = UnifiedNativeApi.getGenesisHashBin()
     /**
-     * Get the local signing public key (64 bytes for SPHINCS+ SPX256s).
-     * Used for bilateral transaction verification and QR code generation.
-     * @return 64-byte signing public key or empty array if not initialized
-     */
-    @Keep @JvmStatic fun getSigningPublicKeyBin(): ByteArray =
-        UnifiedNativeApi.getSigningPublicKeyBin()
-    /**
-     * Get the current BLE MAC address for a device_id by searching identity cache.
-     * @param deviceId Raw 32-byte device ID
-     * @return UTF-8 BLE MAC address bytes or empty array if not found/connected
-     */
-    @Keep @JvmStatic fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray =
-        UnifiedNativeApi.resolveBleAddressForDeviceIdBin(deviceId)
-    /**
      * Resolve the persisted peer identity for a BLE address.
      * Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.
      */
-    @Keep @JvmStatic fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray =
-        UnifiedNativeApi.resolvePeerIdentityForBleAddressBin(address)
-    /**
-     * Retrieve 32-byte local chain tip for a remote device (for identity payload composition).
-     * @param deviceAddress MAC address or hex device ID
-     * @return 32-byte chain tip or empty array if unavailable
-     */
-    @Keep @JvmStatic fun getLocalChainTipBin(deviceAddress: String): ByteArray =
-        UnifiedNativeApi.getLocalChainTipBin(deviceAddress)
     @Keep @JvmStatic fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray =
         UnifiedNativeApi.isRejectEnvelope(envelopeBytes)
     @Keep @JvmStatic fun isErrorEnvelope(envelopeBytes: ByteArray): Int =
@@ -575,25 +434,10 @@ object Unified {
         frameType,
         counterpartyDeviceId
     )
-    
-    /**
-     * Force initialization of the BLE frame coordinator if genesis-time injection was skipped.
-     * Returns true if coordinator is present or injected successfully.
-     */
-    @Keep @JvmStatic fun forceBleCoordinatorInit(): Boolean = UnifiedNativeApi.forceBleCoordinatorInit()
 
-    // ---------- Bilateral manual accept gate ----------
-    @Keep @JvmStatic fun setManualAcceptEnabled(enabled: Boolean) {
-        UnifiedNativeApi.setManualAcceptEnabled(enabled)
-    }
-
-    // ---------- BLE diagnostics + retry helpers (non-external; pure-Kotlin wrappers) ----------
+    // ---------- BLE diagnostics helpers (non-external; pure-Kotlin wrappers) ----------
     @Keep @JvmStatic fun getBleStats(deviceAddress: String): ByteArray {
         return UnifiedBleBridge.getBleStats(deviceAddress)
-    }
-
-    @Keep @JvmStatic fun retryLastBleTransaction(deviceAddress: String): Boolean {
-        return UnifiedBleBridge.retryLastBleTransaction(deviceAddress)
     }
 
     // ---------- Bluetooth pairing status API ----------
@@ -623,38 +467,10 @@ object Unified {
         return ready
     }
 
-    // ---------- Runtime JNI surface self-test (non-fatal) ----------
-    /**
-     * Performs lightweight invocation tests of core JNI externals.
-     * Returns binary report: [u32BE count] then per entry [u16BE nameLen][name][ok_byte][u16BE detailLen][detail].
-     * Never throws; failure details captured per entry.
-     */
-    @Keep @JvmStatic fun runNativeBridgeSelfTest(): ByteArray {
-        return UnifiedNativeDiagnostics.runNativeBridgeSelfTest()
-    }
-
     // getCdbrwRuntimeSnapshot() was removed with the Protocol 6.2 collapse.
     // Kotlin no longer computes trust/entropy/Wasserstein on its own — the
     // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot
     // with the same data, and frontend/UI consume that directly.
-
-    // ---------- BLE pairing orchestration (Rust-driven loop) ----------
-
-    /**
-     * Start the Rust pairing orchestrator loop that scans all unpaired contacts
-     * and drives BLE pairing automatically. Fire-and-forget — status updates are
-     * delivered via PairingStatusUpdate BleEvent envelopes through the event bus.
-     */
-    @Keep @JvmStatic fun startPairingAll() {
-        UnifiedNativeApi.startPairingAll()
-    }
-
-    /**
-     * Signal the Rust pairing orchestrator to stop its loop at the next cycle boundary.
-     */
-    @Keep @JvmStatic fun stopPairingAll() {
-        UnifiedNativeApi.stopPairingAll()
-    }
 
     @Keep @JvmStatic fun onConnectionFailed(address: String, reason: String) {
         UnifiedBleEvents.onConnectionFailed(address, reason)

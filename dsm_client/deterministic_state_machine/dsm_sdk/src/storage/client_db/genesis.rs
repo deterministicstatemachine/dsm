@@ -2,7 +2,6 @@
 //! Genesis record persistence and verification.
 
 use anyhow::Result;
-use log::warn;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
@@ -10,15 +9,11 @@ use super::types::GenesisRecord;
 use crate::storage::codecs::{
     encode_genesis_record_bytes, generate_hash_chain_proof_bytes, smt_proof_bytes,
 };
-use crate::util::deterministic_time::tick;
 
 pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<()> {
     let enc = encode_genesis_record_bytes(record);
     let proof_bytes = generate_hash_chain_proof_bytes(&enc);
     let smt_bytes = smt_proof_bytes(record.merkle_root.as_bytes(), &enc);
-    let ts = tick();
-
-    let storage_nodes_text = record.storage_nodes.join(",");
 
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -28,27 +23,23 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
 
     conn.execute(
         "INSERT OR REPLACE INTO genesis_records(
-             genesis_id,device_id,mpc_proof,device_birth_binding,merkle_root,
-             participant_count,chain_tip,publication_hash,storage_nodes,
+             genesis_id,device_id,device_birth_binding,merkle_root,
+             chain_tip,publication_hash,
              entropy_hash,protocol_version,hash_chain_proof,smt_proof,
-             verification_step,created_at,genesis_nonce,genesis_profile,network_id)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+             verification_step,genesis_nonce,genesis_profile,network_id)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             record.genesis_id,
             record.device_id,
-            record.mpc_proof,
             record.device_birth_binding,
             record.merkle_root,
-            record.participant_count as i32,
             record.progress_marker,
             record.publication_hash,
-            storage_nodes_text,
             record.entropy_hash,
             record.protocol_version,
             &proof_bytes as &[u8],
             &smt_bytes as &[u8],
-            ts as i64,
-            ts as i64,
+            record.verification_step.map(|v| v as i64),
             record.genesis_nonce,
             record.genesis_profile,
             record.network_id,
@@ -85,9 +76,6 @@ fn get_verified_genesis_record_where(
         String,
         String,
         String,
-        i32,
-        String,
-        String,
         String,
         String,
         String,
@@ -100,13 +88,13 @@ fn get_verified_genesis_record_where(
     )> = conn
         .query_row(
             &format!(
-                "SELECT genesis_id,device_id,mpc_proof,device_birth_binding,merkle_root,
-                        participant_count,chain_tip,publication_hash,storage_nodes,
+                "SELECT genesis_id,device_id,device_birth_binding,merkle_root,
+                        chain_tip,publication_hash,
                         entropy_hash,protocol_version,hash_chain_proof,smt_proof,
                         verification_step,genesis_nonce,genesis_profile,network_id
                    FROM genesis_records
                  {filter}
-               ORDER BY created_at DESC
+               ORDER BY rowid DESC
                   LIMIT 1"
             ),
             filter_params,
@@ -126,9 +114,6 @@ fn get_verified_genesis_record_where(
                     r.get(11)?,
                     r.get(12)?,
                     r.get(13)?,
-                    r.get(14)?,
-                    r.get(15)?,
-                    r.get(16)?,
                 ))
             },
         )
@@ -137,13 +122,10 @@ fn get_verified_genesis_record_where(
     if let Some((
         id,
         dev,
-        mpc,
         bind,
         root,
-        parts,
         ts,
         pub_hash,
-        nodes_csv,
         ent_hash,
         proto,
         hash_proof,
@@ -154,22 +136,13 @@ fn get_verified_genesis_record_where(
         network_id,
     )) = row
     {
-        let storage_nodes: Vec<String> = if nodes_csv.is_empty() {
-            Vec::new()
-        } else {
-            nodes_csv.split(",").map(|s| s.trim().to_string()).collect()
-        };
-
         let rec = GenesisRecord {
             genesis_id: id.clone(),
             device_id: dev,
-            mpc_proof: mpc,
             device_birth_binding: bind,
             merkle_root: root.clone(),
-            participant_count: parts as u32,
             progress_marker: ts,
             publication_hash: pub_hash,
-            storage_nodes,
             entropy_hash: ent_hash,
             protocol_version: proto,
             hash_chain_proof: hash_proof.clone(),
@@ -184,7 +157,9 @@ fn get_verified_genesis_record_where(
             let enc = encode_genesis_record_bytes(&rec);
             let recomputed = generate_hash_chain_proof_bytes(&enc);
             if proof.as_slice() != recomputed.as_slice() {
-                warn!("Genesis hash-chain proof FAILED");
+                return Err(anyhow::anyhow!(
+                    "genesis record {id}: its stored hash-chain proof does not recompute"
+                ));
             }
         }
         return Ok(Some(rec));
@@ -198,7 +173,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -207,13 +182,10 @@ mod tests {
         GenesisRecord {
             genesis_id: "gen-test-001".into(),
             device_id: "dev-test-001".into(),
-            mpc_proof: "mpc-proof-data".into(),
             device_birth_binding: "binding-data".into(),
             merkle_root: "merkle-root-hash".into(),
-            participant_count: 5,
             progress_marker: "PM".into(),
             publication_hash: "pub-hash".into(),
-            storage_nodes: vec!["node-a".into(), "node-b".into(), "node-c".into()],
             entropy_hash: "entropy".into(),
             protocol_version: "2.0.0".into(),
             hash_chain_proof: None,
@@ -266,9 +238,7 @@ mod tests {
             .expect("genesis record exists");
         assert_eq!(loaded.genesis_id, "gen-test-001");
         assert_eq!(loaded.device_id, "dev-test-001");
-        assert_eq!(loaded.participant_count, 5);
         assert_eq!(loaded.protocol_version, "2.0.0");
-        assert_eq!(loaded.storage_nodes, vec!["node-a", "node-b", "node-c"]);
         assert!(loaded.hash_chain_proof.is_some());
         assert!(loaded.smt_proof.is_some());
     }

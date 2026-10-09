@@ -11,7 +11,6 @@
 
 import * as ble from "./ble";
 import * as bilateral from "./bilateral";
-import * as devtree from "./devtree";
 import * as diagnostics from "./diagnostics";
 import * as events from "./events";
 import * as genesis from "./genesis";
@@ -28,7 +27,6 @@ export const {
   callBin,
   mustBridge,
   normalizeToBytes,
-  processEnvelopeV3Bin,
   queryTransportHeadersV3,
   routerInvokeBin,
   routerQueryBin,
@@ -38,43 +36,34 @@ export const {
 
 export const {
   openBluetoothSettings,
-  readPeerRelationshipStatusBridge,
   requestBlePermissions,
-  resolveBleAddressForDeviceIdBridge,
-  setBleIdentityForAdvertising,
-  startBleAdvertisingViaRouter,
-  startBleScanViaRouter,
-  startPairingAll,
-  stopBleAdvertisingViaRouter,
-  stopBleScanViaRouter,
-  stopPairingAll,
 } = ble;
 
 export const {
   acceptBilateralByCommitmentBridge,
+  cancelBilateralByCommitmentBridge,
   rejectBilateralByCommitmentBridge,
 } = bilateral;
 
 export const {
-  computeB0xAddressBridge,
   getArchitectureInfo,
   getDeviceIdBinBridgeAsync,
-  getDiagnosticsLogStrict,
-  getRouterStatusBridge,
-  getSigningPublicKeyBinBridgeAsync,
-  runNativeBridgeSelfTest,
+  getDiagnosticsLog,
+  returnToConnectCaller,
+  shareDiagnosticsReport,
 } = diagnostics;
 
 export const { addDsmEventListener } = events;
-export const { addSecondaryDeviceBin, createGenesisViaRouter, generateMnemonic } = genesis;
+export const { createGenesisViaRouter, generateMnemonic } = genesis;
 
-export const { fetchDeviceTreeSnapshot } = devtree;
 export const { getPreference, setPreference } = preferences;
 export const {
+  applySessionSnapshot,
   configureLockViaRouter,
   lockSessionViaRouter,
-  unlockSessionViaRouter,
+  tryUnlockViaRouter,
 } = sessionLock;
+export type { UnlockKey } from "./sessionLock";
 
 export const {
   getAllBalancesStrictBridge,
@@ -82,13 +71,10 @@ export const {
   getInboxStrictBridge,
   getPendingBilateralListStrictBridge,
   getWalletHistoryStrictBridge,
-  syncWithStorageStrictBridge,
 } = strictQueries;
 
 export const { startNativeQrScannerViaRouter } = qr;
 export const {
   addTokenByAnchor,
-  getTokenPolicyBytes,
-  listCachedTokenPolicies,
   publishTokenPolicyBytes,
 } = tokenPolicy;

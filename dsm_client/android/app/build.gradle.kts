@@ -66,8 +66,8 @@ android {
         applicationId = "com.dsm.wallet"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.0-beta.3"
+        versionCode = 4
+        versionName = "0.1.0-beta.4"
 
         // Instrumentation runner for androidTest
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -176,6 +176,17 @@ android {
     }
 
     testOptions {
+        // Gradle managed device for the instrumented suite in CI (device-local
+        // tests only; `@RealHardware` classes are excluded by runner argument).
+        managedDevices {
+            localDevices {
+                create("pixel6Api34") {
+                    device = "Pixel 6"
+                    apiLevel = 34
+                    systemImageSource = "aosp-atd"
+                }
+            }
+        }
         unitTests {
             isIncludeAndroidResources = true
             // Many Android platform APIs in unit tests don't have real implementations; returning defaults makes tests less flaky
@@ -265,8 +276,6 @@ tasks.register("failOnJsonOrB64") {
         fileTree("src").matching {
             include("**/*.kt", "**/*.java")
             exclude("**/build/**")
-            // Allow JSON in infrastructure plumbing (event dispatch, MCP serialization)
-            exclude("**/EventPoller.kt", "**/McpService.kt")
         }.files.forEach { f ->
             val t = f.readText()
             if (rx.containsMatchIn(t)) {
@@ -285,6 +294,24 @@ tasks.register("failOnJsonOrB64") {
 
 tasks.named("preBuild").configure {
     dependsOn("failOnJsonOrB64")
+}
+
+// The build refuses what scripts/real_code_guard.py forbids anywhere under dsm_client/android:
+// a source line holding one of its tokens that the baseline does not already record fails it.
+val realCodeGuard = tasks.register<Exec>("realCodeGuard") {
+    val repoRoot = rootProject.projectDir.parentFile.parentFile
+    workingDir = repoRoot
+    commandLine(
+        "python3",
+        "scripts/real_code_guard.py",
+        "--root",
+        repoRoot.absolutePath,
+        "--scope",
+        "dsm_client/android",
+    )
+}
+tasks.named("preBuild").configure {
+    dependsOn(realCodeGuard)
 }
 
 
@@ -476,7 +503,6 @@ dependencies {
     // Reverted upgrades: latest versions require AGP >=8.6 & compileSdk 36.
     // Keep previous stable versions until AGP/toolchain bump planned.
     implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.biometric:biometric:1.1.0")
     // Phase 13: androidx.security:security-crypto dependency removed.
     // The only consumer was `security/CdbrwKeystoreSalt.kt` which
     // wrapped the now-defunct random DBRW salt in

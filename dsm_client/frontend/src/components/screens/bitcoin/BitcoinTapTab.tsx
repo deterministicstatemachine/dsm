@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// BitcoinTapTab — Bitcoin Tap wallet tab (dBTC <-> BTC via HTLC deposits)
-// Orchestrator component delegating to sub-views and hooks.
-import React from 'react';
+// BitcoinTapTab — the Bitcoin tab of the wallet (dBTC <-> BTC via HTLC deposits).
+//
+// Simple by default: one balance, two actions, the receive address and a
+// plain-language activity list. Everything a first-time user does not need —
+// accounts, network, address index, node status, vault internals — sits under
+// a single Advanced fold. Data loading and the sub-views are unchanged.
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { bitcoinNetworkLabel, formatBtc, normalizeBitcoinUiNetwork } from '../../../services/bitcoinTap';
 import { useBitcoinTapData } from './hooks/useBitcoinTapData';
 import { useBitcoinWallet } from './hooks/useBitcoinWallet';
@@ -10,213 +14,305 @@ import WithdrawView from './WithdrawView';
 import WalletAccountsPanel from './WalletAccountsPanel';
 import DepositCard from './DepositCard';
 import VaultCard from './VaultCard';
+import { Disclosure, Notice, scrollToTop } from '../../common/ScreenFrame';
+import { useBackButton } from '../../../hooks/useBackButton';
+import { InfoTip } from '../../common/InfoTip';
+import { isSettledDeposit } from './labels';
 
-export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif' }: { btcLogoSrc?: string }): JSX.Element {
+export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif' }: { btcLogoSrc?: string }): React.JSX.Element {
   const data = useBitcoinTapData();
   const wallet = useBitcoinWallet(data.loadData, data.setWalletMessage);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [showSettled, setShowSettled] = useState(false);
 
-  const activeAccount = data.walletAccounts.find(a => a.active || a.accountId === data.walletActiveId);
-  const activeVaultCount = data.vaults.filter((vault) => vault.state === 'active').length;
+  // A sub-view is a new page. It must not open scrolled to wherever the
+  // button that opened it happened to sit.
+  useEffect(() => {
+    scrollToTop(rootRef.current);
+  }, [data.subView]);
+
+  // B (or Escape) inside Deposit / Withdraw returns to this tab, not to home.
+  useBackButton(data.subView !== 'main', () => data.setSubView('main'));
+
+  const activeAccount = data.walletAccounts.find((a) => a.active || a.accountId === data.walletActiveId);
   const displayAddr = data.addressCache.get(data.selectedIndex) ?? data.address;
   const isPendingIndexChange = data.selectedIndex !== (data.address?.index ?? 0);
   const isWif = activeAccount?.importKind === 'wif';
   const activeNetwork = normalizeBitcoinUiNetwork(activeAccount?.network ?? wallet.globalNetwork);
-  const networkLabel = activeAccount ? bitcoinNetworkLabel(activeAccount.network) : null;
+  const networkLabel = bitcoinNetworkLabel(activeNetwork);
+  const pendingSats = data.balance?.locked ?? 0n;
+  const nativeUnavailable = data.nativeBalance?.source === 'UNAVAILABLE';
+
+  const { inFlight, settled } = useMemo(() => ({
+    inFlight: data.deposits.filter((d) => !isSettledDeposit(d.status)),
+    settled: data.deposits.filter((d) => isSettledDeposit(d.status)),
+  }), [data.deposits]);
+
+  const accountsPanel = (
+    <WalletAccountsPanel
+      walletAccounts={data.walletAccounts}
+      walletActiveId={data.walletActiveId}
+      walletLoading={data.walletLoading}
+      walletMessage={data.walletMessage}
+      globalNetwork={wallet.globalNetwork}
+      setGlobalNetwork={wallet.setGlobalNetwork}
+      walletTab={wallet.walletTab}
+      setWalletTab={wallet.setWalletTab}
+      createLabel={wallet.createLabel}
+      setCreateLabel={wallet.setCreateLabel}
+      createWordCount={wallet.createWordCount}
+      setCreateWordCount={wallet.setCreateWordCount}
+      createLoading={wallet.createLoading}
+      generatedMnemonic={wallet.generatedMnemonic}
+      mnemonicCopied={wallet.mnemonicCopied}
+      mnemonicConfirmed={wallet.mnemonicConfirmed}
+      setMnemonicConfirmed={wallet.setMnemonicConfirmed}
+      importKind={wallet.importKind}
+      setImportKind={wallet.setImportKind}
+      importSecret={wallet.importSecret}
+      setImportSecret={wallet.setImportSecret}
+      importLabel={wallet.importLabel}
+      setImportLabel={wallet.setImportLabel}
+      importStartIndex={wallet.importStartIndex}
+      setImportStartIndex={wallet.setImportStartIndex}
+      handleCreateWallet={wallet.handleCreateWallet}
+      handleImportWallet={wallet.handleImportWallet}
+      handleMnemonicCopy={wallet.handleMnemonicCopy}
+      handleMnemonicDone={wallet.handleMnemonicDone}
+      handleSelectWallet={data.handleSelectWallet}
+    />
+  );
 
   if (data.loading) {
-    return <div style={{ padding: 20, textAlign: 'center', fontSize: 12 }}>Loading Bitcoin Tap...</div>;
+    return <div className="sb-empty">Loading Bitcoin{'…'}</div>;
   }
 
   if (data.subView === 'deposit') {
-    return <DepositView balance={data.balance} nativeBalance={data.nativeBalance} network={activeNetwork} onBack={() => data.setSubView('main')} onRefresh={data.loadData} />;
+    return (
+      <div ref={rootRef}>
+        <DepositView
+          balance={data.balance}
+          nativeBalance={data.nativeBalance}
+          network={activeNetwork}
+          onBack={() => data.setSubView('main')}
+          onRefresh={data.loadData}
+        />
+      </div>
+    );
   }
 
   if (data.subView === 'withdraw') {
-    return <WithdrawView balance={data.balance} nativeBalance={data.nativeBalance} vaults={data.vaults} network={activeNetwork} onBack={() => data.setSubView('main')} onRefresh={data.loadData} />;
+    return (
+      <div ref={rootRef}>
+        <WithdrawView
+          balance={data.balance}
+          nativeBalance={data.nativeBalance}
+          vaults={data.vaults}
+          network={activeNetwork}
+          onBack={() => data.setSubView('main')}
+          onRefresh={data.loadData}
+        />
+      </div>
+    );
   }
 
   return (
-    <div className="bitcoin-tap-tab" style={{ padding: '0 4px' }}>
+    <div className="bitcoin-tap-tab" ref={rootRef}>
       {data.error && (
-        <div style={{ padding: '8px 12px', marginBottom: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 4, fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: 'var(--text-dark)' }}>
-          <span>{data.error}</span>
-          <button onClick={() => data.setError(null)} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 14 }}>x</button>
-        </div>
+        <Notice kind="error" onClose={() => data.setError(null)}>{data.error}</Notice>
       )}
-      {data.nativeBalance && data.nativeBalance.source === 'UNAVAILABLE' && !data.error && (
-        <div style={{ padding: '6px 12px', marginBottom: 8, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: 'var(--text-disabled)' }}>
-          <span>Balance unavailable — check connection</span>
-          <button onClick={() => data.loadData()} style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text-dark)', cursor: 'pointer', fontSize: 10, padding: '2px 8px' }}>Retry</button>
-        </div>
+      {nativeUnavailable && !data.error && (
+        <Notice>
+          Bitcoin balance unavailable. Check your connection.{' '}
+          <button type="button" className="sb-btn sb-btn--small" onClick={() => void data.loadData()}>Retry</button>
+        </Notice>
       )}
 
-      {/* Tap Overview */}
-      <div className="balance-section" style={{ marginBottom: 12 }}>
-        <h3 style={{ margin: '0 0 8px 0', fontSize: 14, fontWeight: 500 }}>Tap Overview</h3>
-        <div className="balance-card btc-tap-summary-card btc-tap-overview-card">
-          <div className="balance-info btc-tap-summary-col">
-            <span className="token-symbol">Wallet</span>
-            <span className="balance-amount btc-tap-summary-amount-sm">{activeAccount ? activeAccount.label : 'Not configured'}</span>
-          </div>
-          <div className="balance-info btc-tap-summary-col btc-tap-summary-col-right">
-            <span className="token-symbol">Tap</span>
-            <span className="balance-amount btc-tap-summary-amount-sm">{activeVaultCount > 0 ? `${activeVaultCount} active` : 'Idle'}</span>
-          </div>
+      {/* The one number that matters, and the on-chain balance it came from. */}
+      <section className="sb-card sb-card--hero" aria-label="dBTC balance">
+        <div className="sb-hero__label">
+          <img src={btcLogoSrc} alt="" />
+          dBTC balance
         </div>
-        {isPendingIndexChange && (
-          <div className="btc-tap-hint">Address index {data.selectedIndex} is preview-only. Click <strong>Use This</strong> before withdrawing.</div>
-        )}
-      </div>
-
-      {/* dBTC Balance */}
-      <div className="balance-section" style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: '0 0 8px 0', fontSize: 14, fontWeight: 500 }}>dBTC Balance (DSM)</h3>
-        <div className="balance-card" style={{ padding: '12px 16px' }}>
-          <div className="balance-info">
-            <span className="token-symbol" style={{ display: 'flex', alignItems: 'center' }}>
-              <img src={btcLogoSrc} alt="dBTC" className="btc-gif small" style={{ flexShrink: 0 }} />dBTC
-            </span>
-            <span className="balance-amount" style={{ fontSize: 16 }}>{data.balance ? formatBtc(data.balance.available) : '0.00000000'}</span>
-          </div>
+        <div className="sb-hero__value">
+          {data.balance ? formatBtc(data.balance.available) : '0.00000000'}
+          <span className="sb-hero__unit">dBTC</span>
         </div>
-        {data.balance && data.balance.locked > 0n && (
-          <div style={{ fontSize: 10, color: 'var(--text-disabled)', marginTop: 4, paddingLeft: 4 }}>Locked in HTLCs: {formatBtc(data.balance.locked)} BTC</div>
+        {pendingSats > 0n && (
+          <div className="sb-hero__sub">{formatBtc(pendingSats)} held for a withdrawal</div>
         )}
-      </div>
-
-      {/* Native BTC Balance */}
-      <div className="balance-section" style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: '0 0 8px 0', fontSize: 14, fontWeight: 500 }}>
-          Native BTC Balance
-          {data.walletHealth?.source && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 600, opacity: 0.85 }}>[{data.walletHealth.source}]</span>}
-          {data.walletHealth?.network && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 400, color: 'var(--text-disabled)', textTransform: 'uppercase' }}>{data.walletHealth.network}</span>}
-        </h3>
-        <div className="balance-card" style={{ padding: '12px 16px' }}>
-          <div className="balance-info">
-            <span className="token-symbol" style={{ display: 'flex', alignItems: 'center' }}>
-              <img src={btcLogoSrc} alt="BTC" className="btc-gif small" style={{ flexShrink: 0 }} />BTC
-            </span>
-            <span className="balance-amount" style={{ fontSize: 16 }}>{data.nativeBalance ? formatBtc(data.nativeBalance.available) : '0.00000000'}</span>
-          </div>
+        <div className="sb-hero__row">
+          <span>On-chain BTC</span>
+          <b>{data.nativeBalance && !nativeUnavailable ? `${formatBtc(data.nativeBalance.available)} BTC` : '—'}</b>
         </div>
         {data.nativeBalance && data.nativeBalance.locked > 0n && (
-          <div style={{ fontSize: 10, color: 'var(--text-disabled)', marginTop: 4, paddingLeft: 4 }}>Pending outgoing: {formatBtc(data.nativeBalance.locked)} BTC</div>
+          <div className="sb-hero__sub">{formatBtc(data.nativeBalance.locked)} BTC leaving</div>
         )}
-        {data.walletHealth && (
-          <div style={{ fontSize: 10, color: 'var(--text-disabled)', marginTop: 6, paddingLeft: 4 }}>
-            {data.walletHealth.source === 'MEMPOOL' ? 'Mempool.space' : 'RPC'}: {data.walletHealth.reachable ? 'Connected' : 'Unavailable'} • Network: {data.walletHealth.network}{data.walletHealth.rpcUrl ? ` • ${data.walletHealth.rpcUrl}` : ''}{data.walletHealth.reason ? ` • ${data.walletHealth.reason}` : ''}
+      </section>
+
+      <div className="sb-actions">
+        <button
+          type="button"
+          className="sb-btn sb-btn--primary"
+          onClick={() => data.setSubView('deposit')}
+          disabled={!activeAccount}
+        >
+          Deposit BTC
+        </button>
+        <button
+          type="button"
+          className="sb-btn"
+          onClick={() => data.setSubView('withdraw')}
+          disabled={!activeAccount || !displayAddr}
+        >
+          Withdraw
+        </button>
+      </div>
+
+      {!activeAccount ? (
+        <section className="sb-card">
+          <div className="sb-card__title">
+            <span>Set up Bitcoin</span>
+            <InfoTip title="Set up Bitcoin" label="About Bitcoin setup">
+              <p>Deposits and withdrawals need a Bitcoin account on this device: it holds the on-chain BTC that becomes dBTC, and the keys that pay a withdrawal out. You type the address each withdrawal goes to.</p>
+              <p><b>New wallet</b> creates one and shows its recovery phrase once. <b>Import</b> takes a recovery phrase, an extended private key or a single key you already have.</p>
+            </InfoTip>
           </div>
-        )}
-      </div>
-
-      {/* Address Section */}
-      <div style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: '0 0 8px 0', fontSize: 14, fontWeight: 500 }}>
-          Your Bitcoin Address
-          {networkLabel && <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 400, color: 'var(--text-disabled)', textTransform: 'uppercase' }}>[{networkLabel}]</span>}
-        </h3>
-        {!activeAccount ? (
-          <div style={{ padding: '12px 14px', border: '1px dashed var(--border)', borderRadius: 8, fontSize: 11, color: 'var(--text-disabled)', textAlign: 'center' }}>
-            No wallet yet — use Bitcoin Accounts below to create one or import an existing one.
+          <p className="sb-hint">Create a new wallet, or import one you already have.</p>
+          {accountsPanel}
+        </section>
+      ) : (
+        <section className="sb-card">
+          <div className="sb-card__title">
+            <span>Your Bitcoin address</span>
+            <span className="sb-tag">{networkLabel}</span>
           </div>
-        ) : (
-          <>
-            {!isWif && (
-              <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
-                <select value={data.selectedIndex} onChange={(e) => void data.handleAddressSelect(Number(e.target.value))} className="form-input" style={{ flex: 1 }}>
-                  {Array.from({ length: 10 }, (_, i) => {
-                    const cached = data.addressCache.get(i);
-                    const preview = cached ? ` (${cached.address.slice(0, 10)}…)` : '';
-                    return <option key={i} value={i}>Address #{i}{preview}</option>;
-                  })}
-                </select>
-                <button onClick={() => void data.handleAddressUse()} className="button-brick" disabled={data.addressSelectLoading || data.selectedIndex === (data.address?.index ?? 0)} style={{ fontSize: 10, padding: '6px 10px', borderRadius: 8, whiteSpace: 'nowrap' }}>
-                  {data.addressSelectLoading ? '...' : 'Use This'}
-                </button>
-              </div>
-            )}
-            <div className="address-display" style={{ padding: '10px 12px' }}>
-              <div className="address-text" style={{ fontSize: 10, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>{displayAddr ? displayAddr.address : '—'}</div>
-              <button onClick={data.handleCopy} className="copy-button button-brick" style={{ fontSize: 10, padding: '6px 10px', borderRadius: 8, whiteSpace: 'nowrap' }} disabled={!displayAddr}>
-                {data.copied ? 'Copied' : 'Copy'}
-              </button>
-            </div>
-            {displayAddr && (
-              <div style={{ fontSize: 9, color: 'var(--text-disabled)', paddingLeft: 4 }}>
-                {isWif ? 'Single-key account — index selection not available' : `Index: ${displayAddr.index}${displayAddr.index === (data.address?.index ?? 0) ? ' • active' : ' • preview only'}`}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* Action Buttons */}
-      <div className="quick-actions" style={{ marginBottom: 16 }}>
-        <button onClick={() => data.setSubView('deposit')} className="action-button button-brick" style={{ fontSize: 11 }}>Deposit (BTC → dBTC)</button>
-        <button onClick={() => data.setSubView('withdraw')} className="action-button button-brick" style={{ fontSize: 11 }} disabled={!activeAccount || !displayAddr}>Withdraw (dBTC → BTC)</button>
-      </div>
-
-      {!activeAccount && (
-        <div className="btc-tap-hint btc-tap-hint-muted" style={{ marginTop: -8, marginBottom: 14 }}>
-          Create or import a Bitcoin account below to enable deposits and withdrawals.
-        </div>
+          <div className="btc-address">
+            <div className="sb-mono">{displayAddr ? displayAddr.address : '—'}</div>
+            <button type="button" className="sb-btn sb-btn--small" onClick={data.handleCopy} disabled={!displayAddr}>
+              {data.copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          {isPendingIndexChange && (
+            <p className="sb-hint sb-hint--tight">
+              Previewing address #{data.selectedIndex}. Choose &ldquo;Use this&rdquo; under Advanced before withdrawing to it.
+            </p>
+          )}
+        </section>
       )}
 
-      {/* Wallet Accounts */}
-      <WalletAccountsPanel
-        walletAccounts={data.walletAccounts}
-        walletActiveId={data.walletActiveId}
-        walletLoading={data.walletLoading}
-        walletMessage={data.walletMessage}
-        globalNetwork={wallet.globalNetwork}
-        setGlobalNetwork={wallet.setGlobalNetwork}
-        walletTab={wallet.walletTab}
-        setWalletTab={wallet.setWalletTab}
-        createLabel={wallet.createLabel}
-        setCreateLabel={wallet.setCreateLabel}
-        createWordCount={wallet.createWordCount}
-        setCreateWordCount={wallet.setCreateWordCount}
-        createLoading={wallet.createLoading}
-        generatedMnemonic={wallet.generatedMnemonic}
-        mnemonicCopied={wallet.mnemonicCopied}
-        mnemonicConfirmed={wallet.mnemonicConfirmed}
-        setMnemonicConfirmed={wallet.setMnemonicConfirmed}
-        importKind={wallet.importKind}
-        setImportKind={wallet.setImportKind}
-        importSecret={wallet.importSecret}
-        setImportSecret={wallet.setImportSecret}
-        importLabel={wallet.importLabel}
-        setImportLabel={wallet.setImportLabel}
-        importStartIndex={wallet.importStartIndex}
-        setImportStartIndex={wallet.setImportStartIndex}
-        handleCreateWallet={wallet.handleCreateWallet}
-        handleImportWallet={wallet.handleImportWallet}
-        handleMnemonicCopy={wallet.handleMnemonicCopy}
-        handleMnemonicDone={wallet.handleMnemonicDone}
-        handleSelectWallet={data.handleSelectWallet}
-      />
+      {data.walletMessage && activeAccount && (
+        <Notice kind={data.walletMessage.startsWith('Error') ? 'error' : 'info'} onClose={() => data.setWalletMessage(null)}>
+          {data.walletMessage}
+        </Notice>
+      )}
 
-      {/* Active Deposits */}
-      {data.deposits.length > 0 && (
-        <div style={{ marginBottom: 16 }}>
-          <h3 style={{ margin: '0 0 8px 0', fontSize: 14, fontWeight: 500 }}>Active Deposits</h3>
-          {data.deposits.map((deposit) => (
+      {(inFlight.length > 0 || settled.length > 0) && (
+        <section>
+          <div className="sb-section-title">Activity</div>
+          {inFlight.map((deposit) => (
             <DepositCard key={deposit.vaultOpId} deposit={deposit} onRefresh={data.loadData} network={activeNetwork} />
           ))}
-        </div>
+          {settled.length > 0 && !showSettled && (
+            <button type="button" className="sb-btn sb-btn--ghost sb-btn--small sb-btn--block" onClick={() => setShowSettled(true)}>
+              Show {settled.length} completed
+            </button>
+          )}
+          {showSettled && settled.map((deposit) => (
+            <DepositCard key={deposit.vaultOpId} deposit={deposit} onRefresh={data.loadData} network={activeNetwork} />
+          ))}
+        </section>
       )}
 
-      {/* Vault Monitor */}
-      {data.vaults.length > 0 && (
-        <div style={{ marginBottom: 16 }}>
-          <h3 style={{ margin: '0 0 8px 0', fontSize: 14, fontWeight: 500, cursor: 'pointer' }} onClick={() => data.setVaultsExpanded(!data.vaultsExpanded)}>
-            {data.vaultsExpanded ? '\u25BC' : '\u25B6'} DLV Vaults ({data.vaults.length})
-          </h3>
-          {data.vaultsExpanded && data.vaults.map((v) => (
-            <VaultCard key={v.vaultId} vault={v} />
-          ))}
+      <Disclosure summary="Advanced" className="btc-advanced">
+        <div className="sb-kv">
+          <span className="sb-kv__k">Network</span>
+          <span className="sb-kv__v">{networkLabel}</span>
         </div>
-      )}
+        {data.walletHealth && (
+          <>
+            <div className="sb-kv">
+              <span className="sb-kv__k">Node</span>
+              <span className="sb-kv__v">
+                {data.walletHealth.source === 'MEMPOOL' ? 'mempool.space' : 'RPC'} {'·'} {data.walletHealth.reachable ? 'connected' : 'unreachable'}
+              </span>
+            </div>
+            {data.walletHealth.rpcUrl && (
+              <div className="sb-kv">
+                <span className="sb-kv__k">Endpoint</span>
+                <span className="sb-kv__v sb-kv__v--mono">{data.walletHealth.rpcUrl}</span>
+              </div>
+            )}
+            {data.walletHealth.reason && <p className="sb-hint sb-hint--tight">{data.walletHealth.reason}</p>}
+          </>
+        )}
+        {pendingSats > 0n && (
+          <div className="sb-kv">
+            <span className="sb-kv__k">Held for withdrawal</span>
+            <span className="sb-kv__v">{formatBtc(pendingSats)} BTC</span>
+          </div>
+        )}
+
+        {activeAccount && !isWif && (
+          <>
+            <div className="sb-titlebar">
+              <div className="sb-section-title">Receive address</div>
+              <InfoTip title="Receive address" label="About receive addresses">
+                <p>Every index is a different address from the same wallet. Funds sent to any of them belong to you; the active one is what this tab shows and copies.</p>
+                <p>Withdrawals go to the address you type in the Withdraw form. Pick an index to preview it, then <b>Use this</b> to make it active.</p>
+              </InfoTip>
+            </div>
+            <div className="sb-input-row">
+              <select
+                className="sb-input sb-input--small"
+                value={data.selectedIndex}
+                onChange={(e) => void data.handleAddressSelect(Number(e.target.value))}
+                aria-label="Receive address index"
+              >
+                {Array.from({ length: 10 }, (_, i) => {
+                  const cached = data.addressCache.get(i);
+                  const preview = cached ? ` (${cached.address.slice(0, 10)}…)` : '';
+                  return <option key={i} value={i}>Address #{i}{preview}</option>;
+                })}
+              </select>
+              <button
+                type="button"
+                className="sb-btn sb-btn--small"
+                onClick={() => void data.handleAddressUse()}
+                disabled={data.addressSelectLoading || !isPendingIndexChange}
+              >
+                {data.addressSelectLoading ? '…' : 'Use this'}
+              </button>
+            </div>
+            <p className="sb-hint sb-hint--tight">Active: #{data.address?.index ?? 0}.</p>
+          </>
+        )}
+        {activeAccount && isWif && (
+          <p className="sb-hint">Single-key account: it has one address.</p>
+        )}
+
+        {activeAccount && (
+          <>
+            <div className="sb-section-title">Bitcoin accounts</div>
+            {accountsPanel}
+          </>
+        )}
+
+        {data.vaults.length > 0 && (
+          <>
+            <div className="sb-titlebar">
+              <div className="sb-section-title">Vaults ({data.vaults.length})</div>
+              <InfoTip title="Vaults" label="About vaults">
+                <p>The on-chain vaults behind your dBTC: each holds BTC locked for a deposit. This list is status only.</p>
+                <p><b>Active</b> vaults back your balance. <b>Pending</b> ones are still confirming. <b>Spent</b> and <b>Void</b> are history. A withdrawal plans itself across the active ones; you never pick one.</p>
+              </InfoTip>
+            </div>
+            {data.vaults.map((v) => (
+              <VaultCard key={v.vaultId} vault={v} />
+            ))}
+          </>
+        )}
+      </Disclosure>
     </div>
   );
 }
