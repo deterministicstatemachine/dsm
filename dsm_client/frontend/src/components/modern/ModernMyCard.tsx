@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// Your own contact card (DSM Amendment A17): the name, and the email and
-// phone you choose to share. It rides on your DSM code, so whoever scans it
-// sees who you are, and can email you a receipt when they pay you.
+// Your own contact card (DSM Amendment A17): your code to scan, and the name,
+// email and phone you choose to share. The card rides on your DSM code, so
+// whoever scans it sees who you are, and can email you a receipt when they
+// pay you. Saving the card shows the code again, since the code carries it.
 
 import React, { useEffect, useState } from 'react';
 import { getOwnProfile, setOwnProfile } from '../../dsm/contacts';
 import type { PersonProfile } from '../../domain/types';
 import { Avatar, PageTitle } from './parts';
 import { modernNav } from './modernNav';
+import ModernMyCode from './ModernMyCode';
 
 const BLANK: PersonProfile = { name: '', email: '', phone: '', phoneLookupKey: '' };
 
@@ -16,6 +18,7 @@ type Card = { kind: 'reading' } | { kind: 'read'; card: PersonProfile } | { kind
 export default function ModernMyCard(): React.JSX.Element {
   const [card, setCard] = useState<Card>({ kind: 'reading' });
   const [said, setSaid] = useState<string | null>(null);
+  const [saves, setSaves] = useState(0);
 
   useEffect(() => {
     let live = 'yes';
@@ -42,6 +45,7 @@ export default function ModernMyCard(): React.JSX.Element {
       (stored) => {
         setCard({ kind: 'read', card: stored });
         setSaid('Saved. Your DSM code now carries it.');
+        setSaves((n) => n + 1);
       },
       (e: unknown) => setSaid(e instanceof Error ? e.message : String(e)),
     );
@@ -50,6 +54,7 @@ export default function ModernMyCard(): React.JSX.Element {
   return (
     <>
       <PageTitle title="My Card" onBack={() => modernNav.back()} />
+      <ModernMyCode key={saves} heading="Your code: let someone scan it to add you." />
       <section className="s-card" style={{ textAlign: 'center' }}>
         <Avatar name={draft.name.length > 0 ? draft.name : '?'} large="large" />
         <div className="s-row-title" style={{ marginTop: 10 }}>{draft.name.length > 0 ? draft.name : 'Your name'}</div>

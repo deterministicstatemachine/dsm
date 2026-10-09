@@ -181,7 +181,10 @@ html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
 
 .s-qr { background: #ffffff; border-radius: 20px; padding: 16px; width: fit-content; margin: 8px auto; }
 .s-qr img { display: block; width: 220px; height: 220px; }
-.s-code { font-size: 15px; font-weight: 700; text-align: center; word-break: break-all; margin: 8px 0 14px; color: var(--s-muted); }
+.s-code-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.4;
+  word-break: break-all; resize: none; color: var(--s-text);
+}
 
 .s-seg { display: grid; grid-auto-flow: column; gap: 6px; background: var(--s-surface-2); border-radius: 14px; padding: 4px; }
 .s-seg button { border: none; border-radius: 10px; padding: 10px; font-weight: 700; font-size: 15px; background: transparent; color: var(--s-text); }
