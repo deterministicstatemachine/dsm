@@ -18,6 +18,7 @@ function Boot({ appState }: { appState: AppState }) {
     <AppContent
       appState={appState}
       skin="classic"
+      choosing="chosen"
       error={null}
       showIntro={showIntro}
       introGifSrc="intro.gif"

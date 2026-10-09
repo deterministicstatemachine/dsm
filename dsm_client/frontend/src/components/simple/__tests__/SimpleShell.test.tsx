@@ -6,7 +6,7 @@ import React from 'react';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import SimpleShell from '../SimpleShell';
-import SkinChoice from '../SkinChoice';
+import SkinChoiceScreen from '../../SkinChoiceScreen';
 import { WalletContext } from '../../../contexts/WalletContext';
 import { ContactsContext } from '../../../contexts/ContactsContext';
 import { appRuntimeStore } from '../../../runtime/appRuntimeStore';
@@ -184,24 +184,25 @@ describe('what the Simple skin reaches', () => {
   });
 });
 
-describe('the choice of skin', () => {
-  it('asks once the preferences are read and none is chosen, and remembers the choice', async () => {
+describe('the choice of look', () => {
+  it('is the Game Boy screen a phone starts on, and picking switches the look and its colours together', async () => {
     appRuntimeStore.setSkin(null);
-    appRuntimeStore.setSkinRead('read');
-    render(<SkinChoice />);
-    expect(screen.getByRole('dialog', { name: 'Choose your wallet' })).toBeInTheDocument();
+    render(<SkinChoiceScreen />);
+    expect(screen.getByRole('menu', { name: 'Wallet looks' })).toBeInTheDocument();
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Simple: send, receive, people/ }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'SIMPLE · DARK' }));
     });
     expect(appRuntimeStore.getSnapshot().skin).toBe('simple');
-    expect(screen.queryByRole('dialog', { name: 'Choose your wallet' })).not.toBeInTheDocument();
+    expect(appRuntimeStore.getSnapshot().scheme).toBe('dark');
   });
 
-  it('does not ask before the preferences are read', () => {
+  it('offers Classic as well', async () => {
     appRuntimeStore.setSkin(null);
-    appRuntimeStore.setSkinRead('unread');
-    render(<SkinChoice />);
-    expect(screen.queryByRole('dialog', { name: 'Choose your wallet' })).not.toBeInTheDocument();
+    render(<SkinChoiceScreen />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'CLASSIC' }));
+    });
+    expect(appRuntimeStore.getSnapshot().skin).toBe('classic');
   });
 });
 
