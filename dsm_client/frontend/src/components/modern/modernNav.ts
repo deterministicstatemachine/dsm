@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// Where the Simple skin is: one of its four tabs, or a page opened over one
+// Where the Modern skin is: one of its four tabs, or a page opened over one
 // (Send, Receive, a contact, your card, …). Back closes the page.
 
 import { useSyncExternalStore } from 'react';
 
-export type SimpleTab = 'wallet' | 'people' | 'activity' | 'settings';
+export type ModernTab = 'wallet' | 'people' | 'activity' | 'settings';
 
-export type SimplePage =
+export type ModernPage =
   | { kind: 'tab' }
-  /** Send, to a contact already chosen or not. */
-  | { kind: 'send'; to: string | null }
+  /** Send, to a contact already chosen or not, of a token already chosen or not. */
+  | { kind: 'send'; to: string | null; tokenId?: string }
   | { kind: 'receive' }
   | { kind: 'add_contact' }
   /** One contact, by device id (Base32). */
@@ -17,9 +17,9 @@ export type SimplePage =
   | { kind: 'my_card' }
   | { kind: 'receipts' };
 
-type Snapshot = { tab: SimpleTab; pages: SimplePage[] };
+type Snapshot = { tab: ModernTab; pages: ModernPage[] };
 
-class SimpleNavStore {
+class ModernNavStore {
   private snapshot: Snapshot = { tab: 'wallet', pages: [] };
   private listeners = new Set<() => void>();
 
@@ -36,7 +36,7 @@ class SimpleNavStore {
    * A tab, with no page over it. Pages left open are closed in the browser
    * history too, so the phone's back button has nothing stale to step through.
    */
-  showTab = (tab: SimpleTab): void => {
+  showTab = (tab: ModernTab): void => {
     const open = this.snapshot.pages.length;
     this.set({ tab, pages: [] });
     if (open > 0) {
@@ -49,7 +49,7 @@ class SimpleNavStore {
    * Opens a page over the tab. Each page is a browser history entry: the
    * phone's back button steps the WebView back, which closes the page.
    */
-  open = (page: SimplePage): void => {
+  open = (page: ModernPage): void => {
     window.history.pushState({ simplePage: this.snapshot.pages.length + 1 }, '');
     this.set({ tab: this.snapshot.tab, pages: [...this.snapshot.pages, page] });
   };
@@ -78,13 +78,13 @@ class SimpleNavStore {
   }
 }
 
-export const simpleNav = new SimpleNavStore();
+export const modernNav = new ModernNavStore();
 
-export function useSimpleNav(): Snapshot {
-  return useSyncExternalStore(simpleNav.subscribe, simpleNav.getSnapshot, simpleNav.getSnapshot);
+export function useModernNav(): Snapshot {
+  return useSyncExternalStore(modernNav.subscribe, modernNav.getSnapshot, modernNav.getSnapshot);
 }
 
 /** The page on top, or the tab itself. */
-export function currentPage(s: Snapshot): SimplePage {
+export function currentPage(s: Snapshot): ModernPage {
   return s.pages.length > 0 ? s.pages[s.pages.length - 1] : { kind: 'tab' };
 }

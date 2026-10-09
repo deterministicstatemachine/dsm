@@ -6,10 +6,11 @@
 import React, { useState } from 'react';
 import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
 import { setReceiptsEmail } from '../../runtime/skinPreferences';
+import { RECEIPT_CONSENT } from '../../domain/receiptConsent';
 import { PageTitle } from './parts';
-import { simpleNav } from './simpleNav';
+import { modernNav } from './modernNav';
 
-export default function SimpleReceipts(): React.JSX.Element {
+export default function ModernReceipts(): React.JSX.Element {
   const runtime = useAppRuntimeStore();
   const [said, setSaid] = useState<string | null>(null);
   const on = runtime.receiptsEmail === 'on';
@@ -23,19 +24,14 @@ export default function SimpleReceipts(): React.JSX.Element {
 
   return (
     <>
-      <PageTitle title="Email Receipts" onBack={() => simpleNav.back()} />
+      <PageTitle title="Email Receipts" onBack={() => modernNav.back()} />
       <section className="s-card">
-        <p className="s-row-title" style={{ whiteSpace: 'normal' }}>
-          When you pay someone whose email you have, DSM can email them a receipt.
-        </p>
-        <p className="s-hint" style={{ marginTop: 10 }}>To send it, the DSM receipt service is given, for that payment only:</p>
+        <p className="s-row-title" style={{ whiteSpace: 'normal' }}>{RECEIPT_CONSENT.lead}</p>
+        <p className="s-hint" style={{ marginTop: 10 }}>{RECEIPT_CONSENT.given}</p>
         <ul className="s-hint">
-          <li>their email address</li>
-          <li>your name, from your contact card</li>
-          <li>the amount, the currency and your note</li>
-          <li>the payment&apos;s reference, and your phone&apos;s date and time</li>
+          {RECEIPT_CONSENT.items.map((item) => <li key={item}>{item}</li>)}
         </ul>
-        <p className="s-hint">Nothing else is sent, and the service keeps no copy. Payments work the same with receipts off.</p>
+        <p className="s-hint">{RECEIPT_CONSENT.after}</p>
       </section>
       {on ? (
         <button type="button" className="s-btn s-btn-quiet" onClick={() => turn('off')}>Turn receipts off</button>

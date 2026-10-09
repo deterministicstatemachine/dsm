@@ -3102,7 +3102,7 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 - The contact code's `preferred_alias`, `email` and `phone` from that card.
 - `receipts.email` (`sdk::email_receipts`, `handlers::receipt_routes`): builds and signs the request under `DSM/receipt-email` and posts it to the env config's `receipt_service_url`.
 - The receipt service, `crates/dsm-receipt-service`.
-- The Simple skin is the frontend that uses them.
+- Both skins use them: the Modern skin's My Card, Add Contact and Email Receipts pages, and on the DGen Game Boy the My QR screen's card, Add Contact's phone-contact pick, and Settings' receipts permission. Either skin's send asks for the receipt.
 
 **Open.**
 - The receipt service does not read the device directory: a signature proves a device asked, not that the device is in the directory.

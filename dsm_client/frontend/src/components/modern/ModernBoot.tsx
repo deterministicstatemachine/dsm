@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Simple skin from the first screen to the last: starting up, setting up
+// The Modern skin from the first screen to the last: starting up, setting up
 // a new wallet (its recovery phrase, publishing it, securing the device),
-// restoring one, the lock, and errors. Once the wallet is ready, the Simple
+// restoring one, the lock, and errors. Once the wallet is ready, the Modern
 // shell. Each phase is the app's own (runtime appState); this only draws it.
 
 import React from 'react';
@@ -9,8 +9,8 @@ import AppScreenRouter from '../AppScreenRouter';
 import LockScreen from '../lock/LockScreen';
 import type { AppState, ScreenType } from '../../types/app';
 import { Icon } from './parts';
-import SimplePhrase from './SimplePhrase';
-import SimpleShell from './SimpleShell';
+import ModernPhrase from './ModernPhrase';
+import ModernShell from './ModernShell';
 
 /** The restore screens a wallet with no identity yet may open. */
 const RESTORE = new Set<ScreenType>(['recovery', 'nfc_recovery', 'recovery_pipeline']);
@@ -51,12 +51,12 @@ function Waiting({ title, lines }: { title: string; lines: string[] }): React.JS
   );
 }
 
-export default function SimpleBoot(props: Props): React.JSX.Element {
+export default function ModernBoot(props: Props): React.JSX.Element {
   const { appState, navigate } = props;
 
   switch (appState) {
     case 'wallet_ready':
-      return <SimpleShell eraTokenSrc={props.eraTokenSrc} btcLogoSrc={props.btcLogoSrc} />;
+      return <ModernShell eraTokenSrc={props.eraTokenSrc} btcLogoSrc={props.btcLogoSrc} />;
 
     case 'loading':
     case 'runtime_loading':
@@ -100,7 +100,7 @@ export default function SimpleBoot(props: Props): React.JSX.Element {
     case 'backup_phrase':
       return (
         <Frame>
-          <SimplePhrase onCancel={props.cancelPhraseBackup} onAnswer={props.answerPhraseCheck} />
+          <ModernPhrase onCancel={props.cancelPhraseBackup} onAnswer={props.answerPhraseCheck} />
         </Frame>
       );
 

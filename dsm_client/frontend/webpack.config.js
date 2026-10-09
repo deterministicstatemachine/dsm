@@ -5,6 +5,7 @@ const HtmlWebpackPlugin  = require('html-webpack-plugin');
 const MiniCssExtract     = require('mini-css-extract-plugin');
 const CopyWebpackPlugin  = require('copy-webpack-plugin');
 const crypto             = require('crypto');
+const { readAppVersion } = require('./scripts/appVersion');
 
 // The WebView's Content-Security-Policy admits no inline script by kind
 // ('unsafe-inline') and no eval ('unsafe-eval'): only the app's own files and
@@ -109,6 +110,8 @@ module.exports = (env, argv) => {
       // Beta readiness: Enable bridge debug logging for development/beta builds only
       // Production builds will dead-code eliminate all debug interceptor logic
       new webpack.DefinePlugin({
+        // The version the screens show: the APK's own (scripts/appVersion.js).
+        'process.env.DSM_APP_VERSION': JSON.stringify(readAppVersion()),
         'process.env.ENABLE_BRIDGE_DEBUG_LOGGING': JSON.stringify(
           process.env.NODE_ENV !== 'production' || process.env.BETA_BUILD === 'true'
         ),

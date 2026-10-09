@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Simple skin over the wallet's own data: what it shows, what it leaves
+// The Modern skin over the wallet's own data: what it shows, what it leaves
 // out (sovereign finance), and how its pages open and close.
 
 import React from 'react';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import SimpleShell from '../SimpleShell';
-import SkinChoiceScreen from '../../SkinChoiceScreen';
+import ModernShell from '../ModernShell';
+import LookPicker from '../../LookPicker';
 import { WalletContext } from '../../../contexts/WalletContext';
 import { ContactsContext } from '../../../contexts/ContactsContext';
 import { appRuntimeStore } from '../../../runtime/appRuntimeStore';
 import { navigationStore } from '../../../runtime/navigationStore';
-import { simpleNav } from '../simpleNav';
-import { activityRows, mainBalance } from '../parts';
+import { modernNav } from '../modernNav';
+import { activityRows, holdings, mainBalance, sendable } from '../parts';
+import { versionLabel } from '../../../appVersion';
 import type { DomainContact, DomainTransaction } from '../../../domain/types';
 import type { TokenBalanceView } from '../../../dsm/types';
 
@@ -39,6 +40,8 @@ function currency(symbol: string, display: string, units: bigint): TokenBalanceV
 }
 
 const era = currency('ERA', '1,234.56', 123456n);
+/** A token someone created: a currency the protocol does not define. */
+const gold: TokenBalanceView = { ...currency('GOLD', '5.00', 500n), protocolDefined: era.symbol === 'GOLD' };
 
 function tx(id: string, txType: DomainTransaction['txType'], amount: bigint, display: string, from: string, to: string, memo?: string): DomainTransaction {
   const stitchedReceipt = undefined;
@@ -86,32 +89,44 @@ function renderShell(balances: TokenBalanceView[] = [era], transactions: DomainT
   return render(
     <WalletContext.Provider value={wallet(balances, transactions) as never}>
       <ContactsContext.Provider value={contactsValue as never}>
-        <SimpleShell eraTokenSrc="" btcLogoSrc="" />
+        <ModernShell eraTokenSrc="" btcLogoSrc="" />
       </ContactsContext.Provider>
     </WalletContext.Provider>,
   );
 }
 
 beforeEach(() => {
-  simpleNav.showTab('wallet');
-  appRuntimeStore.setSkin('simple');
+  modernNav.showTab('wallet');
+  appRuntimeStore.setSkin('modern');
+  appRuntimeStore.setSimpleMode('off');
   appRuntimeStore.setSimpleOffline('off');
   appRuntimeStore.setReceiptsEmail('off');
   navigationStore.setCurrentScreen('home');
 });
 
-describe('the Simple skin', () => {
-  it('shows the balance, Send and Receive, and the payments, without sovereign finance', () => {
-    renderShell();
+describe('the Modern skin', () => {
+  it('shows the balance, every token held, Send and Receive, the payments, and all of DSM', () => {
+    renderShell([era, gold]);
     expect(screen.getByRole('heading', { name: 'Wallet' })).toBeInTheDocument();
     expect(within(screen.getByLabelText('Total balance')).getByText('1,234.56')).toBeInTheDocument();
+    // A created token is listed with ERA, and tapping it sends it.
+    const tokens = screen.getByLabelText('Your tokens');
+    expect(within(tokens).getByText('GOLD')).toBeInTheDocument();
     const recent = screen.getByLabelText('Recent activity');
     // Jane by the name her details give, Mark by his alias; the SoFi trade is left out.
     expect(within(recent).getByText('Jane Miller')).toBeInTheDocument();
     expect(within(recent).getByText('Thanks for lunch!')).toBeInTheDocument();
     expect(within(recent).getByText('mark')).toBeInTheDocument();
     expect(within(recent).queryByText(/1\.00/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/swap|liquidity|vault|bitcoin|token/i)).not.toBeInTheDocument();
+    const more = screen.getByRole('navigation', { name: 'More of DSM' });
+    expect(within(more).getAllByRole('button').map((b) => b.textContent)).toEqual(['Tokens', 'Apps', 'Scan', 'Trade', 'Bitcoin', 'Storage']);
+  });
+
+  it('puts trading, the Bitcoin bridge and storage away in Simple mode, and keeps tokens and apps', () => {
+    appRuntimeStore.setSimpleMode('on');
+    renderShell();
+    const more = screen.getByRole('navigation', { name: 'More of DSM' });
+    expect(within(more).getAllByRole('button').map((b) => b.textContent)).toEqual(['Tokens', 'Apps', 'Scan']);
   });
 
   it('offers the welcome claim when the wallet holds nothing, never a made-up zero', () => {
@@ -129,7 +144,7 @@ describe('the Simple skin', () => {
     expect(screen.getByText('jane@example.com')).toBeInTheDocument();
     await act(async () => {
       const popped = nextPop();
-      simpleNav.back();
+      modernNav.back();
       await popped;
     });
     expect(screen.getByRole('heading', { name: 'People' })).toBeInTheDocument();
@@ -146,9 +161,10 @@ describe('the Simple skin', () => {
     expect(within(list).getByText('Jane Miller')).toBeInTheDocument();
   });
 
-  it('offers Online and Offline only when offline payments are on, and Offline says it is under construction', () => {
+  it('offers Offline in full, and in Simple mode only when switched on there; Offline says it is under construction', () => {
+    appRuntimeStore.setSimpleMode('on');
     renderShell();
-    act(() => simpleNav.open({ kind: 'send', to: JANE }));
+    act(() => modernNav.open({ kind: 'send', to: JANE }));
     expect(screen.queryByRole('group', { name: 'How to send' })).not.toBeInTheDocument();
     act(() => appRuntimeStore.setSimpleOffline('on'));
     fireEvent.click(within(screen.getByRole('group', { name: 'How to send' })).getByRole('button', { name: 'Offline' }));
@@ -157,7 +173,7 @@ describe('the Simple skin', () => {
 
   it('says a receipt will be emailed only when receipts are on and the person has an email', () => {
     renderShell();
-    act(() => simpleNav.open({ kind: 'send', to: JANE }));
+    act(() => modernNav.open({ kind: 'send', to: JANE }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Amount' }), { target: { value: '50' } });
     fireEvent.click(screen.getByRole('button', { name: /Review Send/ }));
     expect(screen.getByRole('dialog', { name: 'Review send' })).not.toHaveTextContent(/receipt/);
@@ -166,54 +182,92 @@ describe('the Simple skin', () => {
     fireEvent.click(screen.getByRole('button', { name: /Review Send/ }));
     expect(screen.getByRole('dialog', { name: 'Review send' })).toHaveTextContent('A receipt will be emailed to jane@example.com.');
   });
+
+  it('sends a created token picked from the wallet', () => {
+    renderShell([era, gold]);
+    fireEvent.click(within(screen.getByLabelText('Your tokens')).getByText('GOLD'));
+    expect(within(screen.getByLabelText('Available balance')).getByText('5.00')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Available balance')).getByText('GOLD')).toBeInTheDocument();
+  });
 });
 
-describe('what the Simple skin reaches', () => {
-  it('refuses the sovereign-finance screens while Simple is the skin, and only then', () => {
-    appRuntimeStore.setSkin('simple');
-    for (const screenType of ['sofi', 'accounts', 'storage', 'dev_policy', 'vault'] as const) {
+describe('what the Modern skin reaches', () => {
+  it('reaches everything, and in Simple mode refuses trading, the Bitcoin bridge, storage and dev tools only', () => {
+    appRuntimeStore.setSkin('modern');
+    appRuntimeStore.setSimpleMode('on');
+    for (const screenType of ['sofi', 'vault', 'storage', 'dev_policy'] as const) {
       navigationStore.navigate(screenType);
       expect(navigationStore.getSnapshot().currentScreen).toBe('home');
     }
-    navigationStore.navigate('lock_setup');
-    expect(navigationStore.getSnapshot().currentScreen).toBe('lock_setup');
+    navigationStore.navigate('accounts');
+    expect(navigationStore.getSnapshot().currentScreen).toBe('accounts');
     navigationStore.setCurrentScreen('home');
-    appRuntimeStore.setSkin('classic');
+    appRuntimeStore.setSimpleMode('off');
     navigationStore.navigate('sofi');
     expect(navigationStore.getSnapshot().currentScreen).toBe('sofi');
+    navigationStore.setCurrentScreen('home');
+    appRuntimeStore.setSimpleMode('on');
+    appRuntimeStore.setSkin('dgen');
+    navigationStore.navigate('storage');
+    expect(navigationStore.getSnapshot().currentScreen).toBe('storage');
   });
 });
 
 describe('the choice of look', () => {
-  it('is the Game Boy screen a phone starts on, and picking switches the look and its colours together', async () => {
+  beforeEach(() => {
     appRuntimeStore.setSkin(null);
-    render(<SkinChoiceScreen />);
-    expect(screen.getByRole('menu', { name: 'Wallet looks' })).toBeInTheDocument();
-    await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Simple · Dark' }));
-    });
-    expect(appRuntimeStore.getSnapshot().skin).toBe('simple');
-    expect(appRuntimeStore.getSnapshot().scheme).toBe('dark');
+    appRuntimeStore.setLookPreview(null);
   });
 
-  it('offers Classic as well', async () => {
-    appRuntimeStore.setSkin(null);
-    render(<SkinChoiceScreen />);
+  it('shows each look behind its box as it is picked, and keeps nothing until OK', () => {
+    render(<LookPicker />);
+    const box = screen.getByRole('dialog', { name: 'Choose your look' });
+    expect(appRuntimeStore.getSnapshot().lookPreview).toEqual({ skin: 'dgen', scheme: 'light', simpleMode: 'off' });
+    fireEvent.click(within(box).getByRole('radio', { name: 'Modern' }));
+    fireEvent.click(within(box).getByRole('switch', { name: 'Dark mode' }));
+    fireEvent.click(within(box).getByRole('switch', { name: 'Simple mode' }));
+    expect(appRuntimeStore.getSnapshot().lookPreview).toEqual({ skin: 'modern', scheme: 'dark', simpleMode: 'on' });
+    expect(appRuntimeStore.getSnapshot().skin).toBeNull();
+    expect(box).toHaveTextContent('DGen: press SELECT to change the screen colour and backlight.');
+  });
+
+  it('keeps the look on OK, and closes', async () => {
+    render(<LookPicker />);
+    fireEvent.click(screen.getByRole('radio', { name: 'Modern' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Dark mode' }));
     await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Classic' }));
+      fireEvent.click(screen.getByRole('button', { name: 'OK' }));
     });
-    expect(appRuntimeStore.getSnapshot().skin).toBe('classic');
+    const runtime = appRuntimeStore.getSnapshot();
+    expect([runtime.skin, runtime.scheme, runtime.simpleMode, runtime.lookPreview]).toEqual(['modern', 'dark', 'off', null]);
+  });
+
+  it('keeps DGen too', async () => {
+    render(<LookPicker />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+    });
+    expect(appRuntimeStore.getSnapshot().skin).toBe('dgen');
   });
 });
 
-describe('how the Simple skin names things', () => {
+describe('how the Modern skin names things', () => {
   it('takes the protocol currency as the main balance and leaves non-payments out of activity', () => {
     expect(mainBalance([era])).toBe(era);
     expect(mainBalance([])).toBeNull();
+    expect(holdings([gold, era]).map((b) => b.symbol)).toEqual(['GOLD', 'ERA']);
+    expect(sendable([era, { ...gold, baseUnits: 0n }], null).map((b) => b.symbol)).toEqual(['ERA']);
     const rows = activityRows(history, contacts);
     expect(rows.map((r) => [r.who, r.direction, r.amount])).toEqual([
       ['Jane Miller', 'out', '50.00'],
       ['mark', 'in', '120.00'],
     ]);
+  });
+});
+
+describe('the version the app shows', () => {
+  it('is the Android build\'s own, named a pre-release', () => {
+    expect(versionLabel()).toMatch(/^DSM v\d+\.\d+\.\d+-[0-9A-Za-z.]+ Pre-release$/);
+    expect(versionLabel()).toBe(`DSM v${process.env.DSM_APP_VERSION} Pre-release`);
   });
 });

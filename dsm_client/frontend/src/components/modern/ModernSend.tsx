@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Simple skin's Send page: who, how much, a note, review, send. The send
+// The Modern skin's Send page: who, how much, a note, review, send. The send
 // is the one both skins make (domain/sendTransfer). When the sender has email
 // receipts on and the person has an email, a receipt follows; the send never
 // waits on it or depends on it.
@@ -9,10 +9,10 @@ import { useWallet } from '../../contexts/WalletContext';
 import { useContacts } from '../../contexts/ContactsContext';
 import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
 import { sendTransfer, type SendMode } from '../../domain/sendTransfer';
-import { emailReceipt } from '../../dsm/receipts';
+import { emailReceiptIfDue } from '../../domain/sendReceipt';
 import UnderConstructionModal from '../UnderConstructionModal';
-import { Avatar, Icon, PageTitle, Sheet, mainBalance, personName } from './parts';
-import { simpleNav } from './simpleNav';
+import { Avatar, Icon, PageTitle, Sheet, mainBalance, personName, sendable } from './parts';
+import { modernNav } from './modernNav';
 import type { DomainContact } from '../../domain/types';
 
 const QUICK = ['10', '50', '100', '200'];
@@ -24,14 +24,15 @@ type Stage =
   | { kind: 'done'; sent: 'sent' | 'open'; message: string; receipt: string | null }
   | { kind: 'failed'; message: string };
 
-export default function SimpleSend({ to }: { to: string | null }): React.JSX.Element {
+export default function ModernSend({ to, tokenId: asked }: { to: string | null; tokenId?: string }): React.JSX.Element {
   const wallet = useWallet();
   const { contacts } = useContacts();
   const runtime = useAppRuntimeStore();
-  const currencies = useMemo(() => wallet.balances.filter((b) => b.holding === 'currency'), [wallet.balances]);
   const main = mainBalance(wallet.balances);
+  const first = asked !== undefined ? asked : main !== null ? main.tokenId : null;
+  const tokens = useMemo(() => sendable(wallet.balances, first), [wallet.balances, first]);
   const [recipient, setRecipient] = useState<string | null>(to);
-  const [tokenId, setTokenId] = useState<string | null>(main !== null ? main.tokenId : null);
+  const [tokenId, setTokenId] = useState<string | null>(first);
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
   const [mode, setMode] = useState<SendMode>('online');
@@ -39,7 +40,7 @@ export default function SimpleSend({ to }: { to: string | null }): React.JSX.Ele
   const [stage, setStage] = useState<Stage>({ kind: 'form' });
 
   const contact: DomainContact | null = contacts.find((c) => c.deviceId === recipient) ?? null;
-  const token = currencies.find((b) => b.tokenId === tokenId) ?? main;
+  const token = tokens.find((b) => b.tokenId === tokenId) ?? (tokens.length > 0 ? tokens[0] : null);
   const amountOk = /^\d+(\.\d+)?$/.test(amount.trim()) && Number(amount) > 0;
   const ready = contact !== null && token !== null && amountOk;
 
@@ -58,18 +59,12 @@ export default function SimpleSend({ to }: { to: string | null }): React.JSX.Ele
           setStage({ kind: 'done', sent: 'open', message: outcome.message, receipt: null });
           return wallet.refreshAll();
         }
-        const email = contact.profile?.email;
-        const wantsReceipt = runtime.receiptsEmail === 'on' && email !== undefined && email.length > 0 && outcome.reference !== null;
-        setStage({ kind: 'done', sent: 'sent', message, receipt: wantsReceipt ? 'Emailing a receipt…' : null });
-        if (wantsReceipt && outcome.reference !== null) {
-          emailReceipt({
-            recipientDeviceId: contact.deviceId,
-            token: token.symbol,
-            amount: amount.trim(),
-            memo: note,
-            reference: outcome.reference,
-            sentAtLocal,
-          }).then(
+        const receipt = emailReceiptIfDue({
+          receiptsEmail: runtime.receiptsEmail, contact, token: token.symbol, amount, note, reference: outcome.reference, sentAtLocal,
+        });
+        setStage({ kind: 'done', sent: 'sent', message, receipt: receipt !== null ? 'Emailing a receipt…' : null });
+        if (receipt !== null) {
+          receipt.then(
             (to) => setStage({ kind: 'done', sent: 'sent', message, receipt: `Receipt emailed to ${to}` }),
             (e: unknown) => setStage({ kind: 'done', sent: 'sent', message, receipt: `The receipt was not emailed: ${e instanceof Error ? e.message : String(e)}` }),
           );
@@ -82,14 +77,14 @@ export default function SimpleSend({ to }: { to: string | null }): React.JSX.Ele
 
   return (
     <>
-      <PageTitle title="Send Money" onBack={() => simpleNav.back()} />
+      <PageTitle title="Send Money" onBack={() => modernNav.back()} />
 
       <section className="s-card" aria-label="To">
         <div className="s-label">To</div>
         {contacts.length === 0 ? (
           <div className="s-empty">
             No people yet.{' '}
-            <button type="button" className="s-chip" onClick={() => simpleNav.open({ kind: 'add_contact' })}>Add someone</button>
+            <button type="button" className="s-chip" onClick={() => modernNav.open({ kind: 'add_contact' })}>Add someone</button>
           </div>
         ) : contact !== null ? (
           <button type="button" className="s-row" onClick={() => setRecipient(null)} aria-label={`Change who: ${personName(contact)}`}>
@@ -137,9 +132,9 @@ export default function SimpleSend({ to }: { to: string | null }): React.JSX.Ele
             </button>
           ))}
         </div>
-        {currencies.length > 1 ? (
-          <div className="s-seg" style={{ marginTop: 12 }} role="group" aria-label="Currency">
-            {currencies.map((b) => (
+        {tokens.length > 1 ? (
+          <div className="s-token-pick" role="group" aria-label="Token">
+            {tokens.map((b) => (
               <button key={b.tokenId} type="button" aria-pressed={token !== null && token.tokenId === b.tokenId} onClick={() => setTokenId(b.tokenId)}>{b.symbol}</button>
             ))}
           </div>
@@ -151,7 +146,8 @@ export default function SimpleSend({ to }: { to: string | null }): React.JSX.Ele
         <input id="s-note" className="s-input" maxLength={200} placeholder="Thanks for lunch!" value={note} onChange={(e) => setNote(e.target.value)} />
       </div>
 
-      {runtime.simpleOffline === 'on' ? (
+      {/* Offline is offered in full, and in Simple mode when switched on there. */}
+      {runtime.simpleMode === 'off' || runtime.simpleOffline === 'on' ? (
         <div className="s-field">
           <div className="s-seg" role="group" aria-label="How to send">
             <button type="button" aria-pressed={mode === 'online'} onClick={() => setMode('online')}>Online</button>
@@ -185,11 +181,11 @@ export default function SimpleSend({ to }: { to: string | null }): React.JSX.Ele
       ) : null}
 
       {stage.kind === 'done' ? (
-        <Sheet label="Sent" onClose={() => simpleNav.back()}>
+        <Sheet label="Sent" onClose={() => modernNav.back()}>
           <h2>{stage.sent === 'sent' ? 'Sent' : 'Not finished yet'}</h2>
           <p>{stage.message}</p>
           {stage.receipt !== null ? <p>{stage.receipt}</p> : null}
-          <button type="button" className="s-btn s-btn-primary" onClick={() => simpleNav.back()}>Done</button>
+          <button type="button" className="s-btn s-btn-primary" onClick={() => modernNav.back()}>Done</button>
         </Sheet>
       ) : null}
 

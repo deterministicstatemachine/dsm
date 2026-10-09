@@ -2,6 +2,9 @@
 // Send tab — transaction form with online/offline mode toggle.
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { sendTransfer } from '../../../domain/sendTransfer';
+import { emailReceiptIfDue } from '../../../domain/sendReceipt';
+import { appRuntimeStore } from '../../../runtime/appRuntimeStore';
+import { useUX } from '../../../contexts/UXContext';
 import ConfirmModal from '../../ConfirmModal';
 import UnderConstructionModal from '../../UnderConstructionModal';
 import { TokenMark } from '../../TokenMark';
@@ -36,6 +39,7 @@ function SendTabInner({
   setError,
 }: Props): React.JSX.Element {
   const fx = useFx();
+  const { notifyToast } = useUX();
   const [sendForm, setSendForm] = useState<{ selectedContactKey: string; amount: string; token: string; note: string }>({
     // No default recipient. A money form that pre-selects whoever happens to
     // be first sends to the wrong person the moment the list reorders — and it
@@ -162,6 +166,24 @@ function SendTabInner({
       }
       if (outcome.kind === 'refused') throw new Error(outcome.message);
 
+      // A receipt to the person paid, when the owner has receipts on and the
+      // person has an email (A17). The send is done either way.
+      const receipt = emailReceiptIfDue({
+        receiptsEmail: appRuntimeStore.getSnapshot().receiptsEmail,
+        contact,
+        token: selectedSendBalance.symbol,
+        amount: sendForm.amount,
+        note: sendForm.note,
+        reference: outcome.reference,
+        sentAtLocal: new Date().toLocaleString(),
+      });
+      if (receipt !== null) {
+        receipt.then(
+          (to) => notifyToast('receipt_emailed', `Receipt emailed to ${to}`),
+          (e: unknown) => notifyToast('warning', `The receipt was not emailed: ${e instanceof Error ? e.message : String(e)}`),
+        );
+      }
+
       const sent = `${sendForm.amount.trim()} ${tokenId}`;
       fx.play({
         anim: txMode === 'offline' ? 'seal' : 'confirm',
@@ -179,7 +201,7 @@ function SendTabInner({
     } finally {
       setSendingTx(false);
     }
-  }, [sendForm, selectedContact, txMode, selectedSendBalance, loadWalletData, setError, onSendComplete, fx]);
+  }, [sendForm, selectedContact, txMode, selectedSendBalance, loadWalletData, setError, onSendComplete, fx, notifyToast]);
 
   const handleSubmit = useCallback((event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();

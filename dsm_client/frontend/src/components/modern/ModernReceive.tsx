@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Simple skin's Receive page: your contact code as a QR for someone to
+// The Modern skin's Receive page: your contact code as a QR for someone to
 // scan, and to share or copy. Paying you starts with them adding you.
 
 import React, { useEffect, useState } from 'react';
@@ -8,11 +8,11 @@ import { getContactCode } from '../../dsm/contacts';
 import { shareText } from '../../dsm/WebViewBridge/phoneContacts';
 import { copyText } from '../../utils/anchorDisplay';
 import { Icon, PageTitle } from './parts';
-import { simpleNav } from './simpleNav';
+import { modernNav } from './modernNav';
 
 type Code = { kind: 'reading' } | { kind: 'read'; code: string; qr: string } | { kind: 'failed'; message: string };
 
-export default function SimpleReceive(): React.JSX.Element {
+export default function ModernReceive(): React.JSX.Element {
   const [code, setCode] = useState<Code>({ kind: 'reading' });
   const [said, setSaid] = useState<string | null>(null);
 
@@ -36,7 +36,7 @@ export default function SimpleReceive(): React.JSX.Element {
 
   return (
     <>
-      <PageTitle title="Receive" onBack={() => simpleNav.back()} />
+      <PageTitle title="Receive" onBack={() => modernNav.back()} />
       <section className="s-card s-balance" style={{ textAlign: 'center' }} aria-label="Your code">
         <p className="s-row-title" style={{ whiteSpace: 'normal', fontSize: 22 }}>Let someone scan this code to pay you.</p>
         {code.kind === 'read' ? (
@@ -68,7 +68,7 @@ export default function SimpleReceive(): React.JSX.Element {
         >
           <Icon name="copy" /> Copy My Code
         </button>
-        <button type="button" className="s-btn s-btn-quiet" onClick={() => simpleNav.open({ kind: 'my_card' })}>
+        <button type="button" className="s-btn s-btn-quiet" onClick={() => modernNav.open({ kind: 'my_card' })}>
           <Icon name="person" /> My contact card
         </button>
       </div>

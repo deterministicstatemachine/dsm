@@ -33,8 +33,10 @@ import { BridgeProvider } from './bridge/BridgeProvider';
 import { FxLayer, FxProvider } from './components/fx/FxProvider';
 import { useNativeSessionBridge } from './hooks/useNativeSessionBridge';
 import './styles/screen.css';
-import './styles/simple.css';
+import './styles/modern.css';
+import './styles/modernKit.css';
 import { useSkin } from './hooks/useSkin';
+import LookPicker from './components/LookPicker';
 
 export default function App() {
   const runtime = useAppRuntimeStore();
@@ -61,18 +63,26 @@ export default function App() {
     setThemeIndex,
   });
 
+  // A phone that has not chosen how its wallet looks is asked first, before
+  // the intro or anything else: the picker's box over the app, which is drawn
+  // in the look the picker is showing until OK keeps one.
+  const choosing = runtime.skinRead === 'read' && runtime.skin === null ? 'choose' : 'chosen';
+  const preview = choosing === 'choose' ? runtime.lookPreview : null;
+
   // Which skin the page is drawn in: the owner's choice, made before anything
   // else, in every phase (a combo-locked wallet's lock screen shows the device).
-  const skin = useSkin(session.received, runtime.skin, runtime.scheme, runtime.appState, session.lock_status.method);
-
-  // A phone that has not chosen how its wallet looks is asked first, on a
-  // screen of its own, before the intro or anything else.
-  const choosing = runtime.skinRead === 'read' && runtime.skin === null ? 'choose' : 'chosen';
+  const skin = useSkin(
+    session.received,
+    preview !== null ? preview.skin : runtime.skin,
+    preview !== null ? preview.scheme : runtime.scheme,
+    runtime.appState,
+    session.lock_status.method,
+  );
 
   // The Game Boy's intro cutscene waits for its A button: it plays only once
-  // Classic is the choice (the Simple skin has neither).
+  // DGen is the choice (the Modern skin has neither).
   const introGate = useIntroGate();
-  const showIntro = introGate.showIntro && runtime.skin === 'classic' && skin === 'classic';
+  const showIntro = introGate.showIntro && runtime.skin === 'dgen' && skin === 'dgen';
   const dismissIntro = introGate.dismissIntro;
   const {
     chameleonSrc,
@@ -156,7 +166,6 @@ export default function App() {
                     <AppContent
                       appState={runtime.appState}
                       skin={skin}
-                      choosing={choosing}
                       error={runtime.error}
                       showIntro={showIntro}
                       introGifSrc={introGifSrc}
@@ -176,14 +185,15 @@ export default function App() {
                       currentMenuIndex={navigation.currentMenuIndex}
                       setCurrentMenuIndex={(next) => navigationStore.setCurrentMenuIndex(next)}
                     />
+                    {choosing === 'choose' ? <LookPicker /> : null}
                     <GlobalToast />
                     <DiagnosticsOverlay />
                     <BilateralTransferDialog walletReady={runtime.appState === 'wallet_ready' && !showIntro} />
                     <FxLayer />
                     {/* The tour walks the Game Boy's menus and buttons: it runs in
-                        Classic, and is offered once Classic is the owner's choice. */}
-                    {skin === 'classic' ? <GuidedTour appState={runtime.appState} /> : null}
-                    {runtime.skin === 'classic' ? <TourOffer appState={runtime.appState} showIntro={showIntro} /> : null}
+                        DGen, and is offered once DGen is the owner's choice. */}
+                    {skin === 'dgen' ? <GuidedTour appState={runtime.appState} /> : null}
+                    {runtime.skin === 'dgen' ? <TourOffer appState={runtime.appState} showIntro={showIntro} /> : null}
                   </ScreenContainer>
                   {/* The passcode prompt is its own layer, not part of the home
                       screen's content: it portals over the whole display, the

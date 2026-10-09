@@ -5,6 +5,7 @@
 
 export const SKIN_PREFERENCE = 'ui_skin';
 export const SCHEME_PREFERENCE = 'ui_scheme';
+export const SIMPLE_MODE_PREFERENCE = 'simple_mode';
 export const SIMPLE_OFFLINE_PREFERENCE = 'simple_offline';
 export const RECEIPTS_EMAIL_PREFERENCE = 'receipts_email';
 
@@ -12,6 +13,7 @@ export const RECEIPTS_EMAIL_PREFERENCE = 'receipts_email';
 export const SKIN_PREFERENCES = [
   SKIN_PREFERENCE,
   SCHEME_PREFERENCE,
+  SIMPLE_MODE_PREFERENCE,
   SIMPLE_OFFLINE_PREFERENCE,
   RECEIPTS_EMAIL_PREFERENCE,
 ] as const;

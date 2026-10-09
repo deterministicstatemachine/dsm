@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Adding someone in the Simple skin: scan (or paste) their DSM code, then say
+// Adding someone in the Modern skin: scan (or paste) their DSM code, then say
 // who they are by picking them from the phone's contacts, or keep the name
 // their card gives. Rust reads the code and adds the contact; the details go
 // with it (DSM Amendment A17).
@@ -11,8 +11,9 @@ import { pickPhoneContact } from '../../dsm/WebViewBridge/phoneContacts';
 import { startNativeQrScannerViaRouter } from '../../dsm/WebViewBridge';
 import type { ContactCard } from '../../dsm/types';
 import type { PersonProfile } from '../../domain/types';
+import { profileFromCard, withPhoneContact } from '../../domain/personProfile';
 import { Avatar, Icon, PageTitle } from './parts';
-import { simpleNav } from './simpleNav';
+import { modernNav } from './modernNav';
 
 type Step =
   | { kind: 'code' }
@@ -25,17 +26,7 @@ function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** What the card itself says about its owner. */
-function profileFromCard(card: ContactCard): PersonProfile {
-  return {
-    name: card.preferredAlias !== undefined ? card.preferredAlias : '',
-    email: card.email !== undefined ? card.email : '',
-    phone: card.phone !== undefined ? card.phone : '',
-    phoneLookupKey: '',
-  };
-}
-
-export default function SimpleAddContact(): React.JSX.Element {
+export default function ModernAddContact(): React.JSX.Element {
   const { addContact } = useContacts();
   const [step, setStep] = useState<Step>({ kind: 'code' });
   const [pasted, setPasted] = useState('');
@@ -77,17 +68,7 @@ export default function SimpleAddContact(): React.JSX.Element {
     pickPhoneContact().then(
       (picked) => {
         if (picked === null) return;
-        // The phone's details first; what the card shared fills what the phone lacks.
-        setStep({
-          kind: 'who',
-          card,
-          profile: {
-            name: picked.name.length > 0 ? picked.name : current.name,
-            email: picked.email.length > 0 ? picked.email : current.email,
-            phone: picked.phone.length > 0 ? picked.phone : current.phone,
-            phoneLookupKey: picked.phoneLookupKey,
-          },
-        });
+        setStep({ kind: 'who', card, profile: withPhoneContact(current, picked) });
       },
       (e: unknown) => setProblem(`Your contacts did not open: ${messageOf(e)}`),
     );
@@ -113,7 +94,7 @@ export default function SimpleAddContact(): React.JSX.Element {
 
   return (
     <>
-      <PageTitle title="Add Contact" onBack={() => simpleNav.back()} />
+      <PageTitle title="Add Contact" onBack={() => modernNav.back()} />
       {problem !== null ? <div className="s-notice s-error">{problem}</div> : null}
 
       {step.kind === 'code' || step.kind === 'reading' ? (
@@ -165,7 +146,7 @@ export default function SimpleAddContact(): React.JSX.Element {
         <section className="s-card" style={{ textAlign: 'center' }}>
           <h2 className="s-section-title">{step.name} is added</h2>
           <p className="s-hint">You can pay them now.</p>
-          <button type="button" className="s-btn s-btn-primary" onClick={() => simpleNav.showTab('people')}>Done</button>
+          <button type="button" className="s-btn s-btn-primary" onClick={() => modernNav.showTab('people')}>Done</button>
         </section>
       ) : null}
     </>

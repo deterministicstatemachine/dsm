@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
- * The Simple skin. `html[data-skin="simple"]` (hooks/useSkin.ts) puts the Game
+ * The Modern skin. `html[data-skin="modern"]` (hooks/useSkin.ts) puts the Game
  * Boy device away and lets the app fill the screen; `data-scheme` picks light
- * or dark. Every Simple screen draws with the --s-* variables below.
+ * or dark. Every Modern screen draws with the --s-* variables below.
  */
 
 :root {
@@ -27,7 +27,7 @@
   --s-radius: 20px;
 }
 
-html[data-skin="simple"][data-scheme="dark"] {
+html[data-skin="modern"][data-scheme="dark"] {
   --s-bg: #0b0b0b;
   --s-surface: #161616;
   --s-surface-2: #1f1f1f;
@@ -49,28 +49,28 @@ html[data-skin="simple"][data-scheme="dark"] {
 }
 
 /* ---- The device, put away ---- */
-html[data-skin="simple"] body { background: var(--s-bg); }
-html[data-skin="simple"] .stateboy {
+html[data-skin="modern"] body { background: var(--s-bg); }
+html[data-skin="modern"] .stateboy {
   max-width: none; transform: none; padding: 0; background: var(--s-bg);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-html[data-skin="simple"] .front-plate { background: var(--s-bg); box-shadow: none; }
-html[data-skin="simple"] .front-plate::before,
-html[data-skin="simple"] .battery-light,
-html[data-skin="simple"] .dsm-shell-logo,
-html[data-skin="simple"] .scanlines,
-html[data-skin="simple"] .screen-inner-shadow,
-html[data-skin="simple"] .screen-depth-sheen,
-html[data-skin="simple"] .screen-nav-bar,
-html[data-skin="simple"] #controller,
-html[data-skin="simple"] #theme-flash { display: none !important; }
-html[data-skin="simple"] .screen-container {
+html[data-skin="modern"] .front-plate { background: var(--s-bg); box-shadow: none; }
+html[data-skin="modern"] .front-plate::before,
+html[data-skin="modern"] .battery-light,
+html[data-skin="modern"] .dsm-shell-logo,
+html[data-skin="modern"] .scanlines,
+html[data-skin="modern"] .screen-inner-shadow,
+html[data-skin="modern"] .screen-depth-sheen,
+html[data-skin="modern"] .screen-nav-bar,
+html[data-skin="modern"] #controller,
+html[data-skin="modern"] #theme-flash { display: none !important; }
+html[data-skin="modern"] .screen-container {
   position: absolute; inset: 0; top: 0; left: 0; transform: none; width: 100%; height: 100%;
   padding: 0; background: var(--s-bg); box-shadow: none; border-radius: 0;
 }
-html[data-skin="simple"] .screen { border: none; border-radius: 0; background: var(--s-bg); animation: none; }
-html[data-skin="simple"] #dsm-app-root { background: var(--s-bg); color: var(--s-text); }
-html[data-skin="simple"] .stateboy-screen-host { height: 100%; }
+html[data-skin="modern"] .screen { border: none; border-radius: 0; background: var(--s-bg); animation: none; }
+html[data-skin="modern"] #dsm-app-root { background: var(--s-bg); color: var(--s-text); }
+html[data-skin="modern"] .stateboy-screen-host { height: 100%; }
 
 /* ---- Shell ---- */
 .s-app {
@@ -189,8 +189,26 @@ html[data-scheme="dark"] .s-seg button[aria-pressed="true"] { background: var(--
 .s-stack { display: grid; gap: 10px; }
 .s-empty { text-align: center; color: var(--s-muted); padding: 30px 10px; font-size: 16px; }
 
-/* A Classic screen opened from the Simple skin (the lock, a connect request):
-   drawn in the Simple colours, under a Back button. */
+/* ---- The rest of DSM, on the Wallet tab ---- */
+.s-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+.s-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 6px; border: none;
+  border-radius: 18px; background: var(--s-surface); color: var(--s-text); box-shadow: var(--s-shadow);
+  font-family: inherit; font-size: 14px; font-weight: 800;
+}
+.s-tile svg { width: 26px; height: 26px; color: var(--s-primary); }
+html[data-scheme="dark"] .s-tile svg { color: var(--s-secondary); }
+.s-coin { width: 40px; height: 40px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; }
+.s-coin-img { width: 40px; height: 40px; border-radius: 50%; }
+.s-token-pick { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.s-token-pick button {
+  border: none; border-radius: 999px; padding: 8px 14px; font-weight: 800; font-size: 15px;
+  background: var(--s-surface-2); color: var(--s-text);
+}
+.s-token-pick button[aria-pressed="true"] { background: var(--s-primary); color: var(--s-on-primary); }
+
+/* A DGen screen opened from the Modern skin (the lock, a connect request):
+   drawn in the Modern colours, under a Back button. */
 .s-classic {
   --bg: var(--s-bg); --bg-secondary: var(--s-surface); --text: var(--s-text); --text-dark: var(--s-text);
   --border: var(--s-line); --stateboy-screen: var(--s-surface); --stateboy-dark: var(--s-text);

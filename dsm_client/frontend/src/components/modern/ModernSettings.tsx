@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Simple skin's Settings tab: the look, offline payments, email receipts,
-// your card, the lock, and reporting a problem.
+// The Modern skin's Settings tab: the look and Simple mode, offline payments,
+// email receipts, your card, the lock, every other setting, reporting a
+// problem, and the app's version.
 
 import React, { useState } from 'react';
 import { useAppRuntimeStore, type Scheme, type Skin, type Switch } from '../../runtime/appRuntimeStore';
-import { chooseScheme, chooseSkin, setSimpleOffline } from '../../runtime/skinPreferences';
+import { chooseScheme, chooseSkin, setSimpleMode, setSimpleOffline } from '../../runtime/skinPreferences';
+import { versionLabel } from '../../appVersion';
 import { navigationStore } from '../../runtime/navigationStore';
 import { Icon } from './parts';
-import { simpleNav } from './simpleNav';
+import { modernNav } from './modernNav';
 
 const OPEN_DIAGNOSTICS_EVENT = 'dsm-open-diagnostics';
 
@@ -36,7 +38,7 @@ function Link({ title, sub, onOpen }: { title: string; sub: string; onOpen: () =
   );
 }
 
-export default function SimpleSettings(): React.JSX.Element {
+export default function ModernSettings(): React.JSX.Element {
   const runtime = useAppRuntimeStore();
   const [said, setSaid] = useState<string | null>(null);
 
@@ -56,8 +58,8 @@ export default function SimpleSettings(): React.JSX.Element {
         <div className="s-section-title" style={{ marginBottom: 10 }}>Appearance</div>
         <Seg<Skin>
           label="Wallet style"
-          value={runtime.skin !== null ? runtime.skin : 'simple'}
-          options={[{ id: 'simple', text: 'Simple' }, { id: 'classic', text: 'Classic' }]}
+          value={runtime.skin !== null ? runtime.skin : 'modern'}
+          options={[{ id: 'modern', text: 'Modern' }, { id: 'dgen', text: 'DGen' }]}
           onPick={(v) => report(chooseSkin(v))}
         />
         <Seg<Scheme>
@@ -67,27 +69,37 @@ export default function SimpleSettings(): React.JSX.Element {
           onPick={(v) => report(chooseScheme(v))}
         />
         <Seg<Switch>
-          label="Offline payments (appliance)"
-          value={runtime.simpleOffline}
+          label="Simple mode"
+          value={runtime.simpleMode}
           options={[{ id: 'off', text: 'Off' }, { id: 'on', text: 'On' }]}
-          onPick={(v) => report(setSimpleOffline(v))}
+          onPick={(v) => report(setSimpleMode(v))}
         />
+        <p className="s-hint">Simple mode hides trading, storage and the Bitcoin bridge. Tokens, people and apps stay.</p>
+        {runtime.simpleMode === 'on' ? (
+          <Seg<Switch>
+            label="Offline payments in Simple mode"
+            value={runtime.simpleOffline}
+            options={[{ id: 'off', text: 'Off' }, { id: 'on', text: 'On' }]}
+            onPick={(v) => report(setSimpleOffline(v))}
+          />
+        ) : null}
       </section>
 
       <section className="s-card" aria-label="You">
-        <Link title="My contact card" sub="Your name, and what your DSM code shares" onOpen={() => simpleNav.open({ kind: 'my_card' })} />
+        <Link title="My contact card" sub="Your name, and what your DSM code shares" onOpen={() => modernNav.open({ kind: 'my_card' })} />
         <Link
           title="Email receipts"
           sub={runtime.receiptsEmail === 'on' ? 'On: people you pay get a receipt' : 'Off'}
-          onOpen={() => simpleNav.open({ kind: 'receipts' })}
+          onOpen={() => modernNav.open({ kind: 'receipts' })}
         />
       </section>
 
       <section className="s-card" aria-label="Security and help">
         <Link title="Lock" sub="A passcode for this wallet" onOpen={() => navigationStore.navigate('lock_setup')} />
+        <Link title="More settings" sub="Recovery ring backup and developer options" onOpen={() => navigationStore.navigate('settings')} />
         <Link title="Report a problem" sub="Send the wallet's report to the DSM team" onOpen={() => window.dispatchEvent(new CustomEvent(OPEN_DIAGNOSTICS_EVENT))} />
       </section>
-      <p className="s-hint" style={{ textAlign: 'center' }}>Classic shows every DSM feature: trading, tokens, storage and more.</p>
+      <p className="s-hint" style={{ textAlign: 'center' }}>{versionLabel()}</p>
     </>
   );
 }
