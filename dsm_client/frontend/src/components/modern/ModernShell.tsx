@@ -21,6 +21,8 @@ import ModernAddContact from './ModernAddContact';
 import ModernContact from './ModernContact';
 import ModernMyCard from './ModernMyCard';
 import ModernReceipts from './ModernReceipts';
+import ProfileHeader from './ProfileHeader';
+import { useOwnCard } from './ownCard';
 
 /** The DGen screens the Modern skin opens inside itself. */
 const CLASSIC_INSIDE = new Set<ScreenType>([
@@ -53,6 +55,7 @@ function TabContent({ tab }: { tab: ModernTab }): React.JSX.Element {
 
 export default function ModernShell({ eraTokenSrc, btcLogoSrc }: { eraTokenSrc: string; btcLogoSrc: string }): React.JSX.Element {
   const nav = useModernNav();
+  const own = useOwnCard();
   const navigation = useNavigationStore();
   const page = currentPage(nav);
 
@@ -99,15 +102,23 @@ export default function ModernShell({ eraTokenSrc, btcLogoSrc }: { eraTokenSrc: 
     }
   }
 
+  // The Wallet tab is headed by who the wallet is: the banner, photo and name.
+  const onWallet = classic === null && page.kind === 'tab' && nav.tab === 'wallet';
+
   return (
     <div className="s-app">
+      {onWallet ? null : (
       <header className="s-topbar">
         <div className="s-brand"><span className="s-brand-mark" aria-hidden /> DSM Wallet</div>
-        <button type="button" className="s-icon-btn" aria-label="My contact card" onClick={() => modernNav.open({ kind: 'my_card' })}>
-          <Icon name="person" />
+        <button type="button" className="s-icon-btn s-me" aria-label="My contact card" onClick={() => modernNav.open({ kind: 'my_card' })}>
+          {own.kind === 'read' && own.photo !== null ? <img src={own.photo} alt="" /> : <Icon name="person" />}
         </button>
       </header>
-      <main className="s-body">{body}</main>
+      )}
+      <main className="s-body">
+        {onWallet ? <ProfileHeader mode="show" onOpen={() => modernNav.open({ kind: 'my_card' })} /> : null}
+        {body}
+      </main>
       <nav className="s-tabbar" aria-label="Wallet sections">
         {TABS.map((t) => (
           <button

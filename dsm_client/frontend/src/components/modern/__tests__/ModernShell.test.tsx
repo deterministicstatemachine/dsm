@@ -107,7 +107,9 @@ beforeEach(() => {
 describe('the Modern skin', () => {
   it('shows the balance, every token held, Send and Receive, the payments, and all of DSM', () => {
     renderShell([era, gold]);
-    expect(screen.getByRole('heading', { name: 'Wallet' })).toBeInTheDocument();
+    // The Wallet tab is headed by the owner's card, not a "Wallet" title.
+    expect(screen.queryByRole('heading', { name: 'Wallet' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /your card/i })).toBeInTheDocument();
     expect(within(screen.getByLabelText('Total balance')).getByText('1,234.56')).toBeInTheDocument();
     // A created token is listed with ERA, and tapping it sends it.
     const tokens = screen.getByLabelText('Your tokens');

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-// Your own contact card (DSM Amendment A17): your code to scan, and the name,
-// email and phone you choose to share. The card rides on your DSM code, so
+// Your own contact card (DSM Amendment A17): your banner and photo (kept on
+// this phone), the name, email and phone you choose to share, and your code. The card rides on your DSM code, so
 // whoever scans it sees who you are, and can email you a receipt when they
 // pay you. Saving the card shows the code again, since the code carries it.
 
 import React, { useEffect, useState } from 'react';
 import { getOwnProfile, setOwnProfile } from '../../dsm/contacts';
 import type { PersonProfile } from '../../domain/types';
-import { Avatar, PageTitle } from './parts';
+import { PageTitle } from './parts';
+import ProfileHeader from './ProfileHeader';
+import { ownCardStore } from './ownCard';
 import { modernNav } from './modernNav';
 import ModernMyCode from './ModernMyCode';
 
@@ -45,6 +47,7 @@ export default function ModernMyCard(): React.JSX.Element {
       (stored) => {
         setCard({ kind: 'read', card: stored });
         setSaid('Saved. Your DSM code now carries it.');
+        ownCardStore.setName(stored.name);
         setSaves((n) => n + 1);
       },
       (e: unknown) => setSaid(e instanceof Error ? e.message : String(e)),
@@ -54,12 +57,8 @@ export default function ModernMyCard(): React.JSX.Element {
   return (
     <>
       <PageTitle title="My Card" onBack={() => modernNav.back()} />
-      <ModernMyCode key={saves} heading="Your code: let someone scan it to add you." />
-      <section className="s-card" style={{ textAlign: 'center' }}>
-        <Avatar name={draft.name.length > 0 ? draft.name : '?'} large="large" />
-        <div className="s-row-title" style={{ marginTop: 10 }}>{draft.name.length > 0 ? draft.name : 'Your name'}</div>
-        <p className="s-hint">People who scan your code see this. Leave a line empty to keep it to yourself.</p>
-      </section>
+      <ProfileHeader mode="edit" />
+      <p className="s-hint">People who scan your code see your name, and the email and phone you add. Leave a line empty to keep it to yourself.</p>
       {(['name', 'email', 'phone'] as const).map((field) => (
         <div key={field} className="s-field">
           <label className="s-label" htmlFor={`s-card-${field}`}>{field === 'name' ? 'Your name' : field === 'email' ? 'Email (receipts can be sent here)' : 'Phone'}</label>
@@ -75,6 +74,9 @@ export default function ModernMyCard(): React.JSX.Element {
       ))}
       <button type="button" className="s-btn s-btn-primary" onClick={save}>Save my card</button>
       {said !== null ? <p className="s-hint" style={{ textAlign: 'center', marginTop: 12 }}>{said}</p> : null}
+      <div style={{ marginTop: 18 }}>
+        <ModernMyCode key={saves} heading="Your code: let someone scan it to add you." />
+      </div>
     </>
   );
 }
