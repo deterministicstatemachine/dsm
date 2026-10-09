@@ -3,7 +3,7 @@
 // policy's facts), creating and adopting tokens, and the ERA faucet.
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { CoinArt } from '../CoinArt';
+import { CoinArt, HeroCoin } from '../CoinArt';
 import { dsmClient } from '../../services/dsmClient';
 import { useWallet } from '../../contexts/WalletContext';
 import { useDpadNav } from '../../hooks/useDpadNav';
@@ -591,7 +591,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                                   disabled={busy || !amount.trim()}
                                   onClick={() => void runSupplyAction()}
                                 >
-                                  {busy ? 'WORKING...' : 'CONFIRM'}
+                                  {busy ? 'Working…' : 'Confirm'}
                                 </button>
                               </div>
                             </>
@@ -635,14 +635,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       ) : (
         <div className="faucet-tab">
           <section className="sb-card sb-card--dark sb-card--hero">
-            <span className="sb-coin-tile">
-              <CoinArt
-                src={eraTokenSrc}
-                ticker="ERA"
-                alt="ERA Token"
-                style={{ width: 48, height: 48, imageRendering: 'pixelated' }}
-              />
-            </span>
+            <HeroCoin src={eraTokenSrc} alt="ERA Token" />
             <div className="sb-hero__label" style={{ marginTop: 6 }}>ERA token faucet</div>
             <div className="sb-hero__sub">Releases ERA from the network&apos;s reserve, under ERA&apos;s committed policy.</div>
           </section>
@@ -655,7 +648,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
               onClick={() => void claimFromFaucet()}
               disabled={claiming}
             >
-              {claiming ? 'CLAIMING...' : 'CLAIM FAUCET'}
+              {claiming ? 'Claiming…' : 'Claim faucet'}
             </button>
           </div>
         </div>

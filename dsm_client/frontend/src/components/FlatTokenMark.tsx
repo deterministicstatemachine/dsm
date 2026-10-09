@@ -23,7 +23,7 @@ export function FlatTokenMark({ ticker, iconUrl, className, alt }: Props): React
   const letter = lower === 'dbtc' || lower === 'btc' ? '₿' : ticker.slice(0, 1).toUpperCase();
   return (
     <span className={classes} data-tone={tone(lower)} role="img" aria-label={alt !== undefined && alt.length > 0 ? alt : ticker}>
-      {letter}
+      <span className="s-token-letter">{letter}</span>
     </span>
   );
 }

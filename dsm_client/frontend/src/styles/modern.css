@@ -231,12 +231,15 @@ html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
   display: inline-grid; place-items: center; flex: 0 0 auto; border-radius: 50%; overflow: hidden;
   aspect-ratio: 1; object-fit: cover; image-rendering: auto; container-type: size;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-weight: 900; line-height: 1;
-  font-size: 55cqh; background: var(--s-surface-2); color: var(--s-text);
+  background: var(--s-surface-2); color: var(--s-text);
 }
+/* The letter is sized by its badge: the badge is the size container, so the letter scales with it. */
+.s-token-letter { font-size: 55cqh; line-height: 1; }
 .s-token-flat[data-tone="fuchsia"] { background: var(--s-fuchsia); color: #ffffff; }
 .s-token-flat[data-tone="gold"] { background: var(--s-gold); color: #0f0f0f; }
 /* A still mark standing where coin artwork had its own size: it fills that box. */
 .s-token-fill { width: 100%; height: 100%; }
+/* The token-creation preview's mark stands bare: no disc around it. */
 html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; box-shadow: none; padding: 0; }
 
 /* A DGen screen opened from the Modern skin (the lock, a connect request):

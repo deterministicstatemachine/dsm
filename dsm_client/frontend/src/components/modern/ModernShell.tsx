@@ -81,7 +81,7 @@ export default function ModernShell({ eraTokenSrc, btcLogoSrc }: { eraTokenSrc: 
   if (classic !== null) {
     body = (
       <div className="s-classic">
-        <button type="button" className="s-icon-btn" aria-label="Back" onClick={() => navigationStore.navigate('home')}>
+        <button type="button" className="s-icon-btn s-classic-back" aria-label="Back" onClick={() => navigationStore.navigate('home')}>
           <Icon name="back" />
         </button>
         <AppScreenRouter currentScreen={classic} navigate={navigationStore.navigate} eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />
