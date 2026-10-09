@@ -1,6 +1,7 @@
 -- SPDX-License-Identifier: MIT OR Apache-2.0
 import Sphincs.CompAddress
 import Sphincs.CompOpenPre
+import Sphincs.CompWotsUd
 open DSM.Sphincs DSM.Sphincs.Security DSM.Sphincs.Comp
 
 /- Controls for the computational games (milestone 2). Each game is run on a
@@ -15,6 +16,29 @@ private def single {α : Type} (a : α) : FiniteExperiment α := ⟨1, by decide
 private def coin : FiniteExperiment Bool := ⟨2, by decide, fun i => i.val == 1⟩
 private def bools : FiniteExperiment (Bool → Bool) :=
   ⟨4, by decide, fun i b => if b then i.val / 2 == 1 else i.val % 2 == 1⟩
+
+
+-- Toy WOTS-TW: w = 4, two chains, digits (m mod 4, 3 − m mod 4) (a checksum),
+-- one-bit chain values, tweak = (instance, chain, depth).
+private def wset (f : Bool → Nat × Nat × Nat → Bool → Bool) :
+    WotsSetting Bool (Nat × Nat × Nat) Nat Nat Bool Bool :=
+  { w := 4, len := 2, enc := fun m => [m % 4, 3 - m % 4], twk := fun a c h => (a, c, h),
+    inst := fun tw => tw.1, f := f, fc := f, embed := id }
+private def fConst : Bool → Nat × Nat × Nat → Bool → Bool := fun _ _ _ => false
+private def fXor : Bool → Nat × Nat × Nat → Bool → Bool := fun pp _ x => x != pp
+private def sigOf : WotsAnswer Bool → List Bool × List Bool
+  | .inl r => r
+  | .inr _ => ([], [])
+/-- Signs message 0 on instance 0, forges message 1: one step up chain 0, a
+    brute-force preimage on chain 1. -/
+private def wForge (f : Bool → Nat × Nat × Nat → Bool → Bool) (qs : List (WotsQuery (Nat × Nat × Nat) Nat Nat Bool))
+    (msg : Nat) : WotsAdv Bool (Nat × Nat × Nat) Nat Nat Bool Bool (List Bool × List Bool) :=
+  ⟨qs.foldr (fun q k => .ask q (fun _ => k)) (.ask (.inl (0, 0)) (fun r => .done (sigOf r))),
+   fun st pp =>
+    let s0 := st.2.getD 0 false
+    let pk1 := st.1.getD 1 false
+    if msg == 1 then (0, 1, [f pp (0, 0, 0) s0, if f pp (0, 1, 2) false == pk1 then false else true])
+    else (0, msg, st.2)⟩
 
 private def check (ok : Bool) (msg : String) : IO Unit :=
   unless ok do throw (IO.userError msg)
@@ -129,4 +153,21 @@ def main : IO Unit := do
     check (op + sp ≤ d + 3 * tc) s!"Theorem 2 count inequality fails on the {name} control"
     if name == "constant" then
       check (op == 8 && tc == 4) s!"Theorem 2 constant control: op={op} tc={tc}"
-  IO.println "Computational game controls passed: TCR(-C), ITSR, PRF (with domain mask), PRE, OpenPRE, UD, DSPR/SPprob, Theorem 2's reductions, and the DSM instances on an insecure oracle."
+  -- WOTS-TW on toys: the forger wins every ticket (8 = 2 pp × 4 tapes); a
+  -- replayed message, a second signing query (c = 1) and a collection query
+  -- in the signed instance each lose; the UD-C step's exact identity
+  -- |D|^t·#G + #ideal = #real + |D|^t·#Hyb_{w−2} holds on both toys.
+  for (fn, name) in [(fConst, "constant"), (fXor, "xor")] do
+    let W := wset fn
+    let g := fun (A : WotsAdv Bool (Nat × Nat × Nat) Nat Nat Bool Bool (List Bool × List Bool)) =>
+      (W.gameProb false 1 coin coin (single A)).numerator
+    check (g (wForge fn [] 1) == 8) s!"WOTS forger control ({name})"
+    check (g (wForge fn [] 0) == 0) s!"WOTS replayed message control ({name})"
+    check (g (wForge fn [.inl (1, 2)] 1) == 0) s!"WOTS signing budget control ({name})"
+    check (g (wForge fn [.inr ((0, 1, 2), true)] 1) == 0) s!"WOTS collection disjointness control ({name})"
+    let co := W.udCoins 1 false coin (single (wForge fn [] 1)) 2 (by decide)
+    let re := (udRealProb coin coin false W.f W.fc 2 co).numerator
+    let id := (udIdealProb coin coin false W.fc 2 co).numerator
+    let h2 := (W.hybProb false 1 coin coin (single (wForge fn [] 1)) 2).numerator
+    check (4 * g (wForge fn [] 1) + id == re + 4 * h2) s!"WOTS UD-C identity ({name}): re={re} id={id} h2={h2}"
+  IO.println "Computational game controls passed: TCR(-C), ITSR, PRF (with domain mask), PRE, OpenPRE, UD, DSPR/SPprob, Theorem 2's reductions, the WOTS-TW game and its UD-C step, and the DSM instances on an insecure oracle."
