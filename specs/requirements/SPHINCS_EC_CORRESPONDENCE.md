@@ -35,7 +35,7 @@ The Lean side (`euf_cma_transfer`) proves:
 
 for every bound `B` on DSM's final world (PRG and PRF hops done). The premise
 is that `B` is the right-hand side above, for the instance `E_DSM` of §3 and
-the embedded forger `A_emb` of §6, with the two PRF terms equal to 0 (§3).
+the embedded forger `A_emb` of §6, whose two PRF terms are 0 (§3).
 
 ## 2. Parameters (SPX256f)
 
@@ -65,20 +65,28 @@ key pair, type, tree, layer (C74).
 | `mkey` | n bytes (`R`) |
 | `mco mk m` (`FORS_ES.ec` line 412) | for `m = PK.seed ‖ PK.root ‖ M`: `splitDigest(h_msg(mk, PK.seed, PK.root, M)) = (md, tree, leaf)`; `cm` = the first `k·a` bits of `md`, MSB first; `idx = tree·2^h' + leaf` (`mco`, `mco_verifier`, C73) |
 | `sseed`, `skg ss (ps, ad)`, `dsseed` | **ideal**: `ss` is a function on `pseed × adrs`, `skg ss x = ss x`. `dsseed` is the law of `(ps, ad) ↦ F(ps ‖ prfAdr(ofEc ad).bytes)` for `F` uniform on (n+32)-byte inputs (DSM's final world). `prfAdr` sets kind 0 → 5 and kind 3 → 6 (chain 0) and is the identity on kinds 1, 2, 4. It is injective on valid addresses (the kind separates the images; C74 within a kind), so `dsseed` is uniform on functions. |
-| `mseed`, `mkg ms m`, `dmseed` | **ideal**: `ms` is a function on `msg`, `mkg ms m = ms m`, `dmseed` uniform on such functions |
+| `mseed`, `mkg ms m`, `dmseed` | **ideal, read through the key's seed**: `ms` is a function on byte strings of length ≤ n + `maxMessageBytes`, `mkg ms m = ms(dropRoot m)` with `dropRoot(PK.seed ‖ PK.root ‖ M) = PK.seed ‖ M`, and `dmseed` is the law of DSM's final-world `H` (uniform on such functions) |
 
-With ideal `skg` and `mkg`, the real and ideal oracles of EasyCrypt's PRF game
-(`KeyedHashFunctions.eca`, `PRF`/`O_PRF_Default`) have the same law: a
-uniformly random function, evaluated lazily or up front. So the two PRF terms
-of §1 are 0 for every distinguisher. DSM's actual SKG and MKG are handled by
-DSM's own exact hops instead (C11, C15, C16; their advantages remain as terms).
+**The two PRF terms are 0.**
+* `PRF_skg`: with `dsseed` uniform on functions, EasyCrypt's real and ideal
+  PRF oracles (`KeyedHashFunctions.eca`, `PRF`/`O_PRF_Default`) have the same
+  law for every distinguisher: a uniformly random function, evaluated up
+  front or lazily.
+* `PRF_mkg`: the term is for one distinguisher, `R_MKGPRF_EUFCMA(A_emb)`
+  (`SPHINCS_PLUS.ec` 1214–1300). It queries its oracle only inside its
+  signing oracle, on the messages `A_emb` asks. Those are all
+  `pk ‖ M` for the one public key of the run (§6). On that set `dropRoot` is
+  injective, so `m ↦ ms(dropRoot m)` is a uniformly random function there, and
+  both oracles have the same law.
 
-**Message key: the one non-pointwise step (T3a).** DSM's final world keys
-`R` by a random function `H` on `PK.seed ‖ M`. `E_DSM` keys it by `ms` on
-`PK.seed ‖ PK.root ‖ M`. For one key pair, `pk` is fixed, so both are uniform
-random functions of `M` and the two games have the same law. This is the
-fixed-prefix lemma for variable-length domains. C72 proves only the
-fixed-width case, so this step is **owed in Lean**.
+These are statements about EasyCrypt's games, argued here. They are not
+checked by any tool. DSM's actual SKG and MKG are handled by DSM's own exact
+hops instead (C11, C15, C16; their advantages remain as terms).
+
+With this instance, DSM's final world and `E_DSM`'s game for `A_emb` agree
+pointwise: the same key distribution, the same secrets and message keys at the
+same inputs, and the same signer and verifier. No step of the transfer is a
+distributional argument on the Lean side.
 
 ## 4. EasyCrypt axioms, discharged for `E_DSM`
 
@@ -122,8 +130,8 @@ the parsed forgery. Freshness is preserved, since `M ↦ pk ‖ M` is injective.
 Verification agrees, since `verify_EC(pk, pk ‖ M', σ) = verify_DSM(pk, M', bytes σ)`.
 A malformed forgery loses in both games. `A_emb` is lossless.
 
-With T3a, DSM's final world for strategy `A` and `E_DSM`'s game for `A_emb`
-have the same law. The premise of `euf_cma_transfer` is then exactly §1 for
+DSM's final world for strategy `A` and `E_DSM`'s game for `A_emb` agree
+pointwise (§3). The premise of `euf_cma_transfer` is then exactly §1 for
 `(E_DSM, A_emb)`.
 
 ## 7. The terms, as DSM games
@@ -139,7 +147,7 @@ modules and are not rendered in Lean. Theorem 2 (C76) and the WOTS-TW bound
 
 ## 8. Owed, and not claimed
 
-Owed: T3a (variable-length fixed-prefix lemma, Lean); the per-kind ranges of
+Owed: the per-kind ranges of
 the addresses DSM's signer issues (C18 proves only `InRange`); the signature
 parse bijection in Lean (T5); the artifact replay result (§9).
 

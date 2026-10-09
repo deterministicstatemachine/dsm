@@ -874,7 +874,7 @@ The auditors must accept both explicitly.
 | --- | --- | --- |
 | T1 | One-seed key generation and composite PRFs (I2, I3): exact PRG, KDF and PRF hops | done (C11, C15, C16; as advantages C75) |
 | T2 | DSM's primitives meet EasyCrypt's axioms (I5, I6, I13): `in_collection`, `dist_adrstypes`, `two_encodings`, `ch0`/`chS`, ITSR shape, address validity | done (C22, C73, C74), except the per-type ranges of the addresses DSM's signer issues |
-| T3 | Message binding (I1) by message embedding. The instance `E_DSM` and the embedded forger `A_emb` are fixed in `SPHINCS_EC_CORRESPONDENCE.md`: `msg := PK ‖ M`, `mco(R, PK ‖ M) := MCO_DSM(R, PK, M)`, ideal `skg` and `mkg` (EasyCrypt's two PRF terms are 0), DSM's own hops in their place. Everything matches pointwise except the message key's domain (`PK.seed ‖ M` against `PK ‖ M`), which agrees in distribution for one key (T3a, the variable-length fixed-prefix lemma) | record written; T3a owed in Lean |
+| T3 | Message binding (I1) by message embedding. The instance `E_DSM` and the embedded forger `A_emb` are fixed in `SPHINCS_EC_CORRESPONDENCE.md`: `msg := PK ‖ M`, `mco(R, PK ‖ M) := MCO_DSM(R, PK, M)`, ideal `skg`, and `mkg` read through `PK.seed ‖ M` with the law of DSM's final-world message key. DSM's final world and `E_DSM`'s game for `A_emb` then agree pointwise. EasyCrypt's two PRF terms are 0 (argued for its games in the record). DSM's own hops replace them | record written |
 | T4 | The transfer theorem: real DSM EUF-CMA ≤ the five named primitive advantages + B, for any bound B on the final world (`euf_cma_final`, `euf_cma_transfer`, C79); the premise is that B is EasyCrypt's Theorem-4 bound for `(E_DSM, A_emb)` | done in Lean (premise a hypothesis) |
 | T5 | Rust ↔ Lean model refinement | existing refinement checks |
 
@@ -893,4 +893,6 @@ item in `SPHINCS_EC_CORRESPONDENCE.md`: parameters, the instance, the axioms
 discharged, every algorithm, the game and the embedded forger, and the terms.
 The artifact replay is running on the maintainer's machine (EasyCrypt r2026.02
 test box), and its result will be recorded there. Remaining Lean work for the
-transfer: T3a, and the signature parse bijection (T5).
+transfer: the signature parse bijection (T5). (An earlier draft of the record
+needed a variable-length fixed-prefix lemma, T3a; choosing `mkg` to read
+`PK.seed ‖ M` makes the correspondence pointwise and removes it.)
