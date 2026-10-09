@@ -47,8 +47,14 @@ pub fn app(service: Arc<Service>) -> Router {
 }
 
 fn refused(refusal: Refusal) -> Response {
-    let status = StatusCode::from_u16(refusal.status).map_or(StatusCode::BAD_REQUEST, |s| s);
-    (status, refusal.reason).into_response()
+    match StatusCode::from_u16(refusal.status) {
+        Ok(status) => (status, refusal.reason).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{} ({e})", refusal.reason),
+        )
+            .into_response(),
+    }
 }
 
 async fn receipt(State(service): State<Arc<Service>>, body: Bytes) -> Response {
