@@ -219,9 +219,11 @@ impl AppRouterImpl {
                 if let Some(profile) = req.profile {
                     match contact_profile::set_contact_profile(&device_id, profile) {
                         Ok(stored) => added.profile = Some(stored),
-                        Err(e) => return err(format!(
+                        Err(e) => {
+                            return err(format!(
                             "contacts.addManual: the contact was added; its details were not: {e}"
-                        )),
+                        ))
+                        }
                     }
                 }
                 pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(added))
