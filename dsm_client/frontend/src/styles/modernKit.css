@@ -180,7 +180,7 @@ html[data-skin="modern"] .sb-popover,
 html[data-skin="modern"] .sb-popover.sb-card--dark,
 html[data-skin="modern"] .bilateral-transfer-dialog {
   width: 100%; max-width: none; max-height: 90%; margin: 0; overflow-y: auto; box-sizing: border-box;
-  border: none; border-radius: 26px 26px 0 0; padding: 22px 20px calc(22px + env(safe-area-inset-bottom));
+  border: none; border-radius: 26px 26px 0 0; padding: 22px 20px 22px;
   background: var(--s-bg); background-image: none; color: var(--s-text); box-shadow: none; image-rendering: auto;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 16px;
 }
@@ -235,7 +235,7 @@ html[data-skin="modern"] .bilateral-btn-accept:active:not(:disabled) { backgroun
 
 /* ---- The toast at the bottom of the screen (its Game Boy colours are set inline) ---- */
 html[data-skin="modern"] .wallet-toast {
-  position: fixed !important; bottom: calc(84px + env(safe-area-inset-bottom)) !important; left: 16px !important; right: 16px !important;
+  position: fixed !important; bottom: 84px !important; left: 16px !important; right: 16px !important;
   border: none !important; border-radius: 16px !important; padding: 14px 16px !important;
   background: var(--s-text) !important; color: var(--s-bg) !important;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 15px !important; font-weight: 700;
