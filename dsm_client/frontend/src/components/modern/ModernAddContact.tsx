@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Adding someone in the Modern skin: scan (or paste) their DSM code, then say
 // who they are by picking them from the phone's contacts, or keep the name
-// their card gives. Rust reads the code and adds the contact; the details go
+// their card gives. Your own code is shown too, for them to add you. Rust reads the code and adds the contact; the details go
 // with it (DSM Amendment A17).
 
 import React, { useCallback, useEffect, useState } from 'react';
@@ -14,6 +14,7 @@ import type { PersonProfile } from '../../domain/types';
 import { profileFromCard, withPhoneContact } from '../../domain/personProfile';
 import { Avatar, Icon, PageTitle } from './parts';
 import { modernNav } from './modernNav';
+import ModernMyCode from './ModernMyCode';
 
 type Step =
   | { kind: 'code' }
@@ -110,6 +111,9 @@ export default function ModernAddContact(): React.JSX.Element {
           <button type="button" className="s-btn s-btn-quiet" disabled={pasted.trim().length === 0 || step.kind === 'reading'} onClick={() => read(pasted)}>
             {step.kind === 'reading' ? 'Reading…' : 'Use this code'}
           </button>
+          <div style={{ marginTop: 18 }}>
+            <ModernMyCode heading="They add you the same way: let them scan your code, or send it to them." />
+          </div>
         </>
       ) : null}
 
