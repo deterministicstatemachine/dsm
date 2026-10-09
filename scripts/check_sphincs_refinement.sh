@@ -96,6 +96,7 @@ lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/CompWotsG3.olean lean4
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/CompWotsPre.olean lean4/Sphincs/CompWotsPre.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/CompWotsTcr.olean lean4/Sphincs/CompWotsTcr.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/CompWotsBound.olean lean4/Sphincs/CompWotsBound.lean
+lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/CompTransfer.olean lean4/Sphincs/CompTransfer.lean
 lean -DwarningAsError=true --run lean4/Sphincs/CompGamesChecks.lean
 lean -DwarningAsError=true lean4/Sphincs/Blake3Proofs.lean
 lean -DwarningAsError=true -o target/sphincs-lean/Sphincs/Blake3Vectors.olean lean4/Sphincs/Blake3Vectors.lean
