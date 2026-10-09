@@ -340,3 +340,6 @@ html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; 
 }
 .s-switch[aria-checked="true"] .s-switch-knob { background: var(--s-fuchsia); }
 .s-switch[aria-checked="true"] .s-switch-knob::after { transform: translateX(16px); }
+
+/* A contact's picture, tapped to choose a photo for them. */
+.s-avatar-pick { position: relative; display: inline-block; cursor: pointer; }

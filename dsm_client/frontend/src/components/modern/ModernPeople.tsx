@@ -28,7 +28,7 @@ export default function ModernPeople(): React.JSX.Element {
           shown.map((c) => (
             <div key={c.deviceId} className="s-row">
               <button type="button" className="s-row" style={{ padding: 0 }} onClick={() => modernNav.open({ kind: 'contact', deviceId: c.deviceId })}>
-                <Avatar name={personName(c)} lookupKey={c.profile?.phoneLookupKey} />
+                <Avatar name={personName(c)} lookupKey={c.profile?.phoneLookupKey} deviceId={c.deviceId} />
                 <span className="s-row-main">
                   <span className="s-row-title" style={{ display: 'block' }}>{personName(c)}</span>
                   <span className="s-row-sub" style={{ display: 'block' }}>Send to {personName(c).split(' ')[0]}</span>
