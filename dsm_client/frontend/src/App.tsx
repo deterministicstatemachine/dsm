@@ -172,8 +172,10 @@ export default function App() {
                     <DiagnosticsOverlay />
                     <BilateralTransferDialog walletReady={runtime.appState === 'wallet_ready' && !showIntro} />
                     <FxLayer />
-                    <GuidedTour appState={runtime.appState} />
-                    <TourOffer appState={runtime.appState} showIntro={showIntro} />
+                    {/* The tour walks the Game Boy's menus and buttons: it runs in
+                        Classic, and is offered once Classic is the owner's choice. */}
+                    {skin === 'classic' ? <GuidedTour appState={runtime.appState} /> : null}
+                    {runtime.skin === 'classic' ? <TourOffer appState={runtime.appState} showIntro={showIntro} /> : null}
                     <SkinChoice appState={runtime.appState} />
                   </ScreenContainer>
                   {/* The passcode prompt is its own layer, not part of the home
