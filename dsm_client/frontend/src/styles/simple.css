@@ -103,6 +103,11 @@ html[data-scheme="dark"] .s-brand-mark { background: var(--s-secondary); }
 .s-tab svg { width: 26px; height: 26px; }
 
 /* ---- Pieces ---- */
+/* Every icon has a size: an SVG with none fills its box. */
+.s-app svg, .s-sheet svg { width: 24px; height: 24px; flex: none; }
+.s-row > svg { width: 22px; height: 22px; color: var(--s-muted); }
+.s-avatar svg { width: 26px; height: 26px; }
+.s-notice svg { width: 20px; height: 20px; }
 .s-card { background: var(--s-surface); border-radius: var(--s-radius); padding: 18px; box-shadow: var(--s-shadow); border: 1px solid var(--s-line); margin-bottom: 14px; }
 .s-balance { background: var(--s-surface-2); border: none; position: relative; overflow: hidden; }
 html[data-scheme="dark"] .s-balance { background: linear-gradient(160deg, #1b1b1b 55%, #3a2f05 100%); border: 1px solid #3a3a3a; }
@@ -125,6 +130,8 @@ html[data-scheme="dark"] .s-balance { background: linear-gradient(160deg, #1b1b1
 
 .s-row { display: flex; align-items: center; gap: 14px; padding: 12px 0; border: none; background: none; width: 100%; text-align: left; color: inherit; }
 .s-row + .s-row { border-top: 1px solid var(--s-line); }
+/* A row that is itself a card keeps the card's surface. */
+.s-card.s-row { background: var(--s-surface); border: 1px solid var(--s-line); padding: 14px 18px; }
 .s-row-main { flex: 1; min-width: 0; }
 .s-row-title { font-size: 18px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .s-row-sub { font-size: 14px; color: var(--s-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
