@@ -20,6 +20,8 @@ type Props = {
   height: number;
   onSave: (picture: string) => void;
   onCancel: () => void;
+  /** What the screen is called; by default "Frame your photo" or "Frame your banner". */
+  title?: string;
 };
 
 /** Where the picture sits under the frame: its zoom, and its top-left corner in frame pixels. */
@@ -50,7 +52,7 @@ function zoomedAbout(image: HTMLImageElement, frame: Frame, view: View, zoom: nu
   return covered(image, frame, { zoom, x: px - ix * after, y: py - iy * after });
 }
 
-export default function ImageCropper({ image, shape, width, height, onSave, onCancel }: Props): React.JSX.Element {
+export default function ImageCropper({ image, shape, width, height, onSave, onCancel, title }: Props): React.JSX.Element {
   const frameRef = useRef<HTMLDivElement>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
@@ -138,10 +140,11 @@ export default function ImageCropper({ image, shape, width, height, onSave, onCa
   };
 
   const scale = frame !== null ? scaleAt(image, frame, view.zoom) : 0;
+  const heading = title !== undefined ? title : shape === 'circle' ? 'Frame your photo' : 'Frame your banner';
 
   return createPortal(
-    <div className="s-crop" role="dialog" aria-label={shape === 'circle' ? 'Frame your photo' : 'Frame your banner'}>
-      <h2 className="s-crop-title">{shape === 'circle' ? 'Frame your photo' : 'Frame your banner'}</h2>
+    <div className="s-crop" role="dialog" aria-label={heading}>
+      <h2 className="s-crop-title">{heading}</h2>
       <p className="s-hint" style={{ textAlign: 'center' }}>Drag to move it. Pinch or use the slider to zoom.</p>
       <div
         ref={frameRef}

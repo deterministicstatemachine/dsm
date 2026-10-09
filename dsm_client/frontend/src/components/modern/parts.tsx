@@ -8,6 +8,7 @@ import type { DomainContact, DomainTransaction } from '../../domain/types';
 import type { TokenBalanceView } from '../../dsm/types';
 import { phoneContactPhoto } from '../../dsm/WebViewBridge/phoneContacts';
 import logger from '../../utils/logger';
+import { useContactPhoto } from './contactPhotos';
 
 export type IconName =
   | 'send' | 'receive' | 'people' | 'home' | 'activity' | 'settings' | 'person' | 'back' | 'chevron' | 'share' | 'copy' | 'info'
@@ -52,8 +53,13 @@ function tone(name: string): 'a' | 'b' {
   return name.length % 2 === 0 ? 'a' : 'b';
 }
 
-export function Avatar({ name, lookupKey, large }: { name: string; lookupKey?: string; large?: 'large' }): React.JSX.Element {
-  const [photo, setPhoto] = useState<string | null>(null);
+/**
+ * A person's round picture: the photo the owner set for the contact
+ * (`deviceId`), else the linked phone contact's photo, else their initial.
+ */
+export function Avatar({ name, lookupKey, deviceId, large }: { name: string; lookupKey?: string; deviceId?: string; large?: 'large' }): React.JSX.Element {
+  const set = useContactPhoto(deviceId !== undefined ? deviceId : '');
+  const [phonePhoto, setPhoto] = useState<string | null>(null);
   useEffect(() => {
     let live = 'yes';
     if (lookupKey === undefined || lookupKey.length === 0) {
@@ -62,10 +68,11 @@ export function Avatar({ name, lookupKey, large }: { name: string; lookupKey?: s
     }
     phoneContactPhoto(lookupKey).then(
       (url) => { if (live === 'yes') setPhoto(url); },
-      (e: unknown) => logger.warn('[simple] the contact photo was not read:', e),
+      (e: unknown) => logger.warn('[modern] the phone contact photo was not read:', e),
     );
     return () => { live = 'no'; };
   }, [lookupKey]);
+  const photo = set !== null ? set : phonePhoto;
   const initial = name.trim().slice(0, 1).toUpperCase();
   const classes = ['s-avatar', tone(name) === 'b' ? 'b' : '', large === 'large' ? 'large' : ''].filter((c) => c.length > 0).join(' ');
   return (
@@ -124,7 +131,7 @@ export function ActivityItem({ row }: { row: ActivityRow }): React.JSX.Element {
   const verb = row.direction === 'out' ? 'To' : 'From';
   return (
     <div className="s-row">
-      <Avatar name={row.who} lookupKey={row.contact?.profile?.phoneLookupKey} />
+      <Avatar name={row.who} lookupKey={row.contact?.profile?.phoneLookupKey} deviceId={row.contact?.deviceId} />
       <div className="s-row-main">
         <div className="s-row-title">{row.who}</div>
         <div className="s-row-sub">{row.tx.memo !== undefined && row.tx.memo.length > 0 ? row.tx.memo : `${verb} ${row.who}`}</div>

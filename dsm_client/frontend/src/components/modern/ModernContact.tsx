@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
-// One contact in the Modern skin: who they are, Send, and their details to
-// edit or link to a phone contact. The details are the wallet's own, for
+// One contact in the Modern skin: who they are (with a photo the owner sets
+// for them: tap the picture), Send, and their details to edit or link to a
+// phone contact. The details are the wallet's own, for
 // showing and for emailing receipts (DSM Amendment A17).
 
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { useContacts } from '../../contexts/ContactsContext';
 import { contactsStore } from '../../stores/contactsStore';
 import { pickPhoneContact } from '../../dsm/WebViewBridge/phoneContacts';
 import type { PersonProfile } from '../../domain/types';
 import { Avatar, Icon, PageTitle, personName } from './parts';
 import { modernNav } from './modernNav';
+import { loadImageFile } from '../../utils/imageCrop';
+import ImageCropper from './ImageCropper';
+import { contactPhotoStore, useContactPhoto } from './contactPhotos';
+
+/** The size a contact's photo is kept at. */
+const PHOTO_SIDE = 320;
 
 function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -20,6 +27,9 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
   const contact = contacts.find((c) => c.deviceId === deviceId) ?? null;
   const [draft, setDraft] = useState<PersonProfile | null>(null);
   const [said, setSaid] = useState<string | null>(null);
+  const [framing, setFraming] = useState<{ image: HTMLImageElement; release: () => void } | null>(null);
+  const inputId = useId();
+  const setPhoto = useContactPhoto(deviceId);
 
   if (contact === null) {
     return (
@@ -46,6 +56,27 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
     );
   };
 
+  const choosePhoto = (file: File) => {
+    setSaid(null);
+    loadImageFile(file).then(
+      ({ image, release }) => setFraming({ image, release }),
+      (e: unknown) => setSaid(messageOf(e)),
+    );
+  };
+
+  const endFraming = () => {
+    framing?.release();
+    setFraming(null);
+  };
+
+  const keepPhoto = (photo: string | null) => {
+    endFraming();
+    contactPhotoStore.keep(contact.deviceId, photo).then(
+      () => undefined,
+      (e: unknown) => setSaid(messageOf(e)),
+    );
+  };
+
   const link = () => {
     pickPhoneContact().then(
       (picked) => {
@@ -65,7 +96,26 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
     <>
       <PageTitle title={name} onBack={() => modernNav.back()} />
       <section className="s-card" style={{ textAlign: 'center' }}>
-        <Avatar name={name} lookupKey={contact.profile?.phoneLookupKey} large="large" />
+        <input
+          id={inputId}
+          type="file"
+          className="sb-file"
+          accept="image/png,image/jpeg,image/webp"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = '';
+            if (file !== undefined) choosePhoto(file);
+          }}
+        />
+        <label htmlFor={inputId} className="s-avatar-pick" aria-label={`Choose a photo for ${name}`}>
+          <Avatar name={name} lookupKey={contact.profile?.phoneLookupKey} deviceId={contact.deviceId} large="large" />
+          <span className="s-profile-camera" aria-hidden>+</span>
+        </label>
+        {setPhoto !== null ? (
+          <div style={{ marginTop: 8 }}>
+            <button type="button" className="s-chip" onClick={() => keepPhoto(null)}>Remove photo</button>
+          </div>
+        ) : null}
         <div className="s-row-title" style={{ marginTop: 10 }}>{name}</div>
         {held.email.length > 0 ? <div className="s-row-sub">{held.email}</div> : null}
         {held.phone.length > 0 ? <div className="s-row-sub">{held.phone}</div> : null}
@@ -101,6 +151,17 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
         )}
       </div>
       {said !== null ? <p className="s-hint" style={{ textAlign: 'center', marginTop: 12 }}>{said}</p> : null}
+      {framing !== null ? (
+        <ImageCropper
+          image={framing.image}
+          shape="circle"
+          title={`Frame ${name.split(' ')[0]}'s photo`}
+          width={PHOTO_SIDE}
+          height={PHOTO_SIDE}
+          onSave={(photo) => keepPhoto(photo)}
+          onCancel={endFraming}
+        />
+      ) : null}
     </>
   );
 }

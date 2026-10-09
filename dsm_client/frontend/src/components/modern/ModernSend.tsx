@@ -99,7 +99,7 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
           </div>
         ) : contact !== null ? (
           <button type="button" className="s-row" onClick={() => setRecipient(null)} aria-label={`Change who: ${personName(contact)}`}>
-            <Avatar name={personName(contact)} lookupKey={contact.profile?.phoneLookupKey} />
+            <Avatar name={personName(contact)} lookupKey={contact.profile?.phoneLookupKey} deviceId={contact.deviceId} />
             <span className="s-row-main">
               <span className="s-row-title" style={{ display: 'block' }}>{personName(contact)}</span>
               <span className="s-row-sub" style={{ display: 'block' }}>{contact.profile?.email || contact.profile?.phone || 'On DSM'}</span>
@@ -109,7 +109,7 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
         ) : (
           contacts.map((c) => (
             <button key={c.deviceId} type="button" className="s-row" onClick={() => setRecipient(c.deviceId)}>
-              <Avatar name={personName(c)} lookupKey={c.profile?.phoneLookupKey} />
+              <Avatar name={personName(c)} lookupKey={c.profile?.phoneLookupKey} deviceId={c.deviceId} />
               <span className="s-row-main"><span className="s-row-title" style={{ display: 'block' }}>{personName(c)}</span></span>
             </button>
           ))
