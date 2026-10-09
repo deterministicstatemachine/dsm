@@ -189,7 +189,8 @@ mod tests {
     // +1 for the route lane (client routing policy, owner 2026-10-07).
     // +4 with a vault's history (SoFi Amendment S26): its leaf, node, head
     // and locator.
-    const EXPECTED_TAG_COUNT: usize = 396;
+    // +1 for an email receipt request's signature (DSM Amendment A17).
+    const EXPECTED_TAG_COUNT: usize = 397;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
