@@ -344,3 +344,10 @@ html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; 
 
 /* A contact's picture, tapped to choose a photo for them. */
 .s-avatar-pick { position: relative; display: inline-block; cursor: pointer; }
+
+/* Where Bluetooth pairing stands (People): fuchsia, with its icon. */
+.s-pairing { align-items: center; background: var(--s-avatar-a); color: var(--s-text); }
+.s-pairing svg { color: var(--s-fuchsia); flex: 0 0 auto; }
+html[data-scheme="dark"] .s-pairing { background: #2a0a17; }
+.s-paired { align-items: center; gap: 4px; }
+.s-paired svg { width: 15px; height: 15px; color: var(--s-fuchsia); }

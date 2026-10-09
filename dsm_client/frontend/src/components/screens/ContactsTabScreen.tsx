@@ -14,7 +14,7 @@ import StitchedReceiptDetails from '../receipts/StitchedReceiptDetails';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import { Disclosure, Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
-import type { DomainContact } from '../../domain/types';
+import { pairingLineFor, pairingStage } from '../../domain/pairing';
 
 interface Props { onNavigate?: (screen: string) => void; eraTokenSrc?: string }
 
@@ -27,17 +27,6 @@ const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
 ];
 
 const TAB_STORAGE_KEY = 'dsm_contacts_active_tab';
-
-/** Where a contact's pairing stands, as Rust states it on the contact. */
-function pairingLineFor(c: DomainContact): string | null {
-  switch (c.pairing) {
-    case 'paired': return 'Paired over Bluetooth';
-    case 'connected': return 'Connecting…';
-    case 'searching':
-    case 'retrying': return 'Pairing…';
-    default: return null;
-  }
-}
 
 const ContactsTabScreen: React.FC<Props> = () => {
   const [activeTab, setActiveTab] = useState<Tab>(() => {
@@ -130,11 +119,7 @@ const ContactsTabScreen: React.FC<Props> = () => {
   // Bluetooth on and permitted, until no contact is left unpaired. Where it
   // stands is Rust's too: each contact carries its phase from the pairing
   // loop, and the line shows the furthest a pairing has got.
-  const pairingLine: 'connected' | 'searching' | null = contacts.some((c) => c.pairing === 'connected')
-    ? 'connected'
-    : contacts.some((c) => c.pairing === 'searching' || c.pairing === 'retrying')
-      ? 'searching'
-      : null;
+  const pairingLine = pairingStage(contacts);
 
   // Only on a cold start with no contacts at all: a refresh with rows already
   // on screen is near-instant and would only flicker.

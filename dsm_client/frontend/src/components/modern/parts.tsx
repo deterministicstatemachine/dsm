@@ -12,7 +12,7 @@ import { useContactPhoto } from './contactPhotos';
 
 export type IconName =
   | 'send' | 'receive' | 'people' | 'home' | 'activity' | 'settings' | 'person' | 'back' | 'chevron' | 'share' | 'copy' | 'info'
-  | 'tokens' | 'trade' | 'bitcoin' | 'storage' | 'apps' | 'scan';
+  | 'tokens' | 'trade' | 'bitcoin' | 'storage' | 'apps' | 'scan' | 'bluetooth';
 
 export function Icon({ name }: { name: IconName }): React.JSX.Element {
   const paths: Record<string, React.ReactNode> = {
@@ -33,6 +33,7 @@ export function Icon({ name }: { name: IconName }): React.JSX.Element {
     bitcoin: <><circle cx="12" cy="12" r="9" /><path d="M9.5 7.5h4a2 2 0 0 1 0 4h-4m0 0h4.5a2 2 0 0 1 0 4h-4.5m0-8v8M11 6v1.5M11 15.5V17M13 6v1.5M13 15.5V17" /></>,
     storage: <><rect x="4" y="4" width="16" height="6" rx="2" /><rect x="4" y="14" width="16" height="6" rx="2" /><path d="M8 7h.01M8 17h.01" /></>,
     apps: <><rect x="4" y="4" width="6.5" height="6.5" rx="1.6" /><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6" /><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6" /><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6" /></>,
+    bluetooth: <path d="m7 7 10 10-5 4V3l5 4L7 17" />,
     scan: <><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15" /><path d="M4 12h16" /></>,
   };
   return (
