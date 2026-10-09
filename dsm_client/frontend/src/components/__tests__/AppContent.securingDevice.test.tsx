@@ -10,6 +10,7 @@ describe('AppContent securing device state', () => {
       <AppContent
         appState="securing_device"
         skin="classic"
+        choosing="chosen"
         error={null}
         showIntro={false}
         introGifSrc="intro.gif"

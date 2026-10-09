@@ -35,7 +35,6 @@ import { useNativeSessionBridge } from './hooks/useNativeSessionBridge';
 import './styles/screen.css';
 import './styles/simple.css';
 import { useSkin } from './hooks/useSkin';
-import SkinChoice from './components/simple/SkinChoice';
 
 export default function App() {
   const runtime = useAppRuntimeStore();
@@ -66,10 +65,14 @@ export default function App() {
   // else, in every phase (a combo-locked wallet's lock screen shows the device).
   const skin = useSkin(session.received, runtime.skin, runtime.scheme, runtime.appState, session.lock_status.method);
 
-  // The Game Boy's intro cutscene waits for its A button: the Simple skin has
-  // neither, so it shows no intro.
+  // A phone that has not chosen how its wallet looks is asked first, on a
+  // screen of its own, before the intro or anything else.
+  const choosing = runtime.skinRead === 'read' && runtime.skin === null ? 'choose' : 'chosen';
+
+  // The Game Boy's intro cutscene waits for its A button: it plays only once
+  // Classic is the choice (the Simple skin has neither).
   const introGate = useIntroGate();
-  const showIntro = introGate.showIntro && skin !== 'simple';
+  const showIntro = introGate.showIntro && runtime.skin === 'classic' && skin === 'classic';
   const dismissIntro = introGate.dismissIntro;
   const {
     chameleonSrc,
@@ -153,6 +156,7 @@ export default function App() {
                     <AppContent
                       appState={runtime.appState}
                       skin={skin}
+                      choosing={choosing}
                       error={runtime.error}
                       showIntro={showIntro}
                       introGifSrc={introGifSrc}
@@ -180,7 +184,6 @@ export default function App() {
                         Classic, and is offered once Classic is the owner's choice. */}
                     {skin === 'classic' ? <GuidedTour appState={runtime.appState} /> : null}
                     {runtime.skin === 'classic' ? <TourOffer appState={runtime.appState} showIntro={showIntro} /> : null}
-                    <SkinChoice />
                   </ScreenContainer>
                   {/* The passcode prompt is its own layer, not part of the home
                       screen's content: it portals over the whole display, the

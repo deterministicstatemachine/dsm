@@ -10,12 +10,15 @@ import AppScreenRouter from './AppScreenRouter';
 import RecoveryPhraseScreen from './screens/RecoveryPhraseScreen';
 import { buildHomeStatusLines } from '../viewmodels/homeViewModel';
 import SimpleBoot from './simple/SimpleBoot';
+import SkinChoiceScreen from './SkinChoiceScreen';
 import type { Skin } from '../runtime/appRuntimeStore';
 
 type Props = {
   appState: AppState;
   /** The skin in use: the Simple skin draws every phase, the Game Boy its own. */
   skin: Skin;
+  /** `choose`: no look is chosen yet, and the choice is the only thing shown. */
+  choosing: 'choose' | 'chosen';
   error: string | null;
   showIntro: boolean;
   introGifSrc: string;
@@ -158,6 +161,7 @@ const securingBlinkKeyframes = `
 export default function AppContent({
   appState,
   skin,
+  choosing,
   error,
   showIntro,
   introGifSrc,
@@ -177,6 +181,10 @@ export default function AppContent({
   currentMenuIndex,
   setCurrentMenuIndex,
 }: Props) {
+  if (choosing === 'choose') {
+    return <SkinChoiceScreen />;
+  }
+
   if (showIntro) {
     return <SplashController showIntro={showIntro} introGifSrc={introGifSrc} />;
   }
