@@ -720,3 +720,70 @@ The theorem is about the games. It does not reduce the target count: for
 FORS, t = t_f = 35 · 2^77 (§6), and the up-front cost of the M-FORS
 reduction that produces this adversary remains as stated in §7.
 
+### Obligation 8, part 1: the WOTS-TW game and the UD-C step (done, C77)
+
+`CompWots.lean` defines EasyCrypt's multi-instance WOTS-TW game
+(`M_EUF_GCMA_WOTSTWESNPRF`) for an abstract WOTS-TW setting: Winternitz
+parameter `w`, `len` chains, a message encoding, chain tweaks, a tweakable
+hash `F` and its collection. The adversary adaptively requests public keys and
+signatures on messages of its choice under fresh instances. It may also query
+the collection oracle. After that it receives `pp` and outputs a forgery. It
+wins if the forgery verifies under a signed instance on a fresh message, with
+at most `c` instances, distinct instances, and no collection tweak in a signed
+instance. Fresh secrets are read in order from one tape of `c · len` values.
+
+Hybrid `k` (`hybElem`) starts each chain value at depth `e = digit − 1` from
+a uniform value at depth `min(k, e)`. Hybrid 0 is the real game
+(`realElem_eq_hyb0`, `handler_real_hyb0`). Hybrid `w − 2` is EasyCrypt's
+Game 3: each signature element is one `F` step above a uniform value.
+
+**No restriction is added to the adversary.** The proofs use challengers
+capped at `c` signing queries. The capped game wins on exactly the same
+tickets as the uncapped one (`proc_cap_eq`, via `OT.interp_doom`). The two
+agree up to the `(c+1)`-th signing query, and from then on both lose.
+
+`CompWotsUd.lean` builds EasyCrypt's `R_SMDTUDC_Game23WOTSTWES` explicitly
+(`udRed`, coins `udCoins`). The reduction draws an index `i < w − 2` and
+`c · len` own values. For each chain with digit `e + 1 > i + 1`, it submits
+the tweak at depth `i` as a UD-C target and finishes the chain through the
+collection oracle. For every other chain, it draws the value at depth `e`
+itself.
+
+* **Exact simulation.** The UD-C game of `udRed` is a two-source labelled
+  process (`udRed_run_proc`). Merging its sources (`tape_merge`) gives
+  hybrid `i` with the real challenge and hybrid `i + 1` with the ideal one,
+  on every tape (`udProc_hyb`). On winning runs, the challenger's conditions
+  hold automatically: at most `c · len` targets, distinct target tweaks, and
+  no collection tweak among them (`cond_of_win`).
+* **Exact relationship** (`ud_step`), over the common ticket count:
+
+      |D|^t · #G + #UD_ideal(B) = #UD_real(B) + |D|^t · #Hyb_{w−2}
+
+  (telescoping over the `w − 2` indices; `ud_num`, `ud_den`).
+* **Bound** (`ud_step_frac`):
+  Pr[G] ≤ Pr[Hyb_{w−2}] + (w − 2) · Adv^{SM-DT-UD-C}(B), with the
+  challenger's target bound `t ≥ c · len`.
+
+Hypotheses: `F` agrees with its collection on embedded chain values; every
+encoding has `len` digits, each `≤ w − 1`; chain tweaks are injective on
+chain positions and name their instance; `w ≥ 3`. The UD inputs and outputs
+are uniform on the same space, as for DSM's n-byte chain values.
+
+**Costs of B = R_SMDTUDC_Game23:**
+
+| Resource | Cost |
+| --- | --- |
+| Adversary phases | `A`'s first phase once (interpreted), `A.forge` once in the final check |
+| UD-C queries (targets and collection) | ≤ q · len · (w − 1) for an adversary of q first-phase queries (`udRed_queries`) |
+| Targets | ≤ c · len on winning runs (`cond_of_win`); the challenger rejects more than t |
+| Own hash evaluations | none while simulating (every chain step goes through the collection oracle); ≤ len · (w − 1) evaluations of F in the final verification |
+| Fresh samples | the index i < w − 2 and c · len chain values |
+| Stored values | A's state; for each of ≤ c signed instances: instance, message, len pk and len signature values; the collection tweaks |
+| Loss | factor w − 2 (guessing the hybrid index) |
+
+Not yet done for obligation 8: Game 3's TCR-C and PRE-C reductions
+(EasyCrypt `R_SMDTTCRC_Game34`, `R_SMDTPREC_Game4`), and the DSM
+instantiation (chain values as n-byte wires, tweaks as ADRS bytes, the
+checksum encoding with C22's `two_encodings`). This entry bounds the
+WOTS-TW game by Game 3 and a UD-C advantage. It does not bound DSM's forgery
+probability.
