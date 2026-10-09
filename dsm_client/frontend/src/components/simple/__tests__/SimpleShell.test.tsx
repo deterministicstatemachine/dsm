@@ -190,7 +190,7 @@ describe('the choice of look', () => {
     render(<SkinChoiceScreen />);
     expect(screen.getByRole('menu', { name: 'Wallet looks' })).toBeInTheDocument();
     await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'SIMPLE · DARK' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Simple · Dark' }));
     });
     expect(appRuntimeStore.getSnapshot().skin).toBe('simple');
     expect(appRuntimeStore.getSnapshot().scheme).toBe('dark');
@@ -200,7 +200,7 @@ describe('the choice of look', () => {
     appRuntimeStore.setSkin(null);
     render(<SkinChoiceScreen />);
     await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'CLASSIC' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Classic' }));
     });
     expect(appRuntimeStore.getSnapshot().skin).toBe('classic');
   });

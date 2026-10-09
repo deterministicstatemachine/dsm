@@ -39,7 +39,7 @@ describe('the choice of look comes before anything', () => {
   test('a phone with no choice shows only the choice', () => {
     boot('choose');
     expect(screen.getByRole('menu', { name: 'Wallet looks' })).toBeInTheDocument();
-    expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['SIMPLE · LIGHT', 'SIMPLE · DARK', 'CLASSIC']);
+    expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Simple · Light', 'Simple · Dark', 'Classic']);
     expect(screen.queryByText('INITIALIZE')).not.toBeInTheDocument();
     expect(screen.queryByText(/WALLET SETUP REQUIRED/)).not.toBeInTheDocument();
   });
