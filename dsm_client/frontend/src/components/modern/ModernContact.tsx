@@ -9,6 +9,7 @@ import { useContacts } from '../../contexts/ContactsContext';
 import { contactsStore } from '../../stores/contactsStore';
 import { pickPhoneContact } from '../../dsm/WebViewBridge/phoneContacts';
 import type { PersonProfile } from '../../domain/types';
+import { pairingLineFor } from '../../domain/pairing';
 import { Avatar, Icon, PageTitle, personName } from './parts';
 import { modernNav } from './modernNav';
 import { loadImageFile } from '../../utils/imageCrop';
@@ -119,6 +120,9 @@ export default function ModernContact({ deviceId }: { deviceId: string }): React
         <div className="s-row-title" style={{ marginTop: 10 }}>{name}</div>
         {held.email.length > 0 ? <div className="s-row-sub">{held.email}</div> : null}
         {held.phone.length > 0 ? <div className="s-row-sub">{held.phone}</div> : null}
+        <div className="s-row-sub" style={{ marginTop: 6 }}>
+          {pairingLineFor(contact) ?? 'Not paired over Bluetooth yet: it pairs on its own when you are both nearby with the app open.'}
+        </div>
       </section>
       <div className="s-stack">
         <button type="button" className="s-btn s-btn-primary" onClick={() => modernNav.open({ kind: 'send', to: contact.deviceId })}>
