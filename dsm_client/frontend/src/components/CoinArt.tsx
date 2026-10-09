@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The built-in coin artwork (ERA, dBTC) where a screen draws it directly: the
-// spinning GIF on the DGen Game Boy, a still mark in the Modern skin.
+// spinning GIF on the DGen Game Boy, a still mark in the Modern skin where the
+// coin names a token (CoinArt). A coin that only decorates a card (HeroCoin)
+// is the Game Boy's alone: the Modern skin leaves it out, disc and all.
 
 import React from 'react';
 import { useAppRuntimeStore } from '../runtime/appRuntimeStore';
@@ -26,4 +28,15 @@ export function CoinArt({ src, ticker, alt, className, style }: Props): React.JS
     );
   }
   return <img src={src} alt={alt} className={className} style={style} />;
+}
+
+/** A coin on its disc that decorates a card (the faucet, adding a contact): DGen only. */
+export function HeroCoin({ src, alt }: { src: string; alt: string }): React.JSX.Element | null {
+  const runtime = useAppRuntimeStore();
+  if (runtime.skin === 'modern') return null;
+  return (
+    <span className="sb-coin-tile">
+      <img src={src} alt={alt} style={{ width: 48, height: 48, imageRendering: 'pixelated' }} />
+    </span>
+  );
 }

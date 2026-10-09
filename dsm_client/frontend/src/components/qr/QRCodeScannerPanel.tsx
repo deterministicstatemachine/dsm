@@ -5,7 +5,7 @@
 // phone's contacts, and their details are kept with the contact (A17).
 
 import React, { useEffect, useRef, useState, useCallback, useId } from 'react';
-import { CoinArt } from '../CoinArt';
+import { HeroCoin } from '../CoinArt';
 import { useContacts } from '../../contexts/ContactsContext';
 import { readContactCode } from '../../dsm/contacts';
 import { pickPhoneContact } from '../../dsm/WebViewBridge/phoneContacts';
@@ -171,14 +171,7 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
         <section className="sb-card sb-card--dark sb-card--hero" aria-live="polite">
           {/* The coin on its light, bordered tile, as the faucet shows it: bare
               on the dark card its artwork has no edge. */}
-          <span className="sb-coin-tile">
-            <CoinArt
-              src={eraTokenSrc}
-              ticker="ERA"
-              alt="Adding contact..."
-              style={{ width: 48, height: 48, imageRendering: 'pixelated' }}
-            />
-          </span>
+          <HeroCoin src={eraTokenSrc} alt="Adding contact..." />
           <div className="sb-hero__label" style={{ marginTop: 6 }}>Adding Contact</div>
           <div className="sb-hero__sub">
             {phase.alias ? <>Saving &quot;{phase.alias}&quot; to your contacts...</> : 'Saving the contact...'}

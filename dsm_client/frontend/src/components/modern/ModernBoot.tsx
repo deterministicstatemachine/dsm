@@ -67,7 +67,7 @@ export default function ModernBoot(props: Props): React.JSX.Element {
         return (
           <Frame>
             <div className="s-classic">
-              <button type="button" className="s-icon-btn" aria-label="Back" onClick={() => navigate('home')}>
+              <button type="button" className="s-icon-btn s-classic-back" aria-label="Back" onClick={() => navigate('home')}>
                 <Icon name="back" />
               </button>
               <AppScreenRouter currentScreen={props.currentScreen} navigate={navigate} eraTokenSrc={props.eraTokenSrc} btcLogoSrc={props.btcLogoSrc} />

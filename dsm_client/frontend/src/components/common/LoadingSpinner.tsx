@@ -2,7 +2,6 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { CoinArt } from '../CoinArt';
 
 interface LoadingSpinnerProps {
   message?: string;
@@ -83,9 +82,8 @@ const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
       aria-live="polite"
       aria-busy="true"
     >
-      <CoinArt
+      <img
         src={eraTokenSrc}
-        ticker="ERA"
         alt="Loading…"
         style={{
           width: currentSize.coin,

@@ -145,7 +145,7 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
         aria-describedby={!devMode ? 'dev-hint' : undefined}
       >
         <div className="sb-kv">
-          <span className="sb-kv__k">VERSION</span>
+          <span className="sb-kv__k">Version</span>
           <span className="sb-kv__v">{versionLabel()}</span>
         </div>
         {!devMode && devModeResolved && (
@@ -291,7 +291,7 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
       {/* Developer Options (only when unlocked) */}
       {devMode && (
         <section className="sb-card" aria-labelledby="dev-section-title">
-          <div id="dev-section-title" className="sb-card__title">DEVELOPER OPTIONS</div>
+          <div id="dev-section-title" className="sb-card__title">Developer options</div>
           <div style={{ display: 'grid', gap: 8 }}>
             <button
               type="button"
