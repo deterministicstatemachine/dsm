@@ -787,3 +787,103 @@ instantiation (chain values as n-byte wires, tweaks as ADRS bytes, the
 checksum encoding with C22's `two_encodings`). This entry bounds the
 WOTS-TW game by Game 3 and a UD-C advantage. It does not bound DSM's forgery
 probability.
+
+### Obligation 8, parts 3–6: Game 3 to TCR-C and PRE-C; the WOTS-TW bound (done, C78)
+
+`CompWotsG3.lean` analyses a winning forgery in Game 3 (`g3Elem`, equal to
+hybrid `w − 2` by `handler_hyb_g3`). Signed entries carry honest public keys
+(`honest_step`). A forgery `(m', σ')` against `(m, σ, pk)` has a first chain
+`j` with `d'_j < d_j` (`firstLess_spec`, from `two_encodings`). Climbing
+`σ'_j` to depth `d_j` gives `y`, and `y` meets `σ_j` at depth `w − 1`
+(`forge_facts`). Then either `y = σ_j` (`preEv`) or `y ≠ σ_j` (`tcrEv`), and
+the chains collide at a first depth (`findCol_spec`). The Game 3 count splits
+exactly into the two cases (`hyb_split`).
+
+`CompWotsPre.lean` builds `R_SMDTPREC_Game4WOTSTWES` (`preRed`). For digit
+`e + 1` it submits the tweak at depth `e` as a PRE-C target, and the answer
+is the signature element. Its PRE-C game is a two-source process whose merged
+run is Game 3 (`preRed_run_proc`, `preProc_of_g3`). In the PRE case it outputs
+the value one step below the signed element, at that target's index
+(`pre_of_ev`, `cond_pre`). Counting gives
+`|D|^t · #(Game 3 ∧ PRE case) ≤ #PRE-C(B_pre)` (`pre_num`, `pre_den`).
+
+`CompWotsTcr.lean` builds `R_SMDTTCRC_Game34WOTSTWES` (`tcrRed`). It draws
+Game 3's values itself, obtains each signature element through the
+collection oracle, and climbs every chain from its digit to depth `w − 1` by
+submitting each step's input as a target. In the TCR case it outputs the
+forgery's side of the first collision, at the honest side's index
+(`tcr_of_ev`, `cond_tcr`). Counting gives
+`#(Game 3 ∧ TCR case) ≤ #TCR-C(B_tcr)` over the same tickets (`tcr_num`,
+`tcr_den`).
+
+`CompWotsBound.lean`:
+
+    Pr[Hyb_{w−2}] ≤ Pr^{TCR-C}(B_tcr) + Pr^{PRE-C}(B_pre)                     (g3_bound)
+    Pr[G] ≤ (w − 2) · Adv^{UD-C}(B_ud) + Pr^{TCR-C}(B_tcr) + Pr^{PRE-C}(B_pre)  (wots_bound)
+
+These are exact fractions, for target bounds `t_ud ≥ c·len`,
+`t_tcr ≥ c·len·(w − 1)` and `t_pre ≥ c·len`. This is EasyCrypt's
+M-EUF-GCMA bound for WOTS-TW, with the same three reductions, for an abstract
+WOTS-TW setting. Hypotheses: `F` agrees with its collection, encodings have
+`len` digits each `≤ w − 1`, `two_encodings`, chain tweaks injective and
+naming their instance, `w ≥ 3`.
+
+| Resource | B_tcr | B_pre |
+| --- | --- | --- |
+| Adversary phases | first phase once (interpreted); `A.forge` once in `find` | same |
+| Oracle queries (targets + collection) | ≤ q · len · (w − 1) (`tcrRed_queries`) | ≤ q · len · (w − 1) (`preRed_queries`) |
+| Targets | ≤ c · len · (w − 1) on winning runs | ≤ c · len on winning runs |
+| Own F evaluations | none while simulating; in `find`, ≤ w − 1 steps to climb the forgery, ≤ 2(w − 1) to search the collision, and its c · len · (w − 1) target values recomputed from its state (each one F step from the previous) | none while simulating; in `find`, ≤ w − 2 |
+| Fresh samples | c · len values | c · len values (digit-0 chains) |
+| Stored values | A's state; ≤ c signed entries (instance, message, 2·len values) | same |
+| Loss | 1 | 1 |
+
+The DSM instance of this bound (DSM's encoding, ADRS tweaks, keyed BLAKE3) was
+started and then withdrawn under the strategy revision in §13: the published
+EasyCrypt result covers the identical construction.
+
+## 13. Strategy revision (2026-10-08): reuse the published proof, prove the deltas
+
+**Decision.** DSM's FORS, WOTS+, XMSS and hypertree are SPHINCS+-256f's
+construction with identical parameters (§3). Those components are not
+re-proved in Lean. The published result (Barbosa, Dupressoir, Hülsing,
+Meijers, Strub, ASIACRYPT 2024; artifact `MM45/FV-SPHINCSPLUS-EC` at
+`a28e4c53`) enters the final Lean theorem as an explicit, named premise. It is
+a hypothesis of the theorem, never a Lean axiom. The Lean work concentrates
+on what DSM changes.
+
+**What stays.** The proofs already done stand as kernel-checked cross-checks
+of those parts of the EasyCrypt proof, with query budgets EasyCrypt does not
+state: Theorem 2 (C76) and WOTS-TW (C77, C78). Withdrawn: the remaining
+re-proofs of obligations 6 (FORS reductions B1–B3), 8 (the DSM instance of
+WOTS-TW) and 9 (the hypertree reduction).
+
+**Trust boundary.** Lean cannot check an EasyCrypt proof. Reuse therefore
+trusts:
+1. the EasyCrypt artifact and toolchain. Owed: replay the artifact at the
+   pinned commit. It has been read, not replayed (§1).
+2. the faithfulness of the Lean statement of the premise to
+   `EUFCMA_SPHINCS_PLUS` (`SPHINCS_PLUS.ec` line 4338): games, reductions and
+   terms. Owed: a line-by-line correspondence record.
+
+The auditors must accept both explicitly.
+
+**Delta obligations** (replacing §9's obligations 6, 9 and 10):
+
+| # | Delta | Status |
+| --- | --- | --- |
+| T1 | One-seed key generation and composite PRFs (I2, I3): exact PRG, KDF and PRF hops | done (C11, C15, C16; as advantages C75) |
+| T2 | DSM's primitives meet EasyCrypt's axioms (I5, I6, I13): `in_collection`, `dist_adrstypes`, `two_encodings`, `ch0`/`chS`, ITSR shape, address validity | done (C22, C73, C74), except the per-type ranges of the addresses DSM's signer issues |
+| T3 | Message binding (I1) by message embedding: EasyCrypt's message type and `mco` are abstract. After T1, DSM is EasyCrypt's SPHINCS+ (random-function secrets) with `msg := PK ‖ M` and `mco(R, PK ‖ M) := MCO_DSM(R, PK, M)`. A DSM forger is an EasyCrypt forger on `PK ‖ M`: it knows `PK`, and freshness is preserved since the prefix is fixed. DSM's message key, a random function on `PK.seed ‖ M`, and EasyCrypt's, a random function on `PK ‖ M`, agree in distribution for a fixed key (fixed-prefix lemma; C72 covers fixed-width inputs, the variable-length case is owed) | to prove: the exact simulation equality |
+| T4 | The transfer theorem: real DSM EUF-CMA ≤ the five named primitive advantages + EasyCrypt's Theorem-4 terms for the embedded forger, conditional on the premise | to prove |
+| T5 | Rust ↔ Lean model refinement | existing refinement checks |
+
+T3 replaces the context-aware M-FORS game of §5b and its simulation equalities
+O6b and O9b. The published games are used unchanged. The §5b reasoning
+remains correct; the embedding needs no new component game.
+
+**Unchanged.** The SM-DT, ITSR, PRG and PRF properties of BLAKE3 and ChaCha20
+remain assumptions, kept as terms; none is proved. The reductions' costs are
+those of §7, including the ≈2^83.2 up-front construction. That cost belongs
+to the published reduction framework, not to BLAKE3. No numerical security
+level is claimed.

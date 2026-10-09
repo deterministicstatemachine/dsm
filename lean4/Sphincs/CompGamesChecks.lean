@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: MIT OR Apache-2.0
 import Sphincs.CompAddress
 import Sphincs.CompOpenPre
-import Sphincs.CompWotsUd
+import Sphincs.CompWotsBound
 open DSM.Sphincs DSM.Sphincs.Security DSM.Sphincs.Comp
 
 /- Controls for the computational games (milestone 2). Each game is run on a
@@ -170,4 +170,9 @@ def main : IO Unit := do
     let id := (udIdealProb coin coin false W.fc 2 co).numerator
     let h2 := (W.hybProb false 1 coin coin (single (wForge fn [] 1)) 2).numerator
     check (4 * g (wForge fn [] 1) + id == re + 4 * h2) s!"WOTS UD-C identity ({name}): re={re} id={id} h2={h2}"
-  IO.println "Computational game controls passed: TCR(-C), ITSR, PRF (with domain mask), PRE, OpenPRE, UD, DSPR/SPprob, Theorem 2's reductions, the WOTS-TW game and its UD-C step, and the DSM instances on an insecure oracle."
+    -- Game 3 split: |D|^t_pre · #Hyb_{w−2} ≤ |D|^t_pre · #TCR-C(B_tcr) + #PRE-C(B_pre)
+    -- (t_tcr = c·len·(w−1) = 6, t_pre = c·len = 2), and the reductions win when Game 3 does.
+    let tc := (tcrProb coin W.f W.fc 6 (W.tcrCoins 1 false coin (single (wForge fn [] 1)))).numerator
+    let pr := (preProb coin coin false W.f W.fc 2 (W.preCoins 1 false coin (single (wForge fn [] 1)))).numerator
+    check (4 * h2 ≤ 4 * tc + pr && (h2 == 0 || tc + pr > 0)) s!"WOTS Game 3 split ({name}): h2={h2} tc={tc} pr={pr}"
+  IO.println "Computational game controls passed: TCR(-C), ITSR, PRF (with domain mask), PRE, OpenPRE, UD, DSPR/SPprob, Theorem 2's reductions, the WOTS-TW game with its UD-C step and Game 3's TCR-C/PRE-C split, and the DSM instances on an insecure oracle."

@@ -237,6 +237,10 @@ theorem all_mono (p p' : α → Prop) (hp : ∀ a, p a → p' a) : ∀ (T : OT Q
 
 theorem all_done (p : α → Prop) (a : α) (h : p a) : (OT.done a : OT Q A α).All p := h
 
+theorem all_and (p p' : α → Prop) : ∀ (T : OT Q A α), T.All p → T.All p' → T.All (fun a => p a ∧ p' a)
+  | .done _, h, h' => ⟨h, h'⟩
+  | .ask _ k, h, h' => fun y => all_and p p' (k y) (h y) (h' y)
+
 theorem all_true : ∀ (T : OT Q A α), T.All (fun _ => True)
   | .done _ => trivial
   | .ask _ k => fun y => all_true (k y)
