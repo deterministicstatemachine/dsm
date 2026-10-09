@@ -1636,6 +1636,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             rootContainer.setBackgroundColor(color)
             paintLegacyBars(color)
             barFit = if (look == "device") "edge" else "fit"
+            // Behind three-button navigation Android lays a grey scrim for contrast;
+            // a Modern page's bar is its own colour, so the scrim stays off there.
+            if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = look == "device"
             applyBarFit()
         }
     }

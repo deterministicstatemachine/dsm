@@ -104,9 +104,10 @@ html[data-scheme="dark"] .s-brand-mark { background: var(--s-gold); }
 .s-subtitle { font-size: 20px; font-weight: 700; color: var(--s-muted); margin: -8px 0 6px; }
 .s-hint { font-size: 14px; color: var(--s-muted); margin: 0 0 12px; }
 
+/* No inset for the phone's buttons in the Modern skin: the phone keeps the page above them (setSystemBars). */
 .s-tabbar {
   display: flex; justify-content: space-around; border-top: 1px solid var(--s-line);
-  background: var(--s-surface); padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
+  background: var(--s-surface); padding: 8px 0 8px;
 }
 .s-tab { flex: 1; background: none; border: none; color: var(--s-muted); font-size: 13px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 0; }
 .s-tab[aria-current="page"] { color: var(--s-nav-active); }
@@ -195,7 +196,7 @@ html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
 .s-sheet-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-end; z-index: 9000; }
 .s-sheet {
   width: 100%; background: var(--s-bg); color: var(--s-text); border-radius: 26px 26px 0 0;
-  padding: 22px 20px calc(22px + env(safe-area-inset-bottom)); max-height: 90%; overflow-y: auto;
+  padding: 22px 20px 22px; max-height: 90%; overflow-y: auto;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 .s-sheet h2 { font-size: 26px; font-weight: 900; margin: 0 0 8px; }
@@ -306,7 +307,7 @@ html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; 
 /* ---- Framing a picture (ImageCropper) ---- */
 .s-crop {
   position: fixed; inset: 0; z-index: 9500; overflow-y: auto; box-sizing: border-box;
-  padding: 18px 20px calc(18px + env(safe-area-inset-bottom));
+  padding: 18px 20px 18px;
   background: var(--s-bg); color: var(--s-text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   display: flex; flex-direction: column; gap: 10px;
