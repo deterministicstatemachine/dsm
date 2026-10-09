@@ -242,6 +242,51 @@ class SinglePathWebViewBridge(private val context: Context) {
                     byteArrayOf(if (stepped) 1 else 0)
                 }
 
+                // Opens the share sheet with a text the user chose to share (their
+                // contact code, from the Simple skin's Receive page). Answers nothing.
+                "shareText" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("shareText: no active activity")
+                    val text = String(payload, Charsets.UTF_8)
+                    require(text.isNotEmpty() && text.length <= 4096) { "shareText: a text to share is 1 to 4096 characters" }
+                    act.runOnUiThread {
+                        val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(android.content.Intent.EXTRA_TEXT, text)
+                        }
+                        act.startActivity(android.content.Intent.createChooser(send, "Share your DSM code"))
+                    }
+                    ByteArray(0)
+                }
+
+                // Opens the phone's contact picker (DSM Amendment A17). Answers nothing
+                // now; the picked contact arrives as a PHONE_CONTACT_PICKED host event.
+                "pickPhoneContact" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("pickPhoneContact: no active activity")
+                    act.pickPhoneContact()
+                    ByteArray(0)
+                }
+
+                // A linked phone contact's photo, by its lookup key (UTF-8): the
+                // image bytes, or none. Read for display; the page keeps no copy.
+                "phoneContactPhoto" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("phoneContactPhoto: no active activity")
+                    com.dsm.wallet.ui.PhoneContacts.photo(act, String(payload, Charsets.UTF_8))
+                }
+
+                // The bars' colours for the skin in use: "light" or "dark" as UTF-8.
+                // Answers nothing; the page's look is all it changes.
+                "setSystemBars" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("setSystemBars: no active activity")
+                    val scheme = String(payload, Charsets.UTF_8)
+                    require(scheme == "light" || scheme == "dark") { "setSystemBars: no scheme named $scheme" }
+                    act.setSystemBars(scheme)
+                    ByteArray(0)
+                }
+
                 "shareDiagnosticsReport" -> {
                     val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
                         ?: throw IllegalStateException("shareDiagnosticsReport: no active activity")
