@@ -194,6 +194,12 @@ html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 .s-sheet h2 { font-size: 26px; font-weight: 900; margin: 0 0 8px; }
+/* A cue's plain pop-up (FxPopup in the Modern skin): the title, the amount, the words. */
+.s-sheet-title { display: flex; align-items: center; gap: 10px; }
+.s-sheet-coin { width: 30px; height: 30px; }
+.s-sheet-amount { font-size: 34px; font-weight: 900; letter-spacing: -1px; margin: 4px 0 6px; color: var(--s-gold-deep); }
+.s-sheet[data-tone="bad"] .s-sheet-amount { color: var(--s-fuchsia); }
+.s-sheet > .s-btn { margin-top: 14px; }
 .s-sheet p { font-size: 16px; line-height: 1.45; color: var(--s-muted); }
 .s-sheet ul { padding-left: 20px; font-size: 15px; line-height: 1.5; }
 .s-stack { display: grid; gap: 10px; }
