@@ -9,9 +9,7 @@ tool checks it. It adds no axiom to DSM's Lean development.
 
 **Source.** `MM45/FV-SPHINCSPLUS-EC` at `a28e4c53897a4bb57b575a177225862d48f824b7`.
 Paths below are under `proofs/`. Line numbers are at that commit.
-**Replay.** Running the artifact's own check (`make docker-check`, EasyCrypt
-r2026.02 test box, Alt-Ergo 2.6.0, Z3 4.13.4) on the maintainer's machine; the
-result is recorded in §9 when it finishes.
+**Replay.** Done on 2026-10-09: all 11 files check, no failure (§9).
 
 ## 1. What is transferred
 
@@ -149,7 +147,7 @@ modules and are not rendered in Lean. Theorem 2 (C76) and the WOTS-TW bound
 
 Owed: the per-kind ranges of
 the addresses DSM's signer issues (C18 proves only `InRange`); the signature
-parse bijection in Lean (T5); the artifact replay result (§9).
+parse bijection in Lean (T5).
 
 Not claimed: that keyed BLAKE3, BLAKE3's XOF or ChaCha20 satisfies any of the
 listed properties; any numerical security level; anything about EasyCrypt's
@@ -157,4 +155,23 @@ reduction running times (none are bounded; see the map, §7).
 
 ## 9. Replay
 
-Pending (running).
+Replayed on 2026-10-09 (UTC) on the maintainer's machine (Apple Silicon, Docker
+Desktop), with the artifact's own procedure:
+
+* source: `MM45/FV-SPHINCSPLUS-EC` checked out at `a28e4c53897a4bb57b575a177225862d48f824b7`;
+* `make docker-check`: an image built `FROM ghcr.io/easycrypt/ec-test-box:r2026.02`
+  (local image `sha256:ddc3b360a149…`), running `easycrypt runtest config/tests.config`
+  over `proofs/`;
+* provers as pinned in `easycrypt.project`: Alt-Ergo 2.6.0 and Z3 4.13.4 (both
+  present in the image), timeout 3;
+* result: **11 files, 11 success, 0 failure**, in 26 min 02 s. The 11 files are
+  all of `proofs/`: `BinaryTrees.ec`, `FL_SL_XMSS_MT_ES.ec`, `FORS_ES.ec`,
+  `MerkleTrees.ec`, `PRE_From_SPR_DSPR.ec`, `SPHINCS_PLUS.ec`, `WOTS_TW_ES.ec`,
+  `HashAddresses.eca`, `KeyedHashFunctions.eca`, `OpenPRE_From_TCR_DSPR_THF.eca`,
+  `TweakableHashFunctions.eca`.
+* No `admit` occurs in the sources (searched). The development's own axioms
+  are the parameter and operator axioms of §4, and `A_forge_ll`.
+
+This replay establishes that the published development checks with its
+pinned toolchain. It does not check §3–§7, which remain a manual
+correspondence.
