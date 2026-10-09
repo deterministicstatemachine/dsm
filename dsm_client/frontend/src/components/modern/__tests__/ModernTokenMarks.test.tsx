@@ -28,6 +28,14 @@ describe('token marks', () => {
     expect(document.querySelector('img[src$=".gif"]')).toBeNull();
   });
 
+  it('follow the look the first-run picker is showing, before any look is kept', () => {
+    appRuntimeStore.setSkin(null);
+    appRuntimeStore.setLookPreview({ skin: 'modern', scheme: 'light', simpleMode: 'off' });
+    render(<TokenMark ticker="PUMP" />);
+    expect(screen.getByRole('img', { name: 'PUMP' })).toHaveTextContent('P');
+    appRuntimeStore.setLookPreview(null);
+  });
+
   it('stay the coin artwork on the DGen Game Boy', () => {
     appRuntimeStore.setSkin('dgen');
     render(<CoinArt src="era.gif" ticker="ERA" alt="ERA coin" />);

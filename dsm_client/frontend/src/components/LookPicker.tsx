@@ -44,34 +44,39 @@ export default function LookPicker(): React.JSX.Element {
     ok,
   ];
   // The D-pad starts on the look shown, so its ring and the picked look agree.
-  const { focusedIndex } = useDpadNav({
+  const { focusedIndex, setFocusedIndex } = useDpadNav({
     itemCount: actions.length,
     onSelect: (i) => actions[i]?.(),
     initialIndex: look.skin === 'modern' ? 0 : 1,
   });
   const focus = (i: number): string => (i === focusedIndex ? ' lp-focused' : '');
+  // A tap moves the D-pad ring too, so the ring is never on one look while another is picked.
+  const tap = (i: number) => () => {
+    setFocusedIndex(i);
+    actions[i]?.();
+  };
 
   return createPortal(
     <div className="lp-backdrop">
       <div className="lp-box" role="dialog" aria-labelledby="lp-title">
         <h2 id="lp-title" className="lp-title">Choose your look</h2>
         <div className="lp-pair" role="radiogroup" aria-label="Look">
-          <button type="button" role="radio" aria-checked={look.skin === 'modern'} className={`lp-btn${focus(0)}`} onClick={actions[0]}>
+          <button type="button" role="radio" aria-checked={look.skin === 'modern'} className={`lp-btn${focus(0)}`} onClick={tap(0)}>
             Modern
           </button>
-          <button type="button" role="radio" aria-checked={look.skin === 'dgen'} className={`lp-btn${focus(1)}`} onClick={actions[1]}>
+          <button type="button" role="radio" aria-checked={look.skin === 'dgen'} className={`lp-btn${focus(1)}`} onClick={tap(1)}>
             DGen
           </button>
         </div>
-        <button type="button" role="switch" aria-checked={look.scheme === 'dark'} className={`lp-switch${focus(2)}`} onClick={actions[2]}>
+        <button type="button" role="switch" aria-checked={look.scheme === 'dark'} className={`lp-switch${focus(2)}`} onClick={tap(2)}>
           <span>Dark mode</span><span className="lp-knob" aria-hidden />
         </button>
-        <button type="button" role="switch" aria-checked={look.simpleMode === 'on'} className={`lp-switch${focus(3)}`} onClick={actions[3]}>
+        <button type="button" role="switch" aria-checked={look.simpleMode === 'on'} className={`lp-switch${focus(3)}`} onClick={tap(3)}>
           <span>Simple mode</span><span className="lp-knob" aria-hidden />
         </button>
         <p className="lp-note">Dark mode and Simple mode are for Modern. Simple mode hides trading, storage and the Bitcoin bridge.</p>
         <p className="lp-note">DGen: press SELECT to change the screen colour and backlight.</p>
-        <button type="button" className={`lp-btn lp-ok${focus(4)}`} disabled={keeping === 'keeping'} onClick={ok}>
+        <button type="button" className={`lp-btn lp-ok${focus(4)}`} disabled={keeping === 'keeping'} onClick={tap(4)}>
           OK
         </button>
         {problem !== null ? <p className="lp-note" role="alert">{problem}</p> : null}

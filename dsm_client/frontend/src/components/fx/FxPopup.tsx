@@ -4,7 +4,7 @@ import { FxCanvas } from './FxCanvas';
 import { isFxEngineReady, loadFxEngine, type FxAnim } from './fxEngine';
 import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
 import { TokenMark } from '../TokenMark';
-import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
+import { skinShown, useAppRuntimeStore } from '../../runtime/appRuntimeStore';
 
 export type FxTone = 'good' | 'bad' | 'neutral';
 
@@ -51,7 +51,7 @@ const PLAIN_LINGER_MS = 3_500;
  */
 export function FxPopup(props: FxPopupProps) {
   const runtime = useAppRuntimeStore();
-  return runtime.skin === 'modern' ? <PlainPopup {...props} /> : <ScenePopup {...props} />;
+  return skinShown(runtime) === 'modern' ? <PlainPopup {...props} /> : <ScenePopup {...props} />;
 }
 
 /** The Modern skin's cue: the words, the amount, and OK. */

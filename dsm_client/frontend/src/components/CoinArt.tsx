@@ -5,7 +5,7 @@
 // is the Game Boy's alone: the Modern skin leaves it out, disc and all.
 
 import React from 'react';
-import { useAppRuntimeStore } from '../runtime/appRuntimeStore';
+import { skinShown, useAppRuntimeStore } from '../runtime/appRuntimeStore';
 import { FlatTokenMark } from './FlatTokenMark';
 
 type Props = {
@@ -20,7 +20,7 @@ type Props = {
 
 export function CoinArt({ src, ticker, alt, className, style }: Props): React.JSX.Element {
   const runtime = useAppRuntimeStore();
-  if (runtime.skin === 'modern') {
+  if (skinShown(runtime) === 'modern') {
     return (
       <span className={className} style={{ display: 'inline-block', flex: '0 0 auto', ...style }}>
         <FlatTokenMark ticker={ticker} alt={alt} className="s-token-fill" />
@@ -33,7 +33,7 @@ export function CoinArt({ src, ticker, alt, className, style }: Props): React.JS
 /** A coin on its disc that decorates a card (the faucet, adding a contact): DGen only. */
 export function HeroCoin({ src, alt }: { src: string; alt: string }): React.JSX.Element | null {
   const runtime = useAppRuntimeStore();
-  if (runtime.skin === 'modern') return null;
+  if (skinShown(runtime) === 'modern') return null;
   return (
     <span className="sb-coin-tile">
       <img src={src} alt={alt} style={{ width: 48, height: 48, imageRendering: 'pixelated' }} />
