@@ -2,7 +2,7 @@
 
 Status: record for obligation T3/T4 of the delta strategy
 (`DSM_MODULAR_PROOF_MAP.md` §13). It states exactly how DSM's construction is
-read as an instance of the published SPHINCS+ proof, so that the auditors can
+read as an instance of the published SPHINCS+ proof, so that anyone can
 check the premise of `euf_cma_transfer` (`lean4/Sphincs/CompTransfer.lean`).
 It is a manual correspondence between two formalisms (EasyCrypt and Lean). No
 tool checks it. It adds no axiom to DSM's Lean development.
@@ -62,7 +62,7 @@ key pair, type, tree, layer (C74).
 | `msg` | byte strings of length ≤ 2n + `maxMessageBytes`; the forger signs only `pk ‖ M` (§6) |
 | `mkey` | n bytes (`R`) |
 | `mco mk m` (`FORS_ES.ec` line 412) | for `m = PK.seed ‖ PK.root ‖ M`: `splitDigest(h_msg(mk, PK.seed, PK.root, M)) = (md, tree, leaf)`; `cm` = the first `k·a` bits of `md`, MSB first; `idx = tree·2^h' + leaf` (`mco`, `mco_verifier`, C73) |
-| `sseed`, `skg ss (ps, ad)`, `dsseed` | **ideal**: `ss` is a function on `pseed × adrs`, `skg ss x = ss x`. `dsseed` is the law of `(ps, ad) ↦ F(ps ‖ prfAdr(ofEc ad).bytes)` for `F` uniform on (n+32)-byte inputs (DSM's final world). `prfAdr` sets kind 0 → 5 and kind 3 → 6 (chain 0) and is the identity on kinds 1, 2, 4. It is injective on valid addresses (the kind separates the images; C74 within a kind), so `dsseed` is uniform on functions. |
+| `sseed`, `skg ss (ps, ad)`, `dsseed` | **ideal**: `ss` is a function on `pseed × adrs`, `skg ss x = ss x`. `dsseed` is the law of `(ps, ad) ↦ F(ps ‖ prfAdr(ofEc ad).bytes)` for `F` uniform on (n+32)-byte inputs (DSM's final world). `prfAdr` sets kind 0 → 5 and kind 3 → 6 (chain 0) and is the identity on kinds 1, 2, 4. It is injective on the addresses `skg` is called at (`prfAdr_inj`, C80), so `dsseed` is uniform on functions. Every PRF request DSM's signer and key generation issue is at `prfAdr b` for such an EasyCrypt-valid `b` (C80). |
 | `mseed`, `mkg ms m`, `dmseed` | **ideal, read through the key's seed**: `ms` is a function on byte strings of length ≤ n + `maxMessageBytes`, `mkg ms m = ms(dropRoot m)` with `dropRoot(PK.seed ‖ PK.root ‖ M) = PK.seed ‖ M`, and `dmseed` is the law of DSM's final-world `H` (uniform on such functions) |
 
 **The two PRF terms are 0.**
@@ -91,7 +91,7 @@ distributional argument on the Lean side.
 | Axiom | File | DSM |
 | --- | --- | --- |
 | `dist_adrstypes` | all three | kinds 0–4 distinct, by `decide` (C74) |
-| `valid_widxvals_idxvals`, `valid_xidxvals_idxvals`, `valid_fidxvals_idxvals` | WOTS, XMSS, FORS | `EcValid` and the per-shape lemmas `ecValid_*` (C74) |
+| `valid_widxvals_idxvals`, `valid_xidxvals_idxvals`, `valid_fidxvals_idxvals` | WOTS, XMSS, FORS | `EcValid` and the per-shape lemmas `ecValid_*` (C74); every thash address DSM's signer and key generation issue is `EcValid` for its type (C80) |
 | `ch0`, `chS` | `WOTS_TW_ES.ec` 504, 511 | DSM's `chain` (`Model.lean`) returns its input after 0 steps by definition; `chain_composes` (`Proofs.lean`) splits a chain into consecutive runs, which gives the last-step form |
 | `two_encodings` | `WOTS_TW_ES.ec` 572 | `wots_checksum_decreases_of_ne` (C22) |
 | `in_collection` | `TweakableHashFunctions.eca` | one function `thc` for every input length (C73) |
@@ -112,7 +112,7 @@ distributional argument on the Lean side.
 | `M_FORS_ES.sign` (1730) | `sign`, lines `r`/`digest`/`indices`/`forsSign` | `mk = mkg ms m`, `(cm, idx) = mco mk m`, `(tidx, kpidx) = edivz idx l'`, FORS at `(layer 0, tree tidx, kind 3, keypair kpidx)` |
 | `FL_SL_XMSS_MT_ES.sign` (1574), `root_from_sigFLSLXMSSMTTW` (1620) | `htSign`, `htSignTail`, `htRoot`, `htRootTail` | layer `i`: `(tidx, kpidx) = edivz tidx l'` (`nextLayer`); WOTS at `(layer i, tree tidx, kind 0, keypair kpidx)` signs the layer below's root |
 | `SPHINCS_PLUS.sign` (984), `verify` (1022) | `sign`, `verify` | as above; DSM's self-check never fails under `OutputWidths` (C10) |
-| signature `(mk, sigFORSTW, sigFLSLXMSSMTTW)` | `R ‖ fors ‖ ht`, fixed widths (`Params.sigBytes`) | a fixed bijection on well-formed bytes. EasyCrypt lists each authentication path root first (`cons_ap`, `MerkleTrees.ec` 12); DSM stores it leaf first. The bijection reverses each path. |
+| signature `(mk, sigFORSTW, sigFLSLXMSSMTTW)` | `R ‖ fors ‖ ht`, fixed widths (`Params.sigBytes`) | a fixed bijection on well-formed bytes. EasyCrypt lists each authentication path root first (`cons_ap`, `MerkleTrees.ec` 12); DSM stores it leaf first. The bijection reverses each path (`ecEncode`, `ecDecode`, C81). |
 
 ## 6. Games and the embedded forger
 
@@ -145,9 +145,11 @@ modules and are not rendered in Lean. Theorem 2 (C76) and the WOTS-TW bound
 
 ## 8. Owed, and not claimed
 
-Owed: the per-kind ranges of
-the addresses DSM's signer issues (C18 proves only `InRange`); the signature
-parse bijection in Lean (T5).
+Owed in Lean: nothing. The per-kind ranges of the addresses DSM's signer and
+key generation issue are proved (C80; C18 proved only `InRange`), and so is
+the signature layout bijection (C81). What this record asserts by reading
+EasyCrypt (the transcribed types, procedures, games and terms) stays a manual
+correspondence, checked by reading, not by a tool.
 
 Not claimed: that keyed BLAKE3, BLAKE3's XOF or ChaCha20 satisfies any of the
 listed properties; any numerical security level; anything about EasyCrypt's

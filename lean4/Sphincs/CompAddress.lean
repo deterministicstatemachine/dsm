@@ -19,8 +19,7 @@ import Sphincs.AddressInjective
 
    Not proved here: that every address DSM's signer issues meets those
    ranges for its type. C18 (`AddressRange`) proves `InRange` for them, which
-   is weaker; the per-type ranges are discharged with the reductions that
-   enumerate the honest addresses (map §9, obligations 6 and 9). -/
+   is weaker; the per-type ranges are proved in `CompAddressValid` (C80). -/
 namespace DSM.Sphincs.Comp
 open DSM.Sphincs DSM.Sphincs.Security
 

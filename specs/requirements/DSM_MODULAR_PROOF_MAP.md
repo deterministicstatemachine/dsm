@@ -866,17 +866,17 @@ trusts:
    `EUFCMA_SPHINCS_PLUS` (`SPHINCS_PLUS.ec` line 4338): games, reductions and
    terms. Owed: a line-by-line correspondence record.
 
-The auditors must accept both explicitly.
+Both are stated explicitly as trusted.
 
 **Delta obligations** (replacing §9's obligations 6, 9 and 10):
 
 | # | Delta | Status |
 | --- | --- | --- |
 | T1 | One-seed key generation and composite PRFs (I2, I3): exact PRG, KDF and PRF hops | done (C11, C15, C16; as advantages C75) |
-| T2 | DSM's primitives meet EasyCrypt's axioms (I5, I6, I13): `in_collection`, `dist_adrstypes`, `two_encodings`, `ch0`/`chS`, ITSR shape, address validity | done (C22, C73, C74), except the per-type ranges of the addresses DSM's signer issues |
+| T2 | DSM's primitives meet EasyCrypt's axioms (I5, I6, I13): `in_collection`, `dist_adrstypes`, `two_encodings`, `ch0`/`chS`, ITSR shape, address validity | done (C22, C73, C74; per-type ranges of the addresses DSM's signer and key generation issue, C80) |
 | T3 | Message binding (I1) by message embedding. The instance `E_DSM` and the embedded forger `A_emb` are fixed in `SPHINCS_EC_CORRESPONDENCE.md`: `msg := PK ‖ M`, `mco(R, PK ‖ M) := MCO_DSM(R, PK, M)`, ideal `skg`, and `mkg` read through `PK.seed ‖ M` with the law of DSM's final-world message key. DSM's final world and `E_DSM`'s game for `A_emb` then agree pointwise. EasyCrypt's two PRF terms are 0 (argued for its games in the record). DSM's own hops replace them | record written |
 | T4 | The transfer theorem: real DSM EUF-CMA ≤ the five named primitive advantages + B, for any bound B on the final world (`euf_cma_final`, `euf_cma_transfer`, C79); the premise is that B is EasyCrypt's Theorem-4 bound for `(E_DSM, A_emb)` | done in Lean (premise a hypothesis) |
-| T5 | Rust ↔ Lean model refinement | existing refinement checks |
+| T5 | Rust ↔ Lean model refinement; EasyCrypt signature values ↔ DSM signature bytes | existing refinement checks; layout bijection done (C81) |
 
 T3 replaces the context-aware M-FORS game of §5b and its simulation equalities
 O6b and O9b. The published games are used unchanged. The §5b reasoning
@@ -894,7 +894,9 @@ discharged, every algorithm, the game and the embedded forger, and the terms.
 The artifact was replayed on 2026-10-09 with its own procedure (EasyCrypt
 r2026.02 test box, Alt-Ergo 2.6.0, Z3 4.13.4): all 11 files check, no failure,
 and no `admit` (record §9). Trust boundary item 1 is discharged up to the
-EasyCrypt toolchain itself. Item 2, the correspondence, remains manual. Remaining Lean work for the
-transfer: the signature parse bijection (T5). (An earlier draft of the record
+EasyCrypt toolchain itself. Item 2, the correspondence, remains manual. The Lean work for the
+transfer is complete: the per-type address ranges (C80) and the signature
+layout bijection (C81) were proved on 2026-10-09. What remains outside
+Lean is the trust boundary above. (An earlier draft of the record
 needed a variable-length fixed-prefix lemma, T3a; choosing `mkg` to read
 `PK.seed ‖ M` makes the correspondence pointwise and removes it.)
