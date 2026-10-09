@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The wallet's look and the user's switches, kept as native preferences: which
-// skin (Simple or the Game Boy), the Simple skin's colours, whether Simple
-// offers the offline appliance, and whether receipts are emailed. Each is read
+// skin (Modern or the DGen Game Boy), the Modern skin's colours, its Simple
+// mode, whether Simple mode offers the offline appliance, and whether receipts
+// are emailed. Each is read
 // as soon as the bridge is up (they are the app's, not a wallet's: they hold
 // before any wallet exists) and written the moment the user changes it. The
 // skin is also kept on the page as a hint, so the first paint after a restart
@@ -9,10 +10,11 @@
 
 import { dsmClient } from '../services/dsmClient';
 import logger from '../utils/logger';
-import { appRuntimeStore, type Scheme, type Skin, type Switch } from './appRuntimeStore';
+import { appRuntimeStore, type Look, type Scheme, type Skin, type Switch } from './appRuntimeStore';
 import {
   RECEIPTS_EMAIL_PREFERENCE,
   SCHEME_PREFERENCE,
+  SIMPLE_MODE_PREFERENCE,
   SIMPLE_OFFLINE_PREFERENCE,
   SKIN_PREFERENCE,
 } from './skinKeys';
@@ -39,7 +41,7 @@ function keepSkinHint(skin: Skin | null): void {
 }
 
 export function readSkin(value: string | null): Skin | null {
-  return value === 'simple' || value === 'classic' ? value : null;
+  return value === 'modern' || value === 'dgen' ? value : null;
 }
 
 export function readScheme(value: string | null): Scheme {
@@ -52,15 +54,17 @@ export function readSwitch(value: string | null): Switch {
 
 /** Reads every preference into the runtime store. */
 export async function loadSkinPreferences(): Promise<void> {
-  const [skin, scheme, offline, receipts] = await Promise.all([
+  const [skin, scheme, simpleMode, offline, receipts] = await Promise.all([
     dsmClient.getPreference(SKIN_PREFERENCE),
     dsmClient.getPreference(SCHEME_PREFERENCE),
+    dsmClient.getPreference(SIMPLE_MODE_PREFERENCE),
     dsmClient.getPreference(SIMPLE_OFFLINE_PREFERENCE),
     dsmClient.getPreference(RECEIPTS_EMAIL_PREFERENCE),
   ]);
   appRuntimeStore.setSkin(readSkin(skin));
   keepSkinHint(readSkin(skin));
   appRuntimeStore.setScheme(readScheme(scheme));
+  appRuntimeStore.setSimpleMode(readSwitch(simpleMode));
   appRuntimeStore.setSimpleOffline(readSwitch(offline));
   appRuntimeStore.setReceiptsEmail(readSwitch(receipts));
   appRuntimeStore.setSkinRead('read');
@@ -75,6 +79,22 @@ export async function chooseSkin(skin: Skin): Promise<void> {
 export async function chooseScheme(scheme: Scheme): Promise<void> {
   await dsmClient.setPreference(SCHEME_PREFERENCE, scheme);
   appRuntimeStore.setScheme(scheme);
+}
+
+export async function setSimpleMode(value: Switch): Promise<void> {
+  await dsmClient.setPreference(SIMPLE_MODE_PREFERENCE, value);
+  appRuntimeStore.setSimpleMode(value);
+}
+
+/**
+ * Keeps the look the first-run picker shows: its colours and Simple mode
+ * first, the skin last, since choosing the skin is what closes the picker.
+ */
+export async function keepLook(look: Look): Promise<void> {
+  await chooseScheme(look.scheme);
+  await setSimpleMode(look.simpleMode);
+  await chooseSkin(look.skin);
+  appRuntimeStore.setLookPreview(null);
 }
 
 export async function setSimpleOffline(value: Switch): Promise<void> {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// One contact in the Simple skin: who they are, Send, and their details to
+// One contact in the Modern skin: who they are, Send, and their details to
 // edit or link to a phone contact. The details are the wallet's own, for
 // showing and for emailing receipts (DSM Amendment A17).
 
@@ -9,13 +9,13 @@ import { contactsStore } from '../../stores/contactsStore';
 import { pickPhoneContact } from '../../dsm/WebViewBridge/phoneContacts';
 import type { PersonProfile } from '../../domain/types';
 import { Avatar, Icon, PageTitle, personName } from './parts';
-import { simpleNav } from './simpleNav';
+import { modernNav } from './modernNav';
 
 function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-export default function SimpleContact({ deviceId }: { deviceId: string }): React.JSX.Element {
+export default function ModernContact({ deviceId }: { deviceId: string }): React.JSX.Element {
   const { contacts } = useContacts();
   const contact = contacts.find((c) => c.deviceId === deviceId) ?? null;
   const [draft, setDraft] = useState<PersonProfile | null>(null);
@@ -24,7 +24,7 @@ export default function SimpleContact({ deviceId }: { deviceId: string }): React
   if (contact === null) {
     return (
       <>
-        <PageTitle title="Contact" onBack={() => simpleNav.back()} />
+        <PageTitle title="Contact" onBack={() => modernNav.back()} />
         <div className="s-empty">This contact is not in your wallet.</div>
       </>
     );
@@ -63,7 +63,7 @@ export default function SimpleContact({ deviceId }: { deviceId: string }): React
 
   return (
     <>
-      <PageTitle title={name} onBack={() => simpleNav.back()} />
+      <PageTitle title={name} onBack={() => modernNav.back()} />
       <section className="s-card" style={{ textAlign: 'center' }}>
         <Avatar name={name} lookupKey={contact.profile?.phoneLookupKey} large="large" />
         <div className="s-row-title" style={{ marginTop: 10 }}>{name}</div>
@@ -71,7 +71,7 @@ export default function SimpleContact({ deviceId }: { deviceId: string }): React
         {held.phone.length > 0 ? <div className="s-row-sub">{held.phone}</div> : null}
       </section>
       <div className="s-stack">
-        <button type="button" className="s-btn s-btn-primary" onClick={() => simpleNav.open({ kind: 'send', to: contact.deviceId })}>
+        <button type="button" className="s-btn s-btn-primary" onClick={() => modernNav.open({ kind: 'send', to: contact.deviceId })}>
           <Icon name="send" /> Send to {name.split(' ')[0]}
         </button>
         {draft === null ? (

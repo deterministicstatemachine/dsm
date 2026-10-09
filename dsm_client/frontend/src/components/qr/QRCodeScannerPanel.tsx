@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Add Contact: the native camera or a pasted contact code. The code goes to
 // Rust as it was scanned or pasted; the card shown is the card Rust read, and
-// a refusal is shown as Rust worded it.
+// a refusal is shown as Rust worded it. The person can be picked from the
+// phone's contacts, and their details are kept with the contact (A17).
 
 import React, { useEffect, useRef, useState, useCallback, useId } from 'react';
 import { useContacts } from '../../contexts/ContactsContext';
 import { readContactCode } from '../../dsm/contacts';
+import { pickPhoneContact } from '../../dsm/WebViewBridge/phoneContacts';
 import type { ContactCard } from '../../dsm/types';
+import type { PersonProfile } from '../../domain/types';
+import { profileFromCard, withPhoneContact } from '../../domain/personProfile';
 import { bytesToDisplay } from '../../contexts/contacts/utils';
 import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
 import { Notice } from '../common/ScreenFrame';
@@ -16,7 +20,7 @@ type ScanPhase =
   | { status: 'idle' }
   | { status: 'scanning' }
   | { status: 'reading' }
-  | { status: 'prompt'; card: ContactCard }
+  | { status: 'prompt'; card: ContactCard; profile: PersonProfile }
   | { status: 'adding'; alias: string }
   | { status: 'success'; alias: string }
   | { status: 'error'; message: string };
@@ -47,7 +51,7 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
     try {
       const card = await readContactCode(text);
       setAliasInput(card.preferredAlias ?? '');
-      setPhase({ status: 'prompt', card });
+      setPhase({ status: 'prompt', card, profile: profileFromCard(card) });
     } catch (e) {
       logger.warn('[QRScanner] Rust refused the contact code:', messageOf(e));
       setPhase({ status: 'error', message: messageOf(e) });
@@ -104,7 +108,7 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
     const alias = aliasInput.trim();
     setPhase({ status: 'adding', alias });
     try {
-      const result = await addContact(alias, phase.card);
+      const result = await addContact(alias, phase.card, { ...phase.profile, name: alias });
       setPhase(result.accepted
         ? { status: 'success', alias: result.alias }
         : { status: 'error', message: result.error });
@@ -115,6 +119,21 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
       addingContactRef.current = false;
     }
   }, [phase, aliasInput, addContact]);
+
+  // Picks the person from the phone's contacts: their name becomes the alias.
+  const fromPhone = useCallback(() => {
+    if (phase.status !== 'prompt') return;
+    const { card, profile } = phase;
+    pickPhoneContact().then(
+      (picked) => {
+        if (picked === null) return;
+        const merged = withPhoneContact(profile, picked);
+        setAliasInput(merged.name);
+        setPhase({ status: 'prompt', card, profile: merged });
+      },
+      (e: unknown) => setPhase({ status: 'error', message: `Your contacts did not open: ${messageOf(e)}` }),
+    );
+  }, [phase]);
 
   const dismissPrompt = useCallback(() => {
     setPhase({ status: 'idle' });
@@ -274,6 +293,13 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
                   onChange={e => setAliasInput(e.target.value)}
                 />
               </div>
+              {phase.profile.email.length > 0 ? (
+                <div className="sb-kv"><span className="sb-kv__k">Email</span><span className="sb-kv__v">{phase.profile.email}</span></div>
+              ) : null}
+              {phase.profile.phone.length > 0 ? (
+                <div className="sb-kv"><span className="sb-kv__k">Phone</span><span className="sb-kv__v">{phase.profile.phone}</span></div>
+              ) : null}
+              <button type="button" className="sb-btn sb-btn--block" style={{ marginTop: 10 }} onClick={fromPhone}>From phone contacts</button>
             </div>
             <div className="sb-actions" style={{ margin: 0 }}>
               <button type="button" className="sb-btn" onClick={dismissPrompt}>Cancel</button>

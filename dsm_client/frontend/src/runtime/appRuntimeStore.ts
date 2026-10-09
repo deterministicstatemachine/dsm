@@ -7,15 +7,18 @@ import type { AppState } from '../types/app';
 type StateUpdate<T> = T | ((prev: T) => T);
 
 /**
- * How the wallet looks: the Game Boy device (`classic`) or the plain wallet
- * (`simple`). `null` until the wallet has read the choice, and while a new
+ * How the wallet looks: the Game Boy device (`dgen`) or the Modern wallet
+ * (`modern`). `null` until the wallet has read the choice, and while a new
  * wallet has not made one.
  */
-export type Skin = 'simple' | 'classic';
-/** The Simple skin's colours. */
+export type Skin = 'modern' | 'dgen';
+/** The Modern skin's colours. */
 export type Scheme = 'light' | 'dark';
-/** A switch the user sets: the offline appliance in Simple, email receipts. */
+/** A switch the user sets: Simple mode, the offline appliance in it, email receipts. */
 export type Switch = 'on' | 'off';
+
+/** A look as the first-run picker shows it behind its box, before OK keeps it. */
+export type Look = { skin: Skin; scheme: Scheme; simpleMode: Switch };
 
 type AppRuntimeSnapshot = {
   appState: AppState;
@@ -28,8 +31,12 @@ type AppRuntimeSnapshot = {
   /** Whether the skin preferences were read for this identity: until then `skin` says nothing. */
   skinRead: 'read' | 'unread';
   scheme: Scheme;
+  /** Simple mode, in the Modern skin only: trading, storage and the Bitcoin bridge put away. */
+  simpleMode: Switch;
   simpleOffline: Switch;
   receiptsEmail: Switch;
+  /** The look the picker is previewing; `null` when no picker is open. */
+  lookPreview: Look | null;
 };
 
 class AppRuntimeStore {
@@ -43,8 +50,10 @@ class AppRuntimeStore {
     skin: null,
     skinRead: 'unread',
     scheme: 'light',
+    simpleMode: 'off',
     simpleOffline: 'off',
     receiptsEmail: 'off',
+    lookPreview: null,
   };
 
   private listeners = new Set<() => void>();
@@ -106,6 +115,14 @@ class AppRuntimeStore {
 
   setScheme = (scheme: Scheme): void => {
     this.setState({ scheme });
+  };
+
+  setSimpleMode = (simpleMode: Switch): void => {
+    this.setState({ simpleMode });
+  };
+
+  setLookPreview = (lookPreview: Look | null): void => {
+    this.setState({ lookPreview });
   };
 
   setSimpleOffline = (simpleOffline: Switch): void => {

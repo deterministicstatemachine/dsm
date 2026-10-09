@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Simple skin's People tab: everyone in the wallet, named as the owner
+// The Modern skin's People tab: everyone in the wallet, named as the owner
 // linked them, with Send beside each, and Add contact.
 
 import React, { useState } from 'react';
 import { useContacts } from '../../contexts/ContactsContext';
 import { Avatar, Icon, personName } from './parts';
-import { simpleNav } from './simpleNav';
+import { modernNav } from './modernNav';
 
-export default function SimplePeople(): React.JSX.Element {
+export default function ModernPeople(): React.JSX.Element {
   const { contacts, isLoading, error } = useContacts();
   const [search, setSearch] = useState('');
   const shown = contacts.filter((c) => personName(c).toLowerCase().includes(search.trim().toLowerCase()));
@@ -27,21 +27,21 @@ export default function SimplePeople(): React.JSX.Element {
         ) : (
           shown.map((c) => (
             <div key={c.deviceId} className="s-row">
-              <button type="button" className="s-row" style={{ padding: 0 }} onClick={() => simpleNav.open({ kind: 'contact', deviceId: c.deviceId })}>
+              <button type="button" className="s-row" style={{ padding: 0 }} onClick={() => modernNav.open({ kind: 'contact', deviceId: c.deviceId })}>
                 <Avatar name={personName(c)} lookupKey={c.profile?.phoneLookupKey} />
                 <span className="s-row-main">
                   <span className="s-row-title" style={{ display: 'block' }}>{personName(c)}</span>
                   <span className="s-row-sub" style={{ display: 'block' }}>Send to {personName(c).split(' ')[0]}</span>
                 </span>
               </button>
-              <button type="button" className="s-btn s-btn-small s-btn-primary" onClick={() => simpleNav.open({ kind: 'send', to: c.deviceId })}>
+              <button type="button" className="s-btn s-btn-small s-btn-primary" onClick={() => modernNav.open({ kind: 'send', to: c.deviceId })}>
                 <Icon name="send" /> Send
               </button>
             </div>
           ))
         )}
       </section>
-      <button type="button" className="s-card s-row" onClick={() => simpleNav.open({ kind: 'add_contact' })}>
+      <button type="button" className="s-card s-row" onClick={() => modernNav.open({ kind: 'add_contact' })}>
         <span className="s-avatar b"><Icon name="people" /></span>
         <span className="s-row-main">
           <span className="s-row-title" style={{ display: 'block' }}>Add Contact</span>

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Reads the skin preferences once the bridge is up, and dresses the page for
-// the skin in use: `data-skin` and `data-scheme` on <html> select the Simple
-// skin's styles (styles/simple.css), which put the Game Boy device away and
+// the skin in use: `data-skin` and `data-scheme` on <html> select the Modern
+// skin's styles (styles/modern.css), which put the Game Boy device away and
 // let the app fill the screen. The choice is the app's, made before anything
 // else, so every screen from the first is in it.
 
@@ -14,14 +14,14 @@ import { setSystemBars } from '../dsm/WebViewBridge/systemBars';
 import logger from '../utils/logger';
 
 /**
- * The skin the page is drawn in now. Simple in every phase once it is the
+ * The skin the page is drawn in now. Modern in every phase once it is the
  * choice, except a wallet locked with a button combo: the combo is entered on
  * the Game Boy's buttons, so its lock screen shows the device.
  */
 export function skinInUse(skin: Skin | null, appState: AppState, lockMethod: NativeSessionLockStatus['method']): Skin {
-  if (skin !== 'simple') return 'classic';
-  if (appState === 'locked' && lockMethod === 'combo') return 'classic';
-  return 'simple';
+  if (skin !== 'modern') return 'dgen';
+  if (appState === 'locked' && lockMethod === 'combo') return 'dgen';
+  return 'modern';
 }
 
 export function useSkin(
@@ -55,8 +55,8 @@ export function useSkin(
     html.setAttribute('data-skin', inUse);
     html.setAttribute('data-scheme', scheme);
     // The phone's status and navigation bars follow: dark around the device,
-    // the scheme's own colour around the Simple skin. Asked only on a change.
-    const wanted: Scheme = inUse === 'simple' ? scheme : 'dark';
+    // the scheme's own colour around the Modern skin. Asked only on a change.
+    const wanted: Scheme = inUse === 'modern' ? scheme : 'dark';
     if (wanted === bars.current) return;
     bars.current = wanted;
     setSystemBars(wanted).then(

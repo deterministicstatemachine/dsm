@@ -7,13 +7,13 @@ import React, { useEffect, useState } from 'react';
 import { getOwnProfile, setOwnProfile } from '../../dsm/contacts';
 import type { PersonProfile } from '../../domain/types';
 import { Avatar, PageTitle } from './parts';
-import { simpleNav } from './simpleNav';
+import { modernNav } from './modernNav';
 
 const BLANK: PersonProfile = { name: '', email: '', phone: '', phoneLookupKey: '' };
 
 type Card = { kind: 'reading' } | { kind: 'read'; card: PersonProfile } | { kind: 'failed'; message: string };
 
-export default function SimpleMyCard(): React.JSX.Element {
+export default function ModernMyCard(): React.JSX.Element {
   const [card, setCard] = useState<Card>({ kind: 'reading' });
   const [said, setSaid] = useState<string | null>(null);
 
@@ -29,7 +29,7 @@ export default function SimpleMyCard(): React.JSX.Element {
   if (card.kind !== 'read') {
     return (
       <>
-        <PageTitle title="My Card" onBack={() => simpleNav.back()} />
+        <PageTitle title="My Card" onBack={() => modernNav.back()} />
         {card.kind === 'reading' ? <div className="s-empty">Loading…</div> : <div className="s-notice s-error">{card.message}</div>}
       </>
     );
@@ -49,7 +49,7 @@ export default function SimpleMyCard(): React.JSX.Element {
 
   return (
     <>
-      <PageTitle title="My Card" onBack={() => simpleNav.back()} />
+      <PageTitle title="My Card" onBack={() => modernNav.back()} />
       <section className="s-card" style={{ textAlign: 'center' }}>
         <Avatar name={draft.name.length > 0 ? draft.name : '?'} large="large" />
         <div className="s-row-title" style={{ marginTop: 10 }}>{draft.name.length > 0 ? draft.name : 'Your name'}</div>

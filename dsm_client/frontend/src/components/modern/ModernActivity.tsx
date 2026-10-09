@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Simple skin's Activity tab: every payment, newest first, filtered to
+// The Modern skin's Activity tab: every payment, newest first, filtered to
 // what was sent or received.
 
 import React, { useState } from 'react';
@@ -9,7 +9,7 @@ import { ActivityItem, activityRows } from './parts';
 
 type Filter = 'all' | 'in' | 'out';
 
-export default function SimpleActivity(): React.JSX.Element {
+export default function ModernActivity(): React.JSX.Element {
   const wallet = useWallet();
   const { contacts } = useContacts();
   const [filter, setFilter] = useState<Filter>('all');

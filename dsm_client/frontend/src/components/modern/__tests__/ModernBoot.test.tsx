@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Simple skin from the first screen: the skin each phase is drawn in, the
+// The Modern skin from the first screen: the skin each phase is drawn in, the
 // welcome screen of a phone with no wallet, and a new wallet's recovery phrase.
 
 import React from 'react';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import SimpleBoot from '../SimpleBoot';
+import ModernBoot from '../ModernBoot';
 import { skinInUse } from '../../../hooks/useSkin';
 import { recoveryPhraseStore } from '../../../runtime/recoveryPhraseStore';
 import type { AppState, ScreenType } from '../../../types/app';
@@ -22,7 +22,7 @@ type Harness = { created: number; went: ScreenType[]; picked: string[]; cancelle
 function boot(appState: AppState, currentScreen: ScreenType = 'home'): Harness {
   const h: Harness = { created: 0, went: [], picked: [], cancelled: 0 };
   render(
-    <SimpleBoot
+    <ModernBoot
       appState={appState}
       error={null}
       securingProgress={40}
@@ -48,17 +48,17 @@ function boot(appState: AppState, currentScreen: ScreenType = 'home'): Harness {
 afterEach(() => recoveryPhraseStore.clear());
 
 describe('the skin each phase is drawn in', () => {
-  it('is Simple in every phase once chosen, but a combo-locked wallet shows the device', () => {
+  it('is Modern in every phase once chosen, but a combo-locked wallet shows the device', () => {
     const phases: AppState[] = ['loading', 'runtime_loading', 'needs_genesis', 'backup_phrase', 'securing_device', 'publication_pending', 'wallet_ready', 'error'];
-    for (const phase of phases) expect(skinInUse('simple', phase, 'none')).toBe('simple');
-    expect(skinInUse('simple', 'locked', 'pin')).toBe('simple');
-    expect(skinInUse('simple', 'locked', 'combo')).toBe('classic');
-    expect(skinInUse('classic', 'wallet_ready', 'none')).toBe('classic');
-    expect(skinInUse(null, 'needs_genesis', 'none')).toBe('classic');
+    for (const phase of phases) expect(skinInUse('modern', phase, 'none')).toBe('modern');
+    expect(skinInUse('modern', 'locked', 'pin')).toBe('modern');
+    expect(skinInUse('modern', 'locked', 'combo')).toBe('dgen');
+    expect(skinInUse('dgen', 'wallet_ready', 'none')).toBe('dgen');
+    expect(skinInUse(null, 'needs_genesis', 'none')).toBe('dgen');
   });
 });
 
-describe('a phone with no wallet, in the Simple skin', () => {
+describe('a phone with no wallet, in the Modern skin', () => {
   it('welcomes the user and creates the wallet or opens the restore', () => {
     const h = boot('needs_genesis');
     expect(screen.getByRole('heading', { name: 'Welcome to DSM' })).toBeInTheDocument();
@@ -76,7 +76,7 @@ describe('a phone with no wallet, in the Simple skin', () => {
   });
 });
 
-describe('a new wallet\'s recovery phrase, in the Simple skin', () => {
+describe('a new wallet\'s recovery phrase, in the Modern skin', () => {
   it('shows the words a page at a time, then checks them, and a wrong pick is caught', () => {
     recoveryPhraseStore.begin(WORDS.join(' '));
     const h = boot('backup_phrase');
