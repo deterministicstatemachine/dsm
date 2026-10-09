@@ -128,7 +128,6 @@ html[data-skin="modern"] .bilateral-btn-reject {
 html[data-skin="modern"] .sb-btn--primary,
 html[data-skin="modern"] .sb-card--dark .sb-btn--primary,
 html[data-skin="modern"] .sb-popover .sb-popover__ok,
-html[data-skin="modern"] .sb-fx-window .sb-fx-ok,
 html[data-skin="modern"] .bilateral-btn-accept { background: var(--s-primary); color: var(--s-on-primary); }
 html[data-skin="modern"] .sb-btn--ghost { background: transparent; color: var(--s-text); }
 html[data-skin="modern"] .sb-btn--small { min-height: 36px; padding: 6px 12px; font-size: 14px; border-radius: 12px; }
@@ -142,8 +141,7 @@ html[data-skin="modern"] .bilateral-transfer-overlay {
 }
 html[data-skin="modern"] .sb-popover,
 html[data-skin="modern"] .sb-popover.sb-card--dark,
-html[data-skin="modern"] .bilateral-transfer-dialog,
-html[data-skin="modern"] .sb-fx-window {
+html[data-skin="modern"] .bilateral-transfer-dialog {
   width: 100%; max-width: none; max-height: 90%; margin: 0; overflow-y: auto; box-sizing: border-box;
   border: none; border-radius: 26px 26px 0 0; padding: 22px 20px calc(22px + env(safe-area-inset-bottom));
   background: var(--s-bg); background-image: none; color: var(--s-text); box-shadow: none; image-rendering: auto;
@@ -151,8 +149,7 @@ html[data-skin="modern"] .sb-fx-window {
 }
 html[data-skin="modern"] .sb-popover__title,
 html[data-skin="modern"] .bilateral-transfer-header h2,
-html[data-skin="modern"] .bilateral-transfer-header h3,
-html[data-skin="modern"] .sb-fx-title {
+html[data-skin="modern"] .bilateral-transfer-header h3 {
   font-size: 22px; font-weight: 900; letter-spacing: 0; text-transform: none; color: var(--s-text); font-family: inherit;
 }
 html[data-skin="modern"] .bilateral-transfer-header { border-bottom: none; padding: 0 0 8px; text-align: left; }
@@ -161,8 +158,7 @@ html[data-skin="modern"] .sb-popover__close {
 }
 html[data-skin="modern"] .sb-popover__body,
 html[data-skin="modern"] .bilateral-transfer-body,
-html[data-skin="modern"] .bilateral-transfer-message,
-html[data-skin="modern"] .sb-fx-caption {
+html[data-skin="modern"] .bilateral-transfer-message {
   font-size: 16px; line-height: 1.45; color: var(--s-muted); padding-left: 0; padding-right: 0; font-family: inherit;
 }
 html[data-skin="modern"] .bilateral-transfer-label { color: var(--s-muted); text-transform: none; letter-spacing: 0; font-family: inherit; font-size: 14px; }
@@ -170,5 +166,3 @@ html[data-skin="modern"] .bilateral-transfer-value { color: var(--s-text); font-
 html[data-skin="modern"] .bilateral-transfer-actions { padding-left: 0; padding-right: 0; gap: 10px; }
 html[data-skin="modern"] .sb-popover .sb-actions { gap: 10px; }
 html[data-skin="modern"] .sb-popover .sb-btn[style] { color: var(--s-text) !important; border-color: transparent !important; background: var(--s-surface-2) !important; }
-html[data-skin="modern"] .sb-fx-screen { border: none; border-radius: 18px; }
-html[data-skin="modern"] .sb-fx-window .sb-fx-replay { background: var(--s-surface-2); color: var(--s-text); width: 48px; }
