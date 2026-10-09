@@ -148,6 +148,15 @@ class AppRuntimeStore {
 
 export const appRuntimeStore = new AppRuntimeStore();
 
+/**
+ * The look on the screen: the one the first-run picker is showing while it is
+ * open, else the owner's choice. What a part of the page draws follows this,
+ * not only the choice, so a preview is drawn as the look it previews.
+ */
+export function skinShown(snapshot: AppRuntimeSnapshot): Skin | null {
+  return snapshot.skin === null && snapshot.lookPreview !== null ? snapshot.lookPreview.skin : snapshot.skin;
+}
+
 export function useAppRuntimeStore(): AppRuntimeSnapshot {
   return useSyncExternalStore(
     appRuntimeStore.subscribe,

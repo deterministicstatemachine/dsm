@@ -237,6 +237,8 @@ html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
 }
 /* The letter is sized by its badge: the badge is the size container, so the letter scales with it. */
 .s-token-letter { font-size: 55cqh; line-height: 1; }
+/* The token's logo shape, white in its badge. */
+.s-token-shape { width: 72%; height: 72%; object-fit: contain; image-rendering: auto; }
 .s-token-flat[data-tone="fuchsia"] { background: var(--s-fuchsia); color: #ffffff; }
 .s-token-flat[data-tone="gold"] { background: var(--s-gold); color: #0f0f0f; }
 /* A still mark standing where coin artwork had its own size: it fills that box. */

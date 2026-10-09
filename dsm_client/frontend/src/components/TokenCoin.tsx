@@ -2,7 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import { coinGifsFor, type CoinGifs } from '../utils/coinArtwork';
 import { useActiveTheme } from '../hooks/useActiveTheme';
-import { useAppRuntimeStore } from '../runtime/appRuntimeStore';
+import { skinShown, useAppRuntimeStore } from '../runtime/appRuntimeStore';
 import { FlatTokenMark } from './FlatTokenMark';
 
 type Props = {
@@ -20,7 +20,7 @@ type Props = {
 /** A token's spinning coin, in the look of the built-in token GIFs, for the active theme; still in the Modern skin. */
 export function TokenCoin(props: Props): React.JSX.Element | null {
   const runtime = useAppRuntimeStore();
-  if (runtime.skin === 'modern') return <FlatTokenMark ticker={props.ticker} iconUrl={props.iconUrl} className={props.className} alt={props.alt} />;
+  if (skinShown(runtime) === 'modern') return <FlatTokenMark ticker={props.ticker} iconUrl={props.iconUrl} className={props.className} alt={props.alt} />;
   return <SpinningCoin {...props} />;
 }
 

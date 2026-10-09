@@ -10,7 +10,7 @@
 import React from 'react';
 import { TokenCoin } from './TokenCoin';
 import { FlatTokenMark } from './FlatTokenMark';
-import { useAppRuntimeStore } from '../runtime/appRuntimeStore';
+import { skinShown, useAppRuntimeStore } from '../runtime/appRuntimeStore';
 import { useActiveTheme } from '../hooks/useActiveTheme';
 import { themeBtcLogo, themeEraToken } from '../hooks/useThemeAssets';
 
@@ -36,7 +36,7 @@ export function TokenMark({ ticker, iconUrl, size = 48, className = 'sb-coin', a
   const name = (ticker ?? '').trim();
   if (name.length === 0) return null;
   // The Modern skin's marks are still: no spinning coins.
-  if (runtime.skin === 'modern') return <FlatTokenMark ticker={name} iconUrl={iconUrl} className={className} alt={alt} />;
+  if (skinShown(runtime) === 'modern') return <FlatTokenMark ticker={name} iconUrl={iconUrl} className={className} alt={alt} />;
 
   const lower = name.toLowerCase();
   const era = themeEraToken(theme);
