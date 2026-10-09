@@ -43,7 +43,12 @@ export default function LookPicker(): React.JSX.Element {
     () => setLook({ ...look, simpleMode: look.simpleMode === 'on' ? 'off' : 'on' }),
     ok,
   ];
-  const { focusedIndex } = useDpadNav({ itemCount: actions.length, onSelect: (i) => actions[i]?.() });
+  // The D-pad starts on the look shown, so its ring and the picked look agree.
+  const { focusedIndex } = useDpadNav({
+    itemCount: actions.length,
+    onSelect: (i) => actions[i]?.(),
+    initialIndex: look.skin === 'modern' ? 0 : 1,
+  });
   const focus = (i: number): string => (i === focusedIndex ? ' lp-focused' : '');
 
   return createPortal(
