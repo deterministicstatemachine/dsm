@@ -786,10 +786,13 @@ jobs:
   # count is asserted instead, so a newly added module cannot be skipped by the
   # glob without the job noticing.
   #
-  # SCOPE, so a green result is not overread: the tree declares 14 `axiom`s and
-  # 3 `opaque` defs (e.g. the SPHINCS+ round-trip). Theorems resting on those
-  # are checked against the axioms, not against the Rust. This job proves the
-  # proofs are well-formed and sorry-free; it does not prove the axioms.
+  # SCOPE, so a green result is not overread: the tree declares no `axiom`s;
+  # scripts/lean_axiom_audit.py asks the kernel what every theorem rests on and
+  # fails on sorryAx, native_decide, an undeclared axiom, or any change from the
+  # committed ledger (specs/requirements/LEAN_AXIOM_LEDGER.tsv). Hypotheses are
+  # not axioms: a theorem whose premise is an idealization (e.g. an injective
+  # hash) is checked against that premise, not against the Rust; those are
+  # listed under "Lean premises" in CONFORMANCE_GAPS.md.
   # --------------------------------------------------------------------------
   lean:
     name: Lean 4 proofs
@@ -836,6 +839,20 @@ jobs:
             fi
           done
           exit "$failed"
+
+      - name: Kernel axiom audit (ledger must match)
+        run: python3 scripts/lean_axiom_audit.py --check
+
+      - name: Paper and spec claims point at existing theorems
+        run: python3 scripts/check_claim_trace.py
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: Install SPHINCS refinement build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - name: Cross-check SPHINCS construction and DSM signing wrappers
+        run: bash scripts/check_sphincs_refinement.sh
 
   # --------------------------------------------------------------------------
   # SPDX: every source file under the primary code paths must carry an

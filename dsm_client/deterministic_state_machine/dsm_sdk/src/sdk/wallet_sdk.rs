@@ -351,15 +351,14 @@ impl WalletSDK {
         let current_id = self.device_id_string();
 
         // Device Kyber keypair: THE SAME deterministic Smaster derivation Genesis
-        // v2 uses (`generate_kyber_keypair_from_entropy(smaster, "DSM/kyber\0")`,
+        // v2 uses (`generate_kyber_identity_keypair(smaster)`,
         // genesis.rs create_genesis_v2), so the keystore key is byte-identical to
         // the one genesis derived — STABLE across app restarts and
         // reinstalls-from-seed. Without Smaster (wallet locked, or no genesis or
         // device id in the app state) there is no key to install, and the wallet
         // is not built.
         let smaster = crate::init::current_smaster()?;
-        let (kyber_pk, kyber_sk) =
-            dsm::crypto::kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?;
+        let (kyber_pk, kyber_sk) = dsm::crypto::kyber::generate_kyber_identity_keypair(&smaster)?;
 
         let mut ks_mut = self.keystore.write();
         ks_mut.insert(format!("{id}_device_kyber_pk", id = current_id), kyber_pk);
