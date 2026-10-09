@@ -128,6 +128,10 @@ jest.mock('../runtime/appRuntimeStore', () => ({
     showLockPrompt: true,
     soundEnabled: true,
     theme: 'stateboy',
+    // The intro plays for the Game Boy, once it is the owner's choice.
+    skin: 'classic',
+    skinRead: 'read',
+    scheme: 'light',
   }),
 }));
 
