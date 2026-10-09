@@ -379,7 +379,7 @@ pub async fn create_asset_with_icon(
             ticker: ticker.into(),
             alias: format!("{ticker} Fixture Asset"),
             decimals,
-            genesis_supply_u128: genesis_supply.to_be_bytes().to_vec(),
+            genesis_supply_entered: genesis_supply.to_string(),
             burn_enabled: true,
             transferable: true,
             threshold: 1,

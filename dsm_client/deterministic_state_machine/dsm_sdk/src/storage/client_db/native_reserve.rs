@@ -124,6 +124,42 @@ pub fn latest_state(genesis: &NativeReserveState) -> Result<NativeReserveState> 
     })
 }
 
+/// Every memoised generation of the reserve whose genesis is `genesis`, in
+/// generation order: the state each final release installed, and the
+/// release's envelope. What this device's own walks established.
+pub fn memoised_lineage(
+    genesis: &NativeReserveState,
+) -> Result<Vec<(NativeReserveState, Vec<u8>)>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("native reserve memo: the store is poisoned: {e}"))?;
+    let mut stmt = conn.prepare(
+        "SELECT generation, remaining, envelope FROM native_reserve_lineage_memo
+          WHERE reserve_id = ?1 ORDER BY generation ASC",
+    )?;
+    let rows = stmt.query_map(params![genesis.reserve_id.as_slice()], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut lineage = Vec::new();
+    for row in rows {
+        let (generation, remaining, envelope) = row?;
+        lineage.push((
+            NativeReserveState {
+                generation: u64_of(generation, "generation")?,
+                remaining_supply: u64_of(remaining, "remaining")?,
+                ..*genesis
+            },
+            envelope,
+        ));
+    }
+    Ok(lineage)
+}
+
 /// The memoised final release at `generation`, with the state it succeeded.
 pub fn release_at(
     genesis: &NativeReserveState,

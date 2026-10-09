@@ -15,7 +15,10 @@ use super::response_helpers::{err, pack_envelope_ok};
 use super::sofi_routes::{d32, entered, position_response, request, shown};
 use super::wallet_routes::token_of_commit;
 use crate::bridge::{AppInvoke, AppResult};
-use crate::sdk::escrow_flow::{CreateEscrowIntent, EscrowVaultView, OutcomeIntent, VerdictView};
+use crate::sdk::escrow_flow::{
+    CreateEscrowIntent, EscrowCreated, EscrowParty, EscrowVaultView, LockOutcome, OutcomeIntent,
+    VerdictView,
+};
 use crate::sdk::sofi_flow::Search;
 use crate::sdk::storage_set::StorageSet;
 
@@ -67,16 +70,48 @@ fn verdict_response(view: VerdictView) -> AppResult {
             verdict_cell: view.verdict_cell.to_vec(),
             state: state as i32,
             outcome,
-            passed_over: view
-                .passed_over
-                .iter()
-                .map(|refusal| format!("{refusal:?}"))
-                .collect(),
+            passed_over: view.passed_over.clone(),
         },
     ))
 }
 
-fn vault_v1(v: &EscrowVaultView, route: &str) -> Result<generated::EscrowVaultV1, String> {
+/// An outcome of a vault's terms, and what it means for `me`.
+fn outcome_v1(
+    b: &dsm::sofi::wire::EscrowBranch,
+    me: &EscrowParty,
+) -> generated::EscrowVaultOutcomeV1 {
+    generated::EscrowVaultOutcomeV1 {
+        outcome: b.outcome().to_vec(),
+        signers: b.signers().iter().map(signer_v1).collect(),
+        recipient_genesis: b.recipient_genesis().to_vec(),
+        recipient_device_id: b.recipient_device_id().to_vec(),
+        decided_by_this_device: b.signers().contains(&me.signer),
+        pays_this_device: b.recipient_genesis() == &me.genesis
+            && b.recipient_device_id() == &me.device_id,
+    }
+}
+
+/// A computed vault's branch (SoFi Amendment S22): no device decides it,
+/// the program computes it.
+fn computed_outcome_v1(
+    b: &dsm::sofi::wire::ComputedBranch,
+    me: &EscrowParty,
+) -> generated::EscrowVaultOutcomeV1 {
+    generated::EscrowVaultOutcomeV1 {
+        outcome: b.label().to_vec(),
+        recipient_genesis: b.recipient_genesis().to_vec(),
+        recipient_device_id: b.recipient_device_id().to_vec(),
+        pays_this_device: b.recipient_genesis() == &me.genesis
+            && b.recipient_device_id() == &me.device_id,
+        ..Default::default()
+    }
+}
+
+fn vault_v1(
+    v: &EscrowVaultView,
+    me: &EscrowParty,
+    route: &str,
+) -> Result<generated::EscrowVaultV1, String> {
     let (token_symbol, ..) = token_of_commit(&v.token).map_err(|e| format!("{route}: {e}"))?;
     let status = match v.status {
         dsm::sofi::wire::VAULT_STATUS_ACTIVE => generated::SofiVaultStatus::Active,
@@ -99,13 +134,35 @@ fn vault_v1(v: &EscrowVaultView, route: &str) -> Result<generated::EscrowVaultV1
         amount_display: shown(v.amount, &v.token, route)?,
         generation: v.generation,
         status: status as i32,
+        outcomes: match v.program {
+            None => v.branches.iter().map(|b| outcome_v1(b, me)).collect(),
+            Some(..) => v
+                .computed
+                .iter()
+                .map(|b| computed_outcome_v1(b, me))
+                .collect(),
+        },
+        // Empty for a signed vault: no program decides it.
+        program: match &v.program {
+            Some(p) => p.to_vec(),
+            None => Vec::new(),
+        },
+        program_name: match &v.program {
+            Some(p) => crate::sdk::outcome_programs::program_text(p),
+            None => String::new(),
+        },
     })
 }
 
-fn vaults_response(views: &[EscrowVaultView], search: Search, route: &str) -> AppResult {
+fn vaults_response(
+    views: &[EscrowVaultView],
+    me: &EscrowParty,
+    search: Search,
+    route: &str,
+) -> AppResult {
     let vaults = match views
         .iter()
-        .map(|v| vault_v1(v, route))
+        .map(|v| vault_v1(v, me, route))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(vaults) => vaults,
@@ -119,6 +176,17 @@ fn vaults_response(views: &[EscrowVaultView], search: Search, route: &str) -> Ap
         generated::EscrowVaultsResponse {
             vaults,
             search: search as i32,
+        },
+    ))
+}
+
+fn created_response(done: EscrowCreated) -> AppResult {
+    pack_envelope_ok(generated::envelope::Payload::EscrowCreatedResponse(
+        generated::EscrowCreatedResponse {
+            vault_id: done.vault_id.to_vec(),
+            verdict_cell: done.verdict_cell.to_vec(),
+            external_commitment: done.external_commitment.to_vec(),
+            position: done.position,
         },
     ))
 }
@@ -140,6 +208,7 @@ impl AppRouterImpl {
         };
         match i.method.as_str() {
             "escrow.create" => self.escrow_create(&i, &set).await,
+            "escrow.lock" => self.escrow_lock(&i, &set).await,
             "escrow.sign" => self.escrow_sign(&i, &set).await,
             "escrow.adjudicate" => self.escrow_adjudicate(&i, &set).await,
             "escrow.verdict" => self.escrow_verdict(&i, &set).await,
@@ -196,14 +265,59 @@ impl AppRouterImpl {
             Err(e) => return err(e),
         };
         match crate::sdk::escrow_flow::create(&self.core_sdk, set, &intent).await {
-            Ok(done) => pack_envelope_ok(generated::envelope::Payload::EscrowCreatedResponse(
-                generated::EscrowCreatedResponse {
-                    vault_id: done.vault_id.to_vec(),
-                    verdict_cell: done.verdict_cell.to_vec(),
-                    external_commitment: done.external_commitment.to_vec(),
-                    position: done.position,
-                },
-            )),
+            Ok(done) => created_response(done),
+            Err(e) => err(format!("{ROUTE}: {e}")),
+        }
+    }
+
+    /// `escrow.lock`: `escrow.create` with each outcome's signers and recipient
+    /// named by device id, resolved by the SDK (`escrow_flow::branches_named`).
+    async fn escrow_lock(&self, i: &AppInvoke, set: &StorageSet) -> AppResult {
+        const ROUTE: &str = "escrow.lock";
+        let req: generated::EscrowLockRequest = match request(i) {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let intent = match (|| -> Result<CreateEscrowIntent, String> {
+            let token = d32(&req.token_policy_commit, "token_policy_commit", ROUTE)?;
+            let amount = entered(&req.amount_entered, &token, "stake", ROUTE)?;
+            if amount == 0 {
+                return Err(format!("{ROUTE}: the stake must be positive"));
+            }
+            let outcomes = req
+                .outcomes
+                .iter()
+                .map(|o| {
+                    Ok(LockOutcome {
+                        outcome: o.outcome.clone(),
+                        decided_by: o
+                            .decided_by
+                            .iter()
+                            .map(|d| d32(d, "decided_by", ROUTE))
+                            .collect::<Result<Vec<_>, String>>()?,
+                        pays: d32(&o.pays, "pays", ROUTE)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let branches = crate::sdk::escrow_flow::branches_named(&self.core_sdk, &outcomes)
+                .map_err(|e| format!("{ROUTE}: {e}"))?;
+            let counterpart = match req.counterpart_vault_id.as_slice() {
+                [] => None,
+                bytes => Some(d32(bytes, "counterpart_vault_id", ROUTE)?),
+            };
+            Ok(CreateEscrowIntent {
+                external: req.external.clone(),
+                token,
+                amount,
+                branches,
+                counterpart,
+            })
+        })() {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match crate::sdk::escrow_flow::create(&self.core_sdk, set, &intent).await {
+            Ok(done) => created_response(done),
             Err(e) => err(format!("{ROUTE}: {e}")),
         }
     }
@@ -290,16 +404,24 @@ impl AppRouterImpl {
             Ok(v) => v,
             Err(e) => return err(e),
         };
+        let me = match crate::sdk::escrow_flow::party(&self.core_sdk) {
+            Ok(me) => me,
+            Err(e) => return err(format!("{ROUTE}: {e}")),
+        };
         match crate::sdk::escrow_flow::locked(&self.core_sdk, set, &verdict_cell).await {
-            Ok((views, search)) => vaults_response(&views, search, ROUTE),
+            Ok((views, search)) => vaults_response(&views, &me, search, ROUTE),
             Err(e) => err(format!("{ROUTE}: {e}")),
         }
     }
 
     async fn escrow_vaults(&self, set: &StorageSet) -> AppResult {
         const ROUTE: &str = "escrow.vaults";
+        let me = match crate::sdk::escrow_flow::party(&self.core_sdk) {
+            Ok(me) => me,
+            Err(e) => return err(format!("{ROUTE}: {e}")),
+        };
         match crate::sdk::escrow_flow::own_vaults(&self.core_sdk, set).await {
-            Ok(views) => vaults_response(&views, Search::Complete, ROUTE),
+            Ok(views) => vaults_response(&views, &me, Search::Complete, ROUTE),
             Err(e) => err(format!("{ROUTE}: {e}")),
         }
     }

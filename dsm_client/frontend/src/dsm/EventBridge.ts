@@ -13,7 +13,7 @@ import { dispatchNativeQrScannerActive } from './qrScannerState';
 import { bytesToBase32CrockfordPrefix, encodeBase32Crockford } from '../utils/textId';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import logger from '../utils/logger';
-import type { NativeSessionSnapshot } from '../runtime/nativeSessionTypes';
+import { decodeSessionState } from './sessionState';
 
 export type DsmEventHandler = (payload: Uint8Array) => void;
 
@@ -109,57 +109,6 @@ function emitGenesisLifecycleFromEnvelope(bytes: Uint8Array): boolean {
     default:
       return false;
   }
-}
-
-function decodeSessionState(bytes: Uint8Array): NativeSessionSnapshot {
-  // Session state arrives envelope-wrapped from Rust: [0x03][Envelope(SessionStateResponse)]
-  // Invariant #1: Envelope v3 only — sole wire container.
-  const env = decodeFramedEnvelopeV3(bytes);
-  const payload: any = env.payload; // eslint-disable-line @typescript-eslint/no-explicit-any
-  if (payload?.case !== 'sessionStateResponse') {
-    throw new Error(`decodeSessionState: unexpected payload case '${payload?.case}'`);
-  }
-  const session = payload.value as pb.AppSessionStateProto;
-  // Rust fills every nested status on every snapshot (session_manager's
-  // compute_snapshot). A snapshot missing one is malformed, not a status of
-  // false, and is refused rather than filled in here.
-  const lock = session.lockStatus;
-  const hardware = session.hardwareStatus;
-  const ble = hardware?.ble;
-  const qr = hardware?.qr;
-  if (!lock || !hardware || !ble || !qr) {
-    throw new Error('decodeSessionState: the snapshot lacks its lock or hardware status');
-  }
-  return {
-    received: true,
-    phase: session.phase as NativeSessionSnapshot['phase'],
-    identity_status: session.identityStatus as NativeSessionSnapshot['identity_status'],
-    env_config_status: session.envConfigStatus as NativeSessionSnapshot['env_config_status'],
-    lock_status: {
-      enabled: lock.enabled,
-      locked: lock.locked,
-      // Rust spells the method itself ("none" when there is no lock).
-      method: lock.method as NativeSessionSnapshot['lock_status']['method'],
-      lock_on_pause: lock.lockOnPause,
-    },
-    hardware_status: {
-      app_foreground: hardware.appForeground,
-      ble: {
-        enabled: ble.enabled,
-        permissions_granted: ble.permissionsGranted,
-        scanning: ble.scanning,
-        advertising: ble.advertising,
-      },
-      qr: {
-        available: qr.available,
-        active: qr.active,
-        camera_permission: qr.cameraPermission,
-      },
-    },
-    // Rust sends an empty string for no error.
-    fatal_error: session.fatalError || null,
-    wallet_refresh_hint: Number(session.walletRefreshHint),
-  };
 }
 
 export function initializeEventBridge(): void {

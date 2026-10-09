@@ -215,6 +215,19 @@ pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) -> Result
     Ok(())
 }
 
+/// The whole supply of a token that is a state object: it exists once.
+const STATE_OBJECT_SUPPLY: u128 = 1;
+
+/// What kind of holding a token of `genesis_supply` is: a state object when
+/// its whole supply is one, else a currency.
+fn holding_of(genesis_supply: u128) -> generated::BalanceHolding {
+    if genesis_supply == STATE_OBJECT_SUPPLY {
+        generated::BalanceHolding::StateObject
+    } else {
+        generated::BalanceHolding::Currency
+    }
+}
+
 /// Fill in everything a balance row says beyond its amounts: the token's
 /// name, unit and policy facts, its anchor, and its offline allocation as
 /// `offline_of` reads it for the row's asset.
@@ -240,6 +253,7 @@ pub(crate) fn enrich_balance_metadata(
             reply.protocol_defined = true;
             reply.genesis_supply_display =
                 format_supply_for_display(era.genesis_supply, era.decimals);
+            reply.holding = holding_of(era.genesis_supply) as i32;
             reply.permissions = Some(generated::TokenPolicyPermissions {
                 burn_enabled: era.burn_enabled,
                 transferable: era.transferable,
@@ -255,6 +269,8 @@ pub(crate) fn enrich_balance_metadata(
                 set_anchor_and_offline(reply, &c, offline_of);
             }
             reply.protocol_defined = true;
+            // Bitcoin, one for one: a currency.
+            reply.holding = generated::BalanceHolding::Currency as i32;
         }
         // Created and adopted tokens carry their own decimals, and the wire
         // amount is BASE UNITS. Leaving decimals at the default meant a
@@ -289,6 +305,7 @@ pub(crate) fn enrich_balance_metadata(
             reply.protocol_defined = false;
             reply.genesis_supply_display =
                 format_supply_for_display(policy.genesis_supply, reply.decimals);
+            reply.holding = holding_of(policy.genesis_supply) as i32;
             reply.permissions = Some(generated::TokenPolicyPermissions {
                 burn_enabled: policy.burn_enabled,
                 transferable: policy.transferable,
@@ -1884,9 +1901,11 @@ mod tests {
             era.policy_anchor_b32,
             "NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0"
         );
+        assert_eq!(era.holding, generated::BalanceHolding::Currency as i32);
         let mut dbtc = seed("dBTC", 0, 0);
         super::enrich_balance_metadata(&mut dbtc, &|_| None).expect("dBTC is named");
         assert!(dbtc.protocol_defined);
+        assert_eq!(dbtc.holding, generated::BalanceHolding::Currency as i32);
     }
 
     /// A created token's facts are its committed policy's, read from bytes
@@ -1912,6 +1931,16 @@ mod tests {
         assert_eq!(row.icon_url, "dsm:coin:v1:ABC");
         assert_eq!(row.symbol, "RIGB");
         assert_eq!(row.display_amount, "0.05");
+        assert_eq!(row.holding, generated::BalanceHolding::Currency as i32);
+
+        // A token whose whole supply is one (a creature the game issued) is a
+        // state object, whatever its policy permits holders to do.
+        let (creature, creature_commit) =
+            store_created_policy("MOS0001", 0, 1, policy.burn_enabled, policy.transferable);
+        register(&creature, creature_commit, 1);
+        let mut held = seed("MOS0001", 1, 0);
+        super::enrich_balance_metadata(&mut held, &|_| None).expect("a state object is named");
+        assert_eq!(held.holding, generated::BalanceHolding::StateObject as i32);
     }
 
     /// A row states its offline allocation only from a reader that knows the

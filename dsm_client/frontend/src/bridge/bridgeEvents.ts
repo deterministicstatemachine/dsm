@@ -2,10 +2,10 @@
 // path: src/bridge/bridgeEvents.ts
 // SPDX-License-Identifier: Apache-2.0
 
-import type { NativeSessionSnapshot } from '../runtime/nativeSessionTypes';
+import type { NativeSessionReport } from '../runtime/nativeSessionTypes';
 
 export type BridgeEventMap = {
-  'session.state': NativeSessionSnapshot;
+  'session.state': NativeSessionReport;
   'identity.ready': void;
   'wallet.refresh': { source: string; [k: string]: any };
   'wallet.bilateralAccepted': { commitmentHash: Uint8Array; counterpartyDeviceId: Uint8Array };

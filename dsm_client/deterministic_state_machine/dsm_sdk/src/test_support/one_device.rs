@@ -79,6 +79,11 @@ impl Fleet {
         Self { nodes, config }
     }
 
+    /// The device config naming the running nodes.
+    pub fn config(&self) -> &FleetGuard {
+        &self.config
+    }
+
     /// The endpoints the device's config names — the running nodes'.
     pub fn endpoints(&self) -> Vec<String> {
         let endpoints = self.config.endpoints();
@@ -93,5 +98,10 @@ impl Fleet {
     /// The TLS a member serves, from the nodes' CA ([`NodeSet::tls_for`]).
     pub async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
         self.nodes.tls_for(member_id).await
+    }
+
+    /// The running nodes, for what each was asked.
+    pub fn nodes(&self) -> &NodeSet {
+        &self.nodes
     }
 }

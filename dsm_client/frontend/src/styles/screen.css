@@ -1187,3 +1187,30 @@ label.sb-btn.is-disabled { opacity: 0.45; pointer-events: none; }
   letter-spacing: 0;
   text-transform: none;
 }
+
+/* A two-way switch with no label: the balances card flips between the
+   wallet's currencies and its state objects (supply-one tokens). */
+.sb-switch {
+  position: relative;
+  width: 26px;
+  height: 14px;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 7px;
+  background: rgba(var(--text-rgb), 0.06);
+  cursor: pointer;
+  flex: none;
+}
+.sb-switch::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dark);
+  transition: transform 0.15s ease;
+}
+.sb-switch[aria-checked='true']::after { transform: translateX(12px); }
+.sb-switch:focus-visible { outline: 2px solid var(--text-dark); outline-offset: 1px; }

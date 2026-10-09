@@ -19,12 +19,16 @@
 //! * `contact_sdk`: Manages peer relationships and communications
 //! * `wallet_sdk`: Key management and secure storage capabilities
 //!
+/// Objects an account publishes under a topic of its own, signed by its AK.
+pub mod authored_objects;
+/// Escrow vaults (SoFi §19.9): stakes released by a canonical verdict.
+pub mod computed_flow;
 pub mod economic_admission_flow;
 pub mod economic_registers;
-/// Escrow vaults (SoFi §19.9): stakes released by a canonical verdict.
 pub mod escrow_flow;
 pub mod faucet_claim_flow;
 pub mod native_reserve;
+pub mod outcome_programs;
 pub mod runtime_config;
 pub mod sdk_context;
 
@@ -34,6 +38,7 @@ pub use sdk_context::SdkContext;
 // Core SDK modules - fundamental building blocks
 
 pub mod anchor_enrollment_store;
+pub mod app_lock; // The app lock: Rust enrolls and checks the PIN or pattern
 pub mod app_state; // Shared application state management
 pub mod apply_outcome; // §16.6 tri-state full-state apply outcome
 pub mod b0x_sdk;
@@ -44,6 +49,7 @@ pub mod identity_publication; // publication-quorum lifecycle for device identit
 pub mod inbox_poller;
 pub mod inbox_waiter; // long-poll on the storage nodes beside the poller
 pub mod kyber_identity; // ML-KEM identity binding for online contact establishment (§11.1)
+pub mod lineage_discovery;
 pub mod realized_records;
 pub mod session_manager; // Native-first session state projection
 pub mod signing_authority;
@@ -58,6 +64,8 @@ pub mod sofi_sdk;
 pub mod tls_transport_sdk;
 pub mod token_sdk;
 pub mod token_state;
+pub mod vault_baseline;
+pub mod vault_history;
 // Storage-node client wrapper
 pub mod device_directory;
 pub(crate) mod final_reads;

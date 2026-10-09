@@ -131,18 +131,23 @@ impl AppRouterImpl {
             Err(e) => return err(e),
         };
         let intent = match (|| -> Result<CreateVaultIntent, String> {
-            let a = d32(&req.token_a_policy_commit, "token_a_policy_commit", ROUTE)?;
-            let b = d32(&req.token_b_policy_commit, "token_b_policy_commit", ROUTE)?;
-            if a >= b {
-                return Err(format!(
-                    "{ROUTE}: the pair must be ordered, token_a < token_b"
-                ));
-            }
-            let reserve_a = entered(&req.reserve_a_entered, &a, "reserve A", ROUTE)?;
-            let reserve_b = entered(&req.reserve_b_entered, &b, "reserve B", ROUTE)?;
-            if reserve_a == 0 || reserve_b == 0 {
+            // The two tokens in the order the user named them, each reserve
+            // parsed against its own token. The pair a vault commits is ordered
+            // bytewise (§28): the order put here, never asked of the caller.
+            let first = d32(&req.token_a_policy_commit, "token_a_policy_commit", ROUTE)?;
+            let second = d32(&req.token_b_policy_commit, "token_b_policy_commit", ROUTE)?;
+            let first_reserve = entered(&req.reserve_a_entered, &first, "reserve A", ROUTE)?;
+            let second_reserve = entered(&req.reserve_b_entered, &second, "reserve B", ROUTE)?;
+            if first_reserve == 0 || second_reserve == 0 {
                 return Err(format!("{ROUTE}: both reserves must be positive"));
             }
+            let ((a, reserve_a), (b, reserve_b)) = match first.cmp(&second) {
+                std::cmp::Ordering::Less => ((first, first_reserve), (second, second_reserve)),
+                std::cmp::Ordering::Greater => ((second, second_reserve), (first, first_reserve)),
+                std::cmp::Ordering::Equal => {
+                    return Err(format!("{ROUTE}: a pair is two different tokens"))
+                }
+            };
             Ok(CreateVaultIntent {
                 token_a_policy_commit: a,
                 token_b_policy_commit: b,
@@ -154,13 +159,35 @@ impl AppRouterImpl {
             Ok(v) => v,
             Err(e) => return err(e),
         };
+        if req.label.len() > crate::storage::client_db::sofi_vault_head::LABEL_MAX {
+            return err(format!(
+                "{ROUTE}: a vault label is at most {} bytes",
+                crate::storage::client_db::sofi_vault_head::LABEL_MAX
+            ));
+        }
         match crate::sdk::sofi_flow::create_vault(&self.core_sdk, set, &intent).await {
-            Ok(done) => pack_envelope_ok(generated::envelope::Payload::SofiVaultCreatedResponse(
-                generated::SofiVaultCreatedResponse {
-                    vault_id: done.vault_id.to_vec(),
-                    position: done.position,
-                },
-            )),
+            Ok(done) => {
+                // The account's own name for the vault, kept with the vault it
+                // names; a vault created and not named is an error the caller
+                // sees, with the vault it created.
+                if !req.label.is_empty() {
+                    if let Err(e) = crate::storage::client_db::sofi_vault_head::put_label(
+                        &done.vault_id,
+                        &req.label,
+                    ) {
+                        return err(format!(
+                            "{ROUTE}: vault {} was created and its label was not kept: {e}",
+                            crate::util::text_id::encode_base32_crockford(&done.vault_id)
+                        ));
+                    }
+                }
+                pack_envelope_ok(generated::envelope::Payload::SofiVaultCreatedResponse(
+                    generated::SofiVaultCreatedResponse {
+                        vault_id: done.vault_id.to_vec(),
+                        position: done.position,
+                    },
+                ))
+            }
             Err(e) => err(format!("{ROUTE}: {e}")),
         }
     }
@@ -395,6 +422,12 @@ impl AppRouterImpl {
                         ))
                     }
                 };
+                // The account's own name for the vault; a vault it never named
+                // is the wire's empty label.
+                let label: String = crate::storage::client_db::sofi_vault_head::label(&v.vault_id)
+                    .map_err(|e| format!("{ROUTE}: {e}"))?
+                    .into_iter()
+                    .collect();
                 Ok(generated::SofiOwnedVaultV1 {
                     vault_id: v.vault_id.to_vec(),
                     token_a_policy_commit: v.token_a_policy_commit.to_vec(),
@@ -408,6 +441,7 @@ impl AppRouterImpl {
                     fee_bps: v.fee_bps,
                     generation: v.generation,
                     status: status as i32,
+                    label,
                 })
             })();
             match row {

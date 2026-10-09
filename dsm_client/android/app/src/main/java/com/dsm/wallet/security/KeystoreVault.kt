@@ -19,11 +19,9 @@ import javax.crypto.spec.GCMParameterSpec
  * never enters Rust or app memory. [open] reverses it on cold start so the signer rebuilds
  * without re-entering the mnemonic.
  *
- * The current key is created with no user-authentication requirement — the no-lock-wallet
- * case, where the seed auto-unlocks on start. A biometric/PIN-gated variant (a locked
- * wallet) needs a `BiometricPrompt` + `Cipher` `CryptoObject`, which is an async UI flow a
- * synchronous JNI upcall cannot drive; that path is a follow-up and would key on a distinct
- * alias with `setUserAuthenticationRequired(true)`.
+ * The key is created with no user-authentication requirement, so the seed opens on start.
+ * What keeps a locked wallet closed is the app lock Rust checks (`sdk::app_lock`), not the
+ * Keystore.
  */
 object KeystoreVault {
     private const val TAG = "KeystoreVault"

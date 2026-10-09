@@ -361,6 +361,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAllBalance
                 );
             }
 
+            // Nothing the app asks runs while the wallet is locked (S-LOCK).
+            if let Err(locked) =
+                crate::sdk::session_manager::refuse_while_locked("getAllBalancesStrict")
+            {
+                return respond_error(
+                    &mut env,
+                    helpers::JniErrorCode::ProcessingFailed as u32,
+                    &locked,
+                );
+            }
+
             // WebView contract: return raw `BalancesListResponse` bytes on success.
             // This JNI export i now migrated to return FramedEnvelopeV3 (0x03 + Envelope).
             let result = crate::bridge::get_all_balances_strict();
@@ -601,9 +612,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
 
 /// App-backgrounded lifecycle transition. Rust performs the ENTIRE decision:
 /// it stops the inbox poller unless a §16.6 settlement step is still owed (a
-/// sender-side pending gate, or a countersigned reply not yet delivered) or a
-/// contact can send to this device, and returns the single directive the
-/// platform layer must obey.
+/// sender-side pending gate, or a countersigned reply not yet delivered), a
+/// contact can send to this device, or an application is connected (its
+/// requests are answered only while the wallet runs), and returns the single
+/// directive the platform layer must obey.
 ///
 /// Returns TRUE when the host MUST keep its foreground service alive: killing
 /// the service kills the poller with it, stranding money in flight until the
@@ -626,7 +638,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_onAppBackgrou
         Ok(Ok(crate::sdk::inbox_poller::Backgrounded::Stopped)) => 0,
         Ok(Ok(
             crate::sdk::inbox_poller::Backgrounded::Settling
-            | crate::sdk::inbox_poller::Backgrounded::Listening,
+            | crate::sdk::inbox_poller::Backgrounded::Listening
+            | crate::sdk::inbox_poller::Backgrounded::Serving,
         )) => 1,
         Ok(Err(e)) => {
             log::error!("onAppBackgrounded: settlement state unreadable, keeping alive: {e}");
@@ -2214,6 +2227,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
             Some(e) => e,
             None => return std::ptr::null_mut(),
         };
+        // Nothing the app asks runs while the wallet is locked (S-LOCK).
+        if let Err(locked) =
+            crate::sdk::session_manager::refuse_while_locked("acceptBilateralByCommitment")
+        {
+            return error_byte_array(
+                &mut env,
+                helpers::JniErrorCode::ProcessingFailed as u32,
+                &locked,
+            )
+            .into_raw();
+        }
         let jba = unsafe { jba_from(commitment_hash_raw) };
         let bytes = match env.convert_byte_array(&jba) {
             Ok(v) => v,
@@ -2384,6 +2408,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_rejectBilater
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
+            // Nothing the app asks runs while the wallet is locked (S-LOCK).
+            if let Err(locked) =
+                crate::sdk::session_manager::refuse_while_locked("rejectBilateralByCommitment")
+            {
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::ProcessingFailed as u32,
+                    &locked,
+                )
+                .into_raw();
+            }
             let jba = unsafe { jba_from(commitment_hash) };
             let bytes = match env.convert_byte_array(&jba) {
                 Ok(v) => v,
@@ -2546,6 +2581,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_cancelBilater
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
+            // Nothing the app asks runs while the wallet is locked (S-LOCK).
+            if let Err(locked) =
+                crate::sdk::session_manager::refuse_while_locked("cancelBilateralByCommitment")
+            {
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::ProcessingFailed as u32,
+                    &locked,
+                )
+                .into_raw();
+            }
             let jba = unsafe { jba_from(commitment_hash) };
             let ch: [u8; 32] = match env
                 .convert_byte_array(&jba)

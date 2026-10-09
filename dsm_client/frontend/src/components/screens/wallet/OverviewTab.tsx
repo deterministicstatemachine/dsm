@@ -3,7 +3,7 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import TransactionItem from './TransactionItem';
 import { Disclosure } from '../../common/ScreenFrame';
-import type { TokenBalanceView } from '../../../dsm/types';
+import type { BalanceHoldingView, TokenBalanceView } from '../../../dsm/types';
 import { TokenMark } from '../../TokenMark';
 import BluetoothIcon from '../../icons/BluetoothIcon';
 import type { DomainTransaction } from '../../../domain/types';
@@ -24,11 +24,15 @@ type Props = {
 function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
   const [showAllBalances, setShowAllBalances] = useState(false);
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
+  // Currencies, or the state objects (supply-one tokens: creatures, items) the wallet holds.
+  const [shown, setShown] = useState<BalanceHoldingView>('currency');
+  const showingObjects = shown === 'object';
+  const listed = useMemo(() => balances.filter((b) => (b.holding ?? 'currency') === shown), [balances, shown]);
 
   const visibleBalances = useMemo(() => {
-    if (showAllBalances) return balances;
-    return balances.slice(0, MAX_OVERVIEW_BALANCES);
-  }, [balances, showAllBalances]);
+    if (showAllBalances) return listed;
+    return listed.slice(0, MAX_OVERVIEW_BALANCES);
+  }, [listed, showAllBalances]);
 
   const recentTransactions = useMemo(() => transactions.slice(0, 5), [transactions]);
 
@@ -41,10 +45,21 @@ function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32,
       <section className="sb-card" aria-label="Your balances">
         <div className="sb-card__title">
           <span className="sb-hero__label">Your Balances</span>
+          <button
+            type="button"
+            role="switch"
+            className="sb-switch"
+            aria-checked={showingObjects}
+            aria-label="Show state objects"
+            title={showingObjects ? 'State objects' : 'Currencies'}
+            onClick={() => setShown(showingObjects ? 'currency' : 'object')}
+          />
         </div>
         {balancesLoading ? (
           <div className="sb-hero__sub" style={{ textAlign: 'center' }}>Loading balances{'…'}</div>
-        ) : balances.length === 0 ? (
+        ) : listed.length === 0 && showingObjects ? (
+          <div className="sb-hero__sub" style={{ textAlign: 'center' }}>No state objects yet.</div>
+        ) : listed.length === 0 ? (
           <>
             <div className="sb-hero__sub" style={{ textAlign: 'center' }}>No balances yet. Claim tokens from the faucet to get started.</div>
           </>
@@ -73,7 +88,7 @@ function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32,
                 )}
               </React.Fragment>
             ))}
-            {balances.length > MAX_OVERVIEW_BALANCES && (
+            {listed.length > MAX_OVERVIEW_BALANCES && (
               <button
                 type="button"
                 onClick={() => setShowAllBalances((prev) => !prev)}
@@ -82,7 +97,7 @@ function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32,
               >
                 {showAllBalances
                   ? 'Show Less'
-                  : `Show ${balances.length - MAX_OVERVIEW_BALANCES} More`}
+                  : `Show ${listed.length - MAX_OVERVIEW_BALANCES} More`}
               </button>
             )}
           </>

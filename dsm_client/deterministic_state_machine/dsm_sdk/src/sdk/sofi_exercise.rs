@@ -13,81 +13,17 @@
 //! key is Core's (`sofi::exercise::exercise_names_key`): the first exercise
 //! at the leader whose `F` names `(v, a)` and whose `P` names `(v, R_n)`.
 
-use dsm::sofi::conformance::{derive_policy_fulfillments, ConformanceEvidence};
-use dsm::sofi::derive;
 use dsm::sofi::exercise::{AttemptCell, RecognizedExercise};
-use dsm::sofi::publication::Publication;
-use dsm::sofi::wire::{DlvPolicyFulfillmentBody, SofiExercise};
+use dsm::sofi::wire::SofiExercise;
 use dsm::types::error::DsmError;
 
 use crate::sdk::route_seats::write_recorded;
-use crate::sdk::sofi_register::InstallRequest;
 use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
 
 fn err(what: &str, e: impl core::fmt::Display) -> DsmError {
     DsmError::verification(format!("{what}: {e}"))
-}
-
-/// The exercise of a request, over the evidence its conformance was decided
-/// on: `F` and `P` in their envelopes, the trader's signed `C_q` exactly as
-/// the install wrote it at `K_root(q)` (SoFi Amendment S20), `P(E)`, the
-/// canonical witnesses derived from `P` and the shadows `P(E)` commits, and
-/// every closure object in reference order. A closure object the evidence
-/// does not hold is an error here — the exercise carries the closure, so it
-/// cannot be built without it.
-pub fn build_exercise(
-    request: &InstallRequest<'_>,
-    resolution_claim: &[u8],
-    evidence: &ConformanceEvidence,
-) -> Result<SofiExercise, DsmError> {
-    let canonical =
-        derive::canonical_legs(request.preimage).map_err(|e| err("canonical legs", e))?;
-    let shadows: Vec<D32> = request
-        .precommit
-        .legs()
-        .iter()
-        .map(|leg| {
-            canonical
-                .iter()
-                .find(|l| l.vault_id == leg.vault_id)
-                .map(|l| l.shadow_core)
-                .ok_or_else(|| err("witnesses", "a leg P(E) does not derive"))
-        })
-        .collect::<Result<_, _>>()?;
-    let witnesses: Vec<Vec<u8>> = derive_policy_fulfillments(request.precommit, &shadows)
-        .map_err(|e| err("witnesses", format!("{e:?}")))?
-        .iter()
-        .map(DlvPolicyFulfillmentBody::encode)
-        .collect();
-    let mut closure = Vec::new();
-    for reference in request.preimage.settlement().closure().refs() {
-        let bytes = evidence
-            .closure
-            .get(reference)
-            .ok_or_else(|| err("closure", format!("object not acquired for {reference:?}")))?;
-        closure.push(bytes.clone());
-    }
-    SofiExercise::new(
-        Publication::Fulfillment {
-            body: request.fulfillment,
-            signature: request.fulfillment_signature,
-        }
-        .object_bytes()
-        .map_err(|e| err("fulfillment envelope", e))?,
-        resolution_claim.to_vec(),
-        Publication::Precommit {
-            body: request.precommit,
-            signature: request.precommit_signature,
-        }
-        .object_bytes()
-        .map_err(|e| err("precommit envelope", e))?,
-        request.preimage.encode().map_err(|e| err("preimage", e))?,
-        witnesses,
-        closure,
-    )
-    .map_err(|e| err("exercise", e))
 }
 
 /// One leg's cell write.

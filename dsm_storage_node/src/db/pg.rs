@@ -5,7 +5,10 @@
 
 use anyhow::{anyhow, bail, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use std::sync::Arc;
 use tokio_postgres_rustls::MakeRustlsConnect;
+
+use super::committed::{CellLeaf, CommittedCells, CommittedLeaves};
 
 /// Create a TLS connector for PostgreSQL connections using webpki root certificates.
 fn create_tls_connector() -> MakeRustlsConnect {
@@ -667,14 +670,9 @@ pub async fn spool_ready(pool: &Pool, marks: &[(String, i64)]) -> Result<Vec<Str
 /// The node's connection pool type.
 pub type DBPool = Pool;
 
-/// A pool on the Postgres database `database_url` names. TLS is required,
-/// verified against the public web roots, unless the URL itself says
-/// `sslmode=disable` — the operator's explicit statement, never inferred
-/// from the host name. `sslmode=prefer` (the Postgres default) would fall
-/// back to plaintext when the server offers no TLS, so every other mode is
-/// held to `require`.
 /// Connections a node holds to Postgres at most. Every request that touches
-/// the store shares them.
+/// the store shares them. A deployed node runs on a server of its own, which
+/// grants them all.
 pub const POOL_MAX_SIZE: usize = 32;
 
 /// How long a request waits for one of those connections before it fails,
@@ -682,7 +680,14 @@ pub const POOL_MAX_SIZE: usize = 32;
 /// transport bound, as an unreachable node is (storage spec §1 rule 4).
 pub const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
+/// A pool of at most `max_size` connections on the Postgres database
+/// `database_url` names: no more than `max_size` are ever open at once. TLS
+/// is required, verified against the public web roots, unless the URL itself
+/// says `sslmode=disable` — the operator's explicit statement, never inferred
+/// from the host name. `sslmode=prefer` (the Postgres default) would fall
+/// back to plaintext when the server offers no TLS, so every other mode is
+/// held to `require`.
+pub fn create_pool(database_url: &str, max_size: usize) -> anyhow::Result<DBPool> {
     use tokio_postgres::config::SslMode;
 
     let mut pg: tokio_postgres::Config = database_url
@@ -699,7 +704,7 @@ pub fn create_pool(database_url: &str) -> anyhow::Result<DBPool> {
         Manager::from_config(pg, create_tls_connector(), manager_config)
     };
     Ok(Pool::builder(manager)
-        .max_size(POOL_MAX_SIZE)
+        .max_size(max_size)
         .wait_timeout(Some(POOL_WAIT_TIMEOUT))
         .runtime(Runtime::Tokio1)
         .build()?)
@@ -882,20 +887,26 @@ pub async fn get_cell_entries(
 /// (the new one, or the existing one if nothing arrived), or `None` if this
 /// node has never closed a cycle and holds no entries.
 ///
-/// `closing` is the node's own closer lock: a closer waits on it before it
-/// takes a database connection, so closers queued behind one another hold
+/// `committed` holds the node's own closer lock: a closer waits on it before
+/// it takes a database connection, so closers queued behind one another hold
 /// none. The advisory lock on [`CLOSE_LOCK`] still keeps closers of the same
 /// database apart across processes.
+///
+/// The SMT is the previous cycle's with the entries this close stamps
+/// written, and the bytes held are the previous cycle's cell bytes plus the
+/// stamped entries' and every immutable object's: the leaf set as of the
+/// latest ByteCommit is read whole from the store only when this process
+/// does not hold it as of that very ByteCommit (see [`CommittedCells`]).
 pub async fn close_cycle(
     pool: &Pool,
-    closing: &tokio::sync::Mutex<()>,
+    committed: &CommittedCells,
     member_id: &[u8],
 ) -> Result<Option<dsm::storage_cell::ByteCommit>> {
     use prost::Message;
     if member_id.is_empty() || member_id.len() > dsm::storage_cell::MAX_MEMBER_ID_LEN {
         anyhow::bail!("member id cannot name a ByteCommit");
     }
-    let _one_closer = closing.lock().await;
+    let mut kept = committed.closer.lock().await;
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
     // One closer at a time; puts are not blocked.
@@ -916,29 +927,42 @@ pub async fn close_cycle(
         )
         .await?
         .get(0);
+    // The leaf set as of `last`: the one this process holds when it is as of
+    // that very ByteCommit, else read whole from the store. Taken out, so a
+    // close that fails leaves none held and the next one reads the store.
+    let base = match kept.take() {
+        Some(held) if held.commit == last => held,
+        _ => read_committed_leaves(&tx, last.clone()).await?,
+    };
     if !pending {
         tx.commit().await?;
+        if let Some(c) = &last {
+            committed.keep(c.cycle_index, c.digest(), base.tree.clone());
+        }
+        *kept = Some(base);
         return Ok(last);
     }
     let cycle = last.as_ref().map_or(1, |c| c.cycle_index + 1);
     let cycle_i64 = i64::try_from(cycle)?;
-    tx.execute(
-        "UPDATE cells SET committed_cycle = $1 WHERE committed_cycle IS NULL",
-        &[&cycle_i64],
-    )
-    .await?;
-    let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
-    // The tree is built over every cell the node holds: CPU work, kept off
-    // the threads that serve requests.
-    let smt_root = tokio::task::spawn_blocking(move || {
-        *dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)))
-            .root()
-    })
-    .await?;
-    let bytes_used: i64 = tx
+    // Exactly the entries that gain a cycle at or below this one: under the
+    // close lock nothing else stamps an entry, and a stamp is never changed.
+    let stamped = tx
+        .query(
+            "UPDATE cells SET committed_cycle = $1 WHERE committed_cycle IS NULL
+             RETURNING namespace, cell_key, arrival_index, running_hash,
+                       LENGTH(value)::BIGINT",
+            &[&cycle_i64],
+        )
+        .await?
+        .iter()
+        .map(|r| Ok((row_to_leaf(r)?, u64::try_from(r.get::<_, i64>(4))?)))
+        .collect::<Result<Vec<_>>>()?;
+    // Writing the changed leaves is CPU work, kept off the threads that
+    // serve requests.
+    let mut next = tokio::task::spawn_blocking(move || base.advance(&stamped)).await??;
+    let immutable_bytes: i64 = tx
         .query_one(
-            "SELECT COALESCE((SELECT SUM(LENGTH(value)) FROM cells), 0)::BIGINT
-                  + COALESCE((SELECT SUM(LENGTH(payload)) FROM immutable_objects), 0)::BIGINT",
+            "SELECT COALESCE(SUM(LENGTH(payload)), 0)::BIGINT FROM immutable_objects",
             &[],
         )
         .await?
@@ -946,8 +970,11 @@ pub async fn close_cycle(
     let commit = dsm::storage_cell::ByteCommit {
         member_id: member_id.to_vec(),
         cycle_index: cycle,
-        smt_root,
-        bytes_used: u64::try_from(bytes_used.max(0))?,
+        smt_root: *next.tree.root(),
+        bytes_used: next
+            .cell_bytes
+            .checked_add(u64::try_from(immutable_bytes)?)
+            .ok_or_else(|| anyhow!("the bytes this node holds overflow a u64"))?,
         parent_digest: last.as_ref().map_or([0u8; 32], |c| c.digest()),
     };
     let digest = commit.digest();
@@ -961,7 +988,36 @@ pub async fn close_cycle(
     )
     .await?;
     tx.commit().await?;
+    committed.keep(cycle, digest, next.tree.clone());
+    next.commit = Some(commit.clone());
+    *kept = Some(next);
     Ok(Some(commit))
+}
+
+/// The leaf set committed as of `last`, read whole from the store: every
+/// cell's latest entry stamped at or before its cycle, the tree over them,
+/// and the bytes of every entry stamped by then.
+async fn read_committed_leaves(
+    tx: &deadpool_postgres::Transaction<'_>,
+    last: Option<dsm::storage_cell::ByteCommit>,
+) -> Result<CommittedLeaves> {
+    let through = i64::try_from(last.as_ref().map_or(0, |c| c.cycle_index))?;
+    let leaves = cell_leaves_tx(tx, through).await?;
+    let cell_bytes: i64 = tx
+        .query_one(
+            "SELECT COALESCE(SUM(LENGTH(value)), 0)::BIGINT FROM cells
+             WHERE committed_cycle <= $1",
+            &[&through],
+        )
+        .await?
+        .get(0);
+    let cell_bytes = u64::try_from(cell_bytes)?;
+    // The tree is built over every cell the node holds: CPU work, kept off
+    // the threads that serve requests.
+    Ok(
+        tokio::task::spawn_blocking(move || CommittedLeaves::read(last, &leaves, cell_bytes))
+            .await?,
+    )
 }
 
 /// The advisory lock closers of one database take, so two processes on the
@@ -974,8 +1030,6 @@ fn decode_commit(bytes: &[u8]) -> Result<dsm::storage_cell::ByteCommit> {
     dsm::storage_cell::ByteCommit::from_proto(&p)
         .ok_or_else(|| anyhow::anyhow!("stored ByteCommit is malformed"))
 }
-
-type CellLeaf = (Vec<u8>, [u8; 32], u64, [u8; 32]);
 
 /// Every cell's latest entry committed at or before `cycle`.
 async fn cell_leaves_tx(
@@ -1041,8 +1095,14 @@ pub async fn get_own_bytecommit(
 /// The proof that this node's ByteCommit for `cycle` commits `(namespace,
 /// key)`'s latest entry as of that cycle. `None` if the cycle does not exist
 /// or the cell had no entry committed by then.
+///
+/// A cycle's leaf set never changes once it closes, so its tree is built
+/// once: a tree `committed` keeps for the cycle's ByteCommit answers, and a
+/// cycle whose tree is not kept (an old one, or any after a restart) is
+/// built from the store and kept.
 pub async fn cell_commit_proof(
     pool: &Pool,
+    committed: &CommittedCells,
     namespace: &[u8],
     key: &[u8; 32],
     cycle: u64,
@@ -1050,15 +1110,43 @@ pub async fn cell_commit_proof(
     let mut client = pool.get().await?;
     let tx = client.build_transaction().read_only(true).start().await?;
     let cycle_i64 = i64::try_from(cycle)?;
-    let exists: bool = tx
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM own_bytecommits WHERE cycle_index = $1)",
+    let Some(digest) = tx
+        .query_opt(
+            "SELECT digest FROM own_bytecommits WHERE cycle_index = $1",
             &[&cycle_i64],
         )
         .await?
-        .get(0);
-    if !exists {
+    else {
         return Ok(None);
+    };
+    let digest: [u8; 32] = digest
+        .get::<_, Vec<u8>>(0)
+        .as_slice()
+        .try_into()
+        .map_err(|e| anyhow!("stored ByteCommit digest is not 32 bytes: {e}"))?;
+    if let Some(tree) = committed.tree_at(cycle, &digest) {
+        // The cell's latest entry as of the cycle: the row the whole read
+        // below finds for it.
+        let latest = tx
+            .query_opt(
+                "SELECT namespace, cell_key, arrival_index, running_hash FROM cells
+                 WHERE namespace = $1 AND cell_key = $2 AND committed_cycle <= $3
+                 ORDER BY arrival_index DESC LIMIT 1",
+                &[&namespace, &key.as_slice(), &cycle_i64],
+            )
+            .await?
+            .map(|r| row_to_leaf(&r))
+            .transpose()?;
+        tx.commit().await?;
+        return Ok(latest.and_then(|(_, _, index, running_hash)| {
+            dsm::storage_cell::CellCommitProof::from_tree(
+                &tree,
+                namespace,
+                key,
+                index,
+                running_hash,
+            )
+        }));
     }
     let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
     tx.commit().await?;
@@ -1072,13 +1160,22 @@ pub async fn cell_commit_proof(
     // The tree is built over every cell the node holds: CPU work, kept off
     // the threads that serve requests.
     let (namespace, key) = (namespace.to_vec(), *key);
-    Ok(tokio::task::spawn_blocking(move || {
+    let (tree, proof) = tokio::task::spawn_blocking(move || {
         let tree = dsm::storage_cell::cell_tree(
             leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)),
         );
-        dsm::storage_cell::CellCommitProof::from_tree(&tree, &namespace, &key, index, running_hash)
+        let proof = dsm::storage_cell::CellCommitProof::from_tree(
+            &tree,
+            &namespace,
+            &key,
+            index,
+            running_hash,
+        );
+        (tree, proof)
     })
-    .await?)
+    .await?;
+    committed.keep(cycle, digest, Arc::new(tree));
+    Ok(proof)
 }
 
 /// Keep a ByteCommit this node fetched from `member_id` itself. Idempotent

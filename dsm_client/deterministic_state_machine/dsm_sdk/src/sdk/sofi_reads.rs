@@ -8,14 +8,17 @@
 //! runs on the SDK's multi-thread runtime from the verifier's synchronous
 //! call (`block_in_place`), which is the shape the peer walk already has.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::future::Future;
 
 use dsm::ccb::StorageSetMembers;
-use dsm::common::domain_tags::{TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR};
+use dsm::common::domain_tags::{
+    TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR,
+    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
+};
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::crypto::domain::TaggedHashDomain;
-use dsm::economic::peer_lineage::{peer_claim_at, peer_root_at, PeerEvidenceFetcher};
+use dsm::economic::peer_lineage::PeerEvidenceFetcher;
 use dsm::economic::provenance::{PeerLineageFailure, ReserveReleaseWin, ValidatedPeerTransition};
 use dsm::economic::register::{read_root_cell, RootCell};
 use dsm::route_chain::{CellEvidence, CellReading, ChainState, CompletionProof, RoutedCell};
@@ -23,23 +26,25 @@ use dsm::sofi::derive;
 use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
-    AcceptedGeneses, LocalLeaves, PeerPositionResolver, ReadFailure, RecordedGenerationRow,
-    SofiReads, VaultLeaves, Verifier, VerifierFailure,
+    AcceptedGeneses, JudgedKey, KeptJudgement, LocalLeaves, PeerPositionResolver, ReadFailure,
+    RecordedGenerationRow, SofiReads, Verifier, VerifierFailure,
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
 use dsm::sofi::wire::{
-    ParentClaimRef, TraderFulfillmentBody, TraderPrecommitBody, VaultGenesisPreimage,
+    ParentClaimRef, SettlementPreimage, TraderFulfillmentBody, TraderPrecommitBody,
+    VaultGenesisPreimage,
 };
 use dsm::types::error::DsmError;
 
 use crate::sdk::economic_admission_flow::committed_network_id;
 use crate::sdk::economic_registers::{
-    anchored_policy_bytes, resolve_peer, LiveRegisterResolver, StoredFrontiers,
+    anchored_policy_bytes, resolve_peer, resolve_peer_claim, resolve_peer_root,
+    LiveRegisterResolver,
 };
 use crate::sdk::route_seats::{keep_completion, read_cell, NodeSeats};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes, LOCATOR_BUDGET};
-use crate::sdk::storage_io::{read_stored_bytes, resolve_locator_all};
+use crate::sdk::storage_io::{fetch_immutable, read_stored_bytes_kept, resolve_locator_all};
 use crate::sdk::storage_set::{as_ccb_members, StorageSet};
 use crate::storage::client_db::{economic_lineage, sofi_vault_head};
 
@@ -94,15 +99,21 @@ pub struct LiveSofiReads<'a> {
     /// This device's `(genesis, device_id)` when it verifies as a trader:
     /// the one identity its own admitted store answers for.
     own: Option<(D32, D32)>,
-    /// The roots frontier-relative verification established for other
-    /// traders' positions, by `(genesis, device_id, position)`, kept for this
-    /// context's life: they are verified, so a walk that meets one trader's
-    /// exercises again does not walk that lineage again.
-    roots: std::sync::Mutex<BTreeMap<(D32, D32, u64), (ValidatedEconomicRoot, ParentClaimRef)>>,
     /// What this context read and keeps for its life — one resolution, one
     /// quote, one walk — so the verifier's passes over the same cells and
     /// objects read each once ([`ReadOnce`]).
-    once: ReadOnce,
+    once: std::sync::Arc<ReadOnce>,
+}
+
+/// What the contexts of one operation keep between them: the readings
+/// [`ReadOnce`] keeps (the roots verified for other traders are kept by the
+/// process). Each is final, and holds whatever position this device stands on, so a
+/// context built after the device's own position moved (a setup admitted
+/// mid-operation) stands on them too. One operation's contexts share one; a
+/// new operation starts from none.
+#[derive(Clone, Default)]
+pub struct KeptReadings {
+    once: std::sync::Arc<ReadOnce>,
 }
 
 /// The readings one context keeps: only those nothing later can change. A
@@ -121,6 +132,7 @@ struct ReadOnce {
     fetched: std::sync::Mutex<BTreeMap<(Vec<u8>, D32), Vec<u8>>>,
     precommits: std::sync::Mutex<BTreeMap<D32, Resolved<Signed<TraderPrecommitBody>>>>,
     fulfillments: std::sync::Mutex<BTreeMap<D32, Resolved<Signed<TraderFulfillmentBody>>>>,
+    preimages: std::sync::Mutex<BTreeMap<D32, Resolved<SettlementPreimage>>>,
     setups: std::sync::Mutex<BTreeMap<D32, Resolved<Vec<u8>>>>,
     geneses: std::sync::Mutex<BTreeMap<D32, Discovered<(VaultGenesisPreimage, Vec<u8>)>>>,
 }
@@ -176,15 +188,26 @@ fn discovered_all<T>(discovered: &Discovered<T>) -> bool {
     matches!(discovered, Discovered::Complete(..))
 }
 
-/// The peer walks' reads, through the context's: every step of a lineage
-/// fetches the objects its steps share again, and a resolution that walks a
-/// lineage twice reads its register cells twice. Each is read once.
+/// The peer step checks' reads, through the context's: a resolution that
+/// checks the same trader's step twice reads its register cell and objects
+/// once.
 struct OnceFetcher<'r, 'a> {
     live: LiveRegisterResolver<'a>,
     once: &'r ReadOnce,
 }
 
 impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
+    /// Never kept: what members hold under a key is where to look, and a
+    /// later look may find a claim that was not there yet.
+    fn register_key_values(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+        self.live.register_key_values(genesis, device_id, position)
+    }
+
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
         // Kept once Core reads a final claim at the cell from them.
         read_once(
@@ -236,17 +259,39 @@ impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
     fn anchored_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, PeerLineageFailure> {
         self.live.anchored_policy_bytes(policy_commit)
     }
+
+    fn held_ek_step(
+        &self,
+        signer: &D32,
+        addr: &D32,
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.live.held_ek_step(signer, addr)
+    }
 }
 
 impl<'a> LiveSofiReads<'a> {
+    /// This device's `(genesis, device_id)` when it verifies as a trader.
+    pub(crate) fn own(&self) -> Option<(D32, D32)> {
+        self.own
+    }
+
     pub fn new(set: &'a StorageSet, own: Option<(D32, D32)>) -> Result<Self, DsmError> {
+        Self::keeping(set, own, &KeptReadings::default())
+    }
+
+    /// [`Self::new`], keeping its readings in `kept`, which the other
+    /// contexts of the same operation share.
+    fn keeping(
+        set: &'a StorageSet,
+        own: Option<(D32, D32)>,
+        kept: &KeptReadings,
+    ) -> Result<Self, DsmError> {
         Ok(Self {
             set,
             runtime: tokio::runtime::Handle::current(),
             network: committed_network_id()?,
             own,
-            roots: std::sync::Mutex::new(BTreeMap::new()),
-            once: ReadOnce::default(),
+            once: kept.once.clone(),
         })
     }
 
@@ -280,6 +325,7 @@ impl<'a> LiveSofiReads<'a> {
             members: &members,
             set_id: self.set.id(),
             network_id: &self.network,
+            programs: crate::sdk::outcome_programs::registry(),
         };
         resolve_peer(
             &self.peer_resolver(),
@@ -345,6 +391,23 @@ impl SofiReads for LiveSofiReads<'_> {
         )
     }
 
+    fn preimage(
+        &self,
+        external_commitment: &D32,
+    ) -> Result<Resolved<SettlementPreimage>, ReadFailure> {
+        read_once(
+            &self.once.preimages,
+            *external_commitment,
+            || {
+                self.read(
+                    "preimage",
+                    crate::sdk::sofi_publish::fetch_preimage(self.set, external_commitment),
+                )
+            },
+            |read| matches!(read, Resolved::Kept(..)),
+        )
+    }
+
     fn fulfillment(
         &self,
         id: &D32,
@@ -370,9 +433,49 @@ impl SofiReads for LiveSofiReads<'_> {
         read_once(
             &self.once.objects,
             *addr,
-            || self.read("stored bytes", read_stored_bytes(self.set, addr)),
+            || self.read("stored bytes", read_stored_bytes_kept(self.set, addr)),
             Option::is_some,
         )
+    }
+
+    fn immutable_object(
+        &self,
+        namespace: TaggedHashDomain<'static>,
+        inner: &D32,
+    ) -> Result<Option<Vec<u8>>, ReadFailure> {
+        // The process keeps an object once a member served bytes that
+        // re-hash to its address (`fetch_immutable`).
+        self.read(
+            "immutable object",
+            fetch_immutable(self.set, namespace, inner),
+        )
+    }
+
+    fn history_leaf_candidates(
+        &self,
+        vault_id: &D32,
+        root: &D32,
+    ) -> Result<Vec<Vec<u8>>, ReadFailure> {
+        let found = self.read(
+            "history leaf candidates",
+            resolve_locator_all(
+                self.set,
+                TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR.source_bytes(),
+                &dsm::sofi::history::history_locator(vault_id, root),
+                LOCATOR_BUDGET,
+                |bytes| {
+                    dsm::sofi::history::decode_leaf(bytes).map(|(named, .., leaf_root)| {
+                        (
+                            dsm::sofi::history::history_locator(&named, &leaf_root),
+                            bytes.to_vec(),
+                        )
+                    })
+                },
+            ),
+        )?;
+        Ok(match found {
+            Discovered::Complete(leaves) | Discovered::Partial(leaves) => leaves,
+        })
     }
 
     fn token_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, ReadFailure> {
@@ -457,15 +560,33 @@ impl SofiReads for LiveSofiReads<'_> {
         self.peer_walk(genesis, device_id, position)
     }
 
-    fn vault_leaves_at(
+    fn vault_state_at(
         &self,
         vault_id: &D32,
         root: &D32,
-        keys: &BTreeSet<D32>,
-    ) -> Result<Option<VaultLeaves>, ReadFailure> {
-        Ok(sofi_vault_head::leaves_at(vault_id, root, keys)
-            .map_err(|e| ReadFailure(format!("vault head: {e}")))?
-            .map(|(.., leaves)| leaves))
+    ) -> Result<Option<dsm::sofi::wire::VaultStateLeaf>, ReadFailure> {
+        sofi_vault_head::state_at(vault_id, root)
+            .map_err(|e| ReadFailure(format!("vault head: {e}")))
+    }
+
+    fn recorded_baseline(
+        &self,
+        genesis: &dsm::sofi::lineage::AcceptedVaultGenesis,
+    ) -> Result<Option<dsm::sofi::frontier::VerifiedFrontier>, ReadFailure> {
+        let Some((generation, bundle)) = sofi_vault_head::baseline(genesis.vault_id())
+            .map_err(|e| ReadFailure(format!("vault baseline: {e}")))?
+        else {
+            return Ok(None);
+        };
+        // The record is this device's own; it stands only as Core
+        // authenticates it again now.
+        match crate::sdk::vault_baseline::authenticate(&bundle, genesis) {
+            Ok(verified) if verified.frontier().generation == generation => Ok(Some(verified)),
+            Ok(..) => Err(ReadFailure(
+                "the recorded baseline is not at the generation it was recorded at".into(),
+            )),
+            Err(e) => Err(ReadFailure(format!("the recorded baseline: {e}"))),
+        }
     }
 
     fn trader_root_at(
@@ -474,15 +595,8 @@ impl SofiReads for LiveSofiReads<'_> {
         device_id: &D32,
         position: u64,
     ) -> Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure> {
-        let key = (*genesis, *device_id, position);
-        let cache = || {
-            self.roots
-                .lock()
-                .map_err(|e| PeerLineageFailure::Incomplete(format!("the root cache: {e}")))
-        };
-        if let Some(known) = cache()?.get(&key) {
-            return Ok(*known);
-        }
+        // Verified roots are kept by the process, not by this context: a
+        // holdings status builds a context for every poll.
         let members = as_ccb_members(self.set)
             .map_err(|e| PeerLineageFailure::Incomplete(format!("the storage set: {e}")))?;
         let conditional = PeerPositionResolver {
@@ -490,18 +604,16 @@ impl SofiReads for LiveSofiReads<'_> {
             members: &members,
             set_id: self.set.id(),
             network_id: &self.network,
+            programs: crate::sdk::outcome_programs::registry(),
         };
-        let known = peer_root_at(
+        resolve_peer_root(
             &self.peer_resolver(),
             &self.network,
             genesis,
             device_id,
             position,
-            &StoredFrontiers,
             &conditional,
-        )?;
-        cache()?.insert(key, known);
-        Ok(known)
+        )
     }
 
     fn accepted_claim_at(
@@ -515,7 +627,8 @@ impl SofiReads for LiveSofiReads<'_> {
             // verification of its lineage accepted there (SoFi Amendment
             // S15, MR-SOFI-0347) — a SoFi position's by its resolution, since
             // a setup made right after one names that claim — or the walk's
-            // failure in the class it gave it.
+            // failure in the class it gave it. The process keeps each claim a
+            // complete walk established.
             let members = as_ccb_members(self.set)
                 .map_err(|e| PeerLineageFailure::Incomplete(format!("the storage set: {e}")))?;
             let conditional = PeerPositionResolver {
@@ -523,14 +636,14 @@ impl SofiReads for LiveSofiReads<'_> {
                 members: &members,
                 set_id: self.set.id(),
                 network_id: &self.network,
+                programs: crate::sdk::outcome_programs::registry(),
             };
-            return peer_claim_at(
+            return resolve_peer_claim(
                 &self.peer_resolver(),
                 &self.network,
                 genesis,
                 device_id,
                 position,
-                &StoredFrontiers,
                 &conditional,
             );
         }
@@ -571,6 +684,57 @@ impl SofiReads for LiveSofiReads<'_> {
             .insert(cell_id(cell), evidence.clone());
         Ok(())
     }
+
+    fn kept_judgement(&self, key: &JudgedKey) -> Result<Option<KeptJudgement>, ReadFailure> {
+        Ok(judgements().get(key).cloned())
+    }
+
+    fn keep_judgement(&self, key: JudgedKey, judgement: KeptJudgement) -> Result<(), ReadFailure> {
+        let mut kept = judgements();
+        if kept.len() >= JUDGEMENTS_MAX {
+            kept.clear();
+        }
+        kept.insert(key, judgement);
+        Ok(())
+    }
+}
+
+/// The skipped keys walks judged, kept for the life of the process (see
+/// `SofiReads::keep_judgement`): a vault's head is walked by every quote,
+/// every `sofi.vaults` and every escrow status, and each re-read and
+/// re-judged the exercises its skipped keys hold, their validation evidence
+/// and the traders' lineages included. Only the walk decides what is kept.
+static JUDGEMENTS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<JudgedKey, KeptJudgement>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// More than the skipped keys a phone's vaults hold: past it the memory
+/// starts over, and the next walk judges each key again.
+const JUDGEMENTS_MAX: usize = 512;
+
+/// The kept judgements. A thread that panicked holding the lock left whole
+/// entries behind (each is inserted in one step), so the map is taken as it
+/// stands.
+fn judgements(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<JudgedKey, KeptJudgement>> {
+    match JUDGEMENTS.lock() {
+        Ok(kept) => kept,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Forget every kept judgement, where a test stands in for a fresh start
+/// (`final_reads::forget_everything`): tests reuse identities, and so
+/// vaults and exercises, over fleets that start empty.
+#[cfg(test)]
+pub(crate) fn forget_judgements() {
+    judgements().clear();
+}
+
+/// The judgements kept, for a test.
+#[cfg(test)]
+pub(crate) fn judgements_kept() -> usize {
+    judgements().len()
 }
 
 /// Everything a [`Verifier`] borrows, held together: the reads over the
@@ -610,8 +774,22 @@ impl<'a> VerifierContext<'a> {
         parent: Option<&'a AdmittedEconomicPosition>,
         accepted: &AcceptedGeneses,
     ) -> Result<Self, DsmError> {
+        Self::sharing_kept(set, own, parent, accepted, &KeptReadings::default())
+    }
+
+    /// [`Self::sharing`], keeping its readings in `kept`: every context one
+    /// operation builds over the set reads a final cell, an object or another
+    /// trader's verified root once between them, though the device's own
+    /// position moved between the contexts.
+    pub fn sharing_kept(
+        set: &'a StorageSet,
+        own: Option<(D32, D32)>,
+        parent: Option<&'a AdmittedEconomicPosition>,
+        accepted: &AcceptedGeneses,
+        kept: &KeptReadings,
+    ) -> Result<Self, DsmError> {
         Ok(Self {
-            reads: LiveSofiReads::new(set, own)?,
+            reads: LiveSofiReads::keeping(set, own, kept)?,
             members: as_ccb_members(set)?,
             set_id: set.id(),
             network: committed_network_id()?,
@@ -629,6 +807,7 @@ impl<'a> VerifierContext<'a> {
             members: &self.members,
             set_id: self.set_id,
             network_id: &self.network,
+            programs: crate::sdk::outcome_programs::registry(),
         }
     }
 
@@ -641,6 +820,7 @@ impl<'a> VerifierContext<'a> {
             self.parent,
             self.accepted.clone(),
         )
+        .with_programs(crate::sdk::outcome_programs::registry().clone())
     }
 }
 

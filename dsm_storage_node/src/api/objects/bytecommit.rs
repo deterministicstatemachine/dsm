@@ -32,7 +32,10 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use futures::StreamExt;
 use prost::Message;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::api::cells::{digest32, namespace, octets};
@@ -49,6 +52,10 @@ const ECHO_HEADER: &str = "x-dsm-node-id";
 /// far behind is 128 fetches, well inside what a client waits for one
 /// request (the SDK's member client waits 30 s).
 const MAX_SYNC_CYCLES: u64 = 128;
+/// Cycles of one member fetched at once in a sync. The fetches are reads of
+/// a set-mate's own ByteCommits; what is kept, and in what order, does not
+/// depend on how many are in flight.
+const SYNC_FETCHES_IN_FLIGHT: usize = 16;
 /// The most bytes a set-mate's answer can hold and still be a ByteCommit:
 /// the largest `ByteCommitV4` encoding, field by field (tag, length,
 /// value). An answer longer than this is not a ByteCommit, and is not read
@@ -93,7 +100,7 @@ fn commit_or_absent(commit: Option<ByteCommit>) -> Response {
 async fn close(Extension(state): Extension<Arc<AppState>>) -> Result<Response, StatusCode> {
     let commit = db::close_cycle(
         &state.db_pool,
-        &state.closing,
+        &state.committed,
         state.configured_member_id.as_bytes(),
     )
     .await
@@ -138,7 +145,7 @@ async fn proof(
     let key: [u8; 32] = digest32(&key)?
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    match db::cell_commit_proof(&state.db_pool, &namespace, &key, cycle)
+    match db::cell_commit_proof(&state.db_pool, &state.committed, &namespace, &key, cycle)
         .await
         .map_err(internal("proof"))?
     {
@@ -167,8 +174,9 @@ async fn mirror_read(
 
 /// Fetch every set-mate's new ByteCommits from the set-mate itself, at the
 /// endpoint this node's own configuration names for it. Anyone may ask;
-/// nothing the caller sends chooses a peer or supplies a byte. One sync runs
-/// at a time, and set-mates are fetched concurrently.
+/// nothing the caller sends chooses a peer or supplies a byte. Set-mates are
+/// synced concurrently, each one sync at a time, and a caller is answered by
+/// a sync of each set-mate that started after it asked ([`MirrorSyncs`]).
 ///
 /// `204 No Content` once every set-mate answered and what it holds is
 /// mirrored. `409 Conflict` when this node is in no set, so has no set-mate
@@ -183,7 +191,6 @@ async fn mirror_sync(
         log::warn!("bytecommit mirror: this node is in no storage set");
         return Err(StatusCode::CONFLICT);
     };
-    let _one_at_a_time = state.mirror_sync.lock().await;
     let own = state.configured_member_id.as_str();
     let client = &state.set_client;
     let syncs = set
@@ -192,7 +199,10 @@ async fn mirror_sync(
         .map(|(member, endpoint)| {
             let state = &state;
             async move {
-                sync_one(state, client, endpoint, member.as_bytes())
+                state
+                    .mirror_syncs
+                    .of(member)
+                    .run(|| sync_one(state, client, endpoint, member.as_bytes()))
                     .await
                     .map_err(|e| log::warn!("bytecommit mirror: {member} at {endpoint}: {e}"))
             }
@@ -262,10 +272,19 @@ async fn sync_one(
     let have = db::mirror_last_cycle(&state.db_pool, member).await?;
     let reach = have.saturating_add(MAX_SYNC_CYCLES);
     let mut added = 0u64;
-    for t in have + 1..=latest.cycle_index.saturating_sub(1).min(reach) {
-        let path = format!("/api/v2/bytecommit/cycle/{t}");
-        let commit = fetch_commit(client, endpoint, &path, member)
-            .await?
+    // Up to SYNC_FETCHES_IN_FLIGHT cycles are fetched at once, and each is
+    // checked and kept in cycle order as it comes back, exactly as one
+    // fetch after another: the first that fails ends the sync with every
+    // cycle before it kept and none after it.
+    let mut fetched =
+        futures::stream::iter(have + 1..=latest.cycle_index.saturating_sub(1).min(reach))
+            .map(|t| async move {
+                let path = format!("/api/v2/bytecommit/cycle/{t}");
+                (t, fetch_commit(client, endpoint, &path, member).await)
+            })
+            .buffered(SYNC_FETCHES_IN_FLIGHT);
+    while let Some((t, answer)) = fetched.next().await {
+        let commit = answer?
             .ok_or_else(|| anyhow::anyhow!("member has a latest ByteCommit but none at {t}"))?;
         if commit.cycle_index != t {
             anyhow::bail!(
@@ -282,4 +301,141 @@ async fn sync_one(
         added += u64::from(db::mirror_put(&state.db_pool, &latest).await?);
     }
     Ok(added)
+}
+
+/// The mirror syncs of each set-mate: one at a time per set-mate, and shared
+/// by the callers waiting for the same one.
+///
+/// Every reader asks for a sync after closing cycles, so syncs arrive in
+/// bursts, and each used to queue a whole sync of its own. A caller is still
+/// answered only by a sync that STARTED after it asked — one that started
+/// earlier may not have seen the cycle it just closed — but every caller that
+/// asked while one sync of a set-mate ran is answered by the same next sync.
+#[derive(Default)]
+pub struct MirrorSyncs {
+    members: std::sync::Mutex<HashMap<String, Arc<MemberSync>>>,
+}
+
+impl MirrorSyncs {
+    fn of(&self, member: &str) -> Arc<MemberSync> {
+        // A panic while the map was held leaves whole entries only, each a
+        // set-mate's sync state, consistent on its own.
+        let mut members = match self.members.lock() {
+            Ok(members) => members,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        members.entry(member.to_string()).or_default().clone()
+    }
+}
+
+/// One set-mate's syncs: how many callers have asked, and, held while a sync
+/// runs, how many of them the last finished sync answers and its answer.
+#[derive(Default)]
+struct MemberSync {
+    asked: AtomicU64,
+    last: tokio::sync::Mutex<Option<(u64, Result<u64, String>)>>,
+}
+
+impl MemberSync {
+    /// Answer this caller from a sync that started after it asked: the last
+    /// finished one if it started late enough, else `sync` run now, which
+    /// then answers every caller that asked before it started. A sync whose
+    /// caller went away before it finished answers nobody.
+    async fn run<F: std::future::Future<Output = anyhow::Result<u64>>>(
+        &self,
+        sync: impl FnOnce() -> F,
+    ) -> Result<u64, String> {
+        let ticket = self.asked.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut last = self.last.lock().await;
+        if let Some((answers_through, answer)) = last.as_ref() {
+            if *answers_through >= ticket {
+                return answer.clone();
+            }
+        }
+        let answers_through = self.asked.load(Ordering::SeqCst);
+        let answer = sync().await.map_err(|e| e.to_string());
+        *last = Some((answers_through, answer.clone()));
+        answer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemberSync;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    /// A sync that waits for a permit from `gate`, then answers with its own
+    /// number among `runs`.
+    fn counted(
+        runs: &Arc<AtomicU64>,
+        gate: &Arc<Semaphore>,
+    ) -> impl FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<u64>> + Send>>
+    {
+        let (runs, gate) = (runs.clone(), gate.clone());
+        move || {
+            Box::pin(async move {
+                drop(gate.acquire().await?);
+                Ok(runs.fetch_add(1, Ordering::SeqCst) + 1)
+            })
+        }
+    }
+
+    fn answered(answer: Result<Result<u64, String>, tokio::task::JoinError>) -> u64 {
+        match answer {
+            Ok(Ok(run)) => run,
+            Ok(Err(e)) => panic!("the sync failed: {e}"),
+            Err(e) => panic!("the caller's task: {e}"),
+        }
+    }
+
+    /// Callers that ask while a sync runs are all answered by one next sync,
+    /// which starts after every one of them asked; a caller that asks after
+    /// that one finished gets a sync of its own. On one thread, so the first
+    /// caller's sync has started before the others ask.
+    #[test]
+    fn callers_asking_during_a_sync_share_the_next_one() {
+        match tokio::runtime::Builder::new_current_thread().build() {
+            Ok(runtime) => runtime.block_on(callers_share_the_next_sync()),
+            Err(e) => panic!("a runtime: {e}"),
+        }
+    }
+
+    async fn callers_share_the_next_sync() {
+        let member = Arc::new(MemberSync::default());
+        let runs = Arc::new(AtomicU64::new(0));
+        let gate = Arc::new(Semaphore::new(0));
+
+        let first = {
+            let (member, sync) = (member.clone(), counted(&runs, &gate));
+            tokio::spawn(async move { member.run(sync).await })
+        };
+        let waiting: Vec<_> = (0..5)
+            .map(|_| {
+                let (member, sync) = (member.clone(), counted(&runs, &gate));
+                tokio::spawn(async move { member.run(sync).await })
+            })
+            .collect();
+        while member.asked.load(Ordering::SeqCst) < 6 {
+            tokio::task::yield_now().await;
+        }
+        gate.add_permits(16);
+
+        assert_eq!(answered(first.await), 1, "the first caller's own sync");
+        for caller in waiting {
+            assert_eq!(
+                answered(caller.await),
+                2,
+                "every caller that asked during sync 1 is answered by sync 2"
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "six callers, two syncs");
+
+        assert_eq!(
+            member.run(counted(&runs, &gate)).await,
+            Ok(3),
+            "a caller asking after the last sync finished gets a new one"
+        );
+    }
 }

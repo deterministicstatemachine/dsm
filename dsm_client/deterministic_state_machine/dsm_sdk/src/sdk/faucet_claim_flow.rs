@@ -223,7 +223,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
             ));
         }
         match read_successor(&set, &parent).await? {
-            SuccessorRead::Final { release, .. } if release.envelope_bytes == envelope => {
+            SuccessorRead::Final { release, child } if release.envelope_bytes == envelope => {
                 if !keep_release_completion(&set, &parent, &envelope).await? {
                     return Err(storage_err(
                         "reserve completion",
@@ -231,6 +231,14 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                          from the seats — retry with the same bytes",
                     ));
                 }
+                // The walk that found `parent` memoised every final release
+                // up to it; this one is final too, so the memo now reaches
+                // `child`, and the verifier asking for this generation reads
+                // it there rather than walking the reserve again.
+                crate::storage::client_db::native_reserve::record_final_release(
+                    &parent, &release, &child,
+                )
+                .map_err(|e| storage_err("reserve memo write", e))?;
                 won = Some((generation, envelope, op_digest));
                 break;
             }

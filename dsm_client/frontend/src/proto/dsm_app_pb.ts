@@ -1093,6 +1093,38 @@ proto3.util.setEnumType(ContactPairingPhase, "dsm.ContactPairingPhase", [
 ]);
 
 /**
+ * What kind of holding a balance row is (BalanceGetResponse.holding).
+ *
+ * @generated from enum dsm.BalanceHolding
+ */
+export enum BalanceHolding {
+  /**
+   * @generated from enum value: BALANCE_HOLDING_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Fungible: counted in units.
+   *
+   * @generated from enum value: BALANCE_HOLDING_CURRENCY = 1;
+   */
+  CURRENCY = 1,
+
+  /**
+   * A token whose whole supply is one: a state object, held or not.
+   *
+   * @generated from enum value: BALANCE_HOLDING_STATE_OBJECT = 2;
+   */
+  STATE_OBJECT = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(BalanceHolding)
+proto3.util.setEnumType(BalanceHolding, "dsm.BalanceHolding", [
+  { no: 0, name: "BALANCE_HOLDING_UNSPECIFIED" },
+  { no: 1, name: "BALANCE_HOLDING_CURRENCY" },
+  { no: 2, name: "BALANCE_HOLDING_STATE_OBJECT" },
+]);
+
+/**
  * @generated from enum dsm.SdkEventKind
  */
 export enum SdkEventKind {
@@ -1135,11 +1167,6 @@ export enum SdkEventKind {
    * @generated from enum value: SDK_EVENT_KIND_ENV_CONFIG_ERROR = 7;
    */
   ENV_CONFIG_ERROR = 7,
-
-  /**
-   * @generated from enum value: SDK_EVENT_KIND_BIOMETRIC_RESULT = 8;
-   */
-  BIOMETRIC_RESULT = 8,
 
   /**
    * @generated from enum value: SDK_EVENT_KIND_QR_SCAN_RESULT = 9;
@@ -1191,7 +1218,6 @@ proto3.util.setEnumType(SdkEventKind, "dsm.SdkEventKind", [
   { no: 5, name: "SDK_EVENT_KIND_WALLET_REFRESH" },
   { no: 6, name: "SDK_EVENT_KIND_IDENTITY_READY" },
   { no: 7, name: "SDK_EVENT_KIND_ENV_CONFIG_ERROR" },
-  { no: 8, name: "SDK_EVENT_KIND_BIOMETRIC_RESULT" },
   { no: 9, name: "SDK_EVENT_KIND_QR_SCAN_RESULT" },
   { no: 10, name: "SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS" },
   { no: 11, name: "SDK_EVENT_KIND_DETERMINISTIC_SAFETY" },
@@ -1248,11 +1274,6 @@ export enum NativeHostRequestKind {
   /**
    * platform_primitive.*
    *
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
-   */
-  PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102,
-
-  /**
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
    */
   PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105,
@@ -1271,7 +1292,6 @@ proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
   { no: 8, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START" },
   { no: 9, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP" },
   { no: 10, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST" },
-  { no: 102, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE" },
   { no: 105, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD" },
   { no: 106, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD" },
 ]);
@@ -1289,11 +1309,6 @@ export enum NativeHostEventKind {
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
    */
   QR_SCAN_RESULT = 1,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
-   */
-  BIOMETRIC_RESULT = 3,
 
   /**
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
@@ -1314,7 +1329,6 @@ export enum NativeHostEventKind {
 proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
   { no: 0, name: "NATIVE_HOST_EVENT_KIND_UNSPECIFIED" },
   { no: 1, name: "NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT" },
-  { no: 3, name: "NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT" },
   { no: 4, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ" },
   { no: 5, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE" },
   { no: 6, name: "NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT" },
@@ -1358,6 +1372,27 @@ export enum ConnectScopeKind {
    * @generated from enum value: CONNECT_SCOPE_KIND_HOLDINGS = 4;
    */
   HOLDINGS = 4,
+
+  /**
+   * lock stakes in matches the application referees, and collect results (DSM Amendment A12)
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_ESCROW = 5;
+   */
+  ESCROW = 5,
+
+  /**
+   * stake in matches a pinned program decides, play their moves, settle and collect (SoFi Amendment S22)
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_DUEL = 6;
+   */
+  DUEL = 6,
+
+  /**
+   * read the DSM identities of the wallet's contacts, nothing more (DSM Amendment A16)
+   *
+   * @generated from enum value: CONNECT_SCOPE_KIND_CONTACTS = 7;
+   */
+  CONTACTS = 7,
 }
 // Retrieve enum metadata with: proto3.getEnumType(ConnectScopeKind)
 proto3.util.setEnumType(ConnectScopeKind, "dsm.ConnectScopeKind", [
@@ -1366,6 +1401,9 @@ proto3.util.setEnumType(ConnectScopeKind, "dsm.ConnectScopeKind", [
   { no: 2, name: "CONNECT_SCOPE_KIND_PAY" },
   { no: 3, name: "CONNECT_SCOPE_KIND_SWAP" },
   { no: 4, name: "CONNECT_SCOPE_KIND_HOLDINGS" },
+  { no: 5, name: "CONNECT_SCOPE_KIND_ESCROW" },
+  { no: 6, name: "CONNECT_SCOPE_KIND_DUEL" },
+  { no: 7, name: "CONNECT_SCOPE_KIND_CONTACTS" },
 ]);
 
 /**
@@ -1412,6 +1450,44 @@ proto3.util.setEnumType(ConnectOutcome, "dsm.ConnectOutcome", [
   { no: 2, name: "CONNECT_OUTCOME_AWAITING_APPROVAL" },
   { no: 3, name: "CONNECT_OUTCOME_DECLINED" },
   { no: 4, name: "CONNECT_OUTCOME_FAILED" },
+]);
+
+/**
+ * @generated from enum dsm.ConnectDuelStart
+ */
+export enum ConnectDuelStart {
+  /**
+   * @generated from enum value: CONNECT_DUEL_START_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * nothing holds the start cell
+   *
+   * @generated from enum value: CONNECT_DUEL_START_OPEN = 1;
+   */
+  OPEN = 1,
+
+  /**
+   * a Start holds it: both sides readied
+   *
+   * @generated from enum value: CONNECT_DUEL_START_STARTED = 2;
+   */
+  STARTED = 2,
+
+  /**
+   * a Withdraw holds it: void, both refunded
+   *
+   * @generated from enum value: CONNECT_DUEL_START_WITHDRAWN = 3;
+   */
+  WITHDRAWN = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(ConnectDuelStart)
+proto3.util.setEnumType(ConnectDuelStart, "dsm.ConnectDuelStart", [
+  { no: 0, name: "CONNECT_DUEL_START_UNSPECIFIED" },
+  { no: 1, name: "CONNECT_DUEL_START_OPEN" },
+  { no: 2, name: "CONNECT_DUEL_START_STARTED" },
+  { no: 3, name: "CONNECT_DUEL_START_WITHDRAWN" },
 ]);
 
 /**
@@ -1497,6 +1573,48 @@ export enum ConnectFact {
    * @generated from enum value: CONNECT_FACT_HOLDINGS = 3;
    */
   HOLDINGS = 3,
+
+  /**
+   * the wallet's Active vault holds the stake under exactly the match's template, on its verdict cell
+   *
+   * @generated from enum value: CONNECT_FACT_ESCROW_LOCKED = 4;
+   */
+  ESCROW_LOCKED = 4,
+
+  /**
+   * each named vault is Retired, and the cell's final verdict (a computed match: its final outcome) pays the wallet
+   *
+   * @generated from enum value: CONNECT_FACT_ESCROW_RELEASED = 5;
+   */
+  ESCROW_RELEASED = 5,
+
+  /**
+   * the wallet's Active computed vault holds the stake under exactly the setup's terms, on its match cell
+   *
+   * @generated from enum value: CONNECT_FACT_DUEL_LOCKED = 6;
+   */
+  DUEL_LOCKED = 6,
+
+  /**
+   * a Start holds the match's start cell: both sides readied
+   *
+   * @generated from enum value: CONNECT_FACT_DUEL_STARTED = 7;
+   */
+  DUEL_STARTED = 7,
+
+  /**
+   * a Withdraw holds the match's start cell: void
+   *
+   * @generated from enum value: CONNECT_FACT_DUEL_WITHDRAWN = 8;
+   */
+  DUEL_WITHDRAWN = 8,
+
+  /**
+   * an occupant the registered program recognizes holds the match cell on `fact_detail`'s outcome
+   *
+   * @generated from enum value: CONNECT_FACT_DUEL_SETTLED = 9;
+   */
+  DUEL_SETTLED = 9,
 }
 // Retrieve enum metadata with: proto3.getEnumType(ConnectFact)
 proto3.util.setEnumType(ConnectFact, "dsm.ConnectFact", [
@@ -1504,6 +1622,12 @@ proto3.util.setEnumType(ConnectFact, "dsm.ConnectFact", [
   { no: 1, name: "CONNECT_FACT_NONE" },
   { no: 2, name: "CONNECT_FACT_PAID" },
   { no: 3, name: "CONNECT_FACT_HOLDINGS" },
+  { no: 4, name: "CONNECT_FACT_ESCROW_LOCKED" },
+  { no: 5, name: "CONNECT_FACT_ESCROW_RELEASED" },
+  { no: 6, name: "CONNECT_FACT_DUEL_LOCKED" },
+  { no: 7, name: "CONNECT_FACT_DUEL_STARTED" },
+  { no: 8, name: "CONNECT_FACT_DUEL_WITHDRAWN" },
+  { no: 9, name: "CONNECT_FACT_DUEL_SETTLED" },
 ]);
 
 /**
@@ -7436,14 +7560,15 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
   decimals = 0;
 
   /**
-   * The whole supply that will ever exist (SoFi §47, §51). User-created
+   * The whole supply that will ever exist (SoFi §47, §51), in whole token
+   * units, as the user typed it: Rust parses and scales it. User-created
    * tokens in beta release all of it to the creator at creation.
    *
-   * big-endian u128, > 0
+   * digits, > 0
    *
-   * @generated from field: bytes genesis_supply_u128 = 4;
+   * @generated from field: string genesis_supply_entered = 14;
    */
-  genesisSupplyU128 = new Uint8Array(0);
+  genesisSupplyEntered = "";
 
   /**
    * governs burns only (§54)
@@ -7494,7 +7619,7 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
     { no: 1, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 4, name: "genesis_supply_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 14, name: "genesis_supply_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 7, name: "burn_enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 8, name: "transferable", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 10, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
@@ -7625,9 +7750,12 @@ export class TokenBurnRequest extends Message<TokenBurnRequest> {
   tokenId = "";
 
   /**
-   * @generated from field: uint64 amount = 2;
+   * The amount as the user typed it, in token units ("12.50"): Rust parses it
+   * against the decimals of the token's committed policy.
+   *
+   * @generated from field: string amount_entered = 4;
    */
-  amount = protoInt64.zero;
+  amountEntered = "";
 
   /**
    * @generated from field: string message = 3;
@@ -7643,7 +7771,7 @@ export class TokenBurnRequest extends Message<TokenBurnRequest> {
   static readonly typeName = "dsm.TokenBurnRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "amount_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
@@ -7913,6 +8041,91 @@ export class TokenAdoptionQrResponse extends Message<TokenAdoptionQrResponse> {
 
   static equals(a: TokenAdoptionQrResponse | PlainMessage<TokenAdoptionQrResponse> | undefined, b: TokenAdoptionQrResponse | PlainMessage<TokenAdoptionQrResponse> | undefined): boolean {
     return proto3.util.equals(TokenAdoptionQrResponse, a, b);
+  }
+}
+
+/**
+ * token.check: a token.create request's fields checked as token.create checks
+ * them, creating nothing. One refusal for each field that fails, naming the
+ * TokenCreateRequest field ("ticker", "alias", "decimals",
+ * "genesis_supply_entered") and why, so a form shows it beside that field.
+ *
+ * @generated from message dsm.TokenFieldRefusal
+ */
+export class TokenFieldRefusal extends Message<TokenFieldRefusal> {
+  /**
+   * @generated from field: string field = 1;
+   */
+  field = "";
+
+  /**
+   * @generated from field: string reason = 2;
+   */
+  reason = "";
+
+  constructor(data?: PartialMessage<TokenFieldRefusal>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenFieldRefusal";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "field", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenFieldRefusal {
+    return new TokenFieldRefusal().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenFieldRefusal {
+    return new TokenFieldRefusal().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenFieldRefusal {
+    return new TokenFieldRefusal().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenFieldRefusal | PlainMessage<TokenFieldRefusal> | undefined, b: TokenFieldRefusal | PlainMessage<TokenFieldRefusal> | undefined): boolean {
+    return proto3.util.equals(TokenFieldRefusal, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.TokenCheckResponse
+ */
+export class TokenCheckResponse extends Message<TokenCheckResponse> {
+  /**
+   * @generated from field: repeated dsm.TokenFieldRefusal refusals = 1;
+   */
+  refusals: TokenFieldRefusal[] = [];
+
+  constructor(data?: PartialMessage<TokenCheckResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenCheckResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "refusals", kind: "message", T: TokenFieldRefusal, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenCheckResponse {
+    return new TokenCheckResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenCheckResponse {
+    return new TokenCheckResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenCheckResponse {
+    return new TokenCheckResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenCheckResponse | PlainMessage<TokenCheckResponse> | undefined, b: TokenCheckResponse | PlainMessage<TokenCheckResponse> | undefined): boolean {
+    return proto3.util.equals(TokenCheckResponse, a, b);
   }
 }
 
@@ -8854,6 +9067,65 @@ export class DsmSuccessorEvidenceV1 extends Message<DsmSuccessorEvidenceV1> {
 
   static equals(a: DsmSuccessorEvidenceV1 | PlainMessage<DsmSuccessorEvidenceV1> | undefined, b: DsmSuccessorEvidenceV1 | PlainMessage<DsmSuccessorEvidenceV1> | undefined): boolean {
     return proto3.util.equals(DsmSuccessorEvidenceV1, a, b);
+  }
+}
+
+/**
+ * An owner baseline of a vault (SoFi Amendment S24): the owner's
+ * presentation over c_n = H(vault-baseline/v1; auth_ccb), the exact
+ * OwnerBaselineAuthV1 bytes it signs, and the exact VaultFrontierV1 bytes
+ * those bind. Published under vault_baseline_locator(v, g); discovery only
+ * until Core authenticates it.
+ *
+ * @generated from message dsm.VaultBaselineV1
+ */
+export class VaultBaselineV1 extends Message<VaultBaselineV1> {
+  /**
+   * @generated from field: dsm.AnchorPresentationV3 presentation = 1;
+   */
+  presentation?: AnchorPresentationV3;
+
+  /**
+   * class 0x0073
+   *
+   * @generated from field: bytes auth_ccb = 2;
+   */
+  authCcb = new Uint8Array(0);
+
+  /**
+   * class 0x0071
+   *
+   * @generated from field: bytes frontier_ccb = 3;
+   */
+  frontierCcb = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<VaultBaselineV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VaultBaselineV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "presentation", kind: "message", T: AnchorPresentationV3 },
+    { no: 2, name: "auth_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "frontier_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultBaselineV1 {
+    return new VaultBaselineV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultBaselineV1 {
+    return new VaultBaselineV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultBaselineV1 {
+    return new VaultBaselineV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VaultBaselineV1 | PlainMessage<VaultBaselineV1> | undefined, b: VaultBaselineV1 | PlainMessage<VaultBaselineV1> | undefined): boolean {
+    return proto3.util.equals(VaultBaselineV1, a, b);
   }
 }
 
@@ -9830,6 +10102,8 @@ export class AppSessionLockStatusProto extends Message<AppSessionLockStatusProto
   locked = false;
 
   /**
+   * "none", "pin" or "combo"
+   *
    * @generated from field: string method = 3;
    */
   method = "";
@@ -9838,6 +10112,19 @@ export class AppSessionLockStatusProto extends Message<AppSessionLockStatusProto
    * @generated from field: bool lock_on_pause = 4;
    */
   lockOnPause = false;
+
+  /**
+   * The wrong PINs or patterns left before only the recovery phrase opens the
+   * lock, and whether that point is reached (or no PIN or pattern is enrolled).
+   *
+   * @generated from field: uint32 misses_left = 5;
+   */
+  missesLeft = 0;
+
+  /**
+   * @generated from field: bool phrase_required = 6;
+   */
+  phraseRequired = false;
 
   constructor(data?: PartialMessage<AppSessionLockStatusProto>) {
     super();
@@ -9851,6 +10138,8 @@ export class AppSessionLockStatusProto extends Message<AppSessionLockStatusProto
     { no: 2, name: "locked", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 3, name: "method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 4, name: "lock_on_pause", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 5, name: "misses_left", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "phrase_required", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppSessionLockStatusProto {
@@ -10246,11 +10535,10 @@ export class SessionHardwareFactsProto extends Message<SessionHardwareFactsProto
  */
 export class SessionConfigureLockRequest extends Message<SessionConfigureLockRequest> {
   /**
-   * @generated from field: bool enabled = 1;
-   */
-  enabled = false;
-
-  /**
+   * The method names whether the lock is on: "none" turns it off.
+   *
+   * "pin", "combo" or "none"
+   *
    * @generated from field: string method = 2;
    */
   method = "";
@@ -10260,6 +10548,14 @@ export class SessionConfigureLockRequest extends Message<SessionConfigureLockReq
    */
   lockOnPause = false;
 
+  /**
+   * The PIN, or the pattern's buttons joined by ",", to enroll. Rust keeps only
+   * its Argon2id hash. Empty keeps the PIN or pattern already enrolled.
+   *
+   * @generated from field: string secret = 4;
+   */
+  secret = "";
+
   constructor(data?: PartialMessage<SessionConfigureLockRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -10268,9 +10564,9 @@ export class SessionConfigureLockRequest extends Message<SessionConfigureLockReq
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.SessionConfigureLockRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 2, name: "method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "lock_on_pause", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "secret", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SessionConfigureLockRequest {
@@ -10287,6 +10583,59 @@ export class SessionConfigureLockRequest extends Message<SessionConfigureLockReq
 
   static equals(a: SessionConfigureLockRequest | PlainMessage<SessionConfigureLockRequest> | undefined, b: SessionConfigureLockRequest | PlainMessage<SessionConfigureLockRequest> | undefined): boolean {
     return proto3.util.equals(SessionConfigureLockRequest, a, b);
+  }
+}
+
+/**
+ * session.unlock: open the lock with its PIN or pattern, or, once the wrong
+ * tries are used up, with the wallet's recovery phrase. Rust decides.
+ *
+ * @generated from message dsm.SessionUnlockRequest
+ */
+export class SessionUnlockRequest extends Message<SessionUnlockRequest> {
+  /**
+   * @generated from oneof dsm.SessionUnlockRequest.key
+   */
+  key: {
+    /**
+     * @generated from field: string secret = 1;
+     */
+    value: string;
+    case: "secret";
+  } | {
+    /**
+     * @generated from field: string recovery_phrase = 2;
+     */
+    value: string;
+    case: "recoveryPhrase";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<SessionUnlockRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SessionUnlockRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "secret", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "key" },
+    { no: 2, name: "recovery_phrase", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "key" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SessionUnlockRequest {
+    return new SessionUnlockRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SessionUnlockRequest {
+    return new SessionUnlockRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SessionUnlockRequest {
+    return new SessionUnlockRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SessionUnlockRequest | PlainMessage<SessionUnlockRequest> | undefined, b: SessionUnlockRequest | PlainMessage<SessionUnlockRequest> | undefined): boolean {
+    return proto3.util.equals(SessionUnlockRequest, a, b);
   }
 }
 
@@ -17870,6 +18219,28 @@ export class Envelope extends Message<Envelope> {
     case: "escrowVaultsResponse";
   } | {
     /**
+     * Reply to `token.check`.
+     *
+     * @generated from field: dsm.TokenCheckResponse token_check_response = 134;
+     */
+    value: TokenCheckResponse;
+    case: "tokenCheckResponse";
+  } | {
+    /**
+     * Replies to `authored.publish` and `authored.read`.
+     *
+     * @generated from field: dsm.AuthoredPublishedResponse authored_published_response = 135;
+     */
+    value: AuthoredPublishedResponse;
+    case: "authoredPublishedResponse";
+  } | {
+    /**
+     * @generated from field: dsm.AuthoredObjectsResponse authored_objects_response = 136;
+     */
+    value: AuthoredObjectsResponse;
+    case: "authoredObjectsResponse";
+  } | {
+    /**
      * Reply to `token.forget`.
      *
      * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
@@ -17997,6 +18368,9 @@ export class Envelope extends Message<Envelope> {
     { no: 131, name: "escrow_signed_response", kind: "message", T: EscrowSignedResponse, oneof: "payload" },
     { no: 132, name: "escrow_verdict_response", kind: "message", T: EscrowVerdictResponse, oneof: "payload" },
     { no: 133, name: "escrow_vaults_response", kind: "message", T: EscrowVaultsResponse, oneof: "payload" },
+    { no: 134, name: "token_check_response", kind: "message", T: TokenCheckResponse, oneof: "payload" },
+    { no: 135, name: "authored_published_response", kind: "message", T: AuthoredPublishedResponse, oneof: "payload" },
+    { no: 136, name: "authored_objects_response", kind: "message", T: AuthoredObjectsResponse, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -18201,7 +18575,8 @@ export class DeviceDirectoryEntryV1 extends Message<DeviceDirectoryEntryV1> {
  */
 export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
   /**
-   * token_a < token_b, bytewise
+   * The two tokens in either order, each with its reserve below; Rust orders
+   * the pair bytewise (§28).
    *
    * @generated from field: bytes token_a_policy_commit = 1;
    */
@@ -18233,6 +18608,15 @@ export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
    */
   reserveBEntered = "";
 
+  /**
+   * A name the creating account keeps for the vault in its own store (owner
+   * bookkeeping: carried nowhere, never read for validity), returned by
+   * sofi.vaults. Empty for none. At most 128 bytes.
+   *
+   * @generated from field: string label = 8;
+   */
+  label = "";
+
   constructor(data?: PartialMessage<SofiCreateVaultRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -18246,6 +18630,7 @@ export class SofiCreateVaultRequest extends Message<SofiCreateVaultRequest> {
     { no: 5, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 6, name: "reserve_a_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 7, name: "reserve_b_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "label", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiCreateVaultRequest {
@@ -18818,6 +19203,13 @@ export class SofiOwnedVaultV1 extends Message<SofiOwnedVaultV1> {
    */
   status = SofiVaultStatus.UNSPECIFIED;
 
+  /**
+   * the creator's own name for it, empty for none
+   *
+   * @generated from field: string label = 13;
+   */
+  label = "";
+
   constructor(data?: PartialMessage<SofiOwnedVaultV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -18838,6 +19230,7 @@ export class SofiOwnedVaultV1 extends Message<SofiOwnedVaultV1> {
     { no: 10, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 11, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 12, name: "status", kind: "enum", T: proto3.getEnumType(SofiVaultStatus) },
+    { no: 13, name: "label", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SofiOwnedVaultV1 {
@@ -19324,6 +19717,139 @@ export class EscrowCreateRequest extends Message<EscrowCreateRequest> {
 }
 
 /**
+ * escrow.lock: lock a stake as escrow.create does, its outcomes named by who
+ * decides each and who each pays: this device or a contact, by device id. Rust
+ * supplies every party's genesis and signing key from what it holds, and puts
+ * the outcomes and each signer set in their one canonical order: the order the
+ * user listed them in carries no meaning. A party that is neither this device
+ * nor a contact is named by its keys through escrow.create.
+ *
+ * @generated from message dsm.EscrowLockOutcomeV1
+ */
+export class EscrowLockOutcomeV1 extends Message<EscrowLockOutcomeV1> {
+  /**
+   * 1..64 bytes
+   *
+   * @generated from field: bytes outcome = 1;
+   */
+  outcome = new Uint8Array(0);
+
+  /**
+   * 1..4 device ids, 32 bytes each
+   *
+   * @generated from field: repeated bytes decided_by = 2;
+   */
+  decidedBy: Uint8Array[] = [];
+
+  /**
+   * a device id
+   *
+   * @generated from field: bytes pays = 3;
+   */
+  pays = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowLockOutcomeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowLockOutcomeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "outcome", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "decided_by", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 3, name: "pays", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowLockOutcomeV1 {
+    return new EscrowLockOutcomeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowLockOutcomeV1 {
+    return new EscrowLockOutcomeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowLockOutcomeV1 {
+    return new EscrowLockOutcomeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowLockOutcomeV1 | PlainMessage<EscrowLockOutcomeV1> | undefined, b: EscrowLockOutcomeV1 | PlainMessage<EscrowLockOutcomeV1> | undefined): boolean {
+    return proto3.util.equals(EscrowLockOutcomeV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EscrowLockRequest
+ */
+export class EscrowLockRequest extends Message<EscrowLockRequest> {
+  /**
+   * X, the bytes the parties agreed on
+   *
+   * @generated from field: bytes external = 1;
+   */
+  external = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_policy_commit = 2;
+   */
+  tokenPolicyCommit = new Uint8Array(0);
+
+  /**
+   * token units, > 0
+   *
+   * @generated from field: string amount_entered = 3;
+   */
+  amountEntered = "";
+
+  /**
+   * 1..16, any order
+   *
+   * @generated from field: repeated dsm.EscrowLockOutcomeV1 outcomes = 4;
+   */
+  outcomes: EscrowLockOutcomeV1[] = [];
+
+  /**
+   * empty, or 32 bytes
+   *
+   * @generated from field: bytes counterpart_vault_id = 5;
+   */
+  counterpartVaultId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EscrowLockRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowLockRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "external", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount_entered", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "outcomes", kind: "message", T: EscrowLockOutcomeV1, repeated: true },
+    { no: 5, name: "counterpart_vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowLockRequest {
+    return new EscrowLockRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowLockRequest {
+    return new EscrowLockRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowLockRequest {
+    return new EscrowLockRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowLockRequest | PlainMessage<EscrowLockRequest> | undefined, b: EscrowLockRequest | PlainMessage<EscrowLockRequest> | undefined): boolean {
+    return proto3.util.equals(EscrowLockRequest, a, b);
+  }
+}
+
+/**
+ * escrow.create and escrow.lock both answer this.
+ *
  * @generated from message dsm.EscrowCreatedResponse
  */
 export class EscrowCreatedResponse extends Message<EscrowCreatedResponse> {
@@ -19687,6 +20213,80 @@ export class EscrowVaultsRequest extends Message<EscrowVaultsRequest> {
 }
 
 /**
+ * One outcome of an escrow vault's terms, in table order, and what it means
+ * for this device.
+ *
+ * @generated from message dsm.EscrowVaultOutcomeV1
+ */
+export class EscrowVaultOutcomeV1 extends Message<EscrowVaultOutcomeV1> {
+  /**
+   * @generated from field: bytes outcome = 1;
+   */
+  outcome = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.EscrowSignerV1 signers = 2;
+   */
+  signers: EscrowSignerV1[] = [];
+
+  /**
+   * @generated from field: bytes recipient_genesis = 3;
+   */
+  recipientGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_device_id = 4;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
+  /**
+   * this device's key is one of its signers
+   *
+   * @generated from field: bool decided_by_this_device = 5;
+   */
+  decidedByThisDevice = false;
+
+  /**
+   * its recipient is this device
+   *
+   * @generated from field: bool pays_this_device = 6;
+   */
+  paysThisDevice = false;
+
+  constructor(data?: PartialMessage<EscrowVaultOutcomeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EscrowVaultOutcomeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "outcome", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signers", kind: "message", T: EscrowSignerV1, repeated: true },
+    { no: 3, name: "recipient_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "decided_by_this_device", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 6, name: "pays_this_device", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVaultOutcomeV1 {
+    return new EscrowVaultOutcomeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EscrowVaultOutcomeV1 {
+    return new EscrowVaultOutcomeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EscrowVaultOutcomeV1 {
+    return new EscrowVaultOutcomeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EscrowVaultOutcomeV1 | PlainMessage<EscrowVaultOutcomeV1> | undefined, b: EscrowVaultOutcomeV1 | PlainMessage<EscrowVaultOutcomeV1> | undefined): boolean {
+    return proto3.util.equals(EscrowVaultOutcomeV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.EscrowVaultV1
  */
 export class EscrowVaultV1 extends Message<EscrowVaultV1> {
@@ -19749,6 +20349,27 @@ export class EscrowVaultV1 extends Message<EscrowVaultV1> {
    */
   status = SofiVaultStatus.UNSPECIFIED;
 
+  /**
+   * the terms' outcomes, in table order
+   *
+   * @generated from field: repeated dsm.EscrowVaultOutcomeV1 outcomes = 12;
+   */
+  outcomes: EscrowVaultOutcomeV1[] = [];
+
+  /**
+   * a computed vault (S22): the program P its outcome is computed by; empty for a signed vault
+   *
+   * @generated from field: bytes program = 13;
+   */
+  program = new Uint8Array(0);
+
+  /**
+   * P's name and rules version when this wallet registered it, as Rust renders it
+   *
+   * @generated from field: string program_name = 14;
+   */
+  programName = "";
+
   constructor(data?: PartialMessage<EscrowVaultV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -19768,6 +20389,9 @@ export class EscrowVaultV1 extends Message<EscrowVaultV1> {
     { no: 9, name: "amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 10, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 11, name: "status", kind: "enum", T: proto3.getEnumType(SofiVaultStatus) },
+    { no: 12, name: "outcomes", kind: "message", T: EscrowVaultOutcomeV1, repeated: true },
+    { no: 13, name: "program", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 14, name: "program_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EscrowVaultV1 {
@@ -22774,6 +23398,16 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
    */
   offlineAllocation?: OfflineAllocationView;
 
+  /**
+   * What kind of holding the token is, decided by Rust from its committed
+   * supply: a token that exists exactly once (a creature, an item) is a state
+   * object, anything else a currency. The wallet lists the two apart; a screen
+   * that decided it from the amount or the ticker would carry its own rule.
+   *
+   * @generated from field: dsm.BalanceHolding holding = 16;
+   */
+  holding = BalanceHolding.UNSPECIFIED;
+
   constructor(data?: PartialMessage<BalanceGetResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22797,6 +23431,7 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
     { no: 13, name: "genesis_supply_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "permissions", kind: "message", T: TokenPolicyPermissions },
     { no: 15, name: "offline_allocation", kind: "message", T: OfflineAllocationView },
+    { no: 16, name: "holding", kind: "enum", T: proto3.getEnumType(BalanceHolding) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceGetResponse {
@@ -26393,104 +27028,6 @@ export class HostPermissionsResult extends Message<HostPermissionsResult> {
 }
 
 /**
- * @generated from message dsm.BiometricAuthorizePayload
- */
-export class BiometricAuthorizePayload extends Message<BiometricAuthorizePayload> {
-  /**
-   * @generated from field: string prompt_title = 1;
-   */
-  promptTitle = "";
-
-  /**
-   * @generated from field: string prompt_subtitle = 2;
-   */
-  promptSubtitle = "";
-
-  /**
-   * @generated from field: string negative_text = 3;
-   */
-  negativeText = "";
-
-  constructor(data?: PartialMessage<BiometricAuthorizePayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BiometricAuthorizePayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "prompt_title", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "prompt_subtitle", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "negative_text", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BiometricAuthorizePayload {
-    return new BiometricAuthorizePayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BiometricAuthorizePayload {
-    return new BiometricAuthorizePayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BiometricAuthorizePayload {
-    return new BiometricAuthorizePayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BiometricAuthorizePayload | PlainMessage<BiometricAuthorizePayload> | undefined, b: BiometricAuthorizePayload | PlainMessage<BiometricAuthorizePayload> | undefined): boolean {
-    return proto3.util.equals(BiometricAuthorizePayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.BiometricAuthorizeResult
- */
-export class BiometricAuthorizeResult extends Message<BiometricAuthorizeResult> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: uint32 error_code = 2;
-   */
-  errorCode = 0;
-
-  /**
-   * @generated from field: string error_message = 3;
-   */
-  errorMessage = "";
-
-  constructor(data?: PartialMessage<BiometricAuthorizeResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BiometricAuthorizeResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "error_code", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 3, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BiometricAuthorizeResult {
-    return new BiometricAuthorizeResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BiometricAuthorizeResult {
-    return new BiometricAuthorizeResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BiometricAuthorizeResult {
-    return new BiometricAuthorizeResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BiometricAuthorizeResult | PlainMessage<BiometricAuthorizeResult> | undefined, b: BiometricAuthorizeResult | PlainMessage<BiometricAuthorizeResult> | undefined): boolean {
-    return proto3.util.equals(BiometricAuthorizeResult, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.NfcTagReadPayload
  */
 export class NfcTagReadPayload extends Message<NfcTagReadPayload> {
@@ -28020,11 +28557,18 @@ export class ConnectScopeV1 extends Message<ConnectScopeV1> {
   policyCommits: Uint8Array[] = [];
 
   /**
-   * PAY and SWAP: the tokens it may spend and how much.
+   * PAY, SWAP, ESCROW and DUEL: the tokens it may spend (ESCROW, DUEL: lock) and how much.
    *
    * @generated from field: repeated dsm.ConnectCapV1 caps = 3;
    */
   caps: ConnectCapV1[] = [];
+
+  /**
+   * DUEL: the outcome programs, by the hash P each is pinned by, whose matches it may stake in.
+   *
+   * @generated from field: repeated bytes programs = 4;
+   */
+  programs: Uint8Array[] = [];
 
   constructor(data?: PartialMessage<ConnectScopeV1>) {
     super();
@@ -28037,6 +28581,7 @@ export class ConnectScopeV1 extends Message<ConnectScopeV1> {
     { no: 1, name: "kind", kind: "enum", T: proto3.getEnumType(ConnectScopeKind) },
     { no: 2, name: "policy_commits", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 3, name: "caps", kind: "message", T: ConnectCapV1, repeated: true },
+    { no: 4, name: "programs", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectScopeV1 {
@@ -28371,6 +28916,63 @@ export class ConnectPayV1 extends Message<ConnectPayV1> {
 }
 
 /**
+ * A vault this account owns, at the generation of a baseline it published
+ * (SoFi Amendment S24), with the session wallet's witness under that
+ * baseline's root: the vault's state leaf and the wallet's relationship proof.
+ * It carries no authority; the wallet authenticates the baseline it reads
+ * under vault_baseline_locator(v, g) and checks the witness against its root.
+ *
+ * @generated from message dsm.ConnectVaultWitnessV1
+ */
+export class ConnectVaultWitnessV1 extends Message<ConnectVaultWitnessV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 generation = 2;
+   */
+  generation = protoInt64.zero;
+
+  /**
+   * class 0x0072
+   *
+   * @generated from field: bytes witness_ccb = 3;
+   */
+  witnessCcb = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectVaultWitnessV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectVaultWitnessV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "witness_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectVaultWitnessV1 {
+    return new ConnectVaultWitnessV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectVaultWitnessV1 {
+    return new ConnectVaultWitnessV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectVaultWitnessV1 {
+    return new ConnectVaultWitnessV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectVaultWitnessV1 | PlainMessage<ConnectVaultWitnessV1> | undefined, b: ConnectVaultWitnessV1 | PlainMessage<ConnectVaultWitnessV1> | undefined): boolean {
+    return proto3.util.equals(ConnectVaultWitnessV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.ConnectQuoteV1
  */
 export class ConnectQuoteV1 extends Message<ConnectQuoteV1> {
@@ -28391,6 +28993,11 @@ export class ConnectQuoteV1 extends Message<ConnectQuoteV1> {
    */
   amountIn = protoInt64.zero;
 
+  /**
+   * @generated from field: repeated dsm.ConnectVaultWitnessV1 vault_witnesses = 4;
+   */
+  vaultWitnesses: ConnectVaultWitnessV1[] = [];
+
   constructor(data?: PartialMessage<ConnectQuoteV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -28402,6 +29009,7 @@ export class ConnectQuoteV1 extends Message<ConnectQuoteV1> {
     { no: 1, name: "token_in", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_out", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "vault_witnesses", kind: "message", T: ConnectVaultWitnessV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectQuoteV1 {
@@ -28449,6 +29057,11 @@ export class ConnectSwapV1 extends Message<ConnectSwapV1> {
    */
   minAmountOut = protoInt64.zero;
 
+  /**
+   * @generated from field: repeated dsm.ConnectVaultWitnessV1 vault_witnesses = 5;
+   */
+  vaultWitnesses: ConnectVaultWitnessV1[] = [];
+
   constructor(data?: PartialMessage<ConnectSwapV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -28461,6 +29074,7 @@ export class ConnectSwapV1 extends Message<ConnectSwapV1> {
     { no: 2, name: "token_out", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "amount_in", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 4, name: "min_amount_out", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "vault_witnesses", kind: "message", T: ConnectVaultWitnessV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSwapV1 {
@@ -28518,6 +29132,1041 @@ export class ConnectHoldingsV1 extends Message<ConnectHoldingsV1> {
 }
 
 /**
+ * Which of the wallet's contacts are who (DSM Amendment A16): asks for their
+ * DSM identities. Nothing else about a contact leaves the wallet.
+ *
+ * @generated from message dsm.ConnectContactsV1
+ */
+export class ConnectContactsV1 extends Message<ConnectContactsV1> {
+  constructor(data?: PartialMessage<ConnectContactsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectContactsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectContactsV1 {
+    return new ConnectContactsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectContactsV1 {
+    return new ConnectContactsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectContactsV1 {
+    return new ConnectContactsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectContactsV1 | PlainMessage<ConnectContactsV1> | undefined, b: ConnectContactsV1 | PlainMessage<ConnectContactsV1> | undefined): boolean {
+    return proto3.util.equals(ConnectContactsV1, a, b);
+  }
+}
+
+/**
+ * One contact of the wallet, as an application may see it: its device id.
+ *
+ * @generated from message dsm.ConnectContactV1
+ */
+export class ConnectContactV1 extends Message<ConnectContactV1> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectContactV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectContactV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectContactV1 {
+    return new ConnectContactV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectContactV1 {
+    return new ConnectContactV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectContactV1 {
+    return new ConnectContactV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectContactV1 | PlainMessage<ConnectContactV1> | undefined, b: ConnectContactV1 | PlainMessage<ConnectContactV1> | undefined): boolean {
+    return proto3.util.equals(ConnectContactV1, a, b);
+  }
+}
+
+/**
+ * The wallet's contacts, excluding the accounts of the applications it is
+ * connected to (DSM Amendment A16). The wallet's word: no other evidence.
+ *
+ * @generated from message dsm.ConnectContactsResultV1
+ */
+export class ConnectContactsResultV1 extends Message<ConnectContactsResultV1> {
+  /**
+   * @generated from field: repeated dsm.ConnectContactV1 contacts = 1;
+   */
+  contacts: ConnectContactV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectContactsResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectContactsResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "contacts", kind: "message", T: ConnectContactV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectContactsResultV1 {
+    return new ConnectContactsResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectContactsResultV1 {
+    return new ConnectContactsResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectContactsResultV1 {
+    return new ConnectContactsResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectContactsResultV1 | PlainMessage<ConnectContactsResultV1> | undefined, b: ConnectContactsResultV1 | PlainMessage<ConnectContactsResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectContactsResultV1, a, b);
+  }
+}
+
+/**
+ * Lock a stake for a match the application referees (DSM Amendment A12). The
+ * wallet builds the escrow terms itself from one fixed outcome table: a-wins
+ * and b-wins, decided by the application's key, pay A and B; cancel, decided
+ * by both players, and void, decided by the application's key, each pay the
+ * vault's own owner back. The request names no branch, signer or recipient.
+ *
+ * @generated from message dsm.ConnectEscrowLockV1
+ */
+export class ConnectEscrowLockV1 extends Message<ConnectEscrowLockV1> {
+  /**
+   * X, the match's agreed bytes: 1..256
+   *
+   * @generated from field: bytes external = 1;
+   */
+  external = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes policy_commit = 2;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * base units, > 0
+   *
+   * @generated from field: uint64 amount = 3;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * the wallet's side: 1 = A, 2 = B
+   *
+   * @generated from field: uint32 side = 4;
+   */
+  side = 0;
+
+  /**
+   * @generated from field: bytes opponent_genesis = 5;
+   */
+  opponentGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes opponent_device_id = 6;
+   */
+  opponentDeviceId = new Uint8Array(0);
+
+  /**
+   * the opponent's key as escrow.party names it
+   *
+   * @generated from field: bytes opponent_signing_key = 7;
+   */
+  opponentSigningKey = new Uint8Array(0);
+
+  /**
+   * side B: side A's vault; side A: empty
+   *
+   * @generated from field: bytes counterpart_vault_id = 8;
+   */
+  counterpartVaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: string memo = 9;
+   */
+  memo = "";
+
+  constructor(data?: PartialMessage<ConnectEscrowLockV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowLockV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "external", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "side", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "opponent_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "opponent_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "opponent_signing_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "counterpart_vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowLockV1 {
+    return new ConnectEscrowLockV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowLockV1 {
+    return new ConnectEscrowLockV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowLockV1 {
+    return new ConnectEscrowLockV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowLockV1 | PlainMessage<ConnectEscrowLockV1> | undefined, b: ConnectEscrowLockV1 | PlainMessage<ConnectEscrowLockV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowLockV1, a, b);
+  }
+}
+
+/**
+ * Collect a match result: each named vault released to this wallet, once its
+ * verdict cell's verdict is final on a branch that pays it.
+ *
+ * @generated from message dsm.ConnectEscrowReleaseV1
+ */
+export class ConnectEscrowReleaseV1 extends Message<ConnectEscrowReleaseV1> {
+  /**
+   * 1..2
+   *
+   * @generated from field: repeated bytes vault_ids = 1;
+   */
+  vaultIds: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<ConnectEscrowReleaseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowReleaseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowReleaseV1 {
+    return new ConnectEscrowReleaseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowReleaseV1 {
+    return new ConnectEscrowReleaseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowReleaseV1 {
+    return new ConnectEscrowReleaseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowReleaseV1 | PlainMessage<ConnectEscrowReleaseV1> | undefined, b: ConnectEscrowReleaseV1 | PlainMessage<ConnectEscrowReleaseV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowReleaseV1, a, b);
+  }
+}
+
+/**
+ * This wallet's session public key for the match whose setup carries
+ * `match_nonce`: what the application puts in the setup for the wallet's side.
+ * Derived in the wallet from its own seed; its secret never leaves the wallet.
+ *
+ * @generated from message dsm.ConnectDuelSessionKeyV1
+ */
+export class ConnectDuelSessionKeyV1 extends Message<ConnectDuelSessionKeyV1> {
+  /**
+   * @generated from field: bytes match_nonce = 1;
+   */
+  matchNonce = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectDuelSessionKeyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelSessionKeyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "match_nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelSessionKeyV1 {
+    return new ConnectDuelSessionKeyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelSessionKeyV1 {
+    return new ConnectDuelSessionKeyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelSessionKeyV1 {
+    return new ConnectDuelSessionKeyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelSessionKeyV1 | PlainMessage<ConnectDuelSessionKeyV1> | undefined, b: ConnectDuelSessionKeyV1 | PlainMessage<ConnectDuelSessionKeyV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelSessionKeyV1, a, b);
+  }
+}
+
+/**
+ * Lock a stake in the match `setup` describes. The wallet reads the setup with
+ * the program it registered, finds itself on `side` with its own session key,
+ * and builds the computed escrow terms itself: a-wins pays A, b-wins pays B,
+ * void refunds the vault's owner.
+ *
+ * @generated from message dsm.ConnectDuelLockV1
+ */
+export class ConnectDuelLockV1 extends Message<ConnectDuelLockV1> {
+  /**
+   * the canonical setup both wallets lock
+   *
+   * @generated from field: bytes setup = 1;
+   */
+  setup = new Uint8Array(0);
+
+  /**
+   * the wallet's side: 1 = A, 2 = B
+   *
+   * @generated from field: uint32 side = 2;
+   */
+  side = 0;
+
+  /**
+   * @generated from field: bytes policy_commit = 3;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * base units, > 0
+   *
+   * @generated from field: uint64 amount = 4;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes opponent_genesis = 5;
+   */
+  opponentGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes opponent_device_id = 6;
+   */
+  opponentDeviceId = new Uint8Array(0);
+
+  /**
+   * the other side's vault when it locked first; may be empty
+   *
+   * @generated from field: bytes counterpart_vault_id = 7;
+   */
+  counterpartVaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: string memo = 8;
+   */
+  memo = "";
+
+  /**
+   * The opponent's holdings of exactly the creatures the setup fields for it,
+   * as its own wallet proved them, relayed by the application. The wallet
+   * verifies it against the opponent's validated economic root itself and
+   * locks nothing without it.
+   *
+   * @generated from field: dsm.HoldingsProofV1 opponent_holdings = 9;
+   */
+  opponentHoldings?: HoldingsProofV1;
+
+  constructor(data?: PartialMessage<ConnectDuelLockV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelLockV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "setup", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "side", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 3, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "opponent_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "opponent_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "counterpart_vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "opponent_holdings", kind: "message", T: HoldingsProofV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelLockV1 {
+    return new ConnectDuelLockV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelLockV1 {
+    return new ConnectDuelLockV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelLockV1 {
+    return new ConnectDuelLockV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelLockV1 | PlainMessage<ConnectDuelLockV1> | undefined, b: ConnectDuelLockV1 | PlainMessage<ConnectDuelLockV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelLockV1, a, b);
+  }
+}
+
+/**
+ * Ready the wallet for the match: it verifies both players' vaults, then signs
+ * its ready. With the other side's ready signature, it readies second and
+ * writes the Start.
+ *
+ * @generated from message dsm.ConnectDuelReadyV1
+ */
+export class ConnectDuelReadyV1 extends Message<ConnectDuelReadyV1> {
+  /**
+   * @generated from field: bytes match_cell = 1;
+   */
+  matchCell = new Uint8Array(0);
+
+  /**
+   * empty when this wallet readies first
+   *
+   * @generated from field: bytes opponent_ready = 2;
+   */
+  opponentReady = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectDuelReadyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelReadyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "match_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "opponent_ready", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelReadyV1 {
+    return new ConnectDuelReadyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelReadyV1 {
+    return new ConnectDuelReadyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelReadyV1 {
+    return new ConnectDuelReadyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelReadyV1 | PlainMessage<ConnectDuelReadyV1> | undefined, b: ConnectDuelReadyV1 | PlainMessage<ConnectDuelReadyV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelReadyV1, a, b);
+  }
+}
+
+/**
+ * Withdraw from the match while no Start holds its start cell: void, both refunded.
+ *
+ * @generated from message dsm.ConnectDuelWithdrawV1
+ */
+export class ConnectDuelWithdrawV1 extends Message<ConnectDuelWithdrawV1> {
+  /**
+   * @generated from field: bytes match_cell = 1;
+   */
+  matchCell = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectDuelWithdrawV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelWithdrawV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "match_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelWithdrawV1 {
+    return new ConnectDuelWithdrawV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelWithdrawV1 {
+    return new ConnectDuelWithdrawV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelWithdrawV1 {
+    return new ConnectDuelWithdrawV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelWithdrawV1 | PlainMessage<ConnectDuelWithdrawV1> | undefined, b: ConnectDuelWithdrawV1 | PlainMessage<ConnectDuelWithdrawV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelWithdrawV1, a, b);
+  }
+}
+
+/**
+ * A transcript entry (class 0x0068) and its side's signature over the head after it.
+ *
+ * @generated from message dsm.ConnectDuelSignedEntryV1
+ */
+export class ConnectDuelSignedEntryV1 extends Message<ConnectDuelSignedEntryV1> {
+  /**
+   * @generated from field: bytes entry = 1;
+   */
+  entry = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectDuelSignedEntryV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelSignedEntryV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "entry", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelSignedEntryV1 {
+    return new ConnectDuelSignedEntryV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelSignedEntryV1 {
+    return new ConnectDuelSignedEntryV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelSignedEntryV1 {
+    return new ConnectDuelSignedEntryV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelSignedEntryV1 | PlainMessage<ConnectDuelSignedEntryV1> | undefined, b: ConnectDuelSignedEntryV1 | PlainMessage<ConnectDuelSignedEntryV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelSignedEntryV1, a, b);
+  }
+}
+
+/**
+ * Sign the wallet's next entry: the other side's signed entries since the
+ * wallet's last one, then the wallet's own entry. Nothing is written to storage.
+ *
+ * @generated from message dsm.ConnectDuelSignV1
+ */
+export class ConnectDuelSignV1 extends Message<ConnectDuelSignV1> {
+  /**
+   * @generated from field: bytes match_cell = 1;
+   */
+  matchCell = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.ConnectDuelSignedEntryV1 preceding = 2;
+   */
+  preceding: ConnectDuelSignedEntryV1[] = [];
+
+  /**
+   * @generated from field: bytes entry = 3;
+   */
+  entry = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectDuelSignV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelSignV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "match_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "preceding", kind: "message", T: ConnectDuelSignedEntryV1, repeated: true },
+    { no: 3, name: "entry", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelSignV1 {
+    return new ConnectDuelSignV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelSignV1 {
+    return new ConnectDuelSignV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelSignV1 {
+    return new ConnectDuelSignV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelSignV1 | PlainMessage<ConnectDuelSignV1> | undefined, b: ConnectDuelSignV1 | PlainMessage<ConnectDuelSignV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelSignV1, a, b);
+  }
+}
+
+/**
+ * Settle the match: the other side's last signed entries, then the wallet writes
+ * the transcript (or the proof the other side equivocated) to the match cell.
+ *
+ * @generated from message dsm.ConnectDuelSettleV1
+ */
+export class ConnectDuelSettleV1 extends Message<ConnectDuelSettleV1> {
+  /**
+   * @generated from field: bytes match_cell = 1;
+   */
+  matchCell = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.ConnectDuelSignedEntryV1 entries = 2;
+   */
+  entries: ConnectDuelSignedEntryV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectDuelSettleV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelSettleV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "match_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "entries", kind: "message", T: ConnectDuelSignedEntryV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelSettleV1 {
+    return new ConnectDuelSettleV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelSettleV1 {
+    return new ConnectDuelSettleV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelSettleV1 {
+    return new ConnectDuelSettleV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelSettleV1 | PlainMessage<ConnectDuelSettleV1> | undefined, b: ConnectDuelSettleV1 | PlainMessage<ConnectDuelSettleV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelSettleV1, a, b);
+  }
+}
+
+/**
+ * Collect a computed match's result: each named vault released to this wallet,
+ * once the match cell's outcome is final on a branch that pays it.
+ *
+ * @generated from message dsm.ConnectDuelCollectV1
+ */
+export class ConnectDuelCollectV1 extends Message<ConnectDuelCollectV1> {
+  /**
+   * 1..2
+   *
+   * @generated from field: repeated bytes vault_ids = 1;
+   */
+  vaultIds: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<ConnectDuelCollectV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelCollectV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelCollectV1 {
+    return new ConnectDuelCollectV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelCollectV1 {
+    return new ConnectDuelCollectV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelCollectV1 {
+    return new ConnectDuelCollectV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelCollectV1 | PlainMessage<ConnectDuelCollectV1> | undefined, b: ConnectDuelCollectV1 | PlainMessage<ConnectDuelCollectV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelCollectV1, a, b);
+  }
+}
+
+/**
+ * The signed part of an authored object.
+ *
+ * @generated from message dsm.AuthoredObjectBodyV1
+ */
+export class AuthoredObjectBodyV1 extends Message<AuthoredObjectBodyV1> {
+  /**
+   * @generated from field: bytes author_genesis = 1;
+   */
+  authorGenesis = new Uint8Array(0);
+
+  /**
+   * H(DSM/devid ‖ AK ‖ AttA)
+   *
+   * @generated from field: bytes author_device_id = 2;
+   */
+  authorDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes author_ak = 3;
+   */
+  authorAk = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes author_att_a = 4;
+   */
+  authorAttA = new Uint8Array(0);
+
+  /**
+   * the author's own name for what the objects are about
+   *
+   * @generated from field: bytes topic = 5;
+   */
+  topic = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes payload = 6;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredObjectBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredObjectBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "author_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "author_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "author_ak", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "author_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "topic", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredObjectBodyV1 {
+    return new AuthoredObjectBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredObjectBodyV1 {
+    return new AuthoredObjectBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredObjectBodyV1 {
+    return new AuthoredObjectBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredObjectBodyV1 | PlainMessage<AuthoredObjectBodyV1> | undefined, b: AuthoredObjectBodyV1 | PlainMessage<AuthoredObjectBodyV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredObjectBodyV1, a, b);
+  }
+}
+
+/**
+ * An authored object as storage holds it: the body and the author's
+ * signature over H(DSM/object/authored-statement/v1 ‖ body).
+ *
+ * @generated from message dsm.AuthoredObjectV1
+ */
+export class AuthoredObjectV1 extends Message<AuthoredObjectV1> {
+  /**
+   * AuthoredObjectBodyV1
+   *
+   * @generated from field: bytes body = 1;
+   */
+  body = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredObjectV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredObjectV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredObjectV1 {
+    return new AuthoredObjectV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredObjectV1 {
+    return new AuthoredObjectV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredObjectV1 {
+    return new AuthoredObjectV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredObjectV1 | PlainMessage<AuthoredObjectV1> | undefined, b: AuthoredObjectV1 | PlainMessage<AuthoredObjectV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredObjectV1, a, b);
+  }
+}
+
+/**
+ * authored.publish: this account publishes `payload` under `topic`.
+ *
+ * @generated from message dsm.AuthoredPublishRequestV1
+ */
+export class AuthoredPublishRequestV1 extends Message<AuthoredPublishRequestV1> {
+  /**
+   * @generated from field: bytes topic = 1;
+   */
+  topic = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes payload = 2;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredPublishRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredPublishRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "topic", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredPublishRequestV1 {
+    return new AuthoredPublishRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredPublishRequestV1 {
+    return new AuthoredPublishRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredPublishRequestV1 {
+    return new AuthoredPublishRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredPublishRequestV1 | PlainMessage<AuthoredPublishRequestV1> | undefined, b: AuthoredPublishRequestV1 | PlainMessage<AuthoredPublishRequestV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredPublishRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AuthoredPublishedResponse
+ */
+export class AuthoredPublishedResponse extends Message<AuthoredPublishedResponse> {
+  /**
+   * the object's immutable address
+   *
+   * @generated from field: bytes address = 1;
+   */
+  address = new Uint8Array(0);
+
+  /**
+   * H(DSM/object/authored-locator/v1 ‖ author device id ‖ topic)
+   *
+   * @generated from field: bytes locator = 2;
+   */
+  locator = new Uint8Array(0);
+
+  /**
+   * Stored, read back from the members
+   *
+   * @generated from field: bool stored = 3;
+   */
+  stored = false;
+
+  constructor(data?: PartialMessage<AuthoredPublishedResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredPublishedResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "address", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "locator", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "stored", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredPublishedResponse {
+    return new AuthoredPublishedResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredPublishedResponse {
+    return new AuthoredPublishedResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredPublishedResponse {
+    return new AuthoredPublishedResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredPublishedResponse | PlainMessage<AuthoredPublishedResponse> | undefined, b: AuthoredPublishedResponse | PlainMessage<AuthoredPublishedResponse> | undefined): boolean {
+    return proto3.util.equals(AuthoredPublishedResponse, a, b);
+  }
+}
+
+/**
+ * authored.read: every object `author_device_id` published under `topic`.
+ *
+ * @generated from message dsm.AuthoredReadRequestV1
+ */
+export class AuthoredReadRequestV1 extends Message<AuthoredReadRequestV1> {
+  /**
+   * @generated from field: bytes author_device_id = 1;
+   */
+  authorDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes topic = 2;
+   */
+  topic = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredReadRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredReadRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "author_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "topic", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredReadRequestV1 {
+    return new AuthoredReadRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredReadRequestV1 {
+    return new AuthoredReadRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredReadRequestV1 {
+    return new AuthoredReadRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredReadRequestV1 | PlainMessage<AuthoredReadRequestV1> | undefined, b: AuthoredReadRequestV1 | PlainMessage<AuthoredReadRequestV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredReadRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AuthoredObjectReadV1
+ */
+export class AuthoredObjectReadV1 extends Message<AuthoredObjectReadV1> {
+  /**
+   * @generated from field: bytes address = 1;
+   */
+  address = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes author_genesis = 2;
+   */
+  authorGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes payload = 3;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthoredObjectReadV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredObjectReadV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "address", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "author_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredObjectReadV1 {
+    return new AuthoredObjectReadV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredObjectReadV1 {
+    return new AuthoredObjectReadV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredObjectReadV1 {
+    return new AuthoredObjectReadV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredObjectReadV1 | PlainMessage<AuthoredObjectReadV1> | undefined, b: AuthoredObjectReadV1 | PlainMessage<AuthoredObjectReadV1> | undefined): boolean {
+    return proto3.util.equals(AuthoredObjectReadV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AuthoredObjectsResponse
+ */
+export class AuthoredObjectsResponse extends Message<AuthoredObjectsResponse> {
+  /**
+   * in append order, each verified from its own bytes
+   *
+   * @generated from field: repeated dsm.AuthoredObjectReadV1 objects = 1;
+   */
+  objects: AuthoredObjectReadV1[] = [];
+
+  /**
+   * every candidate under the locator was read
+   *
+   * @generated from field: bool complete = 2;
+   */
+  complete = false;
+
+  constructor(data?: PartialMessage<AuthoredObjectsResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthoredObjectsResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "objects", kind: "message", T: AuthoredObjectReadV1, repeated: true },
+    { no: 2, name: "complete", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthoredObjectsResponse {
+    return new AuthoredObjectsResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthoredObjectsResponse {
+    return new AuthoredObjectsResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthoredObjectsResponse {
+    return new AuthoredObjectsResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthoredObjectsResponse | PlainMessage<AuthoredObjectsResponse> | undefined, b: AuthoredObjectsResponse | PlainMessage<AuthoredObjectsResponse> | undefined): boolean {
+    return proto3.util.equals(AuthoredObjectsResponse, a, b);
+  }
+}
+
+/**
  * session_id = H(DSM/connect/session ‖ offer_digest ‖ wallet device id).
  *
  * @generated from message dsm.AppRequestBodyV1
@@ -28568,6 +30217,66 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
      */
     value: ConnectHoldingsV1;
     case: "holdings";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowLockV1 escrow_lock = 15;
+     */
+    value: ConnectEscrowLockV1;
+    case: "escrowLock";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowReleaseV1 escrow_release = 16;
+     */
+    value: ConnectEscrowReleaseV1;
+    case: "escrowRelease";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelSessionKeyV1 duel_session_key = 17;
+     */
+    value: ConnectDuelSessionKeyV1;
+    case: "duelSessionKey";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelLockV1 duel_lock = 18;
+     */
+    value: ConnectDuelLockV1;
+    case: "duelLock";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelReadyV1 duel_ready = 19;
+     */
+    value: ConnectDuelReadyV1;
+    case: "duelReady";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelWithdrawV1 duel_withdraw = 20;
+     */
+    value: ConnectDuelWithdrawV1;
+    case: "duelWithdraw";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelSignV1 duel_sign = 21;
+     */
+    value: ConnectDuelSignV1;
+    case: "duelSign";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelSettleV1 duel_settle = 22;
+     */
+    value: ConnectDuelSettleV1;
+    case: "duelSettle";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelCollectV1 duel_collect = 23;
+     */
+    value: ConnectDuelCollectV1;
+    case: "duelCollect";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectContactsV1 contacts = 24;
+     */
+    value: ConnectContactsV1;
+    case: "contacts";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppRequestBodyV1>) {
@@ -28585,6 +30294,16 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
     { no: 12, name: "quote", kind: "message", T: ConnectQuoteV1, oneof: "kind" },
     { no: 13, name: "swap", kind: "message", T: ConnectSwapV1, oneof: "kind" },
     { no: 14, name: "holdings", kind: "message", T: ConnectHoldingsV1, oneof: "kind" },
+    { no: 15, name: "escrow_lock", kind: "message", T: ConnectEscrowLockV1, oneof: "kind" },
+    { no: 16, name: "escrow_release", kind: "message", T: ConnectEscrowReleaseV1, oneof: "kind" },
+    { no: 17, name: "duel_session_key", kind: "message", T: ConnectDuelSessionKeyV1, oneof: "kind" },
+    { no: 18, name: "duel_lock", kind: "message", T: ConnectDuelLockV1, oneof: "kind" },
+    { no: 19, name: "duel_ready", kind: "message", T: ConnectDuelReadyV1, oneof: "kind" },
+    { no: 20, name: "duel_withdraw", kind: "message", T: ConnectDuelWithdrawV1, oneof: "kind" },
+    { no: 21, name: "duel_sign", kind: "message", T: ConnectDuelSignV1, oneof: "kind" },
+    { no: 22, name: "duel_settle", kind: "message", T: ConnectDuelSettleV1, oneof: "kind" },
+    { no: 23, name: "duel_collect", kind: "message", T: ConnectDuelCollectV1, oneof: "kind" },
+    { no: 24, name: "contacts", kind: "message", T: ConnectContactsV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestBodyV1 {
@@ -28914,6 +30633,456 @@ export class ConnectSwapResultV1 extends Message<ConnectSwapResultV1> {
 }
 
 /**
+ * A stake the wallet locked: a notification, never evidence.
+ *
+ * @generated from message dsm.ConnectEscrowLockResultV1
+ */
+export class ConnectEscrowLockResultV1 extends Message<ConnectEscrowLockResultV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * K_verdict
+   *
+   * @generated from field: bytes verdict_cell = 2;
+   */
+  verdictCell = new Uint8Array(0);
+
+  /**
+   * Y
+   *
+   * @generated from field: bytes external_commitment = 3;
+   */
+  externalCommitment = new Uint8Array(0);
+
+  /**
+   * the wallet's economic position that carries the lock
+   *
+   * @generated from field: uint64 position = 4;
+   */
+  position = protoInt64.zero;
+
+  constructor(data?: PartialMessage<ConnectEscrowLockResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowLockResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "external_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowLockResultV1 {
+    return new ConnectEscrowLockResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowLockResultV1 {
+    return new ConnectEscrowLockResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowLockResultV1 {
+    return new ConnectEscrowLockResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowLockResultV1 | PlainMessage<ConnectEscrowLockResultV1> | undefined, b: ConnectEscrowLockResultV1 | PlainMessage<ConnectEscrowLockResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowLockResultV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectEscrowReleasedV1
+ */
+export class ConnectEscrowReleasedV1 extends Message<ConnectEscrowReleasedV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * the wallet's economic position the release took
+   *
+   * @generated from field: uint64 position = 2;
+   */
+  position = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.SofiPositionState state = 3;
+   */
+  state = SofiPositionState.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<ConnectEscrowReleasedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowReleasedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "state", kind: "enum", T: proto3.getEnumType(SofiPositionState) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowReleasedV1 {
+    return new ConnectEscrowReleasedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowReleasedV1 {
+    return new ConnectEscrowReleasedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowReleasedV1 {
+    return new ConnectEscrowReleasedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowReleasedV1 | PlainMessage<ConnectEscrowReleasedV1> | undefined, b: ConnectEscrowReleasedV1 | PlainMessage<ConnectEscrowReleasedV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowReleasedV1, a, b);
+  }
+}
+
+/**
+ * The vaults the wallet released for a collect: a notification, never evidence.
+ *
+ * @generated from message dsm.ConnectEscrowReleaseResultV1
+ */
+export class ConnectEscrowReleaseResultV1 extends Message<ConnectEscrowReleaseResultV1> {
+  /**
+   * @generated from field: repeated dsm.ConnectEscrowReleasedV1 released = 1;
+   */
+  released: ConnectEscrowReleasedV1[] = [];
+
+  constructor(data?: PartialMessage<ConnectEscrowReleaseResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectEscrowReleaseResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "released", kind: "message", T: ConnectEscrowReleasedV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectEscrowReleaseResultV1 {
+    return new ConnectEscrowReleaseResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectEscrowReleaseResultV1 {
+    return new ConnectEscrowReleaseResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectEscrowReleaseResultV1 {
+    return new ConnectEscrowReleaseResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectEscrowReleaseResultV1 | PlainMessage<ConnectEscrowReleaseResultV1> | undefined, b: ConnectEscrowReleaseResultV1 | PlainMessage<ConnectEscrowReleaseResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectEscrowReleaseResultV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectDuelSessionKeyResultV1
+ */
+export class ConnectDuelSessionKeyResultV1 extends Message<ConnectDuelSessionKeyResultV1> {
+  /**
+   * @generated from field: bytes session_public_key = 1;
+   */
+  sessionPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 signature_alg = 2;
+   */
+  signatureAlg = 0;
+
+  constructor(data?: PartialMessage<ConnectDuelSessionKeyResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelSessionKeyResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature_alg", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelSessionKeyResultV1 {
+    return new ConnectDuelSessionKeyResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelSessionKeyResultV1 {
+    return new ConnectDuelSessionKeyResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelSessionKeyResultV1 {
+    return new ConnectDuelSessionKeyResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelSessionKeyResultV1 | PlainMessage<ConnectDuelSessionKeyResultV1> | undefined, b: ConnectDuelSessionKeyResultV1 | PlainMessage<ConnectDuelSessionKeyResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelSessionKeyResultV1, a, b);
+  }
+}
+
+/**
+ * A stake the wallet locked in a computed match: a notification, never evidence.
+ *
+ * @generated from message dsm.ConnectDuelLockResultV1
+ */
+export class ConnectDuelLockResultV1 extends Message<ConnectDuelLockResultV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * K_match
+   *
+   * @generated from field: bytes match_cell = 2;
+   */
+  matchCell = new Uint8Array(0);
+
+  /**
+   * K_start
+   *
+   * @generated from field: bytes start_cell = 3;
+   */
+  startCell = new Uint8Array(0);
+
+  /**
+   * Y = H(DSM/external/v1 ‖ setup)
+   *
+   * @generated from field: bytes external_commitment = 4;
+   */
+  externalCommitment = new Uint8Array(0);
+
+  /**
+   * P
+   *
+   * @generated from field: bytes program = 5;
+   */
+  program = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes session_public_key = 6;
+   */
+  sessionPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 position = 7;
+   */
+  position = protoInt64.zero;
+
+  constructor(data?: PartialMessage<ConnectDuelLockResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelLockResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "match_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "start_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "external_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "program", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "session_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelLockResultV1 {
+    return new ConnectDuelLockResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelLockResultV1 {
+    return new ConnectDuelLockResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelLockResultV1 {
+    return new ConnectDuelLockResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelLockResultV1 | PlainMessage<ConnectDuelLockResultV1> | undefined, b: ConnectDuelLockResultV1 | PlainMessage<ConnectDuelLockResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelLockResultV1, a, b);
+  }
+}
+
+/**
+ * What a computed match's cells hold, as the wallet's verifier read them.
+ *
+ * @generated from message dsm.ConnectDuelCellsV1
+ */
+export class ConnectDuelCellsV1 extends Message<ConnectDuelCellsV1> {
+  /**
+   * @generated from field: bytes match_cell = 1;
+   */
+  matchCell = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes start_cell = 2;
+   */
+  startCell = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.ConnectDuelStart start = 3;
+   */
+  start = ConnectDuelStart.UNSPECIFIED;
+
+  /**
+   * @generated from field: dsm.EscrowVerdictState start_state = 4;
+   */
+  startState = EscrowVerdictState.UNSPECIFIED;
+
+  /**
+   * the occupant's label; empty while none
+   *
+   * @generated from field: bytes outcome = 5;
+   */
+  outcome = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.EscrowVerdictState outcome_state = 6;
+   */
+  outcomeState = EscrowVerdictState.UNSPECIFIED;
+
+  /**
+   * the occupant is the proof that the other side equivocated
+   *
+   * @generated from field: bool by_equivocation = 7;
+   */
+  byEquivocation = false;
+
+  constructor(data?: PartialMessage<ConnectDuelCellsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelCellsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "match_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "start_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "start", kind: "enum", T: proto3.getEnumType(ConnectDuelStart) },
+    { no: 4, name: "start_state", kind: "enum", T: proto3.getEnumType(EscrowVerdictState) },
+    { no: 5, name: "outcome", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "outcome_state", kind: "enum", T: proto3.getEnumType(EscrowVerdictState) },
+    { no: 7, name: "by_equivocation", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelCellsV1 {
+    return new ConnectDuelCellsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelCellsV1 {
+    return new ConnectDuelCellsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelCellsV1 {
+    return new ConnectDuelCellsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelCellsV1 | PlainMessage<ConnectDuelCellsV1> | undefined, b: ConnectDuelCellsV1 | PlainMessage<ConnectDuelCellsV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelCellsV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectDuelReadyResultV1
+ */
+export class ConnectDuelReadyResultV1 extends Message<ConnectDuelReadyResultV1> {
+  /**
+   * @generated from field: bytes ready_signature = 1;
+   */
+  readySignature = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.ConnectDuelCellsV1 cells = 2;
+   */
+  cells?: ConnectDuelCellsV1;
+
+  constructor(data?: PartialMessage<ConnectDuelReadyResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelReadyResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ready_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "cells", kind: "message", T: ConnectDuelCellsV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelReadyResultV1 {
+    return new ConnectDuelReadyResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelReadyResultV1 {
+    return new ConnectDuelReadyResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelReadyResultV1 {
+    return new ConnectDuelReadyResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelReadyResultV1 | PlainMessage<ConnectDuelReadyResultV1> | undefined, b: ConnectDuelReadyResultV1 | PlainMessage<ConnectDuelReadyResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelReadyResultV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectDuelSignResultV1
+ */
+export class ConnectDuelSignResultV1 extends Message<ConnectDuelSignResultV1> {
+  /**
+   * @generated from field: uint32 index = 1;
+   */
+  index = 0;
+
+  /**
+   * @generated from field: bytes head = 2;
+   */
+  head = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 3;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ConnectDuelSignResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectDuelSignResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "index", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "head", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelSignResultV1 {
+    return new ConnectDuelSignResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectDuelSignResultV1 {
+    return new ConnectDuelSignResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectDuelSignResultV1 {
+    return new ConnectDuelSignResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectDuelSignResultV1 | PlainMessage<ConnectDuelSignResultV1> | undefined, b: ConnectDuelSignResultV1 | PlainMessage<ConnectDuelSignResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectDuelSignResultV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.AppResponseBodyV1
  */
 export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
@@ -28958,6 +31127,58 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
      */
     value: HoldingsProofV1;
     case: "holdings";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowLockResultV1 escrow_lock = 13;
+     */
+    value: ConnectEscrowLockResultV1;
+    case: "escrowLock";
+  } | {
+    /**
+     * also a computed match's collect
+     *
+     * @generated from field: dsm.ConnectEscrowReleaseResultV1 escrow_release = 14;
+     */
+    value: ConnectEscrowReleaseResultV1;
+    case: "escrowRelease";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelSessionKeyResultV1 duel_session_key = 15;
+     */
+    value: ConnectDuelSessionKeyResultV1;
+    case: "duelSessionKey";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelLockResultV1 duel_lock = 16;
+     */
+    value: ConnectDuelLockResultV1;
+    case: "duelLock";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelReadyResultV1 duel_ready = 17;
+     */
+    value: ConnectDuelReadyResultV1;
+    case: "duelReady";
+  } | {
+    /**
+     * a withdraw's or a settle's
+     *
+     * @generated from field: dsm.ConnectDuelCellsV1 duel_cells = 18;
+     */
+    value: ConnectDuelCellsV1;
+    case: "duelCells";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelSignResultV1 duel_sign = 19;
+     */
+    value: ConnectDuelSignResultV1;
+    case: "duelSign";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectContactsResultV1 contacts = 20;
+     */
+    value: ConnectContactsResultV1;
+    case: "contacts";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppResponseBodyV1>) {
@@ -28975,6 +31196,14 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
     { no: 10, name: "quote", kind: "message", T: ConnectQuoteResultV1, oneof: "result" },
     { no: 11, name: "swap", kind: "message", T: ConnectSwapResultV1, oneof: "result" },
     { no: 12, name: "holdings", kind: "message", T: HoldingsProofV1, oneof: "result" },
+    { no: 13, name: "escrow_lock", kind: "message", T: ConnectEscrowLockResultV1, oneof: "result" },
+    { no: 14, name: "escrow_release", kind: "message", T: ConnectEscrowReleaseResultV1, oneof: "result" },
+    { no: 15, name: "duel_session_key", kind: "message", T: ConnectDuelSessionKeyResultV1, oneof: "result" },
+    { no: 16, name: "duel_lock", kind: "message", T: ConnectDuelLockResultV1, oneof: "result" },
+    { no: 17, name: "duel_ready", kind: "message", T: ConnectDuelReadyResultV1, oneof: "result" },
+    { no: 18, name: "duel_cells", kind: "message", T: ConnectDuelCellsV1, oneof: "result" },
+    { no: 19, name: "duel_sign", kind: "message", T: ConnectDuelSignResultV1, oneof: "result" },
+    { no: 20, name: "contacts", kind: "message", T: ConnectContactsResultV1, oneof: "result" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppResponseBodyV1 {
@@ -29328,6 +31557,19 @@ export class ConnectSessionV1 extends Message<ConnectSessionV1> {
    */
   offerDigest = new Uint8Array(0);
 
+  /**
+   * The peer's identity as its contact card names it: what an escrow lock (A12)
+   * names an opponent by. Application side: the wallet's; wallet side: the application's.
+   *
+   * @generated from field: bytes peer_genesis = 12;
+   */
+  peerGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes peer_signing_key = 13;
+   */
+  peerSigningKey = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectSessionV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -29347,6 +31589,8 @@ export class ConnectSessionV1 extends Message<ConnectSessionV1> {
     { no: 9, name: "scope_lines", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 10, name: "last_error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 11, name: "offer_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 12, name: "peer_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "peer_signing_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSessionV1 {
@@ -29853,6 +32097,66 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
      */
     value: ConnectHoldingsV1;
     case: "holdings";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowLockV1 escrow_lock = 15;
+     */
+    value: ConnectEscrowLockV1;
+    case: "escrowLock";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectEscrowReleaseV1 escrow_release = 16;
+     */
+    value: ConnectEscrowReleaseV1;
+    case: "escrowRelease";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelSessionKeyV1 duel_session_key = 17;
+     */
+    value: ConnectDuelSessionKeyV1;
+    case: "duelSessionKey";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelLockV1 duel_lock = 18;
+     */
+    value: ConnectDuelLockV1;
+    case: "duelLock";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelReadyV1 duel_ready = 19;
+     */
+    value: ConnectDuelReadyV1;
+    case: "duelReady";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelWithdrawV1 duel_withdraw = 20;
+     */
+    value: ConnectDuelWithdrawV1;
+    case: "duelWithdraw";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelSignV1 duel_sign = 21;
+     */
+    value: ConnectDuelSignV1;
+    case: "duelSign";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelSettleV1 duel_settle = 22;
+     */
+    value: ConnectDuelSettleV1;
+    case: "duelSettle";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectDuelCollectV1 duel_collect = 23;
+     */
+    value: ConnectDuelCollectV1;
+    case: "duelCollect";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectContactsV1 contacts = 24;
+     */
+    value: ConnectContactsV1;
+    case: "contacts";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectAppRequestIntentV1>) {
@@ -29869,6 +32173,16 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
     { no: 12, name: "quote", kind: "message", T: ConnectQuoteV1, oneof: "kind" },
     { no: 13, name: "swap", kind: "message", T: ConnectSwapV1, oneof: "kind" },
     { no: 14, name: "holdings", kind: "message", T: ConnectHoldingsV1, oneof: "kind" },
+    { no: 15, name: "escrow_lock", kind: "message", T: ConnectEscrowLockV1, oneof: "kind" },
+    { no: 16, name: "escrow_release", kind: "message", T: ConnectEscrowReleaseV1, oneof: "kind" },
+    { no: 17, name: "duel_session_key", kind: "message", T: ConnectDuelSessionKeyV1, oneof: "kind" },
+    { no: 18, name: "duel_lock", kind: "message", T: ConnectDuelLockV1, oneof: "kind" },
+    { no: 19, name: "duel_ready", kind: "message", T: ConnectDuelReadyV1, oneof: "kind" },
+    { no: 20, name: "duel_withdraw", kind: "message", T: ConnectDuelWithdrawV1, oneof: "kind" },
+    { no: 21, name: "duel_sign", kind: "message", T: ConnectDuelSignV1, oneof: "kind" },
+    { no: 22, name: "duel_settle", kind: "message", T: ConnectDuelSettleV1, oneof: "kind" },
+    { no: 23, name: "duel_collect", kind: "message", T: ConnectDuelCollectV1, oneof: "kind" },
+    { no: 24, name: "contacts", kind: "message", T: ConnectContactsV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestIntentV1 {
@@ -30093,6 +32407,44 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
    */
   paidTx = new Uint8Array(0);
 
+  /**
+   * FACT_ESCROW_LOCKED: the wallet's vault. FACT_ESCROW_RELEASED: the vaults released.
+   *
+   * @generated from field: repeated bytes escrow_vault_ids = 13;
+   */
+  escrowVaultIds: Uint8Array[] = [];
+
+  /**
+   * the match's K_verdict; empty while no escrow fact holds
+   *
+   * @generated from field: bytes escrow_verdict_cell = 14;
+   */
+  escrowVerdictCell = new Uint8Array(0);
+
+  /**
+   * FACT_ESCROW_LOCKED, FACT_DUEL_LOCKED: the stake, in base units
+   *
+   * @generated from field: uint64 escrow_amount = 15;
+   */
+  escrowAmount = protoInt64.zero;
+
+  /**
+   * FACT_DUEL_*: the match's cells as this account read them
+   *
+   * @generated from field: dsm.ConnectDuelCellsV1 duel_cells = 16;
+   */
+  duelCells?: ConnectDuelCellsV1;
+
+  /**
+   * The wallet's signed answer body (AppResponseBodyV1) exactly as it verified,
+   * for the application to read a result to relay to the other player, such as
+   * a duel's session key, ready or entry signature: never a fact; each is
+   * checked where it is used. Empty while unanswered.
+   *
+   * @generated from field: bytes answer_body = 17;
+   */
+  answerBody = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectAppStatusV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -30113,6 +32465,11 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
     { no: 10, name: "quote", kind: "message", T: ConnectQuoteResultV1 },
     { no: 11, name: "swap", kind: "message", T: ConnectSwapResultV1 },
     { no: 12, name: "paid_tx", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "escrow_vault_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 14, name: "escrow_verdict_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 15, name: "escrow_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 16, name: "duel_cells", kind: "message", T: ConnectDuelCellsV1 },
+    { no: 17, name: "answer_body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppStatusV1 {

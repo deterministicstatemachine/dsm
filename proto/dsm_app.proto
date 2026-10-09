@@ -841,11 +841,10 @@ message TokenCreateRequest {
   string ticker = 1; // 2-8 uppercase
   string alias = 2; // display name
   uint32 decimals = 3; // 0..18
-  // The whole supply that will ever exist (SoFi §47, §51). User-created
+  // The whole supply that will ever exist (SoFi §47, §51), in whole token
+  // units, as the user typed it: Rust parses and scales it. User-created
   // tokens in beta release all of it to the creator at creation.
-  bytes genesis_supply_u128 = 4 [(dsm_fixed_len)=16]; // big-endian u128, > 0
-  reserved 5, 6, 9;
-  reserved "policy_anchor", "initial_alloc_u128", "unlimited_supply", "max_supply_u128";
+  string genesis_supply_entered = 14 [(dsm_max_len)=64]; // digits, > 0
 
   bool   burn_enabled           = 7;   // governs burns only (§54)
   bool   transferable           = 8;
@@ -875,7 +874,9 @@ message TokenForgetResponse {
 // guard's checked_sub on every advance.
 message TokenBurnRequest {
   string token_id  = 1;
-  uint64 amount    = 2;
+  // The amount as the user typed it, in token units ("12.50"): Rust parses it
+  // against the decimals of the token's committed policy.
+  string amount_entered = 4 [(dsm_max_len)=64];
   string message   = 3 [(dsm_max_len)=1024];
 }
 message TokenBurnResponse {
@@ -923,6 +924,19 @@ message TokenAdoptionQrResponse {
   string token_id           = 3;
   string policy_anchor_b32  = 4;
   string anchor_fingerprint = 5;
+}
+
+// token.check: a token.create request's fields checked as token.create checks
+// them, creating nothing. One refusal for each field that fails, naming the
+// TokenCreateRequest field ("ticker", "alias", "decimals",
+// "genesis_supply_entered") and why, so a form shows it beside that field.
+message TokenFieldRefusal {
+  string field  = 1;
+  string reason = 2;
+}
+
+message TokenCheckResponse {
+  repeated TokenFieldRefusal refusals = 1;
 }
 
 message TokenCreateResponse {
@@ -1176,6 +1190,17 @@ message DsmSuccessorEvidenceV1 {
   bytes  sigma_dsm            = 8 [(dsm_max_len)=65535];   // SPX256f under the owner AK
 }
 
+// An owner baseline of a vault (SoFi Amendment S24): the owner's
+// presentation over c_n = H(vault-baseline/v1; auth_ccb), the exact
+// OwnerBaselineAuthV1 bytes it signs, and the exact VaultFrontierV1 bytes
+// those bind. Published under vault_baseline_locator(v, g); discovery only
+// until Core authenticates it.
+message VaultBaselineV1 {
+  AnchorPresentationV3 presentation = 1;
+  bytes auth_ccb     = 2 [(dsm_max_len)=4096]; // class 0x0073
+  bytes frontier_ccb = 3 [(dsm_max_len)=4096]; // class 0x0071
+}
+
 message AnchorPresentationV3 {
   bytes  state_commitment       = 1 [(dsm_fixed_len)=32];  // c_n
   bytes  candidate_public_key   = 2 [(dsm_max_len)=65535];
@@ -1405,8 +1430,12 @@ message AppStateResponse { string key = 1; optional string value = 2; }
 message AppSessionLockStatusProto {
   bool enabled = 1;
   bool locked = 2;
-  string method = 3;
+  string method = 3;          // "none", "pin" or "combo"
   bool lock_on_pause = 4;
+  // The wrong PINs or patterns left before only the recovery phrase opens the
+  // lock, and whether that point is reached (or no PIN or pattern is enrolled).
+  uint32 misses_left = 5;
+  bool phrase_required = 6;
 }
 
 message AppSessionBleHardwareStatusProto {
@@ -1461,9 +1490,21 @@ message SessionHardwareFactsProto {
 
 // Frontend -> Rust: lock policy configuration. Secret verification remains app-local.
 message SessionConfigureLockRequest {
-  bool enabled = 1;
-  string method = 2;
+  // The method names whether the lock is on: "none" turns it off.
+  string method = 2;          // "pin", "combo" or "none"
   bool lock_on_pause = 3;
+  // The PIN, or the pattern's buttons joined by ",", to enroll. Rust keeps only
+  // its Argon2id hash. Empty keeps the PIN or pattern already enrolled.
+  string secret = 4 [(dsm_max_len)=256];
+}
+
+// session.unlock: open the lock with its PIN or pattern, or, once the wrong
+// tries are used up, with the wallet's recovery phrase. Rust decides.
+message SessionUnlockRequest {
+  oneof key {
+    string secret          = 1 [(dsm_max_len)=256];
+    string recovery_phrase = 2 [(dsm_max_len)=1024];
+  }
 }
 
 // State introspection summary (QueryOp: state.info)
@@ -2725,6 +2766,11 @@ message Envelope {
     EscrowSignedResponse              escrow_signed_response           = 131;
     EscrowVerdictResponse             escrow_verdict_response          = 132;
     EscrowVaultsResponse              escrow_vaults_response           = 133;
+    // Reply to `token.check`.
+    TokenCheckResponse                token_check_response             = 134;
+    // Replies to `authored.publish` and `authored.read`.
+    AuthoredPublishedResponse         authored_published_response      = 135;
+    AuthoredObjectsResponse           authored_objects_response        = 136;
 
 
     // Reply to `token.forget`.
@@ -2803,7 +2849,9 @@ message DeviceDirectoryEntryV1 {
 // owner chooses the pair, the reserves and the fee. The storage set is the
 // network's pinned set, never chosen (DSM Amendment A5).
 message SofiCreateVaultRequest {
-  bytes  token_a_policy_commit = 1 [(dsm_fixed_len)=32]; // token_a < token_b, bytewise
+  // The two tokens in either order, each with its reserve below; Rust orders
+  // the pair bytewise (§28).
+  bytes  token_a_policy_commit = 1 [(dsm_fixed_len)=32];
   bytes  token_b_policy_commit = 2 [(dsm_fixed_len)=32];
   // 3 and 4 were reserve_a and reserve_b in base units.
   reserved 3, 4;
@@ -2811,6 +2859,10 @@ message SofiCreateVaultRequest {
   uint32 fee_bps               = 5;                      // < 10000
   string reserve_a_entered     = 6;                      // token units, > 0
   string reserve_b_entered     = 7;                      // token units, > 0
+  // A name the creating account keeps for the vault in its own store (owner
+  // bookkeeping: carried nowhere, never read for validity), returned by
+  // sofi.vaults. Empty for none. At most 128 bytes.
+  string label                 = 8;
 }
 message SofiVaultCreatedResponse {
   bytes  vault_id = 1 [(dsm_fixed_len)=32];
@@ -2917,6 +2969,7 @@ message SofiOwnedVaultV1 {
   uint32          fee_bps               = 10;
   uint64          generation            = 11; // trades and closes the vault has taken
   SofiVaultStatus status                = 12;
+  string          label                 = 13; // the creator's own name for it, empty for none
 }
 message SofiVaultsResponse {
   repeated SofiOwnedVaultV1 vaults = 1;
@@ -2992,6 +3045,25 @@ message EscrowCreateRequest {
   repeated EscrowBranchV1 branches             = 4; // 1..16, ascending by outcome
   bytes                   counterpart_vault_id = 5; // empty, or 32 bytes
 }
+// escrow.lock: lock a stake as escrow.create does, its outcomes named by who
+// decides each and who each pays: this device or a contact, by device id. Rust
+// supplies every party's genesis and signing key from what it holds, and puts
+// the outcomes and each signer set in their one canonical order: the order the
+// user listed them in carries no meaning. A party that is neither this device
+// nor a contact is named by its keys through escrow.create.
+message EscrowLockOutcomeV1 {
+  bytes          outcome    = 1 [(dsm_max_len)=64];   // 1..64 bytes
+  repeated bytes decided_by = 2;                       // 1..4 device ids, 32 bytes each
+  bytes          pays       = 3 [(dsm_fixed_len)=32]; // a device id
+}
+message EscrowLockRequest {
+  bytes                        external             = 1; // X, the bytes the parties agreed on
+  bytes                        token_policy_commit  = 2 [(dsm_fixed_len)=32];
+  string                       amount_entered       = 3; // token units, > 0
+  repeated EscrowLockOutcomeV1 outcomes             = 4; // 1..16, any order
+  bytes                        counterpart_vault_id = 5; // empty, or 32 bytes
+}
+// escrow.create and escrow.lock both answer this.
 message EscrowCreatedResponse {
   bytes  vault_id            = 1 [(dsm_fixed_len)=32];
   bytes  verdict_cell        = 2 [(dsm_fixed_len)=32]; // K_verdict
@@ -3043,6 +3115,16 @@ message EscrowLockedRequest {
   bytes verdict_cell = 1 [(dsm_fixed_len)=32];
 }
 message EscrowVaultsRequest {}
+// One outcome of an escrow vault's terms, in table order, and what it means
+// for this device.
+message EscrowVaultOutcomeV1 {
+  bytes                   outcome             = 1 [(dsm_max_len)=64];
+  repeated EscrowSignerV1 signers             = 2;
+  bytes                   recipient_genesis   = 3 [(dsm_fixed_len)=32];
+  bytes                   recipient_device_id = 4 [(dsm_fixed_len)=32];
+  bool                    decided_by_this_device = 5; // this device's key is one of its signers
+  bool                    pays_this_device       = 6; // its recipient is this device
+}
 message EscrowVaultV1 {
   bytes           vault_id            = 1 [(dsm_fixed_len)=32];
   bytes           owner_genesis       = 2 [(dsm_fixed_len)=32];
@@ -3055,6 +3137,9 @@ message EscrowVaultV1 {
   string          amount_display      = 9;
   uint64          generation          = 10;
   SofiVaultStatus status              = 11; // RETIRED once released
+  repeated EscrowVaultOutcomeV1 outcomes = 12; // the terms' outcomes, in table order
+  bytes           program             = 13 [(dsm_max_len)=32]; // a computed vault (S22): the program P its outcome is computed by; empty for a signed vault
+  string          program_name        = 14; // P's name and rules version when this wallet registered it, as Rust renders it
 }
 message EscrowVaultsResponse {
   repeated EscrowVaultV1 vaults = 1;
@@ -3641,6 +3726,20 @@ message BalanceGetResponse {
   // keyed by the appliance's bundle, and only the appliance states its bundle.
   // Absent means unknown, never zero.
   OfflineAllocationView offline_allocation = 15;
+  // What kind of holding the token is, decided by Rust from its committed
+  // supply: a token that exists exactly once (a creature, an item) is a state
+  // object, anything else a currency. The wallet lists the two apart; a screen
+  // that decided it from the amount or the ticker would carry its own rule.
+  BalanceHolding holding = 16;
+}
+
+// What kind of holding a balance row is (BalanceGetResponse.holding).
+enum BalanceHolding {
+  BALANCE_HOLDING_UNSPECIFIED = 0;
+  // Fungible: counted in units.
+  BALANCE_HOLDING_CURRENCY = 1;
+  // A token whose whole supply is one: a state object, held or not.
+  BALANCE_HOLDING_STATE_OBJECT = 2;
 }
 
 // Cash in hand: what this device has loaded into its offline allocation of a
@@ -4130,7 +4229,6 @@ enum SdkEventKind {
   SDK_EVENT_KIND_WALLET_REFRESH = 5;
   SDK_EVENT_KIND_IDENTITY_READY = 6;
   SDK_EVENT_KIND_ENV_CONFIG_ERROR = 7;
-  SDK_EVENT_KIND_BIOMETRIC_RESULT = 8;
   SDK_EVENT_KIND_QR_SCAN_RESULT = 9;
   SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS = 10;
   SDK_EVENT_KIND_DETERMINISTIC_SAFETY = 11;
@@ -4245,7 +4343,6 @@ enum NativeHostRequestKind {
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
 
   // platform_primitive.*
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
   // Declared host primitives no host implemented and no caller issued.
@@ -4281,7 +4378,6 @@ enum NativeHostEventKind {
   // the policy wants); the frontend had nothing listening for it.
   reserved 2;
   reserved "NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS";
-  NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
   NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
   NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
   NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
@@ -4303,18 +4399,6 @@ message HostPermissionsRequestPayload {
 message HostPermissionsResult {
   repeated string granted_permissions = 1;
   bool all_granted = 2;
-}
-
-message BiometricAuthorizePayload {
-  string prompt_title = 1 [(dsm_max_len)=128];
-  string prompt_subtitle = 2 [(dsm_max_len)=256];
-  string negative_text = 3 [(dsm_max_len)=64];
-}
-
-message BiometricAuthorizeResult {
-  bool success = 1;
-  uint32 error_code = 2;
-  string error_message = 3 [(dsm_max_len)=256];
 }
 
 message NfcTagReadPayload {
@@ -4550,6 +4634,9 @@ enum ConnectScopeKind {
   CONNECT_SCOPE_KIND_PAY           = 2; // pay the application's account
   CONNECT_SCOPE_KIND_SWAP          = 3; // quote and trade between the two tokens of `pair`
   CONNECT_SCOPE_KIND_HOLDINGS      = 4; // prove holdings of the application's tokens
+  CONNECT_SCOPE_KIND_ESCROW        = 5; // lock stakes in matches the application referees, and collect results (DSM Amendment A12)
+  CONNECT_SCOPE_KIND_DUEL          = 6; // stake in matches a pinned program decides, play their moves, settle and collect (SoFi Amendment S22)
+  CONNECT_SCOPE_KIND_CONTACTS      = 7; // read the DSM identities of the wallet's contacts, nothing more (DSM Amendment A16)
 }
 
 // A cap on one token a scope may spend, in that token's base units.
@@ -4564,8 +4651,10 @@ message ConnectScopeV1 {
   // SWAP: the two tokens of the pair, in either order. HOLDINGS: the tokens
   // the application may ask about (objects it issued are always included).
   repeated bytes        policy_commits = 2 [(dsm_fixed_len)=32];
-  // PAY and SWAP: the tokens it may spend and how much.
+  // PAY, SWAP, ESCROW and DUEL: the tokens it may spend (ESCROW, DUEL: lock) and how much.
   repeated ConnectCapV1 caps = 3;
+  // DUEL: the outcome programs, by the hash P each is pinned by, whose matches it may stake in.
+  repeated bytes        programs = 4 [(dsm_fixed_len)=32];
 }
 
 message AppConnectOfferBodyV1 {
@@ -4601,19 +4690,175 @@ message ConnectPayV1 {
   uint64 amount        = 2; // base units
   string memo          = 3 [(dsm_max_len)=256];
 }
+// A vault this account owns, at the generation of a baseline it published
+// (SoFi Amendment S24), with the session wallet's witness under that
+// baseline's root: the vault's state leaf and the wallet's relationship proof.
+// It carries no authority; the wallet authenticates the baseline it reads
+// under vault_baseline_locator(v, g) and checks the witness against its root.
+message ConnectVaultWitnessV1 {
+  bytes  vault_id    = 1 [(dsm_fixed_len)=32];
+  uint64 generation  = 2;
+  bytes  witness_ccb = 3 [(dsm_max_len)=65536]; // class 0x0072
+}
 message ConnectQuoteV1 {
   bytes  token_in  = 1 [(dsm_fixed_len)=32];
   bytes  token_out = 2 [(dsm_fixed_len)=32];
   uint64 amount_in = 3; // base units of token_in
+  repeated ConnectVaultWitnessV1 vault_witnesses = 4;
 }
 message ConnectSwapV1 {
   bytes  token_in       = 1 [(dsm_fixed_len)=32];
   bytes  token_out      = 2 [(dsm_fixed_len)=32];
   uint64 amount_in      = 3; // base units of token_in
   uint64 min_amount_out = 4; // base units of token_out
+  repeated ConnectVaultWitnessV1 vault_witnesses = 5;
 }
 message ConnectHoldingsV1 {
   repeated bytes policy_commits = 1 [(dsm_fixed_len)=32];
+}
+// Which of the wallet's contacts are who (DSM Amendment A16): asks for their
+// DSM identities. Nothing else about a contact leaves the wallet.
+message ConnectContactsV1 {
+}
+// One contact of the wallet, as an application may see it: its device id.
+message ConnectContactV1 {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+}
+// The wallet's contacts, excluding the accounts of the applications it is
+// connected to (DSM Amendment A16). The wallet's word: no other evidence.
+message ConnectContactsResultV1 {
+  repeated ConnectContactV1 contacts = 1;
+}
+// Lock a stake for a match the application referees (DSM Amendment A12). The
+// wallet builds the escrow terms itself from one fixed outcome table: a-wins
+// and b-wins, decided by the application's key, pay A and B; cancel, decided
+// by both players, and void, decided by the application's key, each pay the
+// vault's own owner back. The request names no branch, signer or recipient.
+message ConnectEscrowLockV1 {
+  bytes  external             = 1 [(dsm_max_len)=256]; // X, the match's agreed bytes: 1..256
+  bytes  policy_commit        = 2 [(dsm_fixed_len)=32];
+  uint64 amount               = 3;                     // base units, > 0
+  uint32 side                 = 4;                     // the wallet's side: 1 = A, 2 = B
+  bytes  opponent_genesis     = 5 [(dsm_fixed_len)=32];
+  bytes  opponent_device_id   = 6 [(dsm_fixed_len)=32];
+  bytes  opponent_signing_key = 7 [(dsm_max_len)=64];  // the opponent's key as escrow.party names it
+  bytes  counterpart_vault_id = 8 [(dsm_max_len)=32];  // side B: side A's vault; side A: empty
+  string memo                 = 9 [(dsm_max_len)=256];
+}
+// Collect a match result: each named vault released to this wallet, once its
+// verdict cell's verdict is final on a branch that pays it.
+message ConnectEscrowReleaseV1 {
+  repeated bytes vault_ids = 1 [(dsm_fixed_len)=32]; // 1..2
+}
+
+// ---- Computed matches (SoFi Amendment S22): a stake decided by a pinned
+// program from both players' signed transcript, with no referee. ----
+
+// This wallet's session public key for the match whose setup carries
+// `match_nonce`: what the application puts in the setup for the wallet's side.
+// Derived in the wallet from its own seed; its secret never leaves the wallet.
+message ConnectDuelSessionKeyV1 {
+  bytes match_nonce = 1 [(dsm_fixed_len)=32];
+}
+// Lock a stake in the match `setup` describes. The wallet reads the setup with
+// the program it registered, finds itself on `side` with its own session key,
+// and builds the computed escrow terms itself: a-wins pays A, b-wins pays B,
+// void refunds the vault's owner.
+message ConnectDuelLockV1 {
+  bytes  setup                = 1 [(dsm_max_len)=16384]; // the canonical setup both wallets lock
+  uint32 side                 = 2;                       // the wallet's side: 1 = A, 2 = B
+  bytes  policy_commit        = 3 [(dsm_fixed_len)=32];
+  uint64 amount               = 4;                       // base units, > 0
+  bytes  opponent_genesis     = 5 [(dsm_fixed_len)=32];
+  bytes  opponent_device_id   = 6 [(dsm_fixed_len)=32];
+  bytes  counterpart_vault_id = 7 [(dsm_max_len)=32];    // the other side's vault when it locked first; may be empty
+  string memo                 = 8 [(dsm_max_len)=256];
+  // The opponent's holdings of exactly the creatures the setup fields for it,
+  // as its own wallet proved them, relayed by the application. The wallet
+  // verifies it against the opponent's validated economic root itself and
+  // locks nothing without it.
+  HoldingsProofV1 opponent_holdings = 9;
+}
+// Ready the wallet for the match: it verifies both players' vaults, then signs
+// its ready. With the other side's ready signature, it readies second and
+// writes the Start.
+message ConnectDuelReadyV1 {
+  bytes match_cell     = 1 [(dsm_fixed_len)=32];
+  bytes opponent_ready = 2 [(dsm_max_len)=65535]; // empty when this wallet readies first
+}
+// Withdraw from the match while no Start holds its start cell: void, both refunded.
+message ConnectDuelWithdrawV1 {
+  bytes match_cell = 1 [(dsm_fixed_len)=32];
+}
+// A transcript entry (class 0x0068) and its side's signature over the head after it.
+message ConnectDuelSignedEntryV1 {
+  bytes entry     = 1 [(dsm_max_len)=128];
+  bytes signature = 2 [(dsm_max_len)=65535];
+}
+// Sign the wallet's next entry: the other side's signed entries since the
+// wallet's last one, then the wallet's own entry. Nothing is written to storage.
+message ConnectDuelSignV1 {
+  bytes                             match_cell = 1 [(dsm_fixed_len)=32];
+  repeated ConnectDuelSignedEntryV1 preceding  = 2;
+  bytes                             entry      = 3 [(dsm_max_len)=128];
+}
+// Settle the match: the other side's last signed entries, then the wallet writes
+// the transcript (or the proof the other side equivocated) to the match cell.
+message ConnectDuelSettleV1 {
+  bytes                             match_cell = 1 [(dsm_fixed_len)=32];
+  repeated ConnectDuelSignedEntryV1 entries    = 2;
+}
+// Collect a computed match's result: each named vault released to this wallet,
+// once the match cell's outcome is final on a branch that pays it.
+message ConnectDuelCollectV1 {
+  repeated bytes vault_ids = 1 [(dsm_fixed_len)=32]; // 1..2
+}
+
+// ---- Authored objects: content-addressed immutable objects an account
+// publishes under a topic of its own, each signed by its author's AK. Any
+// reader finds an author's objects on a topic by one locator and checks each
+// from its own bytes: the AK and AttA derive the author's device id, and the
+// AK signed the body. Nothing more is decided here: what the payloads mean
+// is the reader's. ----
+
+// The signed part of an authored object.
+message AuthoredObjectBodyV1 {
+  bytes author_genesis   = 1 [(dsm_fixed_len)=32];
+  bytes author_device_id = 2 [(dsm_fixed_len)=32]; // H(DSM/devid ‖ AK ‖ AttA)
+  bytes author_ak        = 3 [(dsm_max_len)=64];
+  bytes author_att_a     = 4 [(dsm_fixed_len)=32];
+  bytes topic            = 5 [(dsm_fixed_len)=32]; // the author's own name for what the objects are about
+  bytes payload          = 6 [(dsm_max_len)=16384];
+}
+// An authored object as storage holds it: the body and the author's
+// signature over H(DSM/object/authored-statement/v1 ‖ body).
+message AuthoredObjectV1 {
+  bytes body      = 1 [(dsm_max_len)=20480]; // AuthoredObjectBodyV1
+  bytes signature = 2 [(dsm_max_len)=65535];
+}
+// authored.publish: this account publishes `payload` under `topic`.
+message AuthoredPublishRequestV1 {
+  bytes topic   = 1 [(dsm_fixed_len)=32];
+  bytes payload = 2 [(dsm_max_len)=16384];
+}
+message AuthoredPublishedResponse {
+  bytes address = 1 [(dsm_fixed_len)=32]; // the object's immutable address
+  bytes locator = 2 [(dsm_fixed_len)=32]; // H(DSM/object/authored-locator/v1 ‖ author device id ‖ topic)
+  bool  stored  = 3;                      // Stored, read back from the members
+}
+// authored.read: every object `author_device_id` published under `topic`.
+message AuthoredReadRequestV1 {
+  bytes author_device_id = 1 [(dsm_fixed_len)=32];
+  bytes topic            = 2 [(dsm_fixed_len)=32];
+}
+message AuthoredObjectReadV1 {
+  bytes address        = 1 [(dsm_fixed_len)=32];
+  bytes author_genesis = 2 [(dsm_fixed_len)=32];
+  bytes payload        = 3 [(dsm_max_len)=16384];
+}
+message AuthoredObjectsResponse {
+  repeated AuthoredObjectReadV1 objects  = 1; // in append order, each verified from its own bytes
+  bool                          complete = 2; // every candidate under the locator was read
 }
 
 // session_id = H(DSM/connect/session ‖ offer_digest ‖ wallet device id).
@@ -4626,6 +4871,16 @@ message AppRequestBodyV1 {
     ConnectQuoteV1        quote         = 12;
     ConnectSwapV1         swap          = 13;
     ConnectHoldingsV1     holdings      = 14;
+    ConnectEscrowLockV1    escrow_lock    = 15;
+    ConnectEscrowReleaseV1 escrow_release = 16;
+    ConnectDuelSessionKeyV1 duel_session_key = 17;
+    ConnectDuelLockV1       duel_lock        = 18;
+    ConnectDuelReadyV1      duel_ready       = 19;
+    ConnectDuelWithdrawV1   duel_withdraw    = 20;
+    ConnectDuelSignV1       duel_sign        = 21;
+    ConnectDuelSettleV1     duel_settle      = 22;
+    ConnectDuelCollectV1    duel_collect     = 23;
+    ConnectContactsV1       contacts         = 24;
   }
 }
 message AppRequestV1 {
@@ -4676,6 +4931,62 @@ message ConnectSwapResultV1 {
   SofiPositionState state    = 2;
   repeated bytes    vault_ids = 3 [(dsm_fixed_len)=32];
 }
+// A stake the wallet locked: a notification, never evidence.
+message ConnectEscrowLockResultV1 {
+  bytes  vault_id            = 1 [(dsm_fixed_len)=32];
+  bytes  verdict_cell        = 2 [(dsm_fixed_len)=32]; // K_verdict
+  bytes  external_commitment = 3 [(dsm_fixed_len)=32]; // Y
+  uint64 position            = 4; // the wallet's economic position that carries the lock
+}
+message ConnectEscrowReleasedV1 {
+  bytes             vault_id = 1 [(dsm_fixed_len)=32];
+  uint64            position = 2; // the wallet's economic position the release took
+  SofiPositionState state    = 3;
+}
+// The vaults the wallet released for a collect: a notification, never evidence.
+message ConnectEscrowReleaseResultV1 {
+  repeated ConnectEscrowReleasedV1 released = 1;
+}
+
+message ConnectDuelSessionKeyResultV1 {
+  bytes  session_public_key = 1 [(dsm_max_len)=64];
+  uint32 signature_alg      = 2;
+}
+// A stake the wallet locked in a computed match: a notification, never evidence.
+message ConnectDuelLockResultV1 {
+  bytes  vault_id            = 1 [(dsm_fixed_len)=32];
+  bytes  match_cell          = 2 [(dsm_fixed_len)=32]; // K_match
+  bytes  start_cell          = 3 [(dsm_fixed_len)=32]; // K_start
+  bytes  external_commitment = 4 [(dsm_fixed_len)=32]; // Y = H(DSM/external/v1 ‖ setup)
+  bytes  program             = 5 [(dsm_fixed_len)=32]; // P
+  bytes  session_public_key  = 6 [(dsm_max_len)=64];
+  uint64 position            = 7;
+}
+enum ConnectDuelStart {
+  CONNECT_DUEL_START_UNSPECIFIED = 0;
+  CONNECT_DUEL_START_OPEN        = 1; // nothing holds the start cell
+  CONNECT_DUEL_START_STARTED     = 2; // a Start holds it: both sides readied
+  CONNECT_DUEL_START_WITHDRAWN   = 3; // a Withdraw holds it: void, both refunded
+}
+// What a computed match's cells hold, as the wallet's verifier read them.
+message ConnectDuelCellsV1 {
+  bytes              match_cell      = 1 [(dsm_fixed_len)=32];
+  bytes              start_cell      = 2 [(dsm_fixed_len)=32];
+  ConnectDuelStart   start           = 3;
+  EscrowVerdictState start_state     = 4;
+  bytes              outcome         = 5 [(dsm_max_len)=64]; // the occupant's label; empty while none
+  EscrowVerdictState outcome_state   = 6;
+  bool               by_equivocation = 7; // the occupant is the proof that the other side equivocated
+}
+message ConnectDuelReadyResultV1 {
+  bytes              ready_signature = 1 [(dsm_max_len)=65535];
+  ConnectDuelCellsV1 cells           = 2;
+}
+message ConnectDuelSignResultV1 {
+  uint32 index     = 1;
+  bytes  head      = 2 [(dsm_fixed_len)=32];
+  bytes  signature = 3 [(dsm_max_len)=65535];
+}
 
 message AppResponseBodyV1 {
   bytes          session_id = 1 [(dsm_fixed_len)=32];
@@ -4686,6 +4997,14 @@ message AppResponseBodyV1 {
     ConnectQuoteResultV1 quote    = 10;
     ConnectSwapResultV1  swap     = 11;
     HoldingsProofV1      holdings = 12;
+    ConnectEscrowLockResultV1    escrow_lock    = 13;
+    ConnectEscrowReleaseResultV1 escrow_release = 14; // also a computed match's collect
+    ConnectDuelSessionKeyResultV1 duel_session_key = 15;
+    ConnectDuelLockResultV1       duel_lock        = 16;
+    ConnectDuelReadyResultV1      duel_ready       = 17;
+    ConnectDuelCellsV1            duel_cells       = 18; // a withdraw's or a settle's
+    ConnectDuelSignResultV1       duel_sign        = 19;
+    ConnectContactsResultV1       contacts         = 20;
   }
 }
 message AppResponseV1 {
@@ -4738,6 +5057,10 @@ message ConnectSessionV1 {
   repeated string         scope_lines   = 9;
   string                  last_error    = 10; // why the last sync with it did not complete; empty when it did
   bytes                   offer_digest  = 11 [(dsm_fixed_len)=32]; // the offer the session was connected from
+  // The peer's identity as its contact card names it: what an escrow lock (A12)
+  // names an opponent by. Application side: the wallet's; wallet side: the application's.
+  bytes                   peer_genesis     = 12 [(dsm_fixed_len)=32];
+  bytes                   peer_signing_key = 13 [(dsm_max_len)=64];
 }
 message ConnectSessionsV1 {
   repeated ConnectSessionV1 sessions = 1;
@@ -4799,6 +5122,16 @@ message ConnectAppRequestIntentV1 {
     ConnectQuoteV1        quote         = 12;
     ConnectSwapV1         swap          = 13;
     ConnectHoldingsV1     holdings      = 14;
+    ConnectEscrowLockV1    escrow_lock    = 15;
+    ConnectEscrowReleaseV1 escrow_release = 16;
+    ConnectDuelSessionKeyV1 duel_session_key = 17;
+    ConnectDuelLockV1       duel_lock        = 18;
+    ConnectDuelReadyV1      duel_ready       = 19;
+    ConnectDuelWithdrawV1   duel_withdraw    = 20;
+    ConnectDuelSignV1       duel_sign        = 21;
+    ConnectDuelSettleV1     duel_settle      = 22;
+    ConnectDuelCollectV1    duel_collect     = 23;
+    ConnectContactsV1       contacts         = 24;
   }
 }
 message ConnectAppRequestsQueryV1 {
@@ -4815,6 +5148,12 @@ enum ConnectFact {
   CONNECT_FACT_NONE        = 1; // nothing DSM-evidenced yet; an answer alone is never a fact
   CONNECT_FACT_PAID        = 2; // the transfer is accepted onto the application's own relationship
   CONNECT_FACT_HOLDINGS    = 3; // the holdings proof verified
+  CONNECT_FACT_ESCROW_LOCKED   = 4; // the wallet's Active vault holds the stake under exactly the match's template, on its verdict cell
+  CONNECT_FACT_ESCROW_RELEASED = 5; // each named vault is Retired, and the cell's final verdict (a computed match: its final outcome) pays the wallet
+  CONNECT_FACT_DUEL_LOCKED     = 6; // the wallet's Active computed vault holds the stake under exactly the setup's terms, on its match cell
+  CONNECT_FACT_DUEL_STARTED    = 7; // a Start holds the match's start cell: both sides readied
+  CONNECT_FACT_DUEL_WITHDRAWN  = 8; // a Withdraw holds the match's start cell: void
+  CONNECT_FACT_DUEL_SETTLED    = 9; // an occupant the registered program recognizes holds the match cell on `fact_detail`'s outcome
 }
 message VerifiedHoldingV1 {
   bytes  policy_commit = 1 [(dsm_fixed_len)=32];
@@ -4833,6 +5172,16 @@ message ConnectAppStatusV1 {
   ConnectQuoteResultV1       quote       = 10; // a quote is information, never a fact
   ConnectSwapResultV1        swap        = 11;
   bytes                      paid_tx     = 12; // FACT_PAID: the accepted transfer's id
+  // FACT_ESCROW_LOCKED: the wallet's vault. FACT_ESCROW_RELEASED: the vaults released.
+  repeated bytes             escrow_vault_ids    = 13 [(dsm_fixed_len)=32];
+  bytes                      escrow_verdict_cell = 14 [(dsm_max_len)=32]; // the match's K_verdict; empty while no escrow fact holds
+  uint64                     escrow_amount       = 15; // FACT_ESCROW_LOCKED, FACT_DUEL_LOCKED: the stake, in base units
+  ConnectDuelCellsV1         duel_cells          = 16; // FACT_DUEL_*: the match's cells as this account read them
+  // The wallet's signed answer body (AppResponseBodyV1) exactly as it verified,
+  // for the application to read a result to relay to the other player, such as
+  // a duel's session key, ready or entry signature: never a fact; each is
+  // checked where it is used. Empty while unanswered.
+  bytes                      answer_body         = 17 [(dsm_max_len)=1048576];
 }
 
 // One envelope payload for every DSM Connect reply.

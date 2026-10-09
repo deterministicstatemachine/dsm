@@ -21,6 +21,7 @@ pub use bilateral_impl::BiImpl;
 pub use core_bridge_adapters::{install_app_router_adapter, is_app_router_installed};
 pub mod anchor_routes;
 pub mod artifact_republish; // the ONE generic sweep for frozen publication artifacts
+pub mod authored_routes;
 #[cfg(test)]
 mod balance_list_tests;
 #[cfg(test)]
@@ -30,7 +31,13 @@ pub mod bitcoin_helpers;
 pub mod bitcoin_invoke_routes;
 pub mod bitcoin_query_routes;
 #[cfg(test)]
+mod computed_escrow_e2e_tests;
+#[cfg(test)]
+mod connect_duel_e2e_tests;
+#[cfg(test)]
 mod connect_e2e_tests;
+#[cfg(test)]
+mod connect_escrow_e2e_tests;
 pub mod connect_routes;
 pub mod contacts_routes;
 #[cfg(test)]
@@ -39,14 +46,14 @@ pub mod escrow_routes;
 #[cfg(test)]
 mod faucet_flow_tests;
 pub mod faucet_routes;
-#[cfg(test)]
-mod frontier_verification_tests;
 pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
 #[cfg(test)]
 mod node_e2e_tests;
 pub mod offline_cash_routes;
+#[cfg(test)]
+mod one_hop_verification_tests;
 pub mod online_finalize;
 pub mod prefs_routes;
 #[cfg(test)]
@@ -66,7 +73,7 @@ pub mod system_routes;
 #[cfg(test)]
 mod token_adoption_tests;
 #[cfg(test)]
-mod token_create_tests;
+pub(crate) mod token_create_tests;
 pub mod token_routes;
 pub mod transfer_helpers;
 pub mod wallet_routes;

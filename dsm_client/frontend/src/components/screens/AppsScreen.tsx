@@ -10,6 +10,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as connect from '../../dsm/connect';
 import { onConnectLink, takeConnectLink } from '../../dsm/connectLink';
+import { returnToConnectCaller } from '../../dsm/WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
 import { Disclosure, Notice, ScreenFrame, ScreenTabs, middleTruncate } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
@@ -45,6 +46,10 @@ function SessionCard({
   busy: boolean;
   onDisconnect: (s: connect.Session) => void;
 }): React.JSX.Element {
+  // The card shows the app, that it is connected, and Disconnect. What it was
+  // granted, and what this wallet did for it, open from the header: they are
+  // read in full on the approval screen.
+  const [shown, setShown] = useState<'summary' | 'details'>('summary');
   const [entries, setEntries] = useState<connect.LogEntry[] | null>(null);
   const [logError, setLogError] = useState<string | null>(null);
   const loadLog = useCallback(async () => {
@@ -57,10 +62,24 @@ function SessionCard({
   }, [session.sessionId]);
   return (
     <section className="sb-card" data-testid="connected-app">
-      <div className="sb-row sb-row--between">
-        <b>{session.displayName}</b>
-        <span className="sb-hint">{session.connected ? 'connected' : 'disconnected'}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <b style={{ flex: 1, minWidth: 0 }}>{session.displayName}</b>
+        <span className="sb-hint" style={{ margin: 0 }}>{session.connected ? 'connected' : 'disconnected'}</span>
+        <button
+          type="button"
+          className="sb-btn sb-btn--small"
+          aria-expanded={shown === 'details'}
+          aria-label={shown === 'details' ? `Hide ${session.displayName}'s details` : `Show ${session.displayName}'s details`}
+          onClick={() => setShown(shown === 'details' ? 'summary' : 'details')}
+        >
+          {shown === 'details' ? '▴' : '▾'}
+        </button>
       </div>
+      {session.lastError !== '' && (
+        <Notice kind="info">{session.lastError}</Notice>
+      )}
+      {shown === 'details' && (
+      <>
       <div className="sb-hint sb-hint--tight">
         Account {short(session.peerDeviceId)} · {session.endpoint}
       </div>
@@ -76,9 +95,6 @@ function SessionCard({
         </div>
       )}
       <div className="sb-hint">Requests handled: {session.lastSeq.toString()}</div>
-      {session.lastError !== '' && (
-        <Notice kind="info">{session.lastError}</Notice>
-      )}
       <Disclosure summary="What this wallet did for it">
         {logError !== null && <Notice kind="error">{logError}</Notice>}
         {entries === null ? (
@@ -98,6 +114,8 @@ function SessionCard({
           </ul>
         )}
       </Disclosure>
+      </>
+      )}
       {session.connected && (
         <button
           type="button"
@@ -121,6 +139,8 @@ export default function AppsScreen(): React.JSX.Element {
   const [sessions, setSessions] = useState<connect.Session[]>([]);
   const [waiting, setWaiting] = useState<connect.Pending[]>([]);
   const [code, setCode] = useState('');
+  // The code a link from another app on this phone brought, while it is the one shown.
+  const [linkedCode, setLinkedCode] = useState<string | null>(null);
   const [offer, setOffer] = useState<connect.Preview | null>(null);
   /// A camera scan this screen started and has not heard back from. The
   /// camera answers on the shared `dsm-event` channel, so a result is this
@@ -146,6 +166,7 @@ export default function AppsScreen(): React.JSX.Element {
       setTab('apps');
       setOffer(null);
       setCode(linked);
+      setLinkedCode(linked);
       setStatus({ kind: 'info', text: 'An app on this phone handed over its connect code. READ it to see what it asks for.' });
     };
     show();
@@ -223,8 +244,12 @@ export default function AppsScreen(): React.JSX.Element {
     run('Connecting', async () => {
       if (offer === null) throw new Error('read a code first');
       const connected = await connect.approve(offer.offerDigest);
+      const fromLink = linkedCode !== null && linkedCode === code;
       setOffer(null);
       setCode('');
+      setLinkedCode(null);
+      // The app on this phone that sent the code is where the player goes on.
+      if (fromLink) await returnToConnectCaller();
       return `Connected to ${connected.displayName}.`;
     });
 

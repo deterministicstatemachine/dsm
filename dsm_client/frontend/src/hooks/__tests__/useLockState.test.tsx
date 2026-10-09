@@ -5,14 +5,13 @@ import { render, act } from '@testing-library/react';
 import type { AppState } from '../../types/app';
 import { useLockState } from '../useLockState';
 import { LOCK_SETUP_COMPLETE_EVENT } from '../../services/lock/lockService';
-import { lockSessionViaRouter, unlockSessionViaRouter } from '../../dsm/WebViewBridge';
+import { lockSessionViaRouter } from '../../dsm/WebViewBridge';
 
 jest.mock('../../dsm/WebViewBridge', () => ({
   lockSessionViaRouter: jest.fn().mockResolvedValue(undefined),
-  unlockSessionViaRouter: jest.fn().mockResolvedValue(undefined),
 }));
 
-let hookResult: { lock: () => void; unlock: () => Promise<void> };
+let hookResult: { lock: () => void };
 
 function Harness(props: { appState: AppState }) {
   hookResult = useLockState(props);
@@ -20,7 +19,6 @@ function Harness(props: { appState: AppState }) {
 }
 
 const mockedLockSessionViaRouter = lockSessionViaRouter as jest.MockedFunction<typeof lockSessionViaRouter>;
-const mockedUnlockSessionViaRouter = unlockSessionViaRouter as jest.MockedFunction<typeof unlockSessionViaRouter>;
 
 describe('useLockState', () => {
   afterEach(() => {
@@ -42,14 +40,6 @@ describe('useLockState', () => {
     act(() => { hookResult.lock(); });
 
     expect(mockedLockSessionViaRouter).not.toHaveBeenCalled();
-  });
-
-  it('unlock() calls unlockSessionViaRouter', async () => {
-    render(<Harness appState="locked" />);
-
-    await act(async () => { await hookResult.unlock(); });
-
-    expect(mockedUnlockSessionViaRouter).toHaveBeenCalledTimes(1);
   });
 
   it('locks after LOCK_SETUP_COMPLETE_EVENT with delay', () => {
