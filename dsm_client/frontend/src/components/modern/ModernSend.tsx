@@ -42,7 +42,18 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
   const contact: DomainContact | null = contacts.find((c) => c.deviceId === recipient) ?? null;
   const token = tokens.find((b) => b.tokenId === tokenId) ?? (tokens.length > 0 ? tokens[0] : null);
   const amountOk = /^\d+(\.\d+)?$/.test(amount.trim()) && Number(amount) > 0;
-  const ready = contact !== null && token !== null && amountOk;
+  // What still stands between the form and a review, said rather than shown
+  // as a grey button.
+  const missing = contact === null
+    ? 'Choose who to send to.'
+    : token === null
+      ? 'There is no token to send yet.'
+      : amountOk
+        ? null
+        : 'Enter an amount above zero.';
+  // Set once Review Send is tapped while something is missing: from then on
+  // the screen says what is still missing, and stops once nothing is.
+  const [tried, setTried] = useState<'tried' | 'not_tried'>('not_tried');
 
   const send = () => {
     if (contact === null || token === null) return;
@@ -122,7 +133,12 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
           inputMode="decimal"
           placeholder="0"
           value={amount}
-          onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ''))}
+          onChange={(e) => {
+            // A comma is the decimal point on some keyboards; one point is kept.
+            const typed = e.target.value.replace(/,/g, '.').replace(/[^\d.]/g, '');
+            const point = typed.indexOf('.');
+            setAmount(point < 0 ? typed : `${typed.slice(0, point + 1)}${typed.slice(point + 1).replace(/\./g, '')}`);
+          }}
         />
         <div className="s-quick">
           {QUICK.map((q) => (
@@ -156,9 +172,21 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
         </div>
       ) : null}
 
-      <button type="button" className="s-btn s-btn-primary" disabled={!ready} onClick={() => setStage({ kind: 'review' })}>
+      <button
+        type="button"
+        className={`s-btn s-btn-primary${missing !== null ? ' s-btn-waiting' : ''}`}
+        aria-disabled={missing !== null}
+        onClick={() => {
+          if (missing !== null) {
+            setTried('tried');
+            return;
+          }
+          setStage({ kind: 'review' });
+        }}
+      >
         <Icon name="send" /> Review Send
       </button>
+      {tried === 'tried' && missing !== null ? <p className="s-hint" role="alert" style={{ textAlign: 'center', marginTop: 10 }}>{missing}</p> : null}
 
       <UnderConstructionModal title="Offline" message={notice} onClose={() => setNotice(null)} />
 

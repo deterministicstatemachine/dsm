@@ -189,6 +189,18 @@ describe('the Modern skin', () => {
     expect(within(screen.getByLabelText('Available balance')).getByText('5.00')).toBeInTheDocument();
     expect(within(screen.getByLabelText('Available balance')).getByText('GOLD')).toBeInTheDocument();
   });
+
+  it('says what is missing when Review Send is tapped too soon, and takes a comma as the decimal point', () => {
+    renderShell();
+    act(() => modernNav.open({ kind: 'send', to: JANE }));
+    fireEvent.click(screen.getByRole('button', { name: /Review Send/ }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter an amount above zero.');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Amount' }), { target: { value: '1,5' } });
+    expect(screen.getByRole('textbox', { name: 'Amount' })).toHaveValue('1.5');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Review Send/ }));
+    expect(screen.getByRole('dialog', { name: 'Review send' })).toHaveTextContent('Send 1.5 ERA?');
+  });
 });
 
 describe('what the Modern skin reaches', () => {

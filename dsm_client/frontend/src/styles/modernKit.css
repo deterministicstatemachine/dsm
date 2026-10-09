@@ -203,3 +203,41 @@ html[data-skin="modern"] .bilateral-transfer-value { color: var(--s-text); font-
 html[data-skin="modern"] .bilateral-transfer-actions { padding-left: 0; padding-right: 0; gap: 10px; }
 html[data-skin="modern"] .sb-popover .sb-actions { gap: 10px; }
 html[data-skin="modern"] .sb-popover .sb-btn[style] { color: var(--s-text) !important; border-color: transparent !important; background: var(--s-surface-2) !important; }
+
+/* ---- The transfer and confirm dialogs, every part of them ---- */
+html[data-skin="modern"] .bilateral-transfer-message,
+html[data-skin="modern"] .bilateral-transfer-info,
+html[data-skin="modern"] .bilateral-transfer-status-message {
+  background: none; border: none; border-radius: 0; padding: 0; margin: 0 0 10px;
+  color: var(--s-muted); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 16px; text-align: left;
+}
+html[data-skin="modern"] .bilateral-transfer-info { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--s-line); padding: 10px 0; margin: 0; }
+html[data-skin="modern"] .bilateral-transfer-actions { border-top: none; margin-top: 8px; }
+html[data-skin="modern"] .bilateral-transfer-status {
+  background: var(--s-bg); background-image: none; border: none; border-radius: 20px; color: var(--s-text);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18); image-rendering: auto;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-skin="modern"] .bilateral-transfer-status-header { border-bottom: none; }
+html[data-skin="modern"] .bilateral-transfer-status-header h4 {
+  color: var(--s-text); font-family: inherit; font-size: 18px; font-weight: 900; text-transform: none; letter-spacing: 0;
+}
+html[data-skin="modern"] .bilateral-transfer-status-progress::before { background: var(--s-line); }
+html[data-skin="modern"] .progress-step { color: var(--s-muted); font-family: inherit; text-transform: none; letter-spacing: 0; font-size: 13px; }
+html[data-skin="modern"] .progress-step::before { background: var(--s-surface-2); border: none; border-radius: 50%; }
+html[data-skin="modern"] .progress-step.active { color: var(--s-text); }
+html[data-skin="modern"] .progress-step.active::before { background: var(--s-fuchsia); }
+html[data-skin="modern"] .bilateral-spinner { border-color: var(--s-surface-2); border-top-color: var(--s-fuchsia); }
+html[data-skin="modern"] .bilateral-btn-reject:hover:not(:disabled),
+html[data-skin="modern"] .bilateral-btn-reject:active:not(:disabled) { background: var(--s-surface-2); filter: none; transform: none; box-shadow: none; }
+html[data-skin="modern"] .bilateral-btn-accept:hover:not(:disabled),
+html[data-skin="modern"] .bilateral-btn-accept:active:not(:disabled) { background: var(--s-primary); color: var(--s-on-primary); filter: none; transform: none; box-shadow: none; }
+
+/* ---- The toast at the bottom of the screen (its Game Boy colours are set inline) ---- */
+html[data-skin="modern"] .wallet-toast {
+  position: fixed !important; bottom: calc(84px + env(safe-area-inset-bottom)) !important; left: 16px !important; right: 16px !important;
+  border: none !important; border-radius: 16px !important; padding: 14px 16px !important;
+  background: var(--s-text) !important; color: var(--s-bg) !important;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 15px !important; font-weight: 700;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}
