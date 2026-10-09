@@ -12,7 +12,8 @@
 }
 .ba-inner {
   max-width: 560px; margin: 0 auto; box-sizing: border-box;
-  padding: calc(28px + env(safe-area-inset-top)) 20px calc(28px + env(safe-area-inset-bottom));
+  /* The phone keeps this page below the status bar (setSystemBars), so no inset for it here. */
+  padding: 28px 20px calc(28px + env(safe-area-inset-bottom));
 }
 .ba-version { margin: 0 0 6px; font-size: 13px; color: #9a9a9a; }
 .ba-title { margin: 0 0 10px; font-size: 30px; font-weight: 900; line-height: 1.1; color: #ffffff; }

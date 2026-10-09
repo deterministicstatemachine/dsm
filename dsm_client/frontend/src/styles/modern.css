@@ -86,7 +86,7 @@ html[data-skin="modern"] .stateboy-screen-host { height: 100%; }
   display: flex; flex-direction: column; height: 100%; width: 100%;
   background: var(--s-bg); color: var(--s-text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  padding-top: env(safe-area-inset-top);
+  /* No inset for the status bar here: the phone keeps the page below it (setSystemBars). */
 }
 .s-topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px 4px; }
 .s-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
@@ -306,7 +306,7 @@ html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; 
 /* ---- Framing a picture (ImageCropper) ---- */
 .s-crop {
   position: fixed; inset: 0; z-index: 9500; overflow-y: auto; box-sizing: border-box;
-  padding: calc(18px + env(safe-area-inset-top)) 20px calc(18px + env(safe-area-inset-bottom));
+  padding: 18px 20px calc(18px + env(safe-area-inset-bottom));
   background: var(--s-bg); color: var(--s-text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   display: flex; flex-direction: column; gap: 10px;
