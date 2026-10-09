@@ -2,8 +2,10 @@
 
 //! Storage node DB layer: PostgreSQL through `deadpool_postgres::Pool`.
 
+mod committed;
 mod pg;
 
+pub use committed::{CommittedCells, KEPT_CYCLES, KEPT_LEAVES};
 pub use pg::*;
 
 /// The Postgres database the node's unit tests run on.

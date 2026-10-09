@@ -259,6 +259,53 @@ pub mod class {
     pub const SOFI_SETTLEMENT_RELEASE: u16 = 0x0065;
     /// `X_route` preimage branch: a release.
     pub const SOFI_ROUTE_DIGEST_RELEASE: u16 = 0x0066;
+    /// `0x0067` — a computed escrow vault's terms (SoFi Amendment S22): the
+    /// held token, `Y`, the computed table (the program hash, the setup
+    /// digest and one session key per side) and the three branches
+    /// `a-wins`, `b-wins`, `void` with their recipients. The class of the
+    /// object an escrow vault's slots name decides its kind.
+    pub const ESCROW_COMPUTED_TERMS: u16 = 0x0067;
+    /// `0x0068` — one entry of a match transcript (SoFi Amendment S22): its
+    /// index, its side, and a Commit, a Reveal or a Resign. Its canonical
+    /// bytes are what the head chain hashes; it carries no signature.
+    pub const ESCROW_TRANSCRIPT_ENTRY: u16 = 0x0068;
+    /// `0x0069` — a transcript occupying a match cell (SoFi Amendment S22):
+    /// `Y`, the table, the setup, the entries and each side's signature over
+    /// the head of its last entry. It occupies the cell only when it proves
+    /// the outcome from these bytes.
+    pub const ESCROW_TRANSCRIPT_OUTCOME: u16 = 0x0069;
+    /// `0x006A` — two different heads one session key signed at one index
+    /// (SoFi Amendment S22): an occupant of the match cell for the other
+    /// side.
+    pub const ESCROW_EQUIVOCATION_PROOF: u16 = 0x006A;
+    /// `0x006B` — a Start (side B) or a Withdraw (side A) at a match's start
+    /// cell (SoFi Amendment S22).
+    pub const ESCROW_MATCH_START: u16 = 0x006B;
+    /// `0x006C` — a shared lineage's genesis (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENESIS: u16 = 0x006C;
+    /// `0x006D` — a shared lineage's generation (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENERATION: u16 = 0x006D;
+    /// `0x006E` — a generation hint, discovery only (SoFi Amendment S23).
+    pub const SHARED_LINEAGE_GENERATION_HINT: u16 = 0x006E;
+    /// `0x006F` — a 32-generation checkpoint, discovery only (SoFi
+    /// Amendment S23).
+    pub const SHARED_LINEAGE_CHECKPOINT: u16 = 0x006F;
+    /// `0x0070` — a segment's read plan, discovery only (SoFi Amendment
+    /// S23).
+    pub const SHARED_LINEAGE_TRANSITION_BUNDLE: u16 = 0x0070;
+    /// `0x0071` — a vault's frontier `(vault, generation, root)`, which an
+    /// owner baseline binds (SoFi Amendment S24).
+    pub const SOFI_VAULT_FRONTIER: u16 = 0x0071;
+    /// `0x0072` — a vault's state leaf and one trader's relationship proof
+    /// under a frontier's root (SoFi Amendment S24).
+    pub const SOFI_VAULT_FRONTIER_WITNESS: u16 = 0x0072;
+    /// `0x0073` — a frontier commitment and the owner-authority position the
+    /// baseline's signer is proven at (SoFi Amendment S24).
+    pub const SOFI_OWNER_BASELINE_AUTH: u16 = 0x0073;
+    /// `0x0074` — the head of a vault's history: its generation and the
+    /// peaks of the append-only tree whose leaf `g` is `R_g` (SoFi
+    /// Amendment S26).
+    pub const SOFI_VAULT_HISTORY_HEAD: u16 = 0x0074;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

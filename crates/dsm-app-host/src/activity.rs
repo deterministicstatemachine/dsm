@@ -141,9 +141,83 @@ pub fn describe_call(method: &str, args: &[u8]) -> String {
                     "ask the wallet to prove holdings of {} tokens",
                     k.policy_commits.len()
                 ),
+                Some(pb::connect_app_request_intent_v1::Kind::Contacts(..)) => {
+                    "ask the wallet which of its contacts are here".to_string()
+                }
+                Some(pb::connect_app_request_intent_v1::Kind::EscrowLock(k)) => format!(
+                    "ask the wallet to lock {} of {} as side {} against {} ({})",
+                    k.amount,
+                    short(&k.policy_commit),
+                    match k.side {
+                        1 => "A",
+                        2 => "B",
+                        _ => "?",
+                    },
+                    short(&k.opponent_device_id),
+                    k.memo
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::EscrowRelease(k)) => format!(
+                    "ask the wallet to collect a match result from {}",
+                    k.vault_ids
+                        .iter()
+                        .map(|v| short(v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelSessionKey(k)) => format!(
+                    "ask the wallet for its session key for match nonce {}",
+                    short(&k.match_nonce)
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelLock(k)) => format!(
+                    "ask the wallet to stake {} of {} as side {} in a computed match against {} \
+                     ({})",
+                    k.amount,
+                    short(&k.policy_commit),
+                    match k.side {
+                        1 => "A",
+                        2 => "B",
+                        _ => "?",
+                    },
+                    short(&k.opponent_device_id),
+                    k.memo
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelReady(k)) => {
+                    format!("ask the wallet to ready for match {}", short(&k.match_cell))
+                }
+                Some(pb::connect_app_request_intent_v1::Kind::DuelWithdraw(k)) => format!(
+                    "ask the wallet to withdraw from match {}",
+                    short(&k.match_cell)
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelSign(k)) => format!(
+                    "ask the wallet to sign its next entry of match {}",
+                    short(&k.match_cell)
+                ),
+                Some(pb::connect_app_request_intent_v1::Kind::DuelSettle(k)) => {
+                    format!("ask the wallet to settle match {}", short(&k.match_cell))
+                }
+                Some(pb::connect_app_request_intent_v1::Kind::DuelCollect(k)) => format!(
+                    "ask the wallet to collect a computed match result from {}",
+                    k.vault_ids
+                        .iter()
+                        .map(|v| short(v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 None => "an empty request".into(),
             },
             Err(e) => format!("make a request: unreadable arguments ({e})"),
+        },
+        "escrow.adjudicate" | "escrow.sign" => match args_body::<pb::EscrowOutcomeRequest>(args) {
+            Ok(r) => format!(
+                "{} {:?} for vault {}",
+                match method {
+                    "escrow.adjudicate" => "decide",
+                    _ => "sign",
+                },
+                String::from_utf8_lossy(&r.outcome),
+                short(&r.vault_id)
+            ),
+            Err(e) => format!("{method}: unreadable arguments ({e})"),
         },
         "connect.app.status" => match args_body::<pb::ConnectRequestRefV1>(args) {
             Ok(r) => format!("check what DSM established for request #{}", r.seq),
@@ -187,6 +261,18 @@ pub fn describe_answer(response: &pb::IngressResponse) -> Result<String, String>
         Some(pb::envelope::Payload::TokenCreateResponse(r)) => {
             format!("token {} anchored at {}", r.ticker, short(&r.policy_anchor))
         }
+        Some(pb::envelope::Payload::EscrowVerdictResponse(r)) => format!(
+            "the verdict cell {} holds {}",
+            short(&r.verdict_cell),
+            match r.outcome.as_slice() {
+                [] => "no verdict yet".to_string(),
+                outcome => format!(
+                    "{:?} ({:?})",
+                    String::from_utf8_lossy(outcome),
+                    pb::EscrowVerdictState::try_from(r.state)
+                ),
+            }
+        ),
         Some(pb::envelope::Payload::SofiVaultCreatedResponse(r)) => format!(
             "vault {} created at economic position {}",
             short(&r.vault_id),
@@ -206,6 +292,8 @@ pub fn describe_answer(response: &pb::IngressResponse) -> Result<String, String>
                     match pb::ConnectFact::try_from(s.fact) {
                         Ok(pb::ConnectFact::Paid) => "PAID",
                         Ok(pb::ConnectFact::Holdings) => "HOLDINGS PROVEN",
+                        Ok(pb::ConnectFact::EscrowLocked) => "STAKE LOCKED",
+                        Ok(pb::ConnectFact::EscrowReleased) => "RESULT COLLECTED",
                         _ => "nothing established",
                     },
                     s.fact_detail

@@ -103,6 +103,7 @@ async function seedEra(state: PracticeState): Promise<void> {
   const held = await walletAmount({ tokenId: 'ERA' }, { entered: PRACTICE_ERA_HELD });
   const protocolDefined = await eraIsProtocolDefined();
   state.balances.unshift({
+    holding: 'currency',
     tokenId: 'ERA',
     tokenName: 'ERA',
     symbol: 'ERA',

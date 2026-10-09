@@ -7,6 +7,7 @@ import SendTab from './wallet/SendTab';
 import HistoryTab from './wallet/HistoryTab';
 import InboxOverlay from './wallet/InboxOverlay';
 import BitcoinTapTab from './bitcoin/BitcoinTapTab';
+import UnderConstructionModal from '../UnderConstructionModal';
 import { Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
 import '../../styles/EnhancedWallet.css';
 
@@ -44,6 +45,12 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
   }, []);
 
   const [activeTab, setActiveTab] = useState<WalletTab>(initialTab || 'overview');
+  const [notice, setNotice] = useState<string | null>(null);
+  // Bitcoin is not open yet: its tab says so and the wallet stays where it is.
+  const chooseTab = useCallback((tab: WalletTab) => {
+    if (tab === 'bitcoin') setNotice('Under construction.');
+    else setActiveTab(tab);
+  }, []);
 
   // A tab is a new page: it opens at the top, not wherever the last one was scrolled to.
   useEffect(() => {
@@ -120,7 +127,7 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
       bodyRef={bodyRef}
       bodyClassName="tab-content"
       actions={headerActions}
-      tabs={<ScreenTabs tabs={TABS} active={activeTab} onChange={setActiveTab} ariaLabel="Wallet sections" />}
+      tabs={<ScreenTabs tabs={TABS} active={activeTab} onChange={chooseTab} ariaLabel="Wallet sections" />}
       banner={
         <>
           {data.error && (
@@ -191,6 +198,7 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
           </button>
         </div>
       )}
+      <UnderConstructionModal title="Bitcoin" message={notice} onClose={() => setNotice(null)} />
     </ScreenFrame>
   );
 };

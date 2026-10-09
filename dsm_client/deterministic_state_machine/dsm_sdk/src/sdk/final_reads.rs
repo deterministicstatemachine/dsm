@@ -88,6 +88,11 @@ impl<K: Eq + Hash + Clone, V: Clone> Bounded<K, V> {
 static OBJECTS: once_cell::sync::Lazy<Mutex<Bounded<[u8; 32], Vec<u8>>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(Bounded::new()));
 
+/// Objects this process read `Stored` (storage spec §5 rule 6), apart from
+/// the objects one member served: those are their bytes, but not `Stored`.
+static STORED_OBJECTS: once_cell::sync::Lazy<Mutex<Bounded<[u8; 32], Vec<u8>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(Bounded::new()));
+
 static FINAL_CELLS: once_cell::sync::Lazy<Mutex<Bounded<CellKey, CellEvidence>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(Bounded::new()));
 
@@ -114,6 +119,17 @@ pub(crate) fn keep_object(namespace: TaggedHashDomain<'_>, addr: &[u8; 32], byte
     lock(&OBJECTS).keep(*addr, bytes.to_vec(), bytes.len(), OBJECT_BUDGET);
 }
 
+/// The bytes at `addr` this process read `Stored`, when kept.
+pub(crate) fn stored_object(addr: &[u8; 32]) -> Option<Vec<u8>> {
+    lock(&STORED_OBJECTS).get(addr)
+}
+
+/// Keep `bytes`, which Core read `Stored` at `addr`: Core established them
+/// as the object there, so nothing here hashes them again.
+pub(crate) fn keep_stored_object(addr: &[u8; 32], bytes: &[u8]) {
+    lock(&STORED_OBJECTS).keep(*addr, bytes.to_vec(), bytes.len(), OBJECT_BUDGET);
+}
+
 /// The reads of `cell` Core evaluated as showing a final value, when kept.
 pub(crate) fn final_cell(cell: &RoutedCell) -> Option<CellEvidence> {
     lock(&FINAL_CELLS).get(&cell_key(cell))
@@ -138,7 +154,10 @@ pub(crate) fn keep_final_cell(cell: &RoutedCell, evidence: &CellEvidence) {
 #[cfg(test)]
 pub(crate) fn forget_everything() {
     *lock(&OBJECTS) = Bounded::new();
+    *lock(&STORED_OBJECTS) = Bounded::new();
     *lock(&FINAL_CELLS) = Bounded::new();
+    // The walks' judgements stand on cells read final in the same world.
+    crate::sdk::sofi_reads::forget_judgements();
 }
 
 #[cfg(test)]

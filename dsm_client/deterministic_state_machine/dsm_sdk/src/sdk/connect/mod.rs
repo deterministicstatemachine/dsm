@@ -21,6 +21,8 @@
 //!   carries out requests, pending approvals, disconnect.
 //! - [`app`]: the application's side: offers, sessions, requests, answers and
 //!   the facts its own account established.
+//! - [`wager`]: the match template a wallet builds for a stake the application
+//!   asks it to lock (DSM Amendment A12).
 
 pub mod app;
 pub mod code;
@@ -28,6 +30,7 @@ pub mod grant;
 pub mod holdings;
 pub mod pinned_tls;
 pub mod signed;
+pub mod wager;
 pub mod wallet;
 
 /// A 32-byte value from wire bytes, or a refusal naming the field.

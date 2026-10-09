@@ -111,6 +111,12 @@ export interface EscrowVault {
   amountDisplay: string;
   status: EscrowStatus;
   outcomes: EscrowOutcome[];
+  /**
+   * A computed vault (SoFi Amendment S22): the program its outcome is
+   * computed by, as Rust names it. Absent for a signed vault, whose outcomes
+   * the parties named decide.
+   */
+  decidedByProgram?: string;
 }
 
 function statusOf(status: pb.SofiVaultStatus): EscrowStatus {
@@ -138,6 +144,7 @@ function vaultsOf(payload: Awaited<ReturnType<typeof call>>): EscrowVault[] {
       decidedByThisDevice: o.decidedByThisDevice,
       paysThisDevice: o.paysThisDevice,
     })),
+    decidedByProgram: v.program.length > 0 ? v.programName : undefined,
   }));
 }
 

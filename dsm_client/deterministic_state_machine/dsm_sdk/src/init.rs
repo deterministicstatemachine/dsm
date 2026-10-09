@@ -326,6 +326,12 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // 2) Install the BLE runtime slots the offline carrier is injected into.
     crate::bridge::install_ble_runtime(Arc::new(BiImpl::new()));
 
+    // 3) The outcome programs every verifier runs (SoFi Amendment S22): each
+    //    registered only once it reproduces its own conformance vectors. A
+    //    refused program is named in the log, and a match it pins
+    //    establishes nothing.
+    crate::sdk::outcome_programs::init();
+
     // 4) Install AppRouter into BOTH SDK and core layers
     //    - If canonical identity context is ready: full AppRouter
     //    - Otherwise: minimal bootstrap router (narrow bootstrap queries)

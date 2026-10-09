@@ -340,6 +340,74 @@ fn take32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
         .map_err(|_| DsmError::verification(format!("anchor presentation: {what} is not 32 bytes")))
 }
 
+/// A presentation's strict parse: the anchor and the identity material it
+/// presents, decoded by Core's CCB decoders (burned schemas refused, trailing
+/// bytes refused). Nothing in it is trusted until Core authenticates it.
+pub(crate) struct ParsedPresentation {
+    pub(crate) anchor: SignedVaultStateAnchorV3,
+    params: dsm::ccb::GenesisParamsV3,
+    delegations: Vec<SignedDelegation>,
+    transitions: Vec<SignedTransition>,
+    inclusion: DevTreeProof,
+    ak_pk: Vec<u8>,
+    atta: [u8; 32],
+}
+
+impl ParsedPresentation {
+    pub(crate) fn parse(presentation: &generated::AnchorPresentationV3) -> Result<Self, DsmError> {
+        let state_commitment = take32(&presentation.state_commitment, "state_commitment")?;
+        let atta = take32(&presentation.atta, "atta")?;
+        let params = decode_genesis_params(&presentation.genesis_params_ccb)
+            .map_err(|e| DsmError::verification(format!("anchor presentation: params: {e}")))?;
+        let mut delegations = Vec::with_capacity(presentation.delegations.len());
+        for obj in &presentation.delegations {
+            delegations.push(SignedDelegation {
+                delegation: decode_delegation(&obj.ccb).map_err(|e| {
+                    DsmError::verification(format!("anchor presentation: delegation: {e}"))
+                })?,
+                grk_signature: obj.signature.clone(),
+            });
+        }
+        let mut transitions = Vec::with_capacity(presentation.transitions.len());
+        for obj in &presentation.transitions {
+            transitions.push(SignedTransition {
+                transition: decode_transition(&obj.ccb).map_err(|e| {
+                    DsmError::verification(format!("anchor presentation: transition: {e}"))
+                })?,
+                delegate_signature: obj.signature.clone(),
+            });
+        }
+        let inclusion =
+            DevTreeProof::from_bytes(&presentation.inclusion_proof).ok_or_else(|| {
+                DsmError::verification("anchor presentation: inclusion proof does not parse")
+            })?;
+        Ok(Self {
+            anchor: SignedVaultStateAnchorV3 {
+                state_commitment,
+                candidate_public_key: presentation.candidate_public_key.clone(),
+                signature: presentation.anchor_signature.clone(),
+            },
+            params,
+            delegations,
+            transitions,
+            inclusion,
+            ak_pk: presentation.ak_public_key.clone(),
+            atta,
+        })
+    }
+
+    pub(crate) fn presented(&self) -> PresentedIdentity<'_> {
+        PresentedIdentity {
+            genesis_params: &self.params,
+            delegations: &self.delegations,
+            transitions: &self.transitions,
+            inclusion: &self.inclusion,
+            ak_pk: &self.ak_pk,
+            atta: &self.atta,
+        }
+    }
+}
+
 /// Verify a foreign presentation against the exact `CCB(V_n)` bytes.
 ///
 /// `vn_bytes` must come from the immutable store already re-hashed against
@@ -353,50 +421,11 @@ pub fn verify_anchor_presentation(
     presentation: &generated::AnchorPresentationV3,
     vn_bytes: &[u8],
 ) -> Result<VerifiedVaultState, DsmError> {
-    let state_commitment = take32(&presentation.state_commitment, "state_commitment")?;
-    let atta = take32(&presentation.atta, "atta")?;
+    let parsed = ParsedPresentation::parse(presentation)?;
+    let (anchor, presented) = (&parsed.anchor, parsed.presented());
+    let state_commitment = anchor.state_commitment;
 
-    let params = decode_genesis_params(&presentation.genesis_params_ccb)
-        .map_err(|e| DsmError::verification(format!("anchor presentation: params: {e}")))?;
-
-    let mut delegations = Vec::with_capacity(presentation.delegations.len());
-    for obj in &presentation.delegations {
-        delegations.push(SignedDelegation {
-            delegation: decode_delegation(&obj.ccb).map_err(|e| {
-                DsmError::verification(format!("anchor presentation: delegation: {e}"))
-            })?,
-            grk_signature: obj.signature.clone(),
-        });
-    }
-    let mut transitions = Vec::with_capacity(presentation.transitions.len());
-    for obj in &presentation.transitions {
-        transitions.push(SignedTransition {
-            transition: decode_transition(&obj.ccb).map_err(|e| {
-                DsmError::verification(format!("anchor presentation: transition: {e}"))
-            })?,
-            delegate_signature: obj.signature.clone(),
-        });
-    }
-
-    let inclusion = DevTreeProof::from_bytes(&presentation.inclusion_proof).ok_or_else(|| {
-        DsmError::verification("anchor presentation: inclusion proof does not parse")
-    })?;
-
-    let anchor = SignedVaultStateAnchorV3 {
-        state_commitment,
-        candidate_public_key: presentation.candidate_public_key.clone(),
-        signature: presentation.anchor_signature.clone(),
-    };
-    let presented = PresentedIdentity {
-        genesis_params: &params,
-        delegations: &delegations,
-        transitions: &transitions,
-        inclusion: &inclusion,
-        ak_pk: &presentation.ak_public_key,
-        atta: &atta,
-    };
-
-    let owner = authenticate_anchor_owner(&anchor, vn_bytes, &presented)
+    let owner = authenticate_anchor_owner(anchor, vn_bytes, &presented)
         .map_err(|e| DsmError::verification(format!("anchor presentation: {e}")))?;
 
     // authenticate_anchor_owner already decoded these bytes to read the bound

@@ -28,7 +28,7 @@ use crate::route_chain::{
 use super::conformance::closure_object_verifies;
 use super::derive;
 use super::publication::{
-    recognize_policy_fulfillment, recognize_precommit, recognize_fulfillment, Signed,
+    recognize_fulfillment, recognize_policy_fulfillment, recognize_precommit, Publication, Signed,
 };
 use super::registration::fulfillment_proves_the_device;
 use super::wire::{
@@ -109,6 +109,94 @@ impl RecognizedExercise {
             .zip(self.closure.iter().cloned())
             .collect()
     }
+}
+
+/// Why an exercise could not be built from its objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExerciseBuildError {
+    /// A leg of `P` has no canonical leg in `P(E)`, so its witness does not
+    /// derive.
+    Witnesses(String),
+    /// The evidence holds no bytes for a closure reference.
+    Closure(ValidationRef),
+    /// An object has no canonical encoding.
+    Wire(String),
+}
+
+impl core::fmt::Display for ExerciseBuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Witnesses(why) => write!(f, "witnesses: {why}"),
+            Self::Closure(reference) => write!(f, "closure: no object for {reference:?}"),
+            Self::Wire(why) => write!(f, "wire: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for ExerciseBuildError {}
+
+/// The exercise of a position, from its objects: `F` and `P` in their
+/// envelopes, the trader's signed `C_q` exactly as it is final at
+/// `K_root(q)`, `P(E)`, the canonical witnesses derived from `P` and the
+/// shadows `P(E)` commits, and every closure object in reference order from
+/// the evidence its conformance is decided on. A function of public objects
+/// (SoFi Amendment S25): whoever builds it — the trader writing its legs, or
+/// a verifier whose key another exercise holds — builds the same exercise.
+pub fn exercise_from_objects(
+    objects: &super::resolve::ExerciseObjects<'_>,
+    resolution_claim: &[u8],
+    evidence: &super::conformance::ConformanceEvidence,
+) -> Result<SofiExercise, ExerciseBuildError> {
+    let wire = |e: &dyn core::fmt::Display| ExerciseBuildError::Wire(e.to_string());
+    let canonical = derive::canonical_legs(objects.preimage)
+        .map_err(|e| ExerciseBuildError::Witnesses(e.to_string()))?;
+    let shadows: Vec<[u8; 32]> = objects
+        .precommit
+        .legs()
+        .iter()
+        .map(|leg| {
+            canonical
+                .iter()
+                .find(|l| l.vault_id == leg.vault_id)
+                .map(|l| l.shadow_core)
+                .ok_or_else(|| {
+                    ExerciseBuildError::Witnesses("a leg P(E) does not derive".to_string())
+                })
+        })
+        .collect::<Result<_, _>>()?;
+    let witnesses: Vec<Vec<u8>> =
+        super::conformance::derive_policy_fulfillments(objects.precommit, &shadows)
+            .map_err(|e| ExerciseBuildError::Witnesses(format!("{e:?}")))?
+            .iter()
+            .map(DlvPolicyFulfillmentBody::encode)
+            .collect();
+    let mut closure = Vec::new();
+    for reference in objects.preimage.settlement().closure().refs() {
+        let bytes = evidence
+            .closure
+            .get(reference)
+            .ok_or(ExerciseBuildError::Closure(*reference))?;
+        closure.push(bytes.clone());
+    }
+    SofiExercise::new(
+        Publication::Fulfillment {
+            body: objects.fulfillment,
+            signature: objects.fulfillment_signature,
+        }
+        .object_bytes()
+        .map_err(|e| wire(&e))?,
+        resolution_claim.to_vec(),
+        Publication::Precommit {
+            body: objects.precommit,
+            signature: objects.precommit_signature,
+        }
+        .object_bytes()
+        .map_err(|e| wire(&e))?,
+        objects.preimage.encode().map_err(|e| wire(&e))?,
+        witnesses,
+        closure,
+    )
+    .map_err(|e| wire(&e))
 }
 
 /// Rebuild the objects an exercise carries and check their binding to one

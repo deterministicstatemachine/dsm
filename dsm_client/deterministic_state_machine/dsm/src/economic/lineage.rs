@@ -163,12 +163,13 @@ impl ValidatedEconomicRoot {
         }
     }
 
-    /// A peer coordinate THIS verifier authenticated (DSM Amendment A8): its
-    /// recorded frontier for the peer (`peer_lineage::PeerFrontier`), whose
-    /// whole segment it validated before recording it.
-    /// **Only the peer lineage verifier may call this**, from one place
-    /// (`peer_lineage::authenticated_root`). Nothing behind a frontier is
-    /// read again: a verification that fails from one fails.
+    /// The parent a peer's step is validated from (DSM Amendment A14): the
+    /// root that step's own witness was built on, taken only because the
+    /// step's claim is final at the cell routed from it and the step is then
+    /// validated from it, where `advance_validated` refuses a witness built
+    /// on any other root.
+    /// **Only the peer step verifier may call this**, from one place
+    /// (`peer_lineage::authenticated_root`).
     pub(crate) fn from_verifier_memo(economic_position: u64, economic_root: [u8; 32]) -> Self {
         Self {
             economic_position,

@@ -674,6 +674,9 @@ is Unavailable, never Invalid.
 | `vault_token_locator(t)` | the genesis preimage of each vault whose market pairs token `t` (Amendment S16) |
 | `escrow_cell_locator(K)` | the genesis preimage of each escrow vault whose terms derive verdict cell `K` (Amendment S21) |
 | `escrow_statement_locator(K, o)` | gathered signatures deciding outcome `o` at verdict cell `K` (Amendment S21) |
+| `lineage_epoch_locator(k, id, e)` | the generation hints and checkpoints of epoch `e` of shared lineage `(k, id)` (Amendment S23) |
+| `vault_baseline_locator(v, g)` | the owner baselines of vault `v` at generation `g`: each its presentation, `OwnerBaselineAuthV1` and `VaultFrontierV1` (Amendment S24) |
+| `history_locator(v, R)` | the history leaf `v ‖ u64be(g) ‖ R` of vault `v` naming root `R`, a candidate generation; it stands only as a proof under an authenticated history root (Amendment S26) |
 | ρ | the setup body |
 | PolicyFulfillmentIdj | Gj |
 | the auxiliary reference | auxiliary evidence candidates |
@@ -794,6 +797,41 @@ TAG_DSM_ESCROW_VERDICT_OBJECT               DSM/escrow/verdict-object/v1        
 TAG_DSM_ESCROW_CELL_LOCATOR                 DSM/escrow/cell-locator/v1                locator of the escrow vaults bound to K_verdict
 TAG_DSM_ESCROW_STATEMENT_LOCATOR            DSM/escrow/statement-locator/v1           locator of gathered signatures for (K_verdict, o)
 
+Computed escrow vaults (Amendment S22), constants in CORE/common/domain_tags/dsm/misc/escrow.rs.
+TAG_DSM_ESCROW_TERMS_OBJECT also addresses ComputedEscrowTerms, and TAG_DSM_ESCROW_CELL_LOCATOR also locates the vaults bound to K_match.
+TAG_DSM_ESCROW_COMPUTED_TABLE               DSM/escrow/computed-table/v1              τ_c
+TAG_DSM_ESCROW_COMPUTED_MATCH               DSM/escrow/computed-match/v1              K_match
+
+Shared lineages (Amendment S23), constants in CORE/common/domain_tags/dsm/misc/shared_lineage.rs
+TAG_DSM_SHARED_LINEAGE_GENESIS              DSM/shared-lineage/genesis/v1             d_0
+TAG_DSM_SHARED_LINEAGE_GENERATION           DSM/shared-lineage/generation/v1          d_g
+TAG_DSM_SHARED_LINEAGE_VAULT_STEP           DSM/shared-lineage/vault-step/v1          a vault generation's step_digest
+TAG_DSM_SHARED_LINEAGE_CHECKPOINT           DSM/shared-lineage/checkpoint/v1          checkpoint_digest
+TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR        DSM/shared-lineage/epoch-locator/v1       locator of an epoch's hints and checkpoints
+TAG_DSM_SHARED_LINEAGE_OBJECT               DSM/shared-lineage/object/v1              address of a hint, checkpoint or bundle
+TAG_DSM_SOFI_ROUTE_LANE                     DSM/sofi/route-lane/v1                    a trader's order over near-equal routes (client policy, §31 note)
+TAG_DSM_SOFI_VAULT_FRONTIER                 DSM/sofi/vault-frontier/v1                c_f of a VaultFrontierV1 (Amendment S24)
+TAG_DSM_SOFI_VAULT_BASELINE                 DSM/sofi/vault-baseline/v1                c_n of an OwnerBaselineAuthV1, which the owner's anchor signs (Amendment S24)
+TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR         DSM/sofi/vault-baseline-locator/v1        locator of a vault's owner baselines at one generation (Amendment S24)
+TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT          DSM/sofi/vault-frontier-object/v1         address of a VaultFrontierV1, an OwnerBaselineAuthV1 or a VaultFrontierWitnessV1 (Amendment S24)
+TAG_DSM_SOFI_VAULT_HISTORY_LEAF             DSM/sofi/vault-history-leaf/v1            a history leaf's hash, and the namespace of its 72 bytes (Amendment S26)
+TAG_DSM_SOFI_VAULT_HISTORY_NODE             DSM/sofi/vault-history-node/v1            a history node's hash, and the namespace of its 64 bytes (Amendment S26)
+TAG_DSM_SOFI_VAULT_HISTORY_HEAD             DSM/sofi/vault-history-head/v1            H_n of a VaultHistoryHeadV1, and its namespace (Amendment S26)
+TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR          DSM/sofi/vault-history-locator/v1         locator of the history leaf naming a root (Amendment S26)
+TAG_DSM_ESCROW_COMPUTED_MATCH_SEED          DSM/escrow/computed-match-seed/v1         s_match, the seed of the match cell
+TAG_DSM_ESCROW_COMPUTED_START               DSM/escrow/computed-start/v1              K_start
+TAG_DSM_ESCROW_COMPUTED_START_SEED          DSM/escrow/computed-start-seed/v1         s_start, the seed of the start cell
+TAG_DSM_ESCROW_COMPUTED_START_STATEMENT     DSM/escrow/computed-start-statement/v1    m_withdraw
+TAG_DSM_ESCROW_COMPUTED_READY               DSM/escrow/computed-ready/v1              m_ready, a side's ready statement
+TAG_DSM_ESCROW_COMPUTED_SETUP               DSM/escrow/computed-setup/v1              the setup digest
+TAG_DSM_ESCROW_COMPUTED_OCCUPANT            DSM/escrow/computed-occupant/v1           a reader's name for the occupant of K_match or K_start
+TAG_DSM_ESCROW_TRANSCRIPT                   DSM/escrow/transcript/v1                  h_0
+TAG_DSM_ESCROW_TRANSCRIPT_STEP              DSM/escrow/transcript-step/v1             h_i
+TAG_DSM_ESCROW_TRANSCRIPT_HEAD              DSM/escrow/transcript-head/v1             m_head(i, h_i)
+TAG_DSM_ESCROW_MOVE_COMMIT                  DSM/escrow/move-commit/v1                 a Commit's commitment
+The wallet's session-key derivation (§19.10), constant in SDK/sdk/computed_flow.rs.
+TAG_SESSION_KEY                             DSM/escrow/session-key/v1                 the HKDF salt of a match session key
+
 
 <!-- spec-section: SOFI-014-2 -->
 #### 14.2 Object classes
@@ -839,6 +877,20 @@ pre
 0x0064           ESCROW_VERDICT                                a verdict on an external commitment (Amendment S21)
 0x0065           SOFI_SETTLEMENT_RELEASE                       B ◦ , Release branch (Amendment S21)
 0x0066           SOFI_ROUTE_DIGEST_RELEASE                     route digest preimage, Release (Amendment S21)
+0x0067           ESCROW_COMPUTED_TERMS                         a computed escrow vault's terms (Amendment S22)
+0x0068           ESCROW_TRANSCRIPT_ENTRY                       one entry of a match transcript (Amendment S22)
+0x0069           ESCROW_TRANSCRIPT_OUTCOME                     a transcript occupying a match cell (Amendment S22)
+0x006A           ESCROW_EQUIVOCATION_PROOF                     two heads one session key signed at one index (Amendment S22)
+0x006B           ESCROW_MATCH_START                            Start (both readies) or Withdraw at a start cell (Amendment S22)
+0x006C           SHARED_LINEAGE_GENESIS                        a shared lineage's genesis (Amendment S23)
+0x006D           SHARED_LINEAGE_GENERATION                     a shared lineage's generation (Amendment S23)
+0x006E           SHARED_LINEAGE_GENERATION_HINT                a generation hint, discovery only (Amendment S23)
+0x006F           SHARED_LINEAGE_CHECKPOINT                     a 32-generation checkpoint, discovery only (Amendment S23)
+0x0070           SHARED_LINEAGE_TRANSITION_BUNDLE              a segment's read plan, discovery only (Amendment S23)
+0x0071           SOFI_VAULT_FRONTIER                           a vault's frontier (vault, generation, root) (Amendment S24)
+0x0072           SOFI_VAULT_FRONTIER_WITNESS                   the state leaf and a relationship proof under a frontier root (Amendment S24)
+0x0073           SOFI_OWNER_BASELINE_AUTH                      a frontier commitment and the owner-authority position its signer is proven at (Amendment S24)
+0x0074           SOFI_VAULT_HISTORY_HEAD                       a vault's history at one generation: its peaks (Amendment S26)
 
 
 <!-- Source PDF page 19 -->
@@ -1489,6 +1541,134 @@ An escrow vault is Explainer §59's escrow: a DLV with precommitted branches (§
 
 This amends §4 (SoFi also creates and releases escrow vaults), §11 (two indexes), §13 (the verdict facts), §14.1 and §14.2 (the escrow tags and classes `0x0063` to `0x0066`), §15, §19.1 (the slot rule and escrow status), §19.3 to §19.5 (the Release branch), §19.7 (an escrow vault has no close authority), §19.8 (the escrow form of GenesisAccepted), §23.2, §23.5 (arm (v)), §24 (rungs 7 and 8), §27 (the escrow routes), §28 (`EscrowVaultCreate`, variant 38 of `Operation`), §32 (a Close against an escrow vault is Invalid) and Amendment S15 (the verdict is among a Release position's public objects).
 
+<!-- spec-section: SOFI-019-10 -->
+#### 19.10 Computed escrow vaults (Amendment S22)
+
+> **Amendment S22 (owner, 2026-10-06) — computed escrow vaults: a vault released by what a pinned program computes from a committed transcript.** This applies DSM Amendment A13 to S21's escrow vaults. Under S21 a match's stakes were released by a verdict its referee signed, so the referee decided who was paid. The owner's ruling, 2026-10-06: "the outcome is computed, not decided." The owner ruled the same day: a computed outcome is a generic primitive and no game logic enters Core (S21's ruling stands in spirit); no clock and no deadline enters it; the application relays the players' moves, a residual trust the owner accepted; and whether a match can end level is the program's concern.
+
+A computed escrow vault is an S21 escrow vault whose outcome is computed. Everything §19.9 says of an escrow vault holds for it: one held amount of one token, released whole and once along a precommitted branch by the recipient's own Release position, with no market, no owner close and no partial release. The slot rule, the Release branch, its closed write set and its static budget are §19.9's. Two things differ. The authority is a program and two session keys, not a signer set per outcome. And the release stands on what a match cell computes, not on a verdict cell.
+
+**The kind is the class**
+
+- The three slots of an escrow vault name `A_T = immutable_addr(DSM/escrow/terms-object/v1, CCB bytes)` (§19.9). The class of those bytes decides the kind: `0x0063 EscrowTerms` is a signed escrow vault and `0x0067 ComputedEscrowTerms` a computed one. Bytes of any other class are no escrow terms, and the genesis is refused.
+- The signed kind is unchanged byte for byte: its terms, verdict, cell, statement and release are §19.9's.
+
+**`ComputedEscrowTerms`**, class `0x0067`, schema 1.
+
+| Field | Content |
+|---|---|
+| `token` | digest32: the policy commit of the held token |
+| `external_commitment` | digest32: `Y = H(DSM/external/v1 ∥ X)` (Explainer §60). DSM never reads `X`. |
+| `table` | the computed table `T_c`, below |
+| `branches` | exactly three, in this order: `a-wins`, `b-wins`, `void`. Each is the label (`u32be(|o|) ∥ o`), `recipient_genesis` and `recipient_device_id`. |
+
+| Table field | Content |
+|---|---|
+| `program` | digest32: `P`, the hash that pins the outcome program |
+| `setup_digest` | digest32: `H(DSM/escrow/computed-setup/v1; setup)`, the program's input fixed at lock. DSM never interprets `setup`. |
+| `session_a`, `session_b` | `(signature_alg, public_key)` each: side A's and side B's session keys (SPHINCS+, §14.3). The two keys differ. |
+
+- `a-wins` is side A's win, `b-wins` side B's, and `void` is the outcome a Withdraw gives (below). A program may also compute `void`.
+- The table's bytes are `P ∥ setup_digest ∥ u16be(alg_a) ∥ u32be(|key_a|) ∥ key_a ∥ u16be(alg_b) ∥ u32be(|key_b|) ∥ key_b`. Its digest is `τ_c = H(DSM/escrow/computed-table/v1; table bytes)`.
+
+**The cells**
+
+- **The match cell.** `K_match = H(DSM/escrow/computed-match/v1; Y ∥ τ_c)`, with seed `s_match = H(DSM/escrow/computed-match-seed/v1; K_match)`. It holds the outcome.
+- **The start cell.** `K_start = H(DSM/escrow/computed-start/v1; K_match)`, with seed `s_start = H(DSM/escrow/computed-start-seed/v1; K_start)`. It holds whether the match started.
+- Each cell's leader is `FisherYates(s, S)[0]` (§7) over the network's pinned set, and each is written by the procedure of §8 with route-chain finality (Amendment S4). Anyone may write either (§9). A reader names the occupant of either cell by `H(DSM/escrow/computed-occupant/v1; K ∥ u32be(|o|) ∥ o)`, where `o` is the occupant's label (`start` and `withdraw` at the start cell).
+- **Linked vaults.** Two computed escrow vaults are linked exactly when their terms name the same `Y` and byte-identical tables; they then have the same `K_match` and `K_start`. The two players' terms differ only in their recipients, which the table does not contain. Linking is derived from each vault's accepted terms, as in §19.9.
+
+**The transcript**
+
+- **An entry.** `TranscriptEntry`, class `0x0068`, schema 1: `index` (`u32be`, from 1), `side` (`u8`: 1 is A, 2 is B) and `kind`, one of:
+  - `Commit` (`u8` 1): `commitment`, digest32, `H(DSM/escrow/move-commit/v1; salt ∥ u32be(|move|) ∥ move)`;
+  - `Reveal` (`u8` 2): `salt`, digest32, and `move`, 1 to 64 bytes;
+  - `Resign` (`u8` 3): nothing.
+
+  An entry carries no signature; the signature over it travels beside it.
+- **The head chain.** `h_0 = H(DSM/escrow/transcript/v1; K_match ∥ setup_digest)`, and `h_i = H(DSM/escrow/transcript-step/v1; h_{i−1} ∥ CCB(entry_i))`.
+- **The head statement.** A side signs the head of its own entry `i` as `m_head(i, h_i) = H(DSM/escrow/transcript-head/v1; K_match ∥ u32be(i) ∥ h_i)`, under its session key. Since `h_i` commits every entry before it, that signature covers the whole transcript up to `i`.
+- **Commit, then reveal.** A move is committed first and revealed later, so a side that moves second in a turn learns nothing of the first move until both are committed.
+- **The canonical transcript.** Entries `entry_1 … entry_n` are a canonical transcript for a table and a setup exactly when:
+  1. every entry's bytes decode as a `TranscriptEntry` and re-encode to exactly those bytes. An entry that does not round-trip is no entry, and nothing after it counts;
+  2. `entry_i` names index `i`, and side 1 or 2;
+  3. a `Commit` is made only by a side with no unopened commitment; a `Reveal` opens its side's unopened commitment, and only when it hashes to it; a `Resign` is the last entry;
+  4. `H(DSM/escrow/computed-setup/v1; setup)` is the table's `setup_digest`, and `h_0 … h_n` recompute.
+
+  The order of the checks is fixed: decode, re-encode, require byte equality, recompute the chain, then verify signatures.
+- **What the program sees.** The opened entries, in order: each `Reveal`, with its side, its own index, the index of the `Commit` it opened and its move; and a `Resign`, with its side and index. An unopened commitment is not shown.
+
+**The program**
+
+- `P(setup, opened)` returns `Done(o)`, `Incomplete`, or a fault. It is deterministic and total over the bounds above. It keeps no state, calls nothing, reads no clock and fetches nothing (Explainer Amendment A13).
+- A verifier evaluates `P` only when `P` is registered with it under the hash the table pins. An unregistered `P` leaves every fact of the match cell not established. It is never Invalid, and no other program is tried in its place.
+- Core keys its registry by the hash a registered program reports. The binding of code to that hash is the registrar's (owner, 2026-10-06): the SDK registers a program only after the program passes its own frozen conformance vectors, and refuses one that fails them.
+- Core does the canonical, chain and signature checks before `P` sees anything. `P`'s answer counts only when `o` is a label of the branches.
+
+**What occupies the match cell**
+
+The value that counts at `K_match` is the first object at its leader that is recognized there. Everything else at the cell counts as nothing. Two kinds of object are recognized, each from its own bytes alone (Amendment S20).
+
+- **`TranscriptOutcome`**, class `0x0069`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `setup` (1 to 16384 bytes), `entries` (1 to 1024, each `u32be(|entry|) ∥ entry`), and `signatures`: 1 or 2 entries `(side, signature)`, strictly ascending by side. It is recognized at `K` when:
+  1. `H(DSM/escrow/computed-match/v1; Y ∥ τ_c(table)) = K`;
+  2. the entries are a canonical transcript for the table and the setup;
+  3. the sides holding a signature are exactly the sides that made an entry. Each side's signature verifies, under that side's session key, over `m_head(i, h_i)` for the last entry `i` that side made;
+  4. the last entry is a `Reveal` or a `Resign`;
+  5. `P` is registered, `P(setup, opened)` is `Done(o)` with `o` a label of the branches, and `P` over the opened entries without the last is `Incomplete`.
+
+  Its outcome is `o`. A truncated transcript is never recognized: `P` gives it `Incomplete`. Condition 5 makes the occupant exactly the transcript at the entry that ended the match.
+- **`EquivocationProof`**, class `0x006A`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `side`, `index`, and two `(head, signature)` pairs with the heads strictly ascending. It is recognized at `K` when `Y` and the table derive `K`, and both signatures verify, under the session key of `side`, over `m_head(index, head)` for their own heads. Its outcome is the other side's win: `b-wins` when side A equivocated, `a-wins` when side B did.
+  - A side signs one head per index of its own entries, ever. Two different heads signed at one index are proof that the key's holder cheated.
+- The first recognized occupant holds the cell for good (§8, consequences 2 and 3), whatever arrives after it.
+
+**The session keys: a wallet obligation**
+
+A session key is the authority of everything its side does in a match: its ready, its Withdraw and every head it signs. Core reads only the public halves the table commits. How a key is made and kept is the wallet's obligation, and every wallet meets it the same way.
+
+- **Derivation.** A wallet derives its session key for a match from its own wallet seed, its own genesis and the match's 32-byte nonce: `k = HKDF(salt = DSM/escrow/session-key/v1 ∥ 0x00; ikm = wallet seed; info = genesis ∥ match_nonce)`, 32 bytes of HKDF over BLAKE3 (RFC 5869, HMAC-BLAKE3). The key pair is the SPHINCS+ key pair (§14.3) whose deterministic key generation takes `k` as its entropy. The nonce is the one the setup carries; the program reads it, and DSM never does.
+- **The secret stays in the wallet.** The wallet answers with the public half only. The secret half is derived when it is used, from the seed the wallet holds while unlocked, and is never stored, exported or shown. A locked wallet derives nothing and signs nothing.
+- **One key per match.** Two matches with different nonces have different keys, and a key signs only for the match whose setup names it. A wallet locks a stake only when the setup's session key for its side is exactly the one it derives for the setup's nonce.
+- **Restoring.** The derivation reads nothing but the seed, the genesis and the nonce, so a wallet restored from its seed derives the same key and can still ready, withdraw, play or settle a match it staked in.
+
+**The start cell: a ready handshake, or a Withdraw** (owner ruling, 2026-10-06)
+
+- **Ready.** A side is ready when its session key signs `m_ready = H(DSM/escrow/computed-ready/v1; K_match)`. Both sides sign the same statement; the key tells them apart.
+- **What a wallet checks before it signs its ready.** Its own vault and the opponent's vault are both GenesisAccepted and Active, and both bind to this `K_match`. They hold the same token and the same amount. Each is owned by the side its terms say: the recipient of `a-wins` owns side A's vault, the recipient of `b-wins` owns side B's. The branches mirror: `a-wins` and `b-wins` pay the same identities in both vaults, and each vault's `void` pays its own owner. This is the check side B makes against side A's vault under DSM Amendment A12, made by both sides.
+- **`MatchStart`**, class `0x006B`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `kind` (`u8`) and a body:
+  - **Start** (`kind` 1): `ready_a` and `ready_b`, each `u32be(|sig|) ∥ sig`: side A's and side B's signatures over `m_ready`. Whichever side readies second assembles the Start from both signatures and writes it.
+  - **Withdraw** (`kind` 2): `side` (`u8`, 1 or 2) and a `signature`, `u32be(|sig|) ∥ sig`, by that side's session key over `m_withdraw = H(DSM/escrow/computed-start-statement/v1; K_start ∥ u8(2))`. Either side may withdraw.
+- **Recognition**, from the object's own bytes (Amendment S20). A `MatchStart` is recognized at `K` when `Y` and the table derive `K_start = K` and:
+  - for a Start, `ready_a` verifies under `session_a` and `ready_b` under `session_b`, both over `m_ready` for the `K_match` the object derives. A Start holding one side's ready is not a Start;
+  - for a Withdraw, its signature verifies under the session key of the side it names, over `m_withdraw`.
+- Whichever is first at the start cell's leader holds it for good. The match begins at once and for both sides when a Start holds the start cell. A Withdraw counts only if it reaches the leader before any Start, and a Withdraw that arrives after a Start counts for nothing. No clock is involved.
+- **The ready timeout is the application's, outside DSM.** DSM has no clock and no deadline. An application that wants a real-world limit on how long a ready may wait asks the waiting wallet to Withdraw. Nothing in DSM reads the time, and nothing in DSM withdraws on its own.
+
+**The facts** (§13), for a computed escrow vault:
+
+- `VerdictHeld(K_match, void)` holds when a Withdraw holds `K_start`, in any state. `VerdictFinal(K_match, void)` holds when that Withdraw is final there.
+- `VerdictHeld(K_match, o)` holds when a Start holds `K_start` and a recognized occupant on `o` holds `K_match`, each in any state. `VerdictFinal(K_match, o)` holds when both are final, each shown by a completion proof (Amendment S10).
+- Nothing else holds. Until a Start holds `K_start`, the match cell is not read and counts for nothing. Once a Withdraw holds `K_start`, the match cell never counts.
+
+With these facts, the resolution of §19.9 is unchanged: `ConsumedRoute` (§23.2), arm (v) of `RouteImpossible` (§23.5), and rungs 7 and 8 (§24) read `VerdictHeld` and `VerdictFinal` at `B°.verdict_cell` as they do for a signed escrow vault. Every vault bound to `K_match` settles only on the one outcome those facts give.
+
+**Creation and release**
+
+- **Creation.** `EscrowVaultCreate` (§19.9) carries the exact `ComputedEscrowTerms` bytes in place of `EscrowTerms`. Its debit, record and write set are §19.9's, with `terms.token` the held token.
+- **GenesisAccepted** takes §19.9's escrow form, except that the carried bytes decode as `ComputedEscrowTerms` and re-derive `A_T`.
+- **Publication.** The genesis preimage is indexed under `vault_genesis_locator(v)` and under `escrow_cell_locator(K_match)`. Discovery by cell finds exactly the vaults linked to it, and carries no authority.
+- **Static validity of a Release** against a computed vault is §19.9's, with `verdict_cell = K_match(terms.external_commitment, τ_c(terms.table))` in place of `K_verdict`. The outcome names one of the three branches, and the trader is its recipient.
+
+**Liveness, with no clock**
+
+- A match that is not finished waits. A side that stops playing holds both stakes until it returns. It cannot gain by stopping: a transcript with no end computes no outcome, and the other side's stake stays locked with its own.
+- `Resign` is always open to a side that wants out, and its outcome is the program's.
+- Before Start holds, either side's Withdraw voids the match and each stake returns to its owner. A side whose opponent never locks, or never readies, withdraws, so neither stake can be held by the other side's silence before the match begins. A wallet signs its ready only after the check above, and signs no entry until Start is final at `K_start`, so no move is ever made in a match that can still be withdrawn.
+- **Residual trust (owner, 2026-10-06).** The application relays the moves between the players' wallets. It can delay or withhold a move, which only stalls the match. It cannot forge a move, because every entry is covered by its side's session key.
+
+**Bounds.** At most 1024 entries, a move of at most 64 bytes, a setup of at most 16384 bytes, and two SPHINCS+ signatures. With these bounds, the largest `TranscriptOutcome` fits within a cell's value bound (`route_chain::MAX_VALUE_LEN`), and so does an `EquivocationProof`.
+
+This amends §13 (the verdict facts of a computed vault), §14.1 and §14.2 (the computed escrow tags and classes `0x0067` to `0x006B`), §19.8 (the computed form of GenesisAccepted), and §19.9 (an escrow vault's kind is the class of its terms; a Release against a computed vault names `K_match`).
+
 
 ## Part IV — Predicates and resolution
 <!-- spec-section: SOFI-020 -->
@@ -1714,6 +1894,12 @@ route_impossible, CORE/sofi/resolution.rs:253, returning ImpossibleArm from the 
 > - **Permanent.** A position that went to another claim never comes back (PairMutualExclusion), so once the skip holds it holds forever.
 
 
+> **Amendment S25 (owner, 2026-10-07) — a position's exercise is a function of its public objects.** Phone finding, 2026-10-07: two wallets traded on one vault head and both exercises named the vault's first key there. The faster took it. The slower position's exercise never landed anywhere, and every resolver read "the exercise" back from its first leg's key, where it found the winner's. The loser's own wallet, and every peer resolving the loser's lineage, stood unresolved forever. The loser's next trade named that position as its parent, so every walk of the vault stopped at it. The owner ruled the same day that Void must be provable from public facts, without a shortcut: the ladder ranks `Invalid` above `Void`, so deciding Void without the evidence a full verifier holds would split verdicts, and would let a trader escape a terminal Invalid by losing its key on purpose. This amends §23.5, §24 and Amendment S15.
+>
+> - **The exercise is determined by public objects.** A position `q`'s exercise is `(F, C_q, P, P(E), W, 𝒞)` where `F` is the fulfillment registered at `K_ful(q)`; `C_q` is the exact bytes final at `K_root(q)`; `P` is the precommit `F` names; `P(E)` is the preimage published under `preimage_locator(E)`; `W` is the canonical witness set derived from `P` and the shadows `P(E)` commits; and `𝒞` is the closure, each object in reference order: a content-addressed object from the store, a setup at `ρ`, and a parent claim — the bytes final at the trader's `K_root(p)`, routed by the root its lineage holds at `p − 1` — checked by its `claim_ref` or fulfillment id as §19.5 checks it.
+> - **Rebuilding.** A verifier resolving `q` whose first leg's key holds no exercise carrying `q`'s registered `F` — another exercise holds it, or none yet — rebuilds `q`'s exercise from those objects and establishes the facts over it. The ladder (§24) runs unchanged over the same facts, so its verdict is the one it reaches with the exercise in hand: a lost key is Void when `F` conforms and the route is valid, and Invalid when either fails. An object not yet in hand leaves `q` unresolved; it never decides anything.
+> - **One rule for everyone.** The trader resolving its own position and any peer resolving it follow the same rule from the same public objects. What the trader carries is never needed: a position resolvable by its trader is resolvable by anyone.
+
 <!-- spec-section: SOFI-023-6 -->
 #### 23.6 The walk
 For one DLV parent, the walk visits K (0) , K (1) , . . . in order: a skipped key moves to the next attempt, a consumed key
@@ -1896,6 +2082,51 @@ to the next. An unresolved attempt ends the walk: the head is Rn and that attemp
 > - **Another trader's conditional parent.** A walk that meets an exercise whose `P` names its trader's conditional position as its parent resolves that position from SoFi's public objects through frontier-relative verification of the trader's lineage (DSM Amendment A8, Amendment S15), exactly as it resolves one inside a lineage it verifies; it does not wait on the trader. Without it, any trader's second trade through a vault stalls every other device's walk of that vault.
 > - **What it does not change.** The vault side, the walk, the resolution and every predicate are unchanged. Setting up is an ordinary admitted transition, so a setup admitted ahead of a trade that then fails, or is never built, stands as the trader's position. The next trade through that vault reuses it.
 
+> **Amendment S23 (owner, 2026-10-07) — vault and reserve checkpoints: discovery without authority.** Phone finding, 2026-10-07: a fresh wallet found a 24-generation vault's head by the walk above in ~60 s and a 90-generation reserve's head (§51) in ~16 s, because each generation's cell is computed from the root the generation before it established, so every read waited on the one before. The owner ruled the same day that shared lineages carry their history as proof-carrying generations, in phases: (A) checkpoints and generation hints that let a reader fetch a lineage's evidence in parallel, (B) a proof tree over checkpoints, (C) a recursive validity proof (DSM Amendment A15). This amendment specifies phase A. It amends §11, §14.1, §14.2, §30 and §51.
+>
+> - **Nothing here establishes anything.** A discovered root tells a reader where to look; it never tells the reader what the state is. The head is still found by the walk in steps 1–3, from the accepted genesis, one consumption at a time, and every generation is established by Core exactly as before. Hints, checkpoints and bundles only decide which cells and objects are read, and when.
+> - **The consumption key is unchanged.** A generation's successor is still found at `K(a)` derived from its parent root `R_n` (§23), never at a key derived from the generation number: a key computed before its parent exists would let anyone pre-position bytes at it, and would contradict DSM §43.
+> - **Objects** (CCB, §14.2; tags §14.1). For a lineage of kind `k` (1 a vault, 2 the native reserve of §51) and identity `id` (the vault id `v`, or the reserve id):
+>   - `SharedGenesisV1 {kind, lineage_id, state_root, genesis_preimage_digest}`, with `d_0 = H(shared-lineage/genesis/v1; CCB(·))`; `genesis_preimage_digest` is a vault's genesis preimage address, or the reserve's policy commit.
+>   - `SharedGenerationV1 {kind, lineage_id, generation, parent_generation_digest, state_root, step_digest}`, with `d_g = H(shared-lineage/generation/v1; CCB(·))`; `parent_generation_digest` is `d_{g−1}`, and generation 1 names `d_0`. `step_digest` identifies the canonical transition: for a vault `H(shared-lineage/vault-step/v1; E)`, where `E` commits the exercise's legs and so the parent it consumed; for the reserve the release's evidence address. A reader computes `d_g` only from generations it established.
+>   - `GenerationHintV1 {kind, lineage_id, generation, state_root, generation_digest, step_digest}`: one per realized generation.
+>   - `CheckpointV1 {kind, lineage_id, start_generation, end_generation, start_generation_digest, end_generation_digest, roots[33], transition_bundle_digest, checkpoint_digest}`, with `end_generation = start_generation + 32`, `roots[i]` the claimed root of generation `start_generation + i`, and `checkpoint_digest = H(shared-lineage/checkpoint/v1; CCB(every other field))`.
+>   - `TransitionBundleV1`: the addresses a reader needs to read a segment's generations, for a vault per generation the attempt that consumed the parent, `E`, the trader's coordinates `(G, DevID, q)` and the route's other legs `(vault, parent root)` — the exercise and everything it names are read from the attempt cells; for the reserve the release envelope's address. `transition_bundle_digest` is the bundle's address: retrieval integrity only, never a transition's identity.
+> - **The epoch index.** `lineage_epoch_locator(k, id, e) = H(shared-lineage/epoch-locator/v1; u8 k ∥ id ∥ u64be(e))`, an index like every other (§11): it lists the hints and checkpoints of generations `32e … 32e + 31`. Anyone may append to it, so it may hold anything.
+> - **Who writes.** The trader whose position resolves Realized at generation `g` of a vault (§24), and the claimant whose release is final at generation `g` of the reserve, append a hint for `g` after their own state is committed; when `g` is a multiple of 32 and greater than 0, they also publish the bundle and the checkpoint of the segment that ends at `g`. Any reader that established a generation whose hint, or a segment whose checkpoint, it does not find MAY publish it. Publishing is never on the path of an admission, and its absence costs only speed.
+> - **A fresh reader.** From the accepted genesis, the reader:
+>   1. probes the epoch index at `e = 1, 2, 4, …` and then by bisection, and reads every epoch up to the highest populated one, all at once;
+>   2. takes a checkpoint for the segment starting at the generation `s` it has established only when its kind and lineage are the lineage's, `start_generation = s`, `start_generation_digest = d_s` as the reader computed it, `roots[0] = R_s`, `end_generation = s + 32`, its encoding round-trips and `checkpoint_digest` recomputes; it fetches that checkpoint's bundle;
+>   3. derives from the claimed roots every cell and object the walk will need — the attempt cells and their routes, the trader positions, the sibling legs, the reserve cells — and reads them all at once, re-hashing each object to its address;
+>   4. runs the walk of steps 1–3 over what it read, establishing each generation by Core exactly as before; after the segment it compares the `d` and root it computed with the checkpoint's end; a mismatch discards the checkpoint and nothing else;
+>   5. reads the generations after the last checkpoint the same way, from their hints.
+>
+>   Anything a hint, checkpoint or bundle names that the reads do not bear out is passed over, and the walk reads that generation as steps 1–3 describe.
+> - **Flooding.** The epoch index is predictable and anyone may append to it. A reader reads a bounded number of candidates per epoch. Exhausting that bound means discovery is unavailable for that epoch: the reader walks it as steps 1–3 describe. It never means the lineage is invalid, and it never means no later generation exists. No hint's generation is evidence of anything: a hint naming generation 1,000,000 is a place to look.
+> - **What phase A costs.** The reads a reader waits on, one after another, are logarithmic in the lineage's age; the evidence it reads, the bytes it moves and the work Core does are still proportional to the age. Only phase C makes them independent of it (DSM Amendment A15).
+
+> **Amendment S24 (owner, 2026-10-07) — the owner baseline, and the authenticated-root mode.** Phone finding, 2026-10-07: after Amendment S23 a fresh wallet still established every generation of a 27-generation vault before its first swap (~18–25 s), and the cost grows with every trade. The owner ruled the same day, from the SoFi paper (Def 6.1, Req 6.2, Req 6.3, the composition-depth boundary): a party that holds nothing of a vault starts from the latest authenticated owner baseline; every generation after it is authenticated by its own transition evidence; a trader's signature is never the anchor; no zero-knowledge, recursive proof, server proving or history replay. The proof material is constant in size: the root, the state leaf with its path, and the reader's own relationship proof, never the vault's leaves. This amends §11, §14.1, §14.2, §16 and §30, and refines DSM Amendment A15 for owned lineages.
+>
+> - **The frontier.** `VaultFrontierV1 {vault_id, generation, root}` (CCB, §14.2; Amendment S26 adds `history_root`), and `c_f = H(vault-frontier/v1; CCB(VaultFrontierV1))`. It states economic state only: nothing about the owner's authority is in it, so a change in the owner's authority lineage changes no frontier, no root and no parent identity.
+> - **The owner baseline.** `OwnerBaselineAuthV1 {frontier_commitment, owner_authority_transition_digest}` (CCB, §14.2), `c_n = H(vault-baseline/v1; CCB(OwnerBaselineAuthV1))`, and an `AnchorPresentationV3` whose `state_commitment` is `c_n`, by the vault's owner: `frontier_commitment` is `c_f` of the frontier presented with it; P0–P6 run at `owner_authority_transition_digest`, the position the signer committed, as they run at a `V_n`'s own; the identity they prove is the accepted genesis's `(owner_genesis, owner_device_id)`; `K_cand = K_proven`; and the frontier's `vault_id` is the vault's. Published with the frontier and baseline bytes, and indexed under `vault_baseline_locator(v, g) = H(vault-baseline-locator/v1; v ‖ u64be(g))` (§11), discovery only — one locator per generation, so what a reader reads to check a baseline does not grow with the vault's age.
+> - **Verifying a baseline**, in this order: (1) the anchor's candidate key signed `c_n`, and the `OwnerBaselineAuthV1` bytes re-hash to `c_n`; (2) P0–P6 at its `owner_authority_transition_digest` prove the accepted genesis's owner, and `K_cand = K_proven`; (3) `frontier_commitment` is `c_f` of the presented frontier bytes, and the frontier's `vault_id` is the vault's. Only then is the frontier's root accepted, as the verified frontier. (4) A witness is checked against that root before anything is read from it. Authority and economic state meet only at `frontier_commitment`.
+> - **The frontier witness.** `VaultFrontierWitnessV1 {state_leaf, state_path[256], relationship}`, where `relationship` is `Present {leaf: VaultRelationshipLeaf, path[256]}` or `Absent {path[256]}`. Against an authenticated frontier: `root_from_path(vault_state_key(v), econ_leaf(·, vault_state_leaf_value(state_leaf)), state_path) = root`; `state_leaf.generation = generation`; its owner fields are the proven owner's; and at `k_T,v` the path folds to `root` from the absent leaf, or from the present leaf whose trader fields are `(G_T, DevID_T)`. The state part is the same for every reader; the relationship part is the querying trader's own.
+> - **Composed state.** The latest valid baseline, followed by every successor whose transition evidence verifies from it (§23, §30 steps 2–3). In the authenticated-root mode a successor's leaves are proven by the paths its `DlvCore` carries against the authenticated `pre_root`, the vault state preimage is carried forward from the generation before, and a relationship entry's stated base is decided by the fold: present or absent, only one folds to `pre_root`. No other leaf is held.
+> - **Witness advancement.** A held witness is specific to its root. Through each successor, the reader advances its state witness (to the receipt's post state) and its own relationship witness (its value advanced by `relationship_leaf_next` when its leaf was the one written, unchanged otherwise) from `R_n` to `R_n+1`, recomputing each sibling whose subtree the receipt wrote from the receipt's own paths; every recomputed sibling must agree with the receipt on the pre side, and the advanced witness must fold to `R_n+1`, or the successor is refused.
+> - **Failure classes.** No baseline, or a witness not available: the reader composes from the genesis as §30 describes. A locator candidate that does not decode or does not authenticate: passed over. Two authenticated baselines of one vault at one generation whose frontiers differ (different `c_f`): `STORAGE_SAFETY_VIOLATION`, the vault is quarantined for this reader, and nothing is chosen (Req 6.3). Two that bind the same frontier and differ only in their authority material are not a fork: they authenticate one frontier, and either stands. An authenticated baseline whose witness contradicts it: refused. Neither of the last two falls back to composing from the genesis.
+> - **The owner's duty.** Catch-up is synchronization, never a condition of market realization (Def 6.1). A continuously online owner publishes a baseline after each realized generation, and answers a trader's request for its relationship witness against the current baseline's root; the answer carries no authority, since the trader checks it against `root`.
+> - **What it costs.** A fresh reader reads the locator, one presentation, the frontier, one witness, and the generations after the baseline: constant in the vault's age and in the number of its traders when the owner is current; growing with the generations since the last baseline when it is not.
+
+
+> **Amendment S26 (owner, 2026-10-08) — a vault's history, and no replay below a baseline.** Host finding, 2026-10-08: a wallet that started at an owner baseline (Amendment S24) judged another trader's trade above it. Rung 1 asks for that trader's root at its parent, and the trader's lineage held a SoFi position built on a vault root below the reader's baseline. A chain from a baseline names nothing below it, so the reader's walk asked for that root by extending the chain it was already extending, recursed, and overflowed its stack. Composing the vault from its genesis down there would have answered, and would have put back the history-linear cost Amendment S24 removed. The owner ruled the same day: **a baseline MUST be sufficient, together with bounded authenticated proofs, to validate every historical root that later public evidence may reference. No conforming verifier may recover such a root by replaying vault history.** This amends §11, §14.1, §14.2, §30 and Amendment S24.
+>
+> - **The history.** Per vault, never across vaults: an append-only binary Merkle tree whose leaf at position `g` is `R_g`, for every generation `g` from 0 to `n`. Leaf hash `H(vault-history-leaf/v1; v ‖ u64be(g) ‖ R_g)`, node hash `H(vault-history-node/v1; left ‖ right)`. Its head `VaultHistoryHeadV1 {vault_id, generation n, peaks}` (CCB class `0x0074`) lists the peaks of the complete subtrees left to right, one per set bit of `n + 1`, highest first, and its root is `H_n = H(vault-history-head/v1; CCB(head))`. It is keyed by generation, which is unique within the vault's lineage, and it is a separate tree from the economic one, so nothing in it refers to itself.
+> - **The frontier commits it.** `VaultFrontierV1` becomes `{vault_id, generation, root, history_root}`, `history_root = H_n` at the frontier's generation, so `c_f` binds the economic root and the history together. Two baselines at one generation that differ in their history differ in `c_f`, and are quarantined as Amendment S24 says.
+> - **Published once, read by hash.** The owner publishes, before it signs a baseline at `n`, every history object up to `n` it has not published: each leaf's 72 bytes under the leaf tag, indexed under `history_locator(v, R_g) = H(vault-history-locator/v1; v ‖ R_g)`; each interior node a new leaf completes, its 64 bytes under the node tag; the vault's state leaf at each `R_g`, under its leaf-value tag; and the head under the head tag. Each namespace is the hash's own tag, so an object's store digest is its hash and a reader fetches a node, a head or a state leaf by the hash it holds. A completed subtree never changes, so every node is published once and serves every later head. Storage only stores; the owner is never in a reader's path.
+> - **Proving a root below a baseline.** A reader whose chain starts at a baseline at `b` and needs a root `R` it does not name: reads the head by the frontier's `history_root` and checks its hash and generation; reads the leaves under `history_locator(v, R)`, each naming a candidate `g < b`; and for a candidate, reads the nodes from the peak covering `g` down to the leaf by their hashes, checking each, until the leaf `(v, g, R)`. A path that ends there proves `R_g = R`, and the chain holds `R` at `g`; one that ends elsewhere proves nothing for that candidate. The path is the peak's height, at most 64 and `log2` of the vault's age in practice. Anything not in hand leaves the root unestablished, never refuted.
+> - **The state at that root.** An operation built on a proven root reads the vault's state leaf there by the value its own core states at the state key, whose path validation folds to that root; the bytes must re-derive that value.
+> - **Records made before.** A baseline signed before this amendment carries the old frontier, which no longer decodes. A reader drops a record it started at one, whole, and adopts a current baseline; an owner drops what it signed and signs again. No other record changes.
+> - **What it costs.** A root below a reader's baseline costs one head, the candidates under one locator and one path of nodes; nothing grows with the vault's age except a path's `log2`. No conforming verifier walks from the genesis to reach it.
 <!-- spec-section: SOFI-031 -->
 ### 31 A trade and a multihop route
 A single vault trade is a route with one hop. A multihop route is one operation whose hops run through distinct vaults,
@@ -1937,6 +2168,8 @@ every later trader find it by walking.
 > - **Who chooses the split.** The producer: `sofi.findRoute` weighs a split across two vaults of the pair beside every single hop and chain, and proposes whichever gives the trader the most. The trade prices the same split again at the heads it walks. Neither carries authority; RouteValidation checks the hops as stated.
 
 > **Recommendation (owner, 2026-09-23) — not a rule.** Every vault must honour the policy of each of its tokens; that is a rule, not a choice (§49, MR-SOFI-0311). Within those policies, owners are encouraged to set up their vaults for a token in line with the rest of the market for that token, with only minor differences, so that their liquidity is usable by multihop routes and other traders' paths. Nothing enforces this, and no check depends on it.
+
+> **Note (owner, 2026-10-07) — client routing and retry policy; nothing here is validity.** A pair's liquidity may be split across several vaults so that trades on different vaults never contend (a vault's next key is the conflict domain, §23). A route search keeps the best output as its reference and treats a route within `ROUTE_TOLERANCE_BPS` (300 at beta, tunable) of it as near-equal; among near-equal routes it takes the fewest legs, then the order `H(route-lane/v1; G ‖ DevID ‖ sorted vault ids)` gives the trader, then the lowest vault ids, so small trades spread across a pair's vaults and a split is taken only when it is better by more than the tolerance. A trade whose vault moves under its draft before anything is published plans again at the new head; a swap whose position resolves Void (its key lost to another trade, provable by anyone under Amendment S25) is quoted and traded again; an Invalid or pending position is never retried. None of this changes what any verifier accepts. This refines Amendment S19's "proposes whichever gives the trader the most": the most within the tolerance band, then the fewest legs.
 
 <!-- spec-section: SOFI-032 -->
 ### 32 Closing a vault
@@ -2778,6 +3011,8 @@ the only number that matters is what remains unreleased.
 
 **Code**
 ERA is native: its policy (Amendment S11) fixes its genesis supply, and every release, the beta faucet's and later emission's, comes out of the network's reserve.
+
+> **Amendment S23 (owner, 2026-10-07).** The reserve is a shared lineage of kind 2: its generations are found from its genesis by the same discovery as a vault's (§30, Amendment S23), and each is established by `release_constructible` from the generation before it, as before. Its hints and checkpoints carry no authority.
 
 <!-- spec-section: SOFI-052 -->
 ### 52 Externally backed supply

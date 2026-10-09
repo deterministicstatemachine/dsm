@@ -41,47 +41,52 @@ export async function getAllBalances(): Promise<TokenBalanceView[]> {
   if (env.payload.case !== 'balancesListResponse') {
     throw new Error(`Unexpected payload case for balances: ${env.payload.case}`);
   }
-  return env.payload.value.balances.map((b: pb.BalanceGetResponse) => {
-    for (const [field, value] of [
-      ['token_id', b.tokenId],
-      ['symbol', b.symbol],
-      ['token_name', b.tokenName],
-      ['display_amount', b.displayAmount],
-    ] as const) {
-      if (value.length === 0) {
-        throw new Error(`STRICT: balance.list answered a row for ${b.tokenId || 'no token'} without its ${field}`);
-      }
+  return env.payload.value.balances.map(balanceView);
+}
+
+/** One balance row as the wallet shows it, from the row Rust answered; a row missing what Rust always states is refused. */
+export function balanceView(b: pb.BalanceGetResponse): TokenBalanceView {
+  for (const [field, value] of [
+    ['token_id', b.tokenId],
+    ['symbol', b.symbol],
+    ['token_name', b.tokenName],
+    ['display_amount', b.displayAmount],
+  ] as const) {
+    if (value.length === 0) {
+      throw new Error(`STRICT: balance.list answered a row for ${b.tokenId || 'no token'} without its ${field}`);
     }
-    // A created token's row always carries its policy's supply and what it
-    // permits: Rust reads them from the committed bytes or refuses the row.
-    if (!b.protocolDefined && (b.genesisSupplyDisplay.length === 0 || !b.permissions)) {
-      throw new Error(`STRICT: balance.list answered a created token ${b.tokenId} without its policy facts`);
-    }
-    return {
-      tokenId: b.tokenId,
-      symbol: b.symbol,
-      tokenName: b.tokenName,
-      baseUnits: b.available,
-      decimals: b.decimals,
-      // Rust's rendered display form. This layer never computes it.
-      displayAmount: b.displayAmount,
-      canonicalTokenId: named(b.canonicalTokenId),
-      // The token's CPTA anchor, rendered by Rust. Carried, never derived: a
-      // second Base32 encoder pads the wrong group and yields an anchor that
-      // resolves to nothing.
-      policyAnchorB32: named(b.policyAnchorB32),
-      anchorFingerprint: named(b.anchorFingerprint),
-      // The token policy's icon field, carried from Rust. The wallet draws the coin from it.
-      iconUrl: named(b.iconUrl),
-      // Rust's word on what the token is and what its policy fixes and permits.
-      protocolDefined: b.protocolDefined,
-      genesisSupplyDisplay: named(b.genesisSupplyDisplay),
-      permissions: b.permissions
-        ? { burnEnabled: b.permissions.burnEnabled, transferable: b.permissions.transferable }
-        : undefined,
-      offline: offlineView(b),
-    };
-  });
+  }
+  // A created token's row always carries its policy's supply and what it
+  // permits: Rust reads them from the committed bytes or refuses the row.
+  if (!b.protocolDefined && (b.genesisSupplyDisplay.length === 0 || !b.permissions)) {
+    throw new Error(`STRICT: balance.list answered a created token ${b.tokenId} without its policy facts`);
+  }
+  return {
+    tokenId: b.tokenId,
+    symbol: b.symbol,
+    tokenName: b.tokenName,
+    baseUnits: b.available,
+    decimals: b.decimals,
+    // Rust's rendered display form. This layer never computes it.
+    displayAmount: b.displayAmount,
+    canonicalTokenId: named(b.canonicalTokenId),
+    // The token's CPTA anchor, rendered by Rust. Carried, never derived: a
+    // second Base32 encoder pads the wrong group and yields an anchor that
+    // resolves to nothing.
+    policyAnchorB32: named(b.policyAnchorB32),
+    anchorFingerprint: named(b.anchorFingerprint),
+    // The token policy's icon field, carried from Rust. The wallet draws the coin from it.
+    iconUrl: named(b.iconUrl),
+    // Rust's word on what the token is and what its policy fixes and permits.
+    protocolDefined: b.protocolDefined,
+    genesisSupplyDisplay: named(b.genesisSupplyDisplay),
+    // Rust's word on whether the token is a state object (its supply is one).
+    holding: b.holding === pb.BalanceHolding.STATE_OBJECT ? 'object' : 'currency',
+    permissions: b.permissions
+      ? { burnEnabled: b.permissions.burnEnabled, transferable: b.permissions.transferable }
+      : undefined,
+    offline: offlineView(b),
+  };
 }
 
 export async function getWalletHistory(): Promise<WalletHistory> {

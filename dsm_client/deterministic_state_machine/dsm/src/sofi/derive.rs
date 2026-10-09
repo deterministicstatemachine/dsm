@@ -20,9 +20,9 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_VAULT_CREATION_KEY, TAG_DSM_SOFI_STORAGE_SEED_V4, TAG_DSM_SOFI_SUCC_ATTEMPT,
     TAG_DSM_SOFI_SUCC_CELL_V2, TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID,
     TAG_DSM_SOFI_ROUTE_DIGEST, TAG_DSM_SOFI_TRADER_PRECOMMIT_SIGN,
-    TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
-    TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT, TAG_DSM_SOFI_VAULT_LEAF_STATE,
-    TAG_DSM_SOFI_VAULT_STATE_KEY,
+    TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID,
+    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR, TAG_DSM_SOFI_TRADER_PRE_BALANCE_OBJECT,
+    TAG_DSM_SOFI_VAULT_LEAF_STATE, TAG_DSM_SOFI_VAULT_STATE_KEY,
 };
 use crate::common::domain_tags::TAG_DSM_ECONOMIC_LEAF_STATE;
 use crate::storage_object::immutable_addr;
@@ -109,6 +109,16 @@ pub fn closure_content_address(object_class: u16, bytes: &[u8]) -> Option<D32> {
 /// `X_route = H(route-digest/v1 ‖ CCB(RouteDigestPreimage))`.
 pub fn route_digest(preimage: &RouteDigestPreimage) -> Result<D32, SofiWireError> {
     Ok(h(TAG_DSM_SOFI_ROUTE_DIGEST, &[&preimage.encode()?]))
+}
+
+/// `H(vault-baseline-locator/v1 ‖ v ‖ u64be(g))` — where a vault's owner
+/// baselines at generation `g` are indexed (SoFi Amendment S24). Discovery
+/// only.
+pub fn vault_baseline_locator(vault_id: &D32, generation: u64) -> D32 {
+    h(
+        TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR,
+        &[vault_id, &generation.to_be_bytes()],
+    )
 }
 
 /// `H(vault-genesis-locator/v1 ‖ v)`.

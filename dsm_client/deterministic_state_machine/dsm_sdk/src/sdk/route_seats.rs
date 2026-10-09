@@ -55,6 +55,12 @@ pub trait RouteSeats: Send + Sync {
     /// comes from a mirror (§14). `None` when it has none or did not answer.
     fn close(&self, member: &[u8]) -> impl core::future::Future<Output = Option<u64>> + Send;
 
+    /// The cycle of `member`'s latest ByteCommit as it states it, closing
+    /// none. Only the cycle number is taken from the member, as with
+    /// [`Self::close`]. `None` when it has none or did not answer.
+    fn latest_cycle(&self, member: &[u8])
+        -> impl core::future::Future<Output = Option<u64>> + Send;
+
     /// Ask `member` to fetch its set-mates' new ByteCommits into its mirror.
     fn sync_mirror(&self, member: &[u8]) -> impl core::future::Future<Output = ()> + Send;
 
@@ -167,8 +173,16 @@ async fn from_leader<S: RouteSeats, const N: usize>(
     record: &mut Recorder<'_, N>,
 ) -> Result<[WriteReport; N], DsmError> {
     let mut links: [Option<ArrivalRecord>; N] = [(); N].map(|()| None);
-    for (link, (cell, value)) in links.iter_mut().zip(&cells) {
-        match leader_holds(seats, cell, value).await {
+    // The leader's log of each cell is its own read, and none waits on
+    // another: they are asked at once and taken in the cells' order.
+    let held = futures::future::join_all(
+        cells
+            .iter()
+            .map(|(cell, value)| leader_holds(seats, cell, value)),
+    )
+    .await;
+    for (link, holds) in links.iter_mut().zip(held) {
+        match holds {
             LeaderHolds::Record(found) => *link = Some(found),
             LeaderHolds::Nothing => {}
             LeaderHolds::Unread => {
@@ -406,24 +420,28 @@ pub async fn write_recorded_position(
                 let [report] = reports;
                 record(root_cell, claim, report)
             };
-            Ok([
+            // Two cells, each continued seat by seat along its own chain;
+            // neither chain carries anything of the other, so they move at
+            // once, and both run to their end before either's error is
+            // returned.
+            let (ful, root) = futures::future::join(
                 continue_write(
                     &seats,
                     ful_cell,
                     fulfillment,
                     WriteReport { slots: ful.slots },
                     &mut ful_recorder,
-                )
-                .await?,
+                ),
                 continue_write(
                     &seats,
                     root_cell,
                     claim,
                     WriteReport { slots: root.slots },
                     &mut root_recorder,
-                )
-                .await?,
-            ])
+                ),
+            )
+            .await;
+            Ok([ful?, root?])
         }
         (ful, root) => {
             log::info!(
@@ -584,18 +602,56 @@ async fn committed_at<S: RouteSeats>(
 /// seat's view of the leader is the leader's ByteCommit at the leader's
 /// latest cycle as that seat's own mirror holds it, with the leader's proof
 /// (§9 route chains, rule 4).
+/// [`read_cell`] for a cell whose final value, once there, holds it for good
+/// (storage spec §9, finality 2): the reads this process kept when Core
+/// evaluated them as final at the cell, or else the seats' reads, kept when
+/// `is_final` — Core's evaluation of them at this cell — says they show a
+/// final value. An open or undecided cell is read from the seats every time.
+pub(crate) async fn read_cell_kept<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    is_final: impl FnOnce(&CellEvidence) -> bool,
+) -> CellEvidence {
+    if let Some(kept) = crate::sdk::final_reads::final_cell(cell) {
+        return kept;
+    }
+    let evidence = read_cell(seats, cell).await;
+    if is_final(&evidence) {
+        crate::sdk::final_reads::keep_final_cell(cell, &evidence);
+    }
+    evidence
+}
+
+/// Whether Core reads a final claim at the root cell `cell` from `evidence`.
+pub(crate) fn root_claim_final(
+    cell: &dsm::economic::register::RootCell,
+    evidence: &CellEvidence,
+) -> bool {
+    matches!(
+        dsm::economic::register::read_root_cell(cell, evidence),
+        Ok(dsm::route_chain::CellReading::Held {
+            state: dsm::route_chain::ChainState::Final,
+            ..
+        })
+    )
+}
+
 pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvidence {
     let (route, namespace, key) = (cell.route(), cell.namespace(), cell.key());
     // Each phase logs where it ends; the log's own timestamps time it. The
     // cell is named by its key's first five bytes (eight characters).
     let short = crate::util::text_id::encode_base32_crockford(&key[..5]);
     // Every seat is asked at once, and the answers stay in route order: a
-    // seat that does not answer costs one timeout, not one per seat.
-    let values: Vec<Option<Vec<Vec<u8>>>> = futures::future::join_all(
-        route
-            .seats()
-            .iter()
-            .map(|seat| seats.read_values(seat, namespace, key)),
+    // seat that does not answer costs one timeout, not one per seat. The
+    // cycle each seat last closed is asked for in the same round.
+    let (values, latest): (Vec<Option<Vec<Vec<u8>>>>, Vec<Option<u64>>) = futures::future::join(
+        futures::future::join_all(
+            route
+                .seats()
+                .iter()
+                .map(|seat| seats.read_values(seat, namespace, key)),
+        ),
+        futures::future::join_all(route.seats().iter().map(|seat| seats.latest_cycle(seat))),
     )
     .await;
     log::info!(
@@ -603,6 +659,47 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
         values.iter().filter(|v| v.is_some()).count(),
         values.len()
     );
+    let members = seats.members();
+
+    // A settled cell: every seat that holds anything already closed a cycle
+    // committing everything it holds there. Closing another cycle would
+    // commit the same entries at the same running hashes, so the committed
+    // state at the cycles already closed is the read.
+    let held_cycles: Vec<Option<u64>> = values
+        .iter()
+        .zip(&latest)
+        .map(|(held, cycle)| {
+            if held.as_ref().is_some_and(|v| !v.is_empty()) {
+                *cycle
+            } else {
+                None
+            }
+        })
+        .collect();
+    let every_holder_closed = values
+        .iter()
+        .zip(&held_cycles)
+        .all(|(held, cycle)| held.as_ref().is_none_or(|v| v.is_empty()) || cycle.is_some());
+    if every_holder_closed {
+        let evidence = gather(
+            seats,
+            route,
+            &members,
+            values.clone(),
+            held_cycles,
+            namespace,
+            key,
+        )
+        .await;
+        if commits_everything_held(&evidence) {
+            log::info!(
+                "route read {short}: settled, committed state from {} seats",
+                evidence.iter().filter(|e| e.committed.is_some()).count()
+            );
+            return CellEvidence { seats: evidence };
+        }
+    }
+
     let cycles: Vec<Option<u64>> =
         futures::future::join_all(route.seats().iter().zip(&values).map(
             |(seat, held)| async move {
@@ -618,7 +715,6 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
         "route read {short}: cycles closed at {} seats",
         cycles.iter().filter(|c| c.is_some()).count()
     );
-    let members = seats.members();
     if cycles.iter().any(Option::is_some) {
         futures::future::join_all(members.iter().map(|member| seats.sync_mirror(member))).await;
         log::info!(
@@ -626,12 +722,48 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
             members.len()
         );
     }
+    let evidence = gather(seats, route, &members, values, cycles, namespace, key).await;
+    log::info!(
+        "route read {short}: committed state from {} seats",
+        evidence.iter().filter(|e| e.committed.is_some()).count()
+    );
+    CellEvidence { seats: evidence }
+}
+
+/// Whether the committed state gathered commits every entry each seat
+/// holds: each holding seat's proof is at its last entry, and each later
+/// holding seat's view of the leader is at the leader's last entry.
+fn commits_everything_held(evidence: &[SeatEvidence]) -> bool {
+    let held = |seat: &SeatEvidence| seat.values.as_ref().map_or(0, Vec::len);
+    let at_last = |committed: &Option<CommittedAt>, count: usize| {
+        committed
+            .as_ref()
+            .is_some_and(|c| usize::try_from(c.proof.index).is_ok_and(|index| index == count))
+    };
+    let leader_count = evidence.first().map_or(0, held);
+    evidence.iter().enumerate().all(|(position, seat)| {
+        let count = held(seat);
+        count == 0
+            || (at_last(&seat.committed, count)
+                && (position == 0 || at_last(&seat.leader_seen, leader_count)))
+    })
+}
+
+/// Every seat's committed state at the cycle given for it, and each later
+/// seat's view of the leader at the leader's cycle, gathered at once; the
+/// evidence stays in route order.
+async fn gather<S: RouteSeats>(
+    seats: &S,
+    route: &Route,
+    members: &[Vec<u8>],
+    values: Vec<Option<Vec<Vec<u8>>>>,
+    cycles: Vec<Option<u64>>,
+    namespace: &[u8],
+    key: &[u8; 32],
+) -> Vec<SeatEvidence> {
     let leader = route.leader();
     let leader_cycle = cycles.first().copied().flatten();
-    // Every seat's committed state, and its view of the leader, is gathered
-    // at once; the evidence stays in route order.
-    let members = &members;
-    let evidence = futures::future::join_all(
+    futures::future::join_all(
         route
             .seats()
             .iter()
@@ -678,12 +810,7 @@ pub async fn read_cell<S: RouteSeats>(seats: &S, cell: &RoutedCell) -> CellEvide
                 }
             }),
     )
-    .await;
-    log::info!(
-        "route read {short}: committed state from {} seats",
-        evidence.iter().filter(|e| e.committed.is_some()).count()
-    );
-    CellEvidence { seats: evidence }
+    .await
 }
 
 /// The members of a committed set, reached at the endpoints the set names.
@@ -736,6 +863,25 @@ impl RouteSeats for NodeSeats {
 
     async fn close(&self, member: &[u8]) -> Option<u64> {
         self.member(member).ok()?.close_cycle().await
+    }
+
+    async fn latest_cycle(&self, member: &[u8]) -> Option<u64> {
+        use crate::sdk::storage_node_sdk::LatestByteCommit;
+        let client = match self.member(member) {
+            Ok(client) => client,
+            Err(e) => {
+                log::warn!("latest cycle: {e}");
+                return None;
+            }
+        };
+        match client.latest_bytecommit().await.answer {
+            LatestByteCommit::Stated(commit) => Some(commit.cycle_index),
+            LatestByteCommit::NoCycle => None,
+            LatestByteCommit::Unanswered(why) => {
+                log::info!("latest cycle at {}: {why}", String::from_utf8_lossy(member));
+                None
+            }
+        }
     }
 
     async fn sync_mirror(&self, member: &[u8]) {
@@ -1080,6 +1226,8 @@ mod tests {
         in_flight: std::sync::atomic::AtomicUsize,
         most_at_once: std::sync::atomic::AtomicUsize,
         asked: std::sync::atomic::AtomicUsize,
+        /// Cycles the read asked a seat to close.
+        closed: std::sync::atomic::AtomicUsize,
     }
 
     impl Watched<'_> {
@@ -1120,7 +1268,13 @@ mod tests {
         }
 
         async fn close(&self, member: &[u8]) -> Option<u64> {
+            self.closed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.seats.close(member).await
+        }
+
+        async fn latest_cycle(&self, member: &[u8]) -> Option<u64> {
+            self.seats.latest_cycle(member).await
         }
 
         async fn sync_mirror(&self, member: &[u8]) {
@@ -1180,6 +1334,7 @@ mod tests {
             in_flight: AtomicUsize::new(0),
             most_at_once: AtomicUsize::new(0),
             asked: AtomicUsize::new(0),
+            closed: AtomicUsize::new(0),
         };
         let evidence = read_cell(&watched, &cell).await;
         let asked = watched.asked.load(SeqCst);
@@ -1205,6 +1360,79 @@ mod tests {
                 })
             ),
             "the value written to every seat reads Final: {reading:?}"
+        );
+    }
+
+    /// A cell every seat already committed in full is read at the cycles
+    /// already closed: closing another would commit the same entries. The
+    /// read closes no cycle and still reads the value Final. Once a seat
+    /// holds an entry no cycle of its commits, the read closes cycles again.
+    /// On the storage node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_settled_cell_is_read_without_closing_a_cycle() {
+        use dsm::route_chain::{CellReading, ChainState};
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+        let (_nodes, _config, set, cell) = pinned(0x35).await;
+        let seats = NodeSeats::new(&set).expect("seats");
+        let mut quiet = |_: &[WriteReport; 1]| Ok(());
+        from_leader(&seats, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
+            .await
+            .expect("a report");
+        let watched = || Watched {
+            seats: &seats,
+            in_flight: AtomicUsize::new(0),
+            most_at_once: AtomicUsize::new(0),
+            asked: AtomicUsize::new(0),
+            closed: AtomicUsize::new(0),
+        };
+        let reads_final = |evidence: &CellEvidence| {
+            matches!(
+                dsm::route_chain::evaluate(&cell, evidence, |bytes: &[u8]| {
+                    (bytes == b"V").then(|| (dsm::storage_cell::entry_digest(bytes), ()))
+                }),
+                Ok(CellReading::Held {
+                    state: ChainState::Final,
+                    ..
+                })
+            )
+        };
+
+        let first = watched();
+        let evidence = read_cell(&first, &cell).await;
+        assert!(
+            first.closed.load(SeqCst) > 0,
+            "nothing was committed yet: the first read closes cycles"
+        );
+        assert!(reads_final(&evidence), "the first read reads V Final");
+
+        let settled = watched();
+        let evidence = read_cell(&settled, &cell).await;
+        assert_eq!(
+            settled.closed.load(SeqCst),
+            0,
+            "every seat's last cycle commits all it holds: no cycle is closed"
+        );
+        assert!(reads_final(&evidence), "the settled read reads V Final");
+
+        let leader = cell.route().leader().to_vec();
+        seats
+            .put_entries(
+                &leader,
+                &[(cell.namespace().to_vec(), *cell.key(), b"W".to_vec())],
+            )
+            .await
+            .expect("the leader takes a later entry");
+        let moved = watched();
+        let evidence = read_cell(&moved, &cell).await;
+        assert!(
+            moved.closed.load(SeqCst) > 0,
+            "the leader holds an entry no cycle commits: the read closes cycles"
+        );
+        assert!(
+            reads_final(&evidence),
+            "V's chain is still Final once the later entry is committed"
         );
     }
 

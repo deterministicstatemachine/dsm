@@ -218,6 +218,16 @@ impl ProvenanceResolver for OneRelease {
         )))
     }
 
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no relationship in this fixture: {signer:?} step {addr:?}"
+        )))
+    }
+
     fn anchored_policy_bytes(
         &self,
         policy_commit: &[u8; 32],
@@ -273,6 +283,16 @@ impl ProvenanceResolver for Nothing {
         Err(PeerLineageFailure::Incomplete(format!(
             "no evidence store in this fixture: {addr:?} under {:?}",
             namespace.source_bytes()
+        )))
+    }
+
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(format!(
+            "no relationship in this fixture: {signer:?} step {addr:?}"
         )))
     }
 

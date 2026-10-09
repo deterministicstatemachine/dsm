@@ -28,13 +28,16 @@ pub struct AppState {
     /// it). `None` = not configured: the node serves the storage contract but
     /// has no set-mates to mirror.
     pub storage_set: Option<Arc<NodeStorageSet>>,
-    /// Held for the whole of a ByteCommit mirror sync, so one sync runs at a
-    /// time and a caller asking again waits for it instead of repeating it.
-    pub mirror_sync: Arc<tokio::sync::Mutex<()>>,
-    /// Held while a cycle closes. A closer waits here, before it takes a
-    /// database connection, so closers queued behind one another hold no
-    /// connection and cannot starve every other request of the pool.
-    pub closing: Arc<tokio::sync::Mutex<()>>,
+    /// ByteCommit mirror syncs, one at a time per set-mate: a caller asking
+    /// while one runs waits for it and shares the next, instead of queuing a
+    /// sync of its own.
+    pub mirror_syncs: Arc<api::objects::bytecommit::MirrorSyncs>,
+    /// The closer lock, held while a cycle closes (a closer waits there,
+    /// before it takes a database connection, so closers queued behind one
+    /// another hold no connection and cannot starve every other request of
+    /// the pool), and what this process keeps of its closed cycles: the leaf
+    /// set of the last one and the trees proofs are read from.
+    pub committed: Arc<db::CommittedCells>,
     /// Devices' waits on their spools (long-poll), woken by each submit.
     pub spool_waits: api::transport::b0x::SpoolWaits,
 }
@@ -159,8 +162,8 @@ impl AppState {
             db_pool,
             set_client,
             storage_set: None,
-            mirror_sync: Arc::new(tokio::sync::Mutex::new(())),
-            closing: Arc::new(tokio::sync::Mutex::new(())),
+            mirror_syncs: Arc::new(api::objects::bytecommit::MirrorSyncs::default()),
+            committed: Arc::new(db::CommittedCells::default()),
             spool_waits: api::transport::b0x::SpoolWaits::default(),
         })
     }
