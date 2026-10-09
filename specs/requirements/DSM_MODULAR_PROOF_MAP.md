@@ -860,8 +860,8 @@ WOTS-TW) and 9 (the hypertree reduction).
 
 **Trust boundary.** Lean cannot check an EasyCrypt proof. Reuse therefore
 trusts:
-1. the EasyCrypt artifact and toolchain. Owed: replay the artifact at the
-   pinned commit. It has been read, not replayed (§1).
+1. the EasyCrypt artifact and toolchain. Replayed at the pinned commit on
+   2026-10-09 (status below).
 2. the faithfulness of the Lean statement of the premise to
    `EUFCMA_SPHINCS_PLUS` (`SPHINCS_PLUS.ec` line 4338): games, reductions and
    terms. Owed: a line-by-line correspondence record.
@@ -891,8 +891,10 @@ level is claimed.
 **Status after the revision (2026-10-08).** The premise is recorded item by
 item in `SPHINCS_EC_CORRESPONDENCE.md`: parameters, the instance, the axioms
 discharged, every algorithm, the game and the embedded forger, and the terms.
-The artifact replay is running on the maintainer's machine (EasyCrypt r2026.02
-test box), and its result will be recorded there. Remaining Lean work for the
+The artifact was replayed on 2026-10-09 with its own procedure (EasyCrypt
+r2026.02 test box, Alt-Ergo 2.6.0, Z3 4.13.4): all 11 files check, no failure,
+and no `admit` (record §9). Trust boundary item 1 is discharged up to the
+EasyCrypt toolchain itself. Item 2, the correspondence, remains manual. Remaining Lean work for the
 transfer: the signature parse bijection (T5). (An earlier draft of the record
 needed a variable-length fixed-prefix lemma, T3a; choosing `mkg` to read
 `PK.seed ‖ M` makes the correspondence pointwise and removes it.)
