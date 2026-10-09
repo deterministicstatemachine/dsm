@@ -81,6 +81,7 @@ export default function App() {
     preview !== null ? preview.scheme : runtime.scheme,
     runtime.appState,
     session.lock_status.method,
+    agreeing,
   );
 
   // The Game Boy's intro cutscene waits for its A button: it plays only once
