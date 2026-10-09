@@ -6,45 +6,54 @@
  */
 
 :root {
-  --s-bg: #fff8e7;
+  /* The Modern palette, in both schemes: black, white, yellow-gold and fuchsia. */
+  --s-fuchsia: #e8135a;
+  --s-gold: #ffc400;
+  --s-gold-deep: #b98900;
+  --s-bg: #ffffff;
   --s-surface: #ffffff;
-  --s-surface-2: #fff1c7;
-  --s-text: #121212;
-  --s-muted: #6b6b6b;
-  --s-line: #f1e6c8;
-  --s-primary: #e8135a;
+  --s-surface-2: #fff4c4;
+  --s-text: #0f0f0f;
+  --s-muted: #5f5f5f;
+  --s-line: #efe4c2;
+  --s-primary: var(--s-fuchsia);
   --s-on-primary: #ffffff;
-  --s-secondary: #ffd21f;
-  --s-on-secondary: #121212;
-  --s-positive: #b88700;
-  --s-negative: #e8135a;
-  --s-avatar-a: #fde4ec;
-  --s-avatar-a-text: #e8135a;
-  --s-avatar-b: #fff1c7;
-  --s-avatar-b-text: #b88700;
-  --s-nav-active: #e8135a;
-  --s-shadow: 0 2px 10px rgba(110, 80, 0, 0.08);
+  --s-secondary: var(--s-gold);
+  --s-on-secondary: #0f0f0f;
+  --s-accent: var(--s-gold-deep);
+  --s-positive: var(--s-gold-deep);
+  --s-negative: var(--s-fuchsia);
+  --s-avatar-a: #fde0ea;
+  --s-avatar-a-text: var(--s-fuchsia);
+  --s-avatar-b: var(--s-gold);
+  --s-avatar-b-text: #0f0f0f;
+  --s-nav-active: var(--s-fuchsia);
+  --s-balance-bg: linear-gradient(150deg, #ffd84a 0%, #ffc400 100%);
+  --s-balance-text: #0f0f0f;
+  --s-balance-muted: #4a3a00;
+  --s-shadow: 0 2px 10px rgba(110, 80, 0, 0.10);
   --s-radius: 20px;
 }
 
 html[data-skin="modern"][data-scheme="dark"] {
-  --s-bg: #0b0b0b;
+  --s-fuchsia: #ff1f6d;
+  --s-gold: #ffd21f;
+  --s-gold-deep: #ffd21f;
+  --s-bg: #0a0a0a;
   --s-surface: #161616;
-  --s-surface-2: #1f1f1f;
+  --s-surface-2: #222222;
   --s-text: #ffffff;
   --s-muted: #a3a3a3;
   --s-line: #2a2a2a;
-  --s-primary: #ffd21f;
-  --s-on-primary: #121212;
-  --s-secondary: #ffd21f;
-  --s-on-secondary: #121212;
-  --s-positive: #ffd21f;
-  --s-negative: #ff3d7f;
-  --s-avatar-a: #e8135a;
+  --s-on-primary: #ffffff;
+  --s-on-secondary: #0f0f0f;
+  --s-avatar-a: var(--s-fuchsia);
   --s-avatar-a-text: #ffffff;
-  --s-avatar-b: #ffd21f;
-  --s-avatar-b-text: #121212;
-  --s-nav-active: #ffd21f;
+  --s-avatar-b: var(--s-gold);
+  --s-avatar-b-text: #0f0f0f;
+  --s-balance-bg: linear-gradient(155deg, #1a1a1a 45%, #4a3a00 100%);
+  --s-balance-text: #ffffff;
+  --s-balance-muted: var(--s-gold);
   --s-shadow: none;
 }
 
@@ -82,7 +91,8 @@ html[data-skin="modern"] .stateboy-screen-host { height: 100%; }
 .s-topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px 4px; }
 .s-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
 .s-brand-mark { width: 30px; height: 26px; border-radius: 7px; background: var(--s-text); position: relative; }
-html[data-scheme="dark"] .s-brand-mark { background: var(--s-secondary); }
+.s-brand-mark { background: var(--s-fuchsia); }
+html[data-scheme="dark"] .s-brand-mark { background: var(--s-gold); }
 .s-brand-mark::after { content: ''; position: absolute; right: 4px; top: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--s-bg); }
 .s-icon-btn {
   width: 44px; height: 44px; border-radius: 50%; border: none; background: var(--s-surface-2);
@@ -109,9 +119,11 @@ html[data-scheme="dark"] .s-brand-mark { background: var(--s-secondary); }
 .s-avatar svg { width: 26px; height: 26px; }
 .s-notice svg { width: 20px; height: 20px; }
 .s-card { background: var(--s-surface); border-radius: var(--s-radius); padding: 18px; box-shadow: var(--s-shadow); border: 1px solid var(--s-line); margin-bottom: 14px; }
-.s-balance { background: var(--s-surface-2); border: none; position: relative; overflow: hidden; }
-html[data-scheme="dark"] .s-balance { background: linear-gradient(160deg, #1b1b1b 55%, #3a2f05 100%); border: 1px solid #3a3a3a; }
-.s-balance-label { font-size: 16px; color: var(--s-muted); font-weight: 600; }
+.s-balance { background: var(--s-balance-bg); color: var(--s-balance-text); border: none; position: relative; overflow: hidden; }
+html[data-scheme="dark"] .s-balance { border: 1px solid #3a3a3a; }
+.s-balance .s-hint, .s-balance .s-balance-other { color: var(--s-balance-muted); }
+.s-balance-label { font-size: 16px; color: var(--s-balance-muted); font-weight: 700; }
+html[data-scheme="dark"] .s-balance-amount small { color: var(--s-gold); }
 .s-balance-amount { font-size: 42px; font-weight: 900; letter-spacing: -1px; margin-top: 6px; overflow-wrap: anywhere; }
 .s-balance-amount small { font-size: 24px; font-weight: 800; margin-left: 6px; }
 .s-balance-other { margin-top: 10px; font-size: 13px; color: var(--s-muted); }
@@ -150,8 +162,7 @@ html[data-scheme="dark"] .s-balance { background: linear-gradient(160deg, #1b1b1
 
 .s-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .s-section-title { font-size: 24px; font-weight: 900; }
-.s-chip { border: none; border-radius: 999px; padding: 8px 14px; font-weight: 700; font-size: 15px; background: var(--s-avatar-a); color: var(--s-primary); }
-html[data-scheme="dark"] .s-chip { background: var(--s-surface-2); color: var(--s-secondary); }
+.s-chip { border: none; border-radius: 999px; padding: 8px 14px; font-weight: 800; font-size: 15px; background: var(--s-gold); color: #0f0f0f; }
 
 .s-field { margin-bottom: 14px; }
 .s-label { display: block; font-size: 16px; font-weight: 700; margin-bottom: 6px; }
@@ -174,8 +185,7 @@ html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
 
 .s-seg { display: grid; grid-auto-flow: column; gap: 6px; background: var(--s-surface-2); border-radius: 14px; padding: 4px; }
 .s-seg button { border: none; border-radius: 10px; padding: 10px; font-weight: 700; font-size: 15px; background: transparent; color: var(--s-text); }
-.s-seg button[aria-pressed="true"] { background: var(--s-surface); box-shadow: var(--s-shadow); }
-html[data-scheme="dark"] .s-seg button[aria-pressed="true"] { background: var(--s-secondary); color: #121212; }
+.s-seg button[aria-pressed="true"] { background: var(--s-fuchsia); color: #ffffff; }
 
 .s-sheet-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-end; z-index: 9000; }
 .s-sheet {
@@ -196,8 +206,8 @@ html[data-scheme="dark"] .s-seg button[aria-pressed="true"] { background: var(--
   border-radius: 18px; background: var(--s-surface); color: var(--s-text); box-shadow: var(--s-shadow);
   font-family: inherit; font-size: 14px; font-weight: 800;
 }
-.s-tile svg { width: 26px; height: 26px; color: var(--s-primary); }
-html[data-scheme="dark"] .s-tile svg { color: var(--s-secondary); }
+.s-tile svg { width: 26px; height: 26px; color: var(--s-fuchsia); }
+.s-tile:nth-child(even) svg { color: var(--s-gold-deep); }
 .s-coin { width: 40px; height: 40px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; }
 .s-coin-img { width: 40px; height: 40px; border-radius: 50%; }
 .s-token-pick { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -206,6 +216,19 @@ html[data-scheme="dark"] .s-tile svg { color: var(--s-secondary); }
   background: var(--s-surface-2); color: var(--s-text);
 }
 .s-token-pick button[aria-pressed="true"] { background: var(--s-primary); color: var(--s-on-primary); }
+
+/* A token's still mark (FlatTokenMark): its policy icon, or its letter in a badge. */
+.s-token-flat {
+  display: inline-grid; place-items: center; flex: 0 0 auto; border-radius: 50%; overflow: hidden;
+  aspect-ratio: 1; object-fit: cover; image-rendering: auto; container-type: size;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-weight: 900; line-height: 1;
+  font-size: 55cqh; background: var(--s-surface-2); color: var(--s-text);
+}
+.s-token-flat[data-tone="fuchsia"] { background: var(--s-fuchsia); color: #ffffff; }
+.s-token-flat[data-tone="gold"] { background: var(--s-gold); color: #0f0f0f; }
+/* A still mark standing where coin artwork had its own size: it fills that box. */
+.s-token-fill { width: 100%; height: 100%; }
+html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; box-shadow: none; padding: 0; }
 
 /* A DGen screen opened from the Modern skin (the lock, a connect request):
    drawn in the Modern colours, under a Back button. */
@@ -218,8 +241,7 @@ html[data-scheme="dark"] .s-tile svg { color: var(--s-secondary); }
 
 /* ---- Before the wallet is ready ---- */
 .s-step { flex: 1; text-align: center; padding: 10px 6px; border-radius: 10px; font-weight: 700; font-size: 14px; color: var(--s-muted); }
-.s-step[aria-current="step"] { background: var(--s-surface); color: var(--s-text); box-shadow: var(--s-shadow); }
-html[data-scheme="dark"] .s-step[aria-current="step"] { background: var(--s-secondary); color: #121212; }
+.s-step[aria-current="step"] { background: var(--s-gold); color: #0f0f0f; }
 .s-seg[role="list"] { display: flex; }
 .s-words { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .s-words li { background: var(--s-surface-2); border-radius: 14px; padding: 12px 14px; font-size: 19px; font-weight: 800; display: flex; gap: 10px; align-items: baseline; }
@@ -229,4 +251,4 @@ html[data-scheme="dark"] .s-step[aria-current="step"] { background: var(--s-seco
 .s-spinner { width: 54px; height: 54px; border-radius: 50%; border: 5px solid var(--s-surface-2); border-top-color: var(--s-primary); animation: s-spin 0.9s linear infinite; margin-bottom: 18px; }
 @keyframes s-spin { to { transform: rotate(360deg); } }
 .s-progress { width: 100%; height: 14px; border-radius: 999px; background: var(--s-surface-2); overflow: hidden; margin-top: 10px; }
-.s-progress > div { height: 100%; background: var(--s-primary); border-radius: 999px; transition: width 180ms ease-out; }
+.s-progress > div { height: 100%; background: linear-gradient(90deg, var(--s-gold), var(--s-fuchsia)); border-radius: 999px; transition: width 180ms ease-out; }

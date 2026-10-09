@@ -62,6 +62,7 @@ html[data-skin="modern"] .sb-details > summary {
 html[data-skin="modern"] .sb-details[open] > summary { border-bottom-color: var(--s-line); }
 html[data-skin="modern"] .sb-hero__label { font-size: 15px; color: var(--s-muted); }
 html[data-skin="modern"] .sb-hero__value { font-size: 36px; font-weight: 900; letter-spacing: -1px; }
+html[data-skin="modern"] .sb-hero__unit { color: var(--s-gold-deep); }
 html[data-skin="modern"] .sb-hero__unit { font-size: 18px; }
 html[data-skin="modern"] .sb-hero__row { border-top: 1px solid var(--s-line); font-size: 15px; }
 html[data-skin="modern"] .sb-kv { border-bottom: 1px solid var(--s-line); font-size: 15px; }
@@ -72,12 +73,12 @@ html[data-skin="modern"] .sb-tag {
   border: none; border-radius: 999px; padding: 3px 10px; background: var(--s-surface-2); color: var(--s-text);
   text-transform: none; letter-spacing: 0; font-size: 13px;
 }
-html[data-skin="modern"] .sb-tag--solid { background: var(--s-primary); color: var(--s-on-primary); }
+html[data-skin="modern"] .sb-tag--solid { background: var(--s-gold); color: #0f0f0f; }
 html[data-skin="modern"] .sb-notice { border: none; border-radius: 16px; background: var(--s-surface-2); color: var(--s-text); font-size: 14px; }
 html[data-skin="modern"] .sb-notice--error { background: #fde4ec; color: #9b0c3c; }
 html[data-skin="modern"][data-scheme="dark"] .sb-notice--error { background: #3a0d1c; color: #ff9ab9; }
 html[data-skin="modern"] .sb-progress { border: none; border-radius: 999px; height: 10px; background: var(--s-surface-2); }
-html[data-skin="modern"] .sb-progress__fill { background: var(--s-primary); border-radius: 999px; }
+html[data-skin="modern"] .sb-progress__fill { background: linear-gradient(90deg, var(--s-gold), var(--s-fuchsia)); border-radius: 999px; }
 
 /* ---- Menus (the SoFi hub, …) ---- */
 html[data-skin="modern"] .sb-menu__item {
@@ -100,9 +101,7 @@ html[data-skin="modern"] .sb-seg__opt {
   font-size: 14px; letter-spacing: 0; text-transform: none;
 }
 html[data-skin="modern"] .sb-tabs__tab.active,
-html[data-skin="modern"] .sb-seg__opt.active { background: var(--s-surface); color: var(--s-text); box-shadow: var(--s-shadow); }
-html[data-skin="modern"][data-scheme="dark"] .sb-tabs__tab.active,
-html[data-skin="modern"][data-scheme="dark"] .sb-seg__opt.active { background: var(--s-secondary); color: #121212; }
+html[data-skin="modern"] .sb-seg__opt.active { background: var(--s-fuchsia); color: #ffffff; }
 
 /* ---- Fields ---- */
 html[data-skin="modern"] .sb-input,
