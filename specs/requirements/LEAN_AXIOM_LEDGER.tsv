@@ -777,6 +777,8 @@ lean4/Sphincs/CompRestate.lean	DSM.Sphincs.Comp.euf_cma_named	Classical.choice,Q
 lean4/Sphincs/CompRestate.lean	DSM.Sphincs.Comp.expansion_sum	Classical.choice,Quot.sound,propext
 lean4/Sphincs/CompRestate.lean	DSM.Sphincs.Comp.ub_sum	propext
 lean4/Sphincs/CompRestate.lean	DSM.Sphincs.Comp.uncurried_sum	(none)
+lean4/Sphincs/CompTransfer.lean	DSM.Sphincs.Comp.euf_cma_final	Classical.choice,Quot.sound,propext
+lean4/Sphincs/CompTransfer.lean	DSM.Sphincs.Comp.euf_cma_transfer	Classical.choice,Quot.sound,propext
 lean4/Sphincs/CompWots.lean	DSM.Sphincs.Comp.WotsSetting.capH_withinP	Classical.choice,Quot.sound,propext
 lean4/Sphincs/CompWots.lean	DSM.Sphincs.Comp.WotsSetting.chain_add	Quot.sound,propext
 lean4/Sphincs/CompWots.lean	DSM.Sphincs.Comp.WotsSetting.chain_succ	Quot.sound,propext

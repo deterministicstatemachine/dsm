@@ -874,8 +874,8 @@ The auditors must accept both explicitly.
 | --- | --- | --- |
 | T1 | One-seed key generation and composite PRFs (I2, I3): exact PRG, KDF and PRF hops | done (C11, C15, C16; as advantages C75) |
 | T2 | DSM's primitives meet EasyCrypt's axioms (I5, I6, I13): `in_collection`, `dist_adrstypes`, `two_encodings`, `ch0`/`chS`, ITSR shape, address validity | done (C22, C73, C74), except the per-type ranges of the addresses DSM's signer issues |
-| T3 | Message binding (I1) by message embedding: EasyCrypt's message type and `mco` are abstract. After T1, DSM is EasyCrypt's SPHINCS+ (random-function secrets) with `msg := PK ‖ M` and `mco(R, PK ‖ M) := MCO_DSM(R, PK, M)`. A DSM forger is an EasyCrypt forger on `PK ‖ M`: it knows `PK`, and freshness is preserved since the prefix is fixed. DSM's message key, a random function on `PK.seed ‖ M`, and EasyCrypt's, a random function on `PK ‖ M`, agree in distribution for a fixed key (fixed-prefix lemma; C72 covers fixed-width inputs, the variable-length case is owed) | to prove: the exact simulation equality |
-| T4 | The transfer theorem: real DSM EUF-CMA ≤ the five named primitive advantages + EasyCrypt's Theorem-4 terms for the embedded forger, conditional on the premise | to prove |
+| T3 | Message binding (I1) by message embedding. The instance `E_DSM` and the embedded forger `A_emb` are fixed in `SPHINCS_EC_CORRESPONDENCE.md`: `msg := PK ‖ M`, `mco(R, PK ‖ M) := MCO_DSM(R, PK, M)`, ideal `skg` and `mkg` (EasyCrypt's two PRF terms are 0), DSM's own hops in their place. Everything matches pointwise except the message key's domain (`PK.seed ‖ M` against `PK ‖ M`), which agrees in distribution for one key (T3a, the variable-length fixed-prefix lemma) | record written; T3a owed in Lean |
+| T4 | The transfer theorem: real DSM EUF-CMA ≤ the five named primitive advantages + B, for any bound B on the final world (`euf_cma_final`, `euf_cma_transfer`, C79); the premise is that B is EasyCrypt's Theorem-4 bound for `(E_DSM, A_emb)` | done in Lean (premise a hypothesis) |
 | T5 | Rust ↔ Lean model refinement | existing refinement checks |
 
 T3 replaces the context-aware M-FORS game of §5b and its simulation equalities
@@ -887,3 +887,10 @@ remain assumptions, kept as terms; none is proved. The reductions' costs are
 those of §7, including the ≈2^83.2 up-front construction. That cost belongs
 to the published reduction framework, not to BLAKE3. No numerical security
 level is claimed.
+
+**Status after the revision (2026-10-08).** The premise is recorded item by
+item in `SPHINCS_EC_CORRESPONDENCE.md`: parameters, the instance, the axioms
+discharged, every algorithm, the game and the embedded forger, and the terms.
+The artifact replay is running on the maintainer's machine (EasyCrypt r2026.02
+test box), and its result will be recorded there. Remaining Lean work for the
+transfer: T3a, and the signature parse bijection (T5).
