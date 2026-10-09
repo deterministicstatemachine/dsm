@@ -9,9 +9,13 @@ import LockScreen from './lock/LockScreen';
 import AppScreenRouter from './AppScreenRouter';
 import RecoveryPhraseScreen from './screens/RecoveryPhraseScreen';
 import { buildHomeStatusLines } from '../viewmodels/homeViewModel';
+import SimpleShell from './simple/SimpleShell';
+import type { Skin } from '../runtime/appRuntimeStore';
 
 type Props = {
   appState: AppState;
+  /** The skin in use: the Simple shell replaces the Game Boy home once the wallet is ready. */
+  skin: Skin;
   error: string | null;
   showIntro: boolean;
   introGifSrc: string;
@@ -153,6 +157,7 @@ const securingBlinkKeyframes = `
 
 export default function AppContent({
   appState,
+  skin,
   error,
   showIntro,
   introGifSrc,
@@ -302,6 +307,9 @@ export default function AppContent({
       );
 
     case 'wallet_ready':
+      if (skin === 'simple') {
+        return <SimpleShell eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
+      }
       if (currentScreen === 'home') {
         return (
           <div className="dsm-content dsm-content--home">

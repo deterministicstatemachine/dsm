@@ -62,7 +62,7 @@ export async function sendOnlineTransferSmart(
     amount: string | number | bigint,
     memo?: string,
     tokenId?: string
-): Promise<{ success: boolean; message?: string; newBalance?: bigint }> {
+): Promise<{ success: boolean; message?: string; newBalance?: bigint; transactionHash?: Uint8Array }> {
     try {
       const recipientDeviceId = typeof to === 'string'
         ? new Uint8Array(decodeBase32Crockford(to.trim()))
@@ -96,7 +96,8 @@ export async function sendOnlineTransferSmart(
         throw new Error(`Expected onlineTransferResponse, got ${env.payload.case}`);
       }
       const inner = env.payload.value;
-      return { success: inner.success, message: inner.message, newBalance: inner.newBalance };
+      // The hash names the transfer on a receipt; Rust answers it with every accepted send.
+      return { success: inner.success, message: inner.message, newBalance: inner.newBalance, transactionHash: inner.transactionHash?.v };
     } catch (e: any) {
       return { success: false, message: e?.message || 'Online transfer failed' };
     }

@@ -1,0 +1,192 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * The Simple skin. `html[data-skin="simple"]` (hooks/useSkin.ts) puts the Game
+ * Boy device away and lets the app fill the screen; `data-scheme` picks light
+ * or dark. Every Simple screen draws with the --s-* variables below.
+ */
+
+:root {
+  --s-bg: #fff8e7;
+  --s-surface: #ffffff;
+  --s-surface-2: #fff1c7;
+  --s-text: #121212;
+  --s-muted: #6b6b6b;
+  --s-line: #f1e6c8;
+  --s-primary: #e8135a;
+  --s-on-primary: #ffffff;
+  --s-secondary: #ffd21f;
+  --s-on-secondary: #121212;
+  --s-positive: #b88700;
+  --s-negative: #e8135a;
+  --s-avatar-a: #fde4ec;
+  --s-avatar-a-text: #e8135a;
+  --s-avatar-b: #fff1c7;
+  --s-avatar-b-text: #b88700;
+  --s-nav-active: #e8135a;
+  --s-shadow: 0 2px 10px rgba(110, 80, 0, 0.08);
+  --s-radius: 20px;
+}
+
+html[data-skin="simple"][data-scheme="dark"] {
+  --s-bg: #0b0b0b;
+  --s-surface: #161616;
+  --s-surface-2: #1f1f1f;
+  --s-text: #ffffff;
+  --s-muted: #a3a3a3;
+  --s-line: #2a2a2a;
+  --s-primary: #ffd21f;
+  --s-on-primary: #121212;
+  --s-secondary: #ffd21f;
+  --s-on-secondary: #121212;
+  --s-positive: #ffd21f;
+  --s-negative: #ff3d7f;
+  --s-avatar-a: #e8135a;
+  --s-avatar-a-text: #ffffff;
+  --s-avatar-b: #ffd21f;
+  --s-avatar-b-text: #121212;
+  --s-nav-active: #ffd21f;
+  --s-shadow: none;
+}
+
+/* ---- The device, put away ---- */
+html[data-skin="simple"] body { background: var(--s-bg); }
+html[data-skin="simple"] .stateboy {
+  max-width: none; transform: none; padding: 0; background: var(--s-bg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-skin="simple"] .front-plate { background: var(--s-bg); box-shadow: none; }
+html[data-skin="simple"] .front-plate::before,
+html[data-skin="simple"] .battery-light,
+html[data-skin="simple"] .dsm-shell-logo,
+html[data-skin="simple"] .scanlines,
+html[data-skin="simple"] .screen-inner-shadow,
+html[data-skin="simple"] .screen-depth-sheen,
+html[data-skin="simple"] .screen-nav-bar,
+html[data-skin="simple"] #controller,
+html[data-skin="simple"] #theme-flash { display: none !important; }
+html[data-skin="simple"] .screen-container {
+  position: absolute; inset: 0; top: 0; left: 0; transform: none; width: 100%; height: 100%;
+  padding: 0; background: var(--s-bg); box-shadow: none; border-radius: 0;
+}
+html[data-skin="simple"] .screen { border: none; border-radius: 0; background: var(--s-bg); animation: none; }
+html[data-skin="simple"] #dsm-app-root { background: var(--s-bg); color: var(--s-text); }
+html[data-skin="simple"] .stateboy-screen-host { height: 100%; }
+
+/* ---- Shell ---- */
+.s-app {
+  display: flex; flex-direction: column; height: 100%; width: 100%;
+  background: var(--s-bg); color: var(--s-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  padding-top: env(safe-area-inset-top);
+}
+.s-topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px 4px; }
+.s-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
+.s-brand-mark { width: 30px; height: 26px; border-radius: 7px; background: var(--s-text); position: relative; }
+html[data-scheme="dark"] .s-brand-mark { background: var(--s-secondary); }
+.s-brand-mark::after { content: ''; position: absolute; right: 4px; top: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--s-bg); }
+.s-icon-btn {
+  width: 44px; height: 44px; border-radius: 50%; border: none; background: var(--s-surface-2);
+  color: var(--s-text); display: grid; place-items: center; font-size: 18px;
+}
+.s-body { flex: 1; overflow-y: auto; padding: 4px 20px 24px; -webkit-overflow-scrolling: touch; }
+.s-title { font-size: 40px; font-weight: 900; letter-spacing: -1px; margin: 6px 0 14px; line-height: 1.05; }
+.s-title-row { display: flex; align-items: center; gap: 12px; }
+.s-subtitle { font-size: 20px; font-weight: 700; color: var(--s-muted); margin: -8px 0 6px; }
+.s-hint { font-size: 14px; color: var(--s-muted); margin: 0 0 12px; }
+
+.s-tabbar {
+  display: flex; justify-content: space-around; border-top: 1px solid var(--s-line);
+  background: var(--s-surface); padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
+}
+.s-tab { flex: 1; background: none; border: none; color: var(--s-muted); font-size: 13px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 0; }
+.s-tab[aria-current="page"] { color: var(--s-nav-active); }
+.s-tab svg { width: 26px; height: 26px; }
+
+/* ---- Pieces ---- */
+.s-card { background: var(--s-surface); border-radius: var(--s-radius); padding: 18px; box-shadow: var(--s-shadow); border: 1px solid var(--s-line); margin-bottom: 14px; }
+.s-balance { background: var(--s-surface-2); border: none; position: relative; overflow: hidden; }
+html[data-scheme="dark"] .s-balance { background: linear-gradient(160deg, #1b1b1b 55%, #3a2f05 100%); border: 1px solid #3a3a3a; }
+.s-balance-label { font-size: 16px; color: var(--s-muted); font-weight: 600; }
+.s-balance-amount { font-size: 42px; font-weight: 900; letter-spacing: -1px; margin-top: 6px; overflow-wrap: anywhere; }
+.s-balance-amount small { font-size: 24px; font-weight: 800; margin-left: 6px; }
+.s-balance-other { margin-top: 10px; font-size: 13px; color: var(--s-muted); }
+
+.s-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+.s-btn {
+  border: none; border-radius: 18px; padding: 18px 12px; font-size: 20px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
+}
+.s-btn:disabled { opacity: 0.5; }
+.s-btn-primary { background: var(--s-primary); color: var(--s-on-primary); }
+.s-btn-secondary { background: var(--s-secondary); color: var(--s-on-secondary); }
+.s-btn-quiet { background: var(--s-surface); color: var(--s-text); border: 1px solid var(--s-line); font-size: 17px; }
+.s-btn-small { padding: 10px 18px; font-size: 16px; width: auto; border-radius: 14px; }
+.s-btn svg { width: 24px; height: 24px; }
+
+.s-row { display: flex; align-items: center; gap: 14px; padding: 12px 0; border: none; background: none; width: 100%; text-align: left; color: inherit; }
+.s-row + .s-row { border-top: 1px solid var(--s-line); }
+.s-row-main { flex: 1; min-width: 0; }
+.s-row-title { font-size: 18px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-row-sub { font-size: 14px; color: var(--s-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-row-end { text-align: right; }
+.s-amount { font-size: 18px; font-weight: 800; white-space: nowrap; }
+.s-amount.in { color: var(--s-positive); }
+.s-amount.out { color: var(--s-negative); }
+
+.s-avatar {
+  width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; flex: none;
+  font-size: 22px; font-weight: 800; background: var(--s-avatar-a); color: var(--s-avatar-a-text); overflow: hidden;
+}
+.s-avatar.b { background: var(--s-avatar-b); color: var(--s-avatar-b-text); }
+.s-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.s-avatar.large { width: 88px; height: 88px; font-size: 36px; }
+
+.s-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.s-section-title { font-size: 24px; font-weight: 900; }
+.s-chip { border: none; border-radius: 999px; padding: 8px 14px; font-weight: 700; font-size: 15px; background: var(--s-avatar-a); color: var(--s-primary); }
+html[data-scheme="dark"] .s-chip { background: var(--s-surface-2); color: var(--s-secondary); }
+
+.s-field { margin-bottom: 14px; }
+.s-label { display: block; font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+.s-input {
+  width: 100%; box-sizing: border-box; border-radius: 16px; border: 1px solid var(--s-line); background: var(--s-surface);
+  color: var(--s-text); padding: 16px; font-size: 17px; font-family: inherit;
+}
+.s-amount-input { font-size: 44px; font-weight: 900; border: none; background: transparent; padding: 0; width: 100%; color: var(--s-text); }
+.s-quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+.s-quick button { border: none; border-radius: 16px; padding: 12px 4px; font-weight: 800; font-size: 18px; background: var(--s-surface-2); color: var(--s-text); }
+.s-quick button[aria-pressed="true"] { background: var(--s-primary); color: var(--s-on-primary); }
+
+.s-notice { border-radius: 16px; padding: 14px; background: var(--s-surface-2); color: var(--s-text); font-size: 14px; display: flex; gap: 10px; margin-bottom: 14px; }
+.s-error { background: #fde4ec; color: #9b0c3c; }
+html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
+
+.s-qr { background: #ffffff; border-radius: 20px; padding: 16px; width: fit-content; margin: 8px auto; }
+.s-qr img { display: block; width: 220px; height: 220px; }
+.s-code { font-size: 15px; font-weight: 700; text-align: center; word-break: break-all; margin: 8px 0 14px; color: var(--s-muted); }
+
+.s-seg { display: grid; grid-auto-flow: column; gap: 6px; background: var(--s-surface-2); border-radius: 14px; padding: 4px; }
+.s-seg button { border: none; border-radius: 10px; padding: 10px; font-weight: 700; font-size: 15px; background: transparent; color: var(--s-text); }
+.s-seg button[aria-pressed="true"] { background: var(--s-surface); box-shadow: var(--s-shadow); }
+html[data-scheme="dark"] .s-seg button[aria-pressed="true"] { background: var(--s-secondary); color: #121212; }
+
+.s-sheet-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-end; z-index: 9000; }
+.s-sheet {
+  width: 100%; background: var(--s-bg); color: var(--s-text); border-radius: 26px 26px 0 0;
+  padding: 22px 20px calc(22px + env(safe-area-inset-bottom)); max-height: 90%; overflow-y: auto;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.s-sheet h2 { font-size: 26px; font-weight: 900; margin: 0 0 8px; }
+.s-sheet p { font-size: 16px; line-height: 1.45; color: var(--s-muted); }
+.s-sheet ul { padding-left: 20px; font-size: 15px; line-height: 1.5; }
+.s-stack { display: grid; gap: 10px; }
+.s-empty { text-align: center; color: var(--s-muted); padding: 30px 10px; font-size: 16px; }
+
+/* A Classic screen opened from the Simple skin (the lock, a connect request):
+   drawn in the Simple colours, under a Back button. */
+.s-classic {
+  --bg: var(--s-bg); --bg-secondary: var(--s-surface); --text: var(--s-text); --text-dark: var(--s-text);
+  --border: var(--s-line); --stateboy-screen: var(--s-surface); --stateboy-dark: var(--s-text);
+  --stateboy-gray: var(--s-muted); --text-disabled: var(--s-muted);
+  font-size: 15px;
+}

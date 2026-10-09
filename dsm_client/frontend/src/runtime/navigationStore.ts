@@ -3,6 +3,7 @@
 import { useSyncExternalStore } from 'react';
 import { SCREEN_TYPES, type AppState, type ScreenType } from '../types/app';
 import logger from '../utils/logger';
+import { appRuntimeStore } from './appRuntimeStore';
 
 type NavigationSnapshot = {
   currentScreen: ScreenType;
@@ -16,6 +17,28 @@ type MenuIndexUpdate = number | ((prev: number) => number);
 // from which `ScreenType` is derived). `navigate` refuses anything else — a
 // string from an untyped caller — and there is no second list to fall behind.
 const VALID_NAV_TARGETS = new Set<ScreenType>(SCREEN_TYPES);
+
+/**
+ * The screens the Simple skin leaves out: sovereign finance (SoFi, tokens,
+ * vaults), the storage set, the developer tools and the recovery pipeline. While
+ * Simple is the skin, nothing reaches them: no menu offers them, and a call
+ * that names one, a deep link's included, is refused here.
+ */
+export const SIMPLE_EXCLUDED = new Set<ScreenType>([
+  'sofi',
+  'accounts',
+  'tokens',
+  'vault',
+  'storage',
+  'dev_policy',
+  'recovery_pipeline',
+  'bluetooth',
+]);
+
+/** Whether the skin in use lets navigation reach `to`. */
+export function reachable(to: ScreenType): boolean {
+  return appRuntimeStore.getSnapshot().skin !== 'simple' || !SIMPLE_EXCLUDED.has(to);
+}
 
 class NavigationStore {
   private snapshot: NavigationSnapshot = {
@@ -39,6 +62,10 @@ class NavigationStore {
 
   navigate = (to: ScreenType): void => {
     if (!VALID_NAV_TARGETS.has(to)) return;
+    if (!reachable(to)) {
+      logger.info(`[nav] ${to} is not part of the Simple skin`);
+      return;
+    }
     if (this.snapshot.currentScreen === to) return;
     this.snapshot = {
       currentScreen: to,
@@ -50,6 +77,7 @@ class NavigationStore {
 
   setCurrentScreen = (to: ScreenType): void => {
     if (!VALID_NAV_TARGETS.has(to)) return;
+    if (!reachable(to)) return;
     if (this.snapshot.currentScreen === to) return;
     this.snapshot = {
       ...this.snapshot,

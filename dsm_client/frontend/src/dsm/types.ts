@@ -3,6 +3,7 @@
 // Lightweight shared types for DSM UI flows and events
 import * as pb from '../proto/dsm_app_pb';
 import type { ContactPairing } from '../domain/types';
+import type { PersonProfile } from '../domain/types';
 
 /**
  * A contact as `contacts.list` states it (pb-aligned, binary). Rust writes the
@@ -19,6 +20,8 @@ export interface BilateralRelationshipDTO {
   pairing: ContactPairing;          // where BLE pairing stands, as Rust's pairing loop has it
   genesisVerifiedOnline: boolean;   // genesis hash verified via storage node
   sendStatus?: pb.RelationshipSendStatus;
+  /** The details the wallet holds for the contact, when any were set. */
+  profile?: PersonProfile;
 }
 
 /** UI-level transaction shape used by offlineSend. */
@@ -113,6 +116,8 @@ export interface AddContactArgs {
   deviceId: Uint8Array;
   genesisHash: Uint8Array;
   signingPublicKey: Uint8Array;
+  /** The new contact's details, from the card or the phone's contacts. */
+  profile?: PersonProfile;
 }
 
 /**
@@ -127,6 +132,9 @@ export interface ContactCard {
   network: string;
   /** The alias the card's owner suggests, when it names one. */
   preferredAlias?: string;
+  /** The email and phone the card's owner chose to share, when they did. */
+  email?: string;
+  phone?: string;
 }
 
 /**
