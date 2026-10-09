@@ -55,7 +55,6 @@ export default function ModernHome(): React.JSX.Element {
 
   return (
     <>
-      <h1 className="s-title">Wallet</h1>
       <section className="s-card s-balance" aria-label="Total balance">
         <div className="s-balance-label">Total Balance</div>
         {main !== null ? (

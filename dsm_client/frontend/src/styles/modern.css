@@ -266,3 +266,37 @@ html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; 
 @keyframes s-spin { to { transform: rotate(360deg); } }
 .s-progress { width: 100%; height: 14px; border-radius: 999px; background: var(--s-surface-2); overflow: hidden; margin-top: 10px; }
 .s-progress > div { height: 100%; background: linear-gradient(90deg, var(--s-gold), var(--s-fuchsia)); border-radius: 999px; transition: width 180ms ease-out; }
+
+/* ---- The owner's banner, photo and name (ProfileHeader) ---- */
+.s-profile {
+  position: relative; display: block; width: 100%; padding: 0 0 12px; margin: 8px 0 14px; border: none;
+  background: none; color: var(--s-text); text-align: center; font-family: inherit;
+}
+.s-profile-banner {
+  display: block; width: 100%; aspect-ratio: 3 / 1; border-radius: var(--s-radius);
+  background: linear-gradient(120deg, var(--s-gold) 0%, var(--s-fuchsia) 100%) center / cover no-repeat;
+  position: relative; overflow: hidden;
+}
+.s-profile-photo {
+  position: relative; display: grid; place-items: center; width: 96px; height: 96px; margin: -48px auto 0;
+  border-radius: 50%; border: 4px solid var(--s-bg); background: var(--s-surface-2); color: var(--s-text);
+  font-size: 40px; font-weight: 900; overflow: visible;
+}
+.s-profile-photo img, .s-profile-photo > span:first-child { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: grid; place-items: center; overflow: hidden; }
+.s-profile-photo svg { width: 44px; height: 44px; }
+.s-profile-name { display: block; font-size: 26px; font-weight: 900; letter-spacing: -0.5px; margin-top: 8px; }
+.s-profile-edit .s-profile-banner, .s-profile-edit .s-profile-photo { cursor: pointer; }
+.s-profile-hint {
+  position: absolute; right: 10px; top: 10px; padding: 6px 12px; border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55); color: #ffffff; font-size: 13px; font-weight: 800;
+}
+.s-profile-camera {
+  position: absolute; right: -2px; bottom: -2px; width: 30px; height: 30px; border-radius: 50%;
+  display: grid; place-items: center; background: var(--s-fuchsia); color: #ffffff; font-size: 20px; font-weight: 900;
+  border: 3px solid var(--s-bg);
+}
+.s-profile-actions { display: flex; justify-content: center; gap: 8px; margin: 10px 0 4px; }
+
+/* The top bar's card button shows the owner's photo once there is one. */
+.s-me { overflow: hidden; padding: 0; }
+.s-me img { width: 100%; height: 100%; object-fit: cover; }
