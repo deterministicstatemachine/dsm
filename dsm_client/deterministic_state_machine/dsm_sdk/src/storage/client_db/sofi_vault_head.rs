@@ -10,17 +10,15 @@
 //! | Table | Holds | Why |
 //! |---|---|---|
 //! | `sofi_vault_root` | `(vault, generation) -> root` | the chain this verifier established, one row per generation, kept forever because a parent's status is asked about a GENERATION |
-//! | `sofi_vault_leaf` | `(vault, generation, leaf_key) -> value + preimage` | the whole tree of every generation this verifier established, kept as long as the generation is, because evidence for an operation built on generation `g` needs `g`'s leaf PREIMAGES — and it is read after this device has walked past `g`: its own position resolves after the walk recorded the generation its exercise produced |
+//! | `sofi_vault_leaf` | `(vault, generation, leaf_key) -> value + preimage` | every generation's state leaf, which the verifier reads as the state at a root it established (every other leaf an operation reads is proven by its core's path, SoFi Amendment S24), and the leaves this device saw, which rebuild the whole tree where it saw them all: an owner's record, from which it hands traders their witnesses |
+//! | `sofi_vault_witness` | `vault -> generation, root, witness` | this device's own witness at the generation it established last: the state leaf and its relationship leaf with their paths, advanced as each generation is recorded |
+//! | `sofi_vault_baseline` | `vault -> generation, baseline` | the owner baseline a chain starts at, when it does not start at the genesis |
 //!
-//! **A read is checked, never trusted.** The leaves are a cache of this
-//! device's own conclusions, so `leaves_at` rebuilds the generation's tree
-//! from them and requires the recomputed root to equal the recorded one. That
-//! equality is exactly what detects an INCOMPLETE record: a vault another
-//! trader moved between our own trades leaves us missing their relationship
-//! leaf, and a record that cannot reproduce its own root is not evidence. The
-//! caller then gets `None`, Core answers `Unavailable`, and the position
-//! waits — which is the right answer, because this device has not
-//! established that state.
+//! **A read is checked, never trusted.** The rows are a cache of this
+//! device's own conclusions. `tree_at_head` rebuilds the head's tree and
+//! requires the recomputed root to equal the recorded one, which is exactly
+//! what detects an INCOMPLETE record; a witness is checked by Core against
+//! the root it is read at before anything stands on it.
 //!
 //! This replaces the persistent node store R14 deleted. A node store returned
 //! leaf VALUES; evidence needs the preimages, so the values alone could never
@@ -30,9 +28,10 @@ use rusqlite::{params, OptionalExtension, Transaction};
 
 use dsm::economic::tree::EconomicSmt;
 use dsm::sofi::derive;
+use dsm::sofi::frontier::VaultWitness;
 use dsm::sofi::resolve::RecordedGenerationRow;
-use dsm::sofi::validation::{VaultLeafPre, VaultPostState};
-use dsm::sofi::wire::{VaultRelationshipLeaf, VaultStateLeaf};
+use dsm::sofi::validation::VaultPostState;
+use dsm::sofi::wire::{VaultFrontierV1, VaultFrontierWitnessV1, VaultStateLeaf};
 
 use super::get_connection;
 
@@ -90,6 +89,7 @@ pub fn record_resolved_with_conn(tx: &Transaction<'_>, post: &VaultPostState) ->
             leaf.encode(),
         ));
     }
+    advance_witness_with_conn(tx, post)?;
     // BOTH ends of the link. A store that kept only post roots would hold a
     // set and not a chain, and `root_at(v, g)` is what a parent's status is
     // asked about. The pre generation's row stands as it is (it was the post
@@ -312,10 +312,11 @@ pub fn record_walked(post: &VaultPostState) -> Result<()> {
     Ok(())
 }
 
-/// The generations this device recorded for `vault_id`, from generation
-/// zero and contiguous, each with the link it recorded: what the verifier
-/// anchors at the accepted genesis and checks link by link before it stands
-/// on any of it (`VaultChain::from_recorded`). A gap ends the memo there.
+/// The generations this device recorded for `vault_id`, from the lowest it
+/// recorded and contiguous, each with the link it recorded: what the
+/// verifier anchors — at the accepted genesis when the record starts at
+/// zero, at the adopted owner baseline otherwise — and checks link by link
+/// before it stands on any of it. A gap ends the memo there.
 pub fn recorded_generations(vault_id: &D32) -> Result<Vec<RecordedGenerationRow>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -326,19 +327,40 @@ fn recorded_generations_with_conn(
     conn: &rusqlite::Connection,
     vault_id: &D32,
 ) -> Result<Vec<RecordedGenerationRow>> {
-    let mut rows = Vec::new();
-    loop {
-        let generation = u64::try_from(rows.len()).map_err(|e| anyhow!("generation: {e}"))?;
-        let Some(row) = root_row_with_conn(conn, vault_id, generation)? else {
-            return Ok(rows);
-        };
+    let mut stmt = conn.prepare(
+        "SELECT generation, root, pre_root, consumed_by FROM sofi_vault_root
+          WHERE vault_id = ?1 ORDER BY generation ASC",
+    )?;
+    let read = stmt.query_map(params![vault_id.as_slice()], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, Vec<u8>>(1)?,
+            r.get::<_, Option<Vec<u8>>>(2)?,
+            r.get::<_, Option<Vec<u8>>>(3)?,
+        ))
+    })?;
+    let mut rows: Vec<RecordedGenerationRow> = Vec::new();
+    for row in read {
+        let (generation, root, pre_root, consumed_by) = row?;
+        let generation = u64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?;
+        // Contiguous from the lowest: a gap ends the memo there.
+        if let Some(last) = rows.last() {
+            if generation != last.generation + 1 {
+                break;
+            }
+        }
         rows.push(RecordedGenerationRow {
             generation,
-            root: row.root,
-            pre_root: row.pre_root,
-            consumed_by: row.consumed_by,
+            root: digest32(root, "vault root")?,
+            pre_root: pre_root
+                .map(|b| digest32(b, "vault pre root"))
+                .transpose()?,
+            consumed_by: consumed_by
+                .map(|b| digest32(b, "consuming operation"))
+                .transpose()?,
         });
     }
+    Ok(rows)
 }
 
 /// The stored leaves of a vault at one generation, as rows.
@@ -426,64 +448,412 @@ fn generation_of_with_conn(
     .transpose()
 }
 
-/// The vault's leaves at the generation this verifier established `root`
-/// at, for the keys an acquisition needs — CHECKED against that root. The
-/// generation is whichever one the root names, not the head: an operation is
-/// built on the generation it names, and this device may have walked past it
-/// before it resolves that operation.
-///
-/// The cache is this device's own conclusions, so it proves nothing by
-/// existing. The tree is rebuilt from every stored leaf and its root must
-/// equal the recorded one; a record that cannot reproduce its own root is
-/// incomplete (a vault another trader moved between our trades) and yields
-/// `None`, so Core answers `Unavailable` and the position waits.
-pub fn leaves_at(
-    vault_id: &D32,
-    root: &D32,
-    keys: &std::collections::BTreeSet<D32>,
-) -> Result<
-    Option<(
-        VaultHead,
-        std::collections::BTreeMap<(D32, D32), VaultLeafPre>,
-    )>,
-> {
+/// The vault's state leaf at the generation this verifier established `root`
+/// at: the highest such generation, when a generation repeats its
+/// predecessor's root. `None` when it established no generation there.
+pub fn state_at(vault_id: &D32, root: &D32) -> Result<Option<VaultStateLeaf>> {
     let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
     let Some(generation) = generation_of_with_conn(&conn, vault_id, root)? else {
         return Ok(None);
     };
-    let head = VaultHead {
-        vault_id: *vault_id,
-        generation,
-        root: *root,
+    let state_key = derive::vault_state_key(vault_id);
+    match rows_with_conn(&conn, vault_id, generation)?
+        .into_iter()
+        .find(|(key, ..)| *key == state_key)
+    {
+        Some((.., kind, preimage)) if kind == KIND_STATE => Ok(Some(
+            VaultStateLeaf::decode(&preimage).map_err(|e| anyhow!("state leaf: {e}"))?,
+        )),
+        Some((.., kind, _)) => Err(anyhow!("the vault's state key holds leaf kind {kind}")),
+        None => Ok(None),
+    }
+}
+
+/// This device's recorded witness of a vault, as stored: the generation and
+/// root it is at, the trader it is for, and its wire bytes, decoded.
+pub struct RecordedWitness {
+    pub generation: u64,
+    pub root: D32,
+    pub trader_genesis: D32,
+    pub trader_device_id: D32,
+    pub witness: VaultFrontierWitnessV1,
+}
+
+fn witness_with_conn(
+    conn: &rusqlite::Connection,
+    vault_id: &D32,
+) -> Result<Option<RecordedWitness>> {
+    conn.query_row(
+        "SELECT generation, root, trader_genesis, trader_device_id, witness
+           FROM sofi_vault_witness WHERE vault_id = ?1",
+        params![vault_id.as_slice()],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+                r.get::<_, Vec<u8>>(4)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(|(generation, root, genesis, device, witness)| {
+        Ok(RecordedWitness {
+            generation: u64::try_from(generation)
+                .map_err(|e| anyhow!("witness generation: {e}"))?,
+            root: digest32(root, "witness root")?,
+            trader_genesis: digest32(genesis, "witness trader")?,
+            trader_device_id: digest32(device, "witness device")?,
+            witness: VaultFrontierWitnessV1::decode(&witness)
+                .map_err(|e| anyhow!("witness: {e}"))?,
+        })
+    })
+    .transpose()
+}
+
+/// This device's recorded witness of `vault_id`, if it keeps one.
+pub fn witness(vault_id: &D32) -> Result<Option<RecordedWitness>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    witness_with_conn(&conn, vault_id)
+}
+
+fn put_witness_with_conn(conn: &rusqlite::Connection, witness: &VaultWitness) -> Result<()> {
+    let (genesis, device) = witness.trader();
+    conn.execute(
+        "INSERT OR REPLACE INTO sofi_vault_witness
+            (vault_id, generation, root, trader_genesis, trader_device_id, witness)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            witness.vault_id().as_slice(),
+            i64::try_from(witness.generation()).map_err(|e| anyhow!("generation: {e}"))?,
+            witness.root().as_slice(),
+            genesis.as_slice(),
+            device.as_slice(),
+            witness
+                .to_wire()
+                .encode()
+                .map_err(|e| anyhow!("witness: {e}"))?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Keep `witness` as this device's witness of its vault.
+pub fn put_witness(witness: &VaultWitness) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    put_witness_with_conn(&conn, witness)
+}
+
+/// Advance this device's witness through `post`, when it is kept at the
+/// generation `post` was built on; a witness at another generation is left
+/// as it is. A witness at that generation that Core refuses to advance is an
+/// authenticated contradiction — both are this device's own conclusions,
+/// and they disagree — so the vault is quarantined for this device in the
+/// same transaction, the witness kept as it was, and nothing falls back.
+fn advance_witness_with_conn(tx: &Transaction<'_>, post: &VaultPostState) -> Result<()> {
+    let Some(held) = witness_with_conn(tx, post.vault_id())? else {
+        return Ok(());
     };
-    let rows = rows_with_conn(&conn, vault_id, generation)?;
-    let mut tree = EconomicSmt::new();
-    for (key, value, ..) in &rows {
-        tree.insert(*key, *value);
+    if held.generation != post.pre_generation() || held.root != *post.pre_root() {
+        return Ok(());
     }
-    if tree.root() != head.root {
-        // Not an error: an incomplete record is a fact about what this device
-        // established, and the honest answer is that it established nothing
-        // usable here.
-        return Ok(None);
+    match VaultWitness::advance_recorded(
+        &held.witness,
+        held.trader_genesis,
+        held.trader_device_id,
+        post,
+    ) {
+        Ok(advanced) => put_witness_with_conn(tx, &advanced),
+        Err(refused) => quarantine_with_conn(
+            tx,
+            post.vault_id(),
+            &format!(
+                "the recorded witness at generation {} does not advance through the \
+                 generation Core recomputed: {refused}",
+                held.generation
+            ),
+        ),
     }
-    let mut out = std::collections::BTreeMap::new();
-    for key in keys {
-        let pre = match rows.iter().find(|(k, ..)| k == key) {
-            Some((.., kind, preimage)) if *kind == KIND_STATE => VaultLeafPre::State(
-                VaultStateLeaf::decode(preimage).map_err(|e| anyhow!("state leaf: {e}"))?,
-            ),
-            Some((.., kind, preimage)) if *kind == KIND_RELATIONSHIP => VaultLeafPre::Relationship(
-                VaultRelationshipLeaf::decode(preimage)
-                    .map_err(|e| anyhow!("relationship leaf: {e}"))?,
-            ),
-            Some(row) => return Err(anyhow!("unknown vault leaf kind {}", row.2)),
-            None => VaultLeafPre::Absent,
+}
+
+/// Start `vault_id`'s record at an owner baseline Core authenticated: the
+/// baseline's generation and root, its state leaf, the baseline's bytes
+/// (authenticated again whenever the chain starts there) and this device's
+/// witness under its root. Only a device holding no record of the vault
+/// starts one at a baseline.
+pub fn adopt_baseline(witness: &VaultWitness, bundle: &[u8]) -> Result<()> {
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    let tx = conn.transaction()?;
+    let vault_id = witness.vault_id();
+    let held: i64 = tx.query_row(
+        "SELECT count(*) FROM sofi_vault_root WHERE vault_id = ?1",
+        params![vault_id.as_slice()],
+        |r| r.get(0),
+    )?;
+    if held > 0 {
+        return Err(anyhow!(
+            "this device already holds a record of the vault; a baseline starts only an empty one"
+        ));
+    }
+    let state = witness.state();
+    write(
+        &tx,
+        vault_id,
+        witness.generation(),
+        witness.root(),
+        None,
+        &[(
+            derive::vault_state_key(vault_id),
+            derive::vault_state_leaf_value(state).map_err(|e| anyhow!("state leaf value: {e}"))?,
+            KIND_STATE,
+            state.encode().map_err(|e| anyhow!("state leaf: {e}"))?,
+        )],
+    )?;
+    tx.execute(
+        "INSERT INTO sofi_vault_baseline (vault_id, generation, bundle) VALUES (?1, ?2, ?3)",
+        params![
+            vault_id.as_slice(),
+            i64::try_from(witness.generation()).map_err(|e| anyhow!("generation: {e}"))?,
+            bundle
+        ],
+    )?;
+    put_witness_with_conn(&tx, witness)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The baseline `vault_id`'s record starts at, as adopted: its generation
+/// and bytes.
+pub fn baseline(vault_id: &D32) -> Result<Option<(u64, Vec<u8>)>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    conn.query_row(
+        "SELECT generation, bundle FROM sofi_vault_baseline WHERE vault_id = ?1",
+        params![vault_id.as_slice()],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+    )
+    .optional()?
+    .map(|(generation, bundle)| {
+        Ok((
+            u64::try_from(generation).map_err(|e| anyhow!("baseline generation: {e}"))?,
+            bundle,
+        ))
+    })
+    .transpose()
+}
+
+/// The baseline this device signed as `vault_id`'s owner at `generation`.
+pub fn owner_baseline(vault_id: &D32, generation: u64) -> Result<Option<Vec<u8>>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT bundle FROM sofi_vault_owner_baseline WHERE vault_id = ?1 AND generation = ?2",
+            params![
+                vault_id.as_slice(),
+                i64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?
+            ],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?)
+}
+
+/// Keep the baseline this device signed as `vault_id`'s owner at
+/// `generation`. One per generation: the owner signs one frontier there.
+pub fn put_owner_baseline(vault_id: &D32, generation: u64, bundle: &[u8]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO sofi_vault_owner_baseline (vault_id, generation, bundle)
+         VALUES (?1, ?2, ?3)",
+        params![
+            vault_id.as_slice(),
+            i64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?,
+            bundle
+        ],
+    )?;
+    Ok(())
+}
+
+/// How far this device, as `vault_id`'s owner, published its history (SoFi
+/// Amendment S26): every leaf, node and state leaf up to that generation.
+pub fn history_published(vault_id: &D32) -> Result<Option<u64>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    conn.query_row(
+        "SELECT generation FROM sofi_vault_history_published WHERE vault_id = ?1",
+        params![vault_id.as_slice()],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()?
+    .map(|g| u64::try_from(g).map_err(|e| anyhow!("history generation: {e}")))
+    .transpose()
+}
+
+/// Record that `vault_id`'s history is published up to `generation`.
+pub fn put_history_published(vault_id: &D32, generation: u64) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    conn.execute(
+        "INSERT INTO sofi_vault_history_published (vault_id, generation) VALUES (?1, ?2)
+         ON CONFLICT(vault_id) DO UPDATE SET generation = max(generation, excluded.generation)",
+        params![
+            vault_id.as_slice(),
+            i64::try_from(generation).map_err(|e| anyhow!("generation: {e}"))?
+        ],
+    )?;
+    Ok(())
+}
+
+/// The frontier a stored `VaultBaselineV1` carries, or why this build does
+/// not decode it.
+fn stored_frontier(bundle: &[u8]) -> std::result::Result<VaultFrontierV1, String> {
+    use prost::Message;
+    crate::generated::VaultBaselineV1::decode(bundle)
+        .map_err(|e| e.to_string())
+        .and_then(|baseline| {
+            VaultFrontierV1::decode(&baseline.frontier_ccb).map_err(|e| e.to_string())
+        })
+}
+
+/// SoFi Amendment S26 put a history root in the frontier, so a baseline
+/// signed before it no longer decodes. A record this device started at such
+/// a baseline is dropped whole — its rows, leaves, witness and baseline —
+/// and the vault is adopted again from a current baseline; a baseline this
+/// device signed as owner is dropped and signed again when next offered.
+/// Nothing else is touched.
+pub(crate) fn drop_superseded_baselines(conn: &rusqlite::Connection) -> Result<()> {
+    let adopted: Vec<(Vec<u8>, Vec<u8>)> = {
+        let mut stmt = conn.prepare("SELECT vault_id, bundle FROM sofi_vault_baseline")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (vault_id, bundle) in adopted {
+        let Err(why) = stored_frontier(&bundle) else {
+            continue;
         };
-        out.insert((*vault_id, *key), pre);
+        for table in [
+            "sofi_vault_leaf",
+            "sofi_vault_root",
+            "sofi_vault_witness",
+            "sofi_vault_baseline",
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE vault_id = ?1"),
+                params![vault_id],
+            )?;
+        }
+        log::info!("[vault head] a record started at a superseded baseline was dropped: {why}");
     }
-    Ok(Some((head, out)))
+    let signed: Vec<(Vec<u8>, i64, Vec<u8>)> = {
+        let mut stmt =
+            conn.prepare("SELECT vault_id, generation, bundle FROM sofi_vault_owner_baseline")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (vault_id, generation, bundle) in signed {
+        let Err(why) = stored_frontier(&bundle) else {
+            continue;
+        };
+        conn.execute(
+            "DELETE FROM sofi_vault_owner_baseline WHERE vault_id = ?1 AND generation = ?2",
+            params![vault_id, generation],
+        )?;
+        log::info!("[vault head] a superseded owner baseline was dropped: {why}");
+    }
+    Ok(())
+}
+
+/// The longest name an account keeps for one of its vaults.
+pub const LABEL_MAX: usize = 128;
+
+/// Keep `label` as this account's own name for the vault it created (owner
+/// bookkeeping: carried nowhere, never read for validity). A vault keeps the
+/// name it was given first.
+pub fn put_label(vault_id: &D32, label: &str) -> Result<()> {
+    if label.len() > LABEL_MAX {
+        return Err(anyhow!("a vault label is at most {LABEL_MAX} bytes"));
+    }
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO sofi_vault_label (vault_id, label) VALUES (?1, ?2)",
+        params![vault_id.as_slice(), label],
+    )?;
+    Ok(())
+}
+
+/// This account's own name for `vault_id`, if it gave one.
+pub fn label(vault_id: &D32) -> Result<Option<String>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT label FROM sofi_vault_label WHERE vault_id = ?1",
+            params![vault_id.as_slice()],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?)
+}
+
+/// Why `vault_id` is quarantined for this device, if it is.
+pub fn quarantined(vault_id: &D32) -> Result<Option<String>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT why FROM sofi_vault_quarantine WHERE vault_id = ?1",
+            params![vault_id.as_slice()],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?)
+}
+
+/// Quarantine `vault_id` for this device (SoFi Req 6.3): its owner signed two
+/// frontiers at one generation.
+pub fn quarantine(vault_id: &D32, why: &str) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("vault head: the store is poisoned: {e}"))?;
+    quarantine_with_conn(&conn, vault_id, why)
+}
+
+fn quarantine_with_conn(conn: &rusqlite::Connection, vault_id: &D32, why: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO sofi_vault_quarantine (vault_id, why) VALUES (?1, ?2)",
+        params![vault_id.as_slice(), why],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

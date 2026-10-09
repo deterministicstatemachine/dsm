@@ -346,6 +346,259 @@ async fn a_repeat_claimant_succeeds_on_the_next_generation() {
     assert_eq!(reserve_head().await.generation, 2);
 }
 
+/// A walk reads the reserve's cells ahead of it together. After three
+/// claims, a device that keeps nothing of the reserve locates the next
+/// generations from the leader's copies and reads their cells at once: every
+/// final cell is then kept, and the walk that follows reaches the head
+/// without asking any member for those cells again — only the open head
+/// cell is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_reserve_walk_reads_the_cells_ahead_of_it_together() {
+    let d = Device::start(0xA4).await;
+    for _ in 0..3 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    {
+        let binding = client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute("DELETE FROM native_reserve_lineage_memo", [])
+            .expect("forget the walked lineage");
+    }
+    crate::sdk::final_reads::forget_everything();
+
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let members = as_ccb_members(&set).expect("members");
+    let mut states = vec![reserve_genesis()];
+    for generation in 1..=3 {
+        let win = release_at(generation).await;
+        let release = dsm::economic::native_reserve::decode_and_verify_release(&win.envelope_bytes)
+            .expect("a final release verifies");
+        let child = dsm::economic::native_reserve::release_constructible(
+            states.last().expect("a state"),
+            &release,
+        )
+        .expect("each release succeeds the state before it");
+        states.push(child);
+    }
+    let cell_of = |state: &NativeReserveState| {
+        SuccessorCell::of(state, &members).expect("the successor cell")
+    };
+    {
+        let binding = client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute("DELETE FROM native_reserve_lineage_memo", [])
+            .expect("forget the lineage the reads above walked");
+    }
+    crate::sdk::final_reads::forget_everything();
+
+    crate::sdk::native_reserve::read_ahead(
+        &set,
+        &states[0],
+        crate::sdk::native_reserve::RESERVE_LOOKAHEAD,
+    )
+    .await
+    .expect("the cells ahead are read");
+    for (generation, state) in states[..3].iter().enumerate() {
+        assert!(
+            crate::sdk::final_reads::final_cell(cell_of(state).routed()).is_some(),
+            "the cell of generation {} was read ahead and kept final",
+            generation + 1
+        );
+    }
+
+    for node in &d.nodes.nodes {
+        node.forget_requests();
+    }
+    assert_eq!(reserve_head().await.generation, 3);
+    let asked: Vec<String> = d.nodes.nodes.iter().flat_map(|n| n.requests()).collect();
+    for state in &states[..3] {
+        let read = format!(
+            "GET /api/v2/cell/{}",
+            crate::util::text_id::encode_base32_crockford(cell_of(state).routed().key())
+        );
+        assert!(
+            !asked.contains(&read),
+            "the walk read generation {}'s cell again",
+            state.generation + 1
+        );
+    }
+}
+
+/// Forget the reserve lineage this process walked: its memo and every read
+/// kept final — a device that keeps nothing of the reserve.
+fn forget_the_reserve() {
+    {
+        let binding = client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute("DELETE FROM native_reserve_lineage_memo", [])
+            .expect("forget the walked lineage");
+    }
+    crate::sdk::final_reads::forget_everything();
+}
+
+/// The memoised lineage, generation by generation: what a walk established.
+fn walked_lineage() -> Vec<(u64, [u8; 32])> {
+    client_db::native_reserve::memoised_lineage(&reserve_genesis())
+        .expect("the memo")
+        .into_iter()
+        .map(|(state, _)| (state.generation, state.root()))
+        .collect()
+}
+
+/// A walker owes the epoch index a hint for every generation it established
+/// that no hint named, and the sweep publishes them: a later reader reads
+/// each generation's root there. What it owes is what it established.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_reserve_walker_publishes_a_hint_for_each_generation_it_established() {
+    use dsm::shared_lineage::LineageKind;
+    let d = Device::start(0xA5).await;
+    for _ in 0..3 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    forget_the_reserve();
+    assert_eq!(reserve_head().await.generation, 3);
+    let established = walked_lineage();
+    assert_eq!(established.len(), 3);
+    crate::handlers::artifact_republish::publish_lineage_debt()
+        .await
+        .expect("the sweep publishes what is owed");
+
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let found = crate::sdk::lineage_discovery::discover(
+        &set,
+        LineageKind::Reserve,
+        &reserve_genesis().reserve_id,
+        0,
+    )
+    .await;
+    for (generation, root) in &established {
+        assert!(
+            found.hinted(*generation),
+            "generation {generation} is hinted"
+        );
+        assert_eq!(
+            found.roots_at(*generation).collect::<Vec<_>>(),
+            vec![root],
+            "the hint names the root the walk established at {generation}"
+        );
+    }
+}
+
+/// Discovery carries no authority (SoFi Amendment S23). The epoch index of
+/// the reserve holds, beside the hints a walker published, a hint naming a
+/// root generation 2 never had and a hint naming generation 1,000,000. A
+/// device that keeps nothing of the reserve reads them all, and its walk
+/// establishes exactly the lineage a walk without any hint establishes:
+/// the same generations, the same roots, the same head.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
+    use dsm::shared_lineage::{epoch_locator, epoch_of, GenerationHintV1, LineageKind};
+    let d = Device::start(0xA6).await;
+    for _ in 0..3 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    forget_the_reserve();
+    reserve_head().await;
+    let honest = walked_lineage();
+    crate::handlers::artifact_republish::publish_lineage_debt()
+        .await
+        .expect("the sweep publishes what is owed");
+
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let reserve_id = reserve_genesis().reserve_id;
+    for (generation, root) in [(2u64, [0x6F; 32]), (1_000_000u64, [0x70; 32])] {
+        let lie = GenerationHintV1::new(
+            LineageKind::Reserve,
+            reserve_id,
+            generation,
+            root,
+            [0x71; 32],
+            [0x72; 32],
+        )
+        .expect("a hint");
+        let bytes = lie.encode();
+        let (addr, took) = crate::sdk::storage_io::put_immutable(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_OBJECT,
+            &bytes,
+        )
+        .await
+        .expect("anyone may put an object");
+        assert!(took > 0);
+        crate::sdk::storage_io::append_to_index(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
+            &epoch_locator(LineageKind::Reserve, &reserve_id, epoch_of(generation)),
+            &addr,
+        )
+        .await
+        .expect("anyone may append");
+    }
+    let found =
+        crate::sdk::lineage_discovery::discover(&set, LineageKind::Reserve, &reserve_id, 0).await;
+    assert_eq!(
+        found.roots_at(2).count(),
+        2,
+        "the lie is read beside the honest hint: discovery decides nothing"
+    );
+
+    forget_the_reserve();
+    let head = reserve_head().await;
+    assert_eq!(
+        head.generation, 3,
+        "the head is where the reserve is, not where a hint says"
+    );
+    assert_eq!(
+        walked_lineage(),
+        honest,
+        "the walk established exactly what it established without the lies"
+    );
+}
+
+/// The epoch index is predictable and anyone may append to it. Flooded past
+/// what a reader reads per epoch, the epoch's discovery is unavailable: the
+/// walk reads that epoch's cells itself, and establishes the same head.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_flooded_epoch_index_makes_discovery_unavailable_and_nothing_else() {
+    use dsm::shared_lineage::{epoch_locator, LineageKind};
+    let d = Device::start(0xA7).await;
+    for _ in 0..2 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let reserve_id = reserve_genesis().reserve_id;
+    let locator = epoch_locator(LineageKind::Reserve, &reserve_id, 0);
+    for n in 0..=crate::sdk::lineage_discovery::CANDIDATES_PER_EPOCH {
+        let junk = format!("not a hint, {n}").into_bytes();
+        let (addr, _) = crate::sdk::storage_io::put_immutable(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_OBJECT,
+            &junk,
+        )
+        .await
+        .expect("anyone may put an object");
+        crate::sdk::storage_io::append_to_index(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
+            &locator,
+            &addr,
+        )
+        .await
+        .expect("anyone may append");
+    }
+    forget_the_reserve();
+    let head = reserve_head().await;
+    assert_eq!(
+        head.generation, 2,
+        "the walk reaches the head without discovery"
+    );
+    assert_eq!(walked_lineage().len(), 2);
+}
+
 /// Another claimant's release took generation 1 first: the next claim walks
 /// to the moved head and wins generation 2, and the reserve moved by exactly
 /// the two releases.

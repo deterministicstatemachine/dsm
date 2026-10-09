@@ -1264,6 +1264,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "wildstate-duel",
  "zeroize",
 ]
 
@@ -4864,6 +4865,13 @@ dependencies = [
  "objc2-system-configuration",
  "wasite",
  "web-sys",
+]
+
+[[package]]
+name = "wildstate-duel"
+version = "0.1.0"
+dependencies = [
+ "blake3",
 ]
 
 [[package]]

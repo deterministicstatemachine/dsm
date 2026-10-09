@@ -346,4 +346,119 @@ while IFS= read -r hit; do
 done <<<"$literals"
 echo "  ✓ one caller of the anchored, linked chain memo, at the walk's start; facts are built by establish only"
 
+# [6] Shared lineages (DSM Amendment A15, SoFi Amendment S23): discovery
+#     carries no authority. The code that handles discovered hints,
+#     checkpoints and bundles — Core's `shared_lineage` module and the SDK's
+#     `lineage_discovery` — names nothing that constructs or records an
+#     established lineage: no vault chain, no reserve state, no memo write.
+#     A discovered root reaches established state only through the Core walk.
+echo "[6] Shared lineages: discovery constructs no established state..."
+discovery_files="$core/dsm/src/shared_lineage/mod.rs"$'\n'"$core/dsm_sdk/src/sdk/lineage_discovery.rs"
+while IFS= read -r f; do
+  [[ -f "$f" ]] || { echo "[FAIL] $f is not where this gate expects it"; exit 1; }
+done <<<"$discovery_files"
+forbidden='VaultChain|from_recorded|\.extend\(&|record_generation|record_walked|record_resolved|record_final_release|NativeReserveState \{|NativeReserveState::genesis|ValidatedEconomicRoot|VaultPostState \{'
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  prod=$(python3 ci/production_text.py "$f")
+  hits=$(grep -nE "$forbidden" <<<"$prod" || true)
+  if [[ -n "$hits" ]]; then
+    echo "[FAIL] $f names a constructor or record of established lineage state:"
+    echo "$hits"
+    exit 1
+  fi
+done <<<"$discovery_files"
+# The vault walk with its history read ahead (`vault_history`) returns the
+# chain `Verifier::chain` established, so it names the type; it may not
+# build, extend or record one itself.
+vault_history="$core/dsm_sdk/src/sdk/vault_history.rs"
+[[ -f "$vault_history" ]] || { echo "[FAIL] $vault_history is not where this gate expects it"; exit 1; }
+prod=$(python3 ci/production_text.py "$vault_history")
+hits=$(grep -nE 'from_recorded|VaultChain::|\.extend\(&|record_generation|record_walked|record_resolved|ValidatedEconomicRoot' <<<"$prod" || true)
+if [[ -n "$hits" ]]; then
+  echo "[FAIL] $vault_history builds, extends or records a vault chain itself:"
+  echo "$hits"
+  exit 1
+fi
+echo "  ✓ discovery code names no constructor or record of established state"
+
+# [7] The owner baseline (SoFi Amendment S24). A frontier's root becomes a
+#     chain's start only through `authenticate_frontier_owner`, the one
+#     place that builds a `VerifiedFrontier`, and the chain's baseline start
+#     has one production caller, the verifier's chain walk. A reader's
+#     witness has no public field: every way in checks its paths against an
+#     authenticated root.
+echo "[7] Owner baselines: one authentication, one chain start..."
+frontier="$core/dsm/src/sofi/frontier/mod.rs"
+[[ -f "$frontier" ]] || { echo "[FAIL] $frontier is not where this gate expects it"; exit 1; }
+check_no_pub_field VerifiedFrontier "$frontier"
+check_no_pub_field VaultWitness "$frontier"
+prod=$(python3 ci/production_text.py "$frontier")
+literals=$(grep -E 'VerifiedFrontier \{' <<<"$prod" | grep -vE '^(pub struct|impl) ' | wc -l | tr -d ' ')
+if [[ "$literals" -ne 1 ]]; then
+  echo "[FAIL] VerifiedFrontier is stated $literals times in $frontier; exactly one construction earns it"
+  exit 1
+fi
+if ! awk '/^pub fn authenticate_frontier_owner\(/{f=1} f&&/Ok\(VerifiedFrontier \{/{found=1} f&&/^\}/{exit} END{exit !found}' "$frontier"; then
+  echo "[FAIL] the one VerifiedFrontier literal is not inside authenticate_frontier_owner"
+  exit 1
+fi
+others=$(grep -rln 'VerifiedFrontier {' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null | grep -v "sofi/frontier/mod.rs" || true)
+if [[ -n "$others" ]]; then
+  echo "[FAIL] VerifiedFrontier is constructed outside its own module:"
+  echo "$others"
+  exit 1
+fi
+baseline_callers=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  prod=$(python3 ci/production_text.py "$f")
+  grep -q 'VaultChain::from_baseline(' <<<"$prod" && baseline_callers="$baseline_callers$f"$'\n'
+done < <(grep -rln 'VaultChain::from_baseline(' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null | sort)
+baseline_callers=${baseline_callers%$'\n'}
+if [[ "$baseline_callers" != "$expected_memo" ]]; then
+  echo "[FAIL] VaultChain::from_baseline must be called only from $expected_memo"
+  echo "       production callers found: ${baseline_callers:-none}"
+  exit 1
+fi
+echo "  ✓ one authentication builds a verified frontier; one chain walk starts from it"
+
+# [8] A vault's history (SoFi Amendment S26). A root below a chain's
+#     baseline enters the chain only as a `ProvenRoot`, which only the
+#     history proof builds, and only the verifier's chain walk admits one.
+echo "[8] Vault history: one proof builds a proven root; one walk admits it..."
+history="$core/dsm/src/sofi/history/mod.rs"
+[[ -f "$history" ]] || { echo "[FAIL] $history is not where this gate expects it"; exit 1; }
+body=$(awk '/^pub struct ProvenRoot \{/{f=1} f{print} f&&/^\}/{exit}' "$history")
+[[ -n "$body" ]] || { echo "[FAIL] ProvenRoot is not defined in $history"; exit 1; }
+if grep -qE '^\s+pub' <<<"$body"; then
+  echo "[FAIL] ProvenRoot has a field visible outside its module:"
+  grep -nE '^\s+pub' <<<"$body"
+  exit 1
+fi
+prod=$(python3 ci/production_text.py "$history")
+literals=$(grep -E 'ProvenRoot \{' <<<"$prod" | grep -vE '^(pub struct|impl) ' | wc -l | tr -d ' ')
+if [[ "$literals" -ne 1 ]]; then
+  echo "[FAIL] ProvenRoot is stated $literals times in $history; only prove builds one"
+  exit 1
+fi
+prove_body=$(awk '/^pub fn prove</{f=1} f{print} f&&/^\}/{exit}' "$history")
+if ! grep -q 'Ok(Ok(ProvenRoot {' <<<"$prove_body"; then
+  echo "[FAIL] the one ProvenRoot construction is not inside prove"
+  exit 1
+fi
+admitters=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  p=$(python3 ci/production_text.py "$f")
+  grep -q 'admit_proven(' <<<"$p" && admitters="$admitters$f"$'\n'
+done < <(grep -rln 'admit_proven(' "$core/dsm/src" "$core/dsm_sdk/src" 2>/dev/null | grep -v "sofi/resolution.rs" | sort)
+admitters=${admitters%$'\n'}
+if [[ "$admitters" != "$core/dsm/src/sofi/resolve.rs" ]]; then
+  echo "[FAIL] VaultChain::admit_proven must be called only from the chain walk in resolve.rs"
+  echo "       callers found: ${admitters:-none}"
+  exit 1
+fi
+echo "  ✓ one proof builds a proven root; one chain walk admits it"
+
 echo "✓ raw envelope -> verified claim -> registered root: every arrow is opaque"

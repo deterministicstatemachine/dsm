@@ -53,8 +53,101 @@ fn resolve_ca_material() -> Result<CaMaterial, DsmError> {
     Ok(CaMaterial { env_path, certs })
 }
 
-/// Every CA certificate the env config at `path` names, read from disk.
+/// A file as it stood when it was read: its length and modification time.
+/// A file whose stamp is unchanged is taken to hold what it held then.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Stamp {
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+fn stamp(path: &std::path::Path) -> Result<Stamp, DsmError> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| ca_error(format!("storage client: {}: {e}", path.display())))?;
+    let modified = meta
+        .modified()
+        .map_err(|e| ca_error(format!("storage client: {}: {e}", path.display())))?;
+    Ok(Stamp {
+        len: meta.len(),
+        modified,
+    })
+}
+
+/// One env config's certificates as read: the config's stamp, and each
+/// certificate's path, stamp and bytes.
+struct CaRead {
+    config: Stamp,
+    certs: Vec<(std::path::PathBuf, Stamp, Vec<u8>)>,
+}
+
+impl CaRead {
+    fn certs(&self) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        self.certs
+            .iter()
+            .map(|(path, _, bytes)| (path.clone(), bytes.clone()))
+            .collect()
+    }
+}
+
+/// Every env config's certificates this process read, by the config's path.
+/// Every storage call resolves its client's material, and reading and parsing
+/// the config and each certificate from disk for every member of every call
+/// is work that only repeats what was read: a config and its certificates
+/// are read again once one of them is changed (its stamp differs), so a
+/// re-pointed config or a replaced certificate still takes effect.
+static CA_READS: std::sync::Mutex<std::collections::BTreeMap<String, CaRead>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The certificates read from the config at `path`, when neither it nor any
+/// of them changed since.
+fn unchanged_ca_certs(
+    path: &str,
+    config: &Stamp,
+) -> Result<Option<Vec<(std::path::PathBuf, Vec<u8>)>>, DsmError> {
+    let reads = match CA_READS.lock() {
+        Ok(reads) => reads,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(read) = reads.get(path) else {
+        return Ok(None);
+    };
+    if read.config != *config {
+        return Ok(None);
+    }
+    for (cert_path, was, _) in &read.certs {
+        if stamp(cert_path)? != *was {
+            return Ok(None);
+        }
+    }
+    Ok(Some(read.certs()))
+}
+
+/// Every CA certificate the env config at `path` names: as last read when
+/// neither the config nor any certificate changed since, read from disk
+/// otherwise.
 fn read_ca_certs(path: &str) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, DsmError> {
+    let config = stamp(std::path::Path::new(path))?;
+    if let Some(certs) = unchanged_ca_certs(path, &config)? {
+        return Ok(certs);
+    }
+    let read = CaRead {
+        config,
+        certs: read_ca_certs_from_disk(path)?,
+    };
+    let certs = read.certs();
+    match CA_READS.lock() {
+        Ok(mut reads) => reads.insert(path.to_string(), read),
+        Err(poisoned) => poisoned.into_inner().insert(path.to_string(), read),
+    };
+    Ok(certs)
+}
+
+/// Every CA certificate the env config at `path` names, read from disk, each
+/// stamped before it was read: a file changed while it was read is then read
+/// again next time.
+fn read_ca_certs_from_disk(
+    path: &str,
+) -> Result<Vec<(std::path::PathBuf, Stamp, Vec<u8>)>, DsmError> {
     let config_dir = std::path::Path::new(path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -86,13 +179,14 @@ fn read_ca_certs(path: &str) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, DsmEr
             } else {
                 config_dir.join(named)
             };
+            let was = stamp(&cert_path)?;
             let bytes = std::fs::read(&cert_path).map_err(|e| {
                 ca_error(format!(
                     "storage client: CA certificate {}: {e}",
                     cert_path.display()
                 ))
             })?;
-            certs.push((cert_path, bytes));
+            certs.push((cert_path, was, bytes));
         }
     }
     Ok(certs)
@@ -242,9 +336,11 @@ fn build_member_client(
 
 /// The HTTP client for the member `member_id`, reached at `endpoint`: over
 /// `https://` only, trusting only the CAs the env config names, and accepting
-/// only a certificate that names `member_id`. The material is re-read on
-/// every call, so a re-pointed config or a replaced certificate takes effect;
-/// each member's client is built once per material and shared.
+/// only a certificate that names `member_id`. The material is resolved on
+/// every call, and read from disk again whenever the config or a certificate
+/// changed ([`read_ca_certs`]), so a re-pointed config or a replaced
+/// certificate takes effect; each member's client is built once per material
+/// and shared.
 pub fn member_client(member_id: &str, endpoint: &str) -> Result<reqwest::Client, DsmError> {
     require_https(endpoint)?;
     let material = resolve_ca_material()?;
@@ -1298,6 +1394,38 @@ mod tests {
                 "{endpoint}: {refused}"
             );
         }
+    }
+
+    /// A config and its certificates are read once while none of them
+    /// changes: a certificate that can no longer be opened, but is unchanged,
+    /// is not opened again, and every call resolves what was read. A
+    /// replaced certificate is read again, and its new bytes are the
+    /// material.
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_ca_material_is_not_read_again_and_a_replaced_one_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, path) = config("custom_ca_certs = [\"root.pem\"]\n");
+        let pem = dir.path().join("root.pem");
+        let first = read_ca_certs(&path).expect("the certificates");
+        assert_eq!(first[0].1, b"PEM");
+
+        std::fs::set_permissions(&pem, std::fs::Permissions::from_mode(0o000))
+            .expect("the certificate made unreadable");
+        let again = read_ca_certs(&path);
+        std::fs::set_permissions(&pem, std::fs::Permissions::from_mode(0o644))
+            .expect("the certificate readable again");
+        assert_eq!(
+            again.expect("an unchanged certificate is not opened again"),
+            first
+        );
+
+        std::fs::write(&pem, b"REPLACED PEM").expect("the certificate replaced");
+        let replaced = read_ca_certs(&path).expect("the certificates");
+        assert_eq!(
+            replaced[0].1, b"REPLACED PEM",
+            "a replaced certificate is read again"
+        );
     }
 
     #[test]

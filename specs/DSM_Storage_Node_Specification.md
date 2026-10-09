@@ -634,3 +634,4 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 12 | The minimum network size: a set needs five distinct operators, and replacements need more to draw from (§12). |
 | 13 | Whether opting out of a member should carry a cost (§12.4). |
 | 14 | The registry growth ranking, its genesis commit-reveal anchor, and the Up and Down capacity-signal computations, now referenced from the October 2025 spec outside this corpus (§13, §14). |
+| 15 | An ancestry accumulator over each member's ByteCommits, so a reader holding a member's current ByteCommit can check an earlier one with a proof whose size does not grow with the cycles between them. DSM Amendment A15's phase C (a validity proof of a shared lineage's history) needs it to rely on historical finality facts. Whether it holds against a member showing different histories to different readers is undecided (§14). |

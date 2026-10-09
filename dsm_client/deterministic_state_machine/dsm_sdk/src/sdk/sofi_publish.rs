@@ -64,11 +64,19 @@ pub struct Published {
 pub async fn publish(set: &StorageSet, object: &Publication<'_>) -> Result<Published, DsmError> {
     let bytes = object.object_bytes().map_err(wire_err)?;
     let (addr, ..) = put_immutable(set, object.namespace(), &bytes).await?;
-    let mut indexed = Vec::new();
-    for locator in object.locators().map_err(wire_err)? {
-        let took = append_to_index(set, locator.index_namespace, &locator.locator, &addr).await?;
-        indexed.push((locator, took));
-    }
+    // Each locator is an index of its own: the appends go at once, and are
+    // reported in the order the object names its locators.
+    let addr_ref = &addr;
+    let indexed =
+        futures::future::try_join_all(object.locators().map_err(wire_err)?.into_iter().map(
+            |locator| async move {
+                let took =
+                    append_to_index(set, locator.index_namespace, &locator.locator, addr_ref)
+                        .await?;
+                Ok::<_, DsmError>((locator, took))
+            },
+        ))
+        .await?;
     // The fact, from the members' answers — never from the fanout.
     let stored = read_stored_bytes(set, &addr).await?.is_some();
     Ok(Published {
@@ -88,9 +96,10 @@ pub async fn publish_produced(
     produced: &Produced,
     operation_signature: &[u8],
 ) -> Result<Vec<Published>, DsmError> {
-    let mut out = Vec::with_capacity(produced.publish.len());
-    for item in &produced.publish {
-        let publication = match item {
+    let publications: Vec<Publication<'_>> = produced
+        .publish
+        .iter()
+        .map(|item| match item {
             ToPublish::Setup(body) => Publication::Setup {
                 body,
                 signature: operation_signature,
@@ -106,10 +115,13 @@ pub async fn publish_produced(
                 signature: operation_signature,
             },
             ToPublish::PreBalance(balance) => Publication::TraderPreBalance(balance),
-        };
-        out.push(publish(set, &publication).await?);
-    }
-    Ok(out)
+        })
+        .collect();
+    // Every object is built and signed before any is put, and none waits on
+    // another's answer: they are published at once, each put before its
+    // locators are appended ([`publish`]), and reported in the order
+    // produced. The caller reads each back Stored before going on.
+    futures::future::try_join_all(publications.iter().map(|object| publish(set, object))).await
 }
 
 async fn fetch<T>(

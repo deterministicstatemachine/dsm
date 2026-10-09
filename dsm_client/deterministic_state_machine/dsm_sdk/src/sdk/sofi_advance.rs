@@ -52,8 +52,8 @@ use dsm::types::operations::Operation;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
 use crate::sdk::economic_admission_flow::validated_root_or_activate;
-use crate::sdk::route_seats::{read_cell, NodeSeats};
-use crate::sdk::sofi_exercise::{build_exercise, write_exercise, LegWrite};
+use crate::sdk::route_seats::{read_cell_kept, root_claim_final, NodeSeats};
+use crate::sdk::sofi_exercise::{write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
 use crate::sdk::sofi_reads::{verifier_error, VerifierContext};
 use crate::sdk::sofi_register::{
@@ -344,7 +344,9 @@ async fn exercise_legs(
         Acquired::Complete(evidence) => evidence,
         Acquired::Exhausted(missing) => return Ok(Err(NotTaken::Evidence(missing))),
     };
-    let exercise = build_exercise(&install, resolution_claim, &evidence)?;
+    let exercise =
+        dsm::sofi::exercise::exercise_from_objects(&install.objects(), resolution_claim, &evidence)
+            .map_err(|e| refuse(format!("the exercise: {e}")))?;
     let recognized = dsm::sofi::exercise::recognize_exercise(&exercise.encode())
         .ok_or_else(|| refuse("the exercise built here does not recognize"))?;
     let writes = write_exercise(set, &exercise, &recognized).await?;
@@ -458,7 +460,11 @@ async fn final_root_cell(
 ) -> Result<Option<Vec<u8>>, DsmError> {
     let cells = position_cells(set, genesis, device_id, position, parent_root)?;
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cells.root().routed()).await;
+    // A claim final at K_root holds it for good: kept once read final.
+    let evidence = read_cell_kept(&seats, cells.root().routed(), |evidence| {
+        root_claim_final(cells.root(), evidence)
+    })
+    .await;
     Ok(match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {
             value,
@@ -590,6 +596,10 @@ pub enum NotResolved {
     /// The first leg's cell does not hold the exercise yet, or its reads do
     /// not decide it.
     ExerciseNotRead,
+    /// Another exercise holds the first leg's key, and this position's
+    /// exercise is not rebuilt from its public objects yet: what Core names is
+    /// not in hand.
+    ExerciseNotRebuilt(String),
     /// The facts are complete and the ladder, run inside the advance, does
     /// not resolve the position yet (Amendment S7).
     Ladder(Incomplete),
@@ -762,14 +772,15 @@ pub async fn resolve_pending_position(
     log::info!("[sofi settle] position {q}: its registration read");
     // Through the verifier's reads: the walks below read the same precommit,
     // and this resolution fetches it once.
-    let precommit = match verifier
+    let signed_precommit = match verifier
         .reads
         .precommit(fulfillment.body.precommit_id())
         .map_err(|e| storage("precommit", e))?
     {
-        Resolved::Kept(precommit) => precommit.body,
+        Resolved::Kept(precommit) => precommit,
         Resolved::None | Resolved::Unavailable => return not_yet(NotResolved::PrecommitNotStored),
     };
+    let precommit = signed_precommit.body.clone();
     log::info!("[sofi settle] position {q}: its precommit fetched");
 
     // The exercise, read back from the first leg's cell: the object the
@@ -789,7 +800,26 @@ pub async fn resolve_pending_position(
         .map_err(verifier_error)?
     {
         Ok(read) => match read.into_exercise() {
-            Some(exercise) => exercise,
+            Some(exercise)
+                if derive::fulfillment_id(&exercise.fulfillment().body) == fulfillment_id =>
+            {
+                exercise
+            }
+            // Another trader's exercise holds the key this F names: two
+            // trades were built on one head and this one lost the key. What
+            // is resolved is still this device's own exercise, which Core
+            // rebuilds from its public objects as any verifier does (SoFi
+            // Amendment S25); the ladder then reads the key held by the
+            // other, and decides as it would with the exercise in hand.
+            Some(..) => match verifier
+                .rebuild_exercise(&signed_precommit, &fulfillment, &registration)
+                .map_err(verifier_error)?
+            {
+                Ok(rebuilt) => rebuilt,
+                Err(missing) => {
+                    return not_yet(NotResolved::ExerciseNotRebuilt(format!("{missing:?}")))
+                }
+            },
             None => return not_yet(NotResolved::ExerciseNotRead),
         },
         Err(missing) => {

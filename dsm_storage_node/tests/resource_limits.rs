@@ -127,7 +127,7 @@ fn closers_waiting_their_turn_leave_the_pool_to_everyone_else() {
                 .await,
             "take the close lock",
         );
-        let closing = Arc::new(tokio::sync::Mutex::new(()));
+        let closing = Arc::new(db::CommittedCells::default());
         let closers: Vec<_> = (0..db::POOL_MAX_SIZE + 4)
             .map(|_| {
                 let (pool, closing) = (pool.clone(), closing.clone());

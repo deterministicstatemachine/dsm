@@ -11,7 +11,7 @@ use crate::db::{self, test_store::unique_name, SCHEMA_VERSION};
 
 /// A pool whose connections see only `schema`, created empty, and a pool on
 /// the database to drop it with.
-async fn isolated_schema(tag: u8) -> (db::DBPool, db::DBPool, String) {
+pub(super) async fn isolated_schema(tag: u8) -> (db::DBPool, db::DBPool, String) {
     let url = std::env::var("DSM_TEST_DATABASE_URL").expect(
         "DSM_TEST_DATABASE_URL must name a Postgres database: the node's store is Postgres",
     );
@@ -33,7 +33,7 @@ async fn isolated_schema(tag: u8) -> (db::DBPool, db::DBPool, String) {
     (scoped, admin, schema)
 }
 
-async fn drop_schema(admin: &db::DBPool, schema: &str) {
+pub(super) async fn drop_schema(admin: &db::DBPool, schema: &str) {
     admin
         .get()
         .await

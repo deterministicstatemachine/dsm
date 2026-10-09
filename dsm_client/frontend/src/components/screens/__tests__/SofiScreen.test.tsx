@@ -52,6 +52,7 @@ const ERA_1000 = { baseUnits: 100000n, decimals: 2, displayAmount: '1000.00' };
 
 function balance(symbol: string, anchor: string | undefined, held = WHOLE_1000): TokenBalanceView {
   return {
+    holding: 'currency',
     tokenId: symbol,
     symbol,
     tokenName: symbol,

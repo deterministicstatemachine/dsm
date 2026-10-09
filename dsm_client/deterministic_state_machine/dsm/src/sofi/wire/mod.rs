@@ -193,6 +193,27 @@
 //! 9 `closure`. One leg.
 //! `0x0066 RouteDigestRelease`: 1 `vault_id` · 2 `parent_root` · 3 `setup_ref`
 //! · 4 `verdict_cell` · 5 `outcome` · 6 `amount` u64.
+//!
+//! Computed escrow vaults (SoFi Amendment S22, §19.10). A computed table is
+//! `program` digest32 · `setup_digest` digest32 · `session_a` and
+//! `session_b`, each `signature_alg u16 ‖ key u32 len ‖ bytes`, distinct.
+//! `0x0067 ComputedEscrowTerms`: 1 `token` · 2 `external_commitment` (`Y`) ·
+//! 3 `table` · 4 `branches`, a `u32` count of exactly 3, each `label u32 len
+//! ‖ bytes` · `recipient_genesis` · `recipient_device_id`, labelled `a-wins`,
+//! `b-wins`, `void` in that order.
+//! `0x0068 TranscriptEntry`: 1 `index` u32, from 1 · 2 `side` u8 (1 A, 2 B) ·
+//! 3 `kind` u8 and its body: 1 Commit `commitment` digest32; 2 Reveal `salt`
+//! digest32 · `move` `u32 len ‖ bytes`, 1..=64; 3 Resign, nothing.
+//! `0x0069 TranscriptOutcome`: 1 `external_commitment` · 2 `table` · 3
+//! `setup` `u32 len ‖ bytes`, 1..=16384 · 4 `entries` `seq<u32 len ‖ entry>`,
+//! 1..=1024 · 5 `signatures` `seq<(side u8 ‖ signature u32 len ‖ bytes)>`,
+//! 1..=2, strictly ascending by side.
+//! `0x006A EquivocationProof`: 1 `external_commitment` · 2 `table` · 3 `side`
+//! u8 · 4 `index` u32 · 5 `head` digest32 · 6 `signature` · 7 `head` · 8
+//! `signature`, the heads strictly ascending.
+//! `0x006B MatchStart`: 1 `external_commitment` · 2 `table` · 3 `kind` u8 ·
+//! then for a Start (1) 4 `ready_a` · 5 `ready_b`, each `u32 len ‖ bytes`,
+//! and for a Withdraw (2) 4 `side` u8 · 5 `signature` `u32 len ‖ bytes`.
 
 pub mod objects;
 
@@ -288,6 +309,8 @@ pub enum SofiWireError {
     LengthOverflow,
     /// `status` is not one of the two declared vault statuses.
     UnknownVaultStatus { status: u16 },
+    /// A frontier witness's relationship kind is neither Absent nor Present.
+    UnknownFrontierRelationship { kind: u16 },
     /// An object exceeds the frozen byte bound for its class, so it has no
     /// canonical representation.
     ObjectTooLarge {
@@ -312,6 +335,16 @@ pub enum SofiWireError {
     /// all three of its state's slots name: it would be indexed under a
     /// verdict cell it is not bound to (SoFi Amendment S21).
     EscrowTermsNotCommitted,
+    /// A computed escrow vault's branches are not exactly `a-wins`,
+    /// `b-wins` and `void`, in that order (SoFi Amendment S22).
+    ComputedBranchesNotTheThreeLabels,
+    /// A computed table names one session key for both sides: an equivocation
+    /// could not say which side cheated (SoFi Amendment S22).
+    SessionKeysNotDistinct,
+    /// A one-byte or index field holds a value the table does not declare: a
+    /// side other than 1 or 2, an entry or start kind it does not have, or
+    /// an entry index of 0.
+    UndeclaredValue { field: &'static str, value: u32 },
 }
 
 impl core::fmt::Display for SofiWireError {
@@ -367,6 +400,10 @@ impl core::fmt::Display for SofiWireError {
                 f,
                 "vault status {status:#06x} is neither Active nor Retired"
             ),
+            Self::UnknownFrontierRelationship { kind } => write!(
+                f,
+                "frontier relationship kind {kind:#06x} is neither Absent nor Present"
+            ),
             Self::PathDepth { expected, got } => write!(
                 f,
                 "authentication path is {got} siblings deep; the tree fixes {expected}"
@@ -383,6 +420,17 @@ impl core::fmt::Display for SofiWireError {
                 f,
                 "the escrow terms are not the object all three of the vault genesis's slots name"
             ),
+            Self::ComputedBranchesNotTheThreeLabels => write!(
+                f,
+                "a computed escrow vault's branches are exactly a-wins, b-wins and void, in that order"
+            ),
+            Self::SessionKeysNotDistinct => write!(
+                f,
+                "a computed table's two session keys are one key"
+            ),
+            Self::UndeclaredValue { field, value } => {
+                write!(f, "{field}: {value} is not a value the table declares")
+            }
         }
     }
 }

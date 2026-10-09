@@ -31,11 +31,13 @@ pub mod completion_proofs;
 pub mod connect;
 mod contacts;
 pub mod counterparty_canonical_heads;
+pub mod duel_matches;
 pub mod economic_admission;
 pub mod economic_lineage;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
 mod genesis;
 mod history_repair;
+pub mod lineage_publication;
 mod manifold_seeds;
 pub mod native_reserve;
 mod nonces;
@@ -190,6 +192,7 @@ pub fn init_database() -> Result<()> {
         conn.execute_batch("PRAGMA synchronous = FULL;")?;
         info!("[DSM_SDK] Database journal mode: {journal}");
         create_schema(&conn)?;
+        sofi_vault_head::drop_superseded_baselines(&conn)?;
         {
             let mut guard = DB_CONNECTION
                 .write()
@@ -241,6 +244,10 @@ pub(crate) fn close_database_for_tests() {
 #[cfg(any(test, feature = "test-utils"))]
 #[allow(clippy::panic)] // a reset that fails leaves the next test on stale rows; it must stop
 pub fn reset_database_for_tests() {
+    // A fresh world: tests reuse device identities on new nodes, so a peer
+    // position validated in an earlier world names another chain here.
+    #[cfg(test)]
+    crate::sdk::economic_registers::validated_peers().forget();
     #[cfg(test)]
     let lifecycle = TEST_DB_LIFECYCLE_LOCK
         .lock()
@@ -487,6 +494,19 @@ fn get_database_path() -> Result<PathBuf> {
 /// (`connect_app_offers`, `connect_app_sessions`, `connect_app_requests`,
 /// `connect_app_facts`).
 ///
+/// 29: a peer's step is validated one hop, from its own parent (DSM
+/// Amendment A14), so no frontier is kept and `peer_frontier` is no longer
+/// created, read or written. A database made before keeps the table, unused.
+///
+/// 29: the owner baseline (SoFi Amendment S24) adds
+/// `sofi_vault_witness`, `sofi_vault_baseline`, `sofi_vault_owner_baseline`
+/// and `sofi_vault_quarantine`, created on open; no existing table changes.
+/// The same for `sofi_vault_label`, an account's own names for its vaults,
+/// and for `sofi_vault_history_published`, how far an owner published a
+/// vault's history (SoFi Amendment S26). A baseline record whose frontier
+/// predates S26 is dropped when the database opens, and adopted or signed
+/// again (`sofi_vault_head::drop_superseded_baselines`).
+///
 /// 30: key schedule KS1 (Extract-then-Expand). Every identity secret, and so
 /// every key, DevID and genesis this store records, comes from a new
 /// derivation of the same mnemonic; a store written under the earlier
@@ -610,6 +630,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- them as `Stored` (storage spec §5 rule 6: three members return the
         -- exact bytes), established by reading them back. The object key is
         -- the object's content address, so one key names one byte string.
+        -- SoFi Amendment S23: the appends this device owes the epoch index
+        -- of a shared lineage, made once the object is Stored.
+        CREATE TABLE IF NOT EXISTS lineage_index_debt(
+            object_key     TEXT NOT NULL,
+            locator        BLOB NOT NULL,             -- 32B epoch locator
+            storage_set_id BLOB NOT NULL,             -- 32B
+            state          TEXT NOT NULL CHECK (state IN ('pending','appended')),
+            last_error     TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(object_key, locator)
+        );
+
         CREATE TABLE IF NOT EXISTS frozen_publication_artifact(
             insertion_ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
             object_key        TEXT NOT NULL UNIQUE,
@@ -663,6 +694,53 @@ fn create_schema(conn: &Connection) -> Result<()> {
             kind       INTEGER NOT NULL,
             preimage   BLOB NOT NULL,
             PRIMARY KEY (vault_id, generation, leaf_key)
+        ) WITHOUT ROWID;
+
+        -- v25 (SoFi Amendment S24): this device's witness of each vault at
+        -- the generation it last established — the vault's state leaf and
+        -- this device's relationship leaf, each with its path. Advanced as
+        -- each generation is recorded; checked against the chain's head
+        -- before it is stood on.
+        CREATE TABLE IF NOT EXISTS sofi_vault_witness(
+            vault_id         BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            generation       INTEGER NOT NULL CHECK (generation >= 0),
+            root             BLOB NOT NULL CHECK (length(root) = 32),
+            trader_genesis   BLOB NOT NULL CHECK (length(trader_genesis) = 32),
+            trader_device_id BLOB NOT NULL CHECK (length(trader_device_id) = 32),
+            witness          BLOB NOT NULL      -- CCB VaultFrontierWitnessV1
+        ) WITHOUT ROWID;
+        -- v25: the owner baseline this device started a vault's chain at,
+        -- authenticated again whenever the chain starts there.
+        CREATE TABLE IF NOT EXISTS sofi_vault_baseline(
+            vault_id   BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation > 0),
+            bundle     BLOB NOT NULL            -- VaultBaselineV1
+        ) WITHOUT ROWID;
+        -- v25: the baselines this device signed as a vault's owner, one per
+        -- generation, and whether each is published.
+        CREATE TABLE IF NOT EXISTS sofi_vault_owner_baseline(
+            vault_id   BLOB NOT NULL CHECK (length(vault_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation > 0),
+            bundle     BLOB NOT NULL,           -- VaultBaselineV1
+            PRIMARY KEY (vault_id, generation)
+        ) WITHOUT ROWID;
+        -- v25: a vault whose owner signed two frontiers at one generation
+        -- (Req 6.3): quarantined for this device, never chosen between.
+        -- Still 29: a name this account keeps for a vault it created (owner
+        -- bookkeeping, never read for validity).
+        CREATE TABLE IF NOT EXISTS sofi_vault_label(
+            vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            label    TEXT NOT NULL
+        ) WITHOUT ROWID;
+        -- SoFi Amendment S26: the highest generation of a vault's history
+        -- its owner published, with every node, leaf and state leaf below.
+        CREATE TABLE IF NOT EXISTS sofi_vault_history_published(
+            vault_id   BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation >= 0)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS sofi_vault_quarantine(
+            vault_id BLOB PRIMARY KEY CHECK (length(vault_id) = 32),
+            why      TEXT NOT NULL
         ) WITHOUT ROWID;
 
         -- v15: the native ERA reserve (R4). This device's frozen release at
@@ -792,21 +870,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             state_ccb  BLOB NOT NULL        -- exact leaf-state CCB bytes
         );
 
-        -- This receiver's frontiers (DSM Amendment A8): for each peer, the
-        -- coordinates it authenticated on the way to a step it accepted
-        -- from that peer, each with the claim it accepted there. Written
-        -- only in the transaction that accepts the step. A verification
-        -- starts at the latest one below its target and never reads
-        -- behind it.
-        CREATE TABLE IF NOT EXISTS peer_frontier(
-            peer_genesis        BLOB NOT NULL,      -- 32B
-            peer_devid          BLOB NOT NULL,      -- 32B
-            economic_position   INTEGER NOT NULL,
-            economic_root       BLOB NOT NULL,      -- 32B
-            accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
-            PRIMARY KEY(peer_genesis, peer_devid, economic_position)
-        );
-
         -- The device's per-relationship per-SIGNER content-addressed EK step
         -- ancestry (3.5b PR4). Keyed by SIGNER identity, never receipt role:
         -- role reversal and BLE steps advance the same signer chain. This is
@@ -855,6 +918,40 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- Storage-node auth tokens are gone with writer authorization
         -- (storage spec §4); an older database drops its table here.
         DROP TABLE IF EXISTS auth_tokens;
+
+        -- Computed escrow matches this wallet locked a stake in (SoFi
+        -- Amendment S22; duel_matches.rs). One row per match cell: the
+        -- wallet's side, its own terms and the setup, its ready signature,
+        -- the Start found final, and the verified state after the last
+        -- applied entry, so each entry is applied in O(1).
+        CREATE TABLE IF NOT EXISTS duel_match(
+            match_cell   BLOB PRIMARY KEY CHECK (length(match_cell) = 32),
+            side         INTEGER NOT NULL CHECK (side IN (1, 2)),
+            terms        BLOB NOT NULL,
+            setup        BLOB NOT NULL,
+            vault_id     BLOB NOT NULL CHECK (length(vault_id) = 32),
+            ready        BLOB,
+            start_final  BLOB,
+            last_index   INTEGER NOT NULL CHECK (last_index >= 0),
+            head         BLOB NOT NULL CHECK (length(head) = 32),
+            open_a       BLOB CHECK (open_a IS NULL OR length(open_a) = 36),
+            open_b       BLOB CHECK (open_b IS NULL OR length(open_b) = 36),
+            progress     BLOB NOT NULL,
+            equivocation BLOB
+        );
+        -- Every entry applied to a match, with the head after it and its
+        -- side's signature over that head. One entry per index, ever: the
+        -- primary key is what keeps this wallet from signing two different
+        -- entries at one index, across any restart.
+        CREATE TABLE IF NOT EXISTS duel_entry(
+            match_cell BLOB NOT NULL CHECK (length(match_cell) = 32),
+            idx        INTEGER NOT NULL CHECK (idx > 0),
+            side       INTEGER NOT NULL CHECK (side IN (1, 2)),
+            entry      BLOB NOT NULL,
+            head       BLOB NOT NULL CHECK (length(head) = 32),
+            signature  BLOB NOT NULL,
+            PRIMARY KEY (match_cell, idx)
+        );
 
         -- DSM Connect (DSM Amendment A11), the wallet's side (connect.rs).
         -- An offer fetched and verified for the approval screen.

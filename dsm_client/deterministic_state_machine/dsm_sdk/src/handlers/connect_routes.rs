@@ -18,6 +18,11 @@
 //!   `connect.app.respond`, `connect.app.status` (invokes);
 //! - `connect.app.requests`, `connect.app.sessions` (queries).
 //!
+//! A connected application may also ask a wallet to lock a stake for a match
+//! it decides, and to collect the result (DSM Amendment A12). The wallet
+//! builds the escrow terms itself from the match template
+//! (`sdk::connect::wager`); the request names no branch, signer or recipient.
+//!
 //! The relay is transport, never evidence. A request inside its grant is
 //! carried out by the router's own production routes, exactly as the player
 //! would by hand; what the application learns from an answer is a
@@ -34,8 +39,10 @@ use super::app_router_impl::{resolve_counterparty_via_transport, AppRouterImpl, 
 use super::response_helpers::{err, pack_envelope_ok};
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use crate::sdk::connect::grant::{
-    decide, narrows, request_from_wire, scopes_from_wire, scopes_to_wire, Decision, Request, Scope,
+    decide, narrows, request_from_wire, scopes_from_wire, scopes_to_wire, Decision, DuelLock,
+    DuelSigned, EscrowLock, Opponent, Request, Scope,
 };
+use crate::sdk::connect::wager::{self, Player, Referee};
 use crate::sdk::connect::pinned_tls::Relay;
 use crate::sdk::connect::signed::{
     canonical, own_card, own_network, session_id, sign_own, verify, Signed,
@@ -148,9 +155,10 @@ fn connected(sid: &[u8; 32]) -> Result<store::WalletSession, String> {
 }
 
 /// Why `request` cannot be carried out yet, if it cannot. A payment waits
-/// while its relationship with the application catches up; a holdings proof
-/// waits while this device is still admitting its latest position. Neither
-/// is a refusal: the request stays queued, unanswered and unspent.
+/// while its relationship with the application catches up; a holdings proof,
+/// an escrow request, a quote and a swap wait while this device is still
+/// admitting its latest position (SoFi builds no route on a pending one).
+/// None is a refusal: the request stays queued, unanswered and unspent.
 fn waits(
     core: &crate::sdk::core_sdk::CoreSDK,
     session: &store::WalletSession,
@@ -159,9 +167,195 @@ fn waits(
     match request {
         Request::Pay { .. } => Ok(payment_waits(&session.app_device_id)
             .map(|why| format!("the relationship with the application is settling: {why}"))),
-        Request::Holdings { .. } => Ok(holdings::admission_pending(core)?
+        Request::Holdings { .. }
+        | Request::EscrowLock(..)
+        | Request::EscrowRelease { .. }
+        | Request::DuelLock(..)
+        | Request::DuelCollect { .. }
+        | Request::Quote { .. }
+        | Request::Swap { .. } => Ok(holdings::admission_pending(core)?
             .map(|position| format!("position {position} is still being admitted"))),
-        _ => Ok(None),
+        // The other steps of a match admit no position: they sign, or write
+        // a match's own cells.
+        Request::AcceptIssued { .. }
+        | Request::Contacts
+        | Request::DuelSessionKey { .. }
+        | Request::DuelReady { .. }
+        | Request::DuelWithdraw { .. }
+        | Request::DuelSign { .. }
+        | Request::DuelSettle { .. } => Ok(None),
+    }
+}
+
+/// This wallet's contacts as a CONTACTS request shares them (DSM Amendment
+/// A16): their device ids, without the applications it connected to.
+fn shared_contacts() -> Result<generated::ConnectContactsResultV1, String> {
+    let contacts = crate::storage::client_db::get_all_contacts()
+        .map_err(|e| format!("the wallet's contacts: {e}"))?;
+    let apps: BTreeSet<[u8; 32]> = store::sessions()
+        .map_err(|e| format!("the wallet's connected applications: {e}"))?
+        .into_iter()
+        .map(|s| s.app_device_id)
+        .collect();
+    Ok(crate::sdk::connect::wallet::contacts_to_share(
+        contacts.into_iter().map(|c| c.device_id),
+        &apps,
+    ))
+}
+
+/// This device as a player of a match: the identity a branch pays and the
+/// key it decides a cancel with.
+fn own_player(core: &crate::sdk::core_sdk::CoreSDK) -> Result<Player, String> {
+    let me = crate::sdk::escrow_flow::party(core)
+        .map_err(|e| format!("this device as an escrow party: {e}"))?;
+    Ok(Player {
+        genesis: me.genesis,
+        device_id: me.device_id,
+        signer: me.signer,
+    })
+}
+
+fn opponent_player(o: &Opponent) -> Player {
+    Player {
+        genesis: o.genesis,
+        device_id: o.device_id,
+        signer: o.signer.clone(),
+    }
+}
+
+/// The connected application deciding a match, as the wallet holds it: its
+/// device and the key on the card its offer carried, the key its requests
+/// verify under.
+fn app_referee(session: &store::WalletSession) -> Result<Referee, String> {
+    Ok(Referee {
+        device_id: session.app_device_id,
+        signer: wager::signer(&session.app_ak)?,
+    })
+}
+
+/// This account as the application deciding a match.
+fn own_referee(core: &crate::sdk::core_sdk::CoreSDK) -> Result<Referee, String> {
+    let me = own_player(core)?;
+    Ok(Referee {
+        device_id: me.device_id,
+        signer: me.signer,
+    })
+}
+
+/// The wallet of an application's session as a player of a match: the
+/// identity and key its accepted card carried.
+fn wallet_player(session: &store::AppSession) -> Result<Player, String> {
+    Ok(Player {
+        genesis: session.wallet_genesis,
+        device_id: session.wallet_device_id,
+        signer: wager::signer(&session.wallet_ak)?,
+    })
+}
+
+/// How many times a swap is traded when it keeps losing its vault's key to
+/// another trade (each loss resolves Void, moving nothing).
+const SWAP_ATTEMPTS: usize = 3;
+
+/// The prefix of a recorded FACT_ESCROW_RELEASED in this account's facts.
+const RELEASED_FACT: &[u8] = b"DSM/connect/escrow-released/v1";
+
+/// A collect this account established (FACT_ESCROW_RELEASED): each vault the
+/// request named, in its order, with its verdict cell and the final outcome
+/// that paid the wallet. Recorded under the request once established, and
+/// unique to those vaults: a vault is released once.
+struct Released {
+    vaults: Vec<([u8; 32], [u8; 32], Vec<u8>)>,
+}
+
+impl Released {
+    fn vault_ids(&self) -> Vec<[u8; 32]> {
+        self.vaults.iter().map(|(vault, ..)| *vault).collect()
+    }
+
+    /// The status this fact gives a request.
+    fn show(&self, status: &mut generated::ConnectAppStatusV1) {
+        status.fact = generated::ConnectFact::EscrowReleased as i32;
+        status.escrow_vault_ids = self.vaults.iter().map(|(v, ..)| v.to_vec()).collect();
+        if let Some((_, cell, _)) = self.vaults.first() {
+            status.escrow_verdict_cell = cell.to_vec();
+        }
+        let outcomes: Vec<String> = self
+            .vaults
+            .iter()
+            .map(|(.., outcome)| String::from_utf8_lossy(outcome).into_owned())
+            .collect();
+        status.fact_detail = format!(
+            "each vault is Retired and its cell's final verdict ({}) pays the wallet",
+            outcomes.join(", ")
+        );
+    }
+
+    /// The prefix, the vault count, then each vault, its cell, its outcome's
+    /// length and the outcome; big-endian lengths.
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        let count = |n: usize| {
+            u32::try_from(n)
+                .map(u32::to_be_bytes)
+                .map_err(|e| format!("a released fact's length: {e}"))
+        };
+        let mut out = RELEASED_FACT.to_vec();
+        out.extend(count(self.vaults.len())?);
+        for (vault, cell, outcome) in &self.vaults {
+            out.extend(vault);
+            out.extend(cell);
+            out.extend(count(outcome.len())?);
+            out.extend(outcome);
+        }
+        Ok(out)
+    }
+
+    /// Exactly what [`Self::encode`] wrote, and nothing else.
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        fn take<'b>(bytes: &mut &'b [u8], n: usize) -> Result<&'b [u8], String> {
+            let (head, rest) = bytes
+                .split_at_checked(n)
+                .ok_or_else(|| "a recorded release is cut short".to_string())?;
+            *bytes = rest;
+            Ok(head)
+        }
+        fn take_len(bytes: &mut &[u8]) -> Result<usize, String> {
+            let raw: [u8; 4] = take(bytes, 4)?
+                .try_into()
+                .map_err(|e| format!("a recorded release's length: {e}"))?;
+            usize::try_from(u32::from_be_bytes(raw))
+                .map_err(|e| format!("a recorded release's length: {e}"))
+        }
+        fn take_id(bytes: &mut &[u8]) -> Result<[u8; 32], String> {
+            take(bytes, 32)?
+                .try_into()
+                .map_err(|e| format!("a recorded release's id: {e}"))
+        }
+        let mut rest = bytes
+            .strip_prefix(RELEASED_FACT)
+            .ok_or_else(|| "the request's recorded fact is not a release".to_string())?;
+        let count = take_len(&mut rest)?;
+        let mut vaults = Vec::new();
+        for _ in 0..count {
+            let vault = take_id(&mut rest)?;
+            let cell = take_id(&mut rest)?;
+            let len = take_len(&mut rest)?;
+            vaults.push((vault, cell, take(&mut rest, len)?.to_vec()));
+        }
+        if !rest.is_empty() {
+            return Err("a recorded release has bytes past its last vault".into());
+        }
+        Ok(Self { vaults })
+    }
+}
+
+fn position_state(state: crate::sdk::sofi_flow::PositionState) -> generated::SofiPositionState {
+    match state {
+        crate::sdk::sofi_flow::PositionState::Realized => generated::SofiPositionState::Realized,
+        crate::sdk::sofi_flow::PositionState::Void => generated::SofiPositionState::Void,
+        crate::sdk::sofi_flow::PositionState::Invalid => generated::SofiPositionState::Invalid,
+        crate::sdk::sofi_flow::PositionState::RetriesExhausted => {
+            generated::SofiPositionState::RetriesExhausted
+        }
     }
 }
 
@@ -207,7 +401,7 @@ impl AppRouterImpl {
             "connect.sync" => self.connect_sync().await,
             "connect.app.offer" => connect_app_offer(&i.args),
             "connect.app.accept" => self.connect_app_accept(&i.args).await,
-            "connect.app.request" => connect_app_request(&i.args),
+            "connect.app.request" => self.connect_app_request(&i.args).await,
             "connect.app.respond" => connect_app_respond(&i.args),
             "connect.app.status" => self.connect_app_status(&i.args).await,
             other => Err(format!("unknown connect invoke: {other}")),
@@ -599,6 +793,19 @@ impl AppRouterImpl {
         };
         match decide(&scopes, &request, &spent_of, &issued) {
             Decision::InScope { spend } => {
+                // A quote or swap behind this device's own pending SoFi position (a
+                // trade cut off before it settled) finishes that position first, from
+                // what storage holds, as `sofi.resolve` does; anything else pending is
+                // waited for.
+                if matches!(request, Request::Quote { .. } | Request::Swap { .. })
+                    && holdings::admission_pending(&self.core_sdk)?.is_some()
+                {
+                    if let Err(e) =
+                        crate::sdk::sofi_flow::resolve(&self.core_sdk, &own_set()?).await
+                    {
+                        log::info!("[connect] request {seq}: the pending position is not a SoFi one to finish here ({e})");
+                    }
+                }
                 if let Some(why) = waits(&self.core_sdk, session, &request)? {
                     return Ok(Flow::NotYet(format!("request {seq} waits: {why}")));
                 }
@@ -722,7 +929,8 @@ impl AppRouterImpl {
                 token_in,
                 token_out,
                 amount_in,
-            } => match self.quote(token_in, token_out, *amount_in).await {
+                witnesses,
+            } => match self.quote(token_in, token_out, *amount_in, witnesses).await {
                 Ok(found) => match found.ends {
                     Some(ends) => {
                         Executed::carried_out(Some(generated::app_response_body_v1::Result::Quote(
@@ -743,8 +951,9 @@ impl AppRouterImpl {
                 token_out,
                 amount_in,
                 min_amount_out,
+                witnesses,
             } => {
-                self.swap(token_in, token_out, *amount_in, *min_amount_out)
+                self.swap(token_in, token_out, *amount_in, *min_amount_out, witnesses)
                     .await
             }
             Request::Holdings { policy_commits } => {
@@ -755,7 +964,388 @@ impl AppRouterImpl {
                     Err(e) => Executed::failed(e),
                 }
             }
+            Request::Contacts => match shared_contacts() {
+                Ok(shared) => Executed::carried_out(Some(
+                    generated::app_response_body_v1::Result::Contacts(shared),
+                )),
+                Err(e) => Executed::failed(e),
+            },
+            Request::EscrowLock(lock) => match self.lock_stake(session, lock).await {
+                Ok(locked) => Executed::carried_out(Some(
+                    generated::app_response_body_v1::Result::EscrowLock(locked),
+                )),
+                Err(e) => Executed::failed(e),
+            },
+            Request::EscrowRelease { vault_ids } => self.collect(session, vault_ids).await,
+            Request::DuelSessionKey { match_nonce } => {
+                match crate::sdk::computed_flow::session_public_key(match_nonce) {
+                    Ok(key) => Executed::carried_out(Some(
+                        generated::app_response_body_v1::Result::DuelSessionKey(
+                            generated::ConnectDuelSessionKeyResultV1 {
+                                session_public_key: key,
+                                signature_alg: u32::from(crate::sdk::sofi_flow::SIGNATURE_ALG),
+                            },
+                        ),
+                    )),
+                    Err(e) => Executed::failed(format!("the session key: {e}")),
+                }
+            }
+            Request::DuelLock(lock) => match self.duel_lock(lock).await {
+                Ok(locked) => Executed::carried_out(Some(
+                    generated::app_response_body_v1::Result::DuelLock(locked),
+                )),
+                Err(e) => Executed::failed(e),
+            },
+            Request::DuelReady {
+                match_cell,
+                opponent_ready,
+            } => {
+                let readied = async {
+                    let set = own_set()?;
+                    crate::sdk::computed_flow::ready(
+                        &self.core_sdk,
+                        &set,
+                        match_cell,
+                        opponent_ready.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| format!("readying: {e}"))
+                };
+                match readied.await {
+                    Ok(r) => Executed::carried_out(Some(
+                        generated::app_response_body_v1::Result::DuelReady(
+                            generated::ConnectDuelReadyResultV1 {
+                                ready_signature: r.ready_signature,
+                                cells: Some(duel_cells(&r.view)),
+                            },
+                        ),
+                    )),
+                    Err(e) => Executed::failed(e),
+                }
+            }
+            Request::DuelWithdraw { match_cell } => {
+                let withdrawn = async {
+                    let set = own_set()?;
+                    crate::sdk::computed_flow::withdraw(&self.core_sdk, &set, match_cell)
+                        .await
+                        .map_err(|e| format!("withdrawing: {e}"))
+                };
+                match withdrawn.await {
+                    Ok(view) => Executed::carried_out(Some(
+                        generated::app_response_body_v1::Result::DuelCells(duel_cells(&view)),
+                    )),
+                    Err(e) => Executed::failed(e),
+                }
+            }
+            Request::DuelSign {
+                match_cell,
+                preceding,
+                entry,
+            } => {
+                let signed = own_set().and_then(|set| {
+                    crate::sdk::computed_flow::sign_entry(
+                        &self.core_sdk,
+                        &set,
+                        match_cell,
+                        &signed_entries(preceding),
+                        entry,
+                    )
+                    .map_err(|e| format!("signing: {e}"))
+                });
+                match signed {
+                    Ok(s) => Executed::carried_out(Some(
+                        generated::app_response_body_v1::Result::DuelSign(
+                            generated::ConnectDuelSignResultV1 {
+                                index: s.index,
+                                head: s.head.to_vec(),
+                                signature: s.signature,
+                            },
+                        ),
+                    )),
+                    Err(e) => Executed::failed(e),
+                }
+            }
+            Request::DuelSettle {
+                match_cell,
+                entries,
+            } => {
+                let settled = async {
+                    let set = own_set()?;
+                    crate::sdk::computed_flow::settle(
+                        &self.core_sdk,
+                        &set,
+                        match_cell,
+                        &signed_entries(entries),
+                    )
+                    .await
+                    .map_err(|e| format!("settling: {e}"))
+                };
+                match settled.await {
+                    Ok(view) => Executed::carried_out(Some(
+                        generated::app_response_body_v1::Result::DuelCells(duel_cells(&view)),
+                    )),
+                    Err(e) => Executed::failed(e),
+                }
+            }
+            Request::DuelCollect { vault_ids } => self.duel_collect(vault_ids).await,
         }
+    }
+
+    /// Lock a stake in a computed match (SoFi Amendment S22). The terms are
+    /// built by `computed_flow::create` from the setup, read by the program
+    /// this wallet registered; nothing in them comes from the request but
+    /// the setup, the side, the stake and who the opponent is.
+    async fn duel_lock(
+        &self,
+        lock: &DuelLock,
+    ) -> Result<generated::ConnectDuelLockResultV1, String> {
+        let set = own_set()?;
+        let side = match lock.side {
+            crate::sdk::connect::grant::Side::A => dsm::sofi::wire::MatchSide::A,
+            crate::sdk::connect::grant::Side::B => dsm::sofi::wire::MatchSide::B,
+        };
+        let locked = crate::sdk::computed_flow::create(
+            &self.core_sdk,
+            &set,
+            &crate::sdk::computed_flow::LockIntent {
+                setup: lock.setup.clone(),
+                side,
+                token: lock.policy_commit,
+                amount: lock.amount,
+                opponent: (lock.opponent_genesis, lock.opponent_device_id),
+                counterpart: lock.counterpart,
+                opponent_holdings: lock.opponent_holdings.clone(),
+            },
+        )
+        .await
+        .map_err(|e| format!("locking the stake: {e}"))?;
+        Ok(generated::ConnectDuelLockResultV1 {
+            vault_id: locked.vault_id.to_vec(),
+            match_cell: locked.match_cell.to_vec(),
+            start_cell: locked.start_cell.to_vec(),
+            external_commitment: locked.external_commitment.to_vec(),
+            program: locked.program.to_vec(),
+            session_public_key: locked.session_public_key,
+            position: locked.position,
+        })
+    }
+
+    /// Collect a computed match's result: each vault released to this wallet
+    /// by `computed_flow::release`, which builds a release only once the
+    /// match's outcome is final on a branch that pays this wallet. Every
+    /// vault is checked first to be a stake in a match this wallet locked a
+    /// stake in itself; any other is no business of the application.
+    async fn duel_collect(&self, vault_ids: &[[u8; 32]]) -> Executed {
+        let checked = async {
+            let set = own_set()?;
+            for vault_id in vault_ids {
+                let held = crate::sdk::escrow_flow::vault(&self.core_sdk, &set, vault_id)
+                    .await
+                    .map_err(|e| format!("vault {}: {e}", short(vault_id)))?;
+                let kept = crate::storage::client_db::duel_matches::get_match(&held.verdict_cell)
+                    .map_err(|e| format!("the kept matches: {e}"))?;
+                if held.program.is_none() || kept.is_none() {
+                    return Err(format!(
+                        "vault {} is not a stake in a computed match this wallet staked in",
+                        short(vault_id)
+                    ));
+                }
+            }
+            Ok::<_, String>(set)
+        };
+        let set = match checked.await {
+            Ok(set) => set,
+            Err(e) => return Executed::failed(e),
+        };
+        let mut released = Vec::with_capacity(vault_ids.len());
+        for vault_id in vault_ids {
+            let done = crate::sdk::computed_flow::release(&self.core_sdk, &set, vault_id).await;
+            let failure = match &done {
+                Ok(outcome) => match outcome.state {
+                    crate::sdk::sofi_flow::PositionState::Realized => None,
+                    other => Some(format!(
+                        "the release of {} at position {} did not realize: {other:?}",
+                        short(vault_id),
+                        outcome.position
+                    )),
+                },
+                Err(e) => Some(format!("releasing {}: {e}", short(vault_id))),
+            };
+            if let Ok(outcome) = &done {
+                released.push(generated::ConnectEscrowReleasedV1 {
+                    vault_id: vault_id.to_vec(),
+                    position: outcome.position,
+                    state: position_state(outcome.state) as i32,
+                });
+            }
+            if let Some(reason) = failure {
+                return Executed {
+                    outcome: generated::ConnectOutcome::Failed,
+                    reason,
+                    result: Some(generated::app_response_body_v1::Result::EscrowRelease(
+                        generated::ConnectEscrowReleaseResultV1 { released },
+                    )),
+                };
+            }
+        }
+        Executed::carried_out(Some(
+            generated::app_response_body_v1::Result::EscrowRelease(
+                generated::ConnectEscrowReleaseResultV1 { released },
+            ),
+        ))
+    }
+
+    /// Lock a stake for a match (DSM Amendment A12). The terms are the match
+    /// template's, built here for this wallet, the opponent the application
+    /// named and the application's own key; nothing in them comes from the
+    /// request but the match, the stake and who the opponent is. Side B locks
+    /// only against side A's vault holding the same stake under the template
+    /// with this wallet as B.
+    async fn lock_stake(
+        &self,
+        session: &store::WalletSession,
+        lock: &EscrowLock,
+    ) -> Result<generated::ConnectEscrowLockResultV1, String> {
+        let me = own_player(&self.core_sdk)?;
+        let referee = app_referee(session)?;
+        let opponent = opponent_player(&lock.opponent);
+        let terms = wager::terms(
+            &lock.external,
+            lock.policy_commit,
+            lock.side,
+            &me,
+            &opponent,
+            &referee,
+        )?;
+        let set = own_set()?;
+        if let Some(counterpart) = &lock.counterpart {
+            let held = crate::sdk::escrow_flow::vault(&self.core_sdk, &set, counterpart)
+                .await
+                .map_err(|e| format!("side A's vault {}: {e}", short(counterpart)))?;
+            if (held.owner_genesis, held.owner_device_id) != (opponent.genesis, opponent.device_id)
+            {
+                return Err(format!(
+                    "side A's vault {} is not the opponent's",
+                    short(counterpart)
+                ));
+            }
+            if held.status != dsm::sofi::wire::VAULT_STATUS_ACTIVE {
+                return Err(format!(
+                    "side A's vault {} is no longer Active",
+                    short(counterpart)
+                ));
+            }
+            if (held.token, held.amount) != (lock.policy_commit, lock.amount) {
+                return Err(format!(
+                    "side A's vault holds {}, not the {} this stake matches",
+                    crate::sdk::connect::wallet::amount_text(&held.token, held.amount),
+                    crate::sdk::connect::wallet::amount_text(&lock.policy_commit, lock.amount)
+                ));
+            }
+            let side_a = wager::branches(lock.side.other(), &opponent, &me, &referee)?;
+            if held.external_commitment != *terms.external_commitment() || held.branches != side_a {
+                return Err(format!(
+                    "side A's vault {} is not this match's stake with this wallet as B",
+                    short(counterpart)
+                ));
+            }
+        }
+        let created = crate::sdk::escrow_flow::create(
+            &self.core_sdk,
+            &set,
+            &crate::sdk::escrow_flow::CreateEscrowIntent {
+                external: lock.external.clone(),
+                token: lock.policy_commit,
+                amount: lock.amount,
+                branches: terms.branches().to_vec(),
+                counterpart: lock.counterpart,
+            },
+        )
+        .await
+        .map_err(|e| format!("locking the stake: {e}"))?;
+        Ok(generated::ConnectEscrowLockResultV1 {
+            vault_id: created.vault_id.to_vec(),
+            verdict_cell: created.verdict_cell.to_vec(),
+            external_commitment: created.external_commitment.to_vec(),
+            position: created.position,
+        })
+    }
+
+    /// Collect a match result (DSM Amendment A12): each vault released to
+    /// this wallet by `escrow.release`, which builds a release only once the
+    /// cell's verdict is final on a branch that pays this wallet. Every vault
+    /// is checked first to be a match this application decides with this
+    /// wallet as a player; one that is not is no business of the application,
+    /// and nothing is released.
+    async fn collect(&self, session: &store::WalletSession, vault_ids: &[[u8; 32]]) -> Executed {
+        let checked = async {
+            let me = own_player(&self.core_sdk)?;
+            let referee = app_referee(session)?;
+            let set = own_set()?;
+            for vault_id in vault_ids {
+                let held = crate::sdk::escrow_flow::vault(&self.core_sdk, &set, vault_id)
+                    .await
+                    .map_err(|e| format!("vault {}: {e}", short(vault_id)))?;
+                wager::is_match_of(
+                    &held.owner_genesis,
+                    &held.owner_device_id,
+                    &held.branches,
+                    &me,
+                    &referee,
+                )
+                .map_err(|why| {
+                    format!(
+                        "vault {} is not a match this application decides with this wallet as a \
+                         player: {why}",
+                        short(vault_id)
+                    )
+                })?;
+            }
+            Ok::<_, String>(set)
+        };
+        let set = match checked.await {
+            Ok(set) => set,
+            Err(e) => return Executed::failed(e),
+        };
+        let mut released = Vec::with_capacity(vault_ids.len());
+        for vault_id in vault_ids {
+            let done = crate::sdk::escrow_flow::release(&self.core_sdk, &set, vault_id).await;
+            let (outcome, failure) = match done {
+                Ok(outcome) => {
+                    let failure = match outcome.state {
+                        crate::sdk::sofi_flow::PositionState::Realized => None,
+                        other => Some(format!(
+                            "the release of {} at position {} did not realize: {other:?}",
+                            short(vault_id),
+                            outcome.position
+                        )),
+                    };
+                    (Some(outcome), failure)
+                }
+                Err(e) => (None, Some(format!("releasing {}: {e}", short(vault_id)))),
+            };
+            if let Some(outcome) = outcome {
+                released.push(generated::ConnectEscrowReleasedV1 {
+                    vault_id: vault_id.to_vec(),
+                    position: outcome.position,
+                    state: position_state(outcome.state) as i32,
+                });
+            }
+            if let Some(reason) = failure {
+                return Executed {
+                    outcome: generated::ConnectOutcome::Failed,
+                    reason,
+                    result: Some(generated::app_response_body_v1::Result::EscrowRelease(
+                        generated::ConnectEscrowReleaseResultV1 { released },
+                    )),
+                };
+            }
+        }
+        Executed::carried_out(Some(
+            generated::app_response_body_v1::Result::EscrowRelease(
+                generated::ConnectEscrowReleaseResultV1 { released },
+            ),
+        ))
     }
 
     async fn quote(
@@ -763,8 +1353,18 @@ impl AppRouterImpl {
         token_in: &[u8; 32],
         token_out: &[u8; 32],
         amount_in: u64,
+        witnesses: &[crate::sdk::connect::grant::OfferedWitness],
     ) -> Result<crate::sdk::sofi_flow::RouteFound, String> {
         let set = own_set()?;
+        // The vaults the application owns, offered at its baselines (SoFi
+        // Amendment S24): a vault this wallet holds nothing of starts there.
+        if !witnesses.is_empty() {
+            let offered: Vec<generated::ConnectVaultWitnessV1> =
+                witnesses.iter().map(|w| w.to_wire()).collect();
+            crate::sdk::sofi_flow::adopt_offered(&self.core_sdk, &set, &offered)
+                .await
+                .map_err(|e| format!("sofi.findRoute: {e}"))?;
+        }
         crate::sdk::sofi_flow::find_route(
             &self.core_sdk,
             &set,
@@ -787,13 +1387,45 @@ impl AppRouterImpl {
         token_out: &[u8; 32],
         amount_in: u64,
         min_amount_out: u64,
+        witnesses: &[crate::sdk::connect::grant::OfferedWitness],
     ) -> Executed {
-        let found = match self.quote(token_in, token_out, amount_in).await {
+        // A trade that lost its vault's key to another resolves Void: nothing
+        // moved, and the swap is quoted and traded again at the vault's new
+        // head (SoFi Amendment S25 makes the loss provable to everyone, so
+        // nothing waits on it). Invalid and a pending position never retry.
+        let mut attempt = 1;
+        loop {
+            let (state, executed) = self
+                .swap_once(token_in, token_out, amount_in, min_amount_out, witnesses)
+                .await;
+            if state != Some(crate::sdk::sofi_flow::PositionState::Void) || attempt >= SWAP_ATTEMPTS
+            {
+                return executed;
+            }
+            log::info!(
+                "[connect] swap attempt {attempt}/{SWAP_ATTEMPTS} lost its vault's key: Void, \
+                 trading again"
+            );
+            attempt += 1;
+        }
+    }
+
+    /// One quote and trade of a swap, and the state its position resolved
+    /// to, when it took one.
+    async fn swap_once(
+        &self,
+        token_in: &[u8; 32],
+        token_out: &[u8; 32],
+        amount_in: u64,
+        min_amount_out: u64,
+        witnesses: &[crate::sdk::connect::grant::OfferedWitness],
+    ) -> (Option<crate::sdk::sofi_flow::PositionState>, Executed) {
+        let found = match self.quote(token_in, token_out, amount_in, witnesses).await {
             Ok(found) => found,
-            Err(e) => return Executed::failed(e),
+            Err(e) => return (None, Executed::failed(e)),
         };
         if found.hops.is_empty() {
-            return Executed::failed("no route among the vaults searched");
+            return (None, Executed::failed("no route among the vaults searched"));
         }
         let mut vault_ids: Vec<[u8; 32]> = Vec::with_capacity(found.hops.len());
         for hop in &found.hops {
@@ -803,7 +1435,7 @@ impl AppRouterImpl {
         }
         let set = match own_set() {
             Ok(set) => set,
-            Err(e) => return Executed::failed(e),
+            Err(e) => return (None, Executed::failed(e)),
         };
         let traded = crate::sdk::sofi_flow::trade(
             &self.core_sdk,
@@ -819,18 +1451,9 @@ impl AppRouterImpl {
         .await;
         let outcome = match traded {
             Ok(outcome) => outcome,
-            Err(e) => return Executed::failed(format!("sofi trade: {e}")),
+            Err(e) => return (None, Executed::failed(format!("sofi trade: {e}"))),
         };
-        let state = match outcome.state {
-            crate::sdk::sofi_flow::PositionState::Realized => {
-                generated::SofiPositionState::Realized
-            }
-            crate::sdk::sofi_flow::PositionState::Void => generated::SofiPositionState::Void,
-            crate::sdk::sofi_flow::PositionState::Invalid => generated::SofiPositionState::Invalid,
-            crate::sdk::sofi_flow::PositionState::RetriesExhausted => {
-                generated::SofiPositionState::RetriesExhausted
-            }
-        };
+        let state = position_state(outcome.state);
         let result = Some(generated::app_response_body_v1::Result::Swap(
             generated::ConnectSwapResultV1 {
                 position: outcome.position,
@@ -838,7 +1461,7 @@ impl AppRouterImpl {
                 vault_ids: vault_ids.iter().map(|v| v.to_vec()).collect(),
             },
         ));
-        match outcome.state {
+        let executed = match outcome.state {
             crate::sdk::sofi_flow::PositionState::Realized => Executed::carried_out(result),
             other => Executed {
                 outcome: generated::ConnectOutcome::Failed,
@@ -848,7 +1471,8 @@ impl AppRouterImpl {
                 ),
                 result,
             },
-        }
+        };
+        (Some(outcome.state), executed)
     }
 
     // ------------------------- the application account -------------------------
@@ -905,19 +1529,26 @@ impl AppRouterImpl {
         let request_body: generated::AppRequestBodyV1 =
             canonical(&request.body, "the stored request")?;
         let asked = request_from_wire(&request_body)?;
-        let answer = match response {
-            Some(bytes) => Some(canonical::<generated::AppResponseBodyV1>(
-                &generated::AppResponseV1::decode(bytes.as_slice())
+        let (answer, answer_body) = match response {
+            Some(bytes) => {
+                let body = generated::AppResponseV1::decode(bytes.as_slice())
                     .map_err(|e| format!("{ROUTE}: the stored answer: {e}"))?
-                    .body,
-                "the stored answer",
-            )?),
-            None => None,
+                    .body;
+                (
+                    Some(canonical::<generated::AppResponseBodyV1>(
+                        &body,
+                        "the stored answer",
+                    )?),
+                    body,
+                )
+            }
+            None => (None, Vec::new()),
         };
         let mut status = generated::ConnectAppStatusV1 {
             session_id: sid.to_vec(),
             seq: req.seq,
             answered: answer.is_some(),
+            answer_body,
             fact: generated::ConnectFact::None as i32,
             ..Default::default()
         };
@@ -1021,12 +1652,579 @@ impl AppRouterImpl {
             Request::Quote { .. } => {
                 status.fact_detail = "a quote is information and carries no authority".into();
             }
+            Request::Contacts => {
+                status.fact_detail =
+                    "contacts are the wallet's word: who its owner keeps, never proof of anything"
+                        .into();
+            }
             Request::AcceptIssued { .. } => {
                 status.fact_detail =
                     "whether the wallet holds the object shows in a holdings proof".into();
             }
+            Request::EscrowLock(lock) => self.lock_fact(&session, lock, &mut status).await?,
+            Request::EscrowRelease { vault_ids } => {
+                self.release_fact(&session, req.seq, vault_ids, &mut status)
+                    .await?
+            }
+            Request::DuelLock(lock) => self.duel_lock_fact(&session, lock, &mut status).await?,
+            Request::DuelReady { match_cell, .. }
+            | Request::DuelWithdraw { match_cell }
+            | Request::DuelSettle { match_cell, .. } => {
+                self.duel_cells_fact(&session, match_cell, &mut status)
+                    .await?
+            }
+            Request::DuelSessionKey { .. } | Request::DuelSign { .. } => {
+                status.fact_detail = "a session key or a signature is relay data: a match proves \
+                                      itself only from its cells"
+                    .into();
+            }
+            Request::DuelCollect { vault_ids } => {
+                self.duel_collect_fact(&session, req.seq, vault_ids, &mut status)
+                    .await?
+            }
         }
         Ok(Reply::Status(status))
+    }
+
+    /// FACT_DUEL_LOCKED (SoFi Amendment S22), from the vaults bound to the
+    /// match cell, which this account derives from the setup itself, reading
+    /// it with the program it registered: the wallet's vault there, Active,
+    /// holding exactly the asked token and amount under exactly the terms the
+    /// setup gives the wallet.
+    async fn duel_lock_fact(
+        &self,
+        session: &store::AppSession,
+        lock: &DuelLock,
+        status: &mut generated::ConnectAppStatusV1,
+    ) -> Result<(), String> {
+        let wallet = wallet_player(session)?;
+        let read = crate::sdk::outcome_programs::read_setup(&lock.setup)?;
+        let named = match lock.side {
+            crate::sdk::connect::grant::Side::A => &read.a,
+            crate::sdk::connect::grant::Side::B => &read.b,
+        };
+        if (named.genesis, named.device_id) != (wallet.genesis, wallet.device_id) {
+            status.fact_detail = "the setup does not name the wallet on its side".into();
+            return Ok(());
+        }
+        let terms = crate::sdk::computed_flow::terms_of(
+            &lock.setup,
+            &read,
+            lock.policy_commit,
+            (wallet.genesis, wallet.device_id),
+        )
+        .map_err(|e| format!("the match's terms: {e}"))?;
+        let cell = dsm::sofi::computed::match_cell_of(&terms);
+        let set = own_set()?;
+        let (vaults, search) = crate::sdk::escrow_flow::locked_by(
+            &self.core_sdk,
+            &set,
+            &cell,
+            &(wallet.genesis, wallet.device_id),
+        )
+        .await
+        .map_err(|e| format!("the wallet's vaults on the match cell: {e}"))?;
+        let held = vaults.iter().find(|v| {
+            v.status == dsm::sofi::wire::VAULT_STATUS_ACTIVE
+                && (v.token, v.amount) == (lock.policy_commit, lock.amount)
+                && v.external_commitment == *terms.external_commitment()
+                && v.program == Some(read.program)
+                && v.computed.as_slice() == terms.branches()
+        });
+        match (held, search) {
+            (Some(v), _) => {
+                status.fact = generated::ConnectFact::DuelLocked as i32;
+                status.escrow_vault_ids = vec![v.vault_id.to_vec()];
+                status.escrow_verdict_cell = cell.to_vec();
+                status.escrow_amount = v.amount;
+                status.fact_detail = format!(
+                    "the wallet's vault {} holds the stake under the setup's terms, Active on \
+                     the match cell, decided by program {}",
+                    short(&v.vault_id),
+                    crate::sdk::outcome_programs::program_text(&read.program)
+                );
+            }
+            (None, crate::sdk::sofi_flow::Search::Complete) => {
+                status.fact_detail = "no vault of the wallet's holds this stake on the match \
+                                      cell; an answer saying locked grants nothing"
+                    .into();
+            }
+            (None, crate::sdk::sofi_flow::Search::Partial) => {
+                status.fact_detail = "no vault of the wallet's holds this stake on the match \
+                                      cell yet; not every vault there could be walked"
+                    .into();
+            }
+        }
+        Ok(())
+    }
+
+    /// The match's cells as this account reads them itself, through the
+    /// wallet's own vault on the match cell: FACT_DUEL_STARTED or
+    /// FACT_DUEL_WITHDRAWN at the start cell, FACT_DUEL_SETTLED once an
+    /// occupant the registered program recognizes holds the match cell.
+    async fn duel_cells_fact(
+        &self,
+        session: &store::AppSession,
+        match_cell: &[u8; 32],
+        status: &mut generated::ConnectAppStatusV1,
+    ) -> Result<(), String> {
+        let wallet = wallet_player(session)?;
+        let set = own_set()?;
+        let (vaults, _) = crate::sdk::escrow_flow::locked_by(
+            &self.core_sdk,
+            &set,
+            match_cell,
+            &(wallet.genesis, wallet.device_id),
+        )
+        .await
+        .map_err(|e| format!("the wallet's vaults on the match cell: {e}"))?;
+        let Some(vault) = vaults.iter().find(|v| v.program.is_some()) else {
+            status.fact_detail = "the wallet holds no computed vault on this match cell".into();
+            return Ok(());
+        };
+        let (_, view) =
+            crate::sdk::computed_flow::view_of_vault(&self.core_sdk, &set, &vault.vault_id)
+                .map_err(|e| format!("the match's cells: {e}"))?;
+        status.escrow_verdict_cell = match_cell.to_vec();
+        status.duel_cells = Some(duel_cells(&view));
+        match (&view.occupant, &view.start) {
+            (Some((label, ..)), _) => {
+                status.fact = generated::ConnectFact::DuelSettled as i32;
+                status.fact_detail = format!(
+                    "the match cell holds an occupant the registered program decides {:?}",
+                    String::from_utf8_lossy(label)
+                );
+            }
+            (None, Some((dsm::sofi::wire::StartKind::Start, ..))) => {
+                status.fact = generated::ConnectFact::DuelStarted as i32;
+                status.fact_detail = "a Start holds the start cell: both sides readied".into();
+            }
+            (None, Some((dsm::sofi::wire::StartKind::Withdraw, ..))) => {
+                status.fact = generated::ConnectFact::DuelWithdrawn as i32;
+                status.fact_detail =
+                    "a Withdraw holds the start cell: the match is void, both refunded".into();
+            }
+            (None, None) => {
+                status.fact_detail = "nothing holds the match's start cell yet".into();
+            }
+        }
+        Ok(())
+    }
+
+    /// FACT_ESCROW_RELEASED for a computed match: every named vault is a
+    /// computed stake of the session's wallet's match, Retired at its walked
+    /// head, and the match's final outcome names a branch that pays the
+    /// wallet. Recorded once established, as for a signed match.
+    async fn duel_collect_fact(
+        &self,
+        session: &store::AppSession,
+        seq: u64,
+        vault_ids: &[[u8; 32]],
+        status: &mut generated::ConnectAppStatusV1,
+    ) -> Result<(), String> {
+        if let Some(recorded) =
+            store::app_fact_of(&session.session_id, seq).map_err(|e| e.to_string())?
+        {
+            let released = Released::decode(&recorded)?;
+            if released.vault_ids() != vault_ids {
+                return Err(format!(
+                    "request {seq}'s recorded release names other vaults than it asks about"
+                ));
+            }
+            released.show(status);
+            return Ok(());
+        }
+        let wallet = wallet_player(session)?;
+        let set = own_set()?;
+        let mut released = Released {
+            vaults: Vec::with_capacity(vault_ids.len()),
+        };
+        for vault_id in vault_ids {
+            let held = match crate::sdk::escrow_flow::vault(&self.core_sdk, &set, vault_id).await {
+                Ok(held) => held,
+                Err(e) => {
+                    status.fact_detail = format!("vault {}: {e}", short(vault_id));
+                    return Ok(());
+                }
+            };
+            if held.program.is_none() {
+                status.fact_detail = format!("vault {} is not a computed vault", short(vault_id));
+                return Ok(());
+            }
+            if held.status != dsm::sofi::wire::VAULT_STATUS_RETIRED {
+                status.fact_detail = format!(
+                    "vault {} is not released yet; an answer saying collected grants nothing",
+                    short(vault_id)
+                );
+                return Ok(());
+            }
+            let (terms, view) =
+                crate::sdk::computed_flow::view_of_vault(&self.core_sdk, &set, vault_id)
+                    .map_err(|e| format!("the match of vault {}: {e}", short(vault_id)))?;
+            let Some(outcome) = view.final_outcome() else {
+                status.fact_detail = format!(
+                    "vault {} is Retired but its match's outcome is not final",
+                    short(vault_id)
+                );
+                return Ok(());
+            };
+            let pays_wallet = terms.branch(&outcome).is_some_and(|b| {
+                (b.recipient_genesis(), b.recipient_device_id())
+                    == (&wallet.genesis, &wallet.device_id)
+            });
+            if !pays_wallet {
+                status.fact_detail = format!(
+                    "vault {} was released on {:?}, which pays another identity",
+                    short(vault_id),
+                    String::from_utf8_lossy(&outcome)
+                );
+                return Ok(());
+            }
+            released
+                .vaults
+                .push((*vault_id, held.verdict_cell, outcome));
+        }
+        released.show(status);
+        let record = released.encode()?;
+        let used = || store::app_fact_used(&record).map_err(|e| e.to_string());
+        if used()?.is_none() {
+            if let Err(e) = store::app_record_fact(&record, &session.session_id, seq) {
+                if used()?.is_none() {
+                    return Err(e.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// FACT_ESCROW_LOCKED (DSM Amendment A12), from the vaults bound to the
+    /// match's verdict cell, which this account derives from the template and
+    /// reads and walks itself: the wallet's vault there, Active, holding
+    /// exactly the asked token and amount under exactly the template's terms.
+    /// Another vault on the cell, the opponent's included, is not the
+    /// wallet's stake.
+    async fn lock_fact(
+        &self,
+        session: &store::AppSession,
+        lock: &EscrowLock,
+        status: &mut generated::ConnectAppStatusV1,
+    ) -> Result<(), String> {
+        let wallet = wallet_player(session)?;
+        let terms = wager::terms(
+            &lock.external,
+            lock.policy_commit,
+            lock.side,
+            &wallet,
+            &opponent_player(&lock.opponent),
+            &own_referee(&self.core_sdk)?,
+        )?;
+        let cell = dsm::sofi::escrow::verdict_cell_of(&terms);
+        let set = own_set()?;
+        // Only the wallet's own vaults on the cell are walked to their heads:
+        // another vault there, the opponent's included, is not its stake.
+        let (vaults, search) = crate::sdk::escrow_flow::locked_by(
+            &self.core_sdk,
+            &set,
+            &cell,
+            &(wallet.genesis, wallet.device_id),
+        )
+        .await
+        .map_err(|e| format!("the wallet's vaults on the match's verdict cell: {e}"))?;
+        let held = vaults.iter().find(|v| {
+            (v.owner_genesis, v.owner_device_id) == (wallet.genesis, wallet.device_id)
+                && v.status == dsm::sofi::wire::VAULT_STATUS_ACTIVE
+                && (v.token, v.amount) == (lock.policy_commit, lock.amount)
+                && v.external_commitment == *terms.external_commitment()
+                && v.branches.as_slice() == terms.branches()
+        });
+        match (held, search) {
+            (Some(v), _) => {
+                status.fact = generated::ConnectFact::EscrowLocked as i32;
+                status.escrow_vault_ids = vec![v.vault_id.to_vec()];
+                status.escrow_verdict_cell = cell.to_vec();
+                status.escrow_amount = v.amount;
+                status.fact_detail = format!(
+                    "the wallet's vault {} holds the stake under the match's terms, Active on its \
+                     verdict cell",
+                    short(&v.vault_id)
+                );
+            }
+            (None, crate::sdk::sofi_flow::Search::Complete) => {
+                status.fact_detail = "no vault of the wallet's holds this stake on the match's \
+                                      verdict cell; an answer saying locked grants nothing"
+                    .into();
+            }
+            (None, crate::sdk::sofi_flow::Search::Partial) => {
+                status.fact_detail = "no vault of the wallet's holds this stake on the match's \
+                                      verdict cell yet; not every vault there could be walked"
+                    .into();
+            }
+        }
+        Ok(())
+    }
+
+    /// FACT_ESCROW_RELEASED (DSM Amendment A12): every named vault is a stake
+    /// of a match this account decides with the session's wallet as a
+    /// player, Retired at its walked head, and its cell's final verdict names
+    /// an outcome whose branch pays the wallet. Only that branch's recipient
+    /// can have released it (SoFi §19.9).
+    ///
+    /// Once established, the fact is recorded for the request and answered
+    /// from that record after: a Retired vault stays Retired and a final
+    /// verdict stays final, so nothing a later poll could read changes it.
+    /// Each vault and its verdict are read through one context. Anything
+    /// short of the fact is read again on every poll.
+    async fn release_fact(
+        &self,
+        session: &store::AppSession,
+        seq: u64,
+        vault_ids: &[[u8; 32]],
+        status: &mut generated::ConnectAppStatusV1,
+    ) -> Result<(), String> {
+        if let Some(recorded) =
+            store::app_fact_of(&session.session_id, seq).map_err(|e| e.to_string())?
+        {
+            let released = Released::decode(&recorded)?;
+            if released.vault_ids() != vault_ids {
+                return Err(format!(
+                    "request {seq}'s recorded release names other vaults than it asks about"
+                ));
+            }
+            released.show(status);
+            return Ok(());
+        }
+        let wallet = wallet_player(session)?;
+        let referee = own_referee(&self.core_sdk)?;
+        let set = own_set()?;
+        let reads = crate::sdk::escrow_flow::EscrowReads::new(&self.core_sdk, &set)
+            .map_err(|e| format!("the escrow reads: {e}"))?;
+        let mut released = Released {
+            vaults: Vec::with_capacity(vault_ids.len()),
+        };
+        for vault_id in vault_ids {
+            let held = match reads.vault(vault_id).await {
+                Ok(held) => held,
+                Err(e) => {
+                    status.fact_detail = format!("vault {}: {e}", short(vault_id));
+                    return Ok(());
+                }
+            };
+            if let Err(why) = wager::is_match_of(
+                &held.owner_genesis,
+                &held.owner_device_id,
+                &held.branches,
+                &wallet,
+                &referee,
+            ) {
+                status.fact_detail = format!(
+                    "vault {} is not a match this account decides with the wallet as a player: \
+                     {why}",
+                    short(vault_id)
+                );
+                return Ok(());
+            }
+            if held.status != dsm::sofi::wire::VAULT_STATUS_RETIRED {
+                status.fact_detail = format!(
+                    "vault {} is not released yet; an answer saying collected grants nothing",
+                    short(vault_id)
+                );
+                return Ok(());
+            }
+            let verdict = reads
+                .verdict(vault_id)
+                .map_err(|e| format!("the verdict of vault {}: {e}", short(vault_id)))?;
+            let outcome = match verdict.held {
+                Some((outcome, dsm::route_chain::ChainState::Final)) => outcome,
+                Some(..) | None => {
+                    status.fact_detail = format!(
+                        "vault {} is Retired but its cell's verdict is not final",
+                        short(vault_id)
+                    );
+                    return Ok(());
+                }
+            };
+            let pays_wallet = held.branches.iter().any(|b| {
+                b.outcome() == outcome.as_slice()
+                    && (b.recipient_genesis(), b.recipient_device_id())
+                        == (&wallet.genesis, &wallet.device_id)
+            });
+            if !pays_wallet {
+                status.fact_detail = format!(
+                    "vault {} was released on {:?}, which pays another identity",
+                    short(vault_id),
+                    String::from_utf8_lossy(&outcome)
+                );
+                return Ok(());
+            }
+            released
+                .vaults
+                .push((*vault_id, held.verdict_cell, outcome));
+        }
+        released.show(status);
+        // One release answers one request, as one transfer does: a second
+        // request naming the same vaults is answered by reading them again.
+        let record = released.encode()?;
+        let used = || store::app_fact_used(&record).map_err(|e| e.to_string());
+        if used()?.is_none() {
+            if let Err(e) = store::app_record_fact(&record, &session.session_id, seq) {
+                // A poll of the same request may have recorded it first.
+                if used()?.is_none() {
+                    return Err(e.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The witnesses this account offers `wallet` for its vaults that trade
+    /// `token_in` or `token_out`, and why any vault it owns was left out.
+    async fn witnesses(
+        &self,
+        token_in: &[u8],
+        token_out: &[u8],
+        wallet: ([u8; 32], [u8; 32]),
+    ) -> Result<Vec<generated::ConnectVaultWitnessV1>, String> {
+        let tokens = [
+            d32(token_in, "the token in")?,
+            d32(token_out, "the token out")?,
+        ];
+        let offered =
+            crate::sdk::vault_baseline::offer(&self.core_sdk, &own_set()?, &tokens, wallet).await;
+        for why in &offered.not_offered {
+            log::info!("[connect] no witness offered for {why}; the wallet walks it");
+        }
+        Ok(offered.witnesses)
+    }
+
+    /// `connect.app.request`: the application signs a request for a
+    /// connected wallet. A lock is checked as the wallet will build it: the
+    /// opponent is neither the wallet nor this account.
+    async fn connect_app_request(&self, args: &[u8]) -> Result<Reply, String> {
+        const ROUTE: &str = "connect.app.request";
+        let req: generated::ConnectAppRequestIntentV1 = body(args, ROUTE)?;
+        let sid = d32(&req.session_id, "the session")?;
+        let session = store::app_session(&sid)
+            .map_err(|e| format!("{ROUTE}: {e}"))?
+            .ok_or_else(|| format!("{ROUTE}: no such session"))?;
+        use generated::app_request_body_v1::Kind as Body;
+        use generated::connect_app_request_intent_v1::Kind as Intent;
+        // A quote or a swap carries, for each vault this account owns that
+        // trades either token, the wallet's witness at the baseline this
+        // account published (SoFi Amendment S24). A vault it cannot witness
+        // is left out, and the wallet walks that one from its genesis.
+        let wallet = (session.wallet_genesis, session.wallet_device_id);
+        let kind = match req.kind {
+            Some(Intent::AcceptIssued(k)) => Body::AcceptIssued(k),
+            Some(Intent::Pay(k)) => Body::Pay(k),
+            Some(Intent::Quote(mut k)) => {
+                k.vault_witnesses = self.witnesses(&k.token_in, &k.token_out, wallet).await?;
+                Body::Quote(k)
+            }
+            Some(Intent::Swap(mut k)) => {
+                k.vault_witnesses = self.witnesses(&k.token_in, &k.token_out, wallet).await?;
+                Body::Swap(k)
+            }
+            Some(Intent::Holdings(k)) => Body::Holdings(k),
+            Some(Intent::Contacts(k)) => Body::Contacts(k),
+            Some(Intent::EscrowLock(k)) => Body::EscrowLock(k),
+            Some(Intent::EscrowRelease(k)) => Body::EscrowRelease(k),
+            Some(Intent::DuelSessionKey(k)) => Body::DuelSessionKey(k),
+            Some(Intent::DuelLock(k)) => Body::DuelLock(k),
+            Some(Intent::DuelReady(k)) => Body::DuelReady(k),
+            Some(Intent::DuelWithdraw(k)) => Body::DuelWithdraw(k),
+            Some(Intent::DuelSign(k)) => Body::DuelSign(k),
+            Some(Intent::DuelSettle(k)) => Body::DuelSettle(k),
+            Some(Intent::DuelCollect(k)) => Body::DuelCollect(k),
+            None => return Err(format!("{ROUTE}: the request asks for nothing")),
+        };
+        // The shape a wallet will read, checked before it is signed.
+        let asked = request_from_wire(&generated::AppRequestBodyV1 {
+            session_id: sid.to_vec(),
+            seq: 1,
+            kind: Some(kind.clone()),
+        })
+        .map_err(|e| format!("{ROUTE}: {e}"))?;
+        if let Request::EscrowLock(lock) = &asked {
+            wager::branches(
+                lock.side,
+                &wallet_player(&session)?,
+                &opponent_player(&lock.opponent),
+                &own_referee(&self.core_sdk)?,
+            )
+            .map_err(|e| format!("{ROUTE}: {e}"))?;
+        }
+        // A stake in a computed match: the setup names the wallet on its side,
+        // read by the program this account registered.
+        if let Request::DuelLock(lock) = &asked {
+            let read = crate::sdk::outcome_programs::read_setup(&lock.setup)
+                .map_err(|e| format!("{ROUTE}: {e}"))?;
+            let wallet = wallet_player(&session)?;
+            let named = match lock.side {
+                crate::sdk::connect::grant::Side::A => &read.a,
+                crate::sdk::connect::grant::Side::B => &read.b,
+            };
+            if (named.genesis, named.device_id) != (wallet.genesis, wallet.device_id) {
+                return Err(format!(
+                    "{ROUTE}: the setup does not name the session's wallet on its side"
+                ));
+            }
+        }
+        let seq = store::app_append_request(&sid, |seq| app::signed_request(&sid, seq, kind))
+            .map_err(|e| format!("{ROUTE}: {e}"))?;
+        Ok(Reply::Request(generated::ConnectRequestRefV1 {
+            session_id: sid.to_vec(),
+            seq,
+        }))
+    }
+}
+
+/// The other side's signed entries a duel request carries, as the wallet's
+/// flow takes them.
+fn signed_entries(given: &[DuelSigned]) -> Vec<crate::sdk::computed_flow::SignedEntry> {
+    given
+        .iter()
+        .map(|e| crate::sdk::computed_flow::SignedEntry {
+            entry: e.entry.clone(),
+            signature: e.signature.clone(),
+        })
+        .collect()
+}
+
+fn chain_state(state: dsm::route_chain::ChainState) -> generated::EscrowVerdictState {
+    match state {
+        dsm::route_chain::ChainState::LeaderHeld => generated::EscrowVerdictState::LeaderHeld,
+        dsm::route_chain::ChainState::Preserved => generated::EscrowVerdictState::Preserved,
+        dsm::route_chain::ChainState::Final => generated::EscrowVerdictState::Final,
+    }
+}
+
+/// A computed match's cells on the wire.
+fn duel_cells(view: &crate::sdk::computed_flow::MatchView) -> generated::ConnectDuelCellsV1 {
+    let (start, start_state) = match &view.start {
+        None => (
+            generated::ConnectDuelStart::Open,
+            generated::EscrowVerdictState::None,
+        ),
+        Some((dsm::sofi::wire::StartKind::Start, state)) => {
+            (generated::ConnectDuelStart::Started, chain_state(*state))
+        }
+        Some((dsm::sofi::wire::StartKind::Withdraw, state)) => {
+            (generated::ConnectDuelStart::Withdrawn, chain_state(*state))
+        }
+    };
+    let (outcome, outcome_state, by_equivocation) = match &view.occupant {
+        None => (Vec::new(), generated::EscrowVerdictState::None, None),
+        Some((label, kind, state)) => (label.clone(), chain_state(*state), Some(*kind)),
+    };
+    generated::ConnectDuelCellsV1 {
+        match_cell: view.match_cell.to_vec(),
+        start_cell: view.start_cell.to_vec(),
+        start: start as i32,
+        start_state: start_state as i32,
+        outcome,
+        outcome_state: outcome_state as i32,
+        by_equivocation: by_equivocation
+            == Some(crate::sdk::computed_flow::OccupantKind::Equivocation),
     }
 }
 
@@ -1120,6 +2318,8 @@ fn wallet_session_view(
             .collect(),
         last_error,
         offer_digest: s.offer_digest.to_vec(),
+        peer_genesis: s.app_genesis.to_vec(),
+        peer_signing_key: s.app_ak.clone(),
     })
 }
 
@@ -1224,6 +2424,8 @@ fn app_session_view(s: &store::AppSession) -> Result<generated::ConnectSessionV1
             .collect(),
         last_error: String::new(),
         offer_digest: s.offer_digest.to_vec(),
+        peer_genesis: s.wallet_genesis.to_vec(),
+        peer_signing_key: s.wallet_ak.clone(),
     })
 }
 
@@ -1271,46 +2473,6 @@ fn connect_app_offer_of(params: &[u8]) -> Result<Reply, String> {
         code,
         offer_digest: digest.to_vec(),
         offer,
-    }))
-}
-
-fn connect_app_request(args: &[u8]) -> Result<Reply, String> {
-    const ROUTE: &str = "connect.app.request";
-    let req: generated::ConnectAppRequestIntentV1 = body(args, ROUTE)?;
-    let sid = d32(&req.session_id, "the session")?;
-    store::app_session(&sid)
-        .map_err(|e| format!("{ROUTE}: {e}"))?
-        .ok_or_else(|| format!("{ROUTE}: no such session"))?;
-    let kind = match req.kind {
-        Some(generated::connect_app_request_intent_v1::Kind::AcceptIssued(k)) => {
-            generated::app_request_body_v1::Kind::AcceptIssued(k)
-        }
-        Some(generated::connect_app_request_intent_v1::Kind::Pay(k)) => {
-            generated::app_request_body_v1::Kind::Pay(k)
-        }
-        Some(generated::connect_app_request_intent_v1::Kind::Quote(k)) => {
-            generated::app_request_body_v1::Kind::Quote(k)
-        }
-        Some(generated::connect_app_request_intent_v1::Kind::Swap(k)) => {
-            generated::app_request_body_v1::Kind::Swap(k)
-        }
-        Some(generated::connect_app_request_intent_v1::Kind::Holdings(k)) => {
-            generated::app_request_body_v1::Kind::Holdings(k)
-        }
-        None => return Err(format!("{ROUTE}: the request asks for nothing")),
-    };
-    // The shape a wallet will read, checked before it is signed.
-    request_from_wire(&generated::AppRequestBodyV1 {
-        session_id: sid.to_vec(),
-        seq: 1,
-        kind: Some(kind.clone()),
-    })
-    .map_err(|e| format!("{ROUTE}: {e}"))?;
-    let seq = store::app_append_request(&sid, |seq| app::signed_request(&sid, seq, kind))
-        .map_err(|e| format!("{ROUTE}: {e}"))?;
-    Ok(Reply::Request(generated::ConnectRequestRefV1 {
-        session_id: sid.to_vec(),
-        seq,
     }))
 }
 

@@ -84,6 +84,8 @@ describe('wallet.ts', () => {
           protocolDefined: true,
           genesisSupplyDisplay: undefined,
           permissions: undefined,
+          // Rows that state no state object are currencies.
+          holding: 'currency',
         },
         {
           tokenId: 'RIGB',
@@ -99,6 +101,7 @@ describe('wallet.ts', () => {
           protocolDefined: false,
           genesisSupplyDisplay: '1000.00',
           permissions: { burnEnabled: true, transferable: false },
+          holding: 'currency',
         },
       ]);
     });

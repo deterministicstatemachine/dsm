@@ -35,6 +35,8 @@ const READ_METHODS = new Set([
   'getDiagnosticsLog',
   // Writes only the report file in the app's cache, then opens the share sheet.
   'shareDiagnosticsReport',
+  // Moves the wallet's window behind the app that sent a connect link; writes nothing.
+  'returnToConnectCaller',
 ]);
 
 /** The preferences the tour's shell lessons change: how the app looks and sounds. */

@@ -45,6 +45,9 @@ dsm-anchor-core = { path = "../../../crates/dsm-anchor-core" }
 # tropic01-free so CI builds without the sibling libtropic checkout; the actual libtropic session
 # reader lives in the workspace-excluded dsm-anchor-hw-verifier crate (D2).
 dsm-anchor-verifier = { path = "../../../crates/dsm-anchor-verifier" }
+# The outcome program staked Wildstate matches are decided by (SoFi Amendment
+# S22): registered with every verifier this SDK builds, never part of Core.
+wildstate-duel = { path = "../../../crates/wildstate-duel" }
 
 # JNI for Android integration
 jni = { version = "0.21", optional = true }
