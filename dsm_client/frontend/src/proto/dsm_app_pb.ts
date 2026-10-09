@@ -1324,6 +1324,14 @@ export enum NativeHostEventKind {
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
    */
   SESSION_STATE_HINT = 6,
+
+  /**
+   * The phone contact the user picked (DSM Amendment A17): a ContactProfileV1,
+   * or no bytes when the user picked none or did not allow the read.
+   *
+   * @generated from enum value: NATIVE_HOST_EVENT_KIND_PHONE_CONTACT_PICKED = 7;
+   */
+  PHONE_CONTACT_PICKED = 7,
 }
 // Retrieve enum metadata with: proto3.getEnumType(NativeHostEventKind)
 proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
@@ -1332,6 +1340,7 @@ proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
   { no: 4, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ" },
   { no: 5, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE" },
   { no: 6, name: "NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT" },
+  { no: 7, name: "NATIVE_HOST_EVENT_KIND_PHONE_CONTACT_PICKED" },
 ]);
 
 /**
@@ -18241,6 +18250,18 @@ export class Envelope extends Message<Envelope> {
     case: "authoredObjectsResponse";
   } | {
     /**
+     * @generated from field: dsm.ContactProfileV1 contact_profile = 137;
+     */
+    value: ContactProfileV1;
+    case: "contactProfile";
+  } | {
+    /**
+     * @generated from field: dsm.ReceiptEmailResultV1 receipt_email_result = 138;
+     */
+    value: ReceiptEmailResultV1;
+    case: "receiptEmailResult";
+  } | {
+    /**
      * Reply to `token.forget`.
      *
      * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
@@ -18371,6 +18392,8 @@ export class Envelope extends Message<Envelope> {
     { no: 134, name: "token_check_response", kind: "message", T: TokenCheckResponse, oneof: "payload" },
     { no: 135, name: "authored_published_response", kind: "message", T: AuthoredPublishedResponse, oneof: "payload" },
     { no: 136, name: "authored_objects_response", kind: "message", T: AuthoredObjectsResponse, oneof: "payload" },
+    { no: 137, name: "contact_profile", kind: "message", T: ContactProfileV1, oneof: "payload" },
+    { no: 138, name: "receipt_email_result", kind: "message", T: ReceiptEmailResultV1, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -22327,6 +22350,20 @@ export class ContactQrV3 extends Message<ContactQrV3> {
    */
   preferredAlias = "";
 
+  /**
+   * What the card's owner chose to share so a payer can reach them: their
+   * email (a receipt goes there when the payer has receipts on) and phone.
+   * Display only; empty when not shared. DSM Amendment A17.
+   *
+   * @generated from field: string email = 8;
+   */
+  email = "";
+
+  /**
+   * @generated from field: string phone = 9;
+   */
+  phone = "";
+
   constructor(data?: PartialMessage<ContactQrV3>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22340,6 +22377,8 @@ export class ContactQrV3 extends Message<ContactQrV3> {
     { no: 5, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "preferred_alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "email", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "phone", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactQrV3 {
@@ -22356,6 +22395,328 @@ export class ContactQrV3 extends Message<ContactQrV3> {
 
   static equals(a: ContactQrV3 | PlainMessage<ContactQrV3> | undefined, b: ContactQrV3 | PlainMessage<ContactQrV3> | undefined): boolean {
     return proto3.util.equals(ContactQrV3, a, b);
+  }
+}
+
+/**
+ * A person's details as the wallet shows them: what a contact's card shared,
+ * or what the wallet's owner linked from the phone's contacts or typed, and
+ * the owner's own card. Display only: no field is read by any validity check,
+ * and none leaves the device except a card the owner chose to share.
+ * DSM Amendment A17.
+ *
+ * @generated from message dsm.ContactProfileV1
+ */
+export class ContactProfileV1 extends Message<ContactProfileV1> {
+  /**
+   * @generated from field: string display_name = 1;
+   */
+  displayName = "";
+
+  /**
+   * @generated from field: string email = 2;
+   */
+  email = "";
+
+  /**
+   * @generated from field: string phone = 3;
+   */
+  phone = "";
+
+  /**
+   * Android's lookup key of the linked phone contact, to read its photo on
+   * this device; empty on the owner's own card.
+   *
+   * @generated from field: string phone_lookup_key = 4;
+   */
+  phoneLookupKey = "";
+
+  constructor(data?: PartialMessage<ContactProfileV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ContactProfileV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "display_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "email", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "phone", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "phone_lookup_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactProfileV1 {
+    return new ContactProfileV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ContactProfileV1 {
+    return new ContactProfileV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ContactProfileV1 {
+    return new ContactProfileV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ContactProfileV1 | PlainMessage<ContactProfileV1> | undefined, b: ContactProfileV1 | PlainMessage<ContactProfileV1> | undefined): boolean {
+    return proto3.util.equals(ContactProfileV1, a, b);
+  }
+}
+
+/**
+ * receipts.email: the page asks the SDK to email a receipt for a send it just
+ * made. The SDK adds the recipient's email (from the contact's details), the
+ * sender's name (from the owner's card) and the signature.
+ *
+ * @generated from message dsm.ReceiptEmailIntentV1
+ */
+export class ReceiptEmailIntentV1 extends Message<ReceiptEmailIntentV1> {
+  /**
+   * @generated from field: bytes recipient_device_id = 1;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: string token = 2;
+   */
+  token = "";
+
+  /**
+   * as Rust displayed it
+   *
+   * @generated from field: string amount = 3;
+   */
+  amount = "";
+
+  /**
+   * @generated from field: string memo = 4;
+   */
+  memo = "";
+
+  /**
+   * the transfer's hash, Base32
+   *
+   * @generated from field: string reference = 5;
+   */
+  reference = "";
+
+  /**
+   * The phone's clock when the send was made, as text, labelled as such on
+   * the receipt: no DSM time exists (no wall clock in DSM validity).
+   *
+   * @generated from field: string sent_at_local = 6;
+   */
+  sentAtLocal = "";
+
+  constructor(data?: PartialMessage<ReceiptEmailIntentV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReceiptEmailIntentV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "reference", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "sent_at_local", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptEmailIntentV1 {
+    return new ReceiptEmailIntentV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReceiptEmailIntentV1 {
+    return new ReceiptEmailIntentV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReceiptEmailIntentV1 {
+    return new ReceiptEmailIntentV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReceiptEmailIntentV1 | PlainMessage<ReceiptEmailIntentV1> | undefined, b: ReceiptEmailIntentV1 | PlainMessage<ReceiptEmailIntentV1> | undefined): boolean {
+    return proto3.util.equals(ReceiptEmailIntentV1, a, b);
+  }
+}
+
+/**
+ * What the SDK posts to the receipt service. `signature` is the sender
+ * device's SPHINCS+ signature (its AK) over this message's encoding with
+ * `signature` empty, under the domain tag DSM/receipt-email/v1.
+ *
+ * @generated from message dsm.ReceiptEmailRequestV1
+ */
+export class ReceiptEmailRequestV1 extends Message<ReceiptEmailRequestV1> {
+  /**
+   * @generated from field: string to_email = 1;
+   */
+  toEmail = "";
+
+  /**
+   * @generated from field: string sender_name = 2;
+   */
+  senderName = "";
+
+  /**
+   * @generated from field: string token = 3;
+   */
+  token = "";
+
+  /**
+   * @generated from field: string amount = 4;
+   */
+  amount = "";
+
+  /**
+   * @generated from field: string memo = 5;
+   */
+  memo = "";
+
+  /**
+   * @generated from field: string reference = 6;
+   */
+  reference = "";
+
+  /**
+   * @generated from field: string sent_at_local = 7;
+   */
+  sentAtLocal = "";
+
+  /**
+   * @generated from field: bytes sender_device_id = 8;
+   */
+  senderDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes sender_signing_public_key = 9;
+   */
+  senderSigningPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 10;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ReceiptEmailRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReceiptEmailRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "to_email", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "sender_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "token", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "reference", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "sent_at_local", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "sender_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "sender_signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptEmailRequestV1 {
+    return new ReceiptEmailRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReceiptEmailRequestV1 {
+    return new ReceiptEmailRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReceiptEmailRequestV1 {
+    return new ReceiptEmailRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReceiptEmailRequestV1 | PlainMessage<ReceiptEmailRequestV1> | undefined, b: ReceiptEmailRequestV1 | PlainMessage<ReceiptEmailRequestV1> | undefined): boolean {
+    return proto3.util.equals(ReceiptEmailRequestV1, a, b);
+  }
+}
+
+/**
+ * The receipt service's answer, and receipts.email's: where it went, masked
+ * (j…@example.com).
+ *
+ * @generated from message dsm.ReceiptEmailResultV1
+ */
+export class ReceiptEmailResultV1 extends Message<ReceiptEmailResultV1> {
+  /**
+   * @generated from field: string sent_to_masked = 1;
+   */
+  sentToMasked = "";
+
+  constructor(data?: PartialMessage<ReceiptEmailResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReceiptEmailResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "sent_to_masked", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptEmailResultV1 {
+    return new ReceiptEmailResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReceiptEmailResultV1 {
+    return new ReceiptEmailResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReceiptEmailResultV1 {
+    return new ReceiptEmailResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReceiptEmailResultV1 | PlainMessage<ReceiptEmailResultV1> | undefined, b: ReceiptEmailResultV1 | PlainMessage<ReceiptEmailResultV1> | undefined): boolean {
+    return proto3.util.equals(ReceiptEmailResultV1, a, b);
+  }
+}
+
+/**
+ * contacts.setProfile: a contact's details, replacing the ones held.
+ *
+ * @generated from message dsm.ContactSetProfileRequest
+ */
+export class ContactSetProfileRequest extends Message<ContactSetProfileRequest> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.ContactProfileV1 profile = 2;
+   */
+  profile?: ContactProfileV1;
+
+  constructor(data?: PartialMessage<ContactSetProfileRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ContactSetProfileRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "profile", kind: "message", T: ContactProfileV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactSetProfileRequest {
+    return new ContactSetProfileRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ContactSetProfileRequest {
+    return new ContactSetProfileRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ContactSetProfileRequest {
+    return new ContactSetProfileRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ContactSetProfileRequest | PlainMessage<ContactSetProfileRequest> | undefined, b: ContactSetProfileRequest | PlainMessage<ContactSetProfileRequest> | undefined): boolean {
+    return proto3.util.equals(ContactSetProfileRequest, a, b);
   }
 }
 
@@ -22383,6 +22744,14 @@ export class ContactManualAddRequest extends Message<ContactManualAddRequest> {
    */
   signingPublicKey = new Uint8Array(0);
 
+  /**
+   * The new contact's details, from the card or the phone's contacts; absent
+   * when there are none.
+   *
+   * @generated from field: dsm.ContactProfileV1 profile = 5;
+   */
+  profile?: ContactProfileV1;
+
   constructor(data?: PartialMessage<ContactManualAddRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22395,6 +22764,7 @@ export class ContactManualAddRequest extends Message<ContactManualAddRequest> {
     { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "profile", kind: "message", T: ContactProfileV1 },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactManualAddRequest {
@@ -22481,6 +22851,13 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
    */
   pairing = ContactPairingPhase.UNSPECIFIED;
 
+  /**
+   * The contact's details as the wallet holds them; absent when none were set.
+   *
+   * @generated from field: dsm.ContactProfileV1 profile = 15;
+   */
+  profile?: ContactProfileV1;
+
   constructor(data?: PartialMessage<ContactAddResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22500,6 +22877,7 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
     { no: 12, name: "signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "send_status", kind: "message", T: RelationshipSendStatus },
     { no: 14, name: "pairing", kind: "enum", T: proto3.getEnumType(ContactPairingPhase) },
+    { no: 15, name: "profile", kind: "message", T: ContactProfileV1 },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactAddResponse {

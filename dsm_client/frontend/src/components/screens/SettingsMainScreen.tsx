@@ -13,6 +13,7 @@ import {
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import { tourStore } from '../tour/tourStore';
+import { chooseSkin } from '../../runtime/skinPreferences';
 import { Notice, ScreenFrame } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
 
@@ -149,6 +150,24 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
           </div>
         )}
       </button>
+
+      {/* The wallet's look: this Game Boy (Classic), or the Simple wallet. */}
+      <section className="sb-card" aria-labelledby="look-section-title">
+        <div id="look-section-title" className="sb-card__title">Wallet style</div>
+        <p className="sb-hint">Simple is a plain wallet: send, receive and people. Switch back here from its Settings.</p>
+        <button
+          type="button"
+          className="sb-btn sb-btn--block"
+          onClick={() => {
+            chooseSkin('simple').then(
+              () => undefined,
+              (e: unknown) => setStatus(e instanceof Error ? e.message : String(e)),
+            );
+          }}
+        >
+          Switch to Simple
+        </button>
+      </section>
 
       {/* Guided tour — replay at any time */}
       <section className="sb-card" aria-labelledby="tour-section-title">

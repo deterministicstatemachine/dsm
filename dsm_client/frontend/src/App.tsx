@@ -33,6 +33,9 @@ import { BridgeProvider } from './bridge/BridgeProvider';
 import { FxLayer, FxProvider } from './components/fx/FxProvider';
 import { useNativeSessionBridge } from './hooks/useNativeSessionBridge';
 import './styles/screen.css';
+import './styles/simple.css';
+import { useSkin } from './hooks/useSkin';
+import SkinChoice from './components/simple/SkinChoice';
 
 export default function App() {
   const runtime = useAppRuntimeStore();
@@ -58,6 +61,10 @@ export default function App() {
     themes,
     setThemeIndex,
   });
+
+  // Which skin the page is drawn in: Simple once the wallet is ready and the
+  // owner chose it, the Game Boy otherwise.
+  const skin = useSkin(session.identity_status, runtime.skin, runtime.scheme, runtime.appState);
 
   const { showIntro, dismissIntro } = useIntroGate();
   const {
@@ -141,6 +148,7 @@ export default function App() {
                   <ScreenContainer theme={runtime.theme}>
                     <AppContent
                       appState={runtime.appState}
+                      skin={skin}
                       error={runtime.error}
                       showIntro={showIntro}
                       introGifSrc={introGifSrc}
@@ -166,6 +174,7 @@ export default function App() {
                     <FxLayer />
                     <GuidedTour appState={runtime.appState} />
                     <TourOffer appState={runtime.appState} showIntro={showIntro} />
+                    <SkinChoice appState={runtime.appState} />
                   </ScreenContainer>
                   {/* The passcode prompt is its own layer, not part of the home
                       screen's content: it portals over the whole display, the

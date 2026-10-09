@@ -116,6 +116,8 @@ export function decodeNativeHostEventToLegacyTopic(eventBytes: Uint8Array): { to
       return { topic: 'nfc.backup_written', payload: event.payload };
     case NativeHostEventKind.SESSION_STATE_HINT:
       return { topic: 'session.state.hint', payload: event.payload };
+    case NativeHostEventKind.PHONE_CONTACT_PICKED:
+      return { topic: 'phone_contact_picked', payload: event.payload };
     default:
       return null;
   }
