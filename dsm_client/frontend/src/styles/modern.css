@@ -134,6 +134,8 @@ html[data-scheme="dark"] .s-balance-amount small { color: var(--s-gold); }
   display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
 }
 .s-btn:disabled { opacity: 0.5; }
+/* A button that still waits on the form: dimmed, and tapping it says what is missing. */
+.s-btn-waiting { opacity: 0.5; }
 .s-btn-primary { background: var(--s-primary); color: var(--s-on-primary); }
 .s-btn-secondary { background: var(--s-secondary); color: var(--s-on-secondary); }
 .s-btn-quiet { background: var(--s-surface); color: var(--s-text); border: 1px solid var(--s-line); font-size: 17px; }
