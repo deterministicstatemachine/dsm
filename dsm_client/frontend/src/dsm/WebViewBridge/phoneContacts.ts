@@ -31,9 +31,13 @@ export async function phoneContactPhoto(lookupKey: string): Promise<string | nul
   const bytes = await callBin("phoneContactPhoto", new TextEncoder().encode(lookupKey));
   if (bytes.length === 0) return null;
   const type = bytes[0] === 0x89 ? "image/png" : "image/jpeg";
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return `data:${type};base64,${btoa(binary)}`;
+  // The browser encodes the image bytes itself: no binary string on a bridge payload.
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("the contact photo could not be read"));
+    reader.readAsDataURL(new Blob([bytes as BlobPart], { type }));
+  });
 }
 
 /** Opens the phone's share sheet with `text`, for the user to send where they choose. */
