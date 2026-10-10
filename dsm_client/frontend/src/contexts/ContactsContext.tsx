@@ -7,6 +7,7 @@ import { hasIdentity } from '../utils/identity';
 import { contactsStore, useContactsStore } from '../stores/contactsStore';
 import type { AddContactResult, ContactCard } from '../dsm/types';
 import type { DomainContact } from '../domain/types';
+import type { PersonProfile } from '../domain/types';
 
 export interface ContactsState {
   /** Rust's list in the one contact shape: a contact is its device, with its send-readiness. */
@@ -18,7 +19,7 @@ export interface ContactsState {
 export interface ContactsContextValue extends ContactsState {
   refreshContacts: () => Promise<void>;
   /** Adds the contact a card names; empty alias: Rust names it by its device. */
-  addContact: (alias: string, card: ContactCard) => Promise<AddContactResult>;
+  addContact: (alias: string, card: ContactCard, profile?: PersonProfile) => Promise<AddContactResult>;
   setError: (error: string | null) => void;
 }
 

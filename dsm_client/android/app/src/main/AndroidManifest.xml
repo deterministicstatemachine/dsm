@@ -41,6 +41,9 @@
 
     <!-- Camera for QR scanning in WebView -->
     <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- Asked only when the user picks a phone contact to link to a DSM contact
+         (DSM Amendment A17); the wallet reads that one contact and nothing else. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS"/>
     <!-- NFC for recovery capsule import -->
     <uses-permission android:name="android.permission.NFC" />
     <uses-permission android:name="android.permission.VIBRATE" />

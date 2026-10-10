@@ -16,6 +16,7 @@ mod shared_lineage;
 mod sofi;
 mod testing;
 mod token_ops;
+mod wallet;
 
 pub use addressing::*;
 pub use connect::*;
@@ -26,6 +27,7 @@ pub use shared_lineage::*;
 pub use sofi::*;
 pub use testing::*;
 pub use token_ops::*;
+pub use wallet::*;
 
 /// The SoFi v8 tags, collected separately so the flat `TAGS` list below stays
 /// untouched by the v8 allocation.
@@ -117,6 +119,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_RECEIPT_B_CANONICAL,
     TAG_DSM_RECEIPT_EVIDENCE_A,
     TAG_DSM_RECEIPT_EVIDENCE_B,
+    TAG_DSM_RECEIPT_EMAIL,
     TAG_DSM_RELATIONSHIP_FINALIZED,
     TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
     TAG_DSM_EXT_COMMIT,

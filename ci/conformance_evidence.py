@@ -65,6 +65,7 @@ CRATES = {
     "dsm_vertical_validation": "tools/vertical_validation",
     "dsm_sphincs": "crates/dsm-sphincs",
     "dsm_app_host": "crates/dsm-app-host",
+    "dsm_receipt_service": "crates/dsm-receipt-service",
 }
 # What the boards compile and run: a recorded commit must match these exactly.
 TESTED_CODE = [

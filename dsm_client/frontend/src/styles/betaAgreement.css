@@ -1,0 +1,44 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * The beta agreement: a plain full-screen page, white on black, the same in
+ * every look (it shows before one is chosen). Its colours are its own: nothing
+ * the skins or the Game Boy themes set reaches it.
+ */
+.ba-page {
+  position: fixed; inset: 0; z-index: 30000; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  background: #000000; color: #ffffff;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; text-align: left;
+  letter-spacing: normal; text-transform: none;
+}
+.ba-inner {
+  max-width: 560px; margin: 0 auto; box-sizing: border-box;
+  /* The phone keeps this page below the status bar (setSystemBars), so no inset for it here. */
+  padding: 28px 20px 28px;
+}
+.ba-version { margin: 0 0 6px; font-size: 13px; color: #9a9a9a; }
+.ba-title { margin: 0 0 10px; font-size: 30px; font-weight: 900; line-height: 1.1; color: #ffffff; }
+.ba-lead { margin: 0 0 18px; font-size: 16px; line-height: 1.45; color: #d0d0d0; }
+.ba-points { list-style: none; margin: 0 0 20px; padding: 0; display: grid; gap: 10px; }
+.ba-point {
+  position: relative; display: flex; gap: 14px; align-items: flex-start; padding: 14px;
+  border: 1px solid #333333; border-radius: 14px; background: #111111; cursor: pointer;
+}
+.ba-point input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.ba-box {
+  flex: 0 0 auto; width: 24px; height: 24px; margin-top: 1px; border-radius: 7px;
+  border: 2px solid #8a8a8a; background: transparent; position: relative;
+}
+.ba-point input:checked + .ba-box { background: #ffffff; border-color: #ffffff; }
+.ba-point input:checked + .ba-box::after {
+  content: ""; position: absolute; left: 7px; top: 2px; width: 6px; height: 12px;
+  border: solid #000000; border-width: 0 3px 3px 0; transform: rotate(45deg);
+}
+.ba-point input:focus-visible + .ba-box { outline: 2px solid #2f8cff; outline-offset: 2px; }
+.ba-text { font-size: 15px; line-height: 1.45; color: #ffffff; }
+.ba-agree {
+  -webkit-appearance: none; appearance: none; width: 100%; min-height: 54px; border: none; border-radius: 14px;
+  background: #ffffff; color: #000000; font: inherit; font-size: 17px; font-weight: 800; cursor: pointer;
+}
+.ba-agree:disabled { background: #2a2a2a; color: #777777; cursor: not-allowed; }
+.ba-count { margin: 10px 0 0; text-align: center; font-size: 13px; color: #9a9a9a; }
+.ba-problem { margin: 10px 0 0; text-align: center; font-size: 14px; color: #ff8a8a; }

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Contact route handlers extracted from AppRouterImpl.
 //!
-//! Handles `contacts.list`, `contacts.readContactCode`, and `contacts.addManual`.
+//! Handles `contacts.list`, `contacts.readContactCode`, `contacts.addManual`,
+//! and the details the wallet shows for a person (DSM Amendment A17):
+//! `contacts.setProfile`, `contacts.ownProfile` and `contacts.setOwnProfile`.
 
 use prost::Message;
 
@@ -13,22 +15,9 @@ use super::app_router_impl::{resolve_counterparty_via_transport, AppRouterImpl, 
 use crate::sdk::contact_sdk::contact_add_response;
 use super::relationship_status::derive_local_send_status_for_contact;
 use super::response_helpers::{err, pack_envelope_ok};
+use crate::sdk::contact_profile;
 
 impl AppRouterImpl {
-    async fn add_resolved_contact(
-        &self,
-        preferred_alias: &str,
-        resolved: ResolvedCounterparty,
-    ) -> AppResult {
-        match self
-            .add_contact_from_resolved(preferred_alias, resolved)
-            .await
-        {
-            Ok(added) => pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(added)),
-            Err(e) => err(e),
-        }
-    }
-
     /// Add the counterparty a directory read proved, and establish the
     /// relationship before any step on it (§26). The one path a contact is
     /// added by: `contacts.addManual`, and a connected application or wallet
@@ -128,6 +117,10 @@ impl AppRouterImpl {
                     };
                     let mut item = contact_add_response(contact);
                     item.send_status = Some(derive_local_send_status_for_contact(&record));
+                    item.profile = match contact_profile::profile_of(&record) {
+                        Ok(profile) => profile,
+                        Err(e) => return err(format!("contacts.list: {e}")),
+                    };
                     let session = crate::bluetooth::get_pairing_orchestrator()
                         .get_session_status(&contact.device_id)
                         .await;
@@ -168,6 +161,21 @@ impl AppRouterImpl {
                 }
             }
 
+            // The owner's own card: what it shares on the contact code.
+            // No card made yet is answered as that: an `own_profile` state with no value.
+            "contacts.ownProfile" => match contact_profile::own_profile() {
+                Ok(Some(card)) => {
+                    pack_envelope_ok(generated::envelope::Payload::ContactProfile(card))
+                }
+                Ok(None) => pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+                    generated::AppStateResponse {
+                        key: "own_profile".into(),
+                        value: None,
+                    },
+                )),
+                Err(e) => err(format!("contacts.ownProfile: {e}")),
+            },
+
             other => err(format!("contacts: unknown route '{other}'")),
         }
     }
@@ -202,11 +210,81 @@ impl AppRouterImpl {
                     Ok(r) => r,
                     Err(e) => return err(format!("contacts.addManual: resolve failed: {e}")),
                 };
-                self.add_resolved_contact(&req.alias, resolved).await
+                let device_id = resolved.entry.body.device_id;
+                let mut added = match self.add_contact_from_resolved(&req.alias, resolved).await {
+                    Ok(added) => added,
+                    Err(e) => return err(e),
+                };
+                // The details the card shared or the phone's contacts supplied.
+                if let Some(profile) = req.profile {
+                    match contact_profile::set_contact_profile(&device_id, profile) {
+                        Ok(stored) => added.profile = Some(stored),
+                        Err(e) => {
+                            return err(format!(
+                            "contacts.addManual: the contact was added; its details were not: {e}"
+                        ))
+                        }
+                    }
+                }
+                pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(added))
+            }
+            "contacts.setProfile" => {
+                let req = match decode_proto_arg::<generated::ContactSetProfileRequest>(
+                    &i.args,
+                    "contacts.setProfile",
+                ) {
+                    Ok(req) => req,
+                    Err(e) => return err(e),
+                };
+                let Some(profile) = req.profile else {
+                    return err("contacts.setProfile: the request names no details".into());
+                };
+                let stored = match contact_profile::set_contact_profile(&req.device_id, profile) {
+                    Ok(stored) => stored,
+                    Err(e) => return err(format!("contacts.setProfile: {e}")),
+                };
+                let device_id = match <[u8; 32]>::try_from(req.device_id.as_slice()) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return err(format!("contacts.setProfile: a device id is 32 bytes: {e}"))
+                    }
+                };
+                let Some(contact) = self.contact_manager.get_verified_contact(device_id).await
+                else {
+                    return err("contacts.setProfile: the contact is not held in memory".into());
+                };
+                let mut reply = contact_add_response(&contact);
+                reply.profile = Some(stored);
+                pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(reply))
+            }
+            "contacts.setOwnProfile" => {
+                let profile = match decode_proto_arg::<generated::ContactProfileV1>(
+                    &i.args,
+                    "contacts.setOwnProfile",
+                ) {
+                    Ok(profile) => profile,
+                    Err(e) => return err(e),
+                };
+                match contact_profile::set_own_profile(profile) {
+                    Ok(stored) => {
+                        pack_envelope_ok(generated::envelope::Payload::ContactProfile(stored))
+                    }
+                    Err(e) => err(format!("contacts.setOwnProfile: {e}")),
+                }
             }
             other => err(format!("contacts: unknown invoke '{other}'")),
         }
     }
+}
+
+/// An invoke's argument: an ArgPack of codec PROTO holding one `M`.
+fn decode_proto_arg<M: Message + Default>(args: &[u8], route: &str) -> Result<M, String> {
+    let pack = generated::ArgPack::decode(args)
+        .map_err(|e| format!("{route}: decode ArgPack failed: {e}"))?;
+    if pack.codec != generated::Codec::Proto as i32 {
+        return Err(format!("{route}: ArgPack.codec must be PROTO"));
+    }
+    M::decode(&*pack.body).map_err(|e| format!("{route}: the argument does not decode: {e}"))
 }
 
 #[cfg(test)]
@@ -230,6 +308,8 @@ mod tests {
             genesis_hash: genesis_hash.clone(),
             signing_public_key: vec![0x22; 64],
             preferred_alias: "Alice".into(),
+            email: "alice@example.com".into(),
+            phone: "+1 555 0100".into(),
         };
 
         let encoded = qr.encode_to_vec();
@@ -238,6 +318,8 @@ mod tests {
         assert_eq!(decoded.device_id, device_id);
         assert_eq!(decoded.genesis_hash, genesis_hash);
         assert_eq!(decoded.preferred_alias, "Alice");
+        assert_eq!(decoded.email, "alice@example.com");
+        assert_eq!(decoded.phone, "+1 555 0100");
         assert_eq!(decoded.network, "test");
         assert_eq!(decoded.signing_public_key.len(), 64);
     }
@@ -249,6 +331,7 @@ mod tests {
             device_id: vec![0x01; 32],
             genesis_hash: vec![0x02; 32],
             signing_public_key: vec![0x03; 64],
+            profile: None,
         };
 
         let encoded = req.encode_to_vec();
@@ -305,12 +388,22 @@ mod tests {
             signing_public_key: vec![0x88; 64],
             send_status: None,
             pairing: generated::ContactPairingPhase::Paired as i32,
+            profile: Some(generated::ContactProfileV1 {
+                display_name: "Carol Diaz".into(),
+                email: "carol@example.com".into(),
+                phone: String::new(),
+                phone_lookup_key: "0r1-ABC".into(),
+            }),
         };
 
         let bytes = resp.encode_to_vec();
         let decoded = generated::ContactAddResponse::decode(&*bytes).expect("decode");
 
         assert_eq!(decoded.alias, "Carol");
+        let profile = decoded.profile.as_ref().expect("the profile round-trips");
+        assert_eq!(profile.display_name, "Carol Diaz");
+        assert_eq!(profile.email, "carol@example.com");
+        assert_eq!(profile.phone_lookup_key, "0r1-ABC");
         assert!(decoded.genesis_verified_online);
         assert_eq!(decoded.verifying_storage_nodes.len(), 2);
         assert_eq!(decoded.ble_address, "AA:BB:CC:DD:EE:FF");

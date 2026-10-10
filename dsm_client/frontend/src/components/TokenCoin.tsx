@@ -2,6 +2,8 @@
 import React, { useEffect, useState } from 'react';
 import { coinGifsFor, type CoinGifs } from '../utils/coinArtwork';
 import { useActiveTheme } from '../hooks/useActiveTheme';
+import { skinShown, useAppRuntimeStore } from '../runtime/appRuntimeStore';
+import { FlatTokenMark } from './FlatTokenMark';
 
 type Props = {
   /** The token policy's icon field, as Rust carried it. */
@@ -15,8 +17,14 @@ type Props = {
   fallbackSrc?: string;
 };
 
-/** A token's spinning coin, in the look of the built-in token GIFs, for the active theme. */
-export function TokenCoin({ iconUrl, ticker, size = 72, className, alt, fallbackSrc }: Props): React.JSX.Element | null {
+/** A token's spinning coin, in the look of the built-in token GIFs, for the active theme; still in the Modern skin. */
+export function TokenCoin(props: Props): React.JSX.Element | null {
+  const runtime = useAppRuntimeStore();
+  if (skinShown(runtime) === 'modern') return <FlatTokenMark ticker={props.ticker} iconUrl={props.iconUrl} className={props.className} alt={props.alt} />;
+  return <SpinningCoin {...props} />;
+}
+
+function SpinningCoin({ iconUrl, ticker, size = 72, className, alt, fallbackSrc }: Props): React.JSX.Element | null {
   const theme = useActiveTheme();
   const [gifs, setGifs] = useState<CoinGifs | null>(null);
   const [url, setUrl] = useState('');

@@ -3090,16 +3090,38 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 |---|---|---|---|
 | MR-DSM-0319 to MR-DSM-0321 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
 
+### 6.83 A plain wallet had no names, no card and no receipts (`feat/simple-wallet-skin`, DSM Amendment A17, 2026-10-09)
+
+**The finding.** For a wallet aimed at people new to Web3, a contact was a typed alias over a device id, the owner had no card beyond the bare contact code, and nothing told the person paid that a payment had been made.
+
+**The ruling.** Owner, 2026-10-09: link contacts to phone contacts, make your own card, and email a generic receipt only with consent and only to a contact with an email. DSM Amendment A17.
+
+**Built.**
+- `ContactProfileV1`, held in a contact row's metadata (`sdk::contact_profile`), answered by `contacts.list` and set by `contacts.addManual` and `contacts.setProfile`.
+- The owner's card in settings (`contacts.ownProfile`, `contacts.setOwnProfile`).
+- The contact code's `preferred_alias`, `email` and `phone` from that card.
+- `receipts.email` (`sdk::email_receipts`, `handlers::receipt_routes`): builds and signs the request under `DSM/receipt-email` and posts it to the env config's `receipt_service_url`.
+- The receipt service, `crates/dsm-receipt-service`.
+- Both skins use them: the Modern skin's My Card, Add Contact and Email Receipts pages, and on the DGen Game Boy the My QR screen's card, Add Contact's phone-contact pick, and Settings' receipts permission. Either skin's send asks for the receipt.
+
+**Open.**
+- The receipt service does not read the device directory: a signature proves a device asked, not that the device is in the directory.
+- No receipt service is deployed until the owner names a sending domain and SMTP credentials. Until then a network config names no `receipt_service_url`, and `receipts.email` says so.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| MR-DSM-0322 to MR-DSM-0325 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 321 | 132 | 97 | 41 | 0 | 33 | 18 |
+| DSM high-level (MR-DSM) | 325 | 136 | 97 | 41 | 0 | 33 | 18 |
 | SoFi (MR-SOFI) | 420 | 289 | 91 | 19 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **1045** | **495** | **207** | **117** | **4** | **68** | **154** |
+| **All** | **1049** | **499** | **207** | **117** | **4** | **68** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3428,6 +3450,10 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | MR-DSM-0319 | Met | `dsm_sdk::sdk::connect::grant::decide`; `dsm_sdk::sdk::connect::grant::scopes_from_wire` | `dsm_sdk::sdk::connect::grant::tests::a_contacts_request_runs_without_the_player_only_under_a_contacts_scope` | DSM Amendment A16 (§6.82). |
 | MR-DSM-0320 | Met | `dsm_sdk::sdk::connect::wallet::contacts_to_share` | `dsm_sdk::sdk::connect::wallet::tests::a_contacts_answer_shares_device_ids_only_and_never_an_application` | DSM Amendment A16 (§6.82). |
 | MR-DSM-0321 | Met | `dsm_sdk::handlers::connect_routes` | `dsm_sdk::handlers::connect_e2e_tests::the_game_sees_the_wallets_contacts_as_device_ids_and_never_itself` | DSM Amendment A16 (§6.82). The answer establishes `ConnectFact::None`. |
+| MR-DSM-0322 | Met | `dsm_sdk::sdk::contact_profile::set_contact_profile`; `dsm_sdk::sdk::contact_profile::set_own_profile` | `dsm_sdk::sdk::contact_profile::tests::a_contacts_details_are_kept_with_its_row_and_replaced_whole`; `dsm_sdk::sdk::contact_profile::tests::the_owners_card_reads_back_without_a_phone_contacts_key` | DSM Amendment A17 (§6.83). |
+| MR-DSM-0323 | Met | `dsm_sdk::handlers::identity_routes::contact_card` | `dsm_sdk::handlers::identity_routes::tests::the_contact_code_carries_what_the_owners_card_shares` | DSM Amendment A17 (§6.83). |
+| MR-DSM-0324 | Met | `dsm_sdk::sdk::email_receipts::build_request`; `dsm_receipt_service::check` | `dsm_sdk::sdk::email_receipts::tests::a_request_is_signed_by_the_device_and_names_the_contacts_email`; `dsm_sdk::sdk::email_receipts::tests::a_contact_without_an_email_gets_no_receipt` | DSM Amendment A17 (§6.83). The service's own tests are in its crate. Consent is the page's (`SimpleReceipts`). |
+| MR-DSM-0325 | Met | `dsm_receipt_service::render`; `dsm_receipt_service::RateLimiter` | `dsm_receipt_service::tests::the_receipt_says_who_paid_what_and_escapes_markup` | DSM Amendment A17 (§6.83). |
 
 ### 8.2 SoFi settlement specification
 
