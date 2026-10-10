@@ -20,7 +20,7 @@ pub struct GenesisRecord {
     pub verification_step: Option<u64>,
     /// Public genesis nonce (Base32-Crockford).
     pub genesis_nonce: String,
-    /// Genesis derivation profile: "MnemonicV2" or "MnemonicV3".
+    /// Genesis derivation profile: "MnemonicV3-KS1" (Genesis v3 under key schedule KS1).
     pub genesis_profile: String,
     /// The network id the genesis was created under (v3: a GRK derivation
     /// input, so the authority chain is re-derivable after restart).

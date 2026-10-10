@@ -280,3 +280,116 @@ Tests named `dsm_sdk::…` run on devices created as wallet creation creates the
 | MR-DSM-0298, DSM Amendment A12 (§6.76): a lock past the escrow scope's caps waits for the player; a collect is inside the grant only with an escrow scope | `dsm_sdk` · sdk/connect/grant.rs · `decide` → `within` | `dsm_sdk::sdk::connect::grant::tests::a_lock_past_the_escrow_caps_waits_for_the_player`; `dsm_sdk::sdk::connect::grant::tests::a_collect_is_in_scope_whenever_an_escrow_scope_stands`; `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_nobody_joined_is_voided_and_the_stake_returns` (40 ERA past the 30 ERA cap waits on the device) | The caps skipped for a lock → `a_lock_past_the_escrow_caps_waits_for_the_player` red, and end to end the 40 ERA lock is carried out with nothing waiting. A collect taken in without an escrow scope → `a_collect_is_in_scope_whenever_an_escrow_scope_stands` red (2026-10-05). | — |
 | MR-DSM-0299, DSM Amendment A12 (§6.76): the application counts a lock only from the wallet's own Active vault on the template's verdict cell, holding exactly the asked stake under exactly the template's terms | `dsm_sdk` · handlers/connect_routes.rs · `lock_fact`; sdk/escrow_flow.rs · `locked` | `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_the_game_referees_pays_the_winner_both_stakes` (B's lock before B's wallet acts, with A's vault on the same cell; A's signed "locked" for a match it never locked) | Any Active vault on the cell counted → red: B's lock is counted from A's vault (`EscrowLocked`, not `None`) (2026-10-05). | — |
 | MR-DSM-0299, DSM Amendment A12 (§6.76): the application counts a collection only when each vault is Retired and the cell's final verdict pays the wallet | `dsm_sdk` · handlers/connect_routes.rs · `release_fact`; sdk/escrow_flow.rs · `vault`, `verdict` | `dsm_sdk::handlers::connect_escrow_e2e_tests::a_match_the_game_referees_pays_the_winner_both_stakes` (B's failed collect, once A has released both vaults on a-wins) | The payee check removed → red: B's collect is counted `EscrowReleased` from the vaults A released (2026-10-05). | — |
+
+## SPHINCS construction-v2 refinement evidence
+
+MR-DSM-0259 and canonical signing/key binding: see
+[SPHINCS_REFINEMENT.md](SPHINCS_REFINEMENT.md) for kernel-checked statements,
+ordered primitive-transcript checks, exact source map and open proof obligations.
+Run `bash scripts/check_sphincs_refinement.sh`; the Lean CI job enforces it.
+This evidence does not discharge cryptographic unforgeability, constant-time,
+CCB codec, JNI, or compiled-binary refinement obligations. MR-SOFI-0111's
+signature uniqueness must not be inferred from deterministic signing alone.
+
+The signer follow-up proves generated digit bounds, generated WOTS chain recovery,
+XOR/parity sibling equivalence, exact block extraction, node/chain output widths
+under the explicit primitive-width contract, and parent recurrence against the
+actual XMSS/FORS signer model. Complete serialized sibling/leaf correspondence
+and signer composition now hold in `Signer.lean`, including `keygen_sign_verify`
+for all six variants. Extracted Rust `next_layer` has a total source-refinement
+proof; full signer source/binary and JNI/timing guarantees remain open. See the
+report for exact premises and pinned regeneration commands.
+
+The source follow-up additionally proves total extracted Rust address writes
+(`type_clear_correct`, `tree_set_correct`) with no hash premise. The Android
+arm64 release and JNI ABI were checked after removing raw `'static` handle
+reconstruction from `processEnvelopeV3` and preserving pending exceptions.
+A seed-redaction regression test passes. SDK Android Clippy remains failing
+(190 errors; baseline 191); these checks are not timing/binary/JVM proofs.
+
+The parser follow-up proves total extracted `base_2b` refill for every implemented
+width, exact zero/one/two-byte reads under sufficient-buffer bounds, and paired
+read-count noninterference for arbitrary byte/accumulator contents. It does not
+prove full parser bitstream equality or machine timing. Typed failures remove
+borrowed diagnostic strings from the cryptographic result; fixed text and wire
+behavior are preserved. The public Rust graph translates at its explicit hash
+boundary; 40 external declarations still require models and source proofs.
+
+SecurityGames.lean adds the actual model-backed classical chosen-message game,
+independent seed/adversary sampling, seed sampler bijectivity, query budget,
+public-key preservation, freshness and finite-event accounting. SecurityGameChecks
+runs adaptive-query/freshness/budget controls and a width-correct insecure oracle
+forgery control in the existing refinement gate. The new charter retains open
+computational/quantum reduction and wrapper-authorization obligations. The
+artifact locker rechecks build-file identity; it is not a binary semantics proof.
+
+WrapperReduction.lean and its controls verify certificate forgery extraction,
+explicit collision witnesses, fresh primitive-signature witnesses and q+1 hash
+query traces. RustExtraction.base_2b_complete proves total parser execution and
+output length for widths 1..14 with b*count <= 8*input.length; it uses the proved
+outer-loop bit-budget induction. Both proof sets are in the existing gates.
+They do not close primitive hardness, parser digit equality or binary guarantees.
+
+Blake3.lean provides a concrete Lean compression/tree/XOF implementation linked
+to the exact DSM request encoding. Blake3Proofs.lean proves model output widths,
+accepted-request widths and root-XOF prefix consistency. Wiring and deployed
+H_msg width theorems expose actual modes, contexts and input bytes. The official
+35-length/three-mode vector suite and independent recomputation of all 517,251
+BLAKE3 outputs in the 114 Rust transcripts pass; altered-output and unknown-mode
+controls reject. These tests add independent primitive-output evidence to the
+existing transcript-request checks. They do not prove the Rust crate universally
+equivalent, compression/tree correctness against an independent formal spec,
+computational hardness, leakage, erasure or JNI. See the pinned cross-reference
+in SPHINCS_EXTERNAL_PROOF_ARTIFACTS.md.
+
+SeedHybrid.lean proves the exact decomposition of existing key generation into
+actual expansion plus unchanged suffix, the explicit adaptive PRG challenge
+distinguisher's equality to the deployed model game, uniform 3n-byte sampler
+bijection, field/key widths, query budget and exact common-denominator PRG-gap
+bound. SeedHybridChecks exercises correlated expansion and freshness. Efficient
+adversary cost, actual ChaCha20 hardness and the BLAKE3 substitution rows remain
+unproved; the bound does not assign a numerical security level.
+
+## Paper and specification claims (audit-prep, 2026-10-07)
+
+Every claim the papers and specifications make about the formal artifacts is
+traced in [CLAIM_TRACE.tsv](CLAIM_TRACE.tsv): claim, exact theorem, exact
+assumptions, implementation symbol and test. `scripts/check_claim_trace.py`
+(CI, Lean job) fails if a named theorem is missing from the kernel's axiom
+ledger, rests on anything beyond Lean's core axioms, or names a Rust symbol or
+test that does not exist. Published wording that the artifacts do not support,
+and its replacement, is recorded in [PUBLISHED_CLAIMS.md](PUBLISHED_CLAIMS.md).
+
+## SPHINCS+ (BLAKE3) security reduction (audit-prep, 2026-10-07)
+
+MR-DSM-0259: the classical EUF-CMA game reduces to explicit primitive events and
+distinguisher advantages (`euf_cma_reduction`, Lean, core axioms only; claim
+trace rows C15–C32). Kernel-checked; no test evidence is claimed for it, and it
+bounds nothing numerically. See SPHINCS_REFINEMENT.md, "Classical EUF-CMA
+reduction", and SPHINCS_BLAKE3_ROLE_MAP.md for which assumption each term is.
+
+Reduction overhead: the challenger's primitive requests are bounded
+(`challenger_request_budget`, `sign_cost`, `verify_cost`, `keygen_cost`,
+`deployed_request_bounds`; claim trace row C41): at most keygenCost +
+q_s·signCost + verifyCost, evaluated for SPX128f and SPX256f. Executable
+controls: QueryCostChecks.lean. The adversary's own cost is not modeled.
+
+Random-oracle level (phase 2): kernel-checked role bounds (`rom_tweak_collision`,
+`rom_secret_guess`, `itsr_spx128f`, `itsr_spx256f`) and the summed levels
+(`rom_level_128f`: q_h·2^-125; `rom_level_256f`: q_h·2^-252); claim trace rows
+C42–C44. The identification of the reduction's terms with these role games is
+argued in SPHINCS_ROM_BOUND.md, not machine-checked. Quantum: narrative only
+(SPHINCS_QROM_NARRATIVE.md, not machine-checked). Controls: RomChecks.lean.
+
+Hidden-value bridge (phase 3, generic): for any challenger written as a
+symbolic program, the symbolic run never reads an unrevealed answer
+(`strace_inv`), equals the real run when no lookup disagrees (`coupling`), and
+disagreement is bounded by compatible guesses plus wild guesses and unopened
+collisions (`hidden_bound`, `real_le_sym`); claim trace row C45. Its
+instantiation for DSM's signer is not yet checked, so link 3 of
+SPHINCS_ROM_BOUND.md remains argued for DSM.
+Instantiated for DSM's signer (game H1): `sim_sign`, `sim_kgTail`, `sim_game`
+(the model's game as a query tree equals the real run of the symbolic game)
+and `rom_game_hidden` (claim trace row C46); B, the step bound, the
+unopened-collision bound and the symbolic win probability for DSM remain
+open, and `RomSample.lean` (`sample`) is the groundwork for adaptive ITSR.

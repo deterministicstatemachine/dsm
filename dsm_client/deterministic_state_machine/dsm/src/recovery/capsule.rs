@@ -3,8 +3,7 @@
 //! Encrypted recovery capsule implementation.
 //!
 //! Live recovery capsules follow the whitepaper recovery-ring path:
-//! - mnemonic-only Argon2id seed derivation
-//! - BLAKE3 key derivation for the 32-byte AEAD key
+//! - the 32-byte AEAD key from the BIP39 wallet seed (key schedule KS1 Expand)
 //! - deterministic nonce from capsule index + receipt rollup
 //! - XChaCha20-Poly1305 with fixed associated data
 
@@ -12,20 +11,15 @@ use crate::crypto::domain::TaggedHashDomain;
 
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::error::DsmError;
-use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use zeroize::Zeroize;
 
 static CAPSULE_SYSTEM_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 const RECOVERY_CAPSULE_MAGIC: &[u8; 4] = b"RCV3";
 const RECOVERY_CAPSULE_AAD: &[u8] = b"DSM/recovery-capsule-v3\0";
-const RECOVERY_RING_ARGON2_SALT: &[u8] = b"DSM/recovery-ring\0";
-const RECOVERY_AEAD_CONTEXT: &str = "DSM/recovery-aead\0";
-const RECOVERY_AUTHORITY_CONTEXT: &str = "DSM/recovery-authority\0";
 const RECOVERY_NONCE_DOMAIN: TaggedHashDomain<'static> =
     crate::common::domain_tags::TAG_DSM_RECOVERY_NONCE;
 const RECOVERY_CHALLENGE_DOMAIN: TaggedHashDomain<'static> =
@@ -296,51 +290,49 @@ impl RecoveryCapsule {
     }
 }
 
-/// Derive the 32-byte recovery key from a mnemonic.
-pub fn derive_recovery_key(mnemonic: &str) -> Result<[u8; 32], DsmError> {
-    let argon2 = Argon2::default();
-    let mut seed = [0u8; 32];
-    argon2
-        .hash_password_into(mnemonic.as_bytes(), RECOVERY_RING_ARGON2_SALT, &mut seed)
-        .map_err(|e| DsmError::crypto(format!("Argon2id failed: {e}"), None::<std::io::Error>))?;
-
-    let mut hasher = blake3::Hasher::new_derive_key(RECOVERY_AEAD_CONTEXT);
-    hasher.update(&seed);
-    let key = *hasher.finalize().as_bytes();
-    seed.zeroize();
-    Ok(key)
-}
-
-/// Derive a 32-byte seed for the recovery authority SPHINCS+ keypair.
+/// The recovery ring's AEAD key, from the BIP39 wallet seed through key schedule KS1:
+/// `Expand(Extract("DSM/kdf/wallet-root/v1", wallet_seed), "DSM/recovery-aead/v2")`.
 ///
-/// Uses the same Argon2id intermediate as `derive_recovery_key`, but a distinct
-/// BLAKE3 domain (`DSM/recovery-authority`) so the two keys are cryptographically
-/// independent. The resulting seed is fed to `generate_keypair_from_seed()` to
-/// produce a deterministic SPHINCS+ keypair that acts as the mnemonic-derived
-/// recovery authority — the root of trust for tombstone and succession signing.
-pub fn derive_recovery_authority_seed(mnemonic: &str) -> Result<[u8; 32], DsmError> {
-    let argon2 = Argon2::default();
-    let mut seed = [0u8; 32];
-    argon2
-        .hash_password_into(mnemonic.as_bytes(), RECOVERY_RING_ARGON2_SALT, &mut seed)
-        .map_err(|e| DsmError::crypto(format!("Argon2id failed: {e}"), None::<std::io::Error>))?;
-
-    let mut hasher = blake3::Hasher::new_derive_key(RECOVERY_AUTHORITY_CONTEXT);
-    hasher.update(&seed);
-    let authority_seed = *hasher.finalize().as_bytes();
-    seed.zeroize();
-    Ok(authority_seed)
+/// It was once `BLAKE3-derive-key(Argon2id(mnemonic))`, a second function of the mnemonic
+/// beside the BIP39 seed. With 256-bit mnemonics the password hardening is not needed, and
+/// every recovery secret now comes from the same wallet-root Extract as the identity.
+pub fn derive_recovery_key(wallet_seed: &[u8]) -> Result<[u8; 32], DsmError> {
+    if wallet_seed.is_empty() {
+        return Err(DsmError::invalid_parameter(
+            "recovery key: empty wallet seed",
+        ));
+    }
+    Ok(crate::core::identity::key_schedule::recovery_aead_key(
+        &crate::core::identity::key_schedule::wallet_prk(wallet_seed),
+    ))
 }
 
-/// Create encrypted recovery capsule for NFC ring storage using the mnemonic-derived key.
+/// The seed of the recovery-authority SPHINCS+ keypair (KS1:
+/// `Expand(PRK_w, "DSM/recovery-authority/v2")`), a sibling of the AEAD key. It is fed to
+/// `generate_keypair_from_seed()`; the resulting keypair is the recovery authority, the root
+/// of trust for tombstone and succession signing. Its public key is published.
+pub fn derive_recovery_authority_seed(wallet_seed: &[u8]) -> Result<[u8; 32], DsmError> {
+    if wallet_seed.is_empty() {
+        return Err(DsmError::invalid_parameter(
+            "recovery authority: empty wallet seed",
+        ));
+    }
+    Ok(
+        crate::core::identity::key_schedule::recovery_authority_seed(
+            &crate::core::identity::key_schedule::wallet_prk(wallet_seed),
+        ),
+    )
+}
+
+/// Create encrypted recovery capsule for NFC ring storage using the wallet-seed-derived key.
 pub fn create_encrypted_capsule(
     smt_root: &[u8],
     counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
     rollup: &super::ReceiptRollup,
-    mnemonic: &str,
+    wallet_seed: &[u8],
     counter: u64,
 ) -> Result<EncryptedCapsule, DsmError> {
-    let key = derive_recovery_key(mnemonic)?;
+    let key = derive_recovery_key(wallet_seed)?;
     create_encrypted_capsule_with_key(smt_root, counterparty_tips, rollup, &key, counter)
 }
 
@@ -460,12 +452,12 @@ pub fn create_encrypted_capsule_with_cert_chain(
     encrypt_capsule_with_key(&capsule, key)
 }
 
-/// Decrypt and verify a recovery capsule using the mnemonic-derived key.
+/// Decrypt and verify a recovery capsule using the wallet-seed-derived key.
 pub fn decrypt_capsule(
     encrypted: &EncryptedCapsule,
-    mnemonic: &str,
+    wallet_seed: &[u8],
 ) -> Result<RecoveryCapsule, DsmError> {
-    let key = derive_recovery_key(mnemonic)?;
+    let key = derive_recovery_key(wallet_seed)?;
     decrypt_capsule_with_key(encrypted, &key)
 }
 
@@ -808,8 +800,8 @@ mod tests {
     use super::*;
     use crate::recovery::{update_rollup, ReceiptRollup};
 
-    const MNEMONIC: &str =
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const MNEMONIC: &[u8] =
+        b"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     #[test]
     fn test_capsule_encrypt_decrypt() -> Result<(), DsmError> {
@@ -916,7 +908,7 @@ mod tests {
 
         assert!(decrypt_capsule(
             &encrypted,
-            "wrong wrong wrong wrong wrong wrong wrong wrong wrong wrong wrong wrong",
+            b"wrong wrong wrong wrong wrong wrong wrong wrong wrong wrong wrong wrong",
         )
         .is_err());
 

@@ -190,7 +190,10 @@ mod tests {
     // +4 with a vault's history (SoFi Amendment S26): its leaf, node, head
     // and locator.
     // +1 for an email receipt request's signature (DSM Amendment A17).
-    const EXPECTED_TAG_COUNT: usize = 397;
+    // +6 with key schedule KS1 (Extract-then-Expand): the three Extract salts
+    // and twelve Expand / keyed labels replace the six v2 key-tree tags,
+    // the v2 genesis nonce, the v1 GRK seed and the SDK entropy hash.
+    const EXPECTED_TAG_COUNT: usize = 403;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

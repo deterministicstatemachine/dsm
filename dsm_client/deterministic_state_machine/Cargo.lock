@@ -180,6 +180,9 @@ name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "asn1-rs"
@@ -526,6 +529,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq 0.4.2",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -1093,7 +1097,6 @@ version = "0.1.0-beta.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "argon2",
  "arrayref",
  "async-trait",
  "base32",

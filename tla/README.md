@@ -327,12 +327,17 @@ verifier, which has no `sk_prf` and cannot recompute the deterministic `R`.
 Seven mutation controls remove one recomputation each (signature binding,
 ancestry binding, coordinate derivation, canonical encoding, proof
 verification, consumed-key exclusion, the bound); the named theorems rest on
-`sorryAx` and the witness stays green. The cryptography is exactly the model
-of `DSMCertChain.lean`: an injective domain-separated hash and deterministic
-SPHINCS+ as `(keyGen, sign, verify)` with round-trip soundness and message
-binding; unforgeability is stated over the adversary's outputs, with replay
-allowed; nothing is assumed about `sign` as a function of its key, and a
-public key tells nothing about its seed.
+`sorryAx` and the witness stays green (re-run on audit-prep, 2026-10-07, for
+all controls but the encoding one). The cryptography assumes no property of
+the hash and no binding property of signatures: the hash is an arbitrary
+function, deterministic SPHINCS+ is `(keyGen, sign, verify)` with round-trip
+soundness, and unforgeability (EUF-CMA) is stated over the adversary's outputs,
+with replay allowed. Where two digests must name one input, a theorem concludes
+"the same, or an explicit collision" (`msgOf_inj`), and one signature verifying
+two messages is reported as `Retarget`, never assumed away. The payload is the
+operation's canonical bytes, so the codec is injective by construction. Nothing
+is assumed about `sign` as a function of its key, and a public key tells
+nothing about its seed.
 Conservation, the tripwire, SoFi atomicity and leader finality are refinements
 of that boundary: none of them rescues DSM from an invalid state after the
 fact, because no invalid state is admissible.

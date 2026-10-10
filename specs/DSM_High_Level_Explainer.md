@@ -4123,10 +4123,15 @@ Failure to reach a cell’s leader, or two other members, is a liveness failure:
 durable member memory is a safety failure.
 
 > **Note (2026-09-22).** How member replacement and storage migration preserve assumption 11 is specified in `DSM_Storage_Node_Specification.md` Part III.
-The concrete primitives behind the first two assumptions are post-quantum: BLAKE3 for hashing,
-SPHINCS+ for signatures, and Kyber for key encapsulation. The safety theorem itself is scheme-agnostic;
-any collision-resistant hash and unforgeable signature will do, and the choice of post-quantum primitives
-means the assumptions do not weaken when large quantum computers arrive.
+The concrete primitives behind the first two assumptions were chosen for post-quantum security: BLAKE3
+for hashing, SPHINCS+ (instantiated with BLAKE3) for signatures, and Kyber for key encapsulation. The
+safety theorem itself is scheme-agnostic: a break of it yields an explicit hash collision or signature
+forgery, so it holds for any collision-resistant hash and EUF-CMA signature. Whether these instantiations
+meet those assumptions against quantum adversaries is a property of the primitives, not of DSM.
+DSM's BLAKE3 instantiation of SPHINCS+ is not a standardized parameter set, the published SPHINCS+
+proofs do not transfer to it automatically, and what remains owed is listed in
+`specs/requirements/SPHINCS_BLAKE3_ROLE_MAP.md`. No numerical security level is claimed until those
+reductions exist.
 No cryptographic protocol eliminates assumptions.
 The important requirement is that the safety theorem follows from clearly stated assumptions rather
 than from informal trust.

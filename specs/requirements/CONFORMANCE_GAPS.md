@@ -4066,3 +4066,116 @@ The deferral also covers MR-DSM-0198 and MR-DSM-0221–0237 (§6.1), and the dBT
 | STOR-014/L422 | Met | `dsm_storage_node::db::pg::close_cycle` (pending check) | `dsm_storage_node::bytecommit_chain::cycles_close_over_new_entries_and_commit_their_records` ("no new entry, no new cycle") | Confirmed. |
 | STOR-014/L423 | Partial | dsm_storage_node · db/pg.rs::`cell_commit_proof`; api/objects/bytecommit.rs::`proof` | bytecommit_chain::`cycles_close_over_new_entries_and_commit_their_records` (node-serving side only) | Confirmed no SDK/Core verifier consumer (grep: 0 hits for `record_is_committed`/`CellCommitProof` in `dsm_sdk`). |
 | STOR-014/L424 | Met | `dsm_storage_node::api::objects::bytecommit::mirror_sync`; `dsm_storage_node::api::objects::bytecommit::sync_one`; `dsm_storage_node::api::objects::bytecommit::fetch_commit`; `dsm_storage_node::db::pg::mirror_put` | `dsm_storage_node::bytecommit_chain::a_set_mate_mirrors_by_fetching_from_the_member_itself`; `dsm_storage_node::bytecommit_chain::an_impostor_at_a_set_mates_endpoint_is_not_mirrored`; `dsm_storage_node::bytecommit_chain::a_rewritten_cycle_is_kept_beside_the_first` | Confirmed. |
+
+## SPHINCS construction-v2 formal boundary
+
+The model, structural proofs and executable refinement program are recorded in
+[SPHINCS_REFINEMENT.md](SPHINCS_REFINEMENT.md). They preserve the current
+construction and add source-drift checking, rather than replacing the primitive.
+Complete model signer correctness is proved under the primitive-width contract.
+Actual Rust `next_layer` source refinement is proved with pinned extraction tools.
+Universal Rust/source/binary simulation, custom BLAKE3 security reductions, side-channel/secret-memory review
+and complete DSM canonical wrapper refinement remain unproved. These additions
+supply evidence for MR-DSM-0259; they do not change it to unconditional proof of
+post-quantum security. Deterministic R does not establish MR-SOFI-0111's assertion
+that at most one envelope can verify for a body.
+
+The SPHINCS source proof now includes total parser refill and read-count
+noninterference for widths 1–14 under explicit buffer bounds. Typed error data
+removed the signer/verifier borrowed-string extraction failures. Whole public
+Rust translation succeeds at the keyed-hash primitive boundary, but 40 external
+interfaces and whole-function simulation theorems remain open. These facts do
+not establish machine timing, erasure, JVM validity or universal binary behavior.
+
+The new charter fixes an initial classical, single-key security game. Executable
+Lean games and seed/query/event-accounting proofs now exist; primitive hybrids,
+efficient-adversary bounds and forgery extraction do not. A width-correct insecure
+oracle negative control permits forgery. A pinned SDK file inventory improves
+artifact identity evidence but leaves device runtime identity, compiler/ISA
+simulation, leakage, erasure and JNI guarantees open.
+
+Certificate wrapper extraction now proves the actual fresh-signature-or-hash-
+collision classification and the resulting finite-event bound, with q+1 hash
+query overhead. The full extracted Rust base_2b function now has a termination/
+output-length theorem at the actual bit-budget bound. Underlying SPHINCS
+security reductions, adaptive oracle simulation, parser digit/spec equality,
+allocator/compiler/machine refinement and leakage/erasure/JNI remain open.
+
+BLAKE3 oracle outputs now have a concrete Lean evaluator, output-width and XOF
+prefix theorems, official-vector tests and full independent transcript-output
+recomputation. This closes the previous test limitation that hash outputs were
+only replayed. The abstraction remains in the general functional/security
+theorems; concrete evaluator shape safety and whole signer specialization still
+need proofs. BLAKE3 cryptographic assumptions and correlated-context/multi-target
+reductions remain open. The published bound restricted to <=32 output bytes
+cannot directly cover the deployed 34-/49-byte H_msg outputs, and a 32-byte
+BLAKE3 key must not be described as proving 256-bit computational security.
+
+The first explicit seed-distribution hybrid now has a constructed distinguisher
+and checked real-game equivalence, uniform-expansion sampler and exact advantage
+loss. The SHA-2/DSM difference is pinned to five primitive/encoding boundaries.
+Efficient-adversary/primitive-query costs, ChaCha20 hardness and the remaining
+BLAKE3 family transfers still need proofs; the original unbounded Strategy type
+has not been relabeled as an efficient adversary.
+
+## Lean premises (audit-prep, 2026-10-07)
+
+`scripts/lean_axiom_audit.py` asks the kernel what each theorem rests on and
+records it in `LEAN_AXIOM_LEDGER.tsv`; CI fails on `sorryAx`, `native_decide`,
+an undeclared axiom, or a ledger change nobody reviewed. The tree now declares
+no axioms (`LEAN_DECLARED_ASSUMPTIONS.tsv` is empty).
+
+Closed in this pass:
+
+- `DSMCryptoBinding.lean` was unsound: `claim_key_material_binding` asserted
+  that `preimage ‖ hash_lock` determines both parts, which the module's own
+  definition refutes (`[1] ++ [2,3] = [1,2] ++ [3]`); the kernel derived
+  `False` from it. The deployed code fixes `hash_lock` at 32 bytes
+  (`derive_claim_keypair`), and the restated theorem carries that premise.
+- `domain_hash_injective`, `verify_message_binding`,
+  `sphincs_signature_message_binding` (DSMCryptoBinding, DSMCertChain) were
+  axioms no real primitive satisfies: no fixed-width hash is injective, and a
+  hash-based signature does not bind at most one message. Each binding theorem
+  now concludes "equal, or an explicit hash collision, or an explicit EUF-CMA
+  forgery", with the primitives as parameters. Signature correctness is a
+  field of the parameter, not an axiom.
+- `canonical_encode_injective` (DSMGuardedTripwire) is proved for a concrete
+  encoding; digest binding is stated as "same state, or a collision".
+
+- `DSMRecognition.lean` and `DSMSofiStorage.lean` no longer take an injective
+  hash or signature message binding as structure hypotheses (2026-10-07).
+  `msgOf_inj`, `addr_inj`, `counting_reads_agree` and
+  `a_wrong_namespace_never_counts` now conclude "the same, or an explicit
+  collision of `H`"; `replayed_signature_pins_the_fields` adds the `Retarget`
+  case (one signature verifying two messages). `Adversary.euf` is standard
+  message-level EUF-CMA, so `hostile_bytes_never_become_state` now concludes
+  that the owner was observed signing exactly this object's message (before:
+  this exact signature was observed, which needed message binding). The payload
+  is the canonical bytes, so the codec needs no hash. Every theorem name is
+  kept, and the recognition mutation controls still fail exactly their named
+  theorems with the witness green.
+
+Open:
+- The axiom audit does not cover `lean4/Sphincs/RustExtraction` (Aeneas
+  backend, Lean 4.31); `check_sphincs_source_refinement.sh` gates it and needs
+  the pinned Aeneas/Charon checkouts.
+
+## SPHINCS+ signers added after construction-v2 evidence (audit-prep, 2026-10-07)
+
+Upstream added production SPHINCS+ signing wrappers after the refinement branch
+was written; they are recorded in `SPHINCS_REFINEMENT_MAP.tsv` as unproved:
+
+- DSM Connect signed objects (`dsm_sdk::sdk::connect::signed`, Amendment A11):
+  `domain_hash(kind tag, canonical body)`.
+- Escrow verdict statements (`dsm::sofi::escrow`, Amendment S21):
+  `K_verdict ‖ u32be(|o|) ‖ o`, bounded by `ESCROW_MAX_OUTCOME_BYTES`.
+
+Their canonical-byte injectivity is proved (audit-prep, 2026-10-07) in
+`lean4/Sphincs/WrapperInjective.lean`: `escrow_statement_injective`,
+`connect_signing_injective`, `resolution_claim_signing_injective`, and
+`signing_domain_separation` across the EK-cert, DevID, Kyber-binding,
+resolution-claim, escrow and Connect domains (the tag type forbids NUL, so
+`tag ‖ 0 ‖ body` is unambiguous). Equal digests of distinct objects are
+therefore an explicit hash collision. Stateful acceptance semantics per
+wrapper remain as recorded above.
+
