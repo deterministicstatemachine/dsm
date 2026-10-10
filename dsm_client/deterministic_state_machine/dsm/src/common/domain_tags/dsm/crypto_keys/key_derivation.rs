@@ -45,34 +45,54 @@ pub const TAG_DSM_SPHINCS_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sphincs-seed");
 pub const TAG_DSM_STEP_SALT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/step-salt");
 
-// --- Genesis v2 mnemonic-rooted key tree (mnemonic -> wallet_seed -> s0 -> Smaster) ---
-// The canonical deterministic key tree. `s0`/`Smaster` are NEVER persisted; they are
-// re-derived from the BIP39 wallet seed via the recovery path. Authorship + recovery
-// continuity only — NOT anti-clone (a seed copy holds Smaster and can sign; anti-clone
-// is the fused anchor).
-/// `s0 = keyed-BLAKE3(wallet_seed, "DSM/s0/v2" || G || device_slot_id || authority_policy_hash)`.
-pub const TAG_DSM_S0_V2: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/s0/v2");
-/// `Smaster = keyed-BLAKE3(s0, "DSM/Smaster/v2" || G || DevID || authority_policy_hash)`.
-pub const TAG_DSM_SMASTER_V2: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/Smaster/v2");
-/// `device_seed = keyed-BLAKE3(wallet_seed, "DSM/device-seed/v2" || G || device_slot_id)`.
-pub const TAG_DSM_DEVICE_SEED_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/device-seed/v2");
-/// `AK_seed = keyed-BLAKE3(device_seed, "DSM/device-ak/v2" || authority_policy_hash)`;
-/// the device signing/attestation keypair is `SPHINCS+.KeyGen(AK_seed)`. Derived from
-/// `device_seed` (NOT Smaster) so it does not depend on DevID — DevID is
-/// `H("DSM/devid" || AK_pk || AttA)`, which would otherwise be circular.
-pub const TAG_DSM_DEVICE_AK_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/device-ak/v2");
-/// Device-birth attestation digest `AttA = keyed-BLAKE3(wallet_seed, "DSM/atta/v2" || G || device_slot)`.
-/// `AttA` folds into `DevID = H("DSM/devid" || AK_pk || AttA)`. Deriving it deterministically from the
-/// wallet seed makes `DevID` reproducible from the mnemonic alone (recovery), with NO silicon
-/// fingerprint and NO random root. It is a NON-load-bearing lineage tag — anti-clone is the Boot
-/// Fenced Fused Anchor alone (a seed copy reproduces `AttA`/`DevID` and that is acceptable).
-pub const TAG_DSM_ATTA_V2: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/atta/v2");
+// --- Key schedule KS1 (`core::identity::key_schedule`): Extract-then-Expand. ---
+// Three Extracts under fixed protocol salts; every derivation is an Expand whose
+// `info` starts with one of the labels below and 0x00. `s0`, `Smaster`, the
+// device seed and the PRKs are NEVER persisted; they re-derive from the BIP39
+// wallet seed. Authorship + recovery continuity only, NOT anti-clone (a seed
+// copy holds Smaster and can sign; anti-clone is the fused anchor).
+/// Extract salt at the wallet root: `PRK_w = Extract(this ‖ 0x00, wallet_seed)`.
+pub const TAG_DSM_KDF_WALLET_ROOT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/kdf/wallet-root/v1");
+/// Extract salt under the device seed: `PRK_d = Extract(this ‖ 0x00, device_seed)`.
+pub const TAG_DSM_KDF_DEVICE_ROOT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/kdf/device-root/v1");
+/// Extract salt under `s0`: `PRK_s0 = Extract(this ‖ 0x00, s0)`.
+pub const TAG_DSM_KDF_S0_ROOT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/kdf/s0-root/v1");
+/// `s0 = Expand(PRK_w, "DSM/s0/v3" ‖ 0x00 ‖ G ‖ device_slot ‖ authority_policy_hash)`.
+pub const TAG_DSM_S0_V3: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/s0/v3");
+/// `Smaster = Expand(PRK_s0, "DSM/Smaster/v3" ‖ 0x00 ‖ G ‖ DevID ‖ authority_policy_hash)`.
+pub const TAG_DSM_SMASTER_V3: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/Smaster/v3");
+/// `device_seed = Expand(PRK_w, "DSM/device-seed/v3" ‖ 0x00 ‖ G ‖ device_slot)`.
+pub const TAG_DSM_DEVICE_SEED_V3: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/device-seed/v3");
+/// `AK_seed = Expand(PRK_d, "DSM/device-ak/v3" ‖ 0x00 ‖ authority_policy_hash)`; the
+/// device signing/attestation keypair is `SPHINCS+.KeyGen(AK_seed)`. Rooted in the
+/// device seed (NOT Smaster) so it does not depend on DevID, which is
+/// `H("DSM/devid" ‖ AK_pk ‖ AttA)` and would otherwise be circular.
+pub const TAG_DSM_DEVICE_AK_V3: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/device-ak/v3");
+/// Device-birth attestation digest `AttA = Expand(PRK_w, "DSM/atta/v3" ‖ 0x00 ‖ G ‖
+/// device_slot)`. PUBLIC; folds into `DevID = H("DSM/devid" ‖ AK_pk ‖ AttA)`, so DevID is
+/// reproducible from the mnemonic alone. A NON-load-bearing lineage tag: anti-clone is
+/// the fused anchor alone.
+pub const TAG_DSM_ATTA_V3: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/atta/v3");
 /// AEAD key for per-relationship chain-head SK storage at rest:
-/// `K_at-rest = keyed-BLAKE3(s0, "DSM/chain-head-at-rest/v2" || G || DevID)`. Rooted in
-/// `s0` (the recovery path), domain-separated from authorship (`Smaster`), so a copied
-/// database is undecryptable without the wallet seed and a leak of one root does not
-/// expose the other. Replaces the former C-DBRW binding key for SK-at-rest.
-pub const TAG_DSM_CHAIN_HEAD_AT_REST_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/chain-head-at-rest/v2");
+/// `K_at-rest = Expand(PRK_s0, "DSM/chain-head-at-rest/v3" ‖ 0x00 ‖ G ‖ DevID)`, a
+/// sibling of Smaster under `s0`'s Extract: exposing it does not expose Smaster.
+pub const TAG_DSM_CHAIN_HEAD_AT_REST_V3: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/chain-head-at-rest/v3");
+/// SDK context entropy: `Expand(PRK_w, "DSM/sdk-entropy/v3" ‖ 0x00 ‖ DevID ‖ G)`.
+pub const TAG_DSM_SDK_ENTROPY_V3: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sdk-entropy/v3");
+/// The recovery ring's AEAD key: `Expand(PRK_w, "DSM/recovery-aead/v2" ‖ 0x00)`.
+pub const TAG_DSM_RECOVERY_AEAD_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/recovery-aead/v2");
+/// The recovery-authority SPHINCS+ seed: `Expand(PRK_w, "DSM/recovery-authority/v2" ‖ 0x00)`.
+pub const TAG_DSM_RECOVERY_AUTHORITY_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/recovery-authority/v2");
+/// The ML-KEM identity seed, keyed by Smaster like the per-step EK seeds:
+/// `keyed-BLAKE3(Smaster, "DSM/ml-kem-identity/v1" ‖ 0x00 ‖ "ML-KEM-768")`.
+pub const TAG_DSM_ML_KEM_IDENTITY_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/ml-kem-identity/v1");

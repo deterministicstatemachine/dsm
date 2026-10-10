@@ -10,7 +10,7 @@ name = "dsm_sphincs"
 
 [dependencies]
 # BLAKE3-only hashing (matches the DSM SPHINCS+ scheme). no_std.
-blake3 = { version = "1", default-features = false }
+blake3 = { version = "1", default-features = false, features = ["zeroize"] }
 subtle = { version = "2", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["derive", "alloc"] }
 # Deterministic keygen expands the 32-byte seed via ChaCha20 (no_std, no OS RNG).
