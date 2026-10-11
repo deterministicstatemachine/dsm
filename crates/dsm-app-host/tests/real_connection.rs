@@ -1135,29 +1135,48 @@ async fn connect_over_the_real_relay() {
         "no payment ran again"
     );
 
-    // Disconnected: a payment inside the old grant, asked afterwards, is never
-    // carried out. A sync on the wallet reaches no session, and the listener
-    // has stopped.
+    // Disconnected: the wallet's signed notice reaches the game's account over
+    // the relay, which then holds the session as disconnected and lets the
+    // game ask nothing more over it. A sync on the wallet reaches no session.
     disconnect(&wallet, &session).await;
-    let after = ask(
-        &game,
-        &session,
-        Kind::Pay(pb::ConnectPayV1 {
+    let ended = until(
+        "the game's account holds the session as disconnected",
+        || async {
+            match game
+                .connect(Route::Query, "connect.app.sessions", Vec::new())
+                .await?
+            {
+                Reply::Sessions(list) => list
+                    .sessions
+                    .into_iter()
+                    .find(|s| s.session_id == session.to_vec())
+                    .filter(|s| s.status == pb::ConnectSessionStatus::Disconnected as i32)
+                    .ok_or_else(|| "still connected".to_string()),
+                other => Err(format!("connect.app.sessions answered {other:?}")),
+            }
+        },
+    )
+    .await;
+    assert_eq!(ended.session_id, session.to_vec());
+    let intent = pb::ConnectAppRequestIntentV1 {
+        session_id: session.to_vec(),
+        kind: Some(Kind::Pay(pb::ConnectPayV1 {
             policy_commit: wild.to_vec(),
             amount: 3,
             memo: String::new(),
-        }),
-    )
-    .await;
+        })),
+    };
+    match game
+        .connect(Route::Invoke, "connect.app.request", intent.encode_to_vec())
+        .await
+    {
+        Err(why) => assert!(why.contains("disconnected"), "{why}"),
+        Ok(reply) => panic!("a request went over an ended session: {reply:?}"),
+    }
     let synced = wallet
         .connect(Route::Invoke, "connect.sync", Vec::new())
         .await;
     assert_eq!(wallet.holds("WILD").await, wild_held, "nothing was paid");
-    let unanswered = match status(&game, &session, after).await {
-        Ok(unanswered) => unanswered,
-        Err(e) => panic!("{e}"),
-    };
-    assert!(!unanswered.answered, "a disconnected wallet answered");
     match synced {
         Ok(Reply::Sessions(list)) => assert!(list.sessions.is_empty(), "{:?}", list.sessions),
         other => panic!("connect.sync answered {other:?}"),

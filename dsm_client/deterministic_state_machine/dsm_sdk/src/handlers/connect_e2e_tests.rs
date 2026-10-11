@@ -51,6 +51,14 @@ pub(super) struct Held {
     pub(super) requests: Vec<Vec<u8>>,
     pub(super) responses: Vec<Vec<u8>>,
     serve: Serve,
+    /// Whether the relay takes answers, or is down and refuses every one, as an unreachable application's would.
+    answers: Reach,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reach {
+    Up,
+    Down,
 }
 
 type Shared = Arc<Mutex<Held>>;
@@ -101,11 +109,14 @@ async fn serve_requests(
 }
 
 async fn keep_response(State(held): State<Shared>, body: Bytes) -> StatusCode {
-    held.lock()
-        .expect("the relay")
-        .responses
-        .push(body.to_vec());
-    StatusCode::OK
+    let mut held = held.lock().expect("the relay");
+    match held.answers {
+        Reach::Down => StatusCode::SERVICE_UNAVAILABLE,
+        Reach::Up => {
+            held.responses.push(body.to_vec());
+            StatusCode::OK
+        }
+    }
 }
 
 impl ForwardRelay {
@@ -126,6 +137,7 @@ impl ForwardRelay {
             accepts: Vec::new(),
             requests: Vec::new(),
             responses: Vec::new(),
+            answers: Reach::Up,
             serve: Serve::Above,
         }));
         let app = axum::Router::new()
@@ -145,6 +157,11 @@ impl ForwardRelay {
             held,
             _handle: handle,
         }
+    }
+
+    /// The relay taking answers again, or down (the application unreachable).
+    pub(super) fn answers(&self, reach: Reach) {
+        self.held().answers = reach;
     }
 
     pub(super) fn held(&self) -> std::sync::MutexGuard<'_, Held> {
@@ -1022,5 +1039,179 @@ async fn two_syncs_at_once_carry_a_request_out_once() {
         generated::ConnectFact::Paid,
         "{}",
         paid.fact_detail
+    );
+}
+
+/// The player disconnects the application in the wallet: the application is
+/// told by the wallet's own signature, its account reports the session ended,
+/// it can ask nothing more over it, and a second approval while one session
+/// stands is refused (DSM Amendment A11: a grant ends when the player
+/// disconnects the application).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_disconnect_in_the_wallet_ends_the_session_on_the_applications_side_too() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let sid = connect(&p, &relay, &made.code).await;
+
+    // A second code from the same application: refused while the first session stands.
+    let again = offer(&p.a, &relay, &wild).await;
+    let previewed = query(
+        &p.b,
+        "connect.preview",
+        args(&generated::ConnectPreviewRequestV1 {
+            code: again.code.clone(),
+        }),
+    )
+    .await;
+    let Reply::Preview(preview) = reply(&previewed) else {
+        panic!("connect.preview answered another reply");
+    };
+    let refused = invoke(
+        &p.b,
+        "connect.approve",
+        args(&generated::ConnectApproveRequestV1 {
+            offer_digest: preview.offer_digest.clone(),
+            granted: Vec::new(),
+        }),
+    )
+    .await;
+    let why = refused
+        .error_message
+        .clone()
+        .expect("a second approval is refused, with a reason");
+    assert!(
+        why.contains("already connected"),
+        "a second session to a connected application: {why}"
+    );
+
+    // The application's account sees the session connected, then the wallet disconnects it.
+    let listed = query(&p.a, "connect.app.sessions", Vec::new()).await;
+    let Reply::Sessions(before) = reply(&listed) else {
+        panic!("connect.app.sessions answered another reply");
+    };
+    assert_eq!(before.sessions.len(), 1);
+    assert_eq!(
+        before.sessions[0].status,
+        generated::ConnectSessionStatus::Connected as i32
+    );
+
+    let ended = invoke(
+        &p.b,
+        "connect.disconnect",
+        args(&generated::ConnectSessionRefV1 {
+            session_id: sid.to_vec(),
+        }),
+    )
+    .await;
+    let Reply::Session(wallet_side) = reply(&ended) else {
+        panic!("connect.disconnect answered another reply");
+    };
+    assert_eq!(
+        wallet_side.status,
+        generated::ConnectSessionStatus::Disconnected as i32
+    );
+    assert_eq!(
+        wallet_side.last_error, "",
+        "the application was told at once"
+    );
+
+    // The notice went over the relay, signed; the application's account takes it in.
+    let notices = std::mem::take(&mut relay.held().responses);
+    assert_eq!(notices.len(), 1, "one signed disconnect notice");
+    let notice = generated::AppResponseV1::decode(notices[0].as_slice()).expect("an AppResponseV1");
+    let body = generated::AppResponseBodyV1::decode(notice.body.as_slice()).expect("its body");
+    assert_eq!(body.seq, 0, "a notice, answering no request");
+    let taken = invoke(&p.a, "connect.app.respond", args_raw(notices[0].clone())).await;
+    reply(&taken);
+
+    let listed = query(&p.a, "connect.app.sessions", Vec::new()).await;
+    let Reply::Sessions(after) = reply(&listed) else {
+        panic!("connect.app.sessions answered another reply");
+    };
+    assert_eq!(
+        after.sessions[0].status,
+        generated::ConnectSessionStatus::Disconnected as i32
+    );
+
+    // Nothing more can be asked over it.
+    let asked = invoke(
+        &p.a,
+        "connect.app.request",
+        args(&generated::ConnectAppRequestIntentV1 {
+            session_id: sid.to_vec(),
+            kind: Some(generated::connect_app_request_intent_v1::Kind::Holdings(
+                generated::ConnectHoldingsV1 {
+                    policy_commits: Vec::new(),
+                },
+            )),
+        }),
+    )
+    .await;
+    let why = asked
+        .error_message
+        .clone()
+        .expect("a request over an ended session is refused, with a reason");
+    assert!(
+        why.contains("disconnected"),
+        "a request over an ended session: {why}"
+    );
+
+    // And the wallet may connect to the application again: a fresh session, the old one ended.
+    relay.held().offer = Some((
+        again.offer_digest.as_slice().try_into().expect("a digest"),
+        again.offer.clone(),
+    ));
+    let fresh = connect(&p, &relay, &again.code).await;
+    assert_ne!(fresh, sid);
+}
+
+/// An application unreachable when the player disconnects it is told at the
+/// wallet's next sync: the notice is kept, and goes when the relay answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_unreachable_application_is_told_of_its_disconnect_at_the_next_sync() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let sid = connect(&p, &relay, &made.code).await;
+    relay.answers(Reach::Down);
+    let ended = invoke(
+        &p.b,
+        "connect.disconnect",
+        args(&generated::ConnectSessionRefV1 {
+            session_id: sid.to_vec(),
+        }),
+    )
+    .await;
+    let Reply::Session(wallet_side) = reply(&ended) else {
+        panic!("connect.disconnect answered another reply");
+    };
+    assert_eq!(
+        wallet_side.status,
+        generated::ConnectSessionStatus::Disconnected as i32
+    );
+    assert!(
+        wallet_side.last_error.contains("not told yet"),
+        "{}",
+        wallet_side.last_error
+    );
+    assert!(relay.held().responses.is_empty());
+    relay.answers(Reach::Up);
+    invoke(&p.b, "connect.sync", Vec::new()).await;
+    let notices = std::mem::take(&mut relay.held().responses);
+    assert_eq!(notices.len(), 1, "the kept notice went at the sync");
+    let taken = invoke(&p.a, "connect.app.respond", args_raw(notices[0].clone())).await;
+    reply(&taken);
+    let listed = query(&p.a, "connect.app.sessions", Vec::new()).await;
+    let Reply::Sessions(after) = reply(&listed) else {
+        panic!("connect.app.sessions answered another reply");
+    };
+    assert_eq!(
+        after.sessions[0].status,
+        generated::ConnectSessionStatus::Disconnected as i32
     );
 }
