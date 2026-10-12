@@ -358,7 +358,7 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     });
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByRole('button', { name: 'Faucet' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'CLAIM FAUCET' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Claim faucet' }));
     expect(await screen.findByText('claimed 100.00 ERA (economic position 3)')).toBeInTheDocument();
     expect(dsmClient.claimFaucet).toHaveBeenCalledWith();
 
@@ -366,7 +366,7 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
       success: false,
       message: 'faucet.claim: the reserve is spent',
     });
-    fireEvent.click(await screen.findByRole('button', { name: 'CLAIM FAUCET' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Claim faucet' }));
     expect(await screen.findByText('faucet.claim: the reserve is spent')).toBeInTheDocument();
   });
 

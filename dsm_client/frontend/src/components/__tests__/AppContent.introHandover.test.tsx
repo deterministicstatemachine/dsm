@@ -17,6 +17,7 @@ function Boot({ appState }: { appState: AppState }) {
   return (
     <AppContent
       appState={appState}
+      skin="dgen"
       error={null}
       showIntro={showIntro}
       introGifSrc="intro.gif"

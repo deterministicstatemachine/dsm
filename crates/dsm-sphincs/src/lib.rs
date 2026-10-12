@@ -70,7 +70,29 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A cryptographic precondition failed (bad sizes, empty message, etc.).
-    Crypto(&'static str),
+    Crypto(CryptoFailure),
+}
+
+/// Failure reasons are data; borrowed diagnostic strings are produced only at
+/// the reporting boundary, outside the signing/verification return value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CryptoFailure {
+    EmptySigningMessage,
+    BadSecretKeySize,
+    SignerSelfCheck,
+    EmptyVerificationMessage,
+}
+
+impl CryptoFailure {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::EmptySigningMessage => "Cannot sign empty message",
+            Self::BadSecretKeySize => "Bad secret key size",
+            Self::SignerSelfCheck => "the signature does not verify under its own key: a fault during signing, or a secret \
+             key whose root is not its own",
+            Self::EmptyVerificationMessage => "Cannot verify empty message",
+        }
+    }
 }
 
 /// The version of the construction: the address layout and the BLAKE3
@@ -239,6 +261,21 @@ impl Adrs {
     }
 }
 
+#[cfg(test)]
+mod refinement_vectors;
+
+fn derive_key(context: &str, input: &[u8]) -> [u8; 32] {
+    // The material phase processes signing seeds; retain a guard for its
+    // state and digest, rather than leaving the one-shot KDF's working state.
+    let mut state = Zeroizing::new(blake3::Hasher::new_derive_key(context));
+    state.update(input);
+    let digest = Zeroizing::new(state.finalize());
+    let output = *digest.as_bytes();
+    #[cfg(test)]
+    refinement_vectors::record(0, context, &[], input, &output);
+    output
+}
+
 // =============================== Hash/PRF ===================================
 
 /// BLAKE3 KDF contexts, one per role. Each is fixed and unique to that role.
@@ -260,7 +297,7 @@ impl PublicCtx {
         Self {
             n,
             pk_seed: pk_seed.to_vec(),
-            thash_key: blake3::derive_key(CONTEXT_THASH, pk_seed),
+            thash_key: derive_key(CONTEXT_THASH, pk_seed),
         }
     }
 }
@@ -273,18 +310,21 @@ struct SecretCtx {
 impl SecretCtx {
     fn new(sk_seed: &[u8]) -> Self {
         Self {
-            prf_key: Zeroizing::new(blake3::derive_key(CONTEXT_PRF, sk_seed)),
+            prf_key: Zeroizing::new(derive_key(CONTEXT_PRF, sk_seed)),
         }
     }
 }
 
 fn keyed(n: usize, key: &[u8; 32], inputs: &[&[u8]]) -> Vec<u8> {
-    let mut h = blake3::Hasher::new_keyed(key);
+    let mut h = Zeroizing::new(blake3::Hasher::new_keyed(key));
     for input in inputs {
         h.update(input);
     }
     let mut out = vec![0u8; n];
-    out.copy_from_slice(&h.finalize().as_bytes()[..n]);
+    let digest = Zeroizing::new(h.finalize());
+    out.copy_from_slice(&digest.as_bytes()[..n]);
+    #[cfg(test)]
+    refinement_vectors::record(1, "", key, &inputs.concat(), &out);
     out
 }
 
@@ -309,7 +349,7 @@ fn prf(pc: &PublicCtx, sc: &SecretCtx, adrs: &Adrs) -> Zeroizing<Vec<u8>> {
 
 /// `PRF_msg(SK.prf, opt_rand, M)`: the randomizer `R`.
 fn prf_msg(n: usize, sk_prf: &[u8], opt_rand: &[u8], m: &[u8]) -> Vec<u8> {
-    let key = Zeroizing::new(blake3::derive_key(CONTEXT_PRF_MSG, sk_prf));
+    let key = Zeroizing::new(derive_key(CONTEXT_PRF_MSG, sk_prf));
     keyed(n, &key, &[opt_rand, m])
 }
 
@@ -322,6 +362,14 @@ fn h_msg(p: &Params, r: &[u8], pk_seed: &[u8], pk_root: &[u8], m: &[u8]) -> Vec<
     h.update(m);
     let mut out = vec![0u8; p.m];
     h.finalize_xof().fill(&mut out);
+    #[cfg(test)]
+    refinement_vectors::record(
+        2,
+        CONTEXT_H_MSG,
+        &[],
+        &[r, pk_seed, pk_root, m].concat(),
+        &out,
+    );
     out
 }
 
@@ -373,12 +421,14 @@ fn wots_digits(p: &Params, m: &[u8]) -> Vec<u32> {
 
 /// FIPS 205 Algorithm 5, `chain`: `s` steps from step `i`.
 fn chain(pc: &PublicCtx, x: &[u8], i: u32, s: u32, adrs: &mut Adrs) -> Vec<u8> {
-    let mut tmp = x.to_vec();
+    // Intermediate chains can contain unreleased secret-derived values.
+    // Clear each replaced allocation and the final working copy on drop.
+    let mut tmp = Zeroizing::new(x.to_vec());
     for j in i..i + s {
         adrs.set_hash(j);
-        tmp = thash(pc, adrs, &[&tmp]);
+        tmp = Zeroizing::new(thash(pc, adrs, &[&tmp]));
     }
-    tmp
+    tmp.to_vec()
 }
 
 /// The address a WOTS+ secret value is drawn under.
@@ -696,10 +746,20 @@ fn fors_adrs(at: &Indices) -> Adrs {
 
 // =============================== Key Material ===============================
 
-#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SphincsKeyPair {
     pub public_key: Vec<u8>, // PK.seed || PK.root
     pub secret_key: Vec<u8>, // SK.seed || SK.prf || PK.seed || PK.root
+}
+
+// Diagnostic formatting must never disclose the caller's signing seeds.
+impl core::fmt::Debug for SphincsKeyPair {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SphincsKeyPair")
+            .field("public_key", &self.public_key)
+            .field("secret_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// FIPS 205 Algorithm 18, `slh_keygen_internal`, from seeds ChaCha20 draws
@@ -709,9 +769,11 @@ pub fn generate_keypair_from_seed(
     seed32: &[u8; 32],
 ) -> Result<SphincsKeyPair, Error> {
     let p = param_set(v);
-    let mut sk = vec![0u8; p.sk_bytes];
+    let mut sk = Zeroizing::new(vec![0u8; p.sk_bytes]);
     let mut rng = ChaCha20Rng::from_seed(*seed32);
     rng.fill_bytes(&mut sk[..3 * p.n]);
+    #[cfg(test)]
+    refinement_vectors::record(3, "ChaCha20Rng", &[], seed32, &sk[..3 * p.n]);
     let (sk_seed, rest) = sk.split_at(p.n);
     let pk_seed = &rest[p.n..2 * p.n];
     let pc = PublicCtx::new(p.n, pk_seed);
@@ -725,7 +787,7 @@ pub fn generate_keypair_from_seed(
     sk[3 * p.n..].copy_from_slice(&root);
     Ok(SphincsKeyPair {
         public_key: pk,
-        secret_key: sk,
+        secret_key: sk.to_vec(),
     })
 }
 
@@ -745,11 +807,11 @@ pub fn sign(
     m: &[u8],
 ) -> Result<Vec<u8>, Error> {
     if m.is_empty() {
-        return Err(Error::Crypto("Cannot sign empty message"));
+        return Err(Error::Crypto(CryptoFailure::EmptySigningMessage));
     }
     let p = param_set(v);
     if sk.len() != p.sk_bytes {
-        return Err(Error::Crypto("Bad secret key size"));
+        return Err(Error::Crypto(CryptoFailure::BadSecretKeySize));
     }
     let (sk_seed, rest) = sk.split_at(p.n);
     let (sk_prf, public) = rest.split_at(p.n);
@@ -757,17 +819,19 @@ pub fn sign(
     let pc = PublicCtx::new(p.n, pk_seed);
     let sc = SecretCtx::new(sk_seed);
 
-    let r = prf_msg(p.n, sk_prf, pk_seed, m);
+    let r = Zeroizing::new(prf_msg(p.n, sk_prf, pk_seed, m));
     let at = split_digest(&p, &h_msg(&p, &r, pk_seed, pk_root, m));
     let mut adrs = fors_adrs(&at);
-    let fors_sig = fors_sign(&p, &pc, &sc, &at.md, &mut adrs);
+    let fors_sig = Zeroizing::new(fors_sign(&p, &pc, &sc, &at.md, &mut adrs));
     let fors_pk = fors_pk_from_sig(&p, &pc, &fors_sig, &at.md, &mut adrs);
-    let ht_sig = ht_sign(&p, &pc, &sc, &fors_pk, at.idx_tree, at.idx_leaf);
+    let ht_sig = Zeroizing::new(ht_sign(&p, &pc, &sc, &fors_pk, at.idx_tree, at.idx_leaf));
 
-    let mut sig = Vec::with_capacity(p.sig_bytes);
-    sig.extend(r);
-    sig.extend(fors_sig);
-    sig.extend(ht_sig);
+    // Until the self-check succeeds, no signature component is released.
+    // Clear these working copies on both the success and failure paths.
+    let mut sig = Zeroizing::new(Vec::with_capacity(p.sig_bytes));
+    sig.extend_from_slice(&r);
+    sig.extend_from_slice(&fors_sig);
+    sig.extend_from_slice(&ht_sig);
     if !ht_verify(
         &p,
         &pc,
@@ -777,12 +841,9 @@ pub fn sign(
         at.idx_leaf,
         pk_root,
     ) {
-        return Err(Error::Crypto(
-            "the signature does not verify under its own key: a fault during signing, or a secret \
-             key whose root is not its own",
-        ));
+        return Err(Error::Crypto(CryptoFailure::SignerSelfCheck));
     }
-    Ok(sig)
+    Ok(sig.to_vec())
 }
 
 /// FIPS 205 Algorithm 20, `slh_verify_internal`. A key or signature of the
@@ -794,7 +855,7 @@ pub fn verify(
     sig: &[u8],
 ) -> Result<bool, Error> {
     if m.is_empty() {
-        return Err(Error::Crypto("Cannot verify empty message"));
+        return Err(Error::Crypto(CryptoFailure::EmptyVerificationMessage));
     }
     let p = param_set(v);
     if pk.len() != p.pk_bytes || sig.len() != p.sig_bytes {
@@ -1137,21 +1198,45 @@ mod tests {
     }
 
     #[test]
+    fn guarded_kdf_preserves_the_blake3_material_definition() {
+        for n in [16, 24, 32] {
+            let material: Vec<u8> = (0..n).map(|i| (i * 7 + 13) as u8).collect();
+            for context in [CONTEXT_PRF, CONTEXT_THASH, CONTEXT_PRF_MSG] {
+                assert_eq!(
+                    derive_key(context, &material),
+                    blake3::derive_key(context, &material)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostics_do_not_disclose_the_signing_seed() {
+        let pair = SphincsKeyPair {
+            public_key: vec![17; 32],
+            secret_key: vec![239; 64],
+        };
+        let diagnostic = std::format!("{pair:?}");
+        assert!(!diagnostic.contains("239"));
+        assert!(diagnostic.contains("public_key"));
+    }
+
+    #[test]
     fn an_empty_message_or_a_short_key_is_refused() {
         let v = SphincsVariant::SPX128f;
         let kp = key(v, 0x09);
         assert_eq!(
             sign(v, &kp.secret_key, b"").unwrap_err(),
-            Error::Crypto("Cannot sign empty message")
+            Error::Crypto(CryptoFailure::EmptySigningMessage)
         );
         assert_eq!(
             sign(v, &kp.secret_key[1..], b"m").unwrap_err(),
-            Error::Crypto("Bad secret key size")
+            Error::Crypto(CryptoFailure::BadSecretKeySize)
         );
         let sig = sign(v, &kp.secret_key, b"m").unwrap();
         assert_eq!(
             verify(v, &kp.public_key, b"", &sig).unwrap_err(),
-            Error::Crypto("Cannot verify empty message")
+            Error::Crypto(CryptoFailure::EmptyVerificationMessage)
         );
     }
 
@@ -1164,7 +1249,7 @@ mod tests {
         let mut sk = key(v, 0x44).secret_key.clone();
         sk[3 * p.n] ^= 1;
         assert!(
-            matches!(sign(v, &sk, b"m"), Err(Error::Crypto(why)) if why.contains("does not verify"))
+            matches!(sign(v, &sk, b"m"), Err(Error::Crypto(why)) if why == CryptoFailure::SignerSelfCheck)
         );
     }
 

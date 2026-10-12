@@ -183,6 +183,7 @@ impl TestDevice {
                     device_id: peer.device_id.to_vec(),
                     genesis_hash: peer.genesis.to_vec(),
                     signing_public_key: peer.ak_pk.clone(),
+                    profile: None,
                 },
             )
             .await;

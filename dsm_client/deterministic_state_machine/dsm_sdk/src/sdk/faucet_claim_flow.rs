@@ -158,6 +158,8 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 // remaining route (storage spec §9 rule 8), whoever's release
                 // it is; the next attempt walks past it once it is final.
                 write_release(&set, &settled, &release.envelope_bytes).await?;
+                // The members take a moment to carry the chain on: walk again after one.
+                tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
                 continue;
             }
             WalkStop::Unavailable { .. } | WalkStop::BudgetExhausted(..) => {
@@ -243,12 +245,15 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 break;
             }
             SuccessorRead::LeaderHeld { release, .. } if release.envelope_bytes == envelope => {
-                return Err(DsmError::storage(
-                    "the release holds the reserve cell's leader link but its chain does not \
-                     have three links yet — retry with the same bytes"
-                        .to_string(),
-                    None::<std::io::Error>,
-                ));
+                // This claim's release holds the reserve cell's leader link and its
+                // chain stopped short of three links. Continue the chain along the
+                // remaining route (storage spec §9 rule 8), exactly as the walk does
+                // for a release found there, give the members a moment, and walk
+                // again: the next attempt finds the release final and keeps it as
+                // this claim's, rather than handing the caller a retry.
+                write_release(&set, &parent, &envelope).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
+                continue;
             }
             // Another release got to the leader first: the head moved.
             SuccessorRead::Final { .. } | SuccessorRead::LeaderHeld { .. } => continue,

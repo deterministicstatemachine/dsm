@@ -770,9 +770,12 @@ async fn a_collects_status_is_read_once_and_answered_from_its_record() {
             again, first,
             "poll {poll}: the record says what the reads said"
         );
+        // Reads only: a cell or index GET. An index append (a POST) another
+        // party's earlier step lands while the poll runs is a write, not this
+        // status reading anything again.
         let read: Vec<String> = asked(&p)
             .into_iter()
-            .filter(|r| r.contains("/api/v2/cell/") || r.contains("/api/v2/index/"))
+            .filter(|r| r.starts_with("GET /api/v2/cell/") || r.starts_with("GET /api/v2/index/"))
             .collect();
         assert_eq!(
             read,

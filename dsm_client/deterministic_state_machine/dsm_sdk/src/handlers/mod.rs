@@ -56,6 +56,7 @@ pub mod offline_cash_routes;
 mod one_hop_verification_tests;
 pub mod online_finalize;
 pub mod prefs_routes;
+pub mod receipt_routes;
 #[cfg(test)]
 mod recipient_admission_tests;
 pub mod recipient_receipt;

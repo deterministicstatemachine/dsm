@@ -43,7 +43,7 @@
 
 use crate::generated as pb;
 use crate::jni::helpers;
-use jni::objects::{JByteArray, JString};
+use jni::objects::{JByteArray, JClass, JString};
 use jni::JNIEnv;
 use prost::Message;
 use std::sync::atomic::Ordering;
@@ -1057,22 +1057,22 @@ pub(crate) fn handle_ble_identity_observed_from_envelope(
 /// Unified.processEnvelopeV3() which routes here.
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    envelope: jni::sys::jbyteArray,
+    mut env: JNIEnv<'_>,
+    _clazz: JClass<'_>,
+    envelope: JByteArray<'_>,
 ) -> jni::sys::jbyteArray {
-    let env_raw = env;
-    let envelope_raw = envelope;
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut env = match unsafe { env_from(env_raw) } {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-        let jba = unsafe { jba_from(envelope_raw) };
-
-        let req = match env.convert_byte_array(&jba) {
+        let req = match env.convert_byte_array(&envelope) {
             Ok(v) => v,
             Err(e) => {
+                match env.exception_check() {
+                    Ok(pending) if pending => return std::ptr::null_mut(),
+                    Ok(_) => {}
+                    Err(check_error) => {
+                        log::error!("processEnvelopeV3: exception check failed: {check_error}");
+                        return std::ptr::null_mut();
+                    }
+                }
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::InvalidInput as u32,
@@ -1094,9 +1094,15 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelo
             }
         };
 
-        env.byte_array_from_slice(&resp)
-            .map(|a| a.into_raw())
-            .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
+        match env.byte_array_from_slice(&resp) {
+            Ok(array) => array.into_raw(),
+            Err(e) => {
+                // Preserve a pending JVM allocation exception; JNI calls that
+                // allocate again are not valid exception recovery.
+                log::error!("processEnvelopeV3: response allocation failed: {e}");
+                std::ptr::null_mut()
+            }
+        }
     })) {
         Ok(result) => result,
         Err(panic) => {
@@ -1104,10 +1110,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelo
                 "processEnvelopeV3: panic captured: {}",
                 crate::jni::bridge_utils::panic_message(&panic)
             );
-            let mut env = match unsafe { env_from(env_raw) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
+            match env.exception_check() {
+                Ok(pending) if pending => return std::ptr::null_mut(),
+                Ok(_) => {}
+                Err(check_error) => {
+                    log::error!("processEnvelopeV3: exception check failed: {check_error}");
+                    return std::ptr::null_mut();
+                }
+            }
             error_byte_array(
                 &mut env,
                 helpers::JniErrorCode::ProcessingFailed as u32,

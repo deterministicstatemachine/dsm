@@ -161,7 +161,7 @@ or orphan. These are the fields, from CORE/sofi/wire/objects.rs, grouped by what
 
 | Angle | Fields that carry it | Ruled out |
 |---|---|---|
-| Authorship | setup, P and F carry `genesis`, `device_id` (through P for F) and `claimant_public_key` inside the body; the signature covers the canonical body in a `SignedSofiObject`; signing is deterministic (randomizer `H(sk_prf ∥ m)`, `CORE/crypto/sphincs.rs:889`), so one body has exactly one valid envelope | forgery, misattribution, a second version of the same object |
+| Authorship | setup, P and F carry `genesis`, `device_id` (through P for F) and `claimant_public_key` inside the body; the signature covers the canonical body in a `SignedSofiObject`; identities are computed over the canonical body, never the envelope, so a second valid envelope over one body is the same object (§14.3) | forgery (EUF-CMA), misattribution, a second version of the same object |
 | Lineage | P: `parent_claim_ref`, `position`; trader core: `pre_root = Rp`; every leg: `parent_root`; every vault core: `pre_root`; setup: `claim_ref`, `position` | attaching to another parent or position; replay later |
 | Placement | every key is computed from fields the object carries: K(0) from `(v, Rn)` in P’s legs; Kful(q) and Kroot(q) from `(G, DevID, q)` in P and F; `F.attempts` names each `(v, a)`; the vault id itself is `H(Go ∥ DevIDo ∥ pcreate)` | counting at a key the object does not name |
 | Uniqueness | consumption keys derived from the parent; one constructor per parent; the same inputs give the same bytes; each Gj is a function of P, one per `(P, E, vault, exact parent, exact shadow)` | alternative witnesses, alternative successors, choice |
@@ -900,8 +900,12 @@ pre
 #### 14.3 Signed objects
 A signed SoFi body travels in SignedSofiObject = (body_class, body_ccb, signature_alg, signature), CORE/sofi/
 wire/objects.rs:638. Identities are always computed over the canonical body bytes, never over the envelope, so a
-second valid signature over the same body is the same object. Signing is deterministic: the SPHINCS+ randomizer is
-H(sk_prf ∥ m) (CORE/crypto/sphincs.rs:889), so at most one valid envelope exists per body.
+second valid signature over the same body is the same object. Signing is deterministic (the SPHINCS+ randomizer is
+derived from SK.prf and the message, `dsm_sphincs::sign`), so an honest signer produces one envelope per body. That is
+a property of the signer, not something a verifier can check: a second, different envelope verifying for the same body
+would be a strong-unforgeability break, which SPHINCS+ is not proved to resist, so no rule may depend on envelope
+uniqueness (SPHINCS_SECURITY_CHARTER.md). Whether every cell comparison is by body identity rather than by envelope
+bytes is open (MASTER_REQUIREMENTS GPT-11).
 
 <!-- spec-section: SOFI-015 -->
 ### 15 Derivations

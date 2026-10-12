@@ -95,7 +95,7 @@ export default function LockScreen() {
 
       <div className="sb-screen__body lock-screen__body">
         <section className="sb-card sb-card--dark sb-card--hero lock-header">
-          <div className="sb-hero__label lock-subtitle">AUTHENTICATION REQUIRED</div>
+          <div className="sb-hero__label lock-subtitle">Authentication required</div>
           <div className="sb-hero__value lock-icon">[LOCKED]</div>
         </section>
 

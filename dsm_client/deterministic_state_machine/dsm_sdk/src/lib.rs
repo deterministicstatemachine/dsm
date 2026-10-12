@@ -285,6 +285,11 @@ pub fn initialize_sdk_context(
         log::debug!("initialize_sdk_context: SDK context already initialized; skipping re-init");
         return Ok(());
     }
+    if initial_entropy.is_empty() {
+        return Err(dsm::types::error::DsmError::invalid_parameter(
+            "initialize_sdk_context: empty entropy (device id or genesis is not 32 bytes)",
+        ));
+    }
     get_sdk_context().initialize(device_id, genesis_hash, initial_entropy)
 }
 
@@ -293,18 +298,29 @@ pub fn initialize_sdk_context(
 /// SDK-context entropy roots in the BIP39 wallet seed (the canonical Genesis v2 root
 /// secret, re-derived from the session-cached mnemonic — never persisted, no C-DBRW).
 ///
-/// Domain: "DSM/SDK/ENTROPY/v2". `device_id`/`genesis_hash` are 32 bytes; `wallet_seed`
-/// is the 64-byte BIP39 seed.
+/// `Expand(PRK_w, "DSM/sdk-entropy/v3" ‖ DevID ‖ G)` (key schedule KS1): the wallet seed
+/// enters only the wallet-root Extract. `device_id`/`genesis_hash` are 32 bytes (anything
+/// else yields empty entropy, which `initialize_sdk_context` refuses); `wallet_seed` is the
+/// 64-byte BIP39 seed.
 pub(crate) fn derive_production_entropy(
     device_id: &[u8],
     genesis_hash: &[u8],
     wallet_seed: &[u8],
 ) -> Vec<u8> {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SDK_HASH);
-    h.update(device_id);
-    h.update(genesis_hash);
-    h.update(wallet_seed);
-    h.finalize().as_bytes().to_vec()
+    let (Ok(devid), Ok(g)) = (
+        <[u8; 32]>::try_from(device_id),
+        <[u8; 32]>::try_from(genesis_hash),
+    ) else {
+        // Both are persisted 32-byte identity values; anything else is a corrupt identity,
+        // and no entropy is better than entropy bound to the wrong identity.
+        return Vec::new();
+    };
+    dsm::core::identity::key_schedule::sdk_entropy(
+        &dsm::core::identity::key_schedule::wallet_prk(wallet_seed),
+        &devid,
+        &g,
+    )
+    .to_vec()
 }
 
 /// The session-cached BIP39 wallet seed (unlocked via the mnemonic). Fails closed when the

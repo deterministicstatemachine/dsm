@@ -1174,9 +1174,12 @@ mod tests {
     /// The BIP39 vectors the lock screen's tests type: this wallet's phrase,
     /// and another wallet's.
     const LOCK_RECORD_PHRASE: &str = "abandon abandon abandon abandon abandon abandon \
-                                      abandon abandon abandon abandon abandon about";
+                                      abandon abandon abandon abandon abandon abandon \
+                                      abandon abandon abandon abandon abandon abandon \
+                                      abandon abandon abandon abandon abandon art";
     const LOCK_RECORD_OTHER_PHRASE: &str = "legal winner thank year wave sausage worth useful \
-                                            legal winner thank yellow";
+                                            legal winner thank year wave sausage worth useful \
+                                            legal winner thank year wave sausage worth title";
 
     /// The app lock through the ingress, as the lock screen meets it: a PIN
     /// lock on, the session locked, three wrong PINs answered with the tries

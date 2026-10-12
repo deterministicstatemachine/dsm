@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
-const MAX_FILE_BYTES = 5 * 1024 * 1024;
-const MAX_PIXELS = 16_000_000;
+export const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+export const MAX_FILE_BYTES = 5 * 1024 * 1024;
+export const MAX_PIXELS = 16_000_000;
 
 /** Decode an uploaded image to RGBA pixels: PNG, JPEG or WebP, at most 5 MB and 16 megapixels. */
 export async function readImageRgba(file: File): Promise<{ rgba: Uint8ClampedArray; width: number; height: number }> {

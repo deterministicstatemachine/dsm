@@ -7,9 +7,9 @@
 //!
 //! ```text
 //! mnemonic -> wallet_seed
-//!   genesis_nonce = KDF(wallet_seed, "DSM/genesis-public-nonce/v2" || network_id || wallet_index)   [PUBLIC]
-//!   GRK_seed      = KDF(wallet_seed, "DSM/genesis-root-authority/v1"
-//!                                    || network_id || wallet_index || genesis_version)
+//!   genesis_nonce = Expand(PRK_w, "DSM/genesis-public-nonce/v3" ‖ lp(network_id) ‖ wallet_index)   [PUBLIC]
+//!   GRK_seed      = Expand(PRK_w, "DSM/genesis-root-authority/v2"
+//!                                    ‖ lp(network_id) ‖ wallet_index ‖ genesis_version)
 //!   GRK           = SPHINCS+.KeyGen(GRK_seed)              (root authority; signs delegations ONLY)
 //!   G             = H_dom("DSM/genesis/v3", CCB(GenesisParamsV3))
 //!   ... s0 / device_seed / AK / AttA / DevID / Smaster exactly as v2, folding the new G
@@ -44,16 +44,15 @@
 use zeroize::Zeroize;
 
 use crate::ccb::{genesis_v3_commitment, sigalg, GenesisParamsV3};
-use crate::common::domain_tags::TAG_DSM_GENESIS_ROOT_AUTHORITY_V1;
 use crate::core::identity::genesis_v2::{
     derive_atta, derive_device_ak_keypair, derive_devid, derive_genesis_nonce, derive_s0,
-    derive_smaster, kdf32,
+    derive_smaster,
 };
 use crate::crypto::signatures::SignatureKeyPair;
 use crate::types::error::DsmError;
 
-/// `GRK_seed = KDF(wallet_seed, "DSM/genesis-root-authority/v1" ‖ network_id
-/// ‖ wallet_index ‖ genesis_version)`.
+/// `GRK_seed = Expand(PRK_w, "DSM/genesis-root-authority/v2" ‖ lp(network_id)
+/// ‖ wallet_index ‖ genesis_version)` (key schedule KS1).
 ///
 /// **No `g` parameter, deliberately** — see the module docs. `genesis_version`
 /// is a plain caller parameter, not a derivative of `G`, so including it keeps
@@ -69,14 +68,11 @@ pub fn derive_grk_seed(
     wallet_index: u32,
     genesis_version: u32,
 ) -> [u8; 32] {
-    kdf32(
-        wallet_seed,
-        TAG_DSM_GENESIS_ROOT_AUTHORITY_V1,
-        &[
-            network_id,
-            &wallet_index.to_le_bytes(),
-            &genesis_version.to_le_bytes(),
-        ],
+    crate::core::identity::key_schedule::grk_seed(
+        &crate::core::identity::key_schedule::wallet_prk(wallet_seed),
+        network_id,
+        wallet_index,
+        genesis_version,
     )
 }
 

@@ -23,7 +23,6 @@ pub const TAG_DSM_REQUEST_HASH: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/request-hash");
 pub const TAG_DSM_SCRIPT_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/script-commit");
-pub const TAG_DSM_SDK_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/sdk-hash");
 pub const TAG_DSM_SIGNING_PREIMAGE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/signing-preimage");
 pub const TAG_DSM_TLS_CERT_HASH: TaggedHashDomain<'static> =

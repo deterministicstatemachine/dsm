@@ -51,7 +51,7 @@ describe('SettingsMainScreen developer unlock', () => {
       expect(screen.getByText(/TAP 7X FOR DEV OPTIONS/i)).toBeInTheDocument(),
     );
 
-    const versionButton = screen.getByText('VERSION').closest('button');
+    const versionButton = screen.getByText('Version').closest('button');
     expect(versionButton).not.toBeNull();
 
     for (let i = 0; i < 7; i += 1) {
@@ -62,7 +62,7 @@ describe('SettingsMainScreen developer unlock', () => {
       expect(mockSetPreference).toHaveBeenCalledWith('dev_mode', '1'),
     );
     await waitFor(() =>
-      expect(screen.getByText('DEVELOPER OPTIONS')).toBeInTheDocument(),
+      expect(screen.getByText('Developer options')).toBeInTheDocument(),
     );
 
     unmount();
@@ -77,7 +77,7 @@ describe('SettingsMainScreen developer unlock', () => {
 
     render(<SettingsMainScreen />);
 
-    expect(screen.getByText('DEVELOPER OPTIONS')).toBeInTheDocument();
+    expect(screen.getByText('Developer options')).toBeInTheDocument();
 
     resolveDevPref?.('true');
     await waitFor(() => expect(mockGetPreference).toHaveBeenCalled());
@@ -130,7 +130,7 @@ describe('SettingsMainScreen developer unlock', () => {
     render(<SettingsMainScreen />);
 
     await waitFor(() =>
-      expect(screen.getByText('DEVELOPER OPTIONS')).toBeInTheDocument(),
+      expect(screen.getByText('Developer options')).toBeInTheDocument(),
     );
 
     const handler = jest.fn();

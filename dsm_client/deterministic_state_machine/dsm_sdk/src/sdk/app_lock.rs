@@ -251,7 +251,7 @@ pub enum PhraseTried {
 /// miss count starts again. A wrong phrase is not counted: guessing a phrase
 /// is not a short search.
 pub fn try_phrase(phrase: &str) -> Result<PhraseTried, DsmError> {
-    let mnemonic = bip39::Mnemonic::parse(phrase.trim())
+    let mnemonic = crate::sdk::recovery_sdk::parse_wallet_mnemonic(phrase)
         .map_err(|e| refuse(format!("that is not a recovery phrase: {e}")))?;
     let held =
         crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {

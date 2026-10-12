@@ -76,30 +76,29 @@
   signature; whether the signature bytes equal Core's own is neither
   assumed nor needed for any theorem below.
 
-  CRYPTOGRAPHIC ASSUMPTIONS — the model of DSMCertChain.lean, stated as
-  fields of `Crypto` so the theorems are parametric in them:
-    * `H_inj`: BLAKE3 domain-hash collision resistance, as the protocol-level
-      consequence (distinct inputs, distinct digests). The same axiom as
-      `domain_hash_injective` in DSMCertChain / DSMCryptoBinding.
+  CRYPTOGRAPHIC ASSUMPTIONS. None is an axiom and none idealizes a primitive
+  (restated on audit-prep, 2026-10-07; an earlier version took an injective
+  hash and "one signature verifies at most one message" as fields of `Crypto`,
+  neither of which BLAKE3 or SPHINCS+ satisfies):
+    * `H`: the domain-separated hash, an arbitrary function. Where a theorem
+      needs two digests to name the same input, it concludes "the same input,
+      or an explicit collision" (`HCollision`).
     * `keyGen`, `sign`, `verify`: a SPHINCS+ keypair from a seed, DETERMINISTIC
-      signing (whitepaper §11: the Cat-5 'f' deterministic variant), and a
-      verification predicate. Nothing is assumed about `sign` as a function
-      of its key, and a public key tells nothing about its seed.
+      signing, and a verification predicate. Nothing is assumed about `sign`
+      as a function of its key, and a public key tells nothing about its seed.
     * `sign_verify_round_trip`: a signature produced with the secret half of
-      a keypair verifies under its public half (soundness). Exactly
-      `sphincs_sign_verify_round_trip` in DSMCertChain.
-    * `signature_message_binding`: for a fixed (pk, sig) at most one message
-      verifies. Exactly `sphincs_signature_message_binding` in DSMCertChain.
-    * `Adversary.euf`: existential unforgeability, phrased over what the
-      adversary can OUTPUT. Any signature it presents that verifies under pk
-      on some message was made with a seed it holds whose public half is
-      pk, or was observed on the wire as an honest signature under pk. This
-      is EUF-CMA with replay allowed: the adversary may copy any signature it
-      has seen and attach it to any fields it likes. We do NOT prove
-      SPHINCS+ security; we state its consequence for the adversary.
-    * The canonical codec decodes only what it encoded (`decode_sound`,
-      proved from `H_inj`). The Rust encoders are injective by the Phase B
-      vectors.
+      a keypair verifies under its public half (functional correctness; proved
+      for the deployed construction in lean4/Sphincs/Signer.lean).
+    * `Adversary.euf`: existential unforgeability (EUF-CMA), phrased over what
+      the adversary can OUTPUT: any signature it presents that verifies under
+      pk on message m was made with a seed it holds for pk, or m is a message
+      the owner of pk was observed to sign. A signature that verifies two
+      different messages is reported as such (`Retarget`), never assumed away.
+      We do NOT prove SPHINCS+ security; we state its consequence for the
+      adversary.
+    * The payload is the operation's canonical bytes (CCB), as in the Rust,
+      so the codec is injective by construction (`encode_inj`,
+      `decode_sound`), with no hash in it.
     * One lineage per operation, one balance per lineage, one source leaf per
       operation: the smallest state on which every construction constraint
       has something to bind. Widening the state adds constraints, not shape.
@@ -130,15 +129,13 @@
 
 namespace DSMRecognition
 
-/-- The primitives and their assumptions: BLAKE3 as an injective
-domain-separated hash; deterministic SPHINCS+ as (keyGen, sign, verify) with
-round-trip soundness and message binding — the DSMCertChain model, nothing
-more. Unforgeability is a statement about the adversary (`Adversary.euf`),
-not about `verify`. `H` is domain-separated by its leading tag. -/
+/-- The primitives: a domain-separated hash `H` (domain = its leading tag),
+and deterministic SPHINCS+ as (keyGen, sign, verify) with round-trip
+soundness. No property of `H` and no binding property of signatures is
+assumed. Unforgeability is a statement about the adversary
+(`Adversary.euf`), not about `verify`. -/
 structure Crypto where
   H : List Nat → Nat
-  /-- Collision resistance, as its protocol-level consequence. -/
-  H_inj : ∀ a b, H a = H b → a = b
   /-- `keyGen seed = (pk, sk)`. -/
   keyGen : Nat → Nat × Nat
   /-- Deterministic signing: `sign sk m`. -/
@@ -148,9 +145,6 @@ structure Crypto where
   /-- Round-trip soundness. -/
   sign_verify_round_trip :
     ∀ seed m, verify (keyGen seed).1 m (sign (keyGen seed).2 m)
-  /-- Message binding: one verifying message per (pk, sig). -/
-  signature_message_binding :
-    ∀ pk m₁ m₂ sig, verify pk m₁ sig → verify pk m₂ sig → m₁ = m₂
 
 /-- An operation as its author intends it. -/
 structure Op where
@@ -171,7 +165,8 @@ structure St where
 /-- The wire object. ANYONE can craft one with any fields: this is what raw
 bytes decode to before recognition. -/
 structure Obj where
-  payload : Nat
+  /-- The operation's canonical bytes. -/
+  payload : List Nat
   parent : Nat
   coord : Nat
   sig : Nat
@@ -182,8 +177,8 @@ variable (c : Crypto)
 
 -- ── the derivations Core recomputes ────────────────────────────────────────
 
-/-- Canonical encoding of an operation (domain 1). -/
-def encode (o : Op) : Nat := c.H [1, o.lineage, o.amount, o.source, o.nonce]
+/-- Canonical encoding of an operation: its fields, in order. -/
+def encode (o : Op) : List Nat := [o.lineage, o.amount, o.source, o.nonce]
 
 /-- The coordinate an operation names: derived from its lineage and the tip
 it extends (domain 2). -/
@@ -192,45 +187,49 @@ def deriveCoord (lineage parent : Nat) : Nat := c.H [2, lineage, parent]
 /-- The proof of the source leaf under the parent (domain 3). -/
 def prove (parent source : Nat) : Nat := c.H [3, parent, source]
 
-/-- What a signature covers (domain 4). -/
-def msgOf (payload parent coord : Nat) : Nat := c.H [4, payload, parent, coord]
+/-- What a signature covers (domain 4): the hash of the payload bytes, the
+parent and the coordinate. -/
+def msgOf (payload : List Nat) (parent coord : Nat) : Nat := c.H (4 :: payload ++ [parent, coord])
 
-theorem msgOf_inj {p₁ a₁ k₁ p₂ a₂ k₂ : Nat}
-    (h : msgOf c p₁ a₁ k₁ = msgOf c p₂ a₂ k₂) : p₁ = p₂ ∧ a₁ = a₂ ∧ k₁ = k₂ := by
-  unfold msgOf at h
-  have hl := c.H_inj _ _ h
-  simp only [List.cons.injEq] at hl
-  exact ⟨hl.2.1, hl.2.2.1, hl.2.2.2.1⟩
+/-- A collision of `H` on two distinct inputs. -/
+def HCollision (x y : List Nat) : Prop := x ≠ y ∧ c.H x = c.H y
 
-/-- The canonical encoding is injective: two operations with one encoding
-are one operation (the hash is injective on its input list). -/
-theorem encode_inj {a b : Op} (h : encode c a = encode c b) : a = b := by
-  unfold encode at h
-  have hl := c.H_inj _ _ h
+/-- One signature verifying two different messages under one key. Under
+EUF-CMA this is a forgery on whichever message the owner never signed. -/
+def Retarget (pk m₁ m₂ sig : Nat) : Prop := m₁ ≠ m₂ ∧ c.verify pk m₁ sig ∧ c.verify pk m₂ sig
+
+/-- Equal signed messages name the same payload, parent and coordinate, or
+exhibit a collision of `H`. -/
+theorem msgOf_inj {p₁ p₂ : List Nat} {a₁ k₁ a₂ k₂ : Nat}
+    (h : msgOf c p₁ a₁ k₁ = msgOf c p₂ a₂ k₂) :
+    (p₁ = p₂ ∧ a₁ = a₂ ∧ k₁ = k₂) ∨
+      HCollision c (4 :: p₁ ++ [a₁, k₁]) (4 :: p₂ ++ [a₂, k₂]) := by
+  by_cases he : (4 :: p₁ ++ [a₁, k₁]) = (4 :: p₂ ++ [a₂, k₂])
+  · left
+    have ht : p₁ ++ [a₁, k₁] = p₂ ++ [a₂, k₂] := (List.cons.inj he).2
+    obtain ⟨hp, hl⟩ := List.append_inj' ht rfl
+    simp only [List.cons.injEq] at hl
+    exact ⟨hp, hl.1, hl.2.1⟩
+  · exact Or.inr ⟨he, h⟩
+
+/-- The canonical encoding is injective. -/
+theorem encode_inj {a b : Op} (h : encode a = encode b) : a = b := by
   cases a; cases b
-  simp only [List.cons.injEq] at hl
-  obtain ⟨_, h1, h2, h3, h4⟩ := hl
+  simp only [encode, List.cons.injEq] at h
+  obtain ⟨h1, h2, h3, h4, _⟩ := h
   simp [h1, h2, h3, h4]
 
-open Classical in
 /-- The canonical decoder: the bytes are an encoding, or nothing. -/
-noncomputable def decode (p : Nat) : Option Op :=
-  if h : ∃ o : Op, encode c o = p then some (Classical.choose h) else none
+def decode : List Nat → Option Op
+  | [l, a, s, n] => some ⟨l, a, s, n⟩
+  | _ => none
 
-theorem decode_encode (o : Op) : decode c (encode c o) = some o := by
-  unfold decode
-  have h : ∃ o' : Op, encode c o' = encode c o := ⟨o, rfl⟩
-  rw [dif_pos h]
-  congr 1
-  exact encode_inj c (Classical.choose_spec h)
+theorem decode_encode (o : Op) : decode (encode o) = some o := rfl
 
-theorem decode_sound {p : Nat} {o : Op} (h : decode c p = some o) : encode c o = p := by
+theorem decode_sound {p : List Nat} {o : Op} (h : decode p = some o) : encode o = p := by
   unfold decode at h
   split at h
-  · rename_i hex
-    have hs := Classical.choose_spec hex
-    injection h with h
-    rw [← h]; exact hs
+  · cases h; rfl
   · cases h
 
 -- ── Core's constructor: the ONLY way a DSM object is made ─────────────────
@@ -241,7 +240,7 @@ precondition; the fields are the derivations. -/
 def construct (s : St) (seed : Nat) (o : Op) : Option Obj :=
   if (c.keyGen seed).1 = s.owner o.lineage ∧ o.amount ≤ s.balance o.lineage
       ∧ s.consumed o.source = false then
-    let payload := encode c o
+    let payload := encode o
     let parent := s.tip o.lineage
     let coord := deriveCoord c o.lineage parent
     some { payload := payload, parent := parent, coord := coord,
@@ -283,7 +282,7 @@ def ProofSound (o : Op) (x : Obj) : Prop := x.proof = prove c x.parent o.source
 /-- ValidDSM: stated over the operation the bytes ENCODE and the state.
 Nothing here mentions recognition or decoding. -/
 def Valid (s : St) (x : Obj) : Prop :=
-  ∃ o, x.payload = encode c o
+  ∃ o, x.payload = encode o
     ∧ Authorized c s o x ∧ ExtendsHead s o x ∧ NamesItsCoordinate c o x
     ∧ SourceAvailable s o ∧ Conserves s o ∧ ProofSound c o x
 
@@ -294,7 +293,7 @@ the reader holds, verify the signature under the owner key the state names,
 and accept only if all agree. Each conjunct is one construction constraint;
 the mutation controls remove them one at a time. -/
 def Recognized (s : St) (x : Obj) : Prop :=
-  ∃ o, decode c x.payload = some o                                   -- canonical encoding
+  ∃ o, decode x.payload = some o                                   -- canonical encoding
     ∧ x.parent = s.tip o.lineage                                       -- ancestry binding
     ∧ x.coord = deriveCoord c o.lineage x.parent                       -- coordinate derivation
     ∧ c.verify (s.owner o.lineage) (msgOf c x.payload x.parent x.coord) x.sig  -- signature binding
@@ -312,7 +311,7 @@ is the security half of the boundary: it holds over the verification
 relation alone. -/
 theorem recognized_implies_valid {s : St} {x : Obj} (h : Recognized c s x) : Valid c s x := by
   obtain ⟨o, hdec, hpar, hcoord, hver, hproof, hcons, hamt⟩ := h
-  exact ⟨o, (decode_sound c hdec).symm, hver, hpar, hcoord, hcons, hamt, hproof⟩
+  exact ⟨o, (decode_sound hdec).symm, hver, hpar, hcoord, hcons, hamt, hproof⟩
 
 /-- CONSTRUCTIBLE ⇒ RECOGNIZED. What Core's constructor emits, Core
 recognizes: the codec decodes what it encoded and the owner's signature
@@ -344,58 +343,64 @@ theorem constructible_implies_valid {s : St} {x : Obj} (h : Constructible c s x)
 /-- What an adversary is and can do. It holds the seeds in `seeds`; it has
 observed the honest signatures `seen pk m sig` on the wire (each verifying
 under pk on m); it can output the objects in `outputs`, with any fields at
-all. `euf` is existential unforgeability phrased over its outputs: a
-signature it presents that verifies under pk on some message was made with a
-seed it holds for pk, or is one it observed under pk — replayed, possibly
-onto other fields. -/
+all. `euf` is existential unforgeability (EUF-CMA) phrased over its outputs:
+a signature it presents that verifies under pk on message m was made with a
+seed it holds for pk, or m is a message the owner of pk was observed to sign.
+Replaying an observed signature onto other fields is allowed; it helps only
+if the signature also verifies the new fields' message. -/
 structure Adversary where
   seeds : Nat → Prop
   seen : Nat → Nat → Nat → Prop
   seen_verifies : ∀ pk m sig, seen pk m sig → c.verify pk m sig
   outputs : Obj → Prop
   euf : ∀ x, outputs x → ∀ pk m, c.verify pk m x.sig →
-    (∃ seed, seeds seed ∧ (c.keyGen seed).1 = pk) ∨ (∃ m₀, seen pk m₀ x.sig)
+    (∃ seed, seeds seed ∧ (c.keyGen seed).1 = pk) ∨ (∃ sig₀, seen pk m sig₀)
 
 /-- HOSTILE BYTES ARE NOT STATE. An adversary that holds no seed for a
-lineage's owner key can get an object recognized on that lineage only by
-re-presenting an honest signature that the owner made over EXACTLY this
-object's message (message binding). Whatever else it crafts — wrong
-ancestry, coordinate, encoding, proof, source, amount, or all of them right —
-the signature binding stops it. -/
+lineage's owner key can get an object recognized on that lineage only if the
+owner was observed to sign EXACTLY this object's message: its payload, parent
+and coordinate (up to a collision of `H`, `msgOf_inj`). Whatever else it
+crafts (wrong ancestry, coordinate, encoding, proof, source, amount, or all of
+them right) the signature binding stops it. (Earlier statement: the
+adversary re-presents this exact signature. That needed the false premise
+that one signature verifies at most one message; this is the EUF-CMA form.) -/
 theorem hostile_bytes_never_become_state {a : Adversary c} {s : St} {x : Obj} {o : Op}
-    (hout : a.outputs x) (hdec : decode c x.payload = some o)
+    (hout : a.outputs x) (hdec : decode x.payload = some o)
     (hnokey : ∀ seed, a.seeds seed → (c.keyGen seed).1 ≠ s.owner o.lineage)
     (hrec : Recognized c s x) :
-    a.seen (s.owner o.lineage) (msgOf c x.payload x.parent x.coord) x.sig := by
+    ∃ sig₀, a.seen (s.owner o.lineage) (msgOf c x.payload x.parent x.coord) sig₀ := by
   obtain ⟨o', hdec', _, _, hver, _, _, _⟩ := hrec
   have ho : o' = o := by rw [hdec] at hdec'; exact (Option.some.inj hdec').symm
   subst ho
-  rcases a.euf x hout _ _ hver with ⟨seed, hheld, hpk⟩ | ⟨m₀, hseen⟩
+  rcases a.euf x hout _ _ hver with ⟨seed, hheld, hpk⟩ | hseen
   · exact absurd hpk (hnokey seed hheld)
-  · have hver₀ := a.seen_verifies _ _ _ hseen
-    have hm := c.signature_message_binding _ _ _ _ hver₀ hver
-    rw [hm] at hseen
-    exact hseen
+  · exact hseen
 
 /-- The replay is the honest object, field for field: an honest signature
 observed on (payload₀, parent₀, coord₀) that verifies for x pins x's own
-payload, parent and coordinate to those (message binding, then hash
-injectivity); recognition then fixes the proof from them. -/
+payload, parent and coordinate to those, unless that one signature verifies
+two different messages (`Retarget`, a forgery under EUF-CMA on whichever was
+never signed) or `H` collides. -/
 theorem replayed_signature_pins_the_fields {s : St} {x : Obj} {o : Op}
-    {p₀ a₀ k₀ : Nat}
-    (hrec : Recognized c s x) (hdec : decode c x.payload = some o)
+    {p₀ : List Nat} {a₀ k₀ : Nat}
+    (hrec : Recognized c s x) (hdec : decode x.payload = some o)
     (hver₀ : c.verify (s.owner o.lineage) (msgOf c p₀ a₀ k₀) x.sig) :
-    x.payload = p₀ ∧ x.parent = a₀ ∧ x.coord = k₀ := by
+    (x.payload = p₀ ∧ x.parent = a₀ ∧ x.coord = k₀) ∨
+      Retarget c (s.owner o.lineage) (msgOf c x.payload x.parent x.coord) (msgOf c p₀ a₀ k₀) x.sig ∨
+      HCollision c (4 :: x.payload ++ [x.parent, x.coord]) (4 :: p₀ ++ [a₀, k₀]) := by
   obtain ⟨o', hdec', _, _, hver, _, _, _⟩ := hrec
   have ho : o' = o := by rw [hdec] at hdec'; exact (Option.some.inj hdec').symm
   subst ho
-  have hm := c.signature_message_binding _ _ _ _ hver hver₀
-  exact msgOf_inj c hm
+  by_cases hm : msgOf c x.payload x.parent x.coord = msgOf c p₀ a₀ k₀
+  · rcases msgOf_inj c hm with h | h
+    · exact Or.inl h
+    · exact Or.inr (Or.inr h)
+  · exact Or.inr (Or.inl ⟨hm, hver, hver₀⟩)
 
 -- ── one witness per construction constraint ────────────────────────────────
 
 theorem forged_signature_is_not_recognized {s : St} {x : Obj} {o : Op}
-    (hdec : decode c x.payload = some o)
+    (hdec : decode x.payload = some o)
     (hforged : ¬ c.verify (s.owner o.lineage) (msgOf c x.payload x.parent x.coord) x.sig) :
     ¬ Recognized c s x := by
   intro hrec
@@ -405,7 +410,7 @@ theorem forged_signature_is_not_recognized {s : St} {x : Obj} {o : Op}
   exact hforged hver
 
 theorem wrong_parent_is_not_recognized {s : St} {x : Obj} {o : Op}
-    (hdec : decode c x.payload = some o) (h : x.parent ≠ s.tip o.lineage) :
+    (hdec : decode x.payload = some o) (h : x.parent ≠ s.tip o.lineage) :
     ¬ Recognized c s x := by
   intro hrec
   obtain ⟨o', hdec', hpar, _⟩ := hrec
@@ -414,7 +419,7 @@ theorem wrong_parent_is_not_recognized {s : St} {x : Obj} {o : Op}
   exact h hpar
 
 theorem wrong_coordinate_is_not_recognized {s : St} {x : Obj} {o : Op}
-    (hdec : decode c x.payload = some o) (h : x.coord ≠ deriveCoord c o.lineage x.parent) :
+    (hdec : decode x.payload = some o) (h : x.coord ≠ deriveCoord c o.lineage x.parent) :
     ¬ Recognized c s x := by
   intro hrec
   obtain ⟨o', hdec', _, hcoord, _⟩ := hrec
@@ -425,14 +430,14 @@ theorem wrong_coordinate_is_not_recognized {s : St} {x : Obj} {o : Op}
 /-- Bytes that are not the canonical encoding of any operation are not an
 object at all: recognition has nothing to rebuild. -/
 theorem non_canonical_encoding_is_not_recognized {s : St} {x : Obj}
-    (h : decode c x.payload = none) : ¬ Recognized c s x := by
+    (h : decode x.payload = none) : ¬ Recognized c s x := by
   intro hrec
   obtain ⟨o, hdec, _⟩ := hrec
   rw [h] at hdec
   cases hdec
 
 theorem wrong_proof_is_not_recognized {s : St} {x : Obj} {o : Op}
-    (hdec : decode c x.payload = some o) (h : x.proof ≠ prove c x.parent o.source) :
+    (hdec : decode x.payload = some o) (h : x.proof ≠ prove c x.parent o.source) :
     ¬ Recognized c s x := by
   intro hrec
   obtain ⟨o', hdec', _, _, _, hproof, _⟩ := hrec
@@ -441,7 +446,7 @@ theorem wrong_proof_is_not_recognized {s : St} {x : Obj} {o : Op}
   exact h hproof
 
 theorem consumed_source_is_not_recognized {s : St} {x : Obj} {o : Op}
-    (hdec : decode c x.payload = some o) (h : s.consumed o.source = true) :
+    (hdec : decode x.payload = some o) (h : s.consumed o.source = true) :
     ¬ Recognized c s x := by
   intro hrec
   obtain ⟨o', hdec', _, _, _, _, hcons, _⟩ := hrec
@@ -451,7 +456,7 @@ theorem consumed_source_is_not_recognized {s : St} {x : Obj} {o : Op}
   cases hcons
 
 theorem overdraft_is_not_recognized {s : St} {x : Obj} {o : Op}
-    (hdec : decode c x.payload = some o) (h : s.balance o.lineage < o.amount) :
+    (hdec : decode x.payload = some o) (h : s.balance o.lineage < o.amount) :
     ¬ Recognized c s x := by
   intro hrec
   obtain ⟨o', hdec', _, _, _, _, _, hamt⟩ := hrec
@@ -466,7 +471,7 @@ its recomputations agree. Its own content, separate from the chain above. -/
 theorem valid_implies_recognized {s : St} {x : Obj} (h : Valid c s x) : Recognized c s x := by
   obtain ⟨o, hpay, hver, hpar, hcoord, hcons, hamt, hproof⟩ := h
   refine ⟨o, ?_, hpar, hcoord, hver, hproof, hcons, hamt⟩
-  rw [hpay]; exact decode_encode c o
+  rw [hpay]; exact decode_encode o
 
 /-- `Valid` and `Recognized` are different predicates that agree on every
 object: `Valid` is stated over the operation the bytes encode, `Recognized`
@@ -490,5 +495,8 @@ theorem valid_is_not_recognized_by_definition {s : St} {x : Obj} :
 #print axioms overdraft_is_not_recognized
 #print axioms valid_implies_recognized
 #print axioms valid_is_not_recognized_by_definition
+#print axioms msgOf_inj
+#print axioms encode_inj
+#print axioms decode_sound
 
 end DSMRecognition

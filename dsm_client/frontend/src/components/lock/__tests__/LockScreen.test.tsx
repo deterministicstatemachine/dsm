@@ -19,8 +19,10 @@ const RECORD = join(__dirname, 'fixtures/session_lock.ingress.bin');
 const carried = (arrivals: Arrival[]): string[] => arrivals.map((a) => a.carried);
 
 /** The BIP39 vectors Rust's record holds: this wallet's phrase, and another's. */
-const THIS_WALLET = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
-const ANOTHER_WALLET = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
+const THIS_WALLET =
+  'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art';
+const ANOTHER_WALLET =
+  'legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth title';
 
 function enterPin(pin: string) {
   for (const digit of pin) fireEvent.click(screen.getByRole('button', { name: digit }));

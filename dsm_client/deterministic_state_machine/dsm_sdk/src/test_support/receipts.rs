@@ -58,7 +58,7 @@ impl Party {
         )
         .expect("genesis v3 from the wallet seed");
         let (kyber_public_key, _) =
-            dsm::crypto::kyber::generate_kyber_keypair_from_entropy(&v3.smaster, "DSM/kyber\0")
+            dsm::crypto::kyber::generate_kyber_identity_keypair(&v3.smaster)
                 .expect("the ML-KEM key from Smaster");
         Self {
             v3,

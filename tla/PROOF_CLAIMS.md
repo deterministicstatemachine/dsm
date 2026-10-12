@@ -27,8 +27,10 @@ The guarded kernel (paper Appendix A/B) is machine checked as:
 - `lean4/DSMGuardedTripwire.lean`: the universal theorems
   (`realized_unique_at_key`, `guarded_tripwire_at_key`/`_exists`,
   `hardened_single_consumption`, `no_resource_local_cycle`, and companions).
-  The uniqueness/tripwire core depends on NO axioms; only the paper's labeled
-  cryptographic Assumptions appear as axioms, and only where the paper uses them.
+  The module depends on NO axioms beyond Lean's core logic
+  (specs/requirements/LEAN_AXIOM_LEDGER.tsv). Paper Assumption 3 is proved for
+  the model's encoding (`canonical_encode_injective`); Assumption 1 enters only
+  as an explicit collision disjunct (`candidate_digest_binds_or_collides`).
 - `lean4/DSMOfflineAnchorOrigin.lean`: the offline-anchor special case of the
   kernel (v2 "Software Authority, Hardware Identity"). One correct enrolled
   appliance emits at most one committed package per SMT anchor origin

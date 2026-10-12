@@ -6,6 +6,7 @@
 // accounts, network, address index, node status, vault internals — sits under
 // a single Advanced fold. Data loading and the sub-views are unchanged.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { CoinArt } from '../../CoinArt';
 import { bitcoinNetworkLabel, formatBtc, normalizeBitcoinUiNetwork } from '../../../services/bitcoinTap';
 import { useBitcoinTapData } from './hooks/useBitcoinTapData';
 import { useBitcoinWallet } from './hooks/useBitcoinWallet';
@@ -131,7 +132,7 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
       {/* The one number that matters, and the on-chain balance it came from. */}
       <section className="sb-card sb-card--hero" aria-label="dBTC balance">
         <div className="sb-hero__label">
-          <img src={btcLogoSrc} alt="" />
+          <CoinArt src={btcLogoSrc} ticker="dBTC" alt="" style={{ width: 18, height: 18 }} />
           dBTC balance
         </div>
         <div className="sb-hero__value">

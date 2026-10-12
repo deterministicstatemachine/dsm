@@ -1,0 +1,353 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * The Modern skin. `html[data-skin="modern"]` (hooks/useSkin.ts) puts the Game
+ * Boy device away and lets the app fill the screen; `data-scheme` picks light
+ * or dark. Every Modern screen draws with the --s-* variables below.
+ */
+
+:root {
+  /* The Modern palette, in both schemes: black, white, yellow-gold and fuchsia. */
+  --s-fuchsia: #e8135a;
+  --s-gold: #ffc400;
+  --s-gold-deep: #b98900;
+  --s-bg: #ffffff;
+  --s-surface: #ffffff;
+  --s-surface-2: #fff4c4;
+  --s-text: #0f0f0f;
+  --s-muted: #5f5f5f;
+  --s-line: #efe4c2;
+  --s-primary: var(--s-fuchsia);
+  --s-on-primary: #ffffff;
+  --s-secondary: var(--s-gold);
+  --s-on-secondary: #0f0f0f;
+  --s-accent: var(--s-gold-deep);
+  --s-positive: var(--s-gold-deep);
+  --s-negative: var(--s-fuchsia);
+  --s-avatar-a: #fde0ea;
+  --s-avatar-a-text: var(--s-fuchsia);
+  --s-avatar-b: var(--s-gold);
+  --s-avatar-b-text: #0f0f0f;
+  --s-nav-active: var(--s-fuchsia);
+  --s-balance-bg: linear-gradient(150deg, #ffd84a 0%, #ffc400 100%);
+  --s-balance-text: #0f0f0f;
+  --s-balance-muted: #4a3a00;
+  --s-shadow: 0 2px 10px rgba(110, 80, 0, 0.10);
+  --s-radius: 20px;
+}
+
+html[data-skin="modern"][data-scheme="dark"] {
+  --s-fuchsia: #ff1f6d;
+  --s-gold: #ffd21f;
+  --s-gold-deep: #ffd21f;
+  --s-bg: #0a0a0a;
+  --s-surface: #161616;
+  --s-surface-2: #222222;
+  --s-text: #ffffff;
+  --s-muted: #a3a3a3;
+  --s-line: #2a2a2a;
+  --s-on-primary: #ffffff;
+  --s-on-secondary: #0f0f0f;
+  --s-avatar-a: var(--s-fuchsia);
+  --s-avatar-a-text: #ffffff;
+  --s-avatar-b: var(--s-gold);
+  --s-avatar-b-text: #0f0f0f;
+  --s-balance-bg: linear-gradient(155deg, #1a1a1a 45%, #4a3a00 100%);
+  --s-balance-text: #ffffff;
+  --s-balance-muted: var(--s-gold);
+  --s-shadow: none;
+}
+
+/* ---- The device, put away ---- */
+html[data-skin="modern"] body { background: var(--s-bg); }
+html[data-skin="modern"] .stateboy {
+  max-width: none; transform: none; padding: 0; background: var(--s-bg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-skin="modern"] .front-plate { background: var(--s-bg); box-shadow: none; }
+html[data-skin="modern"] .front-plate::before,
+html[data-skin="modern"] .battery-light,
+html[data-skin="modern"] .dsm-shell-logo,
+html[data-skin="modern"] .scanlines,
+html[data-skin="modern"] .screen-inner-shadow,
+html[data-skin="modern"] .screen-depth-sheen,
+html[data-skin="modern"] .screen-nav-bar,
+html[data-skin="modern"] #controller,
+html[data-skin="modern"] #theme-flash { display: none !important; }
+html[data-skin="modern"] .screen-container {
+  position: absolute; inset: 0; top: 0; left: 0; transform: none; width: 100%; height: 100%;
+  padding: 0; background: var(--s-bg); box-shadow: none; border-radius: 0;
+}
+html[data-skin="modern"] .screen { border: none; border-radius: 0; background: var(--s-bg); animation: none; }
+html[data-skin="modern"] #dsm-app-root { background: var(--s-bg); color: var(--s-text); }
+html[data-skin="modern"] .stateboy-screen-host { height: 100%; }
+
+/* ---- Shell ---- */
+.s-app {
+  display: flex; flex-direction: column; height: 100%; width: 100%;
+  background: var(--s-bg); color: var(--s-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* No inset for the status bar here: the phone keeps the page below it (setSystemBars). */
+}
+.s-topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px 4px; }
+.s-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
+.s-brand-mark { width: 30px; height: 26px; border-radius: 7px; background: var(--s-text); position: relative; }
+.s-brand-mark { background: var(--s-fuchsia); }
+html[data-scheme="dark"] .s-brand-mark { background: var(--s-gold); }
+.s-brand-mark::after { content: ''; position: absolute; right: 4px; top: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--s-bg); }
+.s-icon-btn {
+  width: 44px; height: 44px; border-radius: 50%; border: none; background: var(--s-surface-2);
+  color: var(--s-text); display: grid; place-items: center; font-size: 18px;
+}
+.s-body { flex: 1; overflow-y: auto; padding: 4px 20px 24px; -webkit-overflow-scrolling: touch; }
+.s-title { font-size: 40px; font-weight: 900; letter-spacing: -1px; margin: 6px 0 14px; line-height: 1.05; }
+.s-title-row { display: flex; align-items: center; gap: 12px; }
+.s-subtitle { font-size: 20px; font-weight: 700; color: var(--s-muted); margin: -8px 0 6px; }
+.s-hint { font-size: 14px; color: var(--s-muted); margin: 0 0 12px; }
+
+/* No inset for the phone's buttons in the Modern skin: the phone keeps the page above them (setSystemBars). */
+.s-tabbar {
+  display: flex; justify-content: space-around; border-top: 1px solid var(--s-line);
+  background: var(--s-surface); padding: 8px 0 8px;
+}
+.s-tab { flex: 1; background: none; border: none; color: var(--s-muted); font-size: 13px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 0; }
+.s-tab[aria-current="page"] { color: var(--s-nav-active); }
+.s-tab svg { width: 26px; height: 26px; }
+
+/* ---- Pieces ---- */
+/* Every icon has a size: an SVG with none fills its box. */
+.s-app svg, .s-sheet svg { width: 24px; height: 24px; flex: none; }
+.s-row > svg { width: 22px; height: 22px; color: var(--s-muted); }
+.s-avatar svg { width: 26px; height: 26px; }
+.s-notice svg { width: 20px; height: 20px; }
+.s-card { background: var(--s-surface); border-radius: var(--s-radius); padding: 18px; box-shadow: var(--s-shadow); border: 1px solid var(--s-line); margin-bottom: 14px; }
+.s-balance { background: var(--s-balance-bg); color: var(--s-balance-text); border: none; position: relative; overflow: hidden; }
+html[data-scheme="dark"] .s-balance { border: 1px solid #3a3a3a; }
+.s-balance .s-hint, .s-balance .s-balance-other { color: var(--s-balance-muted); }
+.s-balance-label { font-size: 16px; color: var(--s-balance-muted); font-weight: 700; }
+html[data-scheme="dark"] .s-balance-amount small { color: var(--s-gold); }
+.s-balance-amount { font-size: 42px; font-weight: 900; letter-spacing: -1px; margin-top: 6px; overflow-wrap: anywhere; }
+.s-balance-amount small { font-size: 24px; font-weight: 800; margin-left: 6px; }
+.s-balance-other { margin-top: 10px; font-size: 13px; color: var(--s-muted); }
+
+.s-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+.s-btn {
+  border: none; border-radius: 18px; padding: 18px 12px; font-size: 20px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
+}
+.s-btn:disabled { opacity: 0.5; }
+/* A button that still waits on the form: dimmed, and tapping it says what is missing. */
+.s-btn-waiting { opacity: 0.5; }
+.s-btn-primary { background: var(--s-primary); color: var(--s-on-primary); }
+.s-btn-secondary { background: var(--s-secondary); color: var(--s-on-secondary); }
+.s-btn-quiet { background: var(--s-surface); color: var(--s-text); border: 1px solid var(--s-line); font-size: 17px; }
+.s-btn-small { padding: 10px 18px; font-size: 16px; width: auto; border-radius: 14px; }
+.s-btn svg { width: 24px; height: 24px; }
+
+.s-row { display: flex; align-items: center; gap: 14px; padding: 12px 0; border: none; background: none; width: 100%; text-align: left; color: inherit; }
+.s-row + .s-row { border-top: 1px solid var(--s-line); }
+/* A row that is itself a card keeps the card's surface. */
+.s-card.s-row { background: var(--s-surface); border: 1px solid var(--s-line); padding: 14px 18px; }
+.s-row-main { flex: 1; min-width: 0; }
+.s-row-title { font-size: 18px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-row-sub { font-size: 14px; color: var(--s-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-row-end { text-align: right; }
+.s-amount { font-size: 18px; font-weight: 800; white-space: nowrap; }
+.s-amount.in { color: var(--s-positive); }
+.s-amount.out { color: var(--s-negative); }
+
+.s-avatar {
+  width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; flex: none;
+  font-size: 22px; font-weight: 800; background: var(--s-avatar-a); color: var(--s-avatar-a-text); overflow: hidden;
+}
+.s-avatar.b { background: var(--s-avatar-b); color: var(--s-avatar-b-text); }
+.s-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.s-avatar.large { width: 88px; height: 88px; font-size: 36px; }
+
+.s-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.s-section-title { font-size: 24px; font-weight: 900; }
+.s-chip { border: none; border-radius: 999px; padding: 8px 14px; font-weight: 800; font-size: 15px; background: var(--s-gold); color: #0f0f0f; }
+
+.s-field { margin-bottom: 14px; }
+.s-label { display: block; font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+.s-input {
+  width: 100%; box-sizing: border-box; border-radius: 16px; border: 1px solid var(--s-line); background: var(--s-surface);
+  color: var(--s-text); padding: 16px; font-size: 17px; font-family: inherit;
+}
+.s-amount-input { font-size: 44px; font-weight: 900; border: none; background: transparent; padding: 0; width: 100%; color: var(--s-text); }
+.s-quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+.s-quick button { border: none; border-radius: 16px; padding: 12px 4px; font-weight: 800; font-size: 18px; background: var(--s-surface-2); color: var(--s-text); }
+.s-quick button[aria-pressed="true"] { background: var(--s-primary); color: var(--s-on-primary); }
+
+.s-notice { border-radius: 16px; padding: 14px; background: var(--s-surface-2); color: var(--s-text); font-size: 14px; display: flex; gap: 10px; margin-bottom: 14px; }
+.s-error { background: #fde4ec; color: #9b0c3c; }
+html[data-scheme="dark"] .s-error { background: #3a0d1c; color: #ff9ab9; }
+
+.s-qr { background: #ffffff; border-radius: 20px; padding: 16px; width: fit-content; margin: 8px auto; }
+.s-qr img { display: block; width: 220px; height: 220px; }
+.s-code-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.4;
+  word-break: break-all; resize: none; color: var(--s-text);
+}
+
+.s-seg { display: grid; grid-auto-flow: column; gap: 6px; background: var(--s-surface-2); border-radius: 14px; padding: 4px; }
+.s-seg button { border: none; border-radius: 10px; padding: 10px; font-weight: 700; font-size: 15px; background: transparent; color: var(--s-text); }
+.s-seg button[aria-pressed="true"] { background: var(--s-fuchsia); color: #ffffff; }
+
+.s-sheet-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: flex-end; z-index: 9000; }
+.s-sheet {
+  width: 100%; background: var(--s-bg); color: var(--s-text); border-radius: 26px 26px 0 0;
+  padding: 22px 20px 22px; max-height: 90%; overflow-y: auto;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.s-sheet h2 { font-size: 26px; font-weight: 900; margin: 0 0 8px; }
+/* A cue's plain pop-up (FxPopup in the Modern skin): the title, the amount, the words. */
+.s-sheet-title { display: flex; align-items: center; gap: 10px; }
+.s-sheet-coin { width: 30px; height: 30px; }
+.s-sheet-amount { font-size: 34px; font-weight: 900; letter-spacing: -1px; margin: 4px 0 6px; color: var(--s-gold-deep); }
+.s-sheet[data-tone="bad"] .s-sheet-amount { color: var(--s-fuchsia); }
+.s-sheet > .s-btn { margin-top: 14px; }
+.s-sheet p { font-size: 16px; line-height: 1.45; color: var(--s-muted); }
+.s-sheet ul { padding-left: 20px; font-size: 15px; line-height: 1.5; }
+.s-stack { display: grid; gap: 10px; }
+.s-empty { text-align: center; color: var(--s-muted); padding: 30px 10px; font-size: 16px; }
+
+/* ---- The rest of DSM, on the Wallet tab ---- */
+.s-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+.s-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 6px; border: none;
+  border-radius: 18px; background: var(--s-surface); color: var(--s-text); box-shadow: var(--s-shadow);
+  font-family: inherit; font-size: 14px; font-weight: 800;
+}
+.s-tile svg { width: 26px; height: 26px; color: var(--s-fuchsia); }
+.s-tile:nth-child(even) svg { color: var(--s-gold-deep); }
+.s-coin { width: 40px; height: 40px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; }
+.s-coin-img { width: 40px; height: 40px; border-radius: 50%; }
+.s-token-pick { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.s-token-pick button {
+  border: none; border-radius: 999px; padding: 8px 14px; font-weight: 800; font-size: 15px;
+  background: var(--s-surface-2); color: var(--s-text);
+}
+.s-token-pick button[aria-pressed="true"] { background: var(--s-primary); color: var(--s-on-primary); }
+
+/* A token's still mark (FlatTokenMark): its policy icon, or its letter in a badge. */
+.s-token-flat {
+  display: inline-grid; place-items: center; flex: 0 0 auto; border-radius: 50%; overflow: hidden;
+  aspect-ratio: 1; object-fit: cover; image-rendering: auto; container-type: size;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-weight: 900; line-height: 1;
+  background: var(--s-surface-2); color: var(--s-text);
+}
+/* The letter is sized by its badge: the badge is the size container, so the letter scales with it. */
+.s-token-letter { font-size: 55cqh; line-height: 1; }
+/* The token's logo shape, white in its badge. */
+.s-token-shape { width: 72%; height: 72%; object-fit: contain; image-rendering: auto; }
+.s-token-flat[data-tone="fuchsia"] { background: var(--s-fuchsia); color: #ffffff; }
+.s-token-flat[data-tone="gold"] { background: var(--s-gold); color: #0f0f0f; }
+/* A still mark standing where coin artwork had its own size: it fills that box. */
+.s-token-fill { width: 100%; height: 100%; }
+/* The token-creation preview's mark stands bare: no disc around it. */
+html[data-skin="modern"] .sb-coin-tile { background: transparent; border: none; box-shadow: none; padding: 0; }
+
+/* A DGen screen opened from the Modern skin (the lock, a connect request):
+   drawn in the Modern colours, under a Back button. */
+.s-classic {
+  --bg: var(--s-bg); --bg-secondary: var(--s-surface); --text: var(--s-text); --text-dark: var(--s-text);
+  --border: var(--s-line); --stateboy-screen: var(--s-surface); --stateboy-dark: var(--s-text);
+  --stateboy-gray: var(--s-muted); --text-disabled: var(--s-muted);
+  font-size: 15px;
+}
+
+/* ---- Before the wallet is ready ---- */
+.s-step { flex: 1; text-align: center; padding: 10px 6px; border-radius: 10px; font-weight: 700; font-size: 14px; color: var(--s-muted); }
+.s-step[aria-current="step"] { background: var(--s-gold); color: #0f0f0f; }
+.s-seg[role="list"] { display: flex; }
+.s-words { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.s-words li { background: var(--s-surface-2); border-radius: 14px; padding: 12px 14px; font-size: 19px; font-weight: 800; display: flex; gap: 10px; align-items: baseline; }
+.s-words li span { color: var(--s-muted); font-size: 14px; font-weight: 700; min-width: 20px; }
+.s-word-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.s-waiting { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 70%; padding-top: 40px; }
+.s-spinner { width: 54px; height: 54px; border-radius: 50%; border: 5px solid var(--s-surface-2); border-top-color: var(--s-primary); animation: s-spin 0.9s linear infinite; margin-bottom: 18px; }
+@keyframes s-spin { to { transform: rotate(360deg); } }
+.s-progress { width: 100%; height: 14px; border-radius: 999px; background: var(--s-surface-2); overflow: hidden; margin-top: 10px; }
+.s-progress > div { height: 100%; background: linear-gradient(90deg, var(--s-gold), var(--s-fuchsia)); border-radius: 999px; transition: width 180ms ease-out; }
+
+/* ---- The owner's banner, photo and name (ProfileHeader) ---- */
+.s-profile {
+  position: relative; display: block; width: 100%; padding: 0 0 12px; margin: 8px 0 14px; border: none;
+  background: none; color: var(--s-text); text-align: center; font-family: inherit;
+}
+.s-profile-banner {
+  display: block; width: 100%; aspect-ratio: 3 / 1; border-radius: var(--s-radius);
+  background: linear-gradient(120deg, var(--s-gold) 0%, var(--s-fuchsia) 100%) center / cover no-repeat;
+  position: relative; overflow: hidden;
+}
+.s-profile-photo {
+  position: relative; display: grid; place-items: center; width: 96px; height: 96px; margin: -48px auto 0;
+  border-radius: 50%; border: 4px solid var(--s-bg); background: var(--s-surface-2); color: var(--s-text);
+  font-size: 40px; font-weight: 900; overflow: visible;
+}
+.s-profile-photo img, .s-profile-photo > span:first-child { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: grid; place-items: center; overflow: hidden; }
+.s-profile-photo svg { width: 44px; height: 44px; }
+.s-profile-name { display: block; font-size: 26px; font-weight: 900; letter-spacing: -0.5px; margin-top: 8px; }
+.s-profile-edit .s-profile-banner, .s-profile-edit .s-profile-photo { cursor: pointer; }
+.s-profile-hint {
+  position: absolute; right: 10px; top: 10px; padding: 6px 12px; border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55); color: #ffffff; font-size: 13px; font-weight: 800;
+}
+.s-profile-camera {
+  position: absolute; right: -2px; bottom: -2px; width: 30px; height: 30px; border-radius: 50%;
+  display: grid; place-items: center; background: var(--s-fuchsia); color: #ffffff; font-size: 20px; font-weight: 900;
+  border: 3px solid var(--s-bg);
+}
+.s-profile-actions { display: flex; justify-content: center; gap: 8px; margin: 10px 0 4px; }
+
+/* The top bar's card button shows the owner's photo once there is one. */
+.s-me { overflow: hidden; padding: 0; }
+.s-me img { width: 100%; height: 100%; object-fit: cover; }
+
+/* ---- Framing a picture (ImageCropper) ---- */
+.s-crop {
+  position: fixed; inset: 0; z-index: 9500; overflow-y: auto; box-sizing: border-box;
+  padding: 18px 20px 18px;
+  background: var(--s-bg); color: var(--s-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.s-crop-title { margin: 0; font-size: 26px; font-weight: 900; text-align: center; }
+.s-crop-frame {
+  position: relative; width: 100%; max-width: 420px; margin: 6px auto; overflow: hidden;
+  touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab;
+  background: #000000; border-radius: var(--s-radius);
+}
+.s-crop-frame:active { cursor: grabbing; }
+.s-crop-banner { aspect-ratio: 3 / 1; }
+.s-crop-circle { aspect-ratio: 1 / 1; max-width: 320px; }
+.s-crop-frame img { position: absolute; max-width: none; pointer-events: none; }
+/* The photo's circle: the picture outside it is dimmed. */
+.s-crop-ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.55); border: 3px solid #ffffff; pointer-events: none; }
+.s-crop-zoom { display: flex; align-items: center; gap: 12px; max-width: 420px; width: 100%; margin: 4px auto; font-weight: 700; }
+.s-crop-zoom input { flex: 1; accent-color: var(--s-fuchsia); }
+.s-crop .s-actions { max-width: 420px; width: 100%; margin: 8px auto 0; }
+
+/* A small switch in a card's head (the wallet's Tokens / Objects). */
+.s-switch {
+  display: inline-flex; align-items: center; gap: 8px; border: none; background: none; padding: 4px 0;
+  color: var(--s-muted); font-family: inherit; font-size: 14px; font-weight: 700;
+}
+.s-switch[aria-checked="true"] { color: var(--s-text); }
+.s-switch-knob { position: relative; width: 40px; height: 24px; border-radius: 999px; background: var(--s-surface-2); flex: 0 0 auto; transition: background 120ms ease-out; }
+.s-switch-knob::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
+  background: #ffffff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); transition: transform 120ms ease-out;
+}
+.s-switch[aria-checked="true"] .s-switch-knob { background: var(--s-fuchsia); }
+.s-switch[aria-checked="true"] .s-switch-knob::after { transform: translateX(16px); }
+
+/* A contact's picture, tapped to choose a photo for them. */
+.s-avatar-pick { position: relative; display: inline-block; cursor: pointer; }
+
+/* Where Bluetooth pairing stands (People): fuchsia, with its icon. */
+.s-pairing { align-items: center; background: var(--s-avatar-a); color: var(--s-text); }
+.s-pairing svg { color: var(--s-fuchsia); flex: 0 0 auto; }
+html[data-scheme="dark"] .s-pairing { background: #2a0a17; }
+.s-paired { align-items: center; gap: 4px; }
+.s-paired svg { width: 15px; height: 15px; color: var(--s-fuchsia); }

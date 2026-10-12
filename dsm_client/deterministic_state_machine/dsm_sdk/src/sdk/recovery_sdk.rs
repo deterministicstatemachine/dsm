@@ -19,12 +19,36 @@ use dsm::recovery::capsule::{
 };
 use dsm::types::error::DsmError;
 
-/// In-memory cached recovery key (derived from mnemonic via Argon2id + HKDF-BLAKE3).
+/// The number of words of a DSM wallet mnemonic: 24, i.e. 256 bits of entropy.
+pub const WALLET_MNEMONIC_WORDS: usize = 24;
+
+/// Parse a DSM wallet mnemonic: a valid English BIP39 phrase of exactly 24 words. Any other
+/// length is refused outright, never reinterpreted: a 12- or 18-word phrase carries 128 or 192
+/// bits, and every identity secret is only as strong as the mnemonic it comes from.
+pub fn parse_wallet_mnemonic(phrase: &str) -> Result<bip39::Mnemonic, DsmError> {
+    let mnemonic = bip39::Mnemonic::parse_in(bip39::Language::English, phrase.trim())
+        .map_err(|e| DsmError::InvalidState(format!("invalid mnemonic: {e}")))?;
+    if mnemonic.word_count() != WALLET_MNEMONIC_WORDS {
+        return Err(DsmError::invalid_parameter(format!(
+            "a DSM wallet mnemonic has {WALLET_MNEMONIC_WORDS} words (256 bits); this one has {}. \
+             Shorter phrases are not supported.",
+            mnemonic.word_count()
+        )));
+    }
+    Ok(mnemonic)
+}
+
+/// The BIP39 wallet seed (empty passphrase) of a 24-word DSM wallet mnemonic.
+pub fn wallet_seed_from_mnemonic(phrase: &str) -> Result<[u8; 64], DsmError> {
+    Ok(parse_wallet_mnemonic(phrase)?.to_seed(""))
+}
+
+/// In-memory cached recovery key (key schedule KS1: an Expand of the wallet-root Extract).
 /// Also persisted to SQLite encrypted by a device-bound key so it survives app restarts.
 static RECOVERY_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
 /// In-memory cached recovery authority SPHINCS+ keypair (public, secret).
-/// Derived from the mnemonic via a separate HKDF domain (`DSM/recovery-authority`).
+/// Derived from the wallet root via a separate KS1 Expand label (`DSM/recovery-authority/v2`).
 /// Used to sign tombstone and succession receipts during device recovery.
 /// Never persisted to disk — cleared alongside the encryption key.
 static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
@@ -34,6 +58,16 @@ static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::ne
 /// ML-KEM coins}` are re-derived from it on demand via the wallet/recovery unlock path.
 /// NEVER persisted; populated at unlock alongside the recovery key, cleared with it.
 static WALLET_SEED_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Digest of the last mnemonic [`RecoverySDK::generate_mnemonic`] produced in this process.
+/// A NEW identity may be created only from that phrase: a 24-word phrase typed in proves
+/// nothing about its entropy, while one drawn here from the OS CSPRNG has 256 bits.
+static GENERATED_MNEMONIC: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+fn mnemonic_digest(phrase: &str) -> [u8; 32] {
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    *blake3::hash(words.join(" ").as_bytes()).as_bytes()
+}
 
 /// SDK for DSM recovery operations
 pub struct RecoverySDK;
@@ -97,7 +131,10 @@ impl RecoverySDK {
         mnemonic: &str,
         counter: u64,
     ) -> Result<EncryptedCapsule, DsmError> {
-        create_recovery_capsule(smt_root, counterparty_tips, rollup, mnemonic, counter)
+        let mut seed = wallet_seed_from_mnemonic(mnemonic)?;
+        let out = create_recovery_capsule(smt_root, counterparty_tips, rollup, &seed, counter);
+        zeroize::Zeroize::zeroize(&mut seed);
+        out
     }
 
     /// Decrypt and verify a recovery capsule from NFC ring
@@ -112,7 +149,10 @@ impl RecoverySDK {
         encrypted_capsule: &EncryptedCapsule,
         mnemonic: &str,
     ) -> Result<RecoveryCapsule, DsmError> {
-        decrypt_recovery_capsule(encrypted_capsule, mnemonic)
+        let mut seed = wallet_seed_from_mnemonic(mnemonic)?;
+        let out = decrypt_recovery_capsule(encrypted_capsule, &seed);
+        zeroize::Zeroize::zeroize(&mut seed);
+        out
     }
 
     /// Create tombstone receipt to invalidate old device binding
@@ -246,7 +286,10 @@ impl RecoverySDK {
     /// # Returns
     /// Tuple of (capsule_index, encrypted capsule bytes serialized for NFC)
     pub fn create_capsule_from_current_state(mnemonic: &str) -> Result<(u64, Vec<u8>), DsmError> {
-        let key = derive_recovery_key(mnemonic)?;
+        let mut seed = wallet_seed_from_mnemonic(mnemonic)?;
+        let key = derive_recovery_key(&seed);
+        zeroize::Zeroize::zeroize(&mut seed);
+        let key = key?;
         Self::create_capsule_from_current_state_with_key(&key)
     }
 
@@ -303,7 +346,25 @@ impl RecoverySDK {
                 None::<std::io::Error>,
             )
         })?;
-        Ok(mnemonic.to_string())
+        zeroize::Zeroize::zeroize(&mut entropy);
+        let phrase = mnemonic.to_string();
+        let mut guard = GENERATED_MNEMONIC.lock().map_err(|e| {
+            DsmError::InvalidState(format!("Generated mnemonic mutex poisoned: {e}"))
+        })?;
+        *guard = Some(mnemonic_digest(&phrase));
+        Ok(phrase)
+    }
+
+    /// Whether `phrase` is the mnemonic [`Self::generate_mnemonic`] last produced in this
+    /// process. Wallet creation requires it; unlock and restore do not (a restored phrase's
+    /// entropy was fixed when its identity was created).
+    pub fn is_generated_mnemonic(phrase: &str) -> Result<bool, DsmError> {
+        use subtle::ConstantTimeEq;
+        let digest = mnemonic_digest(phrase);
+        let guard = GENERATED_MNEMONIC.lock().map_err(|e| {
+            DsmError::InvalidState(format!("Generated mnemonic mutex poisoned: {e}"))
+        })?;
+        Ok(guard.is_some_and(|held| bool::from(held.ct_eq(&digest))))
     }
 
     /// The cached BIP39 wallet seed (the Genesis v2 root-secret input), if the mnemonic
@@ -315,14 +376,21 @@ impl RecoverySDK {
 
     /// Derive recovery key from mnemonic and cache it in memory.
     ///
-    /// Key derivation: S_mn = Argon2id("DSM/recovery-ring\0", mnemonic)
-    ///                 K_R  = BLAKE3 derive-key("DSM/recovery-aead\0", S_mn)
-    ///                 K_A  = BLAKE3 derive-key("DSM/recovery-authority\0", S_mn)
+    /// Key derivation (key schedule KS1), from a 24-word mnemonic only:
+    ///                 wallet_seed = BIP39 seed of the mnemonic
+    ///                 PRK_w = Extract("DSM/kdf/wallet-root/v1", wallet_seed)
+    ///                 K_R  = Expand(PRK_w, "DSM/recovery-aead/v2")
+    ///                 K_A  = Expand(PRK_w, "DSM/recovery-authority/v2")
     ///                 (pk, sk) = SPHINCS+.generate_from_seed(K_A)
     ///
     /// Both the encryption key and the authority keypair are cached in memory.
     pub fn derive_and_cache_key(mnemonic: &str) -> Result<(), DsmError> {
-        let key = derive_recovery_key(mnemonic)?;
+        let mut wallet_seed = wallet_seed_from_mnemonic(mnemonic)?;
+        let key = derive_recovery_key(&wallet_seed);
+        let authority_seed = derive_recovery_authority_seed(&wallet_seed);
+        zeroize::Zeroize::zeroize(&mut wallet_seed);
+        let key = key?;
+        let authority_seed = authority_seed?;
         {
             let mut guard = RECOVERY_KEY
                 .lock()
@@ -337,9 +405,7 @@ impl RecoverySDK {
         // without the mnemonic. The seed is a one-way BIP39 derivation — NOT the mnemonic,
         // never reversible to it; the mnemonic itself is never persisted.
         {
-            let seed = bip39::Mnemonic::parse(mnemonic)
-                .map_err(|e| DsmError::InvalidState(format!("invalid mnemonic: {e}")))?
-                .to_seed("");
+            let seed = wallet_seed_from_mnemonic(mnemonic)?;
             {
                 let mut guard = WALLET_SEED_CACHE
                     .lock()
@@ -360,7 +426,6 @@ impl RecoverySDK {
         }
 
         // Derive and cache the recovery authority SPHINCS+ keypair.
-        let authority_seed = derive_recovery_authority_seed(mnemonic)?;
         let keypair = dsm::crypto::sphincs::generate_keypair_from_seed(
             dsm::crypto::sphincs::SphincsVariant::SPX256f,
             &authority_seed,
@@ -2273,6 +2338,92 @@ impl RecoverySDK {
 mod tests {
     use super::*;
     use dsm::recovery::ReceiptRollup;
+
+    /// A phrase the wallet generates carries 256 bits of entropy (24 words, 32 entropy
+    /// bytes from the OS CSPRNG), may create a wallet, and restoring from it alone
+    /// reproduces the identity byte for byte: G, the nonce, DevID, the AK, the GRK,
+    /// Smaster, the ML-KEM key and the recovery authority.
+    #[test]
+    #[serial_test::serial]
+    fn a_generated_phrase_has_256_bits_and_restores_the_same_identity() {
+        use dsm::core::identity::genesis::create_genesis_v3_self_attested;
+        use dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested;
+        RecoverySDK::clear_wallet_seed_cache();
+        let phrase = RecoverySDK::generate_mnemonic().expect("a generated phrase");
+        let mnemonic = parse_wallet_mnemonic(&phrase).expect("a 24-word phrase");
+        assert_eq!(mnemonic.word_count(), 24);
+        assert_eq!(mnemonic.to_entropy().len(), 32, "256 bits of entropy");
+        assert!(RecoverySDK::is_generated_mnemonic(&phrase).expect("the generated-phrase lock"));
+
+        let aph = dsm::core::identity::genesis_v2::genesis_authority_policy_hash();
+        let net: &[u8] = b"dsm-beta";
+        let seed = wallet_seed_from_mnemonic(&phrase).expect("the wallet seed");
+        let created = create_genesis_v3_self_attested(&seed, net, 0, 0, 3, &aph).expect("genesis");
+        let created_tree =
+            derive_genesis_v3_self_attested(&seed, net, 0, 0, 3, &aph).expect("tree");
+
+        // A fresh session that holds only the phrase.
+        RecoverySDK::clear_wallet_seed_cache();
+        RecoverySDK::derive_and_cache_key(&phrase).expect("restore from the phrase");
+        let restored_seed = RecoverySDK::get_cached_wallet_seed().expect("the restored seed");
+        assert_eq!(restored_seed.as_slice(), seed.as_slice());
+        let restored =
+            create_genesis_v3_self_attested(&restored_seed, net, 0, 0, 3, &aph).expect("genesis");
+        let restored_tree =
+            derive_genesis_v3_self_attested(&restored_seed, net, 0, 0, 3, &aph).expect("tree");
+
+        assert_eq!(created.state.hash, restored.state.hash);
+        assert_eq!(created.genesis_nonce, restored.genesis_nonce);
+        assert_eq!(created.state.device_id, restored.state.device_id);
+        assert_eq!(
+            created.state.signing_key.public_key,
+            restored.state.signing_key.public_key
+        );
+        assert_eq!(
+            created.state.kyber_keypair.public_key,
+            restored.state.kyber_keypair.public_key
+        );
+        assert_eq!(created_tree.grk_public, restored_tree.grk_public);
+        assert_eq!(created_tree.smaster, restored_tree.smaster);
+        assert_eq!(created_tree.s0, restored_tree.s0);
+
+        let authority_seed =
+            dsm::recovery::capsule::derive_recovery_authority_seed(&seed).expect("authority seed");
+        let authority = dsm::crypto::sphincs::generate_keypair_from_seed(
+            dsm::crypto::sphincs::SphincsVariant::SPX256f,
+            &authority_seed,
+        )
+        .expect("authority keypair");
+        let (cached_pk, _sk) =
+            RecoverySDK::get_cached_authority_keypair().expect("the cached recovery authority");
+        assert_eq!(cached_pk, authority.public_key);
+        RecoverySDK::clear_wallet_seed_cache();
+    }
+
+    /// A valid 24-word phrase the wallet did not generate cannot create a wallet: the
+    /// length check says nothing about entropy, generation does.
+    #[test]
+    #[serial_test::serial]
+    fn a_typed_in_phrase_is_not_a_generated_one() {
+        let generated = RecoverySDK::generate_mnemonic().expect("a generated phrase");
+        let typed = bip39::Mnemonic::from_entropy(&[0x42; 32])
+            .expect("a phrase")
+            .to_string();
+        assert_ne!(generated, typed);
+        assert!(!RecoverySDK::is_generated_mnemonic(&typed).expect("the generated-phrase lock"));
+        assert!(RecoverySDK::is_generated_mnemonic(&generated).expect("the generated-phrase lock"));
+    }
+
+    /// Phrases shorter than 24 words are refused, never reinterpreted.
+    #[test]
+    fn a_twelve_word_phrase_is_refused() {
+        let twelve = "abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon about";
+        match parse_wallet_mnemonic(twelve) {
+            Ok(m) => panic!("a {}-word phrase was accepted", m.word_count()),
+            Err(e) => assert!(e.to_string().contains("24 words"), "{e}"),
+        }
+    }
 
     #[test]
     fn test_rollup_operations_via_sdk() -> Result<(), DsmError> {
