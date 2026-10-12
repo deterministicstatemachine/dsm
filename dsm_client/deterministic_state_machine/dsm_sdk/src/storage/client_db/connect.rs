@@ -533,6 +533,27 @@ pub fn log(session_id: &[u8; 32]) -> Result<Vec<LogRow>> {
 }
 
 /// The signed answers of `session_id` not yet delivered, in order.
+/// Keep the wallet's signed disconnect notice (seq 0) to deliver when the
+/// application can be reached; it answers no request and counts nothing.
+pub fn keep_disconnect_notice(session_id: &[u8; 32], notice: &[u8]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO connect_log(session_id, seq, summary, outcome, detail, response, delivery) \
+         VALUES (?1, 0, ?2, 0, ?3, ?4, ?5)",
+        params![
+            session_id.as_slice(),
+            "Disconnected",
+            "the player disconnected this application; it is told at the next sync",
+            notice,
+            UNSENT
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn undelivered(session_id: &[u8; 32]) -> Result<Vec<(u64, Vec<u8>)>> {
     let binding = get_connection()?;
     let conn = binding
@@ -602,10 +623,13 @@ pub struct AppSession {
     /// The `AppConnectAcceptV1` bytes, verified when they arrived.
     pub accept: Vec<u8>,
     pub next_seq: u64,
+    /// Connected until the wallet's signed disconnect arrives (DSM Amendment
+    /// A11: a grant ends when the player disconnects the application).
+    pub connected: SessionStatus,
 }
 
 const APP_SESSION_COLUMNS: &str =
-    "session_id, offer_digest, wallet_device_id, wallet_genesis, wallet_ak, accept, next_seq";
+    "session_id, offer_digest, wallet_device_id, wallet_genesis, wallet_ak, accept, next_seq, status";
 
 fn app_session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppSession> {
     Ok(AppSession {
@@ -616,6 +640,7 @@ fn app_session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppSession> {
         wallet_ak: r.get(4)?,
         accept: r.get(5)?,
         next_seq: u64_of(r, 6)?,
+        connected: status_of(&r.get::<_, String>(7)?)?,
     })
 }
 
@@ -642,7 +667,7 @@ pub fn app_insert_session(s: &AppSession) -> Result<()> {
     tx.execute(
         &format!(
             "INSERT INTO connect_app_sessions({APP_SESSION_COLUMNS}) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
         ),
         params![
             s.session_id.as_slice(),
@@ -652,10 +677,45 @@ pub fn app_insert_session(s: &AppSession) -> Result<()> {
             s.wallet_ak,
             s.accept,
             i64_of(s.next_seq)?,
+            status_text(s.connected),
         ],
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// The wallet of `session_id` ended the session: nothing more is asked over it.
+pub fn app_disconnect(session_id: &[u8; 32]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let changed = conn.execute(
+        "UPDATE connect_app_sessions SET status = ?2 WHERE session_id = ?1",
+        params![session_id.as_slice(), DISCONNECTED],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("no such session"));
+    }
+    Ok(())
+}
+
+/// The wallet's connected session with the application `app_device_id`, if it holds one.
+pub fn session_with_app(app_device_id: &[u8; 32]) -> Result<Option<WalletSession>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {SESSION_COLUMNS} FROM connect_sessions \
+                 WHERE app_device_id = ?1 AND status = ?2 ORDER BY session_id LIMIT 1"
+            ),
+            params![app_device_id.as_slice(), CONNECTED],
+            session_row,
+        )
+        .optional()?)
 }
 
 pub fn app_sessions() -> Result<Vec<AppSession>> {

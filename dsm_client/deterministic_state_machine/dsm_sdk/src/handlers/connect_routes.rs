@@ -510,6 +510,16 @@ impl AppRouterImpl {
                 return Err(format!("{ROUTE}: this application is already connected"));
             }
         }
+        // One connected session per application, whatever code it shows: a
+        // second approval would stack a second grant the player never meant.
+        if let Some(open) =
+            store::session_with_app(&verified.app.device_id).map_err(|e| format!("{ROUTE}: {e}"))?
+        {
+            return Err(format!(
+                "{ROUTE}: {} is already connected; disconnect it first to connect again",
+                open.display_name
+            ));
+        }
         let app_card = verified
             .body
             .app_card
@@ -698,8 +708,20 @@ impl AppRouterImpl {
     /// then fetch and process its requests in order, stopping at one that
     /// waits for the player. Answers with the connected sessions.
     async fn connect_sync(&self) -> Result<Reply, String> {
-        let sessions: Vec<store::WalletSession> = store::sessions()
-            .map_err(|e| format!("connect.sync: {e}"))?
+        let all = store::sessions().map_err(|e| format!("connect.sync: {e}"))?;
+        // A disconnected application still owed its notice is told now; nothing else goes over it.
+        for ended in all
+            .iter()
+            .filter(|s| s.connected == store::SessionStatus::Disconnected)
+        {
+            if let Err(why) = deliver_owed(ended).await {
+                log::debug!(
+                    "connect.sync: {} not told of its disconnect yet: {why}",
+                    ended.display_name
+                );
+            }
+        }
+        let sessions: Vec<store::WalletSession> = all
             .into_iter()
             .filter(|s| s.connected == store::SessionStatus::Connected)
             .collect();
@@ -1507,6 +1529,7 @@ impl AppRouterImpl {
             wallet_ak: verified.wallet.ak.clone(),
             accept: accept.encode_to_vec(),
             next_seq: 1,
+            connected: store::SessionStatus::Connected,
         };
         store::app_insert_session(&session).map_err(|e| format!("{ROUTE}: {e}"))?;
         Ok(Reply::Session(app_session_view(&session)?))
@@ -2106,6 +2129,11 @@ impl AppRouterImpl {
         let session = store::app_session(&sid)
             .map_err(|e| format!("{ROUTE}: {e}"))?
             .ok_or_else(|| format!("{ROUTE}: no such session"))?;
+        if session.connected == store::SessionStatus::Disconnected {
+            return Err(format!(
+                "{ROUTE}: the wallet disconnected this application; it can be asked nothing more"
+            ));
+        }
         use generated::app_request_body_v1::Kind as Body;
         use generated::connect_app_request_intent_v1::Kind as Intent;
         // A quote or a swap carries, for each vault this account owns that
@@ -2389,20 +2417,52 @@ fn connect_log(params: &[u8]) -> Result<Reply, String> {
     Ok(Reply::Log(generated::ConnectLogV1 { entries }))
 }
 
+/// The sequence number of the one answer that is not an answer: the wallet's
+/// signed notice that it ended the session. Requests count from 1, so no
+/// request is ever answered by it.
+pub(crate) const DISCONNECT_SEQ: u64 = 0;
+
 async fn connect_disconnect(args: &[u8]) -> Result<Reply, String> {
-    let req: generated::ConnectSessionRefV1 = body(args, "connect.disconnect")?;
+    const ROUTE: &str = "connect.disconnect";
+    let req: generated::ConnectSessionRefV1 = body(args, ROUTE)?;
     let sid = d32(&req.session_id, "the session")?;
     // A request being carried out finishes first; none starts after.
     let one = PROCESSING.lock().await;
-    store::disconnect(&sid).map_err(|e| format!("connect.disconnect: {e}"))?;
+    store::disconnect(&sid).map_err(|e| format!("{ROUTE}: {e}"))?;
     drop(one);
     let session = store::session(&sid)
-        .map_err(|e| format!("connect.disconnect: {e}"))?
-        .ok_or_else(|| "connect.disconnect: the session vanished".to_string())?;
-    Ok(Reply::Session(wallet_session_view(
-        &session,
-        String::new(),
-    )?))
+        .map_err(|e| format!("{ROUTE}: {e}"))?
+        .ok_or_else(|| format!("{ROUTE}: the session vanished"))?;
+    // The application learns of it from the wallet's own signature (the grant
+    // ends when the player disconnects: DSM Amendment A11), over the same
+    // relay its answers go over. The session is ended here first, whether or
+    // not the application can be reached: an unreachable application has lost
+    // its grant all the same, and is told the next time the wallet reaches it.
+    let notice = generated::AppResponseBodyV1 {
+        session_id: sid.to_vec(),
+        seq: DISCONNECT_SEQ,
+        outcome: generated::ConnectOutcome::Declined as i32,
+        reason: "the player disconnected this application".into(),
+        result: None,
+    }
+    .encode_to_vec();
+    let signed = generated::AppResponseV1 {
+        signature: sign_own(Signed::Response, &notice)?,
+        body: notice,
+    };
+    let told = match Relay::new(&session.endpoint, session.cert_pin) {
+        Ok(relay) => relay.respond(&signed).await.err(),
+        Err(e) => Some(e),
+    };
+    let last_error = match told {
+        None => String::new(),
+        Some(why) => {
+            store::keep_disconnect_notice(&sid, &signed.encode_to_vec())
+                .map_err(|e| format!("{ROUTE}: {e}"))?;
+            format!("the application was not told yet ({why}); it will be at the next sync")
+        }
+    };
+    Ok(Reply::Session(wallet_session_view(&session, last_error)?))
 }
 
 fn app_session_view(s: &store::AppSession) -> Result<generated::ConnectSessionV1, String> {
@@ -2416,7 +2476,10 @@ fn app_session_view(s: &store::AppSession) -> Result<generated::ConnectSessionV1
         endpoint: String::new(),
         granted: scopes_to_wire(&granted),
         last_seq: s.next_seq.saturating_sub(1),
-        status: generated::ConnectSessionStatus::Connected as i32,
+        status: match s.connected {
+            store::SessionStatus::Connected => generated::ConnectSessionStatus::Connected,
+            store::SessionStatus::Disconnected => generated::ConnectSessionStatus::Disconnected,
+        } as i32,
         spent: Vec::new(),
         scope_lines: granted
             .iter()
@@ -2505,6 +2568,15 @@ fn connect_app_respond(args: &[u8]) -> Result<Reply, String> {
         .map_err(|e| format!("{ROUTE}: {e}"))?
         .ok_or_else(|| format!("{ROUTE}: no such session"))?;
     let answer = app::verify_response(&response, &session).map_err(|e| format!("{ROUTE}: {e}"))?;
+    if answer.seq == DISCONNECT_SEQ {
+        // Not an answer: the wallet's signed notice that it ended the session.
+        // Nothing more is asked over it, and the application's screens see it.
+        store::app_disconnect(&sid).map_err(|e| format!("{ROUTE}: {e}"))?;
+        return Ok(Reply::Request(generated::ConnectRequestRefV1 {
+            session_id: sid.to_vec(),
+            seq: DISCONNECT_SEQ,
+        }));
+    }
     let (_, stored) = store::app_request(&sid, answer.seq)
         .map_err(|e| format!("{ROUTE}: {e}"))?
         .ok_or_else(|| format!("{ROUTE}: no request {} in this session", answer.seq))?;

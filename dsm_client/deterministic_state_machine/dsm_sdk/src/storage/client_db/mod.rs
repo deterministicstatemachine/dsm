@@ -511,7 +511,11 @@ fn get_database_path() -> Result<PathBuf> {
 /// every key, DevID and genesis this store records, comes from a new
 /// derivation of the same mnemonic; a store written under the earlier
 /// schedule describes keys this build no longer derives.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 30;
+///
+/// 31: an application account's session carries the wallet's status
+/// (`connect_app_sessions.status` NOT NULL): the wallet's signed disconnect
+/// ends it on the application's side too (DSM Amendment A11, MR-DSM-0292).
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 31;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1016,7 +1020,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             wallet_genesis    BLOB NOT NULL,
             wallet_ak         BLOB NOT NULL,
             accept            BLOB NOT NULL,
-            next_seq          INTEGER NOT NULL
+            next_seq          INTEGER NOT NULL,
+            status            TEXT NOT NULL CHECK (status IN ('connected', 'disconnected'))
         );
         -- Every request the application signed, and the wallet's signed
         -- answer once it posts one: a notification, never evidence.
