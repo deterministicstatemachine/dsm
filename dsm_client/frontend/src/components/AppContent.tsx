@@ -9,9 +9,13 @@ import LockScreen from './lock/LockScreen';
 import AppScreenRouter from './AppScreenRouter';
 import RecoveryPhraseScreen from './screens/RecoveryPhraseScreen';
 import { buildHomeStatusLines } from '../viewmodels/homeViewModel';
+import ModernBoot from './modern/ModernBoot';
+import type { Skin } from '../runtime/appRuntimeStore';
 
 type Props = {
   appState: AppState;
+  /** The skin in use: the Modern skin draws every phase, the Game Boy its own. */
+  skin: Skin;
   error: string | null;
   showIntro: boolean;
   introGifSrc: string;
@@ -153,6 +157,7 @@ const securingBlinkKeyframes = `
 
 export default function AppContent({
   appState,
+  skin,
   error,
   showIntro,
   introGifSrc,
@@ -174,6 +179,24 @@ export default function AppContent({
 }: Props) {
   if (showIntro) {
     return <SplashController showIntro={showIntro} introGifSrc={introGifSrc} />;
+  }
+
+  // The Modern skin draws every phase itself, from the first screen.
+  if (skin === 'modern') {
+    return (
+      <ModernBoot
+        appState={appState}
+        error={error}
+        securingProgress={securingProgress}
+        currentScreen={currentScreen}
+        navigate={navigate}
+        handleGenerateGenesis={handleGenerateGenesis}
+        cancelPhraseBackup={cancelPhraseBackup}
+        answerPhraseCheck={answerPhraseCheck}
+        eraTokenSrc={eraTokenSrc}
+        btcLogoSrc={btcLogoSrc}
+      />
+    );
   }
 
   const errorMenuItems = ['RETRY CONNECTION', 'VIEW ERROR LOG'];

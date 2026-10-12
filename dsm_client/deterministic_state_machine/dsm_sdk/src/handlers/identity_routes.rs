@@ -61,12 +61,21 @@ pub(crate) const CONTACT_CODE_PREFIX: &str = "dsm:contact/v3:";
 /// no nodes.
 pub(crate) fn contact_card() -> Result<generated::ContactQrV3, DsmError> {
     let own = own_identity()?;
+    // What the owner's own card shares, when the owner made one (DSM
+    // Amendment A17): their name, email and phone. Display only.
+    let shared = crate::sdk::contact_profile::own_profile().map_err(DsmError::InvalidState)?;
+    let (preferred_alias, email, phone) = match shared {
+        Some(card) => (card.display_name, card.email, card.phone),
+        None => (String::new(), String::new(), String::new()),
+    };
     Ok(generated::ContactQrV3 {
         device_id: own.device_id.to_vec(),
         network: committed_network()?,
         genesis_hash: own.genesis.to_vec(),
         signing_public_key: own.ak,
-        ..Default::default()
+        preferred_alias,
+        email,
+        phone,
     })
 }
 
@@ -184,6 +193,35 @@ mod tests {
         assert_eq!(read_contact_code(&code).expect("the code reads back"), card);
     }
 
+    /// The owner's card rides on the contact code (DSM Amendment A17): the
+    /// name, email and phone the owner chose to share.
+    #[test]
+    #[serial_test::serial]
+    fn the_contact_code_carries_what_the_owners_card_shares() {
+        identity();
+        let blank = read_contact_code(&contact_code().expect("code")).expect("reads");
+        assert_eq!(
+            (blank.preferred_alias.as_str(), blank.email.as_str()),
+            ("", "")
+        );
+        crate::sdk::contact_profile::set_own_profile(generated::ContactProfileV1 {
+            display_name: "Dana".into(),
+            email: "dana@example.com".into(),
+            phone: "+1 555 0199".into(),
+            phone_lookup_key: String::new(),
+        })
+        .expect("stored");
+        let card = read_contact_code(&contact_code().expect("code")).expect("reads");
+        assert_eq!(
+            (
+                card.preferred_alias.as_str(),
+                card.email.as_str(),
+                card.phone.as_str()
+            ),
+            ("Dana", "dana@example.com", "+1 555 0199"),
+        );
+    }
+
     /// A card naming another network is refused before any directory read:
     /// its device's entry is on that network's set.
     #[test]
@@ -249,6 +287,8 @@ mod tests {
             genesis_hash: vec![0xB1; 32],
             signing_public_key: vec![0xB2; 64],
             preferred_alias: "bob".into(),
+            email: String::new(),
+            phone: String::new(),
         };
         let code = code_of(&card);
         assert_eq!(

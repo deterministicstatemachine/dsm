@@ -7,6 +7,7 @@ import type { ContactsState } from '../contexts/ContactsContext';
 import type { AddContactResult, ContactCard } from '../dsm/types';
 import { mapContactList } from '../domain/mappers';
 import logger from '../utils/logger';
+import type { PersonProfile } from '../domain/types';
 
 
 async function awaitWithFrameBudget<T>(promise: Promise<T>, maxFrames = 360): Promise<T> {
@@ -130,9 +131,10 @@ class ContactsStore {
 
   /**
    * Adds the contact a card names under `alias` (empty: Rust names it by its
-   * device) and answers what Rust answered.
+   * device), with the person's details when there are any, and answers what
+   * Rust answered.
    */
-  addContact = async (alias: string, card: ContactCard): Promise<AddContactResult> => {
+  addContact = async (alias: string, card: ContactCard, profile?: PersonProfile): Promise<AddContactResult> => {
     this.setState({ isLoading: true, error: null });
     try {
       const result = await dsmClient.addContact({
@@ -140,6 +142,7 @@ class ContactsStore {
         deviceId: card.deviceId,
         genesisHash: card.genesisHash,
         signingPublicKey: card.signingPublicKey,
+        profile,
       });
       if (result.accepted) {
         await this.refreshContacts();
@@ -151,6 +154,13 @@ class ContactsStore {
     } finally {
       this.setState({ isLoading: false });
     }
+  };
+
+  /** Replaces the details the wallet holds for a contact, then reads the list again. */
+  setProfile = async (deviceIdB32: string, profile: PersonProfile): Promise<PersonProfile> => {
+    const stored = await dsmClient.setContactProfile(deviceIdB32, profile);
+    await this.refreshContacts();
+    return stored;
   };
 
   private emit(): void {

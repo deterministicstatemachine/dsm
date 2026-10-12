@@ -84,7 +84,7 @@ pub fn create_genesis_v3_self_attested(
 
     // ML-KEM (Kyber) keypair from Smaster — the same context the master-keypair derivation uses.
     let (kyber_public, kyber_secret) =
-        crate::crypto::kyber::generate_kyber_keypair_from_entropy(&v3.smaster, "DSM/kyber\0")?;
+        crate::crypto::kyber::generate_kyber_identity_keypair(&v3.smaster)?;
 
     let state = GenesisState {
         hash: v3.g,

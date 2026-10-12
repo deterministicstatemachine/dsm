@@ -4,6 +4,7 @@ import { FxCanvas } from './FxCanvas';
 import { isFxEngineReady, loadFxEngine, type FxAnim } from './fxEngine';
 import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
 import { TokenMark } from '../TokenMark';
+import { skinShown, useAppRuntimeStore } from '../../runtime/appRuntimeStore';
 
 export type FxTone = 'good' | 'bad' | 'neutral';
 
@@ -25,6 +26,67 @@ export interface FxPopupProps {
   onClose: () => void;
 }
 
+/** B, A, Escape and OK close a cue, and it takes the focus when it opens. */
+function useCueClose(onClose: () => void) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  const close = useCallback(() => onCloseRef.current(), []);
+  useBackButton(true, close);
+  useConfirmButton(true, close);
+
+  useEffect(() => {
+    dialogRef.current?.focus({ preventScroll: true });
+  }, []);
+  return { dialogRef, close };
+}
+
+/** How long the Modern skin's plain pop-up stays before an auto-close. */
+const PLAIN_LINGER_MS = 3_500;
+
+/**
+ * The cue as the skin in use shows it: an animated scene on the DGen Game Boy,
+ * a plain pop-up in the Modern skin, which has no animations.
+ */
+export function FxPopup(props: FxPopupProps) {
+  const runtime = useAppRuntimeStore();
+  return skinShown(runtime) === 'modern' ? <PlainPopup {...props} /> : <ScenePopup {...props} />;
+}
+
+/** The Modern skin's cue: the words, the amount, and OK. */
+function PlainPopup({ title, caption, amount, coin, autoClose, tone = 'good', okLabel = 'OK', onClose }: FxPopupProps) {
+  const { dialogRef, close } = useCueClose(onClose);
+
+  useEffect(() => {
+    if (!(autoClose ?? tone !== 'bad')) return;
+    const timer = setTimeout(close, PLAIN_LINGER_MS);
+    return () => clearTimeout(timer);
+  }, [autoClose, tone, close]);
+
+  return (
+    <div className="s-sheet-backdrop" onClick={close} data-testid="fx-popup">
+      <div
+        ref={dialogRef}
+        className="s-sheet"
+        role="dialog"
+        aria-label={title}
+        tabIndex={-1}
+        data-tone={tone}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="s-sheet-title">
+          {coin ? <TokenMark ticker={coin.ticker} iconUrl={coin.iconUrl} className="s-sheet-coin" /> : null}
+          {title}
+        </h2>
+        {amount ? <div className="s-sheet-amount">{amount}</div> : null}
+        {caption ? <p>{caption}</p> : null}
+        <button type="button" className="s-btn s-btn-primary" onClick={close}>{okLabel}</button>
+      </div>
+    </div>
+  );
+}
+
 /** Hard ceiling for an auto-closing popup, in case the engine never loads. */
 const AUTO_CLOSE_MAX_MS = 11_000;
 /** How long the final frame lingers before an auto-close. */
@@ -35,7 +97,7 @@ const LINGER_MS = 2_400;
  * Stays inside the StateBoy display; B / Escape / tap outside / OK close it,
  * tapping the picture replays it.
  */
-export function FxPopup({
+function ScenePopup({
   anim,
   title,
   caption,
@@ -53,18 +115,8 @@ export function FxPopup({
   // it is rendered meanwhile. false means it never arrived, and the popup drops
   // to its words rather than showing an empty frame.
   const [engineReady, setEngineReady] = useState<boolean | null>(isFxEngineReady() ? true : null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  const { dialogRef, close } = useCueClose(onClose);
   const shouldAutoClose = autoClose ?? tone !== 'bad';
-
-  const close = useCallback(() => onCloseRef.current(), []);
-  useBackButton(true, close);
-  useConfirmButton(true, close);
-
-  useEffect(() => {
-    dialogRef.current?.focus({ preventScroll: true });
-  }, []);
 
   useEffect(() => {
     let alive = true;

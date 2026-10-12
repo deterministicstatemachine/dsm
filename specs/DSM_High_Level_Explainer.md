@@ -3451,6 +3451,15 @@ an ordinary Web2 application. It gains an account, and a way to ask the player's
 >
 > This amends A11's list of request kinds (which of your contacts are who) and its scoped grant (the contacts scope).
 
+> **Amendment A17 (owner, 2026-10-09) — a person's details, your own card, and email receipts.** Owner direction, for a plain wallet for people new to Web3: "import a contact from the phone instead of just an alias", "the option to create your own contact card", and "the option to email receipts when you send a transaction … a pre-made generic email … only with the ones they've provided the email address for and if they have it turned on. And permissioned." There is no directory of people: a contact is still added by its contact code.
+>
+> - **A person's details.** The wallet may hold, for each contact, a name, an email, a phone and the lookup key of a linked phone contact; and, for its owner, a card of a name, an email and a phone. Display only: no validity check reads them, no step carries them, and they leave the device only as the fields of the owner's card that the owner chose to share.
+> - **The contact code.** A contact code may carry its owner's name, email and phone. A reader shows them and may fill in the new contact's details from them; they establish nothing about the device the code names.
+> - **Email receipts.** After a send, a wallet may ask the network's receipt service to email the person paid a plain receipt: only when its owner switched receipts on after being told exactly what the service is given, and only for a contact whose details hold an email. The request names the email, the owner's name, what was sent, the transfer's hash and the phone's time, and carries the device's AK signature over `H(DSM/receipt-email ‖ request with an empty signature)`. The service emails only a request whose signature verifies, holds each device and each address to a rate, and keeps no record of who was emailed.
+> - **Outside the protocol.** A receipt is a courtesy note about a transfer that already happened. The service decides nothing about any transfer and nothing reads a receipt back. Its time is the sender's phone time, labelled as such, never DSM time. The service does not read the device directory: a signature proves a device asked, not that the device is in the directory (open).
+>
+> This adds to A11's contact card its shared details, and names a service outside the protocol.
+
 
 <!-- Source PDF page 68 -->
 
@@ -4114,10 +4123,15 @@ Failure to reach a cell’s leader, or two other members, is a liveness failure:
 durable member memory is a safety failure.
 
 > **Note (2026-09-22).** How member replacement and storage migration preserve assumption 11 is specified in `DSM_Storage_Node_Specification.md` Part III.
-The concrete primitives behind the first two assumptions are post-quantum: BLAKE3 for hashing,
-SPHINCS+ for signatures, and Kyber for key encapsulation. The safety theorem itself is scheme-agnostic;
-any collision-resistant hash and unforgeable signature will do, and the choice of post-quantum primitives
-means the assumptions do not weaken when large quantum computers arrive.
+The concrete primitives behind the first two assumptions were chosen for post-quantum security: BLAKE3
+for hashing, SPHINCS+ (instantiated with BLAKE3) for signatures, and Kyber for key encapsulation. The
+safety theorem itself is scheme-agnostic: a break of it yields an explicit hash collision or signature
+forgery, so it holds for any collision-resistant hash and EUF-CMA signature. Whether these instantiations
+meet those assumptions against quantum adversaries is a property of the primitives, not of DSM.
+DSM's BLAKE3 instantiation of SPHINCS+ is not a standardized parameter set, the published SPHINCS+
+proofs do not transfer to it automatically, and what remains owed is listed in
+`specs/requirements/SPHINCS_BLAKE3_ROLE_MAP.md`. No numerical security level is claimed until those
+reductions exist.
 No cryptographic protocol eliminates assumptions.
 The important requirement is that the safety theorem follows from clearly stated assumptions rather
 than from informal trust.

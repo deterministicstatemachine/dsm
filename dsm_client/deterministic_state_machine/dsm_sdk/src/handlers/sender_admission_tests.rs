@@ -482,6 +482,7 @@ async fn a_send_pays_the_contact_chosen_not_the_first_of_its_alias() {
                 device_id: c.device_id.to_vec(),
                 genesis_hash: c.genesis.to_vec(),
                 signing_public_key: c.ak_pk.clone(),
+                profile: None,
             },
         )
         .await;

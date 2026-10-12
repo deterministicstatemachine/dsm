@@ -24,8 +24,24 @@ export type DomainRelationshipSendStatus = {
 /** Where BLE pairing with a contact stands, as Rust's pairing loop has it. */
 export type ContactPairing = 'paired' | 'idle' | 'searching' | 'connected' | 'retrying';
 
+/**
+ * A person's details as the wallet shows them (DSM Amendment A17): what a
+ * contact's card shared, or what the owner linked from the phone's contacts
+ * or typed; and the owner's own card. Display only. An empty string is a
+ * detail not given.
+ */
+export type PersonProfile = {
+  name: string;
+  email: string;
+  phone: string;
+  /** The linked phone contact's lookup key, to show its photo; empty when none is linked. */
+  phoneLookupKey: string;
+};
+
 export type DomainContact = {
   alias: string;
+  /** The details the wallet holds for the contact, when any were set. */
+  profile?: PersonProfile;
   deviceId: string;
   genesisHash: string;
   chainTip?: string;

@@ -225,6 +225,9 @@ pub fn contact_add_response(
         // Where pairing stands is the contact list's to state (`contacts.list`),
         // from the pairing loop's sessions; an add reply states none.
         pairing: pb::ContactPairingPhase::Unspecified as i32,
+        // The details the wallet holds for the contact are its row's; the
+        // routes that read the row set them (`contacts.list`, `contacts.setProfile`).
+        profile: None,
     }
 }
 

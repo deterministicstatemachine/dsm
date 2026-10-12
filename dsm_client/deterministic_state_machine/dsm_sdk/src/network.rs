@@ -88,6 +88,13 @@ pub struct EnvConfig {
     /// Base URL for mempool.space API. Defaults to "https://mempool.space".
     #[serde(default)]
     pub mempool_api_url: Option<String>,
+
+    // ── Email receipts (DSM Amendment A17; outside the protocol) ──
+    /// The receipt service a wallet posts signed receipt requests to, an
+    /// `https://` URL. Absent: this network has no receipt service, and a
+    /// wallet asked to email a receipt says so.
+    #[serde(default)]
+    pub receipt_service_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -453,6 +460,7 @@ register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
             dbtc_min_vault_balance_sats: None,
             dbtc_fee_rate_sat_vb: None,
             mempool_api_url: None,
+            receipt_service_url: None,
         };
         let toml_str = toml::to_string(&cfg).unwrap();
         let reparsed = parse_env_config_toml(&toml_str).unwrap();

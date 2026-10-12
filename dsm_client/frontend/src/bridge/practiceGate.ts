@@ -22,6 +22,7 @@ import {
   PreferencePayload,
 } from '../proto/dsm_app_pb';
 import type { AndroidBridgeV3 } from '../dsm/bridgeTypes';
+import { SKIN_PREFERENCES } from '../runtime/skinKeys';
 
 export const PRACTICE_BLOCKED_MESSAGE =
   'Practice mode: this is switched off until the tour ends. Your real wallet is untouched.';
@@ -37,10 +38,17 @@ const READ_METHODS = new Set([
   'shareDiagnosticsReport',
   // Moves the wallet's window behind the app that sent a connect link; writes nothing.
   'returnToConnectCaller',
+  // Colours the phone's status and navigation bars for the skin in use; writes nothing.
+  'setSystemBars',
+  // The phone contact the user picks, and its photo: read from the phone, nothing written.
+  'pickPhoneContact',
+  'phoneContactPhoto',
+  // Opens the share sheet with the text the user chose to share; writes nothing.
+  'shareText',
 ]);
 
-/** The preferences the tour's shell lessons change: how the app looks and sounds. */
-const DISPLAY_PREFERENCES = new Set(['ui_theme', 'sfx_enabled']);
+/** The preferences the tour's shell lessons change: how the app looks and sounds, and the skin's switches. */
+const DISPLAY_PREFERENCES = new Set<string>(['ui_theme', 'sfx_enabled', ...SKIN_PREFERENCES]);
 
 /**
  * Router routes that only read, whether the router takes them as a query or an
@@ -54,6 +62,7 @@ const READ_ROUTES = new Set([
   'wallet.amount',
   'contacts.list',
   'contacts.readContactCode',
+  'contacts.ownProfile',
   'identity.contact_code',
   'inbox.pull',
   'storage.status',

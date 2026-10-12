@@ -111,3 +111,7 @@
   animation: pow-burst 0.75s cubic-bezier(0.34,1.56,0.64,1) forwards;
   white-space: nowrap;
 }
+
+/* The lock's subtitle is in capitals on the Game Boy (the Modern skin writes it as a sentence). */
+.lock-subtitle { text-transform: uppercase; }
+html[data-skin="modern"] .lock-subtitle { text-transform: none; }

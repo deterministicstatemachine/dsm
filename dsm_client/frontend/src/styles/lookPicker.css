@@ -1,0 +1,45 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * The first-run look picker: a small plain black box, the same in every look,
+ * over the app it previews. Its colours are its own on purpose: nothing the
+ * skins or the Game Boy themes set reaches it.
+ */
+.lp-backdrop {
+  position: fixed; inset: 0; z-index: 20000;
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: transparent;
+}
+.lp-box {
+  width: 100%; max-width: 280px; box-sizing: border-box; padding: 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  background: #000000; color: #ffffff; border: 1px solid #3a3a3a; border-radius: 14px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; line-height: 1.35;
+  text-align: left; letter-spacing: normal; text-transform: none;
+}
+.lp-title { margin: 0 0 2px; font-size: 16px; font-weight: 700; color: #ffffff; }
+.lp-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lp-btn {
+  -webkit-appearance: none; appearance: none; min-height: 38px; padding: 8px 10px;
+  border: 1px solid #4a4a4a; border-radius: 10px; background: #161616; color: #ffffff;
+  font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+}
+.lp-btn[aria-checked="true"] { background: #ffffff; color: #000000; border-color: #ffffff; }
+.lp-ok { background: #ffffff; color: #000000; border-color: #ffffff; }
+.lp-ok:disabled { opacity: 0.5; }
+.lp-switch {
+  -webkit-appearance: none; appearance: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 2px; border: none; background: transparent; color: #ffffff; font: inherit; font-size: 14px; cursor: pointer;
+}
+.lp-knob {
+  position: relative; width: 38px; height: 22px; border-radius: 999px; background: #3a3a3a; flex: 0 0 auto;
+  transition: background 120ms ease-out;
+}
+.lp-knob::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: #ffffff; transition: transform 120ms ease-out;
+}
+.lp-switch[aria-checked="true"] .lp-knob { background: #2f8cff; }
+.lp-switch[aria-checked="true"] .lp-knob::after { transform: translateX(16px); }
+.lp-note { margin: 0; font-size: 12px; color: #a8a8a8; }
+.lp-focused { outline: 2px solid #2f8cff; outline-offset: 2px; }

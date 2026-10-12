@@ -29,7 +29,7 @@ use ml_kem::{
     B32, EncapsulateDeterministic, EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
 };
 use tracing::{debug, error, info, trace};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // ------------------ Deterministic op-gated health checking (no wall clock) ------------------
 
@@ -294,16 +294,31 @@ pub fn generate_kyber_keypair_from_entropy(
 
     let mut seed = [0u8; 32];
     seed.copy_from_slice(digest.as_bytes());
+    generate_kyber_keypair_from_seed(&seed)
+}
 
+/// The device's ML-KEM identity keypair from `Smaster` (key schedule KS1): the seed is
+/// `keyed-BLAKE3(Smaster, "DSM/ml-kem-identity/v1" ‖ 0x00 ‖ "ML-KEM-768")`, the same
+/// keyed interface as the per-step EK seeds, so Smaster enters no unkeyed hash.
+pub fn generate_kyber_identity_keypair(smaster: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    let mut seed = crate::core::identity::key_schedule::ml_kem_seed(smaster);
+    let kp = generate_kyber_keypair_from_seed(&seed);
+    seed.zeroize();
+    kp
+}
+
+/// Deterministic key generation from a 32-byte seed: `d`, `z` = BLAKE3 of the seed under
+/// two domains, then ML-KEM-768 `generate_deterministic(d, z)`.
+pub fn generate_kyber_keypair_from_seed(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
     let d: B32 = {
         let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ML_KEM_KEYGEN_D);
-        h.update(&seed);
+        h.update(seed);
         h.update(&0u64.to_le_bytes());
         (*h.finalize().as_bytes()).into()
     };
     let z: B32 = {
         let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ML_KEM_KEYGEN_Z);
-        h.update(&seed);
+        h.update(seed);
         h.update(&1u64.to_le_bytes());
         (*h.finalize().as_bytes()).into()
     };

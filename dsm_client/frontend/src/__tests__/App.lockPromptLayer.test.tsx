@@ -128,6 +128,11 @@ jest.mock('../runtime/appRuntimeStore', () => ({
     showLockPrompt: true,
     soundEnabled: true,
     theme: 'stateboy',
+    // The intro plays for the Game Boy, once it is the owner's choice.
+    skin: 'dgen',
+    agreement: 'accepted',
+    skinRead: 'read',
+    scheme: 'light',
   }),
 }));
 
@@ -170,7 +175,7 @@ describe('App passcode prompt layer', () => {
 
   test("shades the screen and its nav bar, not just the home screen's content", () => {
     render(<App />);
-    const dialog = screen.getByRole('dialog', { name: 'PROTECT YOUR WALLET?' });
+    const dialog = screen.getByRole('dialog', { name: 'Protect your wallet?' });
     const shade = dialog.parentElement as HTMLElement;
     expect(shade).toHaveClass('sb-popover-backdrop');
     expect(dialog.closest('.stateboy-screen-host')).toBeNull();
@@ -183,7 +188,7 @@ describe('App passcode prompt layer', () => {
   test('is not shown off the home screen', () => {
     mockScreen.current = 'wallet';
     render(<App />);
-    expect(screen.queryByRole('dialog', { name: 'PROTECT YOUR WALLET?' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Protect your wallet?' })).toBeNull();
   });
 
   // The tour is the layer above everything: the prompt used to cover the
@@ -191,12 +196,12 @@ describe('App passcode prompt layer', () => {
   test('waits while a tour runs', () => {
     mockTour.active = true;
     render(<App />);
-    expect(screen.queryByRole('dialog', { name: 'PROTECT YOUR WALLET?' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Protect your wallet?' })).toBeNull();
   });
 
   test('is not shown over the intro', () => {
     mockIntro.showIntro = true;
     render(<App />);
-    expect(screen.queryByRole('dialog', { name: 'PROTECT YOUR WALLET?' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Protect your wallet?' })).toBeNull();
   });
 });

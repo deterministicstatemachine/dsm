@@ -494,11 +494,11 @@ fn get_database_path() -> Result<PathBuf> {
 /// (`connect_app_offers`, `connect_app_sessions`, `connect_app_requests`,
 /// `connect_app_facts`).
 ///
-/// Still 29: a peer's step is validated one hop, from its own parent (DSM
+/// 29: a peer's step is validated one hop, from its own parent (DSM
 /// Amendment A14), so no frontier is kept and `peer_frontier` is no longer
 /// created, read or written. A database made before keeps the table, unused.
 ///
-/// Still 29: the owner baseline (SoFi Amendment S24) adds
+/// 29: the owner baseline (SoFi Amendment S24) adds
 /// `sofi_vault_witness`, `sofi_vault_baseline`, `sofi_vault_owner_baseline`
 /// and `sofi_vault_quarantine`, created on open; no existing table changes.
 /// The same for `sofi_vault_label`, an account's own names for its vaults,
@@ -506,7 +506,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// vault's history (SoFi Amendment S26). A baseline record whose frontier
 /// predates S26 is dropped when the database opens, and adopted or signed
 /// again (`sofi_vault_head::drop_superseded_baselines`).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 29;
+///
+/// 30: key schedule KS1 (Extract-then-Expand). Every identity secret, and so
+/// every key, DevID and genesis this store records, comes from a new
+/// derivation of the same mnemonic; a store written under the earlier
+/// schedule describes keys this build no longer derives.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 30;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.

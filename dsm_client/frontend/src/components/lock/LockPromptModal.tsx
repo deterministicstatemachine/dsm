@@ -63,20 +63,20 @@ function LockPromptModal({ onNavigate, onDismiss }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sb-popover__head">
-          <h3 id="lock-prompt-title" className="sb-popover__title">PROTECT YOUR WALLET?</h3>
+          <h3 id="lock-prompt-title" className="sb-popover__title">Protect your wallet?</h3>
         </div>
         <div className="sb-popover__body">
           <p>Set up a PIN or a button combo to lock your wallet. It locks when you leave the app or the screen goes off.</p>
         </div>
         <button type="button" className="sb-btn sb-btn--primary sb-btn--block sb-popover__ok" onClick={handleNow}>
-          SECURE NOW
+          Secure now
         </button>
         <div className="sb-actions" style={{ margin: 0 }}>
           <button type="button" className="sb-btn" style={{ color: 'var(--bg)', borderColor: 'var(--bg)', background: 'transparent', boxShadow: 'none' }} onClick={handleLater}>
-            LATER
+            Later
           </button>
           <button type="button" className="sb-btn sb-btn--ghost" style={{ color: 'var(--bg)', borderColor: 'rgba(var(--bg-rgb), 0.5)' }} onClick={() => void handleNever()}>
-            NEVER ASK
+            Never ask
           </button>
         </div>
       </div>

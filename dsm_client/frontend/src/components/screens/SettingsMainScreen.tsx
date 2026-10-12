@@ -13,6 +13,10 @@ import {
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import { tourStore } from '../tour/tourStore';
+import { chooseSkin, setReceiptsEmail } from '../../runtime/skinPreferences';
+import { RECEIPT_CONSENT } from '../../domain/receiptConsent';
+import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
+import { versionLabel } from '../../appVersion';
 import { Notice, ScreenFrame } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
 
@@ -29,6 +33,7 @@ interface SettingsMainScreenProps {
 }
 
 const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) => {
+  const runtime = useAppRuntimeStore();
   const [devMode, setDevMode] = useState<boolean>(() => cachedDevMode ?? false);
   const [devModeResolved, setDevModeResolved] = useState<boolean>(() => cachedDevMode !== null);
   const [tapCount, setTapCount] = useState<number>(0);
@@ -140,8 +145,8 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
         aria-describedby={!devMode ? 'dev-hint' : undefined}
       >
         <div className="sb-kv">
-          <span className="sb-kv__k">VERSION</span>
-          <span className="sb-kv__v">1.0.0</span>
+          <span className="sb-kv__k">Version</span>
+          <span className="sb-kv__v">{versionLabel()}</span>
         </div>
         {!devMode && devModeResolved && (
           <div id="dev-hint" className="sb-hint sb-hint--tight">
@@ -150,18 +155,72 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
         )}
       </button>
 
-      {/* Guided tour — replay at any time */}
-      <section className="sb-card" aria-labelledby="tour-section-title">
-        <div id="tour-section-title" className="sb-card__title">Guided tour</div>
-        <button
-          type="button"
-          className="sb-btn sb-btn--block"
-          data-tour="tutorial-button"
-          onClick={() => tourStore.start()}
-        >
-          Replay tutorial
-        </button>
-      </section>
+      {/* The wallet's look: this Game Boy (DGen), or the Modern wallet. In the
+          Modern skin these settings open inside it, and its own Settings
+          changes the look. */}
+      {runtime.skin === 'dgen' ? (
+        <section className="sb-card" aria-labelledby="look-section-title">
+          <div id="look-section-title" className="sb-card__title">Wallet style</div>
+          <p className="sb-hint">Modern is a full-screen wallet with every DSM feature, light or dark, and a Simple mode. Switch back here from its Settings.</p>
+          <button
+            type="button"
+            className="sb-btn sb-btn--block"
+            onClick={() => {
+              chooseSkin('modern').then(
+                () => undefined,
+                (e: unknown) => setStatus(e instanceof Error ? e.message : String(e)),
+              );
+            }}
+          >
+            Switch to Modern
+          </button>
+        </section>
+      ) : null}
+
+      {/* Your contact card and email receipts (DSM Amendment A17). The Modern
+          skin has its own pages for both. */}
+      {runtime.skin === 'dgen' ? (
+        <section className="sb-card" aria-labelledby="card-section-title">
+          <div id="card-section-title" className="sb-card__title">Contact card and receipts</div>
+          <p className="sb-hint">Your name, email and phone ride on your contact code.</p>
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('mycontact')}>
+            Edit my contact card
+          </button>
+          <p className="sb-hint" style={{ marginTop: 10 }}>{RECEIPT_CONSENT.lead} {RECEIPT_CONSENT.given}</p>
+          <ul className="sb-hint">
+            {RECEIPT_CONSENT.items.map((item) => <li key={item}>{item}</li>)}
+          </ul>
+          <p className="sb-hint">{RECEIPT_CONSENT.after}</p>
+          <p className="sb-hint">Email receipts: {runtime.receiptsEmail === 'on' ? 'on' : 'off'}</p>
+          <button
+            type="button"
+            className={`sb-btn sb-btn--block${runtime.receiptsEmail === 'on' ? '' : ' sb-btn--primary'}`}
+            onClick={() => {
+              setReceiptsEmail(runtime.receiptsEmail === 'on' ? 'off' : 'on').then(
+                () => undefined,
+                (e: unknown) => setStatus(e instanceof Error ? e.message : String(e)),
+              );
+            }}
+          >
+            {runtime.receiptsEmail === 'on' ? 'Turn receipts off' : 'I agree, turn receipts on'}
+          </button>
+        </section>
+      ) : null}
+
+      {/* The guided tour walks the Game Boy's buttons: DGen only. */}
+      {runtime.skin === 'dgen' ? (
+        <section className="sb-card" aria-labelledby="tour-section-title">
+          <div id="tour-section-title" className="sb-card__title">Guided tour</div>
+          <button
+            type="button"
+            className="sb-btn sb-btn--block"
+            data-tour="tutorial-button"
+            onClick={() => tourStore.start()}
+          >
+            Replay tutorial
+          </button>
+        </section>
+      ) : null}
 
       {/* Security / Wallet Lock */}
       <section className="sb-card" aria-labelledby="security-section-title">
@@ -232,7 +291,7 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
       {/* Developer Options (only when unlocked) */}
       {devMode && (
         <section className="sb-card" aria-labelledby="dev-section-title">
-          <div id="dev-section-title" className="sb-card__title">DEVELOPER OPTIONS</div>
+          <div id="dev-section-title" className="sb-card__title">Developer options</div>
           <div style={{ display: 'grid', gap: 8 }}>
             <button
               type="button"

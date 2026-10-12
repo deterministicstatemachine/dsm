@@ -102,6 +102,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     
     // Native QR scanner launcher and callback
     lateinit var qrScannerLauncher: ActivityResultLauncher<Intent>
+    // A phone contact to link to a DSM contact (DSM Amendment A17): the read
+    // permission is asked first, then the system picker opens.
+    private lateinit var contactsPermLauncher: ActivityResultLauncher<String>
+    private lateinit var contactPickLauncher: ActivityResultLauncher<Void?>
     @Volatile var qrScanCallback: ((String?) -> Unit)? = null
     // The page's file control (the token wizard's coin artwork): an
     // <input type="file"> opens the system picker only if the host launches
@@ -127,6 +131,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     lateinit var btEnableLauncher: ActivityResultLauncher<Intent>
 
     private lateinit var rootContainer: FrameLayout
+    /** How the page meets the phone's bars (see setSystemBars), and the bars' heights in pixels. */
+    private var barFit = "edge"
+    private var barInsetTop = 0
+    private var barInsetBottom = 0
     private lateinit var webView: WebView
     private var statusBarScrim: View? = null
     private lateinit var bridge: SinglePathWebViewBridge
@@ -1108,12 +1116,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         val wic = WindowInsetsControllerCompat(window, window.decorView)
         wic.isAppearanceLightStatusBars = false
         wic.isAppearanceLightNavigationBars = false
-        if (Build.VERSION.SDK_INT < 35) {
-            @Suppress("DEPRECATION")
-            window.statusBarColor = barColor
-            @Suppress("DEPRECATION")
-            window.navigationBarColor = barColor
-        }
+        paintLegacyBars(barColor)
 
         // Beta diagnostics: persist bridge logs for export
         try {
@@ -1205,6 +1208,19 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             publishSessionState("bluetoothEnableResult")
         }
         
+        contactPickLauncher = registerForActivityResult(ActivityResultContracts.PickContact()) { uri ->
+            val picked = if (uri == null) ByteArray(0) else PhoneContacts.read(contentResolver, uri)
+            dispatchNativeHostEventOnUi(NativeHostEventKind.NATIVE_HOST_EVENT_KIND_PHONE_CONTACT_PICKED, picked)
+        }
+        contactsPermLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                contactPickLauncher.launch(null)
+            } else {
+                Log.i(tag, "phone contacts: the read was not allowed")
+                dispatchNativeHostEventOnUi(NativeHostEventKind.NATIVE_HOST_EVENT_KIND_PHONE_CONTACT_PICKED, ByteArray(0))
+            }
+        }
+
         qrScannerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             qrLockRoundTripState = qrLockRoundTripState.onScannerResult()
             val data = if (result.resultCode == RESULT_OK) {
@@ -1276,6 +1292,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     // can appear between the scrim and WebView content on some devices.
                     height = topInset + statusBarOverlapPx
                 }
+                barInsetTop = topInset
+                barInsetBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+                applyBarFit()
                 insets
             }
         }
@@ -1589,6 +1608,77 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
      * only when a link opened it. The wallet's main activity is its task's root,
      * and a task it is not the root of is not the wallet's to send back.
      */
+    /**
+     * The status and navigation bars in the colours of the skin in use: the
+     * near-black around the Game Boy device, or the Simple skin's light or dark
+     * page colour. Called by the page whenever the skin or its scheme changes.
+     */
+    /**
+     * The phone's bars for what the page shows: `device` is the Game Boy, which
+     * runs edge to edge under dark bars; `light` and `dark` are the Modern skin
+     * (and the screens before a look is chosen), which stop at the bars, the
+     * bars in the page's own colour behind them.
+     */
+    fun setSystemBars(look: String) {
+        val light = look == "light"
+        val color = android.graphics.Color.parseColor(
+            when (look) {
+                "light" -> "#FFFFFF"
+                "dark" -> "#0A0A0A"
+                else -> "#0D0D0D"
+            }
+        )
+        runOnUiThread {
+            val wic = WindowInsetsControllerCompat(window, window.decorView)
+            wic.isAppearanceLightStatusBars = light
+            wic.isAppearanceLightNavigationBars = light
+            window.decorView.setBackgroundColor(color)
+            rootContainer.setBackgroundColor(color)
+            paintLegacyBars(color)
+            barFit = if (look == "device") "edge" else "fit"
+            // Behind three-button navigation Android lays a grey scrim for contrast;
+            // a Modern page's bar is its own colour, so the scrim stays off there.
+            if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = look == "device"
+            applyBarFit()
+        }
+    }
+
+    /**
+     * The page under the bars (`edge`, the Game Boy) or between them (`fit`):
+     * from Android 15 the window runs behind the bars, so a page that must not
+     * sit under them is kept clear of them by the bars' own heights.
+     */
+    private fun applyBarFit() {
+        val fit = barFit == "fit"
+        rootContainer.setPadding(0, if (fit) barInsetTop else 0, 0, if (fit) barInsetBottom else 0)
+        statusBarScrim?.visibility = if (fit) View.GONE else View.VISIBLE
+    }
+
+    /** Before Android 15 the bars take their own colour; from 15 they show the window behind them. */
+    private fun paintLegacyBars(barColor: Int) {
+        if (Build.VERSION.SDK_INT < 35) {
+            @Suppress("DEPRECATION")
+            window.statusBarColor = barColor
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = barColor
+        }
+    }
+
+    /**
+     * Opens the phone's contact picker (DSM Amendment A17), asking for the
+     * read permission first when it is not held. The picked contact, or none,
+     * reaches the page as a PHONE_CONTACT_PICKED host event.
+     */
+    fun pickPhoneContact() {
+        runOnUiThread {
+            if (PhoneContacts.readAllowed(this)) {
+                contactPickLauncher.launch(null)
+            } else {
+                contactsPermLauncher.launch(android.Manifest.permission.READ_CONTACTS)
+            }
+        }
+    }
+
     fun returnToConnectCaller(): Boolean {
         val opened = connectLinkOpened
         connectLinkOpened = null

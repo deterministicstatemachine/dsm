@@ -52,7 +52,7 @@ fn as_array_32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
 /// IDENTITY…" forever.
 ///
 /// So a cold slot is recovered here from the canonical source rather than
-/// refused: `current_smaster()` + `DSM/kyber\0`, the SAME derivation
+/// refused: `current_smaster()` + `generate_kyber_identity_keypair`, the SAME derivation
 /// `WalletSDK::init_device_keys` uses to populate `{device_id}_device_kyber_pk`,
 /// so the recovered key is byte-identical to the keystore's. It is NOT the
 /// random pre-genesis shell keypair that path falls back to — if the canonical
@@ -81,7 +81,7 @@ pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmErr
 }
 
 /// This device's canonical Kyber public key: the cached slot, or — when it is
-/// cold — the key re-derived from `Smaster` under `DSM/kyber\0`, the same
+/// cold — the key re-derived from `Smaster` (KS1 `ml_kem_seed`, keyed by Smaster), the same
 /// derivation `WalletSDK::init_device_keys` uses, installed into the slot.
 /// Fails closed when the canonical material is unavailable (no seed, no
 /// genesis, wallet locked). The secret half is dropped where it is derived.
@@ -90,7 +90,7 @@ pub fn local_kyber_public_key() -> Result<Vec<u8>, DsmError> {
         Some(pk) => pk,
         None => {
             let smaster = crate::init::current_smaster()?;
-            let (pk, ..) = kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?;
+            let (pk, ..) = kyber::generate_kyber_identity_keypair(&smaster)?;
             log::info!(
                 "[kyber_identity] local Kyber public key cache was cold; recovered the canonical \
                  key from Smaster and installed it"
@@ -134,7 +134,7 @@ mod tests {
         // What the wallet keystore WOULD hold: the same Smaster derivation
         // `WalletSDK::init_device_keys` uses. This is the canonical answer.
         let smaster = crate::init::current_smaster().expect("smaster from seed + genesis");
-        let canonical_pk = kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")
+        let canonical_pk = kyber::generate_kyber_identity_keypair(&smaster)
             .expect("canonical kyber derivation")
             .0;
 

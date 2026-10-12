@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Send tab — transaction form with online/offline mode toggle.
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { dsmClient } from '../../../services/dsmClient';
-import { failureReasonMessage } from '../../../domain/bilateral';
+import { sendTransfer } from '../../../domain/sendTransfer';
+import { emailReceiptIfDue } from '../../../domain/sendReceipt';
+import { appRuntimeStore } from '../../../runtime/appRuntimeStore';
+import { useUX } from '../../../contexts/UXContext';
 import ConfirmModal from '../../ConfirmModal';
 import UnderConstructionModal from '../../UnderConstructionModal';
 import { TokenMark } from '../../TokenMark';
@@ -37,6 +39,7 @@ function SendTabInner({
   setError,
 }: Props): React.JSX.Element {
   const fx = useFx();
+  const { notifyToast } = useUX();
   const [sendForm, setSendForm] = useState<{ selectedContactKey: string; amount: string; token: string; note: string }>({
     // No default recipient. A money form that pre-selects whoever happens to
     // be first sends to the wrong person the moment the list reorders — and it
@@ -138,44 +141,47 @@ function SendTabInner({
       }
       const tokenId = selectedSendBalance.tokenId;
 
-      if (txMode === 'offline') {
-        // Where the recipient's appliance is over BLE is Rust's to know; an appliance
-        // it has not met is its refusal, in its words.
-        const res = await dsmClient.sendOfflineTransfer({
-          tokenId,
-          to: sendForm.selectedContactKey,
-          amount: sendForm.amount.trim(),
-          memo: sendForm.note || undefined,
+      // The send itself is the one both skins make (domain/sendTransfer).
+      const outcome = await sendTransfer({
+        mode: txMode,
+        to: sendForm.selectedContactKey,
+        tokenId,
+        amount: sendForm.amount,
+        note: sendForm.note,
+      });
+      if (outcome.kind === 'open') {
+        // Not finished and not failed: the step is open on both appliances and
+        // completes when they are together again. The form is done with it.
+        fx.play({
+          anim: 'trace',
+          title: 'Not finished yet',
+          caption: outcome.message,
+          tone: 'neutral',
+          okLabel: 'OK',
+          coin: { ticker: selectedSendBalance.symbol, iconUrl: selectedSendBalance.iconUrl },
         });
-        if (res.open) {
-          // Not finished and not failed: the step is open on both appliances and
-          // completes when they are together again. The form is done with it.
-          fx.play({
-            anim: 'trace',
-            title: 'Not finished yet',
-            caption: res.result ?? '',
-            tone: 'neutral',
-            okLabel: 'OK',
-            coin: { ticker: selectedSendBalance.symbol, iconUrl: selectedSendBalance.iconUrl },
-          });
-          onSendComplete();
-          await loadWalletData();
-          return;
-        }
-        if (!res.accepted) {
-          // The failure reason's message when the SDK named one, else its own words.
-          throw new Error(failureReasonMessage(res.failureReason) ?? res.result ?? 'Offline transfer failed');
-        }
-      } else {
-        const res = await dsmClient.sendOnlineTransferSmart(
-          sendForm.selectedContactKey,
-          sendForm.amount.trim(),
-          sendForm.note || undefined,
-          tokenId,
+        onSendComplete();
+        await loadWalletData();
+        return;
+      }
+      if (outcome.kind === 'refused') throw new Error(outcome.message);
+
+      // A receipt to the person paid, when the owner has receipts on and the
+      // person has an email (A17). The send is done either way.
+      const receipt = emailReceiptIfDue({
+        receiptsEmail: appRuntimeStore.getSnapshot().receiptsEmail,
+        contact,
+        token: selectedSendBalance.symbol,
+        amount: sendForm.amount,
+        note: sendForm.note,
+        reference: outcome.reference,
+        sentAtLocal: new Date().toLocaleString(),
+      });
+      if (receipt !== null) {
+        receipt.then(
+          (to) => notifyToast('receipt_emailed', `Receipt emailed to ${to}`),
+          (e: unknown) => notifyToast('warning', `The receipt was not emailed: ${e instanceof Error ? e.message : String(e)}`),
         );
-        if (!res?.success) {
-          throw new Error(res?.message || 'Online transfer failed');
-        }
       }
 
       const sent = `${sendForm.amount.trim()} ${tokenId}`;
@@ -195,7 +201,7 @@ function SendTabInner({
     } finally {
       setSendingTx(false);
     }
-  }, [sendForm, selectedContact, txMode, selectedSendBalance, loadWalletData, setError, onSendComplete, fx]);
+  }, [sendForm, selectedContact, txMode, selectedSendBalance, loadWalletData, setError, onSendComplete, fx, notifyToast]);
 
   const handleSubmit = useCallback((event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();

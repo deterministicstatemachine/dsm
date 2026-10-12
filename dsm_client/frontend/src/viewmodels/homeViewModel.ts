@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { AppState, ScreenType } from '../types/app';
+import { appVersion } from '../appVersion';
 
 type HomeStatusArgs = {
   appState: AppState;
@@ -30,7 +31,7 @@ export function buildHomeStatusLines({ appState, soundEnabled, error }: HomeStat
         'NETWORK: STANDBY',
         'DEVICE: VERIFIED',
         `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
-        'VERSION: 1.0.0',
+        `VERSION: ${appVersion()}`,
       ];
     case 'publication_pending':
       return [
@@ -38,7 +39,7 @@ export function buildHomeStatusLines({ appState, soundEnabled, error }: HomeStat
         'NETWORK: PUBLISHING',
         'DEVICE: VERIFIED',
         `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
-        'VERSION: 1.0.0',
+        `VERSION: ${appVersion()}`,
       ];
     case 'wallet_ready':
       return [
@@ -46,7 +47,7 @@ export function buildHomeStatusLines({ appState, soundEnabled, error }: HomeStat
         'NETWORK: CONNECTED',
         'DEVICE: VERIFIED',
         `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
-        'VERSION: 1.0.0',
+        `VERSION: ${appVersion()}`,
       ];
     case 'error':
       return [
@@ -54,7 +55,7 @@ export function buildHomeStatusLines({ appState, soundEnabled, error }: HomeStat
         'NETWORK: DISCONNECTED',
         'DEVICE: VERIFIED',
         `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
-        'VERSION: 1.0.0',
+        `VERSION: ${appVersion()}`,
       ];
     default:
       return [];

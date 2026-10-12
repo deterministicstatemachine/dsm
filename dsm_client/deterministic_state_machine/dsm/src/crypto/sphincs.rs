@@ -21,7 +21,7 @@ pub use dsm_sphincs::{
 
 fn crypto_error(e: dsm_sphincs::Error) -> DsmError {
     let dsm_sphincs::Error::Crypto(why) = e;
-    DsmError::crypto(why, None::<std::io::Error>)
+    DsmError::crypto(why.message(), None::<std::io::Error>)
 }
 
 /// A key pair from 32 bytes of OS entropy.

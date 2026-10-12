@@ -309,7 +309,7 @@ impl Drop for NoAppRouterHold {
 }
 
 /// A cache of the local device's ML-KEM-768 (Kyber) encapsulation key, the key derived from
-/// `Smaster` under `DSM/kyber\0`. Installed by `AppRouterImpl::new` once `WalletSDK` has
+/// `Smaster` (KS1 `ml_kem_seed`, keyed by Smaster). Installed by `AppRouterImpl::new` once `WalletSDK` has
 /// derived the device keys; `kyber_identity::local_kyber_public_key` re-derives it when the
 /// cache is cold.
 static LOCAL_KYBER_PUBKEY: Lazy<RwLock<Option<Vec<u8>>>> = Lazy::new(|| RwLock::new(None));

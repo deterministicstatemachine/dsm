@@ -180,6 +180,9 @@ name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "asn1-rs"
@@ -526,6 +529,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq 0.4.2",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -1089,11 +1093,10 @@ checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
 name = "dsm"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "argon2",
  "arrayref",
  "async-trait",
  "base32",
@@ -1182,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "dsm_sdk"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "aes-gcm",
  "android_logger",
@@ -1267,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "dsm_storage_node"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "anyhow",
  "axum",

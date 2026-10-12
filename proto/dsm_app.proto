@@ -2771,6 +2771,8 @@ message Envelope {
     // Replies to `authored.publish` and `authored.read`.
     AuthoredPublishedResponse         authored_published_response      = 135;
     AuthoredObjectsResponse           authored_objects_response        = 136;
+    ContactProfileV1                  contact_profile                  = 137;
+    ReceiptEmailResultV1              receipt_email_result             = 138;
 
 
     // Reply to `token.forget`.
@@ -3426,6 +3428,71 @@ message ContactQrV3 {
   bytes  genesis_hash    = 5 [(dsm_fixed_len)=32]; // raw 32-byte genesis hash
   bytes  signing_public_key = 6 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256s public key for bilateral verification
   string preferred_alias = 7; // Optional alias the card's owner suggests
+  // What the card's owner chose to share so a payer can reach them: their
+  // email (a receipt goes there when the payer has receipts on) and phone.
+  // Display only; empty when not shared. DSM Amendment A17.
+  string email           = 8 [(dsm_max_len)=254];
+  string phone           = 9 [(dsm_max_len)=32];
+}
+
+// A person's details as the wallet shows them: what a contact's card shared,
+// or what the wallet's owner linked from the phone's contacts or typed, and
+// the owner's own card. Display only: no field is read by any validity check,
+// and none leaves the device except a card the owner chose to share.
+// DSM Amendment A17.
+message ContactProfileV1 {
+  string display_name     = 1 [(dsm_max_len)=64];
+  string email            = 2 [(dsm_max_len)=254];
+  string phone            = 3 [(dsm_max_len)=32];
+  // Android's lookup key of the linked phone contact, to read its photo on
+  // this device; empty on the owner's own card.
+  string phone_lookup_key = 4 [(dsm_max_len)=256];
+}
+
+// ==================== Email receipts (DSM Amendment A17) ====================
+// Outside the DSM protocol: a receipt is a courtesy email about a transfer
+// that already happened. It decides nothing, and nothing reads it back.
+
+// receipts.email: the page asks the SDK to email a receipt for a send it just
+// made. The SDK adds the recipient's email (from the contact's details), the
+// sender's name (from the owner's card) and the signature.
+message ReceiptEmailIntentV1 {
+  bytes  recipient_device_id = 1 [(dsm_fixed_len)=32];
+  string token               = 2 [(dsm_max_len)=32];
+  string amount              = 3 [(dsm_max_len)=64];  // as Rust displayed it
+  string memo                = 4 [(dsm_max_len)=256];
+  string reference           = 5 [(dsm_max_len)=64];  // the transfer's hash, Base32
+  // The phone's clock when the send was made, as text, labelled as such on
+  // the receipt: no DSM time exists (no wall clock in DSM validity).
+  string sent_at_local       = 6 [(dsm_max_len)=64];
+}
+
+// What the SDK posts to the receipt service. `signature` is the sender
+// device's SPHINCS+ signature (its AK) over this message's encoding with
+// `signature` empty, under the domain tag DSM/receipt-email/v1.
+message ReceiptEmailRequestV1 {
+  string to_email                 = 1 [(dsm_max_len)=254];
+  string sender_name              = 2 [(dsm_max_len)=64];
+  string token                    = 3 [(dsm_max_len)=32];
+  string amount                   = 4 [(dsm_max_len)=64];
+  string memo                     = 5 [(dsm_max_len)=256];
+  string reference                = 6 [(dsm_max_len)=64];
+  string sent_at_local            = 7 [(dsm_max_len)=64];
+  bytes  sender_device_id         = 8 [(dsm_fixed_len)=32];
+  bytes  sender_signing_public_key = 9 [(dsm_fixed_len)=64];
+  bytes  signature                = 10 [(dsm_max_len)=65536];
+}
+
+// The receipt service's answer, and receipts.email's: where it went, masked
+// (j…@example.com).
+message ReceiptEmailResultV1 {
+  string sent_to_masked = 1 [(dsm_max_len)=256];
+}
+
+// contacts.setProfile: a contact's details, replacing the ones held.
+message ContactSetProfileRequest {
+  bytes            device_id = 1 [(dsm_fixed_len)=32];
+  ContactProfileV1 profile   = 2;
 }
 
 message ContactManualAddRequest {
@@ -3433,6 +3500,9 @@ message ContactManualAddRequest {
   bytes  device_id = 2 [(dsm_fixed_len)=32];
   bytes  genesis_hash = 3 [(dsm_fixed_len)=32];
   bytes  signing_public_key = 4 [(dsm_fixed_len)=64];
+  // The new contact's details, from the card or the phone's contacts; absent
+  // when there are none.
+  ContactProfileV1 profile = 5;
 }
 
 // ==================== Contacts (canonical results) ==================
@@ -3455,6 +3525,8 @@ message ContactAddResponse {
   RelationshipSendStatus send_status = 13;
   // Where BLE pairing with the contact stands; set on contacts.list.
   ContactPairingPhase pairing = 14;
+  // The contact's details as the wallet holds them; absent when none were set.
+  ContactProfileV1 profile = 15;
 }
 
 // Where BLE pairing with a contact stands, as the SDK's pairing loop has it.
@@ -4381,6 +4453,9 @@ enum NativeHostEventKind {
   NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
   NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
   NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
+  // The phone contact the user picked (DSM Amendment A17): a ContactProfileV1,
+  // or no bytes when the user picked none or did not allow the read.
+  NATIVE_HOST_EVENT_KIND_PHONE_CONTACT_PICKED = 7;
 }
 
 message NativeHostEvent {

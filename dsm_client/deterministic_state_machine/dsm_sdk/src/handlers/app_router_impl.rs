@@ -2545,7 +2545,9 @@ impl AppRouter for AppRouterImpl {
                 self.handle_wallet_query(q).await
             }
             // Contacts routes
-            "contacts.list" | "contacts.readContactCode" => self.handle_contacts_query(q).await,
+            "contacts.list" | "contacts.readContactCode" | "contacts.ownProfile" => {
+                self.handle_contacts_query(q).await
+            }
             // DSM Connect (DSM Amendment A11)
             "connect.preview"
             | "connect.list"
@@ -2600,7 +2602,11 @@ impl AppRouter for AppRouterImpl {
                 self.handle_offline_cash_invoke(i).await
             }
             // Contacts invoke routes
-            "contacts.addManual" => self.handle_contacts_invoke(i).await,
+            "contacts.addManual" | "contacts.setProfile" | "contacts.setOwnProfile" => {
+                self.handle_contacts_invoke(i).await
+            }
+            // Email receipts (DSM Amendment A17): outside the protocol.
+            "receipts.email" => self.handle_receipts_invoke(i).await,
             // DSM Connect (DSM Amendment A11)
             "connect.approve"
             | "connect.respond"

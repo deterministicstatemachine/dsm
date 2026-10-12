@@ -5,9 +5,12 @@
 // face: wherever an amount, a balance, a swap leg or a vault side names a
 // token, the same coin appears beside it. ERA and dBTC keep their own built-in
 // artwork; every other token is drawn from its policy icon, or from its ticker
-// when the policy carries no icon.
+// when the policy carries no icon. The Modern skin draws a still mark instead
+// (FlatTokenMark).
 import React from 'react';
 import { TokenCoin } from './TokenCoin';
+import { FlatTokenMark } from './FlatTokenMark';
+import { skinShown, useAppRuntimeStore } from '../runtime/appRuntimeStore';
 import { useActiveTheme } from '../hooks/useActiveTheme';
 import { themeBtcLogo, themeEraToken } from '../hooks/useThemeAssets';
 
@@ -29,8 +32,11 @@ function isBitcoin(name: string): boolean {
 /** A token's coin, sized for a row by default. Renders nothing without a name. */
 export function TokenMark({ ticker, iconUrl, size = 48, className = 'sb-coin', alt = '' }: Props): React.JSX.Element | null {
   const theme = useActiveTheme();
+  const runtime = useAppRuntimeStore();
   const name = (ticker ?? '').trim();
   if (name.length === 0) return null;
+  // The Modern skin's marks are still: no spinning coins.
+  if (skinShown(runtime) === 'modern') return <FlatTokenMark ticker={name} iconUrl={iconUrl} className={className} alt={alt} />;
 
   const lower = name.toLowerCase();
   const era = themeEraToken(theme);

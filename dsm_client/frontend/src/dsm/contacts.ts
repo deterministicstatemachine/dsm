@@ -9,7 +9,7 @@ import {
   requestBlePermissions as bridgeRequestBlePermissions,
 } from './WebViewBridge';
 import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ContactCard } from './types';
-import type { ContactPairing } from '../domain/types';
+import type { ContactPairing, PersonProfile } from '../domain/types';
 
 const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
   [pb.ContactPairingPhase.PAIRED]: 'paired',
@@ -53,11 +53,21 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
     pairing,
     genesisVerifiedOnline: c.genesisVerifiedOnline,
     sendStatus: c.sendStatus,
+    profile: c.profile ? profileOf(c.profile) : undefined,
   };
 }
 
+/** A person's details as the wire carries them. */
+export function profileOf(p: pb.ContactProfileV1): PersonProfile {
+  return { name: p.displayName, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey };
+}
+
+function profileToWire(p: PersonProfile): pb.ContactProfileV1 {
+  return new pb.ContactProfileV1({ displayName: p.name, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey });
+}
+
 import { decodeFramedEnvelopeV3 } from './decoding';
-import { encodeBase32Crockford } from '../utils/textId';
+import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
 
 export async function getContacts(): Promise<ContactsList> {
   try {
@@ -132,6 +142,8 @@ export async function readContactCode(text: string): Promise<ContactCard> {
     signingPublicKey: card.signingPublicKey,
     network: card.network,
     preferredAlias: card.preferredAlias || undefined,
+    email: card.email || undefined,
+    phone: card.phone || undefined,
   };
 }
 
@@ -146,6 +158,7 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
       deviceId: args.deviceId as any,
       genesisHash: args.genesisHash as any,
       signingPublicKey: args.signingPublicKey as any,
+      profile: args.profile ? profileToWire(args.profile) : undefined,
     });
     const argPack = new pb.ArgPack({
       codec: pb.Codec.PROTO,
@@ -168,4 +181,44 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
 
 export async function requestBlePermissions(): Promise<void> {
     return bridgeRequestBlePermissions();
+}
+
+/** An invoke's argument: an ArgPack of codec PROTO around `body`. */
+function protoArg(body: Uint8Array): Uint8Array {
+  return new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(body) }).toBinary();
+}
+
+/** Replaces the details the wallet holds for a contact (DSM Amendment A17). */
+export async function setContactProfile(deviceIdB32: string, profile: PersonProfile): Promise<PersonProfile> {
+  const req = new pb.ContactSetProfileRequest({
+    deviceId: new Uint8Array(decodeBase32Crockford(deviceIdB32)),
+    profile: profileToWire(profile),
+  });
+  const env = decodeFramedEnvelopeV3(await routerInvokeBin('contacts.setProfile', protoArg(req.toBinary())));
+  if (env.payload.case === 'error') throw refusal('contacts.setProfile', env.payload.value);
+  if (env.payload.case !== 'contactAddResponse' || !env.payload.value.profile) {
+    throw new Error(`STRICT: contacts.setProfile answered ${env.payload.case} without the details`);
+  }
+  return profileOf(env.payload.value.profile);
+}
+
+/** The owner's own card: what the contact code shares. `null` until one is made. */
+export async function getOwnProfile(): Promise<PersonProfile | null> {
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('contacts.ownProfile'));
+  if (env.payload.case === 'error') throw refusal('contacts.ownProfile', env.payload.value);
+  if (env.payload.case === 'contactProfile') return profileOf(env.payload.value);
+  if (env.payload.case === 'appStateResponse' && env.payload.value.key === 'own_profile' && env.payload.value.value === undefined) {
+    return null;
+  }
+  throw new Error(`STRICT: contacts.ownProfile answered ${env.payload.case}`);
+}
+
+/** Replaces the owner's own card; answers it as Rust stored it. */
+export async function setOwnProfile(profile: PersonProfile): Promise<PersonProfile> {
+  const env = decodeFramedEnvelopeV3(await routerInvokeBin('contacts.setOwnProfile', protoArg(profileToWire(profile).toBinary())));
+  if (env.payload.case === 'error') throw refusal('contacts.setOwnProfile', env.payload.value);
+  if (env.payload.case !== 'contactProfile') {
+    throw new Error(`STRICT: contacts.setOwnProfile answered ${env.payload.case}`);
+  }
+  return profileOf(env.payload.value);
 }
